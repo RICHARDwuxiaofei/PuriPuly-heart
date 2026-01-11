@@ -28,7 +28,7 @@ Interpret ${sourceName} input into the ${targetName} naturally, preserving the s
   * Avoid stiff Keigo. 
   * Prefer to use "私".
 * **English:** 
-  * Use casual spoken English (contractions like "gonna"). 
+  * Prefer to use casual spoken English (contractions like "gonna"). 
   * Prefer to use hedge words in Polite tone to sound considerate.
 * **Korean:** 
   * Mirror formality (Casual=Banmal, Polite=Haeyo-che).
