@@ -1,7 +1,6 @@
 import flet as ft
-from flet import Colors as colors
 
-from puripuly_heart.ui.theme import COLOR_SURFACE
+from puripuly_heart.ui.theme import COLOR_DIVIDER, COLOR_SURFACE
 
 
 class BentoCard(ft.Container):
@@ -12,20 +11,10 @@ class BentoCard(ft.Container):
         height=None,
         width=None,
         padding=20,
-        opacity_on_surface=0.0,
+        bgcolor=None,
     ):
-        """
-        A reusable Bento Grid Card component.
-        opacity_on_surface: If > 0, blends white into surface color for lighter cards (e.g. input fields).
-        """
-        bg_color = COLOR_SURFACE
-        if opacity_on_surface > 0:
-            # We can't easier blend in Flet without complex utils,
-            # so we'll just rely on the user passing a specific color if needed,
-            # or usage of colors.with_opacity if it's an overlay.
-            # For now, let's keep it simple: defaults to COLOR_SURFACE.
-            # If user wants a lighter bg, they can wrap content or we add a bgcolor arg.
-            pass
+        """A reusable Bento Grid Card component for light theme."""
+        bg_color = bgcolor if bgcolor else COLOR_SURFACE
 
         super().__init__(
             content=content,
@@ -35,11 +24,11 @@ class BentoCard(ft.Container):
             expand=expand,
             height=height,
             width=width,
-            border=ft.border.all(1, colors.with_opacity(0.1, colors.WHITE)),
+            border=ft.border.all(1, COLOR_DIVIDER),
             shadow=ft.BoxShadow(
                 spread_radius=0,
-                blur_radius=10,
-                color=colors.with_opacity(0.2, colors.BLACK),
-                offset=ft.Offset(0, 4),
+                blur_radius=8,
+                color=ft.Colors.with_opacity(0.08, ft.Colors.BLACK),
+                offset=ft.Offset(0, 2),
             ),
         )

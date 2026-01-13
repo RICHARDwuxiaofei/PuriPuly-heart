@@ -544,9 +544,7 @@ class SettingsView(ft.ListView):
                 else:
                     logger.error(f"Verification failed for {provider}: {msg}")
                     # Also write to app logs UI
-                    self.page.open(
-                        ft.SnackBar(ft.Text(f"Failed: {msg}"), bgcolor=colors.RED_400)
-                    )
+                    self.page.open(ft.SnackBar(ft.Text(f"Failed: {msg}"), bgcolor=colors.RED_400))
                     btn_control.icon = icons.ERROR_OUTLINE_ROUNDED
                     btn_control.icon_color = colors.RED_400
             except Exception as e:
