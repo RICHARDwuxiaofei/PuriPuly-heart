@@ -2,10 +2,11 @@ from typing import Callable
 
 import flet as ft
 
+from puripuly_heart.ui.components.glow import create_glow_stack
 from puripuly_heart.ui.theme import (
     COLOR_NEUTRAL_DARK,
+    COLOR_PRIMARY,
     COLOR_SURFACE,
-    COLOR_SURFACE_TONAL,
     COLOR_TERTIARY,
 )
 
@@ -29,6 +30,8 @@ class LanguageCard(ft.Container):
             size=44,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL_DARK,
+            no_wrap=True,  # Prevent text from wrapping to next line
+            overflow=ft.TextOverflow.ELLIPSIS,  # Fallback: truncate with ... if still too long
         )
 
         # Target language text
@@ -37,13 +40,19 @@ class LanguageCard(ft.Container):
             size=44,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL_DARK,
+            no_wrap=True,  # Prevent text from wrapping to next line
+            overflow=ft.TextOverflow.ELLIPSIS,  # Fallback: truncate with ... if still too long
         )
 
-        # Arrow icon
-        self._arrow = ft.Icon(
+        # Arrow icon (Wrapped in container to match text padding for alignment)
+        self._arrow_icon = ft.Icon(
             name=ft.Icons.ARROW_RIGHT_ALT,
             size=44,
             color=COLOR_TERTIARY,
+        )
+        self._arrow = ft.Container(
+            content=self._arrow_icon,
+            padding=ft.padding.symmetric(vertical=12),
         )
 
         # Source button area (left side)
@@ -52,9 +61,10 @@ class LanguageCard(ft.Container):
             padding=ft.padding.symmetric(horizontal=12, vertical=12),
             border_radius=12,
             bgcolor=ft.Colors.TRANSPARENT,
-            animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
             on_hover=self._on_source_hover,
             on_click=lambda _: self._on_source_click(),
+            expand_loose=True,  # Fill space but give loose constraints to child
+            alignment=ft.alignment.center,
         )
 
         # Target button area (right side)
@@ -63,9 +73,10 @@ class LanguageCard(ft.Container):
             padding=ft.padding.symmetric(horizontal=12, vertical=12),
             border_radius=12,
             bgcolor=ft.Colors.TRANSPARENT,
-            animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
             on_hover=self._on_target_hover,
             on_click=lambda _: self._on_target_click(),
+            expand_loose=True,  # Fill space but give loose constraints to child
+            alignment=ft.alignment.center,
         )
 
         # Main content layout
@@ -76,12 +87,18 @@ class LanguageCard(ft.Container):
             spacing=16,
         )
 
-        super().__init__(
-            content=ft.Container(
+        # Use the reusable glow stack wrapper
+        # The content container handles formatting
+        content_with_glow = create_glow_stack(
+            ft.Container(
                 content=main_content,
                 expand=True,
                 alignment=ft.alignment.center,
-            ),
+            )
+        )
+
+        super().__init__(
+            content=content_with_glow,
             bgcolor=COLOR_SURFACE,
             border_radius=16,
             border=ft.border.all(1, ft.Colors.with_opacity(0.4, ft.Colors.WHITE)),
@@ -97,17 +114,13 @@ class LanguageCard(ft.Container):
 
     def _on_source_hover(self, e):
         """Handle hover state for source language."""
-        self._source_btn.bgcolor = (
-            COLOR_SURFACE_TONAL if e.data == "true" else ft.Colors.TRANSPARENT
-        )
-        self._source_btn.update()
+        self._source_text.color = COLOR_PRIMARY if e.data == "true" else COLOR_NEUTRAL_DARK
+        self._source_text.update()
 
     def _on_target_hover(self, e):
         """Handle hover state for target language."""
-        self._target_btn.bgcolor = (
-            COLOR_SURFACE_TONAL if e.data == "true" else ft.Colors.TRANSPARENT
-        )
-        self._target_btn.update()
+        self._target_text.color = COLOR_PRIMARY if e.data == "true" else COLOR_NEUTRAL_DARK
+        self._target_text.update()
 
     def set_languages(self, source: str, target: str):
         """Update displayed languages with dynamic sizing."""
@@ -134,11 +147,11 @@ class LanguageCard(ft.Container):
         # Apply size to text and arrow for synchronization
         self._source_text.size = new_size
         self._target_text.size = new_size
-        self._arrow.size = new_size
+        self._arrow_icon.size = new_size
 
         self._source_text.value = source
         self._target_text.value = target
 
         self._source_text.update()
         self._target_text.update()
-        self._arrow.update()
+        self._arrow_icon.update()
