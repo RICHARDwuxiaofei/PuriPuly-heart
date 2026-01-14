@@ -8,6 +8,7 @@ from puripuly_heart.ui.theme import (
     COLOR_PRIMARY,
     COLOR_SURFACE,
     COLOR_TERTIARY,
+    get_card_shadow,
 )
 
 
@@ -104,12 +105,7 @@ class LanguageCard(ft.Container):
             border=ft.border.all(1, ft.Colors.with_opacity(0.4, ft.Colors.WHITE)),
             expand=True,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            shadow=ft.BoxShadow(
-                blur_radius=10,
-                color=ft.Colors.with_opacity(0.03, ft.Colors.BLACK),
-                offset=ft.Offset(0, 2),
-                spread_radius=0,
-            ),
+            shadow=get_card_shadow(),
         )
 
     def _on_source_hover(self, e):
