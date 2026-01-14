@@ -76,6 +76,9 @@ class UIEventBridge:
                 return
             source = event.source or "Mic"
             _, target_lang = self._get_language_codes()
+            dash = getattr(self.app, "view_dashboard", None)
+            if dash is not None:
+                dash.set_display_translation_text(translation.text, language_code=target_lang)
             add_history = getattr(self.app, "add_history_entry", None)
             if add_history is not None:
                 add_history(source, translation.text, translated=True, language_code=target_lang)
@@ -87,9 +90,6 @@ class UIEventBridge:
                 return
             source_lang, target_lang = self._get_language_codes()
             lang_code = target_lang if self._translation_enabled() else source_lang
-            dash = getattr(self.app, "view_dashboard", None)
-            if dash is not None:
-                dash.set_display_text(msg.text, language_code=lang_code)
             add_history = getattr(self.app, "add_history_entry", None)
             if add_history is not None:
                 add_history("VRChat", msg.text, language_code=lang_code)

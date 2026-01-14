@@ -12,6 +12,26 @@ from puripuly_heart.ui.theme import (
     get_card_shadow,
 )
 
+# CJK (Chinese, Japanese, Korean) characters start at this Unicode point.
+_CJK_START = 0x3000
+
+
+def _weighted_len(text: str) -> int:
+    """Calculate weighted length for CJK-aware font sizing."""
+    return sum(2 if ord(char) >= _CJK_START else 1 for char in text)
+
+
+def _display_size_for_length(length: int) -> int:
+    if length <= 12:
+        return 48
+    if length <= 20:
+        return 40
+    if length <= 32:
+        return 34
+    if length <= 44:
+        return 28
+    return 24
+
 
 class DisplayCard(ft.Container):
     """Multi-purpose display card with input field and decorative gradient."""
@@ -20,12 +40,30 @@ class DisplayCard(ft.Container):
         self._on_submit = on_submit
         self._is_connected = False
         self._showing_status = True
+        self._primary_value = t("display.disconnected")
+        self._secondary_value: str | None = None
+        self._primary_font_family: str | None = None
+        self._secondary_font_family: str | None = None
 
-        self._display_text = ft.Text(
-            t("display.disconnected"),
+        self._display_primary = ft.Text(
+            self._primary_value,
             size=48,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL_DARK,
+            no_wrap=True,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+
+        self._display_secondary = ft.Text(
+            "",
+            size=48,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL_DARK,
+            no_wrap=True,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            visible=False,
         )
 
         self._input_field = ft.TextField(
@@ -41,7 +79,13 @@ class DisplayCard(ft.Container):
         main_content = ft.Column(
             [
                 ft.Container(
-                    content=self._display_text,
+                    content=ft.Column(
+                        [
+                            self._display_primary,
+                            self._display_secondary,
+                        ],
+                        spacing=4,
+                    ),
                     alignment=ft.alignment.top_left,
                     padding=ft.padding.only(left=8),
                 ),
@@ -96,33 +140,20 @@ class DisplayCard(ft.Container):
             e.control.update()
 
     def set_display(self, text: str, is_error: bool = False, font_family: str | None = None):
-        """Update the display text with dynamic sizing."""
+        """Update the primary display text and clear any secondary text."""
         self._showing_status = False
-        length = len(text)
+        self._primary_value = text
+        self._primary_font_family = font_family
+        self._secondary_value = None
+        self._secondary_font_family = None
+        self._sync_display(is_error=is_error)
 
-        # Dynamic font sizing formula
-        if length <= 15:
-            new_size = 48
-        elif length <= 30:
-            new_size = 36
-        elif length <= 50:
-            new_size = 28
-        elif length <= 100:
-            new_size = 24
-        else:
-            new_size = 20
-
-        self._display_text.value = text
-        self._display_text.size = new_size
-        self._display_text.color = COLOR_NEUTRAL_DARK
-        self._display_text.font_family = font_family
-
-        # Add safety for very long text
-        self._display_text.max_lines = 6
-        self._display_text.overflow = ft.TextOverflow.ELLIPSIS
-
-        if self._display_text.page is not None:
-            self._display_text.update()
+    def set_display_translation(self, text: str | None, font_family: str | None = None) -> None:
+        """Update the secondary display text and sync font sizing."""
+        self._showing_status = False
+        self._secondary_value = text or None
+        self._secondary_font_family = font_family if text else None
+        self._sync_display()
 
     def set_status(self, connected: bool, font_family: str | None = None):
         """Update connection status display."""
@@ -130,14 +161,11 @@ class DisplayCard(ft.Container):
         self._showing_status = True
         text = t("display.connected") if connected else t("display.disconnected")
 
-        # Reset to default big size for status
-        self._display_text.value = text
-        self._display_text.size = 48
-        self._display_text.color = COLOR_NEUTRAL_DARK
-        self._display_text.font_family = font_family
-        self._display_text.max_lines = 1
-        if self._display_text.page is not None:
-            self._display_text.update()
+        self._primary_value = text
+        self._primary_font_family = font_family
+        self._secondary_value = None
+        self._secondary_font_family = None
+        self._sync_display()
 
     def clear_input(self):
         """Clear the input field."""
@@ -166,9 +194,34 @@ class DisplayCard(ft.Container):
         elif self._input_field.page is not None:
             self._input_field.update()
         if self._showing_status:
-            self._display_text.value = (
+            self._primary_value = (
                 t("display.connected") if self._is_connected else t("display.disconnected")
             )
-            self._display_text.font_family = display_font_family
-            if self._display_text.page is not None:
-                self._display_text.update()
+            self._primary_font_family = display_font_family
+            self._secondary_value = None
+            self._secondary_font_family = None
+            self._sync_display()
+
+    def _sync_display(self, *, is_error: bool = False) -> None:
+        primary_text = self._primary_value or ""
+        secondary_text = self._secondary_value or ""
+        max_len = max(_weighted_len(primary_text), _weighted_len(secondary_text))
+        new_size = _display_size_for_length(max_len)
+
+        text_color = COLOR_NEUTRAL_DARK if not is_error else COLOR_NEUTRAL_DARK
+
+        self._display_primary.value = primary_text
+        self._display_primary.size = new_size
+        self._display_primary.color = text_color
+        self._display_primary.font_family = self._primary_font_family
+
+        self._display_secondary.value = secondary_text
+        self._display_secondary.visible = bool(self._secondary_value)
+        self._display_secondary.size = new_size
+        self._display_secondary.color = text_color
+        self._display_secondary.font_family = self._secondary_font_family
+
+        if self._display_primary.page is not None:
+            self._display_primary.update()
+        if self._display_secondary.page is not None:
+            self._display_secondary.update()

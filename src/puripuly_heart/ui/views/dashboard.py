@@ -8,6 +8,7 @@ from puripuly_heart.ui.components.language_modal import LanguageModal
 from puripuly_heart.ui.components.power_button import PowerButton
 from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import get_locale, language_name, t
+from puripuly_heart.ui.theme import COLOR_TRANS_ON
 
 
 class DashboardView(ft.Column):
@@ -69,6 +70,7 @@ class DashboardView(ft.Column):
             on_click=self._toggle_translation,
             icon_size=64,
             label_size=28,
+            color_on=COLOR_TRANS_ON,
         )
 
         # D: Language card (bottom-right)
@@ -245,9 +247,19 @@ class DashboardView(ft.Column):
         language_code: str | None = None,
         is_error: bool = False,
     ) -> None:
-        """Update the display card with new text (STT result, translation, or error)."""
+        """Update the display card primary line with new text."""
         font_family = font_for_language(language_code) if language_code else self._ui_font()
         self.display_card.set_display(text, is_error=is_error, font_family=font_family)
+
+    def set_display_translation_text(
+        self,
+        text: str | None,
+        *,
+        language_code: str | None = None,
+    ) -> None:
+        """Update the display card translation line."""
+        font_family = font_for_language(language_code) if language_code else self._ui_font()
+        self.display_card.set_display_translation(text, font_family=font_family)
 
     def apply_locale(self) -> None:
         self.stt_button.set_label(t("dashboard.stt_label"))
