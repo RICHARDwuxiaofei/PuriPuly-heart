@@ -18,6 +18,7 @@ COLOR_SURFACE_DIM = "#d7c1c0"  # OFF state background
 COLOR_SECONDARY = "#B78481"  # Secondary text/icons
 COLOR_TERTIARY = "#B28A44"  # Arrow icon
 COLOR_TRANS_TONAL = "#F5DEDC"  # Toggle button background (OFF state)
+COLOR_TRANS_ON = "#D64058"  # TRANS button ON state
 COLOR_NEUTRAL = "#998E8D"  # Inactive icons
 COLOR_NEUTRAL_DARK = "#5C4D4C"  # Main text
 COLOR_SURFACE_TONAL = "#FCEBE9"  # Alternative surface (hover state)

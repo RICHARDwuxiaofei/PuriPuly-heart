@@ -22,12 +22,14 @@ class PowerButton(ft.Container):
         on_click: Callable[[], None],
         icon_size: int = 80,
         label_size: int = 32,
+        color_on: str | None = None,
     ):
         self._label = label
         self._icon = icon
         self._on_click = on_click
         self._is_on = False
         self._needs_key = False
+        self._color_on = color_on if color_on is not None else COLOR_PRIMARY
 
         self._icon_control = ft.Icon(name=icon, size=icon_size, color=COLOR_SECONDARY)
         self._label_control = ft.Text(
@@ -77,7 +79,7 @@ class PowerButton(ft.Container):
             self._icon_control.color = ft.Colors.WHITE
             self._label_control.color = ft.Colors.WHITE
         elif is_on:
-            self.bgcolor = COLOR_PRIMARY
+            self.bgcolor = self._color_on
             self._icon_control.color = ft.Colors.WHITE
             self._label_control.color = ft.Colors.WHITE
         else:
