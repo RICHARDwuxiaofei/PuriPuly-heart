@@ -8,6 +8,7 @@ from puripuly_heart.core.updater import check_for_update
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
 from puripuly_heart.ui.components.title_bar import TitleBar
 from puripuly_heart.ui.controller import GuiController
+from puripuly_heart.ui.i18n import language_name, source_label, t, translated_source_label
 from puripuly_heart.ui.theme import COLOR_BACKGROUND, get_app_theme
 from puripuly_heart.ui.views.dashboard import DashboardView
 from puripuly_heart.ui.views.history import HistoryView
@@ -35,7 +36,7 @@ class TranslatorApp:
         self.view_settings.on_verify_api_key = self._on_verify_api_key
 
     def _setup_page(self):
-        self.page.title = "PuriPuly Heart"
+        self.page.title = t("app.title")
         self.page.theme_mode = ft.ThemeMode.LIGHT
         self.page.theme = get_app_theme()
         self.page.bgcolor = COLOR_BACKGROUND
@@ -94,8 +95,19 @@ class TranslatorApp:
         if index == 1:
             self.view_settings.refresh_prompt_if_empty()
 
-    def add_history_entry(self, source: str, text: str):
-        self.view_history.add_message(source, text)
+    def add_history_entry(self, source: str, text: str, *, translated: bool = False):
+        label = source_label(source)
+        if translated:
+            label = translated_source_label(label)
+        self.view_history.add_message(label, text)
+
+    def apply_locale(self) -> None:
+        self.page.title = t("app.title")
+        self.title_bar.set_title(t("app.title"))
+        self.view_dashboard.apply_locale()
+        self.view_settings.apply_locale()
+        self.view_history.apply_locale()
+        self.page.update()
 
     def _on_manual_submit(self, _source: str, text: str) -> None:
         async def _task():
@@ -128,7 +140,7 @@ class TranslatorApp:
         if warning:
             self.page.open(
                 ft.SnackBar(
-                    ft.Text(warning),
+                    ft.Text(t(warning.key, language=language_name(warning.language_code))),
                     bgcolor=ft.Colors.ORANGE_700,
                     duration=4000,
                 )
@@ -181,13 +193,13 @@ async def _check_and_notify_update(page: ft.Page) -> None:
             bgcolor=ft.Colors.BLUE_900,
             leading=ft.Icon(name=ft.Icons.SYSTEM_UPDATE, color=ft.Colors.BLUE_200, size=40),
             content=ft.Text(
-                f"New version v{update_info.version} is available!",
+                t("update.available", version=update_info.version),
                 color=ft.Colors.WHITE,
                 size=14,
             ),
             actions=[
-                ft.TextButton(text="Download", on_click=_open_download),
-                ft.TextButton(text="Close", on_click=_dismiss),
+                ft.TextButton(text=t("update.download"), on_click=_open_download),
+                ft.TextButton(text=t("update.close"), on_click=_dismiss),
             ],
         )
         page.open(banner)

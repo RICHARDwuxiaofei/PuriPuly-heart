@@ -87,3 +87,9 @@ class PowerButton(ft.Container):
 
         if self.page is not None:
             self.update()
+
+    def set_label(self, label: str) -> None:
+        self._label = label
+        self._label_control.value = label
+        if self._label_control.page is not None:
+            self._label_control.update()

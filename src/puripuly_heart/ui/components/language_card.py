@@ -11,6 +11,18 @@ from puripuly_heart.ui.theme import (
     get_card_shadow,
 )
 
+# CJK (Chinese, Japanese, Korean) characters start at this Unicode point
+_CJK_START = 0x3000
+
+
+def _weighted_len(text: str) -> float:
+    """Calculate weighted length for CJK-aware font sizing.
+
+    CJK characters are rendered ~2x wider than Latin characters,
+    so we weight them accordingly for accurate size calculations.
+    """
+    return sum(2 if ord(c) >= _CJK_START else 1 for c in text)
+
 
 class LanguageCard(ft.Container):
     """Language pair display card with clickable source/target areas."""
@@ -123,20 +135,18 @@ class LanguageCard(ft.Container):
         self._source = source
         self._target = target
 
-        # Calculate total length of both strings combined
-        # "Korean" (6) + "Chinese (Simplified)" (20) = 26 chars -> Clipped at size 44 previously.
-        # Target: Size 28 or lower for total length ~26.
-        total_len = len(source) + len(target)
+        # Calculate weighted total length (CJK chars count as 1.5x)
+        total_len = _weighted_len(source) + _weighted_len(target)
 
-        # Fine-grained Sum-based Scaling
+        # Fine-grained Sum-based Scaling (adjusted for weighted length)
         if total_len < 20:
-            new_size = 44  # Safe zone (e.g., English <-> Korean)
-        elif total_len < 25:
-            new_size = 40  # Caution zone
-        elif total_len < 30:
-            new_size = 32  # Danger zone (Korean + Simplified falls here)
-        elif total_len < 40:
-            new_size = 26  # Extreme zone (Traditional + Simplified)
+            new_size = 44  # Safe zone (e.g., English ↔ Korean)
+        elif total_len < 28:
+            new_size = 38  # Caution zone
+        elif total_len < 36:
+            new_size = 32  # Danger zone
+        elif total_len < 44:
+            new_size = 26  # Extreme zone
         else:
             new_size = 22  # Fallback
 
@@ -148,6 +158,9 @@ class LanguageCard(ft.Container):
         self._source_text.value = source
         self._target_text.value = target
 
-        self._source_text.update()
-        self._target_text.update()
-        self._arrow_icon.update()
+        if self._source_text.page is not None:
+            self._source_text.update()
+        if self._target_text.page is not None:
+            self._target_text.update()
+        if self._arrow_icon.page is not None:
+            self._arrow_icon.update()

@@ -32,6 +32,8 @@ class QwenRegion(str, Enum):
 class LanguageSettings:
     source_language: str = "ko"
     target_language: str = "en"
+    recent_source_languages: list[str] = field(default_factory=lambda: ["en", "zh-CN", "ja"])
+    recent_target_languages: list[str] = field(default_factory=lambda: ["en", "zh-CN", "ja"])
 
     def validate(self) -> None:
         if not self.source_language:
@@ -191,6 +193,15 @@ class QwenSettings:
 
 
 @dataclass(slots=True)
+class UiSettings:
+    locale: str = "en"
+
+    def validate(self) -> None:
+        if not self.locale:
+            raise ValueError("locale must be non-empty")
+
+
+@dataclass(slots=True)
 class AppSettings:
     provider: ProviderSettings = field(default_factory=ProviderSettings)
     languages: LanguageSettings = field(default_factory=LanguageSettings)
@@ -203,6 +214,7 @@ class AppSettings:
     llm: LLMSettings = field(default_factory=LLMSettings)
     osc: OSCSettings = field(default_factory=OSCSettings)
     secrets: SecretsSettings = field(default_factory=SecretsSettings)
+    ui: UiSettings = field(default_factory=UiSettings)
     system_prompt: str = ""
 
     def validate(self) -> None:
@@ -217,6 +229,7 @@ class AppSettings:
         self.llm.validate()
         self.osc.validate()
         self.secrets.validate()
+        self.ui.validate()
 
 
 def _enum_to_value(obj: object) -> object:
@@ -235,6 +248,8 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         "languages": {
             "source_language": settings.languages.source_language,
             "target_language": settings.languages.target_language,
+            "recent_source_languages": settings.languages.recent_source_languages,
+            "recent_target_languages": settings.languages.recent_target_languages,
         },
         "audio": {
             "internal_sample_rate_hz": settings.audio.internal_sample_rate_hz,
@@ -278,6 +293,9 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "backend": settings.secrets.backend.value,
             "encrypted_file_path": settings.secrets.encrypted_file_path,
         },
+        "ui": {
+            "locale": settings.ui.locale,
+        },
         "system_prompt": settings.system_prompt,
     }
     return _enum_to_value(data)  # type: ignore[return-value]
@@ -311,6 +329,18 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         languages=LanguageSettings(
             source_language=data.get("languages", {}).get("source_language", "ko"),
             target_language=data.get("languages", {}).get("target_language", "en"),
+            recent_source_languages=list(
+                dict.fromkeys(
+                    list(data.get("languages", {}).get("recent_source_languages") or [])
+                    + ["ko", "en", "zh-CN", "ja", "es", "fr"]
+                )
+            )[:6],
+            recent_target_languages=list(
+                dict.fromkeys(
+                    list(data.get("languages", {}).get("recent_target_languages") or [])
+                    + ["ko", "en", "zh-CN", "ja", "es", "fr"]
+                )
+            )[:6],
         ),
         audio=AudioSettings(
             internal_sample_rate_hz=int(audio_data.get("internal_sample_rate_hz", 16000)),
@@ -365,6 +395,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 data.get("secrets", {}).get("backend", SecretsBackend.KEYRING.value)
             ),
             encrypted_file_path=data.get("secrets", {}).get("encrypted_file_path", "secrets.json"),
+        ),
+        ui=UiSettings(
+            locale=str(data.get("ui", {}).get("locale", "en")),
         ),
         system_prompt=str(data.get("system_prompt", "")),
     )

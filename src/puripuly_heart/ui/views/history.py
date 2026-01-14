@@ -2,12 +2,19 @@ import flet as ft
 from flet import Colors as colors
 
 from puripuly_heart.ui.components.bento_card import BentoCard
+from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import COLOR_ON_BACKGROUND, COLOR_PRIMARY
 
 
 class HistoryView(ft.Container):
     def __init__(self):
         super().__init__(expand=True)
+        self._title_text = ft.Text(
+            t("history.title"),
+            size=14,
+            color=colors.GREY_500,
+            weight=ft.FontWeight.BOLD,
+        )
         self.history_list = ft.ListView(
             expand=True,
             spacing=10,
@@ -18,12 +25,7 @@ class HistoryView(ft.Container):
         self.content = BentoCard(
             content=ft.Column(
                 [
-                    ft.Text(
-                        "CONVERSATION HISTORY",
-                        size=14,
-                        color=colors.GREY_500,
-                        weight=ft.FontWeight.BOLD,
-                    ),
+                    self._title_text,
                     self.history_list,
                 ],
                 expand=True,
@@ -52,3 +54,8 @@ class HistoryView(ft.Container):
         except RuntimeError:
             # Control not yet added to page - update will happen when attached
             pass
+
+    def apply_locale(self) -> None:
+        self._title_text.value = t("history.title")
+        if self._title_text.page is not None:
+            self._title_text.update()
