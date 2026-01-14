@@ -23,7 +23,7 @@ COLOR_NEUTRAL_DARK = "#5C4D4C"  # Main text
 COLOR_SURFACE_TONAL = "#FCEBE9"  # Alternative surface (hover state)
 
 
-def get_app_theme() -> ft.Theme:
+def get_app_theme(font_family: str | None = None) -> ft.Theme:
     return ft.Theme(
         color_scheme=ft.ColorScheme(
             surface=COLOR_SURFACE,
@@ -35,6 +35,7 @@ def get_app_theme() -> ft.Theme:
             secondary=COLOR_SECONDARY,
             tertiary=COLOR_TERTIARY,
         ),
+        font_family=font_family,
         visual_density=ft.VisualDensity.COMPACT,
         page_transitions=ft.PageTransitionsTheme(
             windows=ft.PageTransitionTheme.NONE,

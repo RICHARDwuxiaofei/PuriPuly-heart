@@ -95,7 +95,7 @@ class DisplayCard(ft.Container):
             e.control.value = ""
             e.control.update()
 
-    def set_display(self, text: str, is_error: bool = False):
+    def set_display(self, text: str, is_error: bool = False, font_family: str | None = None):
         """Update the display text with dynamic sizing."""
         self._showing_status = False
         length = len(text)
@@ -115,6 +115,7 @@ class DisplayCard(ft.Container):
         self._display_text.value = text
         self._display_text.size = new_size
         self._display_text.color = COLOR_NEUTRAL_DARK
+        self._display_text.font_family = font_family
 
         # Add safety for very long text
         self._display_text.max_lines = 6
@@ -123,7 +124,7 @@ class DisplayCard(ft.Container):
         if self._display_text.page is not None:
             self._display_text.update()
 
-    def set_status(self, connected: bool):
+    def set_status(self, connected: bool, font_family: str | None = None):
         """Update connection status display."""
         self._is_connected = connected
         self._showing_status = True
@@ -133,6 +134,7 @@ class DisplayCard(ft.Container):
         self._display_text.value = text
         self._display_text.size = 48
         self._display_text.color = COLOR_NEUTRAL_DARK
+        self._display_text.font_family = font_family
         self._display_text.max_lines = 1
         if self._display_text.page is not None:
             self._display_text.update()
@@ -142,13 +144,31 @@ class DisplayCard(ft.Container):
         self._input_field.value = ""
         self._input_field.update()
 
-    def apply_locale(self) -> None:
-        self._input_field.hint_text = t("display.input_hint")
+    def set_input_font(self, font_family: str | None) -> None:
+        self._input_field.text_style = ft.TextStyle(font_family=font_family)
+        self._input_field.hint_style = ft.TextStyle(
+            color=COLOR_SECONDARY,
+            italic=True,
+            font_family=font_family,
+        )
         if self._input_field.page is not None:
+            self._input_field.update()
+
+    def apply_locale(
+        self,
+        *,
+        display_font_family: str | None = None,
+        input_font_family: str | None = None,
+    ) -> None:
+        self._input_field.hint_text = t("display.input_hint")
+        if input_font_family is not None:
+            self.set_input_font(input_font_family)
+        elif self._input_field.page is not None:
             self._input_field.update()
         if self._showing_status:
             self._display_text.value = (
                 t("display.connected") if self._is_connected else t("display.disconnected")
             )
+            self._display_text.font_family = display_font_family
             if self._display_text.page is not None:
                 self._display_text.update()

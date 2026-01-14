@@ -16,6 +16,18 @@ class UIEventBridge:
         self.event_queue = event_queue
         self._running = False
 
+    def _get_language_codes(self) -> tuple[str | None, str | None]:
+        controller = getattr(self.app, "controller", None)
+        settings = getattr(controller, "settings", None)
+        if settings is None:
+            return None, None
+        return settings.languages.source_language, settings.languages.target_language
+
+    def _translation_enabled(self) -> bool:
+        controller = getattr(self.app, "controller", None)
+        hub = getattr(controller, "hub", None)
+        return bool(getattr(hub, "translation_enabled", False))
+
     async def run(self) -> None:
         self._running = True
         logger.info("UI Event Bridge started")
@@ -46,15 +58,16 @@ class UIEventBridge:
             if not isinstance(transcript, Transcript):
                 return
             source = event.source or "Mic"
+            source_lang, _ = self._get_language_codes()
 
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
-                dash.set_display_text(transcript.text)
+                dash.set_display_text(transcript.text, language_code=source_lang)
 
             if event.type == UIEventType.TRANSCRIPT_FINAL:
                 add_history = getattr(self.app, "add_history_entry", None)
                 if add_history is not None:
-                    add_history(source, transcript.text)
+                    add_history(source, transcript.text, language_code=source_lang)
             return
 
         if event.type == UIEventType.TRANSLATION_DONE:
@@ -62,21 +75,24 @@ class UIEventBridge:
             if not isinstance(translation, Translation):
                 return
             source = event.source or "Mic"
+            _, target_lang = self._get_language_codes()
             add_history = getattr(self.app, "add_history_entry", None)
             if add_history is not None:
-                add_history(source, translation.text, translated=True)
+                add_history(source, translation.text, translated=True, language_code=target_lang)
             return
 
         if event.type == UIEventType.OSC_SENT:
             msg = event.payload
             if not isinstance(msg, OSCMessage):
                 return
+            source_lang, target_lang = self._get_language_codes()
+            lang_code = target_lang if self._translation_enabled() else source_lang
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
-                dash.set_display_text(msg.text)
+                dash.set_display_text(msg.text, language_code=lang_code)
             add_history = getattr(self.app, "add_history_entry", None)
             if add_history is not None:
-                add_history("VRChat", msg.text)
+                add_history("VRChat", msg.text, language_code=lang_code)
             return
 
         if event.type == UIEventType.ERROR:

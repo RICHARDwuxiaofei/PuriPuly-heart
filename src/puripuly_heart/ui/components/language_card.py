@@ -139,16 +139,18 @@ class LanguageCard(ft.Container):
         total_len = _weighted_len(source) + _weighted_len(target)
 
         # Fine-grained Sum-based Scaling (adjusted for weighted length)
-        if total_len < 20:
+        if total_len < 16:
             new_size = 44  # Safe zone (e.g., English ↔ Korean)
-        elif total_len < 28:
+        elif total_len < 22:
             new_size = 38  # Caution zone
-        elif total_len < 36:
+        elif total_len < 28:
             new_size = 32  # Danger zone
-        elif total_len < 44:
+        elif total_len < 34:
             new_size = 26  # Extreme zone
+        elif total_len < 42:
+            new_size = 22  # Critical zone
         else:
-            new_size = 22  # Fallback
+            new_size = 18  # Fallback for very long names
 
         # Apply size to text and arrow for synchronization
         self._source_text.size = new_size

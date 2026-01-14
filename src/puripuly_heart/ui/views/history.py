@@ -33,13 +33,18 @@ class HistoryView(ft.Container):
             expand=True,
         )
 
-    def add_message(self, source: str, text: str):
+    def add_message(self, source: str, text: str, *, text_font_family: str | None = None):
         self.history_list.controls.append(
             ft.Container(
                 content=ft.Column(
                     [
                         ft.Text(source, size=10, color=COLOR_PRIMARY),
-                        ft.Text(text, size=14, color=COLOR_ON_BACKGROUND),
+                        ft.Text(
+                            text,
+                            size=14,
+                            color=COLOR_ON_BACKGROUND,
+                            font_family=text_font_family,
+                        ),
                     ],
                     spacing=2,
                 ),
