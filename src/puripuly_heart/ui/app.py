@@ -17,9 +17,9 @@ from puripuly_heart.ui.i18n import (
     translated_source_label,
 )
 from puripuly_heart.ui.theme import COLOR_BACKGROUND, get_app_theme
+from puripuly_heart.ui.views.about import AboutView
 from puripuly_heart.ui.views.dashboard import DashboardView
 from puripuly_heart.ui.views.history import HistoryView
-from puripuly_heart.ui.views.logs import LogsView
 from puripuly_heart.ui.views.settings import SettingsView
 
 logger = logging.getLogger(__name__)
@@ -57,11 +57,10 @@ class TranslatorApp:
         self.page.window.min_height = 600
 
     def _build_layout(self):
-        # Initialize Views
         self.view_dashboard = DashboardView()
         self.view_settings = SettingsView()
         self.view_history = HistoryView()
-        self.view_logs = LogsView()
+        self.view_about = AboutView()
 
         # Custom title bar
         self.title_bar = TitleBar(self.page)
@@ -97,7 +96,7 @@ class TranslatorApp:
         elif index == 2:
             self.content_area.content = self.view_history
         elif index == 3:
-            self.content_area.content = self.view_logs
+            self.content_area.content = self.view_about
 
         self.content_area.update()
         if index == 1:
