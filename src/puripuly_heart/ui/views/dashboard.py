@@ -2,6 +2,7 @@ import flet as ft
 
 from puripuly_heart.core.language import get_all_language_options
 from puripuly_heart.ui.components.display_card import DisplayCard
+from puripuly_heart.ui.components.glow import create_background_glow_stack
 from puripuly_heart.ui.components.language_card import LanguageCard
 from puripuly_heart.ui.components.power_button import PowerButton
 from puripuly_heart.ui.theme import COLOR_NEUTRAL_DARK
@@ -90,7 +91,13 @@ class DashboardView(ft.Column):
             expand=True,
         )
 
-        self.controls = [top_row, bottom_row]
+        # Wrap grid in background glow for atmospheric warmth
+        grid_content = ft.Column(
+            [top_row, bottom_row],
+            spacing=16,
+            expand=True,
+        )
+        self.controls = [create_background_glow_stack(grid_content)]
 
     def _toggle_stt(self):
         if self.is_stt_on:
@@ -103,6 +110,7 @@ class DashboardView(ft.Column):
         elif self.stt_needs_key:
             self._stt_showing_warning = True
             self.stt_button.set_state(False, needs_key=True)
+            self.set_display_text("Please enter your STT API key")
         else:
             self.is_stt_on = True
             self.stt_button.set_state(True)
@@ -121,6 +129,7 @@ class DashboardView(ft.Column):
         elif self.translation_needs_key:
             self._translation_showing_warning = True
             self.trans_button.set_state(False, needs_key=True)
+            self.set_display_text("Please enter your LLM API key")
         else:
             self.is_translation_on = True
             self.trans_button.set_state(True)

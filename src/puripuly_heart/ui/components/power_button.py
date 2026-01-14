@@ -8,6 +8,7 @@ from puripuly_heart.ui.theme import (
     COLOR_SECONDARY,
     COLOR_TRANS_TONAL,
     COLOR_WARNING,
+    get_card_shadow,
 )
 
 
@@ -63,12 +64,7 @@ class PowerButton(ft.Container):
             # alignment=ft.alignment.center,  <-- REMOVED: This was crushing the stack
             on_click=lambda _: self._on_click(),
             animate=ft.Animation(200, ft.AnimationCurve.EASE_OUT),
-            shadow=ft.BoxShadow(
-                blur_radius=10,
-                color=ft.Colors.with_opacity(0.03, ft.Colors.BLACK),
-                offset=ft.Offset(0, 2),
-                spread_radius=0,
-            ),
+            shadow=get_card_shadow(),
         )
 
     def set_state(self, is_on: bool, needs_key: bool = False):
@@ -89,4 +85,5 @@ class PowerButton(ft.Container):
             self._icon_control.color = COLOR_SECONDARY
             self._label_control.color = COLOR_SECONDARY
 
-        self.update()
+        if self.page is not None:
+            self.update()

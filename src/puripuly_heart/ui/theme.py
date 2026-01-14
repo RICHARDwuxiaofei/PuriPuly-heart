@@ -7,8 +7,12 @@ COLOR_ON_BACKGROUND = "#5C4D4C"  # Neutral Dark
 COLOR_PRIMARY = "#FF6B6B"  # Primary
 COLOR_ERROR = "#FF5449"  # Error
 COLOR_SUCCESS = "#66BB6A"
-COLOR_WARNING = "#FFA726"  # Orange for warning states
+COLOR_WARNING = "#FF8A65"  # Coral orange for warning states
 COLOR_DIVIDER = "#E8D4D2"  # Divider
+COLOR_PRIMARY_CONTAINER = "#ffdad8"
+COLOR_ON_PRIMARY_CONTAINER = "#733332"
+COLOR_ON_SURFACE_VARIANT = "#534341"
+COLOR_SURFACE_DIM = "#d7c1c0"  # OFF state background
 
 # Additional colors for light theme
 COLOR_SECONDARY = "#B78481"  # Secondary text/icons
@@ -37,4 +41,18 @@ def get_app_theme() -> ft.Theme:
             macos=ft.PageTransitionTheme.NONE,
             linux=ft.PageTransitionTheme.NONE,
         ),
+    )
+
+
+def get_card_shadow() -> ft.BoxShadow:
+    """Return the standard card shadow with warm color from theme.
+
+    Uses COLOR_ON_PRIMARY_CONTAINER for a warm, cohesive shadow that
+    blends naturally with the pink/coral color scheme.
+    """
+    return ft.BoxShadow(
+        blur_radius=10,
+        color=ft.Colors.with_opacity(0.05, COLOR_ON_PRIMARY_CONTAINER),
+        offset=ft.Offset(0, 2),
+        spread_radius=0,
     )

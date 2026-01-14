@@ -4,11 +4,11 @@ import flet as ft
 
 from puripuly_heart.ui.components.glow import create_glow_stack
 from puripuly_heart.ui.theme import (
-    COLOR_ERROR,
     COLOR_NEUTRAL,
     COLOR_NEUTRAL_DARK,
     COLOR_SECONDARY,
     COLOR_SURFACE,
+    get_card_shadow,
 )
 
 
@@ -83,12 +83,7 @@ class DisplayCard(ft.Container):
             border=ft.border.all(1, ft.Colors.with_opacity(0.4, ft.Colors.WHITE)),
             expand=True,
             clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            shadow=ft.BoxShadow(
-                blur_radius=10,
-                color=ft.Colors.with_opacity(0.03, ft.Colors.BLACK),
-                offset=ft.Offset(0, 2),
-                spread_radius=0,
-            ),
+            shadow=get_card_shadow(),
         )
 
     def _handle_submit(self, e):
@@ -116,7 +111,7 @@ class DisplayCard(ft.Container):
 
         self._display_text.value = text
         self._display_text.size = new_size
-        self._display_text.color = COLOR_ERROR if is_error else COLOR_NEUTRAL_DARK
+        self._display_text.color = COLOR_NEUTRAL_DARK
 
         # Add safety for very long text
         self._display_text.max_lines = 6
