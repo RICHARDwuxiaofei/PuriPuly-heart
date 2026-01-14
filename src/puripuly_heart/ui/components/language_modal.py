@@ -72,7 +72,7 @@ class LanguageModal:
             ft.Text(
                 t("language_modal.recent"),
                 size=12,
-                weight=ft.FontWeight.W_500,
+                weight=ft.FontWeight.BOLD,
                 color=COLOR_NEUTRAL,
             )
         )
@@ -87,7 +87,7 @@ class LanguageModal:
             ft.Text(
                 t("language_modal.all_languages"),
                 size=12,
-                weight=ft.FontWeight.W_500,
+                weight=ft.FontWeight.BOLD,
                 color=COLOR_NEUTRAL,
             )
         )
@@ -131,7 +131,7 @@ class LanguageModal:
             # Bento Card Style
             bg_color = COLOR_PRIMARY if is_current else COLOR_BACKGROUND
             text_color = ft.Colors.WHITE if is_current else COLOR_NEUTRAL_DARK
-            font_weight = ft.FontWeight.BOLD if is_current else ft.FontWeight.W_500
+            font_weight = ft.FontWeight.BOLD
 
             shadow = (
                 None
@@ -182,7 +182,7 @@ class LanguageModal:
             # Bento Card Style
             bg_color = COLOR_PRIMARY if is_selected else COLOR_BACKGROUND
             text_color = ft.Colors.WHITE if is_selected else COLOR_NEUTRAL_DARK
-            font_weight = ft.FontWeight.BOLD if is_selected else ft.FontWeight.W_500
+            font_weight = ft.FontWeight.BOLD
 
             # Shadow for depth
             shadow = (
