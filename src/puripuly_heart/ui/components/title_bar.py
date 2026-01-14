@@ -14,7 +14,7 @@ class TitleBar(ft.Container):
     def __init__(self, page: ft.Page):
         self._page = page
 
-        title = ft.Text(
+        self._title_text = ft.Text(
             "PuriPuly Heart",
             size=14,
             weight=ft.FontWeight.W_600,
@@ -58,7 +58,7 @@ class TitleBar(ft.Container):
             content=ft.Container(
                 content=ft.Row(
                     [
-                        ft.Container(content=title, padding=ft.padding.only(left=16)),
+                        ft.Container(content=self._title_text, padding=ft.padding.only(left=16)),
                         ft.Container(expand=True),
                     ],
                     expand=True,
@@ -111,3 +111,8 @@ class TitleBar(ft.Container):
             icon.color = COLOR_NEUTRAL
         container.update()
         icon.update()
+
+    def set_title(self, title: str) -> None:
+        self._title_text.value = title
+        if self._title_text.page is not None:
+            self._title_text.update()

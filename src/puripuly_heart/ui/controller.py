@@ -37,6 +37,7 @@ from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
 from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 from puripuly_heart.ui.event_bridge import UIEventBridge
+from puripuly_heart.ui.i18n import get_locale, set_locale, t
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,12 @@ class GuiController:
 
     async def start(self) -> None:
         self.settings = self._load_or_init_settings(self.config_path)
+        set_locale(self.settings.ui.locale)
         self._sync_ui_from_settings()
+        with contextlib.suppress(Exception):
+            apply_locale = getattr(self.app, "apply_locale", None)
+            if callable(apply_locale):
+                apply_locale()
 
         # Attach log handler to LogsView for GUI log display
         logs_view = getattr(self.app, "view_logs", None)
@@ -147,6 +153,7 @@ class GuiController:
             self._log_error(f"Submit failed: {exc}")
 
     async def apply_settings(self, settings: AppSettings) -> None:
+        prev_locale = get_locale()
         self.settings = settings
         self._save_settings()
 
@@ -159,6 +166,15 @@ class GuiController:
         if self._mic_task is not None:
             await self._stop_mic_loop()
             await self._start_mic_loop()
+
+        if prev_locale != settings.ui.locale:
+            set_locale(settings.ui.locale)
+            apply_locale = getattr(self.app, "apply_locale", None)
+            if callable(apply_locale):
+                try:
+                    apply_locale()
+                except Exception as exc:
+                    self._log_error(f"Failed to apply locale: {exc}")
 
     async def verify_api_key(self, provider: str, key: str) -> tuple[bool, str]:
         """Verify API key using the respective provider's static check. Returns (success, error_msg)."""
@@ -388,18 +404,33 @@ class GuiController:
                 dash.set_languages_from_codes(
                     settings.languages.source_language, settings.languages.target_language
                 )
+                # Load recent languages from settings
+                dash.set_recent_languages(
+                    settings.languages.recent_source_languages,
+                    settings.languages.recent_target_languages,
+                )
+                # Connect callback for persistence
+                dash.on_recent_languages_change = self._on_recent_languages_change
 
         with contextlib.suppress(Exception):
             view_settings = getattr(self.app, "view_settings", None)
             if view_settings is not None:
                 view_settings.load_from_settings(settings, config_path=self.config_path)
 
+    def _on_recent_languages_change(self, source: list[str], target: list[str]) -> None:
+        """Callback when recent languages change in dashboard."""
+        if self.settings is None:
+            return
+        self.settings.languages.recent_source_languages = list(source)
+        self.settings.languages.recent_target_languages = list(target)
+        self._save_settings()
+
     def _log_error(self, message: str) -> None:
         logger.error(message)
         with contextlib.suppress(Exception):
             logs = getattr(self.app, "view_logs", None)
             if logs is not None:
-                logs.append_log(f"ERROR: {message}")
+                logs.append_log(f"{t('log.error_prefix')}: {message}")
 
     def _get_qwen_key_and_base_url(self, secrets) -> tuple[str, str]:
         if self.settings is None:

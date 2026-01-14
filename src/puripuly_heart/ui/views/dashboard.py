@@ -4,16 +4,15 @@ from puripuly_heart.core.language import get_all_language_options
 from puripuly_heart.ui.components.display_card import DisplayCard
 from puripuly_heart.ui.components.glow import create_background_glow_stack
 from puripuly_heart.ui.components.language_card import LanguageCard
+from puripuly_heart.ui.components.language_modal import LanguageModal
 from puripuly_heart.ui.components.power_button import PowerButton
-from puripuly_heart.ui.theme import COLOR_NEUTRAL_DARK
+from puripuly_heart.ui.i18n import language_name, t
 
 
 class DashboardView(ft.Column):
     """Main dashboard with 2x2 asymmetric grid layout."""
 
     _LANG_OPTIONS = get_all_language_options()
-    LANG_LABEL_TO_CODE = {name: code for code, name in _LANG_OPTIONS}
-    LANG_CODE_TO_LABEL = {code: name for code, name in _LANG_OPTIONS}
 
     def __init__(self):
         super().__init__(expand=True, spacing=16)
@@ -25,7 +24,7 @@ class DashboardView(ft.Column):
         self.is_stt_on = False
         self.translation_needs_key = False
         self.stt_needs_key = False
-        self.last_sent_text = "Ready to translate..."
+        self.last_sent_text = t("dashboard.ready")
         self.history_items = []
 
         # Warning state for UI feedback
@@ -33,21 +32,26 @@ class DashboardView(ft.Column):
         self._stt_showing_warning = False
 
         # Current language settings
-        self._source_lang = "Korean"
-        self._target_lang = "English"
+        self._source_lang_code = "ko"
+        self._target_lang_code = "en"
+
+        # Recent languages (max 3 each)
+        self._recent_source_langs: list[str] = []
+        self._recent_target_langs: list[str] = []
 
         # Callbacks (assigned by App)
         self.on_send_message = None
         self.on_toggle_translation = None
         self.on_toggle_stt = None
         self.on_language_change = None
+        self.on_recent_languages_change = None  # For persistence
 
         self._build_ui()
 
     def _build_ui(self):
         # A: STT button (top-left) - larger icon
         self.stt_button = PowerButton(
-            label="STT",
+            label=t("dashboard.stt_label"),
             icon=ft.Icons.MIC,
             on_click=self._toggle_stt,
             icon_size=96,
@@ -59,7 +63,7 @@ class DashboardView(ft.Column):
 
         # C: TRANS button (bottom-left) - slightly smaller
         self.trans_button = PowerButton(
-            label="TRANS",
+            label=t("dashboard.trans_label"),
             icon=ft.Icons.TRANSLATE,
             on_click=self._toggle_translation,
             icon_size=64,
@@ -70,6 +74,10 @@ class DashboardView(ft.Column):
         self.language_card = LanguageCard(
             on_source_click=self._open_source_dialog,
             on_target_click=self._open_target_dialog,
+        )
+        self.language_card.set_languages(
+            language_name(self._source_lang_code),
+            language_name(self._target_lang_code),
         )
 
         # 2x2 Grid layout (35:65 ratio)
@@ -110,7 +118,7 @@ class DashboardView(ft.Column):
         elif self.stt_needs_key:
             self._stt_showing_warning = True
             self.stt_button.set_state(False, needs_key=True)
-            self.set_display_text("Please enter your STT API key")
+            self.set_display_text(t("dashboard.warn_stt_key"))
         else:
             self.is_stt_on = True
             self.stt_button.set_state(True)
@@ -129,7 +137,7 @@ class DashboardView(ft.Column):
         elif self.translation_needs_key:
             self._translation_showing_warning = True
             self.trans_button.set_state(False, needs_key=True)
-            self.set_display_text("Please enter your LLM API key")
+            self.set_display_text(t("dashboard.warn_llm_key"))
         else:
             self.is_translation_on = True
             self.trans_button.set_state(True)
@@ -144,82 +152,56 @@ class DashboardView(ft.Column):
             self.on_send_message("You", text)
 
     def _open_source_dialog(self):
-        self._open_language_dialog(is_source=True)
+        modal = LanguageModal(
+            page=self.page,
+            languages=self._LANG_OPTIONS,
+            on_select=self._on_source_select,
+        )
+        modal.open(current=self._source_lang_code, recent=self._recent_source_langs)
 
     def _open_target_dialog(self):
-        self._open_language_dialog(is_source=False)
-
-    def _open_language_dialog(self, is_source: bool):
-        """Open language selection dialog."""
-        lang_names = [name for _, name in self._LANG_OPTIONS]
-        title = "Source Language" if is_source else "Target Language"
-        current = self._source_lang if is_source else self._target_lang
-
-        # Preset buttons
-        presets = [
-            {"label": "KR \u2192 EN", "src": "Korean", "tgt": "English"},
-            {"label": "EN \u2192 KR", "src": "English", "tgt": "Korean"},
-            {"label": "KR \u2192 JP", "src": "Korean", "tgt": "Japanese"},
-        ]
-
-        def on_preset_click(e):
-            preset = e.control.data
-            self._source_lang = preset["src"]
-            self._target_lang = preset["tgt"]
-            self.language_card.set_languages(self._source_lang, self._target_lang)
-            self._notify_language_change()
-            self.page.close(dlg)
-
-        def on_lang_select(e):
-            lang = e.control.data
-            if is_source:
-                self._source_lang = lang
-            else:
-                self._target_lang = lang
-            self.language_card.set_languages(self._source_lang, self._target_lang)
-            self._notify_language_change()
-            self.page.close(dlg)
-
-        preset_row = ft.Row(
-            [
-                ft.TextButton(
-                    text=p["label"],
-                    data=p,
-                    on_click=on_preset_click,
-                )
-                for p in presets
-            ],
-            alignment=ft.MainAxisAlignment.CENTER,
-            spacing=8,
+        modal = LanguageModal(
+            page=self.page,
+            languages=self._LANG_OPTIONS,
+            on_select=self._on_target_select,
         )
+        modal.open(current=self._target_lang_code, recent=self._recent_target_langs)
 
-        lang_list = ft.ListView(
-            controls=[
-                ft.ListTile(
-                    title=ft.Text(name, color=COLOR_NEUTRAL_DARK),
-                    data=name,
-                    on_click=on_lang_select,
-                    bgcolor=(
-                        ft.Colors.with_opacity(0.1, ft.Colors.PRIMARY) if name == current else None
-                    ),
-                )
-                for name in lang_names
-            ],
-            height=300,
+    def _on_source_select(self, lang_code: str):
+        """Handle source language selection."""
+        self._source_lang_code = lang_code
+        self._add_to_recent(lang_code, is_source=True)
+        self.language_card.set_languages(
+            language_name(self._source_lang_code),
+            language_name(self._target_lang_code),
         )
+        self._notify_language_change()
 
-        dlg = ft.AlertDialog(
-            title=ft.Text(title, weight=ft.FontWeight.BOLD),
-            content=ft.Column([preset_row, ft.Divider(), lang_list], spacing=8, width=300),
+    def _on_target_select(self, lang_code: str):
+        """Handle target language selection."""
+        self._target_lang_code = lang_code
+        self._add_to_recent(lang_code, is_source=False)
+        self.language_card.set_languages(
+            language_name(self._source_lang_code),
+            language_name(self._target_lang_code),
         )
+        self._notify_language_change()
 
-        self.page.open(dlg)
+    def _add_to_recent(self, lang_code: str, is_source: bool) -> None:
+        """Add language to recent list, maintaining max 6 unique entries."""
+        recent = self._recent_source_langs if is_source else self._recent_target_langs
+        if lang_code in recent:
+            recent.remove(lang_code)
+        recent.insert(0, lang_code)
+        if len(recent) > 6:
+            recent.pop()
+        # Notify for persistence
+        if self.on_recent_languages_change:
+            self.on_recent_languages_change(self._recent_source_langs, self._recent_target_langs)
 
     def _notify_language_change(self):
         if self.on_language_change:
-            source_code = self.LANG_LABEL_TO_CODE.get(self._source_lang, "ko")
-            target_code = self.LANG_LABEL_TO_CODE.get(self._target_lang, "en")
-            self.on_language_change(source_code, target_code)
+            self.on_language_change(self._source_lang_code, self._target_lang_code)
 
     # Public API methods
     def set_status(self, connected: bool):
@@ -227,9 +209,12 @@ class DashboardView(ft.Column):
         self.display_card.set_status(connected)
 
     def set_languages_from_codes(self, source_code: str, target_code: str) -> None:
-        self._source_lang = self.LANG_CODE_TO_LABEL.get(source_code, "Korean")
-        self._target_lang = self.LANG_CODE_TO_LABEL.get(target_code, "English")
-        self.language_card.set_languages(self._source_lang, self._target_lang)
+        self._source_lang_code = source_code
+        self._target_lang_code = target_code
+        self.language_card.set_languages(
+            language_name(self._source_lang_code),
+            language_name(self._target_lang_code),
+        )
 
     def set_translation_enabled(self, enabled: bool) -> None:
         self.is_translation_on = bool(enabled)
@@ -252,3 +237,24 @@ class DashboardView(ft.Column):
     def set_display_text(self, text: str, is_error: bool = False) -> None:
         """Update the display card with new text (STT result, translation, or error)."""
         self.display_card.set_display(text, is_error=is_error)
+
+    def apply_locale(self) -> None:
+        self.stt_button.set_label(t("dashboard.stt_label"))
+        self.trans_button.set_label(t("dashboard.trans_label"))
+        self.display_card.apply_locale()
+        self.language_card.set_languages(
+            language_name(self._source_lang_code),
+            language_name(self._target_lang_code),
+        )
+        if self._stt_showing_warning:
+            self.set_display_text(t("dashboard.warn_stt_key"))
+        elif self._translation_showing_warning:
+            self.set_display_text(t("dashboard.warn_llm_key"))
+
+    def set_recent_languages(self, source: list[str], target: list[str]) -> None:
+        """Set recent languages from settings (for persistence)."""
+        self._recent_source_langs = list(source)
+        self._recent_target_langs = list(target)
+        # Keep only the last 6 unique languages
+        self._recent_source_langs = self._recent_source_langs[:6]
+        self._recent_target_langs = self._recent_target_langs[:6]

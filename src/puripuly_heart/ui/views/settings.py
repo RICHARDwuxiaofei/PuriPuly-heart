@@ -20,6 +20,7 @@ from puripuly_heart.config.settings import (
 )
 from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.ui.components.bento_card import BentoCard
+from puripuly_heart.ui.i18n import available_locales, language_name, locale_label, provider_label, t
 from puripuly_heart.ui.theme import COLOR_PRIMARY
 
 logger = logging.getLogger(__name__)
@@ -50,9 +51,14 @@ class SettingsView(ft.ListView):
 
         self._settings: AppSettings | None = None
         self._config_path: Path | None = None
+        self._locale_label_to_code: dict[str, str] = {}
+        self._locale_code_to_label: dict[str, str] = {}
+        self._qwen_region_label_to_value: dict[str, QwenRegion] = {}
+        self._qwen_region_value_to_label: dict[QwenRegion, str] = {}
+        self._default_option_label = t("settings.default_option")
 
         self.stt_provider = ft.Dropdown(
-            label="STT Provider",
+            label=t("settings.stt_provider"),
             options=[
                 ft.dropdown.Option("Deepgram"),
                 ft.dropdown.Option("Qwen ASR"),
@@ -62,7 +68,7 @@ class SettingsView(ft.ListView):
             border_radius=8,
         )
         self.llm_provider = ft.Dropdown(
-            label="LLM Provider",
+            label=t("settings.llm_provider"),
             options=[
                 ft.dropdown.Option("Google Gemini"),
                 ft.dropdown.Option("Alibaba Qwen"),
@@ -71,8 +77,15 @@ class SettingsView(ft.ListView):
             border_radius=8,
         )
 
+        self.ui_language = ft.Dropdown(
+            label=t("settings.ui_language"),
+            options=self._build_locale_options(),
+            on_change=self._on_ui_language_change,
+            border_radius=8,
+        )
+
         self.google_api_key = ft.TextField(
-            label="Google API Key (Gemini)",
+            label=t("settings.google_api_key"),
             password=True,
             can_reveal_password=True,
             on_change=lambda e: self._on_secret_change("google_api_key", e),
@@ -82,12 +95,12 @@ class SettingsView(ft.ListView):
         self.verify_google_btn = ft.IconButton(
             icon=icons.CHECK_CIRCLE_OUTLINE_ROUNDED,
             icon_color=colors.GREY_400,
-            tooltip="Verify Key",
+            tooltip=t("settings.verify_key"),
             on_click=lambda e: self._on_verify_req("google", self.google_api_key.value, e.control),
         )
 
         self.alibaba_api_key_beijing = ft.TextField(
-            label="Alibaba API Key (Beijing)",
+            label=t("settings.alibaba_api_key_beijing"),
             password=True,
             can_reveal_password=True,
             on_change=lambda e: self._on_secret_change("alibaba_api_key_beijing", e),
@@ -97,14 +110,14 @@ class SettingsView(ft.ListView):
         self.verify_alibaba_beijing_btn = ft.IconButton(
             icon=icons.CHECK_CIRCLE_OUTLINE_ROUNDED,
             icon_color=colors.GREY_400,
-            tooltip="Verify Key",
+            tooltip=t("settings.verify_key"),
             on_click=lambda e: self._on_verify_req(
                 "alibaba_beijing", self.alibaba_api_key_beijing.value, e.control
             ),
         )
 
         self.alibaba_api_key_singapore = ft.TextField(
-            label="Alibaba API Key (Singapore)",
+            label=t("settings.alibaba_api_key_singapore"),
             password=True,
             can_reveal_password=True,
             on_change=lambda e: self._on_secret_change("alibaba_api_key_singapore", e),
@@ -114,24 +127,21 @@ class SettingsView(ft.ListView):
         self.verify_alibaba_singapore_btn = ft.IconButton(
             icon=icons.CHECK_CIRCLE_OUTLINE_ROUNDED,
             icon_color=colors.GREY_400,
-            tooltip="Verify Key",
+            tooltip=t("settings.verify_key"),
             on_click=lambda e: self._on_verify_req(
                 "alibaba_singapore", self.alibaba_api_key_singapore.value, e.control
             ),
         )
 
         self.qwen_region = ft.Dropdown(
-            label="Qwen Region",
-            options=[
-                ft.dropdown.Option("Beijing"),
-                ft.dropdown.Option("Singapore"),
-            ],
+            label=t("settings.qwen_region"),
+            options=self._build_qwen_region_options(),
             on_change=self._on_qwen_region_change,
             border_radius=8,
         )
 
         self.deepgram_api_key = ft.TextField(
-            label="Deepgram API Key",
+            label=t("settings.deepgram_api_key"),
             password=True,
             can_reveal_password=True,
             on_change=lambda e: self._on_secret_change("deepgram_api_key", e),
@@ -141,14 +151,14 @@ class SettingsView(ft.ListView):
         self.verify_deepgram_btn = ft.IconButton(
             icon=icons.CHECK_CIRCLE_OUTLINE_ROUNDED,
             icon_color=colors.GREY_400,
-            tooltip="Verify Key",
+            tooltip=t("settings.verify_key"),
             on_click=lambda e: self._on_verify_req(
                 "deepgram", self.deepgram_api_key.value, e.control
             ),
         )
 
         self.soniox_api_key = ft.TextField(
-            label="Soniox API Key",
+            label=t("settings.soniox_api_key"),
             password=True,
             can_reveal_password=True,
             on_change=lambda e: self._on_secret_change("soniox_api_key", e),
@@ -158,53 +168,55 @@ class SettingsView(ft.ListView):
         self.verify_soniox_btn = ft.IconButton(
             icon=icons.CHECK_CIRCLE_OUTLINE_ROUNDED,
             icon_color=colors.GREY_400,
-            tooltip="Verify Key",
+            tooltip=t("settings.verify_key"),
             on_click=lambda e: self._on_verify_req("soniox", self.soniox_api_key.value, e.control),
         )
 
         self.deepgram_stt_model = ft.TextField(
-            label="Deepgram Model",
+            label=t("settings.deepgram_model"),
             hint_text="nova-3",
             on_change=self._on_setting_change,
             border_radius=8,
         )
 
         self.soniox_stt_model = ft.TextField(
-            label="Soniox Model",
+            label=t("settings.soniox_model"),
             hint_text="stt-rt-v3",
             on_change=self._on_setting_change,
             border_radius=8,
         )
         self.soniox_stt_endpoint = ft.TextField(
-            label="Soniox Endpoint",
+            label=t("settings.soniox_endpoint"),
             hint_text="wss://stt-rt.soniox.com/transcribe-websocket",
             on_change=self._on_setting_change,
             border_radius=8,
         )
         self.soniox_keepalive_s = ft.TextField(
-            label="Soniox Keepalive (seconds)",
+            label=t("settings.soniox_keepalive"),
             hint_text="10",
             on_change=self._on_setting_change,
             border_radius=8,
         )
         self.soniox_trailing_silence_ms = ft.TextField(
-            label="Soniox Trailing Silence (ms)",
+            label=t("settings.soniox_trailing_silence"),
             hint_text="100",
             on_change=self._on_setting_change,
             border_radius=8,
         )
 
         self.audio_host_api = ft.Dropdown(
-            label="Audio Host API",
-            options=[ft.dropdown.Option("(Default)")],  # Will be populated dynamically
+            label=t("settings.audio_host_api"),
+            options=[
+                ft.dropdown.Option(self._default_option_label)
+            ],  # Will be populated dynamically
             on_change=self._on_audio_change,
             border_radius=8,
         )
         self._populate_host_apis()
 
         self.microphone = ft.Dropdown(
-            label="Microphone",
-            options=[ft.dropdown.Option("(Default)")],
+            label=t("settings.microphone"),
+            options=[ft.dropdown.Option(self._default_option_label)],
             on_change=self._on_audio_change,
             border_radius=8,
         )
@@ -220,19 +232,19 @@ class SettingsView(ft.ListView):
         )
 
         self.prompt_provider_label = ft.Text(
-            "Prompt for: Gemini",
+            t("settings.prompt_for", provider=provider_label("gemini")),
             size=12,
             color=colors.GREY_400,
         )
         self.system_prompt = ft.TextField(
-            label="System Prompt",
+            label=t("settings.system_prompt"),
             multiline=True,
             min_lines=3,
             on_change=self._on_setting_change,
             border_radius=8,
         )
         self.reset_prompt_btn = ft.Button(
-            text="Reset Prompt",
+            text=t("settings.reset_prompt"),
             icon=icons.REFRESH_ROUNDED,
             style=ft.ButtonStyle(
                 color=colors.WHITE,
@@ -243,7 +255,7 @@ class SettingsView(ft.ListView):
         )
 
         self.apply_providers_btn = ft.Button(
-            text="Apply Provider Changes (Restart Pipeline)",
+            text=t("settings.apply_providers"),
             icon=icons.PLAY_CIRCLE_FILL_ROUNDED,
             style=ft.ButtonStyle(
                 color=colors.WHITE,
@@ -253,12 +265,51 @@ class SettingsView(ft.ListView):
             on_click=self._on_apply_providers,
         )
 
+        self._title_text = ft.Text(
+            t("settings.title"), size=20, weight=ft.FontWeight.BOLD, color=colors.WHITE
+        )
+        self._ui_section_title = ft.Text(
+            t("settings.section.ui"),
+            size=12,
+            weight=ft.FontWeight.BOLD,
+            color=colors.GREY_500,
+        )
+        self._providers_section_title = ft.Text(
+            t("settings.section.providers"),
+            size=12,
+            weight=ft.FontWeight.BOLD,
+            color=colors.GREY_500,
+        )
+        self._audio_section_title = ft.Text(
+            t("settings.section.audio"),
+            size=12,
+            weight=ft.FontWeight.BOLD,
+            color=colors.GREY_500,
+        )
+        self._persona_section_title = ft.Text(
+            t("settings.section.persona"),
+            size=12,
+            weight=ft.FontWeight.BOLD,
+            color=colors.GREY_500,
+        )
+        self._stt_subtitle = ft.Text(t("settings.subtitle.stt"), size=12, color=colors.GREY_400)
+        self._translation_subtitle = ft.Text(
+            t("settings.subtitle.translation"), size=12, color=colors.GREY_400
+        )
+        self._vad_label = ft.Text(t("settings.vad_sensitivity"), size=12, color=colors.GREY_400)
+
         self.controls = [
-            ft.Text("Settings", size=20, weight=ft.FontWeight.BOLD, color=colors.WHITE),
+            self._title_text,
             self._build_section(
-                "Providers",
+                self._ui_section_title,
                 [
-                    ft.Text("Speech-to-Text (STT)", size=12, color=colors.GREY_400),
+                    self.ui_language,
+                ],
+            ),
+            self._build_section(
+                self._providers_section_title,
+                [
+                    self._stt_subtitle,
                     self.stt_provider,
                     ft.Divider(height=5, color=colors.TRANSPARENT),
                     ft.Row([self.deepgram_api_key, self.verify_deepgram_btn]),
@@ -270,7 +321,7 @@ class SettingsView(ft.ListView):
                     self.soniox_keepalive_s,
                     self.soniox_trailing_silence_ms,
                     ft.Divider(height=10, color=colors.TRANSPARENT),
-                    ft.Text("Translation (LLM)", size=12, color=colors.GREY_400),
+                    self._translation_subtitle,
                     self.llm_provider,
                     ft.Divider(height=5, color=colors.TRANSPARENT),
                     ft.Row([self.google_api_key, self.verify_google_btn]),
@@ -282,16 +333,16 @@ class SettingsView(ft.ListView):
                 ],
             ),
             self._build_section(
-                "Audio",
+                self._audio_section_title,
                 [
                     self.audio_host_api,
                     self.microphone,
-                    ft.Text("VAD Sensitivity (Speech Detection)", size=12, color=colors.GREY_400),
+                    self._vad_label,
                     self.vad_sensitivity,
                 ],
             ),
             self._build_section(
-                "Persona",
+                self._persona_section_title,
                 [
                     self.prompt_provider_label,
                     self.system_prompt,
@@ -304,6 +355,8 @@ class SettingsView(ft.ListView):
         self._settings = settings
         self._config_path = config_path
 
+        self._refresh_locale_options()
+
         if settings.provider.stt == STTProviderName.QWEN_ASR:
             self.stt_provider.value = "Qwen ASR"
         elif settings.provider.stt == STTProviderName.SONIOX:
@@ -314,8 +367,9 @@ class SettingsView(ft.ListView):
         self.llm_provider.value = (
             "Google Gemini" if settings.provider.llm == LLMProviderName.GEMINI else "Alibaba Qwen"
         )
-        self.qwen_region.value = (
-            "Beijing" if settings.qwen.region == QwenRegion.BEIJING else "Singapore"
+        self._refresh_qwen_region_options()
+        self.qwen_region.value = self._qwen_region_value_to_label.get(
+            settings.qwen.region, self.qwen_region.value
         )
 
         self.deepgram_stt_model.value = settings.deepgram_stt.model
@@ -324,14 +378,16 @@ class SettingsView(ft.ListView):
         self.soniox_keepalive_s.value = str(settings.soniox_stt.keepalive_interval_s)
         self.soniox_trailing_silence_ms.value = str(settings.soniox_stt.trailing_silence_ms)
 
-        self.audio_host_api.value = settings.audio.input_host_api or "(Default)"
+        self.audio_host_api.value = settings.audio.input_host_api or self._default_option_label
         self._refresh_microphones()
-        self.microphone.value = settings.audio.input_device or "(Default)"
+        self.microphone.value = settings.audio.input_device or self._default_option_label
         self.vad_sensitivity.value = settings.stt.vad_speech_threshold
 
         # Load prompt for current LLM provider
         provider_name = "gemini" if settings.provider.llm == LLMProviderName.GEMINI else "qwen"
-        self.prompt_provider_label.value = f"Prompt for: {provider_name.capitalize()}"
+        self.prompt_provider_label.value = t(
+            "settings.prompt_for", provider=provider_label(provider_name)
+        )
         saved_prompt = settings.system_prompt or ""
         if saved_prompt.strip():
             self.system_prompt.value = saved_prompt
@@ -363,11 +419,55 @@ class SettingsView(ft.ListView):
         if self.page:
             self.update()
 
-    def _build_section(self, title: str, controls: list[ft.Control]) -> ft.Control:
+    def _build_locale_options(self) -> list[ft.dropdown.Option]:
+        self._locale_label_to_code.clear()
+        self._locale_code_to_label.clear()
+        options: list[ft.dropdown.Option] = []
+        for code in available_locales():
+            label = locale_label(code)
+            self._locale_label_to_code[label] = code
+            self._locale_code_to_label[code] = label
+            options.append(ft.dropdown.Option(label))
+        return options
+
+    def _refresh_locale_options(self) -> None:
+        current_code = self._settings.ui.locale if self._settings else None
+        self.ui_language.options = self._build_locale_options()
+        if current_code and current_code in self._locale_code_to_label:
+            self.ui_language.value = self._locale_code_to_label[current_code]
+        elif self._locale_code_to_label:
+            self.ui_language.value = next(iter(self._locale_code_to_label.values()))
+        if self.ui_language.page:
+            self.ui_language.update()
+
+    def _build_qwen_region_options(self) -> list[ft.dropdown.Option]:
+        self._qwen_region_label_to_value.clear()
+        self._qwen_region_value_to_label.clear()
+        options: list[ft.dropdown.Option] = []
+        for label, value in (
+            (t("region.beijing"), QwenRegion.BEIJING),
+            (t("region.singapore"), QwenRegion.SINGAPORE),
+        ):
+            self._qwen_region_label_to_value[label] = value
+            self._qwen_region_value_to_label[value] = label
+            options.append(ft.dropdown.Option(label))
+        return options
+
+    def _refresh_qwen_region_options(self) -> None:
+        current_region = self._settings.qwen.region if self._settings else None
+        self.qwen_region.options = self._build_qwen_region_options()
+        if current_region and current_region in self._qwen_region_value_to_label:
+            self.qwen_region.value = self._qwen_region_value_to_label[current_region]
+        elif self._qwen_region_value_to_label:
+            self.qwen_region.value = next(iter(self._qwen_region_value_to_label.values()))
+        if self.qwen_region.page:
+            self.qwen_region.update()
+
+    def _build_section(self, title: ft.Text, controls: list[ft.Control]) -> ft.Control:
         return BentoCard(
             content=ft.Column(
                 [
-                    ft.Text(title, size=12, weight=ft.FontWeight.BOLD, color=colors.GREY_500),
+                    title,
                     ft.Column(
                         controls,
                         spacing=15,
@@ -422,7 +522,7 @@ class SettingsView(ft.ListView):
         if warning and self.page:
             self.page.open(
                 ft.SnackBar(
-                    ft.Text(warning),
+                    ft.Text(t(warning.key, language=language_name(warning.language_code))),
                     bgcolor=colors.ORANGE_700,
                     duration=4000,
                 )
@@ -438,7 +538,9 @@ class SettingsView(ft.ListView):
         if self._settings.provider.llm != new_llm:
             self._settings.provider.llm = new_llm
             provider_name = "gemini" if new_llm == LLMProviderName.GEMINI else "qwen"
-            self.prompt_provider_label.value = f"Prompt for: {provider_name.capitalize()}"
+            self.prompt_provider_label.value = t(
+                "settings.prompt_for", provider=provider_label(provider_name)
+            )
             self.system_prompt.value = load_prompt_for_provider(provider_name)
             self._settings.system_prompt = self.system_prompt.value
             with contextlib.suppress(RuntimeError):
@@ -469,14 +571,22 @@ class SettingsView(ft.ListView):
             self.system_prompt.update()
         self._emit_settings_changed()
 
+    def _on_ui_language_change(self, e) -> None:
+        _ = e
+        if self._settings is None:
+            return
+        label = self.ui_language.value or ""
+        locale = self._locale_label_to_code.get(label, self._settings.ui.locale)
+        self._settings.ui.locale = locale
+        self._emit_settings_changed()
+
     def _on_qwen_region_change(self, e) -> None:
         _ = e
         if self._settings is None:
             return
 
-        new_region = (
-            QwenRegion.BEIJING if self.qwen_region.value == "Beijing" else QwenRegion.SINGAPORE
-        )
+        label = self.qwen_region.value or ""
+        new_region = self._qwen_region_label_to_value.get(label, self._settings.qwen.region)
         self._settings.qwen.region = new_region
         self._emit_settings_changed()
 
@@ -519,7 +629,9 @@ class SettingsView(ft.ListView):
             return
 
         if not key:
-            self.page.open(ft.SnackBar(ft.Text("API Key is empty!"), bgcolor=colors.RED_400))
+            self.page.open(
+                ft.SnackBar(ft.Text(t("snackbar.api_key_empty")), bgcolor=colors.RED_400)
+            )
             return
 
         async def _run():
@@ -536,7 +648,13 @@ class SettingsView(ft.ListView):
                 if success:
                     self.page.open(
                         ft.SnackBar(
-                            ft.Text(f"{provider.capitalize()} Verified!"), bgcolor=colors.GREEN_400
+                            ft.Text(
+                                t(
+                                    "snackbar.verification_ok",
+                                    provider=provider_label(provider),
+                                )
+                            ),
+                            bgcolor=colors.GREEN_400,
                         )
                     )
                     btn_control.icon = icons.CHECK_CIRCLE_ROUNDED
@@ -544,11 +662,21 @@ class SettingsView(ft.ListView):
                 else:
                     logger.error(f"Verification failed for {provider}: {msg}")
                     # Also write to app logs UI
-                    self.page.open(ft.SnackBar(ft.Text(f"Failed: {msg}"), bgcolor=colors.RED_400))
+                    self.page.open(
+                        ft.SnackBar(
+                            ft.Text(t("snackbar.verification_failed", message=msg)),
+                            bgcolor=colors.RED_400,
+                        )
+                    )
                     btn_control.icon = icons.ERROR_OUTLINE_ROUNDED
                     btn_control.icon_color = colors.RED_400
             except Exception as e:
-                self.page.open(ft.SnackBar(ft.Text(f"Error: {e}"), bgcolor=colors.RED_400))
+                self.page.open(
+                    ft.SnackBar(
+                        ft.Text(t("snackbar.verification_error", message=str(e))),
+                        bgcolor=colors.RED_400,
+                    )
+                )
                 btn_control.icon = icons.ERROR_OUTLINE_ROUNDED
                 btn_control.icon_color = colors.RED_400
 
@@ -600,13 +728,13 @@ class SettingsView(ft.ListView):
         if self._settings is None:
             return
 
-        host_api = self.audio_host_api.value or "(Default)"
-        if host_api == "(Default)":
+        host_api = self.audio_host_api.value or self._default_option_label
+        if host_api == self._default_option_label:
             host_api = ""
         self._settings.audio.input_host_api = host_api
 
-        device = self.microphone.value or "(Default)"
-        if device == "(Default)":
+        device = self.microphone.value or self._default_option_label
+        if device == self._default_option_label:
             device = ""
         self._settings.audio.input_device = device
 
@@ -616,11 +744,11 @@ class SettingsView(ft.ListView):
         self._emit_settings_changed()
 
     def _refresh_microphones(self) -> None:
-        host_api = self.audio_host_api.value or "(Default)"
-        if host_api == "(Default)":
+        host_api = self.audio_host_api.value or self._default_option_label
+        if host_api == self._default_option_label:
             host_api = ""
 
-        devices = ["(Default)"]
+        devices = [self._default_option_label]
         try:
             import sounddevice as sd  # type: ignore
 
@@ -635,7 +763,7 @@ class SettingsView(ft.ListView):
 
                 # If user selected a host API but it wasn't found, skip all devices
                 if hostapi_index is None:
-                    devices = ["(Default)"]  # No matching host API
+                    devices = [self._default_option_label]  # No matching host API
 
             for dev in sd.query_devices():
                 if int(dev.get("max_input_channels", 0) or 0) <= 0:
@@ -654,7 +782,7 @@ class SettingsView(ft.ListView):
         if current in devices:
             self.microphone.value = current
         else:
-            self.microphone.value = "(Default)"
+            self.microphone.value = self._default_option_label
 
         if self.microphone.page:
             self.microphone.update()
@@ -666,7 +794,7 @@ class SettingsView(ft.ListView):
         - MME: High latency, can be unstable
         - ASIO: Exclusive mode, prevents microphone sharing with other apps (e.g., VRChat)
         """
-        options = [ft.dropdown.Option("(Default)")]
+        options = [ft.dropdown.Option(self._default_option_label)]
         # Only allow these host APIs for better compatibility
         allowed_apis = {"windows directsound", "windows wasapi"}
         try:
@@ -699,3 +827,72 @@ class SettingsView(ft.ListView):
         self.system_prompt.value = load_prompt_for_provider(provider_name)
         if self.system_prompt.page:
             self.system_prompt.update()
+
+    def apply_locale(self) -> None:
+        old_default = self._default_option_label
+        self._default_option_label = t("settings.default_option")
+
+        self._title_text.value = t("settings.title")
+        self._ui_section_title.value = t("settings.section.ui")
+        self._providers_section_title.value = t("settings.section.providers")
+        self._audio_section_title.value = t("settings.section.audio")
+        self._persona_section_title.value = t("settings.section.persona")
+        self._stt_subtitle.value = t("settings.subtitle.stt")
+        self._translation_subtitle.value = t("settings.subtitle.translation")
+        self._vad_label.value = t("settings.vad_sensitivity")
+
+        self.stt_provider.label = t("settings.stt_provider")
+        self.llm_provider.label = t("settings.llm_provider")
+        self.ui_language.label = t("settings.ui_language")
+        self.google_api_key.label = t("settings.google_api_key")
+        self.alibaba_api_key_beijing.label = t("settings.alibaba_api_key_beijing")
+        self.alibaba_api_key_singapore.label = t("settings.alibaba_api_key_singapore")
+        self.qwen_region.label = t("settings.qwen_region")
+        self.deepgram_api_key.label = t("settings.deepgram_api_key")
+        self.soniox_api_key.label = t("settings.soniox_api_key")
+        self.deepgram_stt_model.label = t("settings.deepgram_model")
+        self.soniox_stt_model.label = t("settings.soniox_model")
+        self.soniox_stt_endpoint.label = t("settings.soniox_endpoint")
+        self.soniox_keepalive_s.label = t("settings.soniox_keepalive")
+        self.soniox_trailing_silence_ms.label = t("settings.soniox_trailing_silence")
+        self.audio_host_api.label = t("settings.audio_host_api")
+        self.microphone.label = t("settings.microphone")
+        self.system_prompt.label = t("settings.system_prompt")
+        self.reset_prompt_btn.text = t("settings.reset_prompt")
+        self.apply_providers_btn.text = t("settings.apply_providers")
+
+        for btn in (
+            self.verify_google_btn,
+            self.verify_alibaba_beijing_btn,
+            self.verify_alibaba_singapore_btn,
+            self.verify_deepgram_btn,
+            self.verify_soniox_btn,
+        ):
+            btn.tooltip = t("settings.verify_key")
+
+        if self._settings is not None:
+            provider_name = (
+                "gemini" if self._settings.provider.llm == LLMProviderName.GEMINI else "qwen"
+            )
+            self.prompt_provider_label.value = t(
+                "settings.prompt_for", provider=provider_label(provider_name)
+            )
+
+        current_host_api = self.audio_host_api.value
+        current_microphone = self.microphone.value
+        if current_host_api == old_default:
+            current_host_api = self._default_option_label
+        if current_microphone == old_default:
+            current_microphone = self._default_option_label
+
+        self._refresh_locale_options()
+        self._refresh_qwen_region_options()
+        self._populate_host_apis()
+        if current_host_api:
+            self.audio_host_api.value = current_host_api
+        self._refresh_microphones()
+        if current_microphone:
+            self.microphone.value = current_microphone
+
+        if self.page:
+            self.update()

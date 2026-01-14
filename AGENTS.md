@@ -24,6 +24,7 @@ audio/VAD -> STT -> LLM -> OSC. It ships a GUI using Flet and CLI entry points.
 - `src/puripuly_heart/providers/` concrete STT and LLM providers
 - `src/puripuly_heart/ui/` Flet UI, views, controller
 - `src/puripuly_heart/config/` settings, prompts, paths
+- `src/puripuly_heart/data/i18n/` UI localization bundles
 - `prompts/` system prompt files
 - `tests/` unit tests
 - `tests/integration/` opt-in integration tests
@@ -47,7 +48,12 @@ audio/VAD -> STT -> LLM -> OSC. It ships a GUI using Flet and CLI entry points.
 - Provider prompt files: `prompts/gemini.txt`, `prompts/qwen.txt`
 - If you add a new default prompt or LLM provider, add a matching file under `prompts/`
 
-### 2.4 Providers
+### 2.4 i18n
+
+- All new user-facing text must go through the i18n layer (use translation keys, not hardcoded strings).
+- Update every locale bundle under `src/puripuly_heart/data/i18n/` when adding keys.
+
+### 2.5 Providers
 
 - STT interface: `src/puripuly_heart/core/stt/backend.py`
 - LLM interface: `src/puripuly_heart/core/llm/provider.py`
@@ -57,14 +63,14 @@ audio/VAD -> STT -> LLM -> OSC. It ships a GUI using Flet and CLI entry points.
 - Provider selection wiring: `src/puripuly_heart/app/wiring.py`
 - Provider settings and enums: `src/puripuly_heart/config/settings.py`
 
-### 2.5 Orchestrator and Hub
+### 2.6 Orchestrator and Hub
 
 - Core pipeline coordinator is `ClientHub` in `src/puripuly_heart/core/orchestrator/hub.py`
 - Flow: audio and VAD events -> STT -> optional LLM translation -> OSC queue -> UI events
 - Owns task lifecycles for the STT event loop and OSC flushing
 - `start` and `stop` manage cancellation and provider shutdown
 
-### 2.6 Context Memory
+### 2.7 Context Memory
 
 - Implemented in `ClientHub` as `_translation_history`
 - Defaults: `context_time_window_s = 20.0`, `context_max_entries = 3`

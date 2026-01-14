@@ -3,6 +3,7 @@ from typing import Callable
 import flet as ft
 
 from puripuly_heart.ui.components.glow import create_glow_stack
+from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import (
     COLOR_NEUTRAL,
     COLOR_NEUTRAL_DARK,
@@ -18,16 +19,17 @@ class DisplayCard(ft.Container):
     def __init__(self, on_submit: Callable[[str], None]):
         self._on_submit = on_submit
         self._is_connected = False
+        self._showing_status = True
 
         self._display_text = ft.Text(
-            "Disconnected",
+            t("display.disconnected"),
             size=48,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL_DARK,
         )
 
         self._input_field = ft.TextField(
-            hint_text="Type message to send...",
+            hint_text=t("display.input_hint"),
             border=ft.InputBorder.NONE,
             text_size=20,
             color=COLOR_NEUTRAL_DARK,
@@ -95,6 +97,7 @@ class DisplayCard(ft.Container):
 
     def set_display(self, text: str, is_error: bool = False):
         """Update the display text with dynamic sizing."""
+        self._showing_status = False
         length = len(text)
 
         # Dynamic font sizing formula
@@ -117,21 +120,35 @@ class DisplayCard(ft.Container):
         self._display_text.max_lines = 6
         self._display_text.overflow = ft.TextOverflow.ELLIPSIS
 
-        self._display_text.update()
+        if self._display_text.page is not None:
+            self._display_text.update()
 
     def set_status(self, connected: bool):
         """Update connection status display."""
         self._is_connected = connected
-        text = "Connected" if connected else "Disconnected"
+        self._showing_status = True
+        text = t("display.connected") if connected else t("display.disconnected")
 
         # Reset to default big size for status
         self._display_text.value = text
         self._display_text.size = 48
         self._display_text.color = COLOR_NEUTRAL_DARK
         self._display_text.max_lines = 1
-        self._display_text.update()
+        if self._display_text.page is not None:
+            self._display_text.update()
 
     def clear_input(self):
         """Clear the input field."""
         self._input_field.value = ""
         self._input_field.update()
+
+    def apply_locale(self) -> None:
+        self._input_field.hint_text = t("display.input_hint")
+        if self._input_field.page is not None:
+            self._input_field.update()
+        if self._showing_status:
+            self._display_text.value = (
+                t("display.connected") if self._is_connected else t("display.disconnected")
+            )
+            if self._display_text.page is not None:
+                self._display_text.update()

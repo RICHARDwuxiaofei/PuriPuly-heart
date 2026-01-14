@@ -5,6 +5,7 @@ import logging
 
 from puripuly_heart.domain.events import UIEvent, UIEventType
 from puripuly_heart.domain.models import OSCMessage, Transcript, Translation
+from puripuly_heart.ui.i18n import t
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ class UIEventBridge:
             source = event.source or "Mic"
             add_history = getattr(self.app, "add_history_entry", None)
             if add_history is not None:
-                add_history(f"{source} (Translated)", translation.text)
+                add_history(source, translation.text, translated=True)
             return
 
         if event.type == UIEventType.OSC_SENT:
@@ -80,10 +81,10 @@ class UIEventBridge:
 
         if event.type == UIEventType.ERROR:
             payload = event.payload
-            text = str(payload) if payload is not None else "Unknown error"
+            text = str(payload) if payload is not None else t("error.unknown")
             logs = getattr(self.app, "view_logs", None)
             if logs is not None:
-                logs.append_log(f"ERROR: {text}")
+                logs.append_log(f"{t('log.error_prefix')}: {text}")
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 dash.set_display_text(text, is_error=True)

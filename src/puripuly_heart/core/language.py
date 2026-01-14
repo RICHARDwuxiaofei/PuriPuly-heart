@@ -23,6 +23,12 @@ class LanguageInfo:
     name: str  # English name: "Korean", "English"
 
 
+@dataclass(frozen=True, slots=True)
+class SttCompatibilityWarning:
+    key: str
+    language_code: str
+
+
 # Supported languages for UI (union of Deepgram Nova-3 + Qwen ASR)
 SUPPORTED_LANGUAGES: dict[str, LanguageInfo] = {
     "ar": LanguageInfo(code="ar", name="Arabic"),
@@ -211,26 +217,22 @@ def is_soniox_supported(code: str) -> bool:
     return get_language_info(code) is not None
 
 
-def get_stt_compatibility_warning(code: str, stt_provider: str) -> str | None:
-    """Get a warning message if the language is not fully supported by the STT provider.
-
-    Returns None if the language is fully supported, or a warning message otherwise.
-    Suggests an alternative STT provider if available.
-    """
+def get_stt_compatibility_warning(code: str, stt_provider: str) -> SttCompatibilityWarning | None:
+    """Return a warning key if the language is not supported by the STT provider."""
     lang_info = get_language_info(code)
-    lang_name = lang_info.name if lang_info else code
+    lang_code = lang_info.code if lang_info else code
 
     if stt_provider == "deepgram" and not is_deepgram_supported(code):
         if is_qwen_asr_supported(code):
-            return f"{lang_name} is not supported by Deepgram. Use Qwen ASR instead."
-        return f"{lang_name} is not supported by Deepgram."
+            return SttCompatibilityWarning("warning.deepgram_suggest_qwen", lang_code)
+        return SttCompatibilityWarning("warning.deepgram_not_supported", lang_code)
 
     if stt_provider == "qwen_asr" and not is_qwen_asr_supported(code):
         if is_deepgram_supported(code):
-            return f"{lang_name} is not supported by Qwen ASR. Use Deepgram instead."
-        return f"{lang_name} is not supported by Qwen ASR."
+            return SttCompatibilityWarning("warning.qwen_suggest_deepgram", lang_code)
+        return SttCompatibilityWarning("warning.qwen_not_supported", lang_code)
 
     if stt_provider == "soniox" and not is_soniox_supported(code):
-        return f"{lang_name} is not supported by Soniox."
+        return SttCompatibilityWarning("warning.soniox_not_supported", lang_code)
 
     return None
