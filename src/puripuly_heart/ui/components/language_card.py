@@ -15,7 +15,7 @@ from puripuly_heart.ui.theme import (
 _CJK_START = 0x3000
 
 
-def _weighted_len(text: str) -> float:
+def _weighted_len(text: str) -> int:
     """Calculate weighted length for CJK-aware font sizing.
 
     CJK characters are rendered ~2x wider than Latin characters,
@@ -135,7 +135,7 @@ class LanguageCard(ft.Container):
         self._source = source
         self._target = target
 
-        # Calculate weighted total length (CJK chars count as 1.5x)
+        # Calculate weighted total length (CJK chars count as 2x)
         total_len = _weighted_len(source) + _weighted_len(target)
 
         # Fine-grained Sum-based Scaling (adjusted for weighted length)
