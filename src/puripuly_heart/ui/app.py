@@ -8,7 +8,14 @@ from puripuly_heart.core.updater import check_for_update
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
 from puripuly_heart.ui.components.title_bar import TitleBar
 from puripuly_heart.ui.controller import GuiController
-from puripuly_heart.ui.i18n import language_name, source_label, t, translated_source_label
+from puripuly_heart.ui.fonts import font_for_language, register_fonts
+from puripuly_heart.ui.i18n import (
+    get_locale,
+    language_name,
+    source_label,
+    t,
+    translated_source_label,
+)
 from puripuly_heart.ui.theme import COLOR_BACKGROUND, get_app_theme
 from puripuly_heart.ui.views.dashboard import DashboardView
 from puripuly_heart.ui.views.history import HistoryView
@@ -38,7 +45,8 @@ class TranslatorApp:
     def _setup_page(self):
         self.page.title = t("app.title")
         self.page.theme_mode = ft.ThemeMode.LIGHT
-        self.page.theme = get_app_theme()
+        register_fonts(self.page)
+        self.page.theme = get_app_theme(font_family=font_for_language(get_locale()))
         self.page.bgcolor = COLOR_BACKGROUND
         self.page.padding = 0
         self.page.window.frameless = True
@@ -95,14 +103,23 @@ class TranslatorApp:
         if index == 1:
             self.view_settings.refresh_prompt_if_empty()
 
-    def add_history_entry(self, source: str, text: str, *, translated: bool = False):
+    def add_history_entry(
+        self,
+        source: str,
+        text: str,
+        *,
+        translated: bool = False,
+        language_code: str | None = None,
+    ):
         label = source_label(source)
         if translated:
             label = translated_source_label(label)
-        self.view_history.add_message(label, text)
+        font_family = font_for_language(language_code or get_locale())
+        self.view_history.add_message(label, text, text_font_family=font_family)
 
     def apply_locale(self) -> None:
         self.page.title = t("app.title")
+        self.page.theme = get_app_theme(font_family=font_for_language(get_locale()))
         self.title_bar.set_title(t("app.title"))
         self.view_dashboard.apply_locale()
         self.view_settings.apply_locale()

@@ -95,13 +95,14 @@ def main(argv: list[str] | None = None) -> int:
         import flet as ft
 
         from puripuly_heart.ui.app import main_gui
+        from puripuly_heart.ui.fonts import assets_dir
 
         config_path = args.config
 
         async def _target(page: ft.Page):
             return await main_gui(page, config_path=config_path)
 
-        ft.app(target=_target)
+        ft.app(target=_target, assets_dir=str(assets_dir()))
         return 0
 
     settings = _load_settings_or_default(args.config)
@@ -147,13 +148,14 @@ def main(argv: list[str] | None = None) -> int:
         import flet as ft
 
         from puripuly_heart.ui.app import main_gui
+        from puripuly_heart.ui.fonts import assets_dir
 
         config_path = args.config
 
         async def _target(page: ft.Page):
             return await main_gui(page, config_path=config_path)
 
-        ft.app(target=_target)
+        ft.app(target=_target, assets_dir=str(assets_dir()))
         return 0
 
     parser.print_help()

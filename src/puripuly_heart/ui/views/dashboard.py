@@ -6,7 +6,8 @@ from puripuly_heart.ui.components.glow import create_background_glow_stack
 from puripuly_heart.ui.components.language_card import LanguageCard
 from puripuly_heart.ui.components.language_modal import LanguageModal
 from puripuly_heart.ui.components.power_button import PowerButton
-from puripuly_heart.ui.i18n import language_name, t
+from puripuly_heart.ui.fonts import font_for_language
+from puripuly_heart.ui.i18n import get_locale, language_name, t
 
 
 class DashboardView(ft.Column):
@@ -79,6 +80,7 @@ class DashboardView(ft.Column):
             language_name(self._source_lang_code),
             language_name(self._target_lang_code),
         )
+        self._update_input_font()
 
         # 2x2 Grid layout (35:65 ratio)
         top_row = ft.Row(
@@ -147,7 +149,7 @@ class DashboardView(ft.Column):
             self.on_toggle_translation(self.is_translation_on)
 
     def _on_submit(self, text: str):
-        self.display_card.set_display(text)
+        self.set_display_text(text, language_code=self._source_lang_code)
         if self.on_send_message:
             self.on_send_message("You", text)
 
@@ -171,6 +173,7 @@ class DashboardView(ft.Column):
         """Handle source language selection."""
         self._source_lang_code = lang_code
         self._add_to_recent(lang_code, is_source=True)
+        self._update_input_font()
         self.language_card.set_languages(
             language_name(self._source_lang_code),
             language_name(self._target_lang_code),
@@ -206,11 +209,12 @@ class DashboardView(ft.Column):
     # Public API methods
     def set_status(self, connected: bool):
         self.is_connected = connected
-        self.display_card.set_status(connected)
+        self.display_card.set_status(connected, font_family=self._ui_font())
 
     def set_languages_from_codes(self, source_code: str, target_code: str) -> None:
         self._source_lang_code = source_code
         self._target_lang_code = target_code
+        self._update_input_font()
         self.language_card.set_languages(
             language_name(self._source_lang_code),
             language_name(self._target_lang_code),
@@ -234,14 +238,24 @@ class DashboardView(ft.Column):
         if needs_key and not self.is_stt_on:
             self.stt_button.set_state(False, needs_key=True)
 
-    def set_display_text(self, text: str, is_error: bool = False) -> None:
+    def set_display_text(
+        self,
+        text: str,
+        *,
+        language_code: str | None = None,
+        is_error: bool = False,
+    ) -> None:
         """Update the display card with new text (STT result, translation, or error)."""
-        self.display_card.set_display(text, is_error=is_error)
+        font_family = font_for_language(language_code) if language_code else self._ui_font()
+        self.display_card.set_display(text, is_error=is_error, font_family=font_family)
 
     def apply_locale(self) -> None:
         self.stt_button.set_label(t("dashboard.stt_label"))
         self.trans_button.set_label(t("dashboard.trans_label"))
-        self.display_card.apply_locale()
+        self.display_card.apply_locale(
+            display_font_family=self._ui_font(),
+            input_font_family=font_for_language(self._source_lang_code),
+        )
         self.language_card.set_languages(
             language_name(self._source_lang_code),
             language_name(self._target_lang_code),
@@ -258,3 +272,9 @@ class DashboardView(ft.Column):
         # Keep only the last 6 unique languages
         self._recent_source_langs = self._recent_source_langs[:6]
         self._recent_target_langs = self._recent_target_langs[:6]
+
+    def _update_input_font(self) -> None:
+        self.display_card.set_input_font(font_for_language(self._source_lang_code))
+
+    def _ui_font(self) -> str | None:
+        return font_for_language(get_locale())
