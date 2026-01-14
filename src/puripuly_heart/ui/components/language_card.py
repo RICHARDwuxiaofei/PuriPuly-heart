@@ -40,7 +40,7 @@ class LanguageCard(ft.Container):
         # Source language text
         self._source_text = ft.Text(
             self._source,
-            size=44,
+            size=48,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL_DARK,
             no_wrap=True,  # Prevent text from wrapping to next line
@@ -50,7 +50,7 @@ class LanguageCard(ft.Container):
         # Target language text
         self._target_text = ft.Text(
             self._target,
-            size=44,
+            size=48,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL_DARK,
             no_wrap=True,  # Prevent text from wrapping to next line
@@ -60,7 +60,7 @@ class LanguageCard(ft.Container):
         # Arrow icon (Wrapped in container to match text padding for alignment)
         self._arrow_icon = ft.Icon(
             name=ft.Icons.ARROW_RIGHT_ALT,
-            size=44,
+            size=48,
             color=COLOR_TERTIARY,
         )
         self._arrow = ft.Container(
@@ -140,17 +140,17 @@ class LanguageCard(ft.Container):
 
         # Fine-grained Sum-based Scaling (adjusted for weighted length)
         if total_len < 16:
-            new_size = 44  # Safe zone (e.g., English ↔ Korean)
+            new_size = 48  # Safe zone (e.g., English ↔ Korean)
         elif total_len < 22:
-            new_size = 38  # Caution zone
+            new_size = 40  # Caution zone
         elif total_len < 28:
-            new_size = 32  # Danger zone
+            new_size = 34  # Danger zone
         elif total_len < 34:
-            new_size = 26  # Extreme zone
+            new_size = 28  # Extreme zone
         elif total_len < 42:
-            new_size = 22  # Critical zone
+            new_size = 24  # Critical zone
         else:
-            new_size = 18  # Fallback for very long names
+            new_size = 20  # Fallback for very long names
 
         # Apply size to text and arrow for synchronization
         self._source_text.size = new_size
