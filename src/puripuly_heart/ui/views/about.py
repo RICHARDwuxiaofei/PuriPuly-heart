@@ -261,11 +261,11 @@ class AboutView(ft.Column):
                         ft.Container(
                             content=ft.Text(
                                 licenses_text,
-                                size=15,
+                                size=16,
                                 color=COLOR_ON_BACKGROUND,
                                 selectable=True,
                             ),
-                            height=250,
+                            height=500,
                             expand=True,
                             border=ft.border.all(1, COLOR_DIVIDER),
                             border_radius=12,
