@@ -109,5 +109,9 @@
   "language.uk": "Ukrainian",
   "language.vi": "Vietnamese",
   "language.zh-CN": "Chinese (Simplified)",
-  "language.zh-TW": "Chinese (Traditional)"
+  "language.zh-TW": "Chinese (Traditional)",
+  "about.developed_by": "Developed by",
+  "about.inspired_by": "Inspired By",
+  "about.special_thanks": "Special Thanks",
+  "about.licenses": "Licenses"
 }

@@ -109,5 +109,9 @@
   "language.uk": "우크라이나어",
   "language.vi": "베트남어",
   "language.zh-CN": "중국어(간체)",
-  "language.zh-TW": "중국어(번체)"
+  "language.zh-TW": "중국어(번체)",
+  "about.developed_by": "Developed by",
+  "about.inspired_by": "Inspired By",
+  "about.special_thanks": "Special Thanks",
+  "about.licenses": "Licenses"
 }
