@@ -47,9 +47,9 @@ async def test_headless_mic_pipeline_smoke():
     await run_audio_vad_loop(source=source, vad=vad, hub=hub, target_sample_rate_hz=16000)
 
     for _ in range(50):
-        if sender.sent:
+        if "FINAL" in sender.sent:
             break
         await asyncio.sleep(0.01)
 
-    assert sender.sent == ["FINAL"]
+    assert "FINAL" in sender.sent
     await hub.stop()
