@@ -201,16 +201,21 @@ class AboutView(ft.Column):
 
         return self._wrap_card(card_content)
 
+    # Special thanks names - add new names here
+    _SPECIAL_THANKS_NAMES = ["SUI_32C", "Nagikokoro"]
+
     def _build_special_thanks_card(self) -> ft.Control:
         """Build Special Thanks section."""
-        nagikokoro_text = ft.Container(
-            content=ft.Text(
-                "nagikokoro",
-                size=28,
-                color=COLOR_ON_BACKGROUND,
-            ),
-            on_hover=self._on_thanks_hover,
-        )
+        thanks_items = []
+        for name in self._SPECIAL_THANKS_NAMES:
+            item = ft.Container(
+                content=ft.Text(name, size=28, color=COLOR_ON_BACKGROUND),
+                on_hover=self._on_thanks_hover,
+            )
+            thanks_items.append(item)
+
+        # Add "and you!" at the end
+        thanks_items.append(ft.Text("\nand you!", size=28, color=COLOR_ON_BACKGROUND, italic=True))
 
         card_content = ft.Column(
             controls=[
@@ -223,15 +228,7 @@ class AboutView(ft.Column):
                 ft.Container(height=16),
                 ft.Container(
                     content=ft.Column(
-                        controls=[
-                            nagikokoro_text,
-                            ft.Text(
-                                "\nand you!",
-                                size=28,
-                                color=COLOR_ON_BACKGROUND,
-                                italic=True,
-                            ),
-                        ],
+                        controls=thanks_items,
                         spacing=8,
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
