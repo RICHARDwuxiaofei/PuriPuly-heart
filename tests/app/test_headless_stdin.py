@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import pytest
 
+import puripuly_heart.app.headless_stdin as headless_stdin
 from puripuly_heart.app.headless_stdin import HeadlessStdinRunner
 from puripuly_heart.config.settings import AppSettings
 from puripuly_heart.core.clock import FakeClock
@@ -76,3 +77,42 @@ async def test_headless_stdin_enqueues_translated_text(monkeypatch):
     await runner._stdin_loop(osc)
 
     assert [msg.text for msg in osc.messages] == ["hello (OK)"]
+
+
+@pytest.mark.asyncio
+async def test_headless_stdin_run_handles_keyboard_interrupt(monkeypatch):
+    sender_ref: dict[str, object] = {}
+
+    class FakeSender:
+        def __init__(self, *args, **kwargs):
+            sender_ref["instance"] = self
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeOsc:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def process_due(self):
+            return None
+
+    async def fake_stdin_loop(self, osc):
+        _ = osc
+        raise KeyboardInterrupt
+
+    async def fake_flush_loop(self, osc):
+        _ = osc
+        return None
+
+    monkeypatch.setattr(headless_stdin, "VrchatOscUdpSender", FakeSender)
+    monkeypatch.setattr(headless_stdin, "SmartOscQueue", FakeOsc)
+    monkeypatch.setattr(HeadlessStdinRunner, "_stdin_loop", fake_stdin_loop)
+    monkeypatch.setattr(HeadlessStdinRunner, "_flush_loop", fake_flush_loop)
+
+    runner = HeadlessStdinRunner(settings=AppSettings(), llm=None, clock=FakeClock())
+    result = await runner.run()
+
+    assert result == 0
+    assert sender_ref["instance"].closed is True

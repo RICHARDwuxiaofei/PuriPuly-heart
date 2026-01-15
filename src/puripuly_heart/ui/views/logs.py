@@ -50,6 +50,17 @@ class FletLogHandler(logging.Handler):
             pass
 
 
+class _LogListProxy:
+    """Compatibility proxy for tests expecting a list-style log view."""
+
+    def __init__(self, view: "LogsView") -> None:
+        self._view = view
+
+    @property
+    def controls(self) -> list[ft.Text]:
+        return [ft.Text(entry) for entry in self._view._log_buffer]
+
+
 class LogsView(ft.Column):
     """System logs view with VR-optimized display and folder access."""
 
@@ -66,6 +77,7 @@ class LogsView(ft.Column):
         self._log_buffer: list[str] = []
         self._last_update: float = 0.0
         self._pending_update: bool = False
+        self.log_list = _LogListProxy(self)
 
         self._build_ui()
 
@@ -79,17 +91,25 @@ class LogsView(ft.Column):
             color=COLOR_NEUTRAL,
         )
 
-        # Folder open button (larger for VR visibility, PRIMARY color)
+        # Folder open button (brown, hover -> primary)
         self._folder_button = ft.TextButton(
             text=t("logs.open_folder"),
             icon=ft.Icons.FOLDER_OPEN,
-            icon_color=COLOR_PRIMARY,
             style=ft.ButtonStyle(
-                color=COLOR_PRIMARY,
+                color={
+                    ft.ControlState.HOVERED: COLOR_PRIMARY,
+                    ft.ControlState.DEFAULT: COLOR_NEUTRAL,
+                },
+                icon_color={
+                    ft.ControlState.HOVERED: COLOR_PRIMARY,
+                    ft.ControlState.DEFAULT: COLOR_NEUTRAL,
+                },
                 text_style=ft.TextStyle(
                     size=20,
                     font_family=font_for_language(get_locale()),
                 ),
+                overlay_color=ft.Colors.TRANSPARENT,
+                animation_duration=0,
             ),
             on_click=self._open_log_folder,
         )

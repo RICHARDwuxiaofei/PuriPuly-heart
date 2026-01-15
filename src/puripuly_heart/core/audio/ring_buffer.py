@@ -43,6 +43,7 @@ class RingBufferF32:
             first = self.capacity_samples - self._write_pos
             self._buffer[self._write_pos :] = samples[:first]
             self._buffer[: end - self.capacity_samples] = samples[first:]
+            self._filled = True
 
         self._write_pos = end % self.capacity_samples
         if self._write_pos == 0:

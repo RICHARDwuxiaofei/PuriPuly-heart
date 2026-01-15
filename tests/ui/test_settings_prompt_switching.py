@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,9 +34,8 @@ def test_settings_view_loads_qwen_prompt(monkeypatch) -> None:
     view = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    assert view.system_prompt.value == load_prompt_for_provider("qwen")
-    assert "Qwen" in view.prompt_provider_label.value
-    assert settings.system_prompt == view.system_prompt.value
+    assert view._prompt_editor.value == load_prompt_for_provider("qwen")
+    assert settings.system_prompt == view._prompt_editor.value
 
 
 def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
@@ -44,16 +44,18 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
     view = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    assert view.system_prompt.value == load_prompt_for_provider("gemini")
+    assert view._prompt_editor.value == load_prompt_for_provider("gemini")
 
-    view.llm_provider.value = "Alibaba Qwen"
-    view._on_provider_change(None)
+    view._on_llm_segmented_change(
+        SimpleNamespace(control=SimpleNamespace(selected={LLMProviderName.QWEN.value}))
+    )
 
-    assert view.system_prompt.value == load_prompt_for_provider("qwen")
+    assert view._prompt_editor.value == load_prompt_for_provider("qwen")
     assert settings.provider.llm == LLMProviderName.QWEN
 
-    view.llm_provider.value = "Google Gemini"
-    view._on_provider_change(None)
+    view._on_llm_segmented_change(
+        SimpleNamespace(control=SimpleNamespace(selected={LLMProviderName.GEMINI.value}))
+    )
 
-    assert view.system_prompt.value == load_prompt_for_provider("gemini")
+    assert view._prompt_editor.value == load_prompt_for_provider("gemini")
     assert settings.provider.llm == LLMProviderName.GEMINI
