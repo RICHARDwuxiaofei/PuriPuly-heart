@@ -17,6 +17,7 @@ from puripuly_heart.domain.events import (
     STTErrorEvent,
     STTFinalEvent,
     STTPartialEvent,
+    STTSessionState,
     STTSessionStateEvent,
     UIEvent,
     UIEventType,
@@ -55,6 +56,9 @@ class STTProvider(Protocol):
     def events(self): ...
 
 
+_PROMO_INTERVAL_SEC: float = 300.0  # 5 minutes
+
+
 @dataclass(slots=True)
 class ClientHub:
     stt: STTProvider | None
@@ -86,6 +90,7 @@ class ClientHub:
     _stt_task: asyncio.Task[None] | None = None
     _osc_flush_task: asyncio.Task[None] | None = None
     _running: bool = False
+    _last_promo_time: float | None = None
 
     async def start(self, *, auto_flush_osc: bool = False) -> None:
         if self._running:
@@ -253,6 +258,8 @@ class ClientHub:
             await self.ui_events.put(
                 UIEvent(type=UIEventType.SESSION_STATE_CHANGED, payload=event.state)
             )
+            if event.state == STTSessionState.STREAMING:
+                self._send_stt_connected_notification()
             return
 
         if isinstance(event, STTErrorEvent):
@@ -282,6 +289,18 @@ class ClientHub:
             else:
                 await self._ensure_translation(event.transcript)
             return
+
+    def _send_stt_connected_notification(self) -> None:
+        """Send promo message to chatbox when STT connects (max once per 5 min)."""
+        now = self.clock.now()
+        if self._last_promo_time is not None:
+            if now - self._last_promo_time < _PROMO_INTERVAL_SEC:
+                return
+        try:
+            self.osc.sender.send_chatbox("PuriPuly ON!")
+            self._last_promo_time = now
+        except OSError:
+            pass
 
     async def _handle_transcript(
         self, transcript: Transcript, *, is_final: bool, source: str | None
