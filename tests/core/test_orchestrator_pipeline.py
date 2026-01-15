@@ -66,7 +66,7 @@ async def test_orchestrator_e2e_headless():
 
 
 async def test_stt_connected_sends_promo_message():
-    """STT 연결 성공 시 'PuriPuly ON!' 메시지 전송."""
+    """버튼 클릭 시 'PuriPuly ON!' 메시지 전송."""
     clock = FakeClock()
     sender = FakeSender()
     osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
@@ -79,6 +79,9 @@ async def test_stt_connected_sends_promo_message():
     llm = SemaphoreLLMProvider(inner=FakeLLM(), semaphore=asyncio.Semaphore(1))
     hub = ClientHub(stt=stt, llm=llm, osc=osc, clock=clock)
     await hub.start(auto_flush_osc=False)
+
+    # 버튼 클릭 시뮬레이션
+    hub.mark_promo_eligible()
 
     # STT 연결 트리거
     uid = __import__("uuid").uuid4()
@@ -90,7 +93,7 @@ async def test_stt_connected_sends_promo_message():
 
 
 async def test_stt_promo_respects_interval():
-    """5분 내 재연결 시 메시지 안 보냄."""
+    """5분 내 버튼 다시 눌러도 메시지 안 보냄."""
     clock = FakeClock()
     sender = FakeSender()
     osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
@@ -104,6 +107,8 @@ async def test_stt_promo_respects_interval():
     hub = ClientHub(stt=stt, llm=llm, osc=osc, clock=clock)
     await hub.start(auto_flush_osc=False)
 
+    # 첫 번째 버튼 클릭
+    hub.mark_promo_eligible()
     uid = __import__("uuid").uuid4()
     await hub.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
     await asyncio.sleep(0.05)
@@ -111,12 +116,10 @@ async def test_stt_promo_respects_interval():
     initial_count = sender.sent.count("PuriPuly ON!")
     assert initial_count == 1
 
-    # 세션 종료 후 4분 후 재연결 (5분 미만)
+    # 세션 종료 후 4분 후 버튼 다시 클릭 (5분 미만)
     await hub.stop()
     clock.advance(240.0)
 
-    # 새 hub 인스턴스 (실제 앱에서는 같은 인스턴스지만, _last_promo_time은 유지됨)
-    # 여기서는 hub._last_promo_time이 유지되므로 같은 인스턴스 재사용
     stt2 = ManagedSTTProvider(
         backend=SpeechAwareFakeBackend(),
         sample_rate_hz=16000,
@@ -126,17 +129,19 @@ async def test_stt_promo_respects_interval():
     hub.stt = stt2
     await hub.start(auto_flush_osc=False)
 
+    # 두 번째 버튼 클릭 (5분 내)
+    hub.mark_promo_eligible()
     uid2 = __import__("uuid").uuid4()
     await hub.handle_vad_event(SpeechStart(uid2, pre_roll=samples(0.0), chunk=samples(1.0)))
     await asyncio.sleep(0.05)
 
-    # 메시지 추가 안 됨
+    # 5분 미만이므로 메시지 추가 안 됨
     assert sender.sent.count("PuriPuly ON!") == 1
     await hub.stop()
 
 
 async def test_stt_promo_sends_after_interval():
-    """5분 후 재연결 시 메시지 다시 보냄."""
+    """5분 후 버튼 클릭 시 메시지 다시 보냄."""
     clock = FakeClock()
     sender = FakeSender()
     osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
@@ -150,13 +155,15 @@ async def test_stt_promo_sends_after_interval():
     hub = ClientHub(stt=stt, llm=llm, osc=osc, clock=clock)
     await hub.start(auto_flush_osc=False)
 
+    # 첫 번째 버튼 클릭
+    hub.mark_promo_eligible()
     uid = __import__("uuid").uuid4()
     await hub.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
     await asyncio.sleep(0.05)
 
     assert sender.sent.count("PuriPuly ON!") == 1
 
-    # 5분 후 재연결
+    # 5분 후 버튼 다시 클릭
     await hub.stop()
     clock.advance(301.0)
 
@@ -169,10 +176,37 @@ async def test_stt_promo_sends_after_interval():
     hub.stt = stt2
     await hub.start(auto_flush_osc=False)
 
+    # 두 번째 버튼 클릭 (5분 후)
+    hub.mark_promo_eligible()
     uid2 = __import__("uuid").uuid4()
     await hub.handle_vad_event(SpeechStart(uid2, pre_roll=samples(0.0), chunk=samples(1.0)))
     await asyncio.sleep(0.05)
 
-    # 메시지 다시 전송됨
+    # 5분 지났으므로 메시지 다시 전송됨
     assert sender.sent.count("PuriPuly ON!") == 2
+    await hub.stop()
+
+
+async def test_stt_promo_skipped_on_session_reset():
+    """세션 자동 리셋 시에는 메시지 안 나감."""
+    clock = FakeClock()
+    sender = FakeSender()
+    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    stt = ManagedSTTProvider(
+        backend=SpeechAwareFakeBackend(),
+        sample_rate_hz=16000,
+        clock=clock,
+        reset_deadline_s=90.0,
+    )
+    llm = SemaphoreLLMProvider(inner=FakeLLM(), semaphore=asyncio.Semaphore(1))
+    hub = ClientHub(stt=stt, llm=llm, osc=osc, clock=clock)
+    await hub.start(auto_flush_osc=False)
+
+    # 버튼 클릭 없이 STT 연결 (세션 자동 리셋 시뮬레이션)
+    uid = __import__("uuid").uuid4()
+    await hub.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+    await asyncio.sleep(0.05)
+
+    # mark_promo_eligible() 호출 없이는 메시지 안 나감
+    assert "PuriPuly ON!" not in sender.sent
     await hub.stop()

@@ -163,6 +163,10 @@ class GuiController:
             else:
                 logger.info(f"[STT] Enabled with provider: {provider}")
 
+        # Mark promo eligible when user explicitly enables STT via button
+        if enabled and self.hub is not None:
+            self.hub.mark_promo_eligible()
+
         await self._ensure_stt_switch()
 
     async def _ensure_stt_switch(self) -> None:
