@@ -20,7 +20,7 @@ class BottomNavBar(ft.Container):
         self._tabs = [
             ft.Icons.GRID_VIEW,
             ft.Icons.SETTINGS,
-            ft.Icons.HISTORY,
+            ft.Icons.ARTICLE,
             ft.Icons.INFO_OUTLINE,
         ]
 
