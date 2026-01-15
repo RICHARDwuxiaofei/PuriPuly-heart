@@ -6,36 +6,28 @@ from uuid import uuid4
 import pytest
 
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
-
-pytestmark = pytest.mark.skipif(
-    os.getenv("INTEGRATION") != "1", reason="set INTEGRATION=1 to run integration tests"
+from tests.integration.helpers import (
+    get_qwen_base_url,
+    integration_mark,
+    require_env,
+    require_module,
 )
+
+pytestmark = integration_mark()
 
 
 @pytest.mark.asyncio
 async def test_qwen_llm_translation_smoke() -> None:
-    api_key = os.getenv("ALIBABA_API_KEY")
-    if not api_key:
-        pytest.skip("missing env var ALIBABA_API_KEY")
+    api_key = require_env("ALIBABA_API_KEY")
 
-    try:
-        import dashscope  # noqa: F401
-    except ModuleNotFoundError as exc:  # pragma: no cover
-        raise RuntimeError(
-            "dashscope is required for this integration test; install project dependencies."
-        ) from exc
-
-    region = os.getenv("QWEN_REGION", "beijing").lower()
-    default_base_url = (
-        "https://dashscope-intl.aliyuncs.com/api/v1"
-        if region == "singapore"
-        else "https://dashscope.aliyuncs.com/api/v1"
+    require_module(
+        "dashscope",
+        reason="dashscope is required for this integration test; install project dependencies.",
     )
-    base_url = os.getenv("QWEN_BASE_URL", default_base_url)
 
     provider = QwenLLMProvider(
         api_key=api_key,
-        base_url=base_url,
+        base_url=get_qwen_base_url(),
         model=os.getenv("QWEN_LLM_MODEL", "qwen-mt-flash"),
     )
 
@@ -46,6 +38,7 @@ async def test_qwen_llm_translation_smoke() -> None:
         source_language="ko",
         target_language="en",
         context="",
+        context_pairs=[{"source": "안녕하세요", "target": "hello"}],
     )
 
     assert translation.text

@@ -1,27 +1,31 @@
 from __future__ import annotations
 
-import asyncio
 import os
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("INTEGRATION") != "1", reason="set INTEGRATION=1 to run integration tests"
+from tests.integration.helpers import (
+    drain_and_close,
+    integration_mark,
+    open_session,
+    require_env,
+    require_module,
+    stream_silence,
 )
+
+pytestmark = integration_mark()
 
 
 @pytest.mark.asyncio
 async def test_deepgram_realtime_streaming_smoke():
-    api_key = os.getenv("DEEPGRAM_API_KEY")
-    if not api_key:
-        pytest.skip("missing env var DEEPGRAM_API_KEY")
+    api_key = require_env("DEEPGRAM_API_KEY")
 
-    try:
-        import websocket  # noqa: F401
-    except ModuleNotFoundError as exc:  # pragma: no cover
-        raise RuntimeError(
+    require_module(
+        "websocket",
+        reason=(
             "websocket-client is required for this integration test; install with pip install websocket-client"
-        ) from exc
+        ),
+    )
 
     from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
 
@@ -32,19 +36,10 @@ async def test_deepgram_realtime_streaming_smoke():
         sample_rate_hz=int(os.getenv("DEEPGRAM_STT_SAMPLE_RATE", "16000")),
     )
 
-    session = await backend.open_session()
+    session = await open_session(backend)
 
     # Send a short silence stream just to validate connectivity/stream lifecycle.
-    silence = b"\0" * 1024
-    for _ in range(10):
-        await session.send_audio(silence)
-        await asyncio.sleep(0.032)
+    await stream_silence(session)
 
     await session.stop()
-
-    async def _drain():
-        async for _ev in session.events():
-            pass
-
-    await asyncio.wait_for(_drain(), timeout=30.0)
-    await asyncio.wait_for(session.close(), timeout=5.0)
+    await drain_and_close(session)
