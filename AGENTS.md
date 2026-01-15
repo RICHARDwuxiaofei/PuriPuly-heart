@@ -14,6 +14,8 @@ audio/VAD -> STT -> LLM -> OSC. It ships a GUI using Flet and CLI entry points.
 - Install: `pip install -e .`
 - Dev install: `pip install -e '.[dev]'`
 - Entry point: `python -m puripuly_heart.main ...`
+- Prefer running tests and CLI commands inside a local project virtual environment.
+- The virtual environment is not committed to git, so use the local venv on the machine.
 
 ## 2. Quick Reference File Map
 
@@ -113,10 +115,10 @@ audio/VAD -> STT -> LLM -> OSC. It ships a GUI using Flet and CLI entry points.
 ### 3.6 Verification Toolbox
 
 - Pre-commit, also run by the git hook: `pre-commit run --all-files`
-- Unit tests: `pytest`
-- Integration tests: `INTEGRATION=1 python -m pytest`
+- Unit tests: `python -m pytest` (use the venv interpreter or an activated venv)
+- Integration tests: `INTEGRATION=1 python -m pytest` (use the venv interpreter or an activated venv)
 - Integration tests require provider credentials. See `README.md`.
-- CLI smoke: `python -m puripuly_heart.main --help`
+- CLI smoke: `python -m puripuly_heart.main --help` (use the venv interpreter or an activated venv)
 - Build verification: run the build commands in Build and Distribution
 
 ## 4. Build and Distribution
