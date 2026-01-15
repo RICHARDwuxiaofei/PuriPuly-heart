@@ -19,6 +19,7 @@ class TitleBar(ft.Container):
             size=14,
             weight=ft.FontWeight.W_600,
             color=COLOR_NEUTRAL_DARK,
+            font_family="NanumSquare",
         )
 
         minimize_btn = ft.Container(
