@@ -1,17 +1,15 @@
+"""Settings view - redesigned with component composition."""
+
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import logging
 from pathlib import Path
 from typing import Callable
 
 import flet as ft
-from flet import Colors as colors
-from flet import Icons as icons
 
 from puripuly_heart.app.wiring import create_secret_store
-from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
@@ -19,14 +17,21 @@ from puripuly_heart.config.settings import (
     STTProviderName,
 )
 from puripuly_heart.core.language import get_stt_compatibility_warning
-from puripuly_heart.ui.components.bento_card import BentoCard
-from puripuly_heart.ui.i18n import available_locales, language_name, locale_label, provider_label, t
-from puripuly_heart.ui.theme import COLOR_PRIMARY
+from puripuly_heart.ui.components.settings import (
+    ApiKeyField,
+    AudioSettings,
+    PromptEditor,
+    ProviderSelector,
+    SettingsSection,
+)
+from puripuly_heart.ui.i18n import available_locales, language_name, locale_label, t
+from puripuly_heart.ui.theme import COLOR_NEUTRAL_DARK
 
 logger = logging.getLogger(__name__)
 
 
 def _load_secret_value(store, key: str, *, legacy_keys: tuple[str, ...] = ()) -> str:
+    """Load secret value with legacy key fallback."""
     value = store.get(key) or ""
     if value or not legacy_keys:
         return value
@@ -39,462 +44,375 @@ def _load_secret_value(store, key: str, *, legacy_keys: tuple[str, ...] = ()) ->
     return ""
 
 
-class SettingsView(ft.ListView):
-    def __init__(self):
-        super().__init__(expand=True, spacing=15, padding=10)
+class SettingsView(ft.Column):
+    """Redesigned settings view with component composition."""
 
+    def __init__(self):
+        super().__init__(expand=True, scroll=ft.ScrollMode.AUTO, spacing=16)
+
+        # Callbacks (assigned by App)
         self.on_settings_changed: Callable[[AppSettings], None] | None = None
         self.on_providers_changed: Callable[[], None] | None = None
-        self.on_verify_api_key: Callable[[str, str], object] | None = (
-            None  # Returns Awaitable[tuple[bool, str]]
-        )
+        self.on_verify_api_key: Callable[[str, str], object] | None = None
 
+        # State
         self._settings: AppSettings | None = None
         self._config_path: Path | None = None
-        self._locale_label_to_code: dict[str, str] = {}
-        self._locale_code_to_label: dict[str, str] = {}
-        self._qwen_region_label_to_value: dict[str, QwenRegion] = {}
-        self._qwen_region_value_to_label: dict[QwenRegion, str] = {}
-        self._default_option_label = t("settings.default_option")
+        self.has_provider_changes: bool = False
 
-        self.stt_provider = ft.Dropdown(
-            label=t("settings.stt_provider"),
-            options=[
-                ft.dropdown.Option("Deepgram"),
-                ft.dropdown.Option("Qwen ASR"),
-                ft.dropdown.Option("Soniox"),
-            ],
-            on_change=self._on_provider_change,
-            border_radius=8,
-        )
-        self.llm_provider = ft.Dropdown(
-            label=t("settings.llm_provider"),
-            options=[
-                ft.dropdown.Option("Google Gemini"),
-                ft.dropdown.Option("Alibaba Qwen"),
-            ],
-            on_change=self._on_provider_change,
-            border_radius=8,
-        )
+        # Build UI components
+        self._build_ui()
 
-        self.ui_language = ft.Dropdown(
+    def _build_ui(self) -> None:
+        """Build the settings UI with sections."""
+        # --- UI Section ---
+        self._ui_language = ft.Dropdown(
             label=t("settings.ui_language"),
             options=self._build_locale_options(),
             on_change=self._on_ui_language_change,
-            border_radius=8,
+            border_radius=12,
+            text_size=28,
+            label_style=ft.TextStyle(size=20, weight=ft.FontWeight.BOLD),
+            color=COLOR_NEUTRAL_DARK,
+        )
+        self._ui_section = SettingsSection(
+            "settings.section.ui",
+            content=self._ui_language,
         )
 
-        self.google_api_key = ft.TextField(
-            label=t("settings.google_api_key"),
-            password=True,
-            can_reveal_password=True,
-            on_change=lambda e: self._on_secret_change("google_api_key", e),
-            border_radius=8,
-            expand=True,
+        # --- STT Section ---
+        self._stt_provider = ProviderSelector(
+            "settings.stt_provider",
+            STTProviderName,
+            on_change=self._on_stt_provider_change,
         )
-        self.verify_google_btn = ft.IconButton(
-            icon=icons.CHECK_CIRCLE_OUTLINE_ROUNDED,
-            icon_color=colors.GREY_400,
-            tooltip=t("settings.verify_key"),
-            on_click=lambda e: self._on_verify_req("google", self.google_api_key.value, e.control),
+        self._deepgram_key = ApiKeyField(
+            "settings.deepgram_api_key",
+            "deepgram_api_key",
+            "deepgram",
+            on_verify=self._verify_key,
+            on_change=self._on_secret_change,
         )
-
-        self.alibaba_api_key_beijing = ft.TextField(
-            label=t("settings.alibaba_api_key_beijing"),
-            password=True,
-            can_reveal_password=True,
-            on_change=lambda e: self._on_secret_change("alibaba_api_key_beijing", e),
-            border_radius=8,
-            expand=True,
+        self._soniox_key = ApiKeyField(
+            "settings.soniox_api_key",
+            "soniox_api_key",
+            "soniox",
+            on_verify=self._verify_key,
+            on_change=self._on_secret_change,
         )
-        self.verify_alibaba_beijing_btn = ft.IconButton(
-            icon=icons.CHECK_CIRCLE_OUTLINE_ROUNDED,
-            icon_color=colors.GREY_400,
-            tooltip=t("settings.verify_key"),
-            on_click=lambda e: self._on_verify_req(
-                "alibaba_beijing", self.alibaba_api_key_beijing.value, e.control
-            ),
+        # Qwen fields for STT (shared reference)
+        self._stt_qwen_region = self._build_qwen_region_dropdown()
+        self._stt_qwen_key_beijing = ApiKeyField(
+            "settings.alibaba_api_key_beijing",
+            "alibaba_api_key_beijing",
+            "alibaba_beijing",
+            on_verify=self._verify_key,
+            on_change=self._on_secret_change,
         )
-
-        self.alibaba_api_key_singapore = ft.TextField(
-            label=t("settings.alibaba_api_key_singapore"),
-            password=True,
-            can_reveal_password=True,
-            on_change=lambda e: self._on_secret_change("alibaba_api_key_singapore", e),
-            border_radius=8,
-            expand=True,
-        )
-        self.verify_alibaba_singapore_btn = ft.IconButton(
-            icon=icons.CHECK_CIRCLE_OUTLINE_ROUNDED,
-            icon_color=colors.GREY_400,
-            tooltip=t("settings.verify_key"),
-            on_click=lambda e: self._on_verify_req(
-                "alibaba_singapore", self.alibaba_api_key_singapore.value, e.control
-            ),
+        self._stt_qwen_key_singapore = ApiKeyField(
+            "settings.alibaba_api_key_singapore",
+            "alibaba_api_key_singapore",
+            "alibaba_singapore",
+            on_verify=self._verify_key,
+            on_change=self._on_secret_change,
         )
 
-        self.qwen_region = ft.Dropdown(
-            label=t("settings.qwen_region"),
-            options=self._build_qwen_region_options(),
-            on_change=self._on_qwen_region_change,
-            border_radius=8,
+        self._stt_fields = ft.Column(
+            [
+                self._deepgram_key,
+                self._soniox_key,
+                self._stt_qwen_region,
+                self._stt_qwen_key_beijing,
+                self._stt_qwen_key_singapore,
+            ],
+            spacing=12,
         )
 
-        self.deepgram_api_key = ft.TextField(
-            label=t("settings.deepgram_api_key"),
-            password=True,
-            can_reveal_password=True,
-            on_change=lambda e: self._on_secret_change("deepgram_api_key", e),
-            border_radius=8,
-            expand=True,
-        )
-        self.verify_deepgram_btn = ft.IconButton(
-            icon=icons.CHECK_CIRCLE_OUTLINE_ROUNDED,
-            icon_color=colors.GREY_400,
-            tooltip=t("settings.verify_key"),
-            on_click=lambda e: self._on_verify_req(
-                "deepgram", self.deepgram_api_key.value, e.control
-            ),
+        self._stt_section = SettingsSection(
+            "settings.section.stt",
+            content=ft.Column([self._stt_provider, self._stt_fields], spacing=16),
         )
 
-        self.soniox_api_key = ft.TextField(
-            label=t("settings.soniox_api_key"),
-            password=True,
-            can_reveal_password=True,
-            on_change=lambda e: self._on_secret_change("soniox_api_key", e),
-            border_radius=8,
-            expand=True,
+        # --- Translation Section ---
+        self._llm_provider = ProviderSelector(
+            "settings.llm_provider",
+            LLMProviderName,
+            on_change=self._on_llm_provider_change,
         )
-        self.verify_soniox_btn = ft.IconButton(
-            icon=icons.CHECK_CIRCLE_OUTLINE_ROUNDED,
-            icon_color=colors.GREY_400,
-            tooltip=t("settings.verify_key"),
-            on_click=lambda e: self._on_verify_req("soniox", self.soniox_api_key.value, e.control),
+        self._google_key = ApiKeyField(
+            "settings.google_api_key",
+            "google_api_key",
+            "google",
+            on_verify=self._verify_key,
+            on_change=self._on_secret_change,
         )
-
-        self.deepgram_stt_model = ft.TextField(
-            label=t("settings.deepgram_model"),
-            hint_text="nova-3",
-            on_change=self._on_setting_change,
-            border_radius=8,
+        # Qwen fields for Translation (shared reference)
+        self._trans_qwen_region = self._build_qwen_region_dropdown()
+        self._trans_qwen_key_beijing = ApiKeyField(
+            "settings.alibaba_api_key_beijing",
+            "alibaba_api_key_beijing",
+            "alibaba_beijing",
+            on_verify=self._verify_key,
+            on_change=self._on_secret_change,
         )
-
-        self.soniox_stt_model = ft.TextField(
-            label=t("settings.soniox_model"),
-            hint_text="stt-rt-v3",
-            on_change=self._on_setting_change,
-            border_radius=8,
-        )
-        self.soniox_stt_endpoint = ft.TextField(
-            label=t("settings.soniox_endpoint"),
-            hint_text="wss://stt-rt.soniox.com/transcribe-websocket",
-            on_change=self._on_setting_change,
-            border_radius=8,
-        )
-        self.soniox_keepalive_s = ft.TextField(
-            label=t("settings.soniox_keepalive"),
-            hint_text="10",
-            on_change=self._on_setting_change,
-            border_radius=8,
-        )
-        self.soniox_trailing_silence_ms = ft.TextField(
-            label=t("settings.soniox_trailing_silence"),
-            hint_text="100",
-            on_change=self._on_setting_change,
-            border_radius=8,
+        self._trans_qwen_key_singapore = ApiKeyField(
+            "settings.alibaba_api_key_singapore",
+            "alibaba_api_key_singapore",
+            "alibaba_singapore",
+            on_verify=self._verify_key,
+            on_change=self._on_secret_change,
         )
 
-        self.audio_host_api = ft.Dropdown(
-            label=t("settings.audio_host_api"),
-            options=[
-                ft.dropdown.Option(self._default_option_label)
-            ],  # Will be populated dynamically
-            on_change=self._on_audio_change,
-            border_radius=8,
-        )
-        self._populate_host_apis()
-
-        self.microphone = ft.Dropdown(
-            label=t("settings.microphone"),
-            options=[ft.dropdown.Option(self._default_option_label)],
-            on_change=self._on_audio_change,
-            border_radius=8,
+        self._trans_fields = ft.Column(
+            [
+                self._google_key,
+                self._trans_qwen_region,
+                self._trans_qwen_key_beijing,
+                self._trans_qwen_key_singapore,
+            ],
+            spacing=12,
         )
 
-        self.vad_sensitivity = ft.Slider(
-            min=0.0,
-            max=1.0,
-            divisions=20,
-            value=0.5,
-            label="{value}",
-            active_color=COLOR_PRIMARY,
-            on_change_end=self._on_audio_change,
+        self._translation_section = SettingsSection(
+            "settings.section.translation",
+            content=ft.Column([self._llm_provider, self._trans_fields], spacing=16),
         )
 
-        self.prompt_provider_label = ft.Text(
-            t("settings.prompt_for", provider=provider_label("gemini")),
-            size=12,
-            color=colors.GREY_400,
-        )
-        self.system_prompt = ft.TextField(
-            label=t("settings.system_prompt"),
-            multiline=True,
-            min_lines=3,
-            on_change=self._on_setting_change,
-            border_radius=8,
-        )
-        self.reset_prompt_btn = ft.Button(
-            text=t("settings.reset_prompt"),
-            icon=icons.REFRESH_ROUNDED,
-            style=ft.ButtonStyle(
-                color=colors.WHITE,
-                bgcolor=colors.BLUE_GREY_700,
-                shape=ft.RoundedRectangleBorder(radius=8),
-            ),
-            on_click=self._on_prompt_reset,
+        # --- Audio Section ---
+        self._audio_settings = AudioSettings(on_change=self._on_audio_change)
+        self._audio_section = SettingsSection(
+            "settings.section.audio",
+            content=self._audio_settings,
         )
 
-        self.apply_providers_btn = ft.Button(
-            text=t("settings.apply_providers"),
-            icon=icons.PLAY_CIRCLE_FILL_ROUNDED,
-            style=ft.ButtonStyle(
-                color=colors.WHITE,
-                bgcolor=COLOR_PRIMARY,
-                shape=ft.RoundedRectangleBorder(radius=8),
-            ),
-            on_click=self._on_apply_providers,
+        # --- Persona Section ---
+        self._prompt_editor = PromptEditor(on_change=self._on_prompt_change)
+        self._persona_section = SettingsSection(
+            "settings.section.persona",
+            content=self._prompt_editor,
         )
 
-        self._title_text = ft.Text(
-            t("settings.title"), size=20, weight=ft.FontWeight.BOLD, color=colors.WHITE
-        )
-        self._ui_section_title = ft.Text(
-            t("settings.section.ui"),
-            size=12,
+        # Title
+        self._title = ft.Text(
+            t("settings.title"),
+            size=28,
             weight=ft.FontWeight.BOLD,
-            color=colors.GREY_500,
+            color=COLOR_NEUTRAL_DARK,
         )
-        self._providers_section_title = ft.Text(
-            t("settings.section.providers"),
-            size=12,
-            weight=ft.FontWeight.BOLD,
-            color=colors.GREY_500,
-        )
-        self._audio_section_title = ft.Text(
-            t("settings.section.audio"),
-            size=12,
-            weight=ft.FontWeight.BOLD,
-            color=colors.GREY_500,
-        )
-        self._persona_section_title = ft.Text(
-            t("settings.section.persona"),
-            size=12,
-            weight=ft.FontWeight.BOLD,
-            color=colors.GREY_500,
-        )
-        self._stt_subtitle = ft.Text(t("settings.subtitle.stt"), size=12, color=colors.GREY_400)
-        self._translation_subtitle = ft.Text(
-            t("settings.subtitle.translation"), size=12, color=colors.GREY_400
-        )
-        self._vad_label = ft.Text(t("settings.vad_sensitivity"), size=12, color=colors.GREY_400)
 
         self.controls = [
-            self._title_text,
-            self._build_section(
-                self._ui_section_title,
-                [
-                    self.ui_language,
-                ],
-            ),
-            self._build_section(
-                self._providers_section_title,
-                [
-                    self._stt_subtitle,
-                    self.stt_provider,
-                    ft.Divider(height=5, color=colors.TRANSPARENT),
-                    ft.Row([self.deepgram_api_key, self.verify_deepgram_btn]),
-                    self.deepgram_stt_model,
-                    ft.Divider(height=5, color=colors.TRANSPARENT),
-                    ft.Row([self.soniox_api_key, self.verify_soniox_btn]),
-                    self.soniox_stt_model,
-                    self.soniox_stt_endpoint,
-                    self.soniox_keepalive_s,
-                    self.soniox_trailing_silence_ms,
-                    ft.Divider(height=10, color=colors.TRANSPARENT),
-                    self._translation_subtitle,
-                    self.llm_provider,
-                    ft.Divider(height=5, color=colors.TRANSPARENT),
-                    ft.Row([self.google_api_key, self.verify_google_btn]),
-                    ft.Row([self.alibaba_api_key_beijing, self.verify_alibaba_beijing_btn]),
-                    ft.Row([self.alibaba_api_key_singapore, self.verify_alibaba_singapore_btn]),
-                    self.qwen_region,
-                    ft.Divider(height=10, color=colors.TRANSPARENT),
-                    self.apply_providers_btn,
-                ],
-            ),
-            self._build_section(
-                self._audio_section_title,
-                [
-                    self.audio_host_api,
-                    self.microphone,
-                    self._vad_label,
-                    self.vad_sensitivity,
-                ],
-            ),
-            self._build_section(
-                self._persona_section_title,
-                [
-                    self.prompt_provider_label,
-                    self.system_prompt,
-                    ft.Row([self.reset_prompt_btn], alignment=ft.MainAxisAlignment.END),
-                ],
-            ),
+            self._title,
+            self._ui_section,
+            self._stt_section,
+            self._translation_section,
+            self._audio_section,
+            self._persona_section,
         ]
 
+    def _build_locale_options(self) -> list[ft.dropdown.Option]:
+        """Build locale dropdown options."""
+        return [
+            ft.dropdown.Option(key=code, text=locale_label(code)) for code in available_locales()
+        ]
+
+    def _build_qwen_region_dropdown(self) -> ft.Dropdown:
+        """Build Qwen region dropdown."""
+        return ft.Dropdown(
+            label=t("settings.qwen_region"),
+            options=[
+                ft.dropdown.Option(key=QwenRegion.BEIJING.value, text=t("region.beijing")),
+                ft.dropdown.Option(key=QwenRegion.SINGAPORE.value, text=t("region.singapore")),
+            ],
+            on_change=self._on_qwen_region_change,
+            border_radius=12,
+            text_size=28,
+            label_style=ft.TextStyle(size=20, weight=ft.FontWeight.BOLD),
+            color=COLOR_NEUTRAL_DARK,
+        )
+
+    # --- Load Settings ---
     def load_from_settings(self, settings: AppSettings, *, config_path: Path) -> None:
+        """Load current settings into the UI."""
         self._settings = settings
         self._config_path = config_path
+        self.has_provider_changes = False
 
-        self._refresh_locale_options()
+        # UI Language
+        self._ui_language.value = settings.ui.locale
+        self._ui_language.options = self._build_locale_options()
 
-        if settings.provider.stt == STTProviderName.QWEN_ASR:
-            self.stt_provider.value = "Qwen ASR"
-        elif settings.provider.stt == STTProviderName.SONIOX:
-            self.stt_provider.value = "Soniox"
-        else:
-            # Default to Deepgram (handles DEEPGRAM and legacy ALIBABA)
-            self.stt_provider.value = "Deepgram"
-        self.llm_provider.value = (
-            "Google Gemini" if settings.provider.llm == LLMProviderName.GEMINI else "Alibaba Qwen"
-        )
-        self._refresh_qwen_region_options()
-        self.qwen_region.value = self._qwen_region_value_to_label.get(
-            settings.qwen.region, self.qwen_region.value
-        )
+        # STT Provider
+        self._stt_provider.selected_provider = settings.provider.stt
+        self._update_stt_visibility()
 
-        self.deepgram_stt_model.value = settings.deepgram_stt.model
-        self.soniox_stt_model.value = settings.soniox_stt.model
-        self.soniox_stt_endpoint.value = settings.soniox_stt.endpoint
-        self.soniox_keepalive_s.value = str(settings.soniox_stt.keepalive_interval_s)
-        self.soniox_trailing_silence_ms.value = str(settings.soniox_stt.trailing_silence_ms)
+        # LLM Provider
+        self._llm_provider.selected_provider = settings.provider.llm
+        self._update_trans_visibility()
 
-        self.audio_host_api.value = settings.audio.input_host_api or self._default_option_label
-        self._refresh_microphones()
-        self.microphone.value = settings.audio.input_device or self._default_option_label
-        self.vad_sensitivity.value = settings.stt.vad_speech_threshold
+        # Qwen Region (sync both)
+        region_value = settings.qwen.region.value
+        self._stt_qwen_region.value = region_value
+        self._trans_qwen_region.value = region_value
 
-        # Load prompt for current LLM provider
+        # Audio Settings
+        self._audio_settings.host_api = settings.audio.input_host_api
+        self._audio_settings.microphone = settings.audio.input_device
+        self._audio_settings.vad_sensitivity = settings.stt.vad_speech_threshold
+
+        # Prompt
         provider_name = "gemini" if settings.provider.llm == LLMProviderName.GEMINI else "qwen"
-        self.prompt_provider_label.value = t(
-            "settings.prompt_for", provider=provider_label(provider_name)
-        )
-        saved_prompt = settings.system_prompt or ""
-        if saved_prompt.strip():
-            self.system_prompt.value = saved_prompt
+        self._prompt_editor.set_provider(provider_name)
+        if settings.system_prompt.strip():
+            self._prompt_editor.value = settings.system_prompt
         else:
-            self.system_prompt.value = load_prompt_for_provider(provider_name)
-        if self.prompt_provider_label.page:
-            self.prompt_provider_label.update()
-        if self.system_prompt.page:
-            self.system_prompt.update()
-        if self._settings and not saved_prompt.strip():
-            self._settings.system_prompt = self.system_prompt.value
+            self._prompt_editor.load_default_prompt()
+            settings.system_prompt = self._prompt_editor.value
 
+        # Load secrets
+        self._load_secrets(settings, config_path)
+
+        if self.page:
+            self.update()
+
+    def _load_secrets(self, settings: AppSettings, config_path: Path) -> None:
+        """Load secret values into fields."""
         try:
             store = create_secret_store(settings.secrets, config_path=config_path)
         except Exception as exc:
             logger.warning("Failed to load secrets: %s", exc)
-        else:
-            self.google_api_key.value = store.get("google_api_key") or ""
-            self.alibaba_api_key_beijing.value = _load_secret_value(
-                store, "alibaba_api_key_beijing", legacy_keys=("alibaba_api_key",)
-            )
-            self.alibaba_api_key_singapore.value = _load_secret_value(
-                store, "alibaba_api_key_singapore", legacy_keys=("alibaba_api_key",)
-            )
-            self.deepgram_api_key.value = store.get("deepgram_api_key") or ""
-            self.soniox_api_key.value = store.get("soniox_api_key") or ""
+            return
 
-        self._update_provider_visibility()
-        if self.page:
-            self.update()
+        self._google_key.value = store.get("google_api_key") or ""
+        self._deepgram_key.value = store.get("deepgram_api_key") or ""
+        self._soniox_key.value = store.get("soniox_api_key") or ""
 
-    def _build_locale_options(self) -> list[ft.dropdown.Option]:
-        self._locale_label_to_code.clear()
-        self._locale_code_to_label.clear()
-        options: list[ft.dropdown.Option] = []
-        for code in available_locales():
-            label = locale_label(code)
-            self._locale_label_to_code[label] = code
-            self._locale_code_to_label[code] = label
-            options.append(ft.dropdown.Option(label))
-        return options
-
-    def _refresh_locale_options(self) -> None:
-        current_code = self._settings.ui.locale if self._settings else None
-        self.ui_language.options = self._build_locale_options()
-        if current_code and current_code in self._locale_code_to_label:
-            self.ui_language.value = self._locale_code_to_label[current_code]
-        elif self._locale_code_to_label:
-            self.ui_language.value = next(iter(self._locale_code_to_label.values()))
-        if self.ui_language.page:
-            self.ui_language.update()
-
-    def _build_qwen_region_options(self) -> list[ft.dropdown.Option]:
-        self._qwen_region_label_to_value.clear()
-        self._qwen_region_value_to_label.clear()
-        options: list[ft.dropdown.Option] = []
-        for label, value in (
-            (t("region.beijing"), QwenRegion.BEIJING),
-            (t("region.singapore"), QwenRegion.SINGAPORE),
-        ):
-            self._qwen_region_label_to_value[label] = value
-            self._qwen_region_value_to_label[value] = label
-            options.append(ft.dropdown.Option(label))
-        return options
-
-    def _refresh_qwen_region_options(self) -> None:
-        current_region = self._settings.qwen.region if self._settings else None
-        self.qwen_region.options = self._build_qwen_region_options()
-        if current_region and current_region in self._qwen_region_value_to_label:
-            self.qwen_region.value = self._qwen_region_value_to_label[current_region]
-        elif self._qwen_region_value_to_label:
-            self.qwen_region.value = next(iter(self._qwen_region_value_to_label.values()))
-        if self.qwen_region.page:
-            self.qwen_region.update()
-
-    def _build_section(self, title: ft.Text, controls: list[ft.Control]) -> ft.Control:
-        return BentoCard(
-            content=ft.Column(
-                [
-                    title,
-                    ft.Column(
-                        controls,
-                        spacing=15,
-                        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-                    ),
-                ],
-                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
-            )
+        # Alibaba keys with legacy fallback
+        beijing_key = _load_secret_value(
+            store, "alibaba_api_key_beijing", legacy_keys=("alibaba_api_key",)
+        )
+        singapore_key = _load_secret_value(
+            store, "alibaba_api_key_singapore", legacy_keys=("alibaba_api_key",)
         )
 
-    def _on_secret_change(self, key: str, e) -> None:
-        if self._settings is None or self._config_path is None:
+        self._stt_qwen_key_beijing.value = beijing_key
+        self._stt_qwen_key_singapore.value = singapore_key
+        self._trans_qwen_key_beijing.value = beijing_key
+        self._trans_qwen_key_singapore.value = singapore_key
+
+    # --- Visibility Updates ---
+    def _update_stt_visibility(self) -> None:
+        """Update STT field visibility based on selected provider."""
+        if not self._settings:
             return
-        value = None
-        data = getattr(e, "data", None)
-        if isinstance(data, str):
-            value = data
-        else:
-            control = getattr(e, "control", None)
-            control_value = getattr(control, "value", None)
-            if isinstance(control_value, str):
-                value = control_value
-        if value is None:
+
+        provider = self._settings.provider.stt
+        is_deepgram = provider == STTProviderName.DEEPGRAM
+        is_soniox = provider == STTProviderName.SONIOX
+        is_qwen = provider == STTProviderName.QWEN_ASR
+
+        self._deepgram_key.visible = is_deepgram
+        self._soniox_key.visible = is_soniox
+        self._stt_qwen_region.visible = is_qwen
+        self._stt_qwen_key_beijing.visible = is_qwen
+        self._stt_qwen_key_singapore.visible = is_qwen
+
+    def _update_trans_visibility(self) -> None:
+        """Update translation field visibility based on selected provider."""
+        if not self._settings:
             return
-        control = getattr(e, "control", None)
-        if control is not None:
-            control.value = value
+
+        is_gemini = self._settings.provider.llm == LLMProviderName.GEMINI
+        is_qwen = self._settings.provider.llm == LLMProviderName.QWEN
+
+        self._google_key.visible = is_gemini
+        self._trans_qwen_region.visible = is_qwen
+        self._trans_qwen_key_beijing.visible = is_qwen
+        self._trans_qwen_key_singapore.visible = is_qwen
+
+    # --- Event Handlers ---
+    def _on_ui_language_change(self, e) -> None:
+        if not self._settings:
+            return
+        old_locale = self._settings.ui.locale
+        new_locale = self._ui_language.value or "en"
+        logger.info(f"[Settings] Language changed: {old_locale} -> {new_locale}")
+        self._settings.ui.locale = new_locale
+        self._emit_settings_changed()
+
+    def _on_stt_provider_change(self, provider: STTProviderName) -> None:
+        if not self._settings:
+            return
+
+        old_provider = self._settings.provider.stt.value
+        logger.info(f"[Settings] STT provider changed: {old_provider} -> {provider.value}")
+        self._settings.provider.stt = provider
+        self._update_stt_visibility()
+        self.has_provider_changes = True
+
+        # Check compatibility warning
+        source_lang = self._settings.languages.source_language
+        warning = get_stt_compatibility_warning(source_lang, provider.value)
+        if warning and self.page:
+            self.page.open(
+                ft.SnackBar(
+                    ft.Text(t(warning.key, language=language_name(warning.language_code))),
+                    bgcolor=ft.Colors.ORANGE_700,
+                    duration=4000,
+                )
+            )
+
+        if self.page:
+            self._stt_fields.update()
+        self._emit_settings_changed()
+
+    def _on_llm_provider_change(self, provider: LLMProviderName) -> None:
+        if not self._settings:
+            return
+
+        old_provider = self._settings.provider.llm
+        logger.info(f"[Settings] LLM provider changed: {old_provider.value} -> {provider.value}")
+        self._settings.provider.llm = provider
+        self._update_trans_visibility()
+        self.has_provider_changes = True
+
+        # Update prompt if provider changed
+        if old_provider != provider:
+            provider_name = "gemini" if provider == LLMProviderName.GEMINI else "qwen"
+            self._prompt_editor.set_provider(provider_name)
+            self._prompt_editor.load_default_prompt()
+            self._settings.system_prompt = self._prompt_editor.value
+
+        if self.page:
+            self._trans_fields.update()
+        self._emit_settings_changed()
+
+    def _on_qwen_region_change(self, e) -> None:
+        if not self._settings:
+            return
+
+        region_value = e.control.value
+        old_region = self._settings.qwen.region.value
+        logger.info(f"[Settings] Qwen region changed: {old_region} -> {region_value}")
+        self._settings.qwen.region = QwenRegion(region_value)
+
+        # Sync both region dropdowns
+        self._stt_qwen_region.value = region_value
+        self._trans_qwen_region.value = region_value
+        if self._stt_qwen_region.page:
+            self._stt_qwen_region.update()
+        if self._trans_qwen_region.page:
+            self._trans_qwen_region.update()
+
+        self.has_provider_changes = True
+        self._emit_settings_changed()
+
+    def _on_secret_change(self, key: str, value: str) -> None:
+        if not self._settings or not self._config_path:
+            return
+
+        action = "updated" if value else "cleared"
+        logger.info(f"[Settings] API key {action}: {key}")
+
         with contextlib.suppress(Exception):
             store = create_secret_store(self._settings.secrets, config_path=self._config_path)
             if value:
@@ -502,397 +420,98 @@ class SettingsView(ft.ListView):
             else:
                 store.delete(key)
 
-    def _on_provider_change(self, e) -> None:
-        _ = e
-        if self._settings is None:
+        # Sync Alibaba keys between sections
+        if key == "alibaba_api_key_beijing":
+            self._stt_qwen_key_beijing.value = value
+            self._trans_qwen_key_beijing.value = value
+        elif key == "alibaba_api_key_singapore":
+            self._stt_qwen_key_singapore.value = value
+            self._trans_qwen_key_singapore.value = value
+
+    def _on_audio_change(self) -> None:
+        if not self._settings:
             return
 
-        stt_value = self.stt_provider.value
-        if stt_value == "Qwen ASR":
-            self._settings.provider.stt = STTProviderName.QWEN_ASR
-        elif stt_value == "Soniox":
-            self._settings.provider.stt = STTProviderName.SONIOX
-        else:
-            self._settings.provider.stt = STTProviderName.DEEPGRAM
+        # New values
+        new_host = self._audio_settings.host_api
+        new_device = self._audio_settings.microphone
+        new_vad = self._audio_settings.vad_sensitivity
 
-        # Check STT provider compatibility with current source language
-        source_lang = self._settings.languages.source_language
-        stt_provider = self._settings.provider.stt.value
-        warning = get_stt_compatibility_warning(source_lang, stt_provider)
-        if warning and self.page:
-            self.page.open(
-                ft.SnackBar(
-                    ft.Text(t(warning.key, language=language_name(warning.language_code))),
-                    bgcolor=colors.ORANGE_700,
-                    duration=4000,
-                )
-            )
+        # Old values
+        old_host = self._settings.audio.input_host_api
+        old_device = self._settings.audio.input_device
+        old_vad = self._settings.stt.vad_speech_threshold
 
-        new_llm = (
-            LLMProviderName.GEMINI
-            if self.llm_provider.value == "Google Gemini"
-            else LLMProviderName.QWEN
-        )
+        # Differential logging
+        if old_host != new_host:
+            logger.info(f"[Settings] Audio Host changed: {old_host} -> {new_host}")
 
-        # Load provider-specific prompt when LLM provider changes
-        if self._settings.provider.llm != new_llm:
-            self._settings.provider.llm = new_llm
-            provider_name = "gemini" if new_llm == LLMProviderName.GEMINI else "qwen"
-            self.prompt_provider_label.value = t(
-                "settings.prompt_for", provider=provider_label(provider_name)
-            )
-            self.system_prompt.value = load_prompt_for_provider(provider_name)
-            self._settings.system_prompt = self.system_prompt.value
-            with contextlib.suppress(RuntimeError):
-                self.prompt_provider_label.update()
-                self.system_prompt.update()
-        else:
-            self._settings.provider.llm = new_llm
+        if old_device != new_device:
+            logger.info(f"[Settings] Microphone changed: {old_device} -> {new_device}")
 
-        self._update_provider_visibility()
+        if abs(old_vad - new_vad) > 0.001:  # Float comparison
+            logger.info(f"[Settings] VAD sensitivity changed: {old_vad:.2f} -> {new_vad:.2f}")
+
+        # Update settings
+        self._settings.audio.input_host_api = new_host
+        self._settings.audio.input_device = new_device
+        self._settings.stt.vad_speech_threshold = new_vad
         self._emit_settings_changed()
 
-    def _on_apply_providers(self, e) -> None:
-        _ = e
-        self._emit_settings_changed()
-        if self.on_providers_changed:
-            self.on_providers_changed()
-
-    def _on_prompt_reset(self, e) -> None:
-        _ = e
-        if self._settings is None:
+    def _on_prompt_change(self, value: str) -> None:
+        if not self._settings:
             return
-        provider_name = (
-            "gemini" if self._settings.provider.llm == LLMProviderName.GEMINI else "qwen"
-        )
-        self.system_prompt.value = load_prompt_for_provider(provider_name)
-        self._settings.system_prompt = self.system_prompt.value
-        with contextlib.suppress(RuntimeError):
-            self.system_prompt.update()
+        self._settings.system_prompt = value
         self._emit_settings_changed()
 
-    def _on_ui_language_change(self, e) -> None:
-        _ = e
-        if self._settings is None:
-            return
-        label = self.ui_language.value or ""
-        locale = self._locale_label_to_code.get(label, self._settings.ui.locale)
-        self._settings.ui.locale = locale
-        self._emit_settings_changed()
-
-    def _on_qwen_region_change(self, e) -> None:
-        _ = e
-        if self._settings is None:
-            return
-
-        label = self.qwen_region.value or ""
-        new_region = self._qwen_region_label_to_value.get(label, self._settings.qwen.region)
-        self._settings.qwen.region = new_region
-        self._emit_settings_changed()
-
-    def _update_provider_visibility(self) -> None:
-        if self._settings is None:
-            return
-
-        stt_provider = self._settings.provider.stt
-
-        is_deepgram_stt = stt_provider == STTProviderName.DEEPGRAM
-        self.deepgram_api_key.visible = is_deepgram_stt
-        self.deepgram_stt_model.visible = is_deepgram_stt
-        self.verify_deepgram_btn.visible = is_deepgram_stt
-
-        is_soniox_stt = stt_provider == STTProviderName.SONIOX
-        self.soniox_api_key.visible = is_soniox_stt
-        self.soniox_stt_model.visible = is_soniox_stt
-        self.soniox_stt_endpoint.visible = is_soniox_stt
-        self.soniox_keepalive_s.visible = is_soniox_stt
-        self.soniox_trailing_silence_ms.visible = is_soniox_stt
-        self.verify_soniox_btn.visible = is_soniox_stt
-
-        # Google API key is always visible
-        self.google_api_key.visible = True
-        self.verify_google_btn.visible = True
-
-        # Show Qwen region dropdown and region-specific API keys when Qwen is used
-        is_qwen_used = (
-            stt_provider == STTProviderName.QWEN_ASR
-            or self._settings.provider.llm == LLMProviderName.QWEN
-        )
-        self.qwen_region.visible = is_qwen_used
-        self.alibaba_api_key_beijing.visible = is_qwen_used
-        self.verify_alibaba_beijing_btn.visible = is_qwen_used
-        self.alibaba_api_key_singapore.visible = is_qwen_used
-        self.verify_alibaba_singapore_btn.visible = is_qwen_used
-
-    def _on_verify_req(self, provider: str, key: str, btn_control: ft.Control) -> None:
-        if not self.on_verify_api_key:
-            return
-
-        if not key:
-            self.page.open(
-                ft.SnackBar(ft.Text(t("snackbar.api_key_empty")), bgcolor=colors.RED_400)
-            )
-            return
-
-        async def _run():
-            original_icon = btn_control.icon
-            original_color = btn_control.icon_color
-
-            btn_control.icon = icons.HOURGLASS_TOP_ROUNDED
-            btn_control.icon_color = colors.BLUE_400
-            if btn_control.page:
-                btn_control.update()
-
-            try:
-                success, msg = await self.on_verify_api_key(provider, key)
-                if success:
-                    self.page.open(
-                        ft.SnackBar(
-                            ft.Text(
-                                t(
-                                    "snackbar.verification_ok",
-                                    provider=provider_label(provider),
-                                )
-                            ),
-                            bgcolor=colors.GREEN_400,
-                        )
-                    )
-                    btn_control.icon = icons.CHECK_CIRCLE_ROUNDED
-                    btn_control.icon_color = colors.GREEN_400
-                else:
-                    logger.error(f"Verification failed for {provider}: {msg}")
-                    # Also write to app logs UI
-                    self.page.open(
-                        ft.SnackBar(
-                            ft.Text(t("snackbar.verification_failed", message=msg)),
-                            bgcolor=colors.RED_400,
-                        )
-                    )
-                    btn_control.icon = icons.ERROR_OUTLINE_ROUNDED
-                    btn_control.icon_color = colors.RED_400
-            except Exception as e:
-                self.page.open(
-                    ft.SnackBar(
-                        ft.Text(t("snackbar.verification_error", message=str(e))),
-                        bgcolor=colors.RED_400,
-                    )
-                )
-                btn_control.icon = icons.ERROR_OUTLINE_ROUNDED
-                btn_control.icon_color = colors.RED_400
-
-            if btn_control.page:
-                btn_control.update()
-
-            await asyncio.sleep(3)
-
-            btn_control.icon = original_icon
-            btn_control.icon_color = original_color
-            if btn_control.page:
-                btn_control.update()
-
-        self.page.run_task(_run)
-
-    def _on_setting_change(self, e) -> None:
-        _ = e
-        if self._settings is None:
-            return
-
-        self._settings.deepgram_stt.model = (
-            self.deepgram_stt_model.value or self._settings.deepgram_stt.model
-        )
-        self._settings.soniox_stt.model = (
-            self.soniox_stt_model.value or self._settings.soniox_stt.model
-        )
-        if self.soniox_stt_endpoint.value:
-            self._settings.soniox_stt.endpoint = self.soniox_stt_endpoint.value
-        if self.soniox_keepalive_s.value:
-            try:
-                self._settings.soniox_stt.keepalive_interval_s = float(
-                    self.soniox_keepalive_s.value
-                )
-            except ValueError:
-                pass
-        if self.soniox_trailing_silence_ms.value:
-            try:
-                self._settings.soniox_stt.trailing_silence_ms = int(
-                    self.soniox_trailing_silence_ms.value
-                )
-            except ValueError:
-                pass
-        self._settings.system_prompt = self.system_prompt.value or ""
-
-        self._emit_settings_changed()
-
-    def _on_audio_change(self, e) -> None:
-        _ = e
-        if self._settings is None:
-            return
-
-        host_api = self.audio_host_api.value or self._default_option_label
-        if host_api == self._default_option_label:
-            host_api = ""
-        self._settings.audio.input_host_api = host_api
-
-        device = self.microphone.value or self._default_option_label
-        if device == self._default_option_label:
-            device = ""
-        self._settings.audio.input_device = device
-
-        self._settings.stt.vad_speech_threshold = float(self.vad_sensitivity.value or 0.5)
-
-        self._refresh_microphones()
-        self._emit_settings_changed()
-
-    def _refresh_microphones(self) -> None:
-        host_api = self.audio_host_api.value or self._default_option_label
-        if host_api == self._default_option_label:
-            host_api = ""
-
-        devices = [self._default_option_label]
-        try:
-            import sounddevice as sd  # type: ignore
-
-            hostapi_index: int | None = None
-            if host_api:
-                for idx, item in enumerate(sd.query_hostapis()):
-                    name = str(item.get("name", "") or "")
-                    # Exact match since dropdown options now come from sounddevice directly
-                    if name == host_api:
-                        hostapi_index = idx
-                        break
-
-                # If user selected a host API but it wasn't found, skip all devices
-                if hostapi_index is None:
-                    devices = [self._default_option_label]  # No matching host API
-
-            for dev in sd.query_devices():
-                if int(dev.get("max_input_channels", 0) or 0) <= 0:
-                    continue
-                if hostapi_index is not None and int(dev.get("hostapi", -1) or -1) != hostapi_index:
-                    continue
-                name = str(dev.get("name", "") or "").strip()
-                if name:
-                    devices.append(name)
-        except Exception as e:
-            logger.warning(f"Failed to enumerate microphones: {e}")
-
-        # Preserve selection if possible.
-        current = self.microphone.value
-        self.microphone.options = [ft.dropdown.Option(d) for d in devices]
-        if current in devices:
-            self.microphone.value = current
-        else:
-            self.microphone.value = self._default_option_label
-
-        if self.microphone.page:
-            self.microphone.update()
-
-    def _populate_host_apis(self) -> None:
-        """Populate audio host API dropdown with available APIs from the system.
-
-        Only shows DirectSound and WASAPI to avoid user confusion:
-        - MME: High latency, can be unstable
-        - ASIO: Exclusive mode, prevents microphone sharing with other apps (e.g., VRChat)
-        """
-        options = [ft.dropdown.Option(self._default_option_label)]
-        # Only allow these host APIs for better compatibility
-        allowed_apis = {"windows directsound", "windows wasapi"}
-        try:
-            import sounddevice as sd  # type: ignore
-
-            for api in sd.query_hostapis():
-                name = str(api.get("name", "") or "").strip()
-                if name and name.lower() in allowed_apis:
-                    options.append(ft.dropdown.Option(name))
-        except Exception as e:
-            logger.warning(f"Failed to enumerate host APIs: {e}")
-
-        self.audio_host_api.options = options
+    async def _verify_key(self, provider: str, key: str) -> tuple[bool, str]:
+        """Verify API key."""
+        if self.on_verify_api_key:
+            return await self.on_verify_api_key(provider, key)
+        return False, "Verification not available"
 
     def _emit_settings_changed(self) -> None:
-        if self._settings is None:
-            return
-        if self.on_settings_changed:
+        if self._settings and self.on_settings_changed:
             self.on_settings_changed(self._settings)
 
-    def refresh_prompt_if_empty(self) -> None:
-        if self._settings is None:
-            return
-        current = (self.system_prompt.value or "").strip()
-        if current:
-            return
-        provider_name = (
-            "gemini" if self._settings.provider.llm == LLMProviderName.GEMINI else "qwen"
-        )
-        self.system_prompt.value = load_prompt_for_provider(provider_name)
-        if self.system_prompt.page:
-            self.system_prompt.update()
-
+    # --- Locale ---
     def apply_locale(self) -> None:
-        old_default = self._default_option_label
-        self._default_option_label = t("settings.default_option")
+        """Update all labels when locale changes."""
+        self._title.value = t("settings.title")
+        self._ui_language.label = t("settings.ui_language")
+        self._ui_language.options = self._build_locale_options()
 
-        self._title_text.value = t("settings.title")
-        self._ui_section_title.value = t("settings.section.ui")
-        self._providers_section_title.value = t("settings.section.providers")
-        self._audio_section_title.value = t("settings.section.audio")
-        self._persona_section_title.value = t("settings.section.persona")
-        self._stt_subtitle.value = t("settings.subtitle.stt")
-        self._translation_subtitle.value = t("settings.subtitle.translation")
-        self._vad_label.value = t("settings.vad_sensitivity")
+        # Update section titles
+        self._ui_section.apply_locale()
+        self._stt_section.apply_locale()
+        self._translation_section.apply_locale()
+        self._audio_section.apply_locale()
+        self._persona_section.apply_locale()
 
-        self.stt_provider.label = t("settings.stt_provider")
-        self.llm_provider.label = t("settings.llm_provider")
-        self.ui_language.label = t("settings.ui_language")
-        self.google_api_key.label = t("settings.google_api_key")
-        self.alibaba_api_key_beijing.label = t("settings.alibaba_api_key_beijing")
-        self.alibaba_api_key_singapore.label = t("settings.alibaba_api_key_singapore")
-        self.qwen_region.label = t("settings.qwen_region")
-        self.deepgram_api_key.label = t("settings.deepgram_api_key")
-        self.soniox_api_key.label = t("settings.soniox_api_key")
-        self.deepgram_stt_model.label = t("settings.deepgram_model")
-        self.soniox_stt_model.label = t("settings.soniox_model")
-        self.soniox_stt_endpoint.label = t("settings.soniox_endpoint")
-        self.soniox_keepalive_s.label = t("settings.soniox_keepalive")
-        self.soniox_trailing_silence_ms.label = t("settings.soniox_trailing_silence")
-        self.audio_host_api.label = t("settings.audio_host_api")
-        self.microphone.label = t("settings.microphone")
-        self.system_prompt.label = t("settings.system_prompt")
-        self.reset_prompt_btn.text = t("settings.reset_prompt")
-        self.apply_providers_btn.text = t("settings.apply_providers")
+        # Update components
+        self._stt_provider.apply_locale()
+        self._llm_provider.apply_locale()
+        self._deepgram_key.apply_locale()
+        self._soniox_key.apply_locale()
+        self._google_key.apply_locale()
+        self._stt_qwen_key_beijing.apply_locale()
+        self._stt_qwen_key_singapore.apply_locale()
+        self._trans_qwen_key_beijing.apply_locale()
+        self._trans_qwen_key_singapore.apply_locale()
+        self._audio_settings.apply_locale()
+        self._prompt_editor.apply_locale()
 
-        for btn in (
-            self.verify_google_btn,
-            self.verify_alibaba_beijing_btn,
-            self.verify_alibaba_singapore_btn,
-            self.verify_deepgram_btn,
-            self.verify_soniox_btn,
-        ):
-            btn.tooltip = t("settings.verify_key")
-
-        if self._settings is not None:
-            provider_name = (
-                "gemini" if self._settings.provider.llm == LLMProviderName.GEMINI else "qwen"
-            )
-            self.prompt_provider_label.value = t(
-                "settings.prompt_for", provider=provider_label(provider_name)
-            )
-
-        current_host_api = self.audio_host_api.value
-        current_microphone = self.microphone.value
-        if current_host_api == old_default:
-            current_host_api = self._default_option_label
-        if current_microphone == old_default:
-            current_microphone = self._default_option_label
-
-        self._refresh_locale_options()
-        self._refresh_qwen_region_options()
-        self._populate_host_apis()
-        if current_host_api:
-            self.audio_host_api.value = current_host_api
-        self._refresh_microphones()
-        if current_microphone:
-            self.microphone.value = current_microphone
+        # Update Qwen region dropdowns
+        for dropdown in (self._stt_qwen_region, self._trans_qwen_region):
+            dropdown.label = t("settings.qwen_region")
+            dropdown.options = [
+                ft.dropdown.Option(key=QwenRegion.BEIJING.value, text=t("region.beijing")),
+                ft.dropdown.Option(key=QwenRegion.SINGAPORE.value, text=t("region.singapore")),
+            ]
 
         if self.page:
             self.update()
+
+    def refresh_prompt_if_empty(self) -> None:
+        """Load default prompt if current is empty."""
+        self._prompt_editor.load_default_if_empty()

@@ -127,6 +127,15 @@ class GuiController:
             self._log_error("Translation is ON but LLM provider is not configured.")
             return
 
+        # Log provider info when enabling
+        if enabled and self.settings is not None:
+            provider = self.settings.provider.llm.value
+            if provider == "qwen":
+                region = self.settings.qwen.region.value
+                logger.info(f"[Translation] Enabled with provider: {provider} (region: {region})")
+            else:
+                logger.info(f"[Translation] Enabled with provider: {provider}")
+
         # Clear context history when toggling translation
         self.hub.clear_context()
         self.hub.translation_enabled = bool(enabled)
@@ -145,6 +154,15 @@ class GuiController:
                 with contextlib.suppress(Exception):
                     await self.hub.stt.close()
             return
+
+        # Log provider info when enabling
+        if self.settings is not None:
+            provider = self.settings.provider.stt.value
+            if provider == "qwen_asr":
+                region = self.settings.qwen.region.value
+                logger.info(f"[STT] Enabled with provider: {provider} (region: {region})")
+            else:
+                logger.info(f"[STT] Enabled with provider: {provider}")
 
         await self._start_mic_loop()
         # Pre-warm STT session for faster first response
