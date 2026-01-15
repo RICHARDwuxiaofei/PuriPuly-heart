@@ -10,6 +10,9 @@ from puripuly_heart.config.settings import (
     LLMSettings,
     ProviderSettings,
     QwenASRSTTSettings,
+    QwenRegion,
+    QwenSettings,
+    SonioxSTTSettings,
     STTProviderName,
 )
 from puripuly_heart.core.language import get_deepgram_language, get_qwen_asr_language
@@ -19,6 +22,7 @@ from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
 from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
+from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 
 
 def test_create_llm_provider_gemini_uses_secret_and_concurrency_limit() -> None:
@@ -47,6 +51,21 @@ def test_create_llm_provider_qwen_uses_secret() -> None:
     assert isinstance(provider.inner, QwenLLMProvider)
     assert provider.inner.api_key == "k2"
     assert provider.inner.base_url == "https://dashscope.aliyuncs.com/api/v1"
+
+
+def test_create_llm_provider_qwen_uses_singapore_region() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.QWEN),
+        qwen=QwenSettings(region=QwenRegion.SINGAPORE),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("alibaba_api_key_singapore", "k3")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, QwenLLMProvider)
+    assert provider.inner.api_key == "k3"
+    assert provider.inner.base_url == "https://dashscope-intl.aliyuncs.com/api/v1"
 
 
 def test_create_llm_provider_requires_secret(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -92,3 +111,30 @@ def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:
     assert backend.endpoint == "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
     assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
     assert backend.language == get_qwen_asr_language(settings.languages.source_language)
+
+
+def test_create_stt_backend_qwen_asr_uses_singapore_region() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(stt=STTProviderName.QWEN_ASR),
+        qwen=QwenSettings(region=QwenRegion.SINGAPORE),
+        qwen_asr_stt=QwenASRSTTSettings(model="qwen3-asr-flash-realtime"),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("alibaba_api_key_singapore", "k5")
+
+    backend = create_stt_backend(settings, secrets=secrets)
+    assert isinstance(backend, QwenASRRealtimeSTTBackend)
+    assert backend.endpoint == "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+
+
+def test_create_stt_backend_soniox_uses_secret() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(stt=STTProviderName.SONIOX),
+        soniox_stt=SonioxSTTSettings(model="stt-rt-v3"),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("soniox_api_key", "k6")
+
+    backend = create_stt_backend(settings, secrets=secrets)
+    assert isinstance(backend, SonioxRealtimeSTTBackend)
+    assert backend.api_key == "k6"

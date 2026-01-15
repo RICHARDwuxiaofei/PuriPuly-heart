@@ -124,10 +124,10 @@ def resolve_sounddevice_input_device(*, host_api: str = "", device: str = "") ->
         with contextlib.suppress(ValueError):
             idx = int(device)
             if 0 <= idx < len(devices) and int(devices[idx].get("max_input_channels", 0) or 0) > 0:
-                if (
-                    hostapi_index is None
-                    or int(devices[idx].get("hostapi", -1) or -1) == hostapi_index
-                ):
+                hostapi_value = devices[idx].get("hostapi")
+                if hostapi_value is None:
+                    hostapi_value = -1
+                if hostapi_index is None or int(hostapi_value) == hostapi_index:
                     return idx
 
     if hostapi_index is not None and not device:
@@ -138,7 +138,10 @@ def resolve_sounddevice_input_device(*, host_api: str = "", device: str = "") ->
     for idx, info in enumerate(devices):
         if int(info.get("max_input_channels", 0) or 0) <= 0:
             continue
-        if hostapi_index is not None and int(info.get("hostapi", -1) or -1) != hostapi_index:
+        hostapi_value = info.get("hostapi")
+        if hostapi_value is None:
+            hostapi_value = -1
+        if hostapi_index is not None and int(hostapi_value) != hostapi_index:
             continue
         if device:
             name = str(info.get("name", "") or "")
