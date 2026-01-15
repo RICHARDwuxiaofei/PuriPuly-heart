@@ -87,6 +87,15 @@ class TranslatorApp:
         self.page.add(ft.Container(content=self.layout, expand=True, padding=0))
 
     def _on_nav_change(self, index: int):
+        # Track previous tab for Settings auto-apply
+        previous_tab = getattr(self, "_current_tab", 0)
+        self._current_tab = index
+
+        # Auto-apply provider changes when leaving Settings (tab 1)
+        if previous_tab == 1 and index != 1 and self.view_settings.has_provider_changes:
+            self.view_settings.has_provider_changes = False
+            self.page.run_task(self.controller.apply_providers)
+
         if index == 0:
             self.content_area.content = self.view_dashboard
         elif index == 1:
