@@ -11,6 +11,7 @@ import asyncio
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
@@ -31,18 +32,22 @@ class DeepgramRealtimeSTTBackend(STTBackend):
     language: str  # Required: passed from wiring.py via get_deepgram_language()
     model: str = "nova-3"
     sample_rate_hz: int = 16000
+    connect_timeout_s: float = 5.0
 
     async def open_session(self) -> STTBackendSession:
         if self.sample_rate_hz not in (8000, 16000):
             raise ValueError("sample_rate_hz must be 8000 or 16000")
         if not self.api_key:
             raise ValueError("api_key must be non-empty")
+        if self.connect_timeout_s <= 0:
+            raise ValueError("connect_timeout_s must be > 0")
 
         session = _DeepgramSDKSession(
             api_key=self.api_key,
             model=self.model,
             language=self.language,
             sample_rate_hz=self.sample_rate_hz,
+            connect_timeout_s=self.connect_timeout_s,
         )
         await session.start()
         return session
@@ -85,6 +90,7 @@ class _DeepgramSDKSession(STTBackendSession):
     model: str
     language: str
     sample_rate_hz: int
+    connect_timeout_s: float
 
     _events: asyncio.Queue[STTBackendTranscriptEvent | BaseException | None] = field(
         init=False, repr=False
@@ -94,6 +100,8 @@ class _DeepgramSDKSession(STTBackendSession):
     _stopped: bool = field(init=False, default=False)
     _loop: asyncio.AbstractEventLoop | None = field(init=False, default=None, repr=False)
     _connected: threading.Event = field(init=False, repr=False)
+    _connect_started_at: float | None = field(init=False, default=None, repr=False)
+    _error_reported: bool = field(init=False, default=False, repr=False)
 
     def __post_init__(self) -> None:
         self._events = asyncio.Queue()
@@ -101,14 +109,20 @@ class _DeepgramSDKSession(STTBackendSession):
         self._connected = threading.Event()
 
     async def start(self) -> None:
-        self._loop = asyncio.get_event_loop()
+        self._loop = asyncio.get_running_loop()
+        self._connect_started_at = time.monotonic()
         self._thread = threading.Thread(target=self._run_sync, name="deepgram-sdk", daemon=True)
         self._thread.start()
 
         # Wait for connection to be established
-        connected = await asyncio.to_thread(self._connected.wait, 5.0)
+        logger.info("[STT] Deepgram connecting (timeout=%.1fs)", self.connect_timeout_s)
+        connected = await asyncio.to_thread(self._connected.wait, self.connect_timeout_s)
         if not connected:
-            self._put_event(RuntimeError("Deepgram SDK connection timeout"))
+            exc = RuntimeError("Deepgram SDK connection timeout")
+            logger.warning("[STT] Deepgram connection timeout after %.1fs", self.connect_timeout_s)
+            self._report_error(exc)
+            await self.stop()
+            raise exc
 
     def _run_sync(self) -> None:
         """Run Deepgram SDK connection in a separate thread."""
@@ -154,14 +168,31 @@ class _DeepgramSDKSession(STTBackendSession):
 
                 def on_error(error: Any) -> None:
                     logger.warning(f"Deepgram error: {error}")
+                    if not self._stopped:
+                        self._report_error(RuntimeError(f"Deepgram error: {error}"))
+                        self._stopped = True
+                        try:
+                            self._audio_q.put_nowait(_STOP)
+                        except Exception:
+                            pass
 
                 def on_close(close_event: Any) -> None:
                     _ = close_event
                     logger.debug("Deepgram: Connection closed")
+                    if not self._stopped:
+                        self._report_error(RuntimeError("Deepgram connection closed"))
+                        self._stopped = True
+                        try:
+                            self._audio_q.put_nowait(_STOP)
+                        except Exception:
+                            pass
 
                 def on_open(open_event: Any) -> None:
                     _ = open_event
                     logger.debug("Deepgram: Connection opened")
+                    if self._connect_started_at is not None:
+                        elapsed = time.monotonic() - self._connect_started_at
+                        logger.info("[STT] Deepgram connected in %.2fs", elapsed)
                     self._connected.set()
 
                 connection.on(EventType.OPEN, on_open)
@@ -179,13 +210,6 @@ class _DeepgramSDKSession(STTBackendSession):
                 listen_thread = threading.Thread(target=listening_thread, daemon=True)
                 listen_thread.start()
 
-                # Give time for connection to open
-                import time
-
-                time.sleep(0.3)
-
-                # Signal that connection is established
-                self._connected.set()
                 logger.debug("Deepgram SDK connection and listening started")
 
                 # Start keepalive thread (sends KeepAlive every 5 seconds to prevent 10-second timeout)
@@ -247,6 +271,12 @@ class _DeepgramSDKSession(STTBackendSession):
             self._put_event(exc)
         finally:
             self._put_event(None)
+
+    def _report_error(self, exc: BaseException) -> None:
+        if self._error_reported:
+            return
+        self._error_reported = True
+        self._put_event(exc)
 
     def _put_event(self, event: STTBackendTranscriptEvent | BaseException | None) -> None:
         """Thread-safe event posting to the asyncio queue."""

@@ -46,9 +46,9 @@ def load_audio_wav(filepath: str | Path) -> tuple[np.ndarray, int]:
 
 @pytest.mark.asyncio
 async def test_qwen_asr_llm_pipeline_smoke() -> None:
-    api_key = os.getenv("ALIBABA_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+    api_key = os.getenv("ALIBABA_API_KEY")
     if not api_key:
-        pytest.skip("missing env var ALIBABA_API_KEY (or DASHSCOPE_API_KEY)")
+        pytest.skip("missing env var ALIBABA_API_KEY")
 
     try:
         import dashscope  # noqa: F401
@@ -81,12 +81,17 @@ async def test_qwen_asr_llm_pipeline_smoke() -> None:
     if sample_rate not in (8000, 16000):
         pytest.skip(f"Unsupported sample rate: {sample_rate}")
 
+    region = os.getenv("QWEN_REGION", "beijing").lower()
+    default_endpoint = (
+        "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+        if region == "singapore"
+        else "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+    )
+
     stt_backend = QwenASRRealtimeSTTBackend(
         api_key=api_key,
         model=os.getenv("QWEN_ASR_MODEL", "qwen3-asr-flash-realtime"),
-        endpoint=os.getenv(
-            "QWEN_ASR_ENDPOINT", "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
-        ),
+        endpoint=os.getenv("QWEN_ASR_ENDPOINT", default_endpoint),
         language=os.getenv("QWEN_ASR_LANGUAGE", "ko"),
         sample_rate_hz=sample_rate,
     )
@@ -98,8 +103,16 @@ async def test_qwen_asr_llm_pipeline_smoke() -> None:
         bridging_ms=300,
     )
 
+    default_base_url = (
+        "https://dashscope-intl.aliyuncs.com/api/v1"
+        if region == "singapore"
+        else "https://dashscope.aliyuncs.com/api/v1"
+    )
+    base_url = os.getenv("QWEN_BASE_URL", default_base_url)
+
     llm_base = QwenLLMProvider(
         api_key=api_key,
+        base_url=base_url,
         model=os.getenv("QWEN_LLM_MODEL", "qwen-mt-flash"),
     )
     llm = SemaphoreLLMProvider(inner=llm_base, semaphore=asyncio.Semaphore(1))

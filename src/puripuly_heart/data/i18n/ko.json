@@ -12,6 +12,7 @@
   "language_modal.all_languages": "모든 언어",
   "display.connected": "준비됐어요!",
   "display.connecting": "연결 중...",
+  "display.stopping": "중지 중...",
   "display.disconnected": "Zzz...",
   "display.input_hint": "메시지를 입력하세요",
   "settings.title": "설정",

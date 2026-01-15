@@ -33,14 +33,24 @@ def _display_size_for_length(length: int) -> int:
     return 24
 
 
+def _status_label(status: str) -> str:
+    if status == "connecting":
+        return t("display.connecting")
+    if status == "connected":
+        return t("display.connected")
+    if status == "stopping":
+        return t("display.stopping")
+    return t("display.disconnected")
+
+
 class DisplayCard(ft.Container):
     """Multi-purpose display card with input field and decorative gradient."""
 
     def __init__(self, on_submit: Callable[[str], None]):
         self._on_submit = on_submit
-        self._is_connected = False
+        self._status = "disconnected"
         self._showing_status = True
-        self._primary_value = t("display.disconnected")
+        self._primary_value = _status_label(self._status)
         self._secondary_value: str | None = None
         self._primary_font_family: str | None = None
         self._secondary_font_family: str | None = None
@@ -156,13 +166,11 @@ class DisplayCard(ft.Container):
         self._secondary_font_family = font_family if text else None
         self._sync_display()
 
-    def set_status(self, connected: bool, font_family: str | None = None):
+    def set_status(self, status: str, font_family: str | None = None):
         """Update connection status display."""
-        self._is_connected = connected
+        self._status = status
         self._showing_status = True
-        text = t("display.connected") if connected else t("display.disconnected")
-
-        self._primary_value = text
+        self._primary_value = _status_label(status)
         self._primary_font_family = font_family
         self._secondary_value = None
         self._secondary_font_family = None
@@ -195,9 +203,7 @@ class DisplayCard(ft.Container):
         elif self._input_field.page is not None:
             self._input_field.update()
         if self._showing_status:
-            self._primary_value = (
-                t("display.connected") if self._is_connected else t("display.disconnected")
-            )
+            self._primary_value = _status_label(self._status)
             self._primary_font_family = display_font_family
             self._secondary_value = None
             self._secondary_font_family = None

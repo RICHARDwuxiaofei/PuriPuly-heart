@@ -8,6 +8,7 @@ from .models import Transcript
 
 
 class STTSessionState(str, Enum):
+    CONNECTING = "CONNECTING"
     DISCONNECTED = "DISCONNECTED"
     STREAMING = "STREAMING"
     DRAINING = "DRAINING"

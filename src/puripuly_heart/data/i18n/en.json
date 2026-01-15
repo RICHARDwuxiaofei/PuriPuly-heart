@@ -12,6 +12,7 @@
   "language_modal.all_languages": "All Languages",
   "display.connected": "Ready!",
   "display.connecting": "Connecting...",
+  "display.stopping": "Stopping...",
   "display.disconnected": "Zzz...",
   "display.input_hint": "Type message to send",
   "settings.title": "Settings",

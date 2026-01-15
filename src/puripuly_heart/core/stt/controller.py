@@ -33,6 +33,10 @@ class ManagedSTTProvider:
     reset_deadline_s: float = 180.0
     drain_timeout_s: float = 1.5
     bridging_ms: int = 500
+    finalize_grace_s: float = 0.2
+    connect_attempts: int = 3
+    connect_retry_base_s: float = 0.8
+    connect_retry_max_s: float = 6.0
 
     _state: STTSessionState = STTSessionState.DISCONNECTED
     _active_session: STTBackendSession | None = None
@@ -55,6 +59,12 @@ class ManagedSTTProvider:
             raise ValueError("drain_timeout_s must be > 0")
         if self.bridging_ms <= 0:
             raise ValueError("bridging_ms must be > 0")
+        if self.connect_attempts <= 0:
+            raise ValueError("connect_attempts must be > 0")
+        if self.connect_retry_base_s <= 0:
+            raise ValueError("connect_retry_base_s must be > 0")
+        if self.connect_retry_max_s <= 0:
+            raise ValueError("connect_retry_max_s must be > 0")
 
         capacity_samples = int(self.sample_rate_hz * (self.bridging_ms / 1000.0))
         self._audio_ring = RingBufferF32(capacity_samples=capacity_samples)
@@ -72,16 +82,20 @@ class ManagedSTTProvider:
             self._reset_timer.cancel()
             self._reset_timer = None
 
-        if self._consumer_task:
+        if self._active_session and self._consumer_task:
+            await self._drain_and_close(
+                self._active_session, self._consumer_task, allow_finalize=True
+            )
+        elif self._consumer_task:
             self._consumer_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._consumer_task
-            self._consumer_task = None
-
-        if self._active_session:
+        elif self._active_session:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._active_session.close()
-            self._active_session = None
+
+        self._consumer_task = None
+        self._active_session = None
 
         if self._draining:
             for task in list(self._draining):
@@ -109,14 +123,15 @@ class ManagedSTTProvider:
 
     async def warmup(self) -> None:
         """Pre-establish STT session for faster first response."""
-        await self._ensure_session()
-        logger.info("[STT] Session pre-warmed")
+        if await self._ensure_session():
+            logger.info("[STT] Session pre-warmed")
 
     async def _on_speech_start(self, event: SpeechStart) -> None:
         self._active_utterance_id = event.utterance_id
         self._pending_final_utterance_id = None
 
-        await self._ensure_session()
+        if not await self._ensure_session():
+            return
         await self._maybe_reset(is_speaking=True)
 
         await self._send_audio(event.pre_roll)
@@ -124,7 +139,8 @@ class ManagedSTTProvider:
 
     async def _on_speech_chunk(self, event: SpeechChunk) -> None:
         self._active_utterance_id = event.utterance_id
-        await self._ensure_session()
+        if not await self._ensure_session():
+            return
         await self._maybe_reset(is_speaking=True)
         await self._send_audio(event.chunk)
 
@@ -148,24 +164,60 @@ class ManagedSTTProvider:
             raise RuntimeError("STT session is not active")
         await self._active_session.send_audio(pcm)
 
-    async def _ensure_session(self) -> None:
+    async def _ensure_session(self) -> bool:
         if self._active_session is not None:
-            return
+            return True
 
-        logger.info("[STT] Opening new session...")
-        try:
-            session = await self.backend.open_session()
-        except Exception as exc:
-            logger.error(f"[STT] Failed to open session: {exc}")
-            await self._events.put(STTErrorEvent(f"Failed to open STT session: {exc}"))
-            raise
+        await self._set_state(STTSessionState.CONNECTING)
+        last_exc: Exception | None = None
 
-        self._active_session = session
-        self._session_started_at = self.clock.now()
-        self._consumer_task = asyncio.create_task(self._consume_session_events(session))
-        self._schedule_reset_timer()
-        await self._set_state(STTSessionState.STREAMING)
-        logger.info(f"[STT] Session opened (reset_deadline={self.reset_deadline_s}s)")
+        for attempt in range(1, self.connect_attempts + 1):
+            logger.info(
+                "[STT] Opening new session (attempt %s/%s)...",
+                attempt,
+                self.connect_attempts,
+            )
+            try:
+                session = await self.backend.open_session()
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "[STT] Failed to open session (attempt %s/%s): %s",
+                    attempt,
+                    self.connect_attempts,
+                    exc,
+                )
+                if attempt < self.connect_attempts:
+                    delay = min(
+                        self.connect_retry_base_s * (2 ** (attempt - 1)),
+                        self.connect_retry_max_s,
+                    )
+                    logger.info("[STT] Retrying session in %.1fs", delay)
+                    await asyncio.sleep(delay)
+                    continue
+                break
+            else:
+                self._active_session = session
+                self._session_started_at = self.clock.now()
+                self._consumer_task = asyncio.create_task(self._consume_session_events(session))
+                self._schedule_reset_timer()
+                await self._set_state(STTSessionState.STREAMING)
+                logger.info(f"[STT] Session opened (reset_deadline={self.reset_deadline_s}s)")
+                return True
+
+        reason = str(last_exc) if last_exc is not None else "unknown error"
+        logger.error(
+            "[STT] Failed to open session after %s attempts: %s",
+            self.connect_attempts,
+            reason,
+        )
+        await self._set_state(STTSessionState.DISCONNECTED)
+        await self._events.put(
+            STTErrorEvent(
+                f"Failed to open STT session after {self.connect_attempts} attempts: {reason}"
+            )
+        )
+        return False
 
     async def _maybe_reset(self, *, is_speaking: bool) -> None:
         if self._active_session is None or self._session_started_at is None:
@@ -206,7 +258,9 @@ class ManagedSTTProvider:
         if old_session and old_consumer:
             logger.info("[STT] BRIDGING: Starting drain of old session in background")
             self._draining.add(
-                asyncio.create_task(self._drain_and_close(old_session, old_consumer))
+                asyncio.create_task(
+                    self._drain_and_close(old_session, old_consumer, allow_finalize=False)
+                )
             )
 
     async def _reset_on_silence(self) -> None:
@@ -221,14 +275,20 @@ class ManagedSTTProvider:
         self._session_started_at = None
 
         await self._set_state(STTSessionState.DRAINING)
-        await self._drain_and_close(old_session, old_consumer)
+        await self._drain_and_close(old_session, old_consumer, allow_finalize=True)
         await self._set_state(STTSessionState.DISCONNECTED)
         logger.info("[STT] SILENCE RESET: Session closed, will reconnect on next speech")
 
     async def _drain_and_close(
-        self, session: STTBackendSession, consumer_task: asyncio.Task[None]
+        self,
+        session: STTBackendSession,
+        consumer_task: asyncio.Task[None],
+        *,
+        allow_finalize: bool,
     ) -> None:
         logger.debug(f"[STT] DRAIN: Starting drain (timeout={self.drain_timeout_s}s)...")
+        if allow_finalize and self._should_finalize_before_stop():
+            await self._finalize_before_stop(session)
         with contextlib.suppress(Exception):
             await session.stop()
 
@@ -246,6 +306,17 @@ class ManagedSTTProvider:
         with contextlib.suppress(Exception):
             await session.close()
         logger.debug("[STT] DRAIN: Session closed")
+
+    def _should_finalize_before_stop(self) -> bool:
+        return self._active_utterance_id is not None or self._pending_final_utterance_id is not None
+
+    async def _finalize_before_stop(self, session: STTBackendSession) -> None:
+        if self._active_utterance_id is not None:
+            with contextlib.suppress(Exception):
+                await session.on_speech_end()
+        if self.finalize_grace_s <= 0:
+            return
+        await asyncio.sleep(self.finalize_grace_s)
 
     async def _consume_session_events(self, session: STTBackendSession) -> None:
         try:

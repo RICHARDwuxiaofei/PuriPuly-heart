@@ -47,10 +47,18 @@ class UIEventBridge:
     async def _handle_event(self, event: UIEvent) -> None:
         if event.type == UIEventType.SESSION_STATE_CHANGED:
             state = event.payload
-            connected = getattr(state, "name", "") == "STREAMING"
+            state_name = getattr(state, "name", "")
+            if state_name == "CONNECTING":
+                status = "connecting"
+            elif state_name == "STREAMING":
+                status = "connected"
+            elif state_name == "DRAINING":
+                status = "stopping"
+            else:
+                status = "disconnected"
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
-                dash.set_status(connected)
+                dash.set_status(status)
             return
 
         if event.type in (UIEventType.TRANSCRIPT_PARTIAL, UIEventType.TRANSCRIPT_FINAL):
