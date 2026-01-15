@@ -138,6 +138,7 @@ class DisplayCard(ft.Container):
             self._on_submit(text)
             e.control.value = ""
             e.control.update()
+            e.control.focus()
 
     def set_display(self, text: str, is_error: bool = False, font_family: str | None = None):
         """Update the primary display text and clear any secondary text."""
