@@ -91,6 +91,7 @@ class ClientHub:
     _osc_flush_task: asyncio.Task[None] | None = None
     _running: bool = False
     _last_promo_time: float | None = None
+    _promo_eligible: bool = False
 
     async def start(self, *, auto_flush_osc: bool = False) -> None:
         if self._running:
@@ -126,6 +127,10 @@ class ClientHub:
 
         if self.llm is not None:
             await self.llm.close()
+
+    def mark_promo_eligible(self) -> None:
+        """Mark that user clicked STT button. Next STREAMING state will send promo."""
+        self._promo_eligible = True
 
     def clear_context(self) -> None:
         """Clear the translation context history and translation memory."""
@@ -291,7 +296,11 @@ class ClientHub:
             return
 
     def _send_stt_connected_notification(self) -> None:
-        """Send promo message to chatbox when STT connects (max once per 5 min)."""
+        """Send promo message when STT connects (only if user clicked button)."""
+        if not self._promo_eligible:
+            return  # Skip if not triggered by user button click
+        self._promo_eligible = False
+
         now = self.clock.now()
         if self._last_promo_time is not None:
             if now - self._last_promo_time < _PROMO_INTERVAL_SEC:
