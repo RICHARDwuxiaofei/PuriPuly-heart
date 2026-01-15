@@ -12,14 +12,12 @@ from puripuly_heart.ui.fonts import font_for_language, register_fonts
 from puripuly_heart.ui.i18n import (
     get_locale,
     language_name,
-    source_label,
     t,
-    translated_source_label,
 )
 from puripuly_heart.ui.theme import COLOR_BACKGROUND, get_app_theme
 from puripuly_heart.ui.views.about import AboutView
 from puripuly_heart.ui.views.dashboard import DashboardView
-from puripuly_heart.ui.views.history import HistoryView
+from puripuly_heart.ui.views.logs import LogsView
 from puripuly_heart.ui.views.settings import SettingsView
 
 logger = logging.getLogger(__name__)
@@ -59,13 +57,13 @@ class TranslatorApp:
     def _build_layout(self):
         self.view_dashboard = DashboardView()
         self.view_settings = SettingsView()
-        self.view_history = HistoryView()
+        self.view_logs = LogsView()
         self.view_about = AboutView()
 
         # Custom title bar
         self.title_bar = TitleBar(self.page)
 
-        # Bottom navigation (order: Home, Settings, History, Logs)
+        # Bottom navigation (order: Home, Settings, Logs, About)
         self.bottom_nav = BottomNavBar(on_change=self._on_nav_change)
 
         # Content area
@@ -94,27 +92,22 @@ class TranslatorApp:
         elif index == 1:
             self.content_area.content = self.view_settings
         elif index == 2:
-            self.content_area.content = self.view_history
+            self.content_area.content = self.view_logs
         elif index == 3:
             self.content_area.content = self.view_about
 
         self.content_area.update()
         if index == 1:
             self.view_settings.refresh_prompt_if_empty()
+        elif index == 2:
+            # Async scroll after rendering completes
+            async def _scroll():
+                import asyncio
 
-    def add_history_entry(
-        self,
-        source: str,
-        text: str,
-        *,
-        translated: bool = False,
-        language_code: str | None = None,
-    ):
-        label = source_label(source)
-        if translated:
-            label = translated_source_label(label)
-        font_family = font_for_language(language_code or get_locale())
-        self.view_history.add_message(label, text, text_font_family=font_family)
+                await asyncio.sleep(0.05)
+                await self.view_logs.scroll_to_bottom()
+
+            self.page.run_task(_scroll)
 
     def apply_locale(self) -> None:
         self.page.title = t("app.title")
@@ -122,7 +115,7 @@ class TranslatorApp:
         self.title_bar.set_title(t("app.title"))
         self.view_dashboard.apply_locale()
         self.view_settings.apply_locale()
-        self.view_history.apply_locale()
+        self.view_logs.apply_locale()
         self.page.update()
 
     def _on_manual_submit(self, _source: str, text: str) -> None:
