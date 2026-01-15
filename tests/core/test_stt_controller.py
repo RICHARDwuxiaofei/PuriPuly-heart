@@ -1,0 +1,176 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+
+from puripuly_heart.core.clock import FakeClock
+from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
+from puripuly_heart.core.stt.controller import ManagedSTTProvider
+from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
+from puripuly_heart.domain.events import STTSessionState, STTSessionStateEvent
+from tests.helpers.fakes import samples
+
+
+@dataclass(slots=True)
+class FakeSession:
+    audio: list[bytes]
+    _queue: asyncio.Queue
+    calls: list[str]
+    _closed: bool = False
+
+    def __init__(self) -> None:
+        self.audio = []
+        self._queue = asyncio.Queue()
+        self.calls = []
+
+    async def send_audio(self, pcm16le: bytes) -> None:
+        self.audio.append(pcm16le)
+        if len(self.audio) == 1:
+            await self._queue.put(STTBackendTranscriptEvent(text="partial", is_final=False))
+
+    async def stop(self) -> None:
+        self.calls.append("stop")
+        await self._queue.put(STTBackendTranscriptEvent(text="final", is_final=True))
+        await self._queue.put(None)  # sentinel
+
+    async def on_speech_end(self) -> None:
+        self.calls.append("on_speech_end")
+
+    async def close(self) -> None:
+        self._closed = True
+        self.calls.append("close")
+
+    async def events(self):
+        while True:
+            item = await self._queue.get()
+            if item is None:
+                return
+            yield item
+
+
+@dataclass(slots=True)
+class FakeBackend:
+    sessions: list[FakeSession]
+
+    def __init__(self) -> None:
+        self.sessions = []
+
+    async def open_session(self) -> FakeSession:
+        s = FakeSession()
+        self.sessions.append(s)
+        return s
+
+
+async def _next_event(stream, *, timeout_s: float = 0.2):
+    return await asyncio.wait_for(stream.__anext__(), timeout=timeout_s)
+
+
+async def _next_state(stream, state, *, max_events: int = 5):
+    for _ in range(max_events):
+        event = await _next_event(stream)
+        if isinstance(event, STTSessionStateEvent) and event.state == state:
+            return event
+    raise AssertionError(f"Expected state {state}")
+
+
+async def test_stt_controller_connects_on_speech_start():
+    clock = FakeClock()
+    backend = FakeBackend()
+    stt = ManagedSTTProvider(
+        backend=backend, sample_rate_hz=16000, clock=clock, reset_deadline_s=90.0
+    )
+
+    uid = __import__("uuid").uuid4()
+    stream = stt.events()
+    await stt.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+    first = await _next_state(stream, STTSessionState.STREAMING)
+
+    assert len(backend.sessions) == 1
+    assert isinstance(first, STTSessionStateEvent)
+    assert first.state == STTSessionState.STREAMING
+
+    await stt.close()
+
+
+async def test_stt_controller_resets_with_bridging_during_speech():
+    clock = FakeClock()
+    backend = FakeBackend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        clock=clock,
+        reset_deadline_s=1.0,
+        drain_timeout_s=0.05,
+        bridging_ms=64,
+        finalize_grace_s=0.0,
+    )
+
+    uid = __import__("uuid").uuid4()
+    stream = stt.events()
+    await stt.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+    _ = await _next_event(stream)
+
+    clock.advance(1.1)
+    await stt.handle_vad_event(SpeechChunk(uid, chunk=samples(2.0)))
+
+    await asyncio.sleep(0.01)
+    assert len(backend.sessions) == 2
+    assert len(backend.sessions[1].audio) >= 1  # bridging audio
+    assert "on_speech_end" not in backend.sessions[0].calls
+
+    await stt.close()
+
+
+async def test_stt_controller_resets_on_silence():
+    clock = FakeClock()
+    backend = FakeBackend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        clock=clock,
+        reset_deadline_s=1.0,
+        drain_timeout_s=0.05,
+        finalize_grace_s=0.0,
+    )
+
+    uid = __import__("uuid").uuid4()
+    stream = stt.events()
+    await stt.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+    _ = await _next_event(stream)
+
+    clock.advance(1.1)
+    await stt.handle_vad_event(SpeechEnd(uid))
+
+    seen_disconnected = False
+    for _ in range(10):
+        ev = await _next_event(stream)
+        if isinstance(ev, STTSessionStateEvent) and ev.state == STTSessionState.DISCONNECTED:
+            seen_disconnected = True
+            break
+    assert seen_disconnected, "Expected DISCONNECTED state event"
+
+    await stt.close()
+
+
+async def test_stt_controller_finalize_on_close_while_speaking():
+    clock = FakeClock()
+    backend = FakeBackend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        clock=clock,
+        reset_deadline_s=90.0,
+        finalize_grace_s=0.0,
+    )
+
+    uid = __import__("uuid").uuid4()
+    stream = stt.events()
+    await stt.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+    await _next_state(stream, STTSessionState.STREAMING)
+
+    await stt.close()
+
+    calls = backend.sessions[0].calls
+    assert "on_speech_end" in calls
+    assert "stop" in calls
+    assert calls.index("on_speech_end") < calls.index("stop")

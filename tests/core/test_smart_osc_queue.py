@@ -1,22 +1,11 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
 
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.domain.models import OSCMessage
-
-
-@dataclass(slots=True)
-class FakeSender:
-    sent: list[str]
-
-    def __init__(self) -> None:
-        self.sent = []
-
-    def send_chatbox(self, text: str) -> None:
-        self.sent.append(text)
+from tests.helpers.fakes import FakeSender
 
 
 def test_smart_queue_cooldown_and_flush():
@@ -63,3 +52,13 @@ def test_smart_queue_ttl_drop():
     queue.process_due()
 
     assert sender.sent == ["first"]
+
+
+def test_smart_queue_send_typing():
+    clock = FakeClock()
+    sender = FakeSender()
+    queue = SmartOscQueue(sender=sender, clock=clock, cooldown_s=1.0, ttl_s=1.0)
+
+    queue.send_typing(True)
+
+    assert sender.typing == [True]
