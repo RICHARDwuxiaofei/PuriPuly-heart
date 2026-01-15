@@ -26,9 +26,18 @@ audio/VAD -> STT -> LLM -> OSC. It ships a GUI using Flet and CLI entry points.
 - `src/puripuly_heart/providers/` concrete STT and LLM providers
 - `src/puripuly_heart/ui/` Flet UI, views, controller
 - `src/puripuly_heart/config/` settings, prompts, paths
+- `src/puripuly_heart/data/` packaged assets (fonts, pictures, VAD model, third-party notices)
 - `src/puripuly_heart/data/i18n/` UI localization bundles
 - `prompts/` system prompt files
-- `tests/` unit tests
+- `tests/` unit/component tests (organized by area)
+  - `tests/app/` app wiring and headless runners
+  - `tests/core/` core pipeline, audio, VAD, STT, OSC, orchestrator
+  - `tests/config/` settings, prompts, secrets
+  - `tests/providers/` provider unit tests and client contracts
+  - `tests/domain/` domain models/events
+  - `tests/ui/` UI tests (WIP, optional)
+  - `tests/smoke/` import and lightweight smoke checks
+  - `tests/helpers/` shared fakes and fixtures
 - `tests/integration/` opt-in integration tests
 
 ### 2.2 Configuration and Settings
@@ -77,7 +86,7 @@ audio/VAD -> STT -> LLM -> OSC. It ships a GUI using Flet and CLI entry points.
 - Implemented in `ClientHub` as `_translation_history`
 - Defaults: `context_time_window_s = 20.0`, `context_max_entries = 3`
 - Only recent entries within the time window are formatted and passed to the LLM
-- Update `tests/test_context_memory.py` when changing window size or behavior
+- Update `tests/core/test_context_memory.py` when changing window size or behavior
 
 ## 3. Verification Policy
 

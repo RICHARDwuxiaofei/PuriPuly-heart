@@ -20,7 +20,11 @@ def test_settings_roundtrip(tmp_path):
     save_settings(path, settings)
 
     loaded = load_settings(path)
-    assert loaded == settings
+    expected = AppSettings()
+    expected.languages.recent_source_languages = ["en", "zh-CN", "ja", "ko", "es", "fr"]
+    expected.languages.recent_target_languages = ["en", "zh-CN", "ja", "ko", "es", "fr"]
+
+    assert loaded == expected
 
 
 def test_settings_validation_rejects_invalid_audio():

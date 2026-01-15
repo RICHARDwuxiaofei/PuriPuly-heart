@@ -10,23 +10,23 @@ from puripuly_heart.providers.llm.qwen import QwenClient, QwenLLMProvider
 
 @dataclass
 class FakeQwenClient(QwenClient):
-    last_call: dict[str, str] | None = None
+    last_call: dict[str, object] | None = None
 
     async def translate(
         self,
         *,
         text: str,
-        system_prompt: str,
         source_language: str,
         target_language: str,
-        context: str = "",
+        domain_prompt: str = "",
+        context_pairs: list[dict[str, str]] | None = None,
     ) -> str:
         self.last_call = {
             "text": text,
-            "system_prompt": system_prompt,
             "source_language": source_language,
             "target_language": target_language,
-            "context": context,
+            "domain_prompt": domain_prompt,
+            "context_pairs": context_pairs,
         }
         return "TRANSLATED"
 
@@ -49,8 +49,8 @@ async def test_qwen_provider_uses_injected_client():
     assert out.text == "TRANSLATED"
     assert fake.last_call == {
         "text": "hello",
-        "system_prompt": "PROMPT",
         "source_language": "ko-KR",
         "target_language": "en",
-        "context": "",
+        "domain_prompt": "PROMPT",
+        "context_pairs": None,
     }

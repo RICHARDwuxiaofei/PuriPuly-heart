@@ -33,22 +33,19 @@ class CountingLLM:
             self.active -= 1
 
 
-def test_llm_semaphore_limits_concurrency():
-    async def run():
-        inner = CountingLLM()
-        provider = SemaphoreLLMProvider(inner=inner, semaphore=asyncio.Semaphore(2))
+async def test_llm_semaphore_limits_concurrency():
+    inner = CountingLLM()
+    provider = SemaphoreLLMProvider(inner=inner, semaphore=asyncio.Semaphore(2))
 
-        async def one(i: int):
-            return await provider.translate(
-                utterance_id=__import__("uuid").uuid4(),
-                text=f"t{i}",
-                system_prompt="",
-                source_language="ko-KR",
-                target_language="en",
-            )
+    async def one(i: int):
+        return await provider.translate(
+            utterance_id=__import__("uuid").uuid4(),
+            text=f"t{i}",
+            system_prompt="",
+            source_language="ko-KR",
+            target_language="en",
+        )
 
-        results = await asyncio.gather(*(one(i) for i in range(8)))
-        assert len(results) == 8
-        assert inner.peak <= 2
-
-    asyncio.run(run())
+    results = await asyncio.gather(*(one(i) for i in range(8)))
+    assert len(results) == 8
+    assert inner.peak <= 2
