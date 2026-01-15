@@ -25,6 +25,7 @@ from puripuly_heart.core.audio.source import (
     resolve_sounddevice_input_device,
 )
 from puripuly_heart.core.clock import SystemClock
+from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
@@ -129,6 +130,13 @@ class GuiController:
         # Clear context history when toggling translation
         self.hub.clear_context()
         self.hub.translation_enabled = bool(enabled)
+        if enabled and self.hub.llm is not None:
+            llm = self.hub.llm
+            if isinstance(llm, SemaphoreLLMProvider):
+                llm = llm.inner
+            if isinstance(llm, GeminiLLMProvider):
+                with contextlib.suppress(Exception):
+                    await llm.warmup()
 
     async def set_stt_enabled(self, enabled: bool) -> None:
         if not enabled:

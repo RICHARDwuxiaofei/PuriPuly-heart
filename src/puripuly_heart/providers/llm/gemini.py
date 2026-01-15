@@ -61,6 +61,16 @@ class GeminiLLMProvider:
         )
         return Translation(utterance_id=utterance_id, text=translated)
 
+    async def warmup(self) -> None:
+        client = self._get_client()
+        await client.translate(
+            text="warmup",
+            system_prompt="Reply with OK only.",
+            source_language="en",
+            target_language="en",
+            context="",
+        )
+
     async def close(self) -> None:
         if self._internal_client is not None:
             await self._internal_client.close()
@@ -134,6 +144,7 @@ class GoogleGenaiGeminiClient:
             config=types.GenerateContentConfig(
                 system_instruction=formatted_system_prompt,
                 thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL),
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             ),
         )
         if getattr(response, "text", None):
