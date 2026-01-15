@@ -9,20 +9,30 @@ Runs 5 iterations and outputs detailed latency statistics.
 from __future__ import annotations
 
 import asyncio
-import os
 import time
-import wave
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from uuid import uuid4
 
-import numpy as np
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("INTEGRATION") != "1",
-    reason="set INTEGRATION=1 to run integration tests",
+from tests.integration.helpers import (
+    CHUNK_DELAY_S,
+    ITERATION_DELAY_S,
+    OSC_TIMEOUT_S,
+    WARMUP_DELAY_S,
+    MockOscSender,
+    SimpleClock,
+    chunk_audio,
+    integration_mark,
+    load_audio_wav,
+    next_ui_event,
+    require_env,
+    resolve_test_audio_path,
+    send_vad_events,
+    wait_for_event,
 )
+
+pytestmark = integration_mark()
 
 
 @dataclass
@@ -58,40 +68,6 @@ class IterationMetrics:
         if self.osc_sent and self.audio_send_start:
             return (self.osc_sent - self.audio_send_start) * 1000
         return 0.0
-
-
-@dataclass
-class MockOscSender:
-    """Mock OSC sender that records messages without network."""
-
-    messages: list[str] = field(default_factory=list)
-    typing_states: list[bool] = field(default_factory=list)
-
-    def send_chatbox(self, text: str) -> None:
-        self.messages.append(text)
-
-    def send_typing(self, is_typing: bool) -> None:
-        self.typing_states.append(is_typing)
-
-
-class SimpleClock:
-    """Simple clock for OSC queue."""
-
-    def now(self) -> float:
-        return time.time()
-
-
-def load_audio_wav(filepath: str | Path) -> tuple[np.ndarray, int]:
-    """Load WAV file and return (float32_samples, sample_rate)."""
-    with wave.open(str(filepath), "rb") as f:
-        sample_rate = f.getframerate()
-        n_frames = f.getnframes()
-        audio_data = f.readframes(n_frames)
-
-    # Convert PCM16 to float32 (-1.0 to 1.0)
-    samples_int16 = np.frombuffer(audio_data, dtype=np.int16)
-    samples_f32 = samples_int16.astype(np.float32) / 32768.0
-    return samples_f32, sample_rate
 
 
 def print_summary_table(results: list[IterationMetrics]) -> None:
@@ -156,30 +132,19 @@ async def test_e2e_latency_5_iterations():
         set TEST_AUDIO_PATH=path\to\test_speech.wav
         python -m pytest tests/integration/test_e2e_latency_measurement.py -v -s
     """
-    deepgram_key = os.getenv("DEEPGRAM_API_KEY")
-    google_key = os.getenv("GOOGLE_API_KEY")
-
-    if not deepgram_key:
-        pytest.skip("missing DEEPGRAM_API_KEY env var")
-    if not google_key:
-        pytest.skip("missing GOOGLE_API_KEY env var")
+    deepgram_key = require_env("DEEPGRAM_API_KEY")
+    google_key = require_env("GOOGLE_API_KEY")
 
     from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
     from puripuly_heart.core.orchestrator.hub import ClientHub
     from puripuly_heart.core.osc.smart_queue import SmartOscQueue
     from puripuly_heart.core.stt.controller import ManagedSTTProvider
-    from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
     from puripuly_heart.domain.events import UIEventType
     from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
     from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
 
     # Load audio file
-    audio_env = os.getenv("TEST_AUDIO_PATH")
-    audio_path = (
-        Path(audio_env)
-        if audio_env
-        else Path(__file__).parent.parent.parent / ".test_audio" / "test_speech.wav"
-    )
+    audio_path = resolve_test_audio_path()
     if not audio_path.exists():
         pytest.skip(f"Audio file not found: {audio_path}")
 
@@ -254,9 +219,8 @@ async def test_e2e_latency_5_iterations():
 
         async def track_events():
             while True:
-                try:
-                    event = await asyncio.wait_for(hub.ui_events.get(), timeout=0.1)
-                except asyncio.TimeoutError:
+                event = await next_ui_event(hub.ui_events)
+                if event is None:
                     continue
 
                 ts = time.perf_counter()
@@ -287,7 +251,7 @@ async def test_e2e_latency_5_iterations():
         event_task = asyncio.create_task(track_events())
 
         # Wait for STT session to initialize
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(WARMUP_DELAY_S)
 
         try:
             # Record start time
@@ -296,29 +260,14 @@ async def test_e2e_latency_5_iterations():
             # Create utterance ID for this iteration
             utterance_id = uuid4()
 
-            # Split audio into chunks (100ms each = sample_rate // 10 samples)
-            chunk_samples = sample_rate // 10  # 100ms worth of samples
-            chunks = [
-                audio_samples[i : i + chunk_samples]
-                for i in range(0, len(audio_samples), chunk_samples)
-            ]
+            # Split audio into chunks (100ms each)
+            try:
+                chunks, _chunk_samples = chunk_audio(audio_samples, sample_rate_hz=sample_rate)
+            except ValueError:
+                pytest.skip("Invalid chunk size for sample rate")
 
-            # Send SpeechStart with first chunk (and empty pre_roll)
             if chunks:
-                pre_roll = np.zeros(chunk_samples, dtype=np.float32)
-                first_chunk = chunks[0]
-                await hub.handle_vad_event(
-                    SpeechStart(utterance_id, pre_roll=pre_roll, chunk=first_chunk)
-                )
-                await asyncio.sleep(0.05)
-
-                # Send remaining chunks as SpeechChunk
-                for chunk in chunks[1:]:
-                    await hub.handle_vad_event(SpeechChunk(utterance_id, chunk=chunk))
-                    await asyncio.sleep(0.05)
-
-                # Signal end of speech
-                await hub.handle_vad_event(SpeechEnd(utterance_id))
+                await send_vad_events(hub, utterance_id, chunks, chunk_delay_s=CHUNK_DELAY_S)
 
             metrics.audio_send_end = time.perf_counter()
             print(
@@ -326,10 +275,8 @@ async def test_e2e_latency_5_iterations():
             )
 
             # Wait for pipeline completion (timeout: 15s)
-            try:
-                await asyncio.wait_for(got_osc_sent.wait(), timeout=15.0)
-            except asyncio.TimeoutError:
-                print("  [TIMEOUT] Pipeline did not complete in 15s")
+            if not await wait_for_event(got_osc_sent, timeout_s=OSC_TIMEOUT_S):
+                print(f"  [TIMEOUT] Pipeline did not complete in {OSC_TIMEOUT_S:.0f}s")
 
             # Force OSC flush
             osc.process_due()
@@ -347,7 +294,7 @@ async def test_e2e_latency_5_iterations():
         results.append(metrics)
 
         # Small delay between iterations
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(ITERATION_DELAY_S)
 
     # Print summary
     print_summary_table(results)

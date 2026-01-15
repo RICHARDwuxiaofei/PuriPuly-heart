@@ -2,60 +2,37 @@ from __future__ import annotations
 
 import asyncio
 import os
-import time
-import wave
-from dataclasses import dataclass, field
-from pathlib import Path
 from uuid import uuid4
 
-import numpy as np
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    os.getenv("INTEGRATION") != "1", reason="set INTEGRATION=1 to run integration tests"
+from tests.integration.helpers import (
+    WARMUP_DELAY_S,
+    MockOscSender,
+    SimpleClock,
+    chunk_audio,
+    get_qwen_asr_endpoint,
+    get_qwen_base_url,
+    integration_mark,
+    load_audio_wav,
+    next_ui_event,
+    require_env,
+    require_module,
+    resolve_test_audio_path,
+    send_vad_events,
+    wait_for_event,
 )
 
-
-@dataclass
-class MockOscSender:
-    messages: list[str] = field(default_factory=list)
-    typing_states: list[bool] = field(default_factory=list)
-
-    def send_chatbox(self, text: str) -> None:
-        self.messages.append(text)
-
-    def send_typing(self, is_typing: bool) -> None:
-        self.typing_states.append(is_typing)
-
-
-class SimpleClock:
-    def now(self) -> float:
-        return time.time()
-
-
-def load_audio_wav(filepath: str | Path) -> tuple[np.ndarray, int]:
-    with wave.open(str(filepath), "rb") as f:
-        sample_rate = f.getframerate()
-        n_frames = f.getnframes()
-        audio_data = f.readframes(n_frames)
-
-    samples_int16 = np.frombuffer(audio_data, dtype=np.int16)
-    samples_f32 = samples_int16.astype(np.float32) / 32768.0
-    return samples_f32, sample_rate
+pytestmark = integration_mark()
 
 
 @pytest.mark.asyncio
 async def test_qwen_asr_llm_pipeline_smoke() -> None:
-    api_key = os.getenv("ALIBABA_API_KEY")
-    if not api_key:
-        pytest.skip("missing env var ALIBABA_API_KEY")
-
-    try:
-        import dashscope  # noqa: F401
-    except ModuleNotFoundError as exc:  # pragma: no cover
-        raise RuntimeError(
-            "dashscope is required for this integration test; install project dependencies."
-        ) from exc
+    api_key = require_env("ALIBABA_API_KEY")
+    require_module(
+        "dashscope",
+        reason="dashscope is required for this integration test; install project dependencies.",
+    )
 
     from puripuly_heart.config.prompts import load_prompt_for_provider
     from puripuly_heart.core.language import get_llm_language_name
@@ -63,17 +40,11 @@ async def test_qwen_asr_llm_pipeline_smoke() -> None:
     from puripuly_heart.core.orchestrator.hub import ClientHub
     from puripuly_heart.core.osc.smart_queue import SmartOscQueue
     from puripuly_heart.core.stt.controller import ManagedSTTProvider
-    from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
     from puripuly_heart.domain.events import UIEventType
     from puripuly_heart.providers.llm.qwen import QwenLLMProvider
     from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
 
-    audio_env = os.getenv("TEST_AUDIO_PATH")
-    audio_path = (
-        Path(audio_env)
-        if audio_env
-        else Path(__file__).parent.parent.parent / ".test_audio" / "test_speech.wav"
-    )
+    audio_path = resolve_test_audio_path()
     if not audio_path.exists():
         pytest.skip(f"Audio file not found: {audio_path}")
 
@@ -81,17 +52,10 @@ async def test_qwen_asr_llm_pipeline_smoke() -> None:
     if sample_rate not in (8000, 16000):
         pytest.skip(f"Unsupported sample rate: {sample_rate}")
 
-    region = os.getenv("QWEN_REGION", "beijing").lower()
-    default_endpoint = (
-        "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
-        if region == "singapore"
-        else "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
-    )
-
     stt_backend = QwenASRRealtimeSTTBackend(
         api_key=api_key,
         model=os.getenv("QWEN_ASR_MODEL", "qwen3-asr-flash-realtime"),
-        endpoint=os.getenv("QWEN_ASR_ENDPOINT", default_endpoint),
+        endpoint=get_qwen_asr_endpoint(),
         language=os.getenv("QWEN_ASR_LANGUAGE", "ko"),
         sample_rate_hz=sample_rate,
     )
@@ -103,16 +67,9 @@ async def test_qwen_asr_llm_pipeline_smoke() -> None:
         bridging_ms=300,
     )
 
-    default_base_url = (
-        "https://dashscope-intl.aliyuncs.com/api/v1"
-        if region == "singapore"
-        else "https://dashscope.aliyuncs.com/api/v1"
-    )
-    base_url = os.getenv("QWEN_BASE_URL", default_base_url)
-
     llm_base = QwenLLMProvider(
         api_key=api_key,
-        base_url=base_url,
+        base_url=get_qwen_base_url(),
         model=os.getenv("QWEN_LLM_MODEL", "qwen-mt-flash"),
     )
     llm = SemaphoreLLMProvider(inner=llm_base, semaphore=asyncio.Semaphore(1))
@@ -150,9 +107,8 @@ async def test_qwen_asr_llm_pipeline_smoke() -> None:
     async def track_events() -> None:
         nonlocal translation_text, error_message
         while True:
-            try:
-                event = await asyncio.wait_for(hub.ui_events.get(), timeout=0.1)
-            except asyncio.TimeoutError:
+            event = await next_ui_event(hub.ui_events)
+            if event is None:
                 continue
 
             if event.type == UIEventType.TRANSLATION_DONE:
@@ -164,32 +120,21 @@ async def test_qwen_asr_llm_pipeline_smoke() -> None:
 
     await hub.start(auto_flush_osc=True)
     event_task = asyncio.create_task(track_events())
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(WARMUP_DELAY_S)
 
     try:
         utterance_id = uuid4()
-        chunk_samples = sample_rate // 10
-        if chunk_samples <= 0:
+        try:
+            chunks, _chunk_samples = chunk_audio(audio_samples, sample_rate_hz=sample_rate)
+        except ValueError:
             pytest.skip("Invalid chunk size for sample rate")
-
-        chunks = [
-            audio_samples[i : i + chunk_samples]
-            for i in range(0, len(audio_samples), chunk_samples)
-        ]
         if not chunks:
             pytest.skip("Audio file is empty")
 
-        pre_roll = np.zeros(chunk_samples, dtype=np.float32)
-        await hub.handle_vad_event(SpeechStart(utterance_id, pre_roll=pre_roll, chunk=chunks[0]))
-        await asyncio.sleep(0.05)
+        await send_vad_events(hub, utterance_id, chunks)
 
-        for chunk in chunks[1:]:
-            await hub.handle_vad_event(SpeechChunk(utterance_id, chunk=chunk))
-            await asyncio.sleep(0.05)
-
-        await hub.handle_vad_event(SpeechEnd(utterance_id))
-
-        await asyncio.wait_for(got_result.wait(), timeout=30.0)
+        if not await wait_for_event(got_result):
+            pytest.fail("Pipeline did not complete in time")
     finally:
         event_task.cancel()
         await hub.stop()
