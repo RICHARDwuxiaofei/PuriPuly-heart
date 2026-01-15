@@ -64,6 +64,35 @@ def _get_secret(
     return None
 
 
+def _get_secret_any(
+    secrets: SecretStore,
+    *,
+    key: str,
+    env_vars: tuple[str, ...],
+) -> str | None:
+    value = secrets.get(key)
+    if value:
+        return value
+    for env_var in env_vars:
+        env = os.getenv(env_var)
+        if env:
+            return env
+    return None
+
+
+def require_secret_any(
+    secrets: SecretStore,
+    *,
+    key: str,
+    env_vars: tuple[str, ...],
+) -> str:
+    value = _get_secret_any(secrets, key=key, env_vars=env_vars)
+    if value:
+        return value
+    env_list = ", ".join(env_vars)
+    raise ValueError(f"Missing secret `{key}` (or env vars {env_list})")
+
+
 def require_secret(
     secrets: SecretStore,
     *,
@@ -84,12 +113,16 @@ def create_llm_provider(settings: AppSettings, *, secrets: SecretStore) -> LLMPr
         from puripuly_heart.config.settings import QwenRegion
 
         if settings.qwen.region == QwenRegion.BEIJING:
-            api_key = require_secret(
-                secrets, key="alibaba_api_key_beijing", env_var="ALIBABA_API_KEY_BEIJING"
+            api_key = require_secret_any(
+                secrets,
+                key="alibaba_api_key_beijing",
+                env_vars=("ALIBABA_API_KEY_BEIJING", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
             )
         else:
-            api_key = require_secret(
-                secrets, key="alibaba_api_key_singapore", env_var="ALIBABA_API_KEY_SINGAPORE"
+            api_key = require_secret_any(
+                secrets,
+                key="alibaba_api_key_singapore",
+                env_vars=("ALIBABA_API_KEY_SINGAPORE", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
             )
         base = QwenLLMProvider(
             api_key=api_key,
@@ -123,12 +156,16 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
         from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
 
         if settings.qwen.region == QwenRegion.BEIJING:
-            api_key = require_secret(
-                secrets, key="alibaba_api_key_beijing", env_var="ALIBABA_API_KEY_BEIJING"
+            api_key = require_secret_any(
+                secrets,
+                key="alibaba_api_key_beijing",
+                env_vars=("ALIBABA_API_KEY_BEIJING", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
             )
         else:
-            api_key = require_secret(
-                secrets, key="alibaba_api_key_singapore", env_var="ALIBABA_API_KEY_SINGAPORE"
+            api_key = require_secret_any(
+                secrets,
+                key="alibaba_api_key_singapore",
+                env_vars=("ALIBABA_API_KEY_SINGAPORE", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
             )
         endpoint = settings.qwen.get_asr_endpoint()
         return QwenASRRealtimeSTTBackend(

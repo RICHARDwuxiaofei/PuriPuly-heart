@@ -11,6 +11,7 @@ import base64
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator
 
@@ -32,12 +33,15 @@ class QwenASRRealtimeSTTBackend(STTBackend):
     model: str = "qwen3-asr-flash-realtime"
     endpoint: str = "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
     sample_rate_hz: int = 16000
+    connect_timeout_s: float = 5.0
 
     async def open_session(self) -> STTBackendSession:
         if self.sample_rate_hz not in (8000, 16000):
             raise ValueError("sample_rate_hz must be 8000 or 16000")
         if not self.api_key:
             raise ValueError("api_key must be non-empty")
+        if self.connect_timeout_s <= 0:
+            raise ValueError("connect_timeout_s must be > 0")
 
         session = _QwenASRSession(
             api_key=self.api_key,
@@ -45,6 +49,7 @@ class QwenASRRealtimeSTTBackend(STTBackend):
             language=self.language,
             endpoint=self.endpoint,
             sample_rate_hz=self.sample_rate_hz,
+            connect_timeout_s=self.connect_timeout_s,
         )
         await session.start()
         return session
@@ -74,6 +79,7 @@ class _QwenASRSession(STTBackendSession):
     language: str
     endpoint: str
     sample_rate_hz: int
+    connect_timeout_s: float
 
     _events: asyncio.Queue[STTBackendTranscriptEvent | BaseException | None] = field(
         init=False, repr=False
@@ -83,6 +89,9 @@ class _QwenASRSession(STTBackendSession):
     _stopped: bool = field(init=False, default=False)
     _loop: asyncio.AbstractEventLoop | None = field(init=False, default=None, repr=False)
     _connected: threading.Event = field(init=False, repr=False)
+    _connect_started_at: float | None = field(init=False, default=None, repr=False)
+    _error_reported: bool = field(init=False, default=False, repr=False)
+    _connect_error: BaseException | None = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._events = asyncio.Queue()
@@ -90,14 +99,19 @@ class _QwenASRSession(STTBackendSession):
         self._connected = threading.Event()
 
     async def start(self) -> None:
-        self._loop = asyncio.get_event_loop()
+        self._loop = asyncio.get_running_loop()
+        self._connect_started_at = time.monotonic()
         self._thread = threading.Thread(target=self._run_sync, name="qwen-asr-sdk", daemon=True)
         self._thread.start()
 
         # Wait for connection to be established
-        connected = await asyncio.to_thread(self._connected.wait, 10.0)
-        if not connected:
-            self._put_event(RuntimeError("Qwen ASR SDK connection timeout"))
+        logger.info("[STT] Qwen ASR connecting (timeout=%.1fs)", self.connect_timeout_s)
+        connected = await asyncio.to_thread(self._connected.wait, self.connect_timeout_s)
+        if not connected or self._connect_error is not None:
+            exc = self._connect_error or RuntimeError("Qwen ASR SDK connection timeout")
+            logger.warning("[STT] Qwen ASR connection failed: %s", exc)
+            await self.stop()
+            raise exc
 
     def _run_sync(self) -> None:
         """Run Qwen ASR SDK connection in a separate thread."""
@@ -120,10 +134,19 @@ class _QwenASRSession(STTBackendSession):
 
                 def on_open(cb_self):
                     logger.debug("Qwen ASR: Connection opened")
+                    if cb_self.parent._connect_started_at is not None:
+                        elapsed = time.monotonic() - cb_self.parent._connect_started_at
+                        logger.info("[STT] Qwen ASR connected in %.2fs", elapsed)
                     cb_self.parent._connected.set()
 
                 def on_close(cb_self, code, msg):
                     logger.debug(f"Qwen ASR: Connection closed, code: {code}, msg: {msg}")
+                    if not cb_self.parent._stopped:
+                        cb_self.parent._report_error(
+                            RuntimeError(f"Qwen ASR connection closed: {code} {msg}")
+                        )
+                        cb_self.parent._stopped = True
+                        cb_self.parent._signal_stop()
 
                 def on_event(cb_self, response):
                     try:
@@ -156,6 +179,12 @@ class _QwenASRSession(STTBackendSession):
                         elif event_type == "error":
                             error_msg = response.get("error", {}).get("message", "Unknown error")
                             logger.warning(f"Qwen ASR error: {error_msg}")
+                            if not cb_self.parent._stopped:
+                                cb_self.parent._report_error(
+                                    RuntimeError(f"Qwen ASR error: {error_msg}")
+                                )
+                                cb_self.parent._stopped = True
+                                cb_self.parent._signal_stop()
 
                     except Exception as e:
                         logger.debug(f"Qwen ASR callback error: {e}")
@@ -190,8 +219,6 @@ class _QwenASRSession(STTBackendSession):
             logger.debug("Qwen ASR SDK connection and session update complete")
 
             # Keepalive: send 100ms silence every 50 seconds to prevent 60s timeout
-            import time
-
             import numpy as np
 
             last_activity = time.monotonic()
@@ -261,9 +288,24 @@ class _QwenASRSession(STTBackendSession):
 
         except BaseException as exc:
             logger.exception("Qwen ASR SDK thread error")
-            self._put_event(exc)
+            self._report_error(exc)
         finally:
             self._put_event(None)
+
+    def _report_error(self, exc: BaseException) -> None:
+        if self._error_reported:
+            return
+        self._error_reported = True
+        if self._connect_error is None:
+            self._connect_error = exc
+        self._connected.set()
+        self._put_event(exc)
+
+    def _signal_stop(self) -> None:
+        try:
+            self._audio_q.put_nowait(_STOP)
+        except Exception:
+            pass
 
     def _put_event(self, event: STTBackendTranscriptEvent | BaseException | None) -> None:
         """Thread-safe event posting to the asyncio queue."""
@@ -299,7 +341,7 @@ class _QwenASRSession(STTBackendSession):
         if self._stopped:
             return
         self._stopped = True
-        self._audio_q.put_nowait(_STOP)
+        self._signal_stop()
 
     async def close(self) -> None:
         await self.stop()

@@ -35,6 +35,7 @@ class SonioxRealtimeSTTBackend(STTBackend):
     sample_rate_hz: int = 16000
     keepalive_interval_s: float = 10.0
     trailing_silence_ms: int = 100
+    connect_timeout_s: float = 5.0
 
     async def open_session(self) -> STTBackendSession:
         if self.sample_rate_hz not in (8000, 16000):
@@ -47,6 +48,8 @@ class SonioxRealtimeSTTBackend(STTBackend):
             raise ValueError("keepalive_interval_s must be > 0")
         if self.trailing_silence_ms < 0:
             raise ValueError("trailing_silence_ms must be >= 0")
+        if self.connect_timeout_s <= 0:
+            raise ValueError("connect_timeout_s must be > 0")
 
         session = _SonioxSession(
             api_key=self.api_key,
@@ -56,6 +59,7 @@ class SonioxRealtimeSTTBackend(STTBackend):
             language_hints=list(self.language_hints),
             keepalive_interval_s=self.keepalive_interval_s,
             trailing_silence_ms=self.trailing_silence_ms,
+            connect_timeout_s=self.connect_timeout_s,
         )
         await session.start()
         return session
@@ -108,6 +112,7 @@ class _SonioxSession(STTBackendSession):
     language_hints: list[str]
     keepalive_interval_s: float
     trailing_silence_ms: int
+    connect_timeout_s: float
 
     _events: asyncio.Queue[STTBackendTranscriptEvent | BaseException | None] = field(
         init=False, repr=False
@@ -140,7 +145,13 @@ class _SonioxSession(STTBackendSession):
         if self.language_hints:
             config["language_hints"] = self.language_hints
 
-        self._ws = await websockets.connect(self.endpoint, ping_interval=None, open_timeout=5)
+        logger.info("[STT] Soniox connecting (timeout=%.1fs)", self.connect_timeout_s)
+        start_at = time.monotonic()
+        self._ws = await websockets.connect(
+            self.endpoint, ping_interval=None, open_timeout=self.connect_timeout_s
+        )
+        elapsed = time.monotonic() - start_at
+        logger.info("[STT] Soniox connected in %.2fs", elapsed)
         await self._ws.send(json.dumps(config))
         self._last_send_at = time.monotonic()
 

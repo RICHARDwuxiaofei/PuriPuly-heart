@@ -12,9 +12,9 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.asyncio
 async def test_qwen_asr_realtime_streaming_smoke():
-    api_key = os.getenv("ALIBABA_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+    api_key = os.getenv("ALIBABA_API_KEY")
     if not api_key:
-        pytest.skip("missing env var ALIBABA_API_KEY (or DASHSCOPE_API_KEY)")
+        pytest.skip("missing env var ALIBABA_API_KEY")
 
     try:
         import dashscope  # noqa: F401
@@ -25,12 +25,17 @@ async def test_qwen_asr_realtime_streaming_smoke():
 
     from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
 
+    region = os.getenv("QWEN_REGION", "beijing").lower()
+    default_endpoint = (
+        "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+        if region == "singapore"
+        else "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+    )
+
     backend = QwenASRRealtimeSTTBackend(
         api_key=api_key,
         model=os.getenv("QWEN_ASR_MODEL", "qwen3-asr-flash-realtime"),
-        endpoint=os.getenv(
-            "QWEN_ASR_ENDPOINT", "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
-        ),
+        endpoint=os.getenv("QWEN_ASR_ENDPOINT", default_endpoint),
         language=os.getenv("QWEN_ASR_LANGUAGE", "ko"),
         sample_rate_hz=int(os.getenv("QWEN_ASR_SAMPLE_RATE", "16000")),
     )

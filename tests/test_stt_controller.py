@@ -16,11 +16,13 @@ from puripuly_heart.domain.events import STTSessionState, STTSessionStateEvent
 class FakeSession:
     audio: list[bytes]
     _queue: asyncio.Queue
+    calls: list[str]
     _closed: bool = False
 
     def __init__(self) -> None:
         self.audio = []
         self._queue = asyncio.Queue()
+        self.calls = []
 
     async def send_audio(self, pcm16le: bytes) -> None:
         self.audio.append(pcm16le)
@@ -28,15 +30,16 @@ class FakeSession:
             await self._queue.put(STTBackendTranscriptEvent(text="partial", is_final=False))
 
     async def stop(self) -> None:
+        self.calls.append("stop")
         await self._queue.put(STTBackendTranscriptEvent(text="final", is_final=True))
         await self._queue.put(None)  # sentinel
 
     async def on_speech_end(self) -> None:
-        """Handle end of speech (no-op for fake session)."""
-        pass
+        self.calls.append("on_speech_end")
 
     async def close(self) -> None:
         self._closed = True
+        self.calls.append("close")
 
     async def events(self):
         while True:
@@ -67,6 +70,14 @@ async def _next_event(stream, *, timeout_s: float = 0.2):
     return await asyncio.wait_for(stream.__anext__(), timeout=timeout_s)
 
 
+async def _next_state(stream, state, *, max_events: int = 5):
+    for _ in range(max_events):
+        event = await _next_event(stream)
+        if isinstance(event, STTSessionStateEvent) and event.state == state:
+            return event
+    raise AssertionError(f"Expected state {state}")
+
+
 def test_stt_controller_connects_on_speech_start():
     async def run():
         clock = FakeClock()
@@ -78,7 +89,7 @@ def test_stt_controller_connects_on_speech_start():
         uid = __import__("uuid").uuid4()
         stream = stt.events()
         await stt.handle_vad_event(SpeechStart(uid, pre_roll=_samples(0.0), chunk=_samples(1.0)))
-        first = await _next_event(stream)
+        first = await _next_state(stream, STTSessionState.STREAMING)
 
         assert len(backend.sessions) == 1
         assert isinstance(first, STTSessionStateEvent)
@@ -98,6 +109,7 @@ def test_stt_controller_resets_with_bridging_during_speech():
             reset_deadline_s=1.0,
             drain_timeout_s=0.05,
             bridging_ms=64,
+            finalize_grace_s=0.0,
         )
 
         uid = __import__("uuid").uuid4()
@@ -111,6 +123,7 @@ def test_stt_controller_resets_with_bridging_during_speech():
         await asyncio.sleep(0.01)
         assert len(backend.sessions) == 2
         assert len(backend.sessions[1].audio) >= 1  # bridging audio
+        assert "on_speech_end" not in backend.sessions[0].calls
 
     asyncio.run(run())
 
@@ -125,6 +138,7 @@ def test_stt_controller_resets_on_silence():
             clock=clock,
             reset_deadline_s=1.0,
             drain_timeout_s=0.05,
+            finalize_grace_s=0.0,
         )
 
         uid = __import__("uuid").uuid4()
@@ -140,5 +154,32 @@ def test_stt_controller_resets_on_silence():
             if isinstance(ev, STTSessionStateEvent) and ev.state == STTSessionState.DISCONNECTED:
                 return
         raise AssertionError("Expected DISCONNECTED state event")
+
+    asyncio.run(run())
+
+
+def test_stt_controller_finalize_on_close_while_speaking():
+    async def run():
+        clock = FakeClock()
+        backend = FakeBackend()
+        stt = ManagedSTTProvider(
+            backend=backend,
+            sample_rate_hz=16000,
+            clock=clock,
+            reset_deadline_s=90.0,
+            finalize_grace_s=0.0,
+        )
+
+        uid = __import__("uuid").uuid4()
+        stream = stt.events()
+        await stt.handle_vad_event(SpeechStart(uid, pre_roll=_samples(0.0), chunk=_samples(1.0)))
+        await _next_state(stream, STTSessionState.STREAMING)
+
+        await stt.close()
+
+        calls = backend.sessions[0].calls
+        assert "on_speech_end" in calls
+        assert "stop" in calls
+        assert calls.index("on_speech_end") < calls.index("stop")
 
     asyncio.run(run())

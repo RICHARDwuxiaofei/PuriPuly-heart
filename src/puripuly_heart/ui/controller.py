@@ -63,6 +63,10 @@ class GuiController:
     _mic_task: asyncio.Task[None] | None = None
     _audio_source: SoundDeviceAudioSource | None = None
     _vad: VadGating | None = None
+    _stt_desired: bool = False
+    _stt_switch_lock: asyncio.Lock | None = None
+    _stt_switch_task: asyncio.Task[None] | None = None
+    _stt_restart_requested: bool = False
 
     async def start(self) -> None:
         self.settings = self._load_or_init_settings(self.config_path)
@@ -148,15 +152,10 @@ class GuiController:
                     await llm.warmup()
 
     async def set_stt_enabled(self, enabled: bool) -> None:
-        if not enabled:
-            await self._stop_mic_loop()
-            if self.hub is not None:
-                with contextlib.suppress(Exception):
-                    await self.hub.stt.close()
-            return
+        self._stt_desired = bool(enabled)
 
         # Log provider info when enabling
-        if self.settings is not None:
+        if enabled and self.settings is not None:
             provider = self.settings.provider.stt.value
             if provider == "qwen_asr":
                 region = self.settings.qwen.region.value
@@ -164,11 +163,43 @@ class GuiController:
             else:
                 logger.info(f"[STT] Enabled with provider: {provider}")
 
-        await self._start_mic_loop()
-        # Pre-warm STT session for faster first response
-        if self.hub is not None and self.hub.stt is not None:
-            with contextlib.suppress(Exception):
-                await self.hub.stt.warmup()
+        await self._ensure_stt_switch()
+
+    async def _ensure_stt_switch(self) -> None:
+        if self._stt_switch_task is None or self._stt_switch_task.done():
+            self._stt_switch_task = asyncio.create_task(self._run_stt_switch())
+        await self._stt_switch_task
+
+    async def _run_stt_switch(self) -> None:
+        if self._stt_switch_lock is None:
+            self._stt_switch_lock = asyncio.Lock()
+        async with self._stt_switch_lock:
+            while True:
+                desired = self._stt_desired
+                restart = self._stt_restart_requested
+                self._stt_restart_requested = False
+
+                if not desired:
+                    await self._stop_mic_loop()
+                    if self.hub is not None:
+                        with contextlib.suppress(Exception):
+                            await self.hub.stt.close()
+                else:
+                    if self.hub is None:
+                        logger.warning("[STT] Enable requested before hub is ready")
+                        break
+                    if restart:
+                        await self._stop_mic_loop()
+                        with contextlib.suppress(Exception):
+                            await self.hub.stt.close()
+                    await self._start_mic_loop()
+                    # Pre-warm STT session for faster first response
+                    if self.hub is not None and self.hub.stt is not None:
+                        with contextlib.suppress(Exception):
+                            await self.hub.stt.warmup()
+
+                if desired == self._stt_desired and not self._stt_restart_requested:
+                    break
 
     async def submit_text(self, text: str) -> None:
         if self.hub is None:
@@ -189,9 +220,9 @@ class GuiController:
             self.hub.system_prompt = settings.system_prompt
 
         # Audio/VAD changes apply on next STT start; if STT is running, restart mic loop.
-        if self._mic_task is not None:
-            await self._stop_mic_loop()
-            await self._start_mic_loop()
+        if self._mic_task is not None and self._stt_desired:
+            self._stt_restart_requested = True
+            await self._ensure_stt_switch()
 
         if prev_locale != settings.ui.locale:
             set_locale(settings.ui.locale)

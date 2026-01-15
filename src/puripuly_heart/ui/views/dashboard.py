@@ -209,9 +209,9 @@ class DashboardView(ft.Column):
             self.on_language_change(self._source_lang_code, self._target_lang_code)
 
     # Public API methods
-    def set_status(self, connected: bool):
-        self.is_connected = connected
-        self.display_card.set_status(connected, font_family=self._ui_font())
+    def set_status(self, status: str) -> None:
+        self.is_connected = status == "connected"
+        self.display_card.set_status(status, font_family=self._ui_font())
 
     def set_languages_from_codes(self, source_code: str, target_code: str) -> None:
         self._source_lang_code = source_code
