@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -22,12 +21,11 @@ logging.basicConfig(
 )
 
 # Add file logging (RotatingFileHandler)
-if getattr(sys, "frozen", False):
-    _app_dir = Path(sys.executable).parent
-else:
-    _app_dir = Path(__file__).parent
+from puripuly_heart.config.paths import user_config_dir
 
-_log_file = _app_dir / "puripuly_heart.log"
+_log_dir = user_config_dir()
+_log_dir.mkdir(parents=True, exist_ok=True)
+_log_file = _log_dir / "puripuly_heart.log"
 _file_handler = RotatingFileHandler(
     _log_file,
     maxBytes=5 * 1024 * 1024,  # 5MB
