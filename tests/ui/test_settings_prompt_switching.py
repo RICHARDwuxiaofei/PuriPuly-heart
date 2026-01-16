@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -46,16 +45,12 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
 
     assert view._prompt_editor.value == load_prompt_for_provider("gemini")
 
-    view._on_llm_segmented_change(
-        SimpleNamespace(control=SimpleNamespace(selected={LLMProviderName.QWEN.value}))
-    )
+    view._on_llm_selected(LLMProviderName.QWEN.value)
 
     assert view._prompt_editor.value == load_prompt_for_provider("qwen")
     assert settings.provider.llm == LLMProviderName.QWEN
 
-    view._on_llm_segmented_change(
-        SimpleNamespace(control=SimpleNamespace(selected={LLMProviderName.GEMINI.value}))
-    )
+    view._on_llm_selected(LLMProviderName.GEMINI.value)
 
     assert view._prompt_editor.value == load_prompt_for_provider("gemini")
     assert settings.provider.llm == LLMProviderName.GEMINI

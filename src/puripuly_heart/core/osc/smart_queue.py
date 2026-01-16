@@ -71,6 +71,21 @@ class SmartOscQueue:
                 )
             )
 
+    def send_immediate(self, text: str) -> bool:
+        """Send a message immediately and apply cooldown to queued messages."""
+        text = text.strip()
+        if not text:
+            return False
+        now = self.clock.now()
+        logger.info(f"[OSC] Sending (immediate): '{text}'")
+        try:
+            self.sender.send_chatbox(text)
+        except OSError as exc:
+            logger.warning(f"[OSC] Send failed: {exc}")
+            return False
+        self._next_send_at = max(self._next_send_at, now + self.cooldown_s)
+        return True
+
     def _drop_expired(self, now: float) -> None:
         self._pending[:] = [m for m in self._pending if (now - m.created_at) <= self.ttl_s]
 
