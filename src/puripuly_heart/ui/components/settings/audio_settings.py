@@ -1,4 +1,4 @@
-"""Audio settings component with Host API, Microphone, and VAD."""
+"""Audio settings component with Host API and Microphone."""
 
 from __future__ import annotations
 
@@ -7,14 +7,15 @@ from typing import Callable
 
 import flet as ft
 
+from puripuly_heart.ui.components.settings.settings_modal import OptionItem, SettingsModal
 from puripuly_heart.ui.i18n import t
-from puripuly_heart.ui.theme import COLOR_NEUTRAL, COLOR_NEUTRAL_DARK, COLOR_PRIMARY
+from puripuly_heart.ui.theme import COLOR_ON_BACKGROUND, COLOR_PRIMARY
 
 logger = logging.getLogger(__name__)
 
 
 class AudioSettings(ft.Column):
-    """Audio settings: Host API, Microphone, and VAD sensitivity."""
+    """Audio settings: Host API and Microphone (modal-based)."""
 
     def __init__(
         self,
@@ -23,96 +24,91 @@ class AudioSettings(ft.Column):
         self._on_change = on_change
         self._default_option_label = t("settings.default_option")
 
-        self._host_api_dropdown = ft.Dropdown(
-            label=t("settings.audio_host_api"),
-            options=[ft.dropdown.Option(self._default_option_label)],
-            on_change=self._handle_host_api_change,
-            border_radius=12,
-            text_size=28,
-            label_style=ft.TextStyle(size=20, weight=ft.FontWeight.BOLD),
-            color=COLOR_NEUTRAL_DARK,
+        # Current selections
+        self._current_host_api = ""
+        self._current_microphone = ""
+
+        # Clickable text for Host API
+        self._host_api_text = self._build_clickable_text(
+            self._default_option_label,
+            self._on_host_api_click,
         )
 
-        self._microphone_dropdown = ft.Dropdown(
-            label=t("settings.microphone"),
-            options=[ft.dropdown.Option(self._default_option_label)],
-            on_change=self._handle_change,
-            border_radius=12,
-            text_size=28,
-            label_style=ft.TextStyle(size=20, weight=ft.FontWeight.BOLD),
-            color=COLOR_NEUTRAL_DARK,
+        # Clickable text for Microphone
+        self._mic_text = self._build_clickable_text(
+            self._default_option_label,
+            self._on_mic_click,
         )
-
-        self._vad_label = ft.Text(
-            t("settings.vad_sensitivity"),
-            size=20,
-            weight=ft.FontWeight.BOLD,
-            color=COLOR_NEUTRAL,
-        )
-
-        self._vad_slider = ft.Slider(
-            min=0.0,
-            max=1.0,
-            divisions=20,
-            value=0.5,
-            label="0.50",
-            active_color=COLOR_PRIMARY,
-            on_change=self._handle_slider_visual_change,
-            on_change_end=self._handle_change,
-        )
-
-        self._populate_host_apis()
 
         super().__init__(
             controls=[
-                self._host_api_dropdown,
-                self._microphone_dropdown,
-                self._vad_label,
-                self._vad_slider,
+                self._host_api_text,
+                ft.Container(height=8),
+                self._mic_text,
             ],
-            spacing=16,
+            spacing=8,
+            expand=True,
+            alignment=ft.MainAxisAlignment.CENTER,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
+
+    def _build_clickable_text(self, text: str, on_click) -> ft.Container:
+        """Build a clickable centered text with hover effect."""
+        text_control = ft.Text(
+            text,
+            size=28,
+            color=COLOR_ON_BACKGROUND,
+            text_align=ft.TextAlign.CENTER,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        return ft.Container(
+            content=text_control,
+            alignment=ft.alignment.center,
+            expand=True,
+            on_click=on_click,
+            on_hover=self._on_text_hover,
+        )
+
+    def _on_text_hover(self, e: ft.ControlEvent) -> None:
+        """Handle hover effect on clickable text."""
+        container = e.control
+        text_control = container.content
+        if e.data == "true":
+            text_control.color = COLOR_PRIMARY
+        else:
+            text_control.color = COLOR_ON_BACKGROUND
+        container.update()
 
     @property
     def host_api(self) -> str:
         """Get selected host API (empty string for default)."""
-        val = self._host_api_dropdown.value or self._default_option_label
-        return "" if val == self._default_option_label else val
+        return self._current_host_api
 
     @host_api.setter
     def host_api(self, val: str) -> None:
-        self._host_api_dropdown.value = val or self._default_option_label
-        self._refresh_microphones()
-        if self._host_api_dropdown.page:
-            self._host_api_dropdown.update()
+        self._current_host_api = val
+        display = val or self._default_option_label
+        self._host_api_text.content.value = display
+        if self._host_api_text.page:
+            self._host_api_text.update()
 
     @property
     def microphone(self) -> str:
         """Get selected microphone (empty string for default)."""
-        val = self._microphone_dropdown.value or self._default_option_label
-        return "" if val == self._default_option_label else val
+        return self._current_microphone
 
     @microphone.setter
     def microphone(self, val: str) -> None:
-        self._microphone_dropdown.value = val or self._default_option_label
-        if self._microphone_dropdown.page:
-            self._microphone_dropdown.update()
+        self._current_microphone = val
+        display = val or self._default_option_label
+        self._mic_text.content.value = display
+        if self._mic_text.page:
+            self._mic_text.update()
 
-    @property
-    def vad_sensitivity(self) -> float:
-        """Get VAD sensitivity value."""
-        return float(self._vad_slider.value or 0.5)
-
-    @vad_sensitivity.setter
-    def vad_sensitivity(self, val: float) -> None:
-        self._vad_slider.value = val
-        self._vad_slider.label = f"{val:.2f}"
-        if self._vad_slider.page:
-            self._vad_slider.update()
-
-    def _populate_host_apis(self) -> None:
-        """Populate host API dropdown with available APIs."""
-        options = [ft.dropdown.Option(self._default_option_label)]
+    def _get_host_api_options(self) -> list[OptionItem]:
+        """Get available host API options."""
+        options = [OptionItem(value="", label=self._default_option_label)]
         allowed_apis = {"windows directsound", "windows wasapi"}
 
         try:
@@ -121,25 +117,24 @@ class AudioSettings(ft.Column):
             for api in sd.query_hostapis():
                 name = str(api.get("name", "") or "").strip()
                 if name and name.lower() in allowed_apis:
-                    options.append(ft.dropdown.Option(name))
+                    options.append(OptionItem(value=name, label=name))
         except Exception as e:
             logger.warning(f"Failed to enumerate host APIs: {e}")
 
-        self._host_api_dropdown.options = options
+        return options
 
-    def _refresh_microphones(self) -> None:
-        """Refresh microphone list based on selected host API."""
-        host_api = self.host_api
-        devices = [self._default_option_label]
+    def _get_microphone_options(self) -> list[OptionItem]:
+        """Get available microphone options based on selected host API."""
+        options = [OptionItem(value="", label=self._default_option_label)]
 
         try:
             import sounddevice as sd
 
             hostapi_index: int | None = None
-            if host_api:
+            if self._current_host_api:
                 for idx, item in enumerate(sd.query_hostapis()):
                     name = str(item.get("name", "") or "")
-                    if name == host_api:
+                    if name == self._current_host_api:
                         hostapi_index = idx
                         break
 
@@ -150,29 +145,50 @@ class AudioSettings(ft.Column):
                     continue
                 name = str(dev.get("name", "") or "").strip()
                 if name:
-                    devices.append(name)
+                    options.append(OptionItem(value=name, label=name))
         except Exception as e:
             logger.warning(f"Failed to enumerate microphones: {e}")
 
-        current = self._microphone_dropdown.value
-        self._microphone_dropdown.options = [ft.dropdown.Option(d) for d in devices]
-        if current in devices:
-            self._microphone_dropdown.value = current
-        else:
-            self._microphone_dropdown.value = self._default_option_label
+        return options
 
-        if self._microphone_dropdown.page:
-            self._microphone_dropdown.update()
+    def _on_host_api_click(self, e) -> None:
+        """Open Host API selection modal."""
+        if not self.page:
+            return
+        options = self._get_host_api_options()
+        modal = SettingsModal(
+            self.page,
+            t("settings.audio_host_api"),
+            options,
+            self._on_host_api_selected,
+            show_description=False,
+        )
+        modal.open(self._current_host_api)
 
-    def _handle_host_api_change(self, e) -> None:
-        self._refresh_microphones()
+    def _on_host_api_selected(self, value: str) -> None:
+        """Handle host API selection from modal."""
+        self.host_api = value
+        # Reset microphone when host API changes
+        self.microphone = ""
         self._emit_change()
 
-    def _handle_slider_visual_change(self, e) -> None:
-        self._vad_slider.label = f"{float(e.control.value):.2f}"
-        self._vad_slider.update()
+    def _on_mic_click(self, e) -> None:
+        """Open Microphone selection modal."""
+        if not self.page:
+            return
+        options = self._get_microphone_options()
+        modal = SettingsModal(
+            self.page,
+            t("settings.microphone"),
+            options,
+            self._on_mic_selected,
+            show_description=False,
+        )
+        modal.open(self._current_microphone)
 
-    def _handle_change(self, e) -> None:
+    def _on_mic_selected(self, value: str) -> None:
+        """Handle microphone selection from modal."""
+        self.microphone = value
         self._emit_change()
 
     def _emit_change(self) -> None:
@@ -184,18 +200,11 @@ class AudioSettings(ft.Column):
         old_default = self._default_option_label
         self._default_option_label = t("settings.default_option")
 
-        self._host_api_dropdown.label = t("settings.audio_host_api")
-        self._microphone_dropdown.label = t("settings.microphone")
-        self._vad_label.value = t("settings.vad_sensitivity")
-
-        # Update default option labels
-        if self._host_api_dropdown.value == old_default:
-            self._host_api_dropdown.value = self._default_option_label
-        if self._microphone_dropdown.value == old_default:
-            self._microphone_dropdown.value = self._default_option_label
-
-        self._populate_host_apis()
-        self._refresh_microphones()
+        # Update display if showing default
+        if self._host_api_text.content.value == old_default:
+            self._host_api_text.content.value = self._default_option_label
+        if self._mic_text.content.value == old_default:
+            self._mic_text.content.value = self._default_option_label
 
         if self.page:
             self.update()

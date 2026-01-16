@@ -253,26 +253,20 @@ class AboutView(ft.Column):
                     color=COLOR_NEUTRAL,
                 ),
                 ft.Container(height=16),
-                ft.Row(
-                    controls=[
-                        ft.Container(
-                            content=ft.Text(
-                                licenses_text,
-                                size=16,
-                                color=COLOR_ON_BACKGROUND,
-                                selectable=True,
-                            ),
-                            height=500,
-                            expand=True,
-                            border=ft.border.all(1, COLOR_DIVIDER),
-                            border_radius=12,
-                            padding=16,
-                            bgcolor=COLOR_SURFACE,
-                        )
-                    ],
+                ft.Container(
+                    content=ft.Text(
+                        licenses_text,
+                        size=16,
+                        color=COLOR_ON_BACKGROUND,
+                        selectable=True,
+                    ),
+                    width=float("inf"),
+                    border=ft.border.all(1, COLOR_DIVIDER),
+                    border_radius=12,
+                    padding=16,
+                    bgcolor=COLOR_SURFACE,
                 ),
             ],
-            expand=True,
         )
 
         return self._wrap_card(card_content)

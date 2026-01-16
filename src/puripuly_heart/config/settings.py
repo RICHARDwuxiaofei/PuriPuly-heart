@@ -202,6 +202,20 @@ class UiSettings:
 
 
 @dataclass(slots=True)
+class ApiKeyVerificationSettings:
+    """Stores API key verification status for each provider."""
+
+    deepgram: bool = False
+    soniox: bool = False
+    google: bool = False
+    alibaba_beijing: bool = False
+    alibaba_singapore: bool = False
+
+    def validate(self) -> None:
+        pass  # No validation needed
+
+
+@dataclass(slots=True)
 class AppSettings:
     provider: ProviderSettings = field(default_factory=ProviderSettings)
     languages: LanguageSettings = field(default_factory=LanguageSettings)
@@ -215,6 +229,7 @@ class AppSettings:
     osc: OSCSettings = field(default_factory=OSCSettings)
     secrets: SecretsSettings = field(default_factory=SecretsSettings)
     ui: UiSettings = field(default_factory=UiSettings)
+    api_key_verified: ApiKeyVerificationSettings = field(default_factory=ApiKeyVerificationSettings)
     system_prompt: str = ""
 
     def validate(self) -> None:
@@ -230,6 +245,7 @@ class AppSettings:
         self.osc.validate()
         self.secrets.validate()
         self.ui.validate()
+        self.api_key_verified.validate()
 
 
 def _enum_to_value(obj: object) -> object:
@@ -295,6 +311,13 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         },
         "ui": {
             "locale": settings.ui.locale,
+        },
+        "api_key_verified": {
+            "deepgram": settings.api_key_verified.deepgram,
+            "soniox": settings.api_key_verified.soniox,
+            "google": settings.api_key_verified.google,
+            "alibaba_beijing": settings.api_key_verified.alibaba_beijing,
+            "alibaba_singapore": settings.api_key_verified.alibaba_singapore,
         },
         "system_prompt": settings.system_prompt,
     }
@@ -398,6 +421,15 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         ),
         ui=UiSettings(
             locale=str(data.get("ui", {}).get("locale", "en")),
+        ),
+        api_key_verified=ApiKeyVerificationSettings(
+            deepgram=bool(data.get("api_key_verified", {}).get("deepgram", False)),
+            soniox=bool(data.get("api_key_verified", {}).get("soniox", False)),
+            google=bool(data.get("api_key_verified", {}).get("google", False)),
+            alibaba_beijing=bool(data.get("api_key_verified", {}).get("alibaba_beijing", False)),
+            alibaba_singapore=bool(
+                data.get("api_key_verified", {}).get("alibaba_singapore", False)
+            ),
         ),
         system_prompt=str(data.get("system_prompt", "")),
     )

@@ -6,8 +6,8 @@ from puripuly_heart.ui.components.glow import create_glow_stack
 from puripuly_heart.ui.theme import (
     COLOR_NEUTRAL_DARK,
     COLOR_PRIMARY,
+    COLOR_SECONDARY,
     COLOR_SURFACE,
-    COLOR_TERTIARY,
     get_card_shadow,
 )
 
@@ -61,7 +61,7 @@ class LanguageCard(ft.Container):
         self._arrow_icon = ft.Icon(
             name=ft.Icons.ARROW_RIGHT_ALT,
             size=48,
-            color=COLOR_TERTIARY,
+            color=COLOR_SECONDARY,
         )
         self._arrow = ft.Container(
             content=self._arrow_icon,
