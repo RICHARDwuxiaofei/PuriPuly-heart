@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from puripuly_heart.domain.events import UIEvent, UIEventType
+from puripuly_heart.domain.events import STTSessionState, UIEvent, UIEventType
 from puripuly_heart.domain.models import OSCMessage, Transcript, Translation
 from puripuly_heart.ui.i18n import t
 
@@ -111,5 +111,16 @@ class UIEventBridge:
                 logs.append_log(f"{t('log.error_prefix')}: {text}")
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
+                msg_lower = text.lower()
+                controller = getattr(self.app, "controller", None)
+                hub = getattr(controller, "hub", None)
+                stt = getattr(hub, "stt", None)
+                stt_state = getattr(stt, "state", None)
+                if (
+                    "soniox" in msg_lower
+                    and "400" in msg_lower
+                    and stt_state in (STTSessionState.DRAINING, STTSessionState.DISCONNECTED)
+                ):
+                    return
                 dash.set_display_text(text, is_error=True)
             return
