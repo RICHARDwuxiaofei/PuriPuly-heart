@@ -274,6 +274,7 @@ class ClientHub:
             return
 
         if isinstance(event, STTPartialEvent):
+            self._send_stt_connected_notification()
             logger.debug(
                 f"[Hub] STT Partial: '{event.transcript.text[:50]}...' id={str(event.transcript.utterance_id)[:8]}"
             )
@@ -281,6 +282,7 @@ class ClientHub:
             return
 
         if isinstance(event, STTFinalEvent):
+            self._send_stt_connected_notification()
             await self._handle_transcript(event.transcript, is_final=True, source="Mic")
             if self.llm is None or not self.translation_enabled:
                 logger.info(
@@ -305,11 +307,8 @@ class ClientHub:
         if self._last_promo_time is not None:
             if now - self._last_promo_time < _PROMO_INTERVAL_SEC:
                 return
-        try:
-            self.osc.sender.send_chatbox("PuriPuly ON!")
+        if self.osc.send_immediate("PuriPuly ON!"):
             self._last_promo_time = now
-        except OSError:
-            pass
 
     async def _handle_transcript(
         self, transcript: Transcript, *, is_final: bool, source: str | None
