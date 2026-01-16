@@ -259,10 +259,8 @@ async def _check_and_notify_update(page: ft.Page) -> None:
 
         def _open_download(_e):
             webbrowser.open(update_info.download_url)
-            page.close(snackbar)
-
-        def _dismiss(_e):
-            page.close(snackbar)
+            snackbar.open = False
+            page.update()
 
         snackbar = ft.SnackBar(
             content=ft.Row(
@@ -291,13 +289,6 @@ async def _check_and_notify_update(page: ft.Page) -> None:
                             overlay_color=COLOR_PRIMARY,
                         ),
                     ),
-                    ft.IconButton(
-                        icon=ft.Icons.CLOSE,
-                        icon_color=ft.Colors.WHITE,
-                        icon_size=24,
-                        on_click=_dismiss,
-                        style=ft.ButtonStyle(overlay_color=COLOR_PRIMARY),
-                    ),
                 ],
                 alignment=ft.MainAxisAlignment.START,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -308,6 +299,8 @@ async def _check_and_notify_update(page: ft.Page) -> None:
             margin=ft.margin.only(bottom=90),
             padding=20,
             duration=30000,  # 30초
+            show_close_icon=True,
+            close_icon_color=ft.Colors.WHITE,
         )
         page.open(snackbar)
 
