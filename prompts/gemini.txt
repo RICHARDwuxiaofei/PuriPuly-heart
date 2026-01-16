@@ -47,35 +47,31 @@ Interpret ${sourceName} input into the ${targetName} naturally, preserving the s
 
     (Emotion: Split run-on sentence. Localized slang 'Gae-jjeo-ne' to 'Immaculate'.)
 
- 4. 아 그거 말고 아까 보여줬던 그 아바타 => ええと、それじゃなくて、さっき見せてくれたあのアバター。
-
-    (Inference: Speaker referring back to earlier topic. Preserved demonstratives naturally without guessing specifics.)
-
- 5. 하하하하 과몰입 썰 듣고 진짜 배아파 죽는 줄 알았어 => あはは、お砂糖の話聞いてマジで腹よじれるかと思った
+ 4. 하하하하 과몰입 썰 듣고 진짜 배아파 죽는 줄 알았어 => あはは、お砂糖の話聞いてマジで腹よじれるかと思った
 
     (Culture: Localized 'Hahaha' to 'Ahaha'. Translated 'Gwamolip' to 'Osatou'.)
 
- 6. 오늘 진짜 고생했어요 이리 와 쓰담쓰담 해 줄게 => 今日は本当にお疲れ様でした。こっちおいで、なでなでしてあげる。
+ 5. 오늘 진짜 고생했어요 이리 와 쓰담쓰담 해 줄게 => 今日は本当にお疲れ様でした。こっちおいで、なでなでしてあげる。
 
     (Social: Mirrored the 'Mixed Politeness' (Polite greeting + Casual affection) common in close social relationships. Translated 'Sseudam-sseudam' to 'Nade-nade'.)
 
- 7. 풀트래킹이라서 발도 움직일 수 있어 => 我是全身追踪，所以脚也能动。
+ 6. 풀트래킹이라서 발도 움직일 수 있어 => 我是全身追踪，所以脚也能动。
 
     (Tech: Translated 'Full Tracking' to 'Quanshen Zhuizong'. Added logical connector.)
 
- 8. 저 혹시 이거 좀 봐주시겠어요 => 能帮我看一下这个吗？
+ 7. 저 혹시 이거 좀 봐주시겠어요 => 能帮我看一下这个吗？
 
     (Tone: Converted Korean honorific request to soft Chinese with 一下 ending.)
     
- 9. 어제거기갔었는데와진짜사람엄청많더라발디딜틈도없었어진짜로 => 昨日そこ行ってきたんだけど、うわー、マジで人多すぎたよ。足の踏み場もないくらい、本当に。
+ 8. 어제거기갔었는데와진짜사람엄청많더라발디딜틈도없었어진짜로 => 昨日そこ行ってきたんだけど、うわー、マジで人多すぎたよ。足の踏み場もないくらい、本当に。
 
     (Run-on: Treated continuous Korean as normal sentences by inferring spacing and sentence breaks.)
 
- 10. [Context: "저는 오늘"] "친구를 만났어요" => 友達に会いました。
+ 9. [Context: "저는 오늘"] "친구를 만났어요" => 友達に会いました。
 
     (Context-Fragment: Speaker's sentence was split. Combined with context to form natural sentence.)
 
- 11. [Context: "이 영화 진짜 재밌어", "액션 장면이 미쳤어"] "꼭 봐" => You gotta watch it.
+ 10. [Context: "이 영화 진짜 재밌어", "액션 장면이 미쳤어"] "꼭 봐" => You gotta watch it.
 
     (Context-Continuation: "꼭 봐" refers to movie recommendation from context.)
 
