@@ -1,19 +1,15 @@
-"""System prompt editor component."""
-
 from __future__ import annotations
 
 from typing import Callable
 
 import flet as ft
-from flet import Icons as icons
 
 from puripuly_heart.config.prompts import load_prompt_for_provider
-from puripuly_heart.ui.i18n import provider_label, t
-from puripuly_heart.ui.theme import COLOR_NEUTRAL, COLOR_NEUTRAL_DARK
+from puripuly_heart.ui.theme import COLOR_DIVIDER, COLOR_NEUTRAL_DARK, COLOR_PRIMARY
 
 
 class PromptEditor(ft.Column):
-    """System prompt editor with reset button."""
+    """System prompt editor component."""
 
     def __init__(
         self,
@@ -22,39 +18,19 @@ class PromptEditor(ft.Column):
         self._on_change = on_change
         self._current_provider = "gemini"
 
-        self._provider_label = ft.Text(
-            t("settings.prompt_for", provider=provider_label(self._current_provider)),
-            size=20,
-            weight=ft.FontWeight.BOLD,
-            color=COLOR_NEUTRAL,
-        )
-
         self._text_field = ft.TextField(
-            label=t("settings.system_prompt"),
             multiline=True,
-            min_lines=3,
+            min_lines=5,
             on_change=self._handle_change,
             border_radius=12,
-            text_size=28,
-            label_style=ft.TextStyle(size=20, weight=ft.FontWeight.BOLD),
+            border_color=COLOR_DIVIDER,
+            focused_border_color=COLOR_PRIMARY,
+            text_size=16,
             color=COLOR_NEUTRAL_DARK,
         )
 
-        self._reset_btn = ft.TextButton(
-            text=t("settings.reset_prompt"),
-            icon=icons.REFRESH_ROUNDED,
-            style=ft.ButtonStyle(
-                color=COLOR_NEUTRAL_DARK,
-            ),
-            on_click=self._handle_reset,
-        )
-
         super().__init__(
-            controls=[
-                self._provider_label,
-                self._text_field,
-                ft.Row([self._reset_btn], alignment=ft.MainAxisAlignment.END),
-            ],
+            controls=[self._text_field],
             spacing=12,
         )
 
@@ -71,13 +47,8 @@ class PromptEditor(ft.Column):
             self._text_field.update()
 
     def set_provider(self, provider_name: str) -> None:
-        """Update the current provider and reload prompt if empty."""
+        """Update the current provider."""
         self._current_provider = provider_name
-        self._provider_label.value = t(
-            "settings.prompt_for", provider=provider_label(provider_name)
-        )
-        if self._provider_label.page:
-            self._provider_label.update()
 
     def load_default_prompt(self) -> None:
         """Load default prompt for current provider."""
@@ -92,19 +63,11 @@ class PromptEditor(ft.Column):
     def _handle_change(self, e) -> None:
         self._emit_change()
 
-    def _handle_reset(self, e) -> None:
-        self.load_default_prompt()
-
     def _emit_change(self) -> None:
         if self._on_change:
             self._on_change(self.value)
 
     def apply_locale(self) -> None:
         """Update labels when locale changes."""
-        self._provider_label.value = t(
-            "settings.prompt_for", provider=provider_label(self._current_provider)
-        )
-        self._text_field.label = t("settings.system_prompt")
-        self._reset_btn.text = t("settings.reset_prompt")
         if self.page:
             self.update()
