@@ -47,7 +47,7 @@ class AudioSettings:
     internal_sample_rate_hz: int = 16000
     internal_channels: int = 1
     ring_buffer_ms: int = 500
-    input_host_api: str = ""
+    input_host_api: str = "Windows DirectSound"
     input_device: str = ""
 
     def validate(self) -> None:

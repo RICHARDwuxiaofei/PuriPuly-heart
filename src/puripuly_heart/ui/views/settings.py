@@ -568,6 +568,7 @@ class SettingsView(ft.Column):
             )
 
         if self.page:
+            self._qwen_region_btn.update()
             self._api_keys_column.update()
             self._stt_text.update()
         self._emit_settings_changed()
@@ -618,6 +619,7 @@ class SettingsView(ft.Column):
             self._settings.system_prompt = self._prompt_editor.value
 
         if self.page:
+            self._qwen_region_btn.update()
             self._api_keys_column.update()
             self._llm_text.update()
         self._emit_settings_changed()
