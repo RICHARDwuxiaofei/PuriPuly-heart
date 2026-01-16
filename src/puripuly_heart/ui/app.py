@@ -56,6 +56,7 @@ class TranslatorApp:
         self.page.window.height = 780  # 16:13 ratio (approx)
         self.page.window.min_width = 800
         self.page.window.min_height = 600
+        self.page.window.icon = "icons/icon.ico"
 
     def _build_layout(self):
         self.view_dashboard = DashboardView()

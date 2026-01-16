@@ -89,7 +89,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,  # TODO: Add icon path if available
+    icon=str(src_path / "puripuly_heart" / "data" / "icons" / "icon.ico"),
     version_info=None,
 )
 
