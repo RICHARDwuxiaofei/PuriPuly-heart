@@ -26,6 +26,7 @@ LicenseFile=LICENSE
 OutputDir=installer_output
 OutputBaseFilename=PuriPulyHeart-Setup-{#MyAppVersion}
 SetupIconFile=src\puripuly_heart\data\icons\icon.ico
+UninstallDisplayIcon={app}\PuriPulyHeart.exe
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
