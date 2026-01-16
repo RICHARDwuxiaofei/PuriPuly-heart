@@ -15,7 +15,12 @@ from puripuly_heart.ui.i18n import (
     language_name,
     t,
 )
-from puripuly_heart.ui.theme import COLOR_BACKGROUND, get_app_theme
+from puripuly_heart.ui.theme import (
+    COLOR_BACKGROUND,
+    COLOR_PRIMARY,
+    COLOR_SUCCESS,
+    get_app_theme,
+)
 from puripuly_heart.ui.views.about import AboutView
 from puripuly_heart.ui.views.dashboard import DashboardView
 from puripuly_heart.ui.views.logs import LogsView
@@ -246,7 +251,7 @@ async def main_gui(page: ft.Page, *, config_path):
 
 
 async def _check_and_notify_update(page: ft.Page) -> None:
-    """Check for updates and show notification if available."""
+    """Check for updates and show notification as a toast."""
     try:
         update_info = await check_for_update()
         if update_info is None:
@@ -254,25 +259,57 @@ async def _check_and_notify_update(page: ft.Page) -> None:
 
         def _open_download(_e):
             webbrowser.open(update_info.download_url)
-            page.close(banner)
+            page.close(snackbar)
 
         def _dismiss(_e):
-            page.close(banner)
+            page.close(snackbar)
 
-        banner = ft.Banner(
-            bgcolor=ft.Colors.BLUE_900,
-            leading=ft.Icon(name=ft.Icons.SYSTEM_UPDATE, color=ft.Colors.BLUE_200, size=40),
-            content=ft.Text(
-                t("update.available", version=update_info.version),
-                color=ft.Colors.WHITE,
-                size=14,
+        snackbar = ft.SnackBar(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(
+                        name=ft.Icons.SYSTEM_UPDATE,
+                        color=ft.Colors.WHITE,
+                        size=28,
+                    ),
+                    ft.Text(
+                        t("update.available", version=update_info.version),
+                        color=ft.Colors.WHITE,
+                        size=18,
+                        font_family=font_for_language(get_locale()),
+                        expand=True,
+                    ),
+                    ft.TextButton(
+                        text=t("update.download"),
+                        on_click=_open_download,
+                        style=ft.ButtonStyle(
+                            color=ft.Colors.WHITE,
+                            text_style=ft.TextStyle(
+                                size=18,
+                                font_family=font_for_language(get_locale()),
+                            ),
+                            overlay_color=COLOR_PRIMARY,
+                        ),
+                    ),
+                    ft.IconButton(
+                        icon=ft.Icons.CLOSE,
+                        icon_color=ft.Colors.WHITE,
+                        icon_size=24,
+                        on_click=_dismiss,
+                        style=ft.ButtonStyle(overlay_color=COLOR_PRIMARY),
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.START,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=12,
             ),
-            actions=[
-                ft.TextButton(text=t("update.download"), on_click=_open_download),
-                ft.TextButton(text=t("update.close"), on_click=_dismiss),
-            ],
+            bgcolor=COLOR_SUCCESS,
+            behavior=ft.SnackBarBehavior.FLOATING,
+            margin=ft.margin.only(bottom=90),
+            padding=20,
+            duration=30000,  # 30초
         )
-        page.open(banner)
+        page.open(snackbar)
 
     except Exception as exc:
         logger.debug(f"Update check notification failed: {exc}")
