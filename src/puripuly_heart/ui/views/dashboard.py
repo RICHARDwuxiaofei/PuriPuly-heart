@@ -230,14 +230,14 @@ class DashboardView(ft.Column):
         self.is_stt_on = bool(enabled)
         self.stt_button.set_state(self.is_stt_on)
 
-    def set_translation_needs_key(self, needs_key: bool) -> None:
+    def set_translation_needs_key(self, needs_key: bool, *, update_ui: bool = True) -> None:
         self.translation_needs_key = bool(needs_key)
-        if needs_key and not self.is_translation_on:
+        if update_ui and needs_key and not self.is_translation_on:
             self.trans_button.set_state(False, needs_key=True)
 
-    def set_stt_needs_key(self, needs_key: bool) -> None:
+    def set_stt_needs_key(self, needs_key: bool, *, update_ui: bool = True) -> None:
         self.stt_needs_key = bool(needs_key)
-        if needs_key and not self.is_stt_on:
+        if update_ui and needs_key and not self.is_stt_on:
             self.stt_button.set_state(False, needs_key=True)
 
     def set_display_text(

@@ -3,6 +3,7 @@ import webbrowser
 
 import flet as ft
 
+from puripuly_heart.config.settings import save_settings
 from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.core.updater import check_for_update
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
@@ -39,6 +40,8 @@ class TranslatorApp:
         self.view_settings.on_settings_changed = self._on_settings_changed
         self.view_settings.on_providers_changed = self._on_providers_changed
         self.view_settings.on_verify_api_key = self._on_verify_api_key
+        self.view_settings.on_secret_cleared = self._on_secret_cleared
+        self.view_settings.show_snackbar = self._show_snackbar
 
     def _setup_page(self):
         self.page.title = t("app.title")
@@ -161,6 +164,9 @@ class TranslatorApp:
                     ft.Text(t(warning.key, language=language_name(warning.language_code))),
                     bgcolor=ft.Colors.ORANGE_700,
                     duration=4000,
+                    behavior=ft.SnackBarBehavior.FLOATING,
+                    margin=ft.margin.only(bottom=90),
+                    padding=20,
                 )
             )
 
@@ -182,7 +188,52 @@ class TranslatorApp:
         self.page.run_task(_task)
 
     async def _on_verify_api_key(self, provider: str, key: str) -> tuple[bool, str]:
-        return await self.controller.verify_api_key(provider, key)
+        success, msg = await self.controller.verify_api_key(provider, key)
+
+        # Save verification result to settings
+        setattr(self.controller.settings.api_key_verified, provider, success)
+        save_settings(self.controller.config_path, self.controller.settings)
+
+        # Sync verification result with dashboard needs_key flags (UI update on user click)
+        if provider in ("deepgram", "soniox", "qwen_asr"):
+            self.view_dashboard.set_stt_needs_key(not success, update_ui=False)
+        elif provider in ("google", "alibaba_beijing", "alibaba_singapore"):
+            self.view_dashboard.set_translation_needs_key(not success, update_ui=False)
+
+        return success, msg
+
+    def _on_secret_cleared(self, key: str) -> None:
+        """Reset verification status when API key is cleared."""
+        # Map secret key name to provider name
+        key_to_provider = {
+            "deepgram_api_key": "deepgram",
+            "soniox_api_key": "soniox",
+            "google_api_key": "google",
+            "alibaba_api_key": "alibaba_beijing",  # Use beijing as default
+        }
+        provider = key_to_provider.get(key)
+        if provider:
+            setattr(self.controller.settings.api_key_verified, provider, False)
+            save_settings(self.controller.config_path, self.controller.settings)
+
+            # Update dashboard needs_key flag
+            if provider in ("deepgram", "soniox"):
+                self.view_dashboard.set_stt_needs_key(True, update_ui=False)
+            elif provider in ("google", "alibaba_beijing", "alibaba_singapore"):
+                self.view_dashboard.set_translation_needs_key(True, update_ui=False)
+
+    def _show_snackbar(self, message: str, bgcolor, duration: int = 4000) -> None:
+        """Show a snackbar above the bottom nav."""
+        self.page.open(
+            ft.SnackBar(
+                ft.Text(message, size=18, color=ft.Colors.WHITE),
+                bgcolor=bgcolor,
+                duration=duration,
+                behavior=ft.SnackBarBehavior.FLOATING,
+                margin=ft.margin.only(bottom=90),
+                padding=20,
+            )
+        )
 
 
 async def main_gui(page: ft.Page, *, config_path):

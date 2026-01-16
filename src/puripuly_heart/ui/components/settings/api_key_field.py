@@ -59,9 +59,7 @@ class ApiKeyField(ft.Row):
             expand=True,
             text_size=28,
             color=COLOR_NEUTRAL_DARK,
-            label_style=ft.TextStyle(
-                size=20, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL_DARK
-            ),
+            label_style=ft.TextStyle(size=20, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL_DARK),
             suffix=self._reveal_button,
         )
 

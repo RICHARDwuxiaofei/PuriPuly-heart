@@ -88,9 +88,20 @@ class GuiController:
 
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
-            # Set needs_key flags (used when user tries to toggle)
-            dash.translation_needs_key = self.hub.llm is None
-            dash.stt_needs_key = self.hub.stt is None
+            # Set needs_key flags based on saved verification status & key existence
+            # STT: check current provider's verification status
+            stt_provider = self.settings.provider.stt.value
+            stt_verified = getattr(self.settings.api_key_verified, stt_provider, False)
+            dash.stt_needs_key = (self.hub.stt is None) or (not stt_verified)
+
+            # LLM: check current provider's verification status
+            llm_provider = self.settings.provider.llm.value
+            # Map llm provider to api_key_verified field name
+            llm_key_map = {"gemini": "google", "qwen": self._get_alibaba_verified_key()}
+            llm_verified_key = llm_key_map.get(llm_provider, llm_provider)
+            llm_verified = getattr(self.settings.api_key_verified, llm_verified_key, False)
+            dash.translation_needs_key = (self.hub.llm is None) or (not llm_verified)
+
             # Set initial enabled states (all start as off/gray)
             dash.set_translation_enabled(False)
             dash.set_stt_enabled(False)
@@ -100,6 +111,14 @@ class GuiController:
 
         bridge = UIEventBridge(app=self.app, event_queue=self.hub.ui_events)
         self._bridge_task = asyncio.create_task(bridge.run())
+
+    def _get_alibaba_verified_key(self) -> str:
+        """Get the api_key_verified field name based on Qwen region."""
+        from puripuly_heart.config.settings import QwenRegion
+
+        if self.settings.qwen.region == QwenRegion.BEIJING:
+            return "alibaba_beijing"
+        return "alibaba_singapore"
 
     async def stop(self) -> None:
         await self.set_stt_enabled(False)
