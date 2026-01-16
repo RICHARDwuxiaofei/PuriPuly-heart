@@ -27,9 +27,9 @@ _UPDATE_INTERVAL = 0.2  # 200ms throttling
 
 def _get_log_dir() -> Path:
     """Get the directory where log files are stored."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).parent.parent.parent  # views -> ui -> puripuly_heart
+    from puripuly_heart.config.paths import user_config_dir
+
+    return user_config_dir()
 
 
 class FletLogHandler(logging.Handler):
