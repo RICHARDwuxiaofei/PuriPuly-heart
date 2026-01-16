@@ -166,10 +166,6 @@ class _SonioxSession(STTBackendSession):
             while True:
                 data = await self._audio_q.get()
                 if data is _STOP:
-                    if self._ws is not None:
-                        with contextlib.suppress(Exception):
-                            await self._ws.send("")
-                            self._last_send_at = time.monotonic()
                     return
                 if data is _FINALIZE:
                     payload = {
@@ -306,6 +302,9 @@ class _SonioxSession(STTBackendSession):
         if self._stopped:
             return
         self._stopped = True
+        if self._ws is not None:
+            with contextlib.suppress(Exception):
+                await self._ws.send("")
         await self._audio_q.put(_STOP)
 
     async def close(self) -> None:
