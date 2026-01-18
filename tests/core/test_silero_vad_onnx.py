@@ -16,8 +16,19 @@ class _NodeArg:
         self.shape = shape
 
 
+class _FakeSessionOptions:
+    def __init__(self):
+        self.intra_op_num_threads = 0
+        self.inter_op_num_threads = 0
+        self.graph_optimization_level = None
+
+
+class _FakeGraphOptimizationLevel:
+    ORT_ENABLE_ALL = 99
+
+
 class _FakeSession:
-    def __init__(self, _path: str, *, providers: list[str]):
+    def __init__(self, _path: str, _sess_options=None, *, providers: list[str]):
         self.providers = providers
         self.calls: list[dict[str, object]] = []
 
@@ -71,6 +82,8 @@ class _FakeSession:
 def test_silero_vad_onnx_inference_and_reset(tmp_path, monkeypatch):
     fake_ort = ModuleType("onnxruntime")
     fake_ort.InferenceSession = _FakeSession
+    fake_ort.SessionOptions = _FakeSessionOptions
+    fake_ort.GraphOptimizationLevel = _FakeGraphOptimizationLevel
     monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
 
     model_path = tmp_path / "silero.onnx"

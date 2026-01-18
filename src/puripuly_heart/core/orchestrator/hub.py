@@ -454,6 +454,6 @@ class ClientHub:
         try:
             while True:
                 self.osc.process_due()
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.1)
         except asyncio.CancelledError:
             raise
