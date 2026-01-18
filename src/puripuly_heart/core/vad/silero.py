@@ -27,8 +27,15 @@ class SileroVadOnnx:
 
         import onnxruntime as ort  # type: ignore
 
+        sess_options = ort.SessionOptions()
+        sess_options.intra_op_num_threads = 1
+        sess_options.inter_op_num_threads = 1
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
         self._session = ort.InferenceSession(
-            str(self.model_path), providers=["CPUExecutionProvider"]
+            str(self.model_path),
+            sess_options,
+            providers=["CPUExecutionProvider"],
         )
         self._configure_io()
         self.reset()
