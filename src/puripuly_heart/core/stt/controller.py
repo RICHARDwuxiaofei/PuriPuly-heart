@@ -134,7 +134,6 @@ class ManagedSTTProvider:
 
         if not await self._ensure_session():
             return
-        await self._maybe_reset(is_speaking=True)
 
         await self._send_audio(event.pre_roll)
         await self._send_audio(event.chunk)
@@ -143,7 +142,6 @@ class ManagedSTTProvider:
         self._active_utterance_id = event.utterance_id
         if not await self._ensure_session():
             return
-        await self._maybe_reset(is_speaking=True)
         await self._send_audio(event.chunk)
 
     async def _on_speech_end(self, event: SpeechEnd) -> None:
@@ -156,8 +154,6 @@ class ManagedSTTProvider:
         if self._active_session is not None:
             logger.info(f"[STT] Speech end handling for id={str(event.utterance_id)[:8]}")
             await self._active_session.on_speech_end()
-
-        await self._maybe_reset(is_speaking=False)
 
     async def _send_audio(self, samples_f32: np.ndarray) -> None:
         samples_f32 = np.asarray(samples_f32, dtype=np.float32).reshape(-1)
@@ -221,24 +217,6 @@ class ManagedSTTProvider:
             )
         )
         return False
-
-    async def _maybe_reset(self, *, is_speaking: bool) -> None:
-        if self._active_session is None or self._session_started_at is None:
-            return
-
-        elapsed = self.clock.now() - self._session_started_at
-        if elapsed < self.reset_deadline_s:
-            return
-
-        logger.warning(
-            f"[STT] Session exceeded {self.reset_deadline_s}s (elapsed={elapsed:.1f}s, speaking={is_speaking})"
-        )
-        if is_speaking:
-            await self._reset_with_bridging()
-        elif self._has_recent_speech():
-            await self._reset_with_reconnect()
-        else:
-            await self._reset_on_silence()
 
     async def _reset_with_bridging(self) -> None:
         logger.info("[STT] BRIDGING: Resetting session while speaking...")
