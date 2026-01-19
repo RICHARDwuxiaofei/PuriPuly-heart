@@ -76,7 +76,7 @@ def font_for_language(code: str | None) -> str | None:
     if base_code in ("ko", "en"):
         return _resolve_family(FONT_FAMILY_NANUM)
 
-    return default_font_family()
+    return None
 
 
 def _resolve_family(font_family: str) -> str | None:

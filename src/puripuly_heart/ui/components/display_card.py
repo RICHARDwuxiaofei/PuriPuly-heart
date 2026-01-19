@@ -182,7 +182,9 @@ class DisplayCard(ft.Container):
         self._input_field.update()
 
     def set_input_font(self, font_family: str | None) -> None:
-        self._input_field.text_style = ft.TextStyle(font_family=font_family)
+        # Force strict system fallback if None (to break theme inheritance)
+        final_font = font_family if font_family else ""
+        self._input_field.text_style = ft.TextStyle(font_family=final_font)
         # Hint style is now managed separately by apply_locale (using UI font)
         if self._input_field.page is not None:
             self._input_field.update()
