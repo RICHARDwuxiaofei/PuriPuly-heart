@@ -37,6 +37,7 @@ class ManagedSTTProvider:
     connect_attempts: int = 3
     connect_retry_base_s: float = 0.8
     connect_retry_max_s: float = 6.0
+    reconnect_window_s: float = 20.0
 
     _state: STTSessionState = STTSessionState.DISCONNECTED
     _active_session: STTBackendSession | None = None
@@ -49,6 +50,7 @@ class ManagedSTTProvider:
     _pending_final_utterance_id: UUID | None = None
     _audio_ring: RingBufferF32 | None = None
     _reset_timer: asyncio.Task[None] | None = None
+    _last_speech_end_time: float | None = None
 
     def __post_init__(self) -> None:
         if self.sample_rate_hz not in (8000, 16000):
@@ -148,6 +150,7 @@ class ManagedSTTProvider:
         if self._active_utterance_id == event.utterance_id:
             self._active_utterance_id = None
         self._pending_final_utterance_id = event.utterance_id
+        self._last_speech_end_time = self.clock.now()
 
         # Delegate end-of-speech handling to the backend (silence + finalize etc.)
         if self._active_session is not None:
@@ -232,6 +235,8 @@ class ManagedSTTProvider:
         )
         if is_speaking:
             await self._reset_with_bridging()
+        elif self._has_recent_speech():
+            await self._reset_with_reconnect()
         else:
             await self._reset_on_silence()
 
@@ -262,6 +267,47 @@ class ManagedSTTProvider:
                     self._drain_and_close(old_session, old_consumer, allow_finalize=False)
                 )
             )
+
+    async def _reset_with_reconnect(self) -> None:
+        """Close current session and immediately open a new one.
+
+        Used when the session limit is reached during silence but there was
+        recent speech activity. Unlike bridging, no audio buffer is sent.
+        """
+        if self._active_session is None or self._consumer_task is None:
+            return
+
+        elapsed = self.clock.now() - (self._last_speech_end_time or 0)
+        logger.info(
+            f"[STT] RECONNECT: Session limit during silence, "
+            f"last speech {elapsed:.1f}s ago, reconnecting..."
+        )
+
+        old_session = self._active_session
+        old_consumer = self._consumer_task
+
+        # Open new session
+        try:
+            new_session = await self.backend.open_session()
+        except Exception as e:
+            logger.error(f"[STT] RECONNECT: Failed to open new session: {e}")
+            await self._reset_on_silence()
+            return
+
+        self._active_session = new_session
+        self._session_started_at = self.clock.now()
+        self._consumer_task = asyncio.create_task(self._consume_session_events(new_session))
+        self._schedule_reset_timer()
+
+        await self._set_state(STTSessionState.STREAMING)
+        logger.info("[STT] RECONNECT: New session ready")
+
+        # Drain old session with finalize (unlike bridging)
+        self._draining.add(
+            asyncio.create_task(
+                self._drain_and_close(old_session, old_consumer, allow_finalize=True)
+            )
+        )
 
     async def _reset_on_silence(self) -> None:
         if self._active_session is None or self._consumer_task is None:
@@ -353,6 +399,13 @@ class ManagedSTTProvider:
         logger.info(f"[STT] State: {old_state.name} -> {state.name}")
         await self._events.put(STTSessionStateEvent(state))
 
+    def _has_recent_speech(self) -> bool:
+        """Check if speech ended recently within the reconnect window."""
+        if self._last_speech_end_time is None:
+            return False
+        elapsed = self.clock.now() - self._last_speech_end_time
+        return elapsed < self.reconnect_window_s
+
     def _schedule_reset_timer(self) -> None:
         """Schedule a timer to reset the session after reset_deadline_s."""
         if self._reset_timer:
@@ -369,6 +422,9 @@ class ManagedSTTProvider:
             if self._active_utterance_id is not None:
                 # Speaking: reset with bridging
                 await self._reset_with_bridging()
+            elif self._has_recent_speech():
+                # Recent speech: reconnect immediately
+                await self._reset_with_reconnect()
             else:
                 # Silence: close session
                 await self._reset_on_silence()
