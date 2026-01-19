@@ -183,11 +183,7 @@ class DisplayCard(ft.Container):
 
     def set_input_font(self, font_family: str | None) -> None:
         self._input_field.text_style = ft.TextStyle(font_family=font_family)
-        self._input_field.hint_style = ft.TextStyle(
-            color=COLOR_SECONDARY,
-            italic=True,
-            font_family=font_family,
-        )
+        # Hint style is now managed separately by apply_locale (using UI font)
         if self._input_field.page is not None:
             self._input_field.update()
 
@@ -198,6 +194,14 @@ class DisplayCard(ft.Container):
         input_font_family: str | None = None,
     ) -> None:
         self._input_field.hint_text = t("display.input_hint")
+
+        # Explicitly set hint font to UI font (Display font)
+        self._input_field.hint_style = ft.TextStyle(
+            color=COLOR_SECONDARY,
+            italic=True,
+            font_family=display_font_family,
+        )
+
         if input_font_family is not None:
             self.set_input_font(input_font_family)
         elif self._input_field.page is not None:

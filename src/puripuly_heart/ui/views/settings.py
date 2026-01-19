@@ -124,6 +124,27 @@ class SettingsView(ft.Column):
             text_control.color = COLOR_ON_BACKGROUND
         container.update()
 
+        container.update()
+
+    def _get_button_style(self, font_family: str) -> ft.ButtonStyle:
+        """Create a complete ButtonStyle with the specified font."""
+        return ft.ButtonStyle(
+            color={
+                ft.ControlState.HOVERED: COLOR_PRIMARY,
+                ft.ControlState.DEFAULT: COLOR_NEUTRAL,
+            },
+            icon_color={
+                ft.ControlState.HOVERED: COLOR_PRIMARY,
+                ft.ControlState.DEFAULT: COLOR_NEUTRAL,
+            },
+            text_style=ft.TextStyle(
+                size=20,
+                font_family=font_family,
+            ),
+            overlay_color=ft.Colors.TRANSPARENT,
+            animation_duration=0,
+        )
+
     def _build_ui(self) -> None:
         """Build the settings UI with Bento grid layout."""
         # === Row 1: STT (1x1) + Translation (1x1) ===
@@ -285,8 +306,39 @@ class SettingsView(ft.Column):
             height=280,
         )
 
-        # === Row 4: Empty (1x1) + VAD (1x1) ===
-        empty_card = self._wrap_card(ft.Container(), expand=True)
+        # === Row 4: Speculative (1x1) + VAD (1x1) ===
+        # Speculative Translation Toggle
+        self._speculative_title = ft.Text(
+            t("settings.speculative_translation"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._speculative_switch = ft.Switch(
+            value=True,
+            active_color=COLOR_PRIMARY,
+            on_change=self._handle_speculative_change,
+        )
+        self._speculative_desc = ft.Text(
+            t("settings.speculative_description"),
+            size=14,
+            color=COLOR_NEUTRAL,
+        )
+        speculative_card = self._wrap_card(
+            ft.Column(
+                [
+                    self._speculative_title,
+                    ft.Container(height=16),
+                    ft.Row(
+                        [self._speculative_switch, self._speculative_desc],
+                        alignment=ft.MainAxisAlignment.START,
+                        spacing=12,
+                    ),
+                ],
+                spacing=0,
+                expand=True,
+            )
+        )
 
         # VAD Box
         self._vad_title = ft.Text(
@@ -321,7 +373,7 @@ class SettingsView(ft.Column):
         )
 
         row4 = ft.Container(
-            content=ft.Row([empty_card, vad_card], spacing=16, expand=True),
+            content=ft.Row([speculative_card, vad_card], spacing=16, expand=True),
             height=280,
         )
 
@@ -425,6 +477,9 @@ class SettingsView(ft.Column):
         else:
             self._prompt_editor.load_default_prompt()
             settings.system_prompt = self._prompt_editor.value
+
+        # Speculative
+        self._speculative_switch.value = settings.speculative_translation_enabled
 
         # Load secrets
         self._load_secrets(settings, config_path)
@@ -736,6 +791,14 @@ class SettingsView(ft.Column):
         self._settings.stt.vad_speech_threshold = new_vad
         self._emit_settings_changed()
 
+    def _handle_speculative_change(self, e) -> None:
+        if not self._settings:
+            return
+        new_value = e.control.value
+        logger.info(f"[Settings] Speculative translation: {new_value}")
+        self._settings.speculative_translation_enabled = new_value
+        self._emit_settings_changed()
+
     def _on_prompt_change(self, value: str) -> None:
         if not self._settings:
             return
@@ -770,7 +833,20 @@ class SettingsView(ft.Column):
         self._audio_title.value = t("settings.section.audio")
         self._vad_title.value = t("settings.vad_sensitivity")
         self._persona_title.value = t("settings.section.persona")
+        self._speculative_title.value = t("settings.speculative_translation")
+        self._speculative_desc.value = t("settings.speculative_description")
         self._reset_prompt_btn.text = t("settings.reset_prompt")
+
+        # Update dynamic buttons by replacing the entire style object
+        ui_font = font_for_language(get_locale())
+
+        if self._reset_prompt_btn:
+            self._reset_prompt_btn.style = self._get_button_style(ui_font)
+
+        if self._qwen_region_btn:
+            self._qwen_region_btn.style = self._get_button_style(ui_font)
+
+        # Update text controls with current selection labels
 
         # Update text controls with current selection labels
         if self._settings:

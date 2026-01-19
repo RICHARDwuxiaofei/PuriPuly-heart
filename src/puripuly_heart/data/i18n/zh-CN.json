@@ -33,6 +33,8 @@
     "settings.audio_host_api": "应用音频接口",
     "settings.microphone": "麦克风",
     "settings.vad_sensitivity": "语音检测灵敏度",
+    "settings.speculative_translation": "推测性翻译",
+    "settings.speculative_description": "在语音暂停时开始翻译",
     "settings.prompt_for": "提示词用于：{provider}",
     "settings.system_prompt": "系统提示词",
     "settings.reset_prompt": "重置提示词",

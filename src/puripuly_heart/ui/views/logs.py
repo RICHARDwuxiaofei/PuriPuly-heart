@@ -81,6 +81,25 @@ class LogsView(ft.Column):
 
         self._build_ui()
 
+    def _get_button_style(self, font_family: str) -> ft.ButtonStyle:
+        """Create a complete ButtonStyle with the specified font."""
+        return ft.ButtonStyle(
+            color={
+                ft.ControlState.HOVERED: COLOR_PRIMARY,
+                ft.ControlState.DEFAULT: COLOR_NEUTRAL,
+            },
+            icon_color={
+                ft.ControlState.HOVERED: COLOR_PRIMARY,
+                ft.ControlState.DEFAULT: COLOR_NEUTRAL,
+            },
+            text_style=ft.TextStyle(
+                size=20,
+                font_family=font_family,
+            ),
+            overlay_color=ft.Colors.TRANSPARENT,
+            animation_duration=0,
+        )
+
     def _build_ui(self):
         """Build the logs view UI."""
         # Title (styled like About page section headers)
@@ -215,6 +234,7 @@ class LogsView(ft.Column):
             self._title_text.value = t("logs.title")
         if self._folder_button:
             self._folder_button.text = t("logs.open_folder")
+            self._folder_button.style = self._get_button_style(font_for_language(get_locale()))
         # Only update if added to page
         if self.page:
             self.update()
