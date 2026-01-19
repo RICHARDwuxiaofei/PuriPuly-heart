@@ -21,7 +21,7 @@ Interpret ${sourceName} input into the ${targetName} naturally, preserving the s
 * **Chinese:** 
   * Use particles like **"吧"** and **"呢"** naturally to sound friendly. 
   * Prefer softeners (e.g., 一下/有点/还挺/真的) to add subtle warmth. 
-  * NEVER use "您".
+  * Only use "你".
 * **Japanese:** 
   * Mirror formality (Casual=Tameguchi, Polite=prefer to use 終助詞). 
   * Avoid stiff Keigo. 
