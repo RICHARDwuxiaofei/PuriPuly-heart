@@ -120,8 +120,8 @@
     "language.vi": "越南语",
     "language.zh-CN": "中文（简体）",
     "language.zh-TW": "中文（繁体）",
-    "about.developed_by": "开发者",
-    "about.inspired_by": "灵感来源",
-    "about.special_thanks": "特别鸣谢",
-    "about.licenses": "开源许可"
+    "about.developed_by": "Developed by",
+    "about.inspired_by": "Inspired by",
+    "about.special_thanks": "Special Thanks",
+    "about.licenses": "Licenses"
 }
