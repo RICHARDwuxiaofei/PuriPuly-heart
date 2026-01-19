@@ -129,6 +129,7 @@ async def test_stt_controller_resets_on_silence():
         sample_rate_hz=16000,
         clock=clock,
         reset_deadline_s=1.0,
+        reconnect_window_s=0.0,  # Disable auto-reconnect for legacy behavior
         drain_timeout_s=0.05,
         finalize_grace_s=0.0,
     )
@@ -174,3 +175,195 @@ async def test_stt_controller_finalize_on_close_while_speaking():
     assert "on_speech_end" in calls
     assert "stop" in calls
     assert calls.index("on_speech_end") < calls.index("stop")
+
+
+async def test_stt_controller_reconnects_when_recent_speech():
+    """Session limit + recent speech -> immediate reconnect (STREAMING maintained)"""
+    clock = FakeClock()
+    backend = FakeBackend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        clock=clock,
+        reset_deadline_s=1.0,
+        reconnect_window_s=0.5,
+        drain_timeout_s=0.05,
+        finalize_grace_s=0.0,
+    )
+
+    uid = __import__("uuid").uuid4()
+    stream = stt.events()
+
+    # 1. Speech start -> session 1 opens
+    await stt.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+    await _next_state(stream, STTSessionState.STREAMING)
+    assert len(backend.sessions) == 1
+
+    # 2. Session limit exceeded, then SpeechEnd triggers _maybe_reset
+    # Since SpeechEnd just happened, _has_recent_speech() returns True -> reconnect
+    clock.advance(1.1)
+    await stt.handle_vad_event(SpeechEnd(uid))
+    await asyncio.sleep(0.01)
+
+    # 3. Verify: new session opened, no DISCONNECTED (reconnect keeps STREAMING)
+    assert len(backend.sessions) == 2
+    assert "on_speech_end" in backend.sessions[0].calls  # allow_finalize=True
+
+    await stt.close()
+
+
+async def test_stt_controller_disconnects_when_reconnect_disabled():
+    """reconnect_window_s=0 disables auto-reconnect -> silence reset (DISCONNECTED)"""
+    clock = FakeClock()
+    backend = FakeBackend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        clock=clock,
+        reset_deadline_s=1.0,
+        reconnect_window_s=0.0,  # Disabled
+        drain_timeout_s=0.05,
+        finalize_grace_s=0.0,
+    )
+
+    uid = __import__("uuid").uuid4()
+    stream = stt.events()
+
+    # 1. Speech start -> session opens
+    await stt.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+    await _next_state(stream, STTSessionState.STREAMING)
+
+    # 2. Session limit exceeded, SpeechEnd triggers _maybe_reset
+    # reconnect_window_s=0 means _has_recent_speech() always False -> silence reset
+    clock.advance(1.1)
+    await stt.handle_vad_event(SpeechEnd(uid))
+
+    # 3. Verify: DISCONNECTED state
+    seen_disconnected = False
+    for _ in range(10):
+        ev = await _next_event(stream)
+        if isinstance(ev, STTSessionStateEvent) and ev.state == STTSessionState.DISCONNECTED:
+            seen_disconnected = True
+            break
+    assert seen_disconnected
+    assert len(backend.sessions) == 1  # No new session
+
+    await stt.close()
+
+
+async def test_stt_controller_reconnect_allows_finalize():
+    """Reconnect should drain old session with allow_finalize=True"""
+    clock = FakeClock()
+    backend = FakeBackend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        clock=clock,
+        reset_deadline_s=1.0,
+        reconnect_window_s=0.5,
+        drain_timeout_s=0.05,
+        finalize_grace_s=0.0,
+    )
+
+    uid = __import__("uuid").uuid4()
+    stream = stt.events()
+
+    await stt.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+    await _next_state(stream, STTSessionState.STREAMING)
+
+    # Session limit exceeded, SpeechEnd triggers reconnect
+    clock.advance(1.1)
+    await stt.handle_vad_event(SpeechEnd(uid))
+    await asyncio.sleep(0.01)
+
+    # Verify: old session called on_speech_end (finalize via allow_finalize=True)
+    old_session = backend.sessions[0]
+    assert "on_speech_end" in old_session.calls
+    assert "stop" in old_session.calls
+
+    await stt.close()
+
+
+async def test_stt_controller_reconnect_no_bridging_audio():
+    """Reconnect should not send bridging audio to new session"""
+    clock = FakeClock()
+    backend = FakeBackend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        clock=clock,
+        reset_deadline_s=1.0,
+        reconnect_window_s=0.5,
+        bridging_ms=64,
+        drain_timeout_s=0.05,
+        finalize_grace_s=0.0,
+    )
+
+    uid = __import__("uuid").uuid4()
+    stream = stt.events()
+
+    await stt.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+    await _next_state(stream, STTSessionState.STREAMING)
+
+    # Session limit exceeded, SpeechEnd triggers reconnect
+    clock.advance(1.1)
+    await stt.handle_vad_event(SpeechEnd(uid))
+    await asyncio.sleep(0.01)
+
+    # Verify: new session has no bridging audio (unlike bridging reset)
+    new_session = backend.sessions[1]
+    assert len(new_session.audio) == 0
+
+    await stt.close()
+
+
+async def test_stt_controller_reconnect_fallback_on_failure():
+    """Reconnect failure should fallback to silence reset"""
+    clock = FakeClock()
+
+    class FailingBackend:
+        def __init__(self):
+            self.sessions = []
+            self.call_count = 0
+
+        async def open_session(self):
+            self.call_count += 1
+            if self.call_count == 1:
+                s = FakeSession()
+                self.sessions.append(s)
+                return s
+            raise ConnectionError("Failed to connect")
+
+    backend = FailingBackend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        clock=clock,
+        reset_deadline_s=1.0,
+        reconnect_window_s=0.5,
+        drain_timeout_s=0.05,
+        finalize_grace_s=0.0,
+        connect_attempts=1,
+    )
+
+    uid = __import__("uuid").uuid4()
+    stream = stt.events()
+
+    await stt.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+    await _next_state(stream, STTSessionState.STREAMING)
+
+    # Session limit exceeded, SpeechEnd triggers reconnect but it fails
+    clock.advance(1.1)
+    await stt.handle_vad_event(SpeechEnd(uid))
+    await asyncio.sleep(0.01)
+
+    # Verify: connection failure -> DISCONNECTED state (fallback to silence reset)
+    seen_disconnected = False
+    for _ in range(10):
+        ev = await _next_event(stream)
+        if isinstance(ev, STTSessionStateEvent) and ev.state == STTSessionState.DISCONNECTED:
+            seen_disconnected = True
+            break
+    assert seen_disconnected
+
+    await stt.close()
