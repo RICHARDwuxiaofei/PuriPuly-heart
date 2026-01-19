@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "puripuly-heart"
-version = "1.0.1"
+version = "1.0.2"
 description = "VRChat real-time speech translation pipeline (STT → LLM → OSC)"
 readme = "README.md"
 license = "MIT"
