@@ -43,7 +43,7 @@ from puripuly_heart.ui.i18n import get_locale, set_locale, t
 logger = logging.getLogger(__name__)
 
 # Hardcoded STT session reset deadline (not configurable via settings)
-STT_RESET_DEADLINE_S = 180.0
+STT_RESET_DEADLINE_S = 300.0
 
 
 @dataclass(slots=True)
