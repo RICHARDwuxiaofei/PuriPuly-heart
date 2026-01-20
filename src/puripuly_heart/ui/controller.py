@@ -416,18 +416,58 @@ class GuiController:
             speech_threshold=self.settings.stt.vad_speech_threshold,
         )
 
-        device_idx = None
-        with contextlib.suppress(Exception):
-            device_idx = resolve_sounddevice_input_device(
-                host_api=self.settings.audio.input_host_api,
-                device=self.settings.audio.input_device,
+        def _resolve_device(host_api: str, device: str) -> int | None:
+            try:
+                return resolve_sounddevice_input_device(host_api=host_api, device=device)
+            except Exception as exc:
+                logger.warning(
+                    "Device resolution failed (host_api=%r, device=%r): %s", host_api, device, exc
+                )
+                return None
+
+        def _open_source(dev_idx: int | None) -> SoundDeviceAudioSource:
+            return SoundDeviceAudioSource(
+                sample_rate_hz=None,
+                channels=self.settings.audio.internal_channels,
+                device=dev_idx,
             )
 
-        source = SoundDeviceAudioSource(
-            sample_rate_hz=None,  # Use device default; resampled later to internal rate
-            channels=self.settings.audio.internal_channels,
-            device=device_idx,
-        )
+        host_api = self.settings.audio.input_host_api
+        device_name = self.settings.audio.input_device
+
+        # 1차 시도: 설정된 Host API + 마이크
+        device_idx = _resolve_device(host_api, device_name)
+        source: SoundDeviceAudioSource | None = None
+
+        try:
+            source = _open_source(device_idx)
+            logger.info("Microphone opened (device_idx=%s)", device_idx)
+        except Exception as exc:
+            logger.error(
+                "Failed to open microphone (host_api=%r, device=%r): %s", host_api, device_name, exc
+            )
+
+        # 2차 시도: Host API 무시, 마이크 이름만
+        if source is None and device_name:
+            fallback_idx = _resolve_device("", device_name)
+            if fallback_idx != device_idx:
+                try:
+                    source = _open_source(fallback_idx)
+                    logger.info("Microphone opened with fallback (device_idx=%s)", fallback_idx)
+                except Exception as exc:
+                    logger.error("Fallback microphone failed: %s", exc)
+
+        # 3차 시도: 시스템 기본 장치
+        if source is None:
+            try:
+                source = _open_source(None)
+                logger.info("Microphone opened with system default")
+            except Exception as exc:
+                logger.error("System default microphone failed: %s", exc)
+
+        if source is None:
+            self._log_error("All microphone attempts failed")
+            return
 
         self._vad = vad
         self._audio_source = source
