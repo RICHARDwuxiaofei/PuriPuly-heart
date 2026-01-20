@@ -21,6 +21,7 @@ def test_vad_gating_emits_start_and_end_with_hangover():
 
     assert start.utterance_id == end.utterance_id
     assert start.pre_roll.shape[0] == 1024  # 64ms @ 16k
+    assert end.trailing_silence_ms == 64
 
 
 def test_vad_gating_pre_roll_contains_previous_audio():

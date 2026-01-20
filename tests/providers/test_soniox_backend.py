@@ -9,9 +9,9 @@ import pytest
 
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.providers.stt.soniox import (
-    _FINALIZE,
     _STOP,
     SonioxRealtimeSTTBackend,
+    _FinalizeRequest,
     _SonioxSession,
 )
 
@@ -106,13 +106,12 @@ async def test_soniox_session_skips_out_of_order_tokens() -> None:
 async def test_soniox_session_on_speech_end_enqueues_finalize() -> None:
     session = _make_session()
 
-    await session.on_speech_end()
+    await session.on_speech_end(trailing_silence_ms=240)
 
-    silence = await session._audio_q.get()
     finalize = await session._audio_q.get()
 
-    assert isinstance(silence, bytes)
-    assert finalize is _FINALIZE
+    assert isinstance(finalize, _FinalizeRequest)
+    assert finalize.trailing_silence_ms == 240
 
 
 @pytest.mark.asyncio

@@ -33,7 +33,8 @@ class FakeSession:
         await self._queue.put(STTBackendTranscriptEvent(text="final", is_final=True))
         await self._queue.put(None)  # sentinel
 
-    async def on_speech_end(self) -> None:
+    async def on_speech_end(self, *, trailing_silence_ms: int | None = None) -> None:
+        _ = trailing_silence_ms
         self.calls.append("on_speech_end")
 
     async def close(self) -> None:

@@ -35,6 +35,7 @@ class SpeechChunk:
 @dataclass(frozen=True, slots=True)
 class SpeechEnd:
     utterance_id: UUID
+    trailing_silence_ms: int = 0
 
 
 VadEvent = SpeechStart | SpeechChunk | SpeechEnd
@@ -139,8 +140,17 @@ class VadGating:
 
         self._silence_run += 1
         if self._silence_run >= self.hangover_chunks:
-            logger.info(f"[VAD] SpeechEnd: id={str(self._utterance_id)[:8]}")
-            events.append(SpeechEnd(self._utterance_id))  # type: ignore[arg-type]
+            trailing_silence_ms = int(
+                round(self._silence_run * (self.chunk_samples / self.sample_rate_hz) * 1000.0)
+            )
+            logger.info(
+                "[VAD] SpeechEnd: id=%s, trailing_silence_ms=%s",
+                str(self._utterance_id)[:8],
+                trailing_silence_ms,
+            )
+            events.append(
+                SpeechEnd(self._utterance_id, trailing_silence_ms=trailing_silence_ms)
+            )  # type: ignore[arg-type]
             self._in_speech = False
             self._utterance_id = None
             self._silence_run = 0

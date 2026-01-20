@@ -317,22 +317,26 @@ class _QwenASRSession(STTBackendSession):
             return
         self._audio_q.put_nowait(pcm16le)
 
-    async def on_speech_end(self) -> None:
-        """Handle end of speech: send commit to finalize transcription."""
+    async def on_speech_end(self, *, trailing_silence_ms: int | None = None) -> None:
+        """Handle end of speech: top up trailing silence if needed, then commit."""
         if self._stopped:
             return
 
-        # Send a small amount of trailing silence before commit
-        import numpy as np
+        min_silence_ms = 100
+        existing_ms = max(int(trailing_silence_ms or 0), 0)
+        missing_ms = max(min_silence_ms - existing_ms, 0)
 
-        silence_samples = int(self.sample_rate_hz * 0.1)  # 100ms silence
-        silence = np.zeros(silence_samples, dtype=np.float32)
-        pcm16 = (silence * 32767).astype(np.int16).tobytes()
-        self._audio_q.put_nowait(pcm16)
-        logger.info(f"[STT] Trailing silence sent ({silence_samples} samples)")
+        if missing_ms > 0:
+            import numpy as np
 
-        # Wait briefly for audio to be processed
-        await asyncio.sleep(0.1)
+            silence_samples = int(self.sample_rate_hz * (missing_ms / 1000.0))
+            if silence_samples > 0:
+                silence = np.zeros(silence_samples, dtype=np.float32)
+                pcm16 = (silence * 32767).astype(np.int16).tobytes()
+                self._audio_q.put_nowait(pcm16)
+                logger.info(
+                    "[STT] Trailing silence sent (%sms, %s samples)", missing_ms, silence_samples
+                )
 
         # Send commit (equivalent to Deepgram's Finalize)
         self._audio_q.put_nowait(_COMMIT)
