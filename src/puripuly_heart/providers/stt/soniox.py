@@ -21,7 +21,11 @@ from puripuly_heart.core.stt.backend import (
 logger = logging.getLogger(__name__)
 
 _STOP = object()
-_FINALIZE = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _FinalizeRequest:
+    trailing_silence_ms: int | None = None
 
 
 @dataclass(slots=True)
@@ -167,11 +171,10 @@ class _SonioxSession(STTBackendSession):
                 data = await self._audio_q.get()
                 if data is _STOP:
                     return
-                if data is _FINALIZE:
-                    payload = {
-                        "type": "finalize",
-                        "trailing_silence_ms": self.trailing_silence_ms,
-                    }
+                if isinstance(data, _FinalizeRequest):
+                    payload = {"type": "finalize"}
+                    if data.trailing_silence_ms is not None:
+                        payload["trailing_silence_ms"] = data.trailing_silence_ms
                     await self._ws.send(json.dumps(payload))
                     self._last_send_at = time.monotonic()
                     continue
@@ -281,22 +284,31 @@ class _SonioxSession(STTBackendSession):
             return
         await self._audio_q.put(pcm16le)
 
-    async def on_speech_end(self) -> None:
+    async def on_speech_end(self, *, trailing_silence_ms: int | None = None) -> None:
         if self._stopped:
             return
 
-        import numpy as np
+        if trailing_silence_ms is None:
+            silence_ms = max(int(self.trailing_silence_ms), 0)
+            silence_samples = int(self.sample_rate_hz * (silence_ms / 1000.0))
+            if silence_samples > 0:
+                import numpy as np
 
-        silence_samples = int(self.sample_rate_hz * (self.trailing_silence_ms / 1000.0))
-        if silence_samples > 0:
-            silence = np.zeros(silence_samples, dtype=np.float32)
-            pcm16 = (silence * 32767).astype(np.int16).tobytes()
-            await self._audio_q.put(pcm16)
-            logger.info(
-                f"[STT] Trailing silence sent ({silence_samples} samples, {len(pcm16)} bytes)"
-            )
+                silence = np.zeros(silence_samples, dtype=np.float32)
+                pcm16 = (silence * 32767).astype(np.int16).tobytes()
+                await self._audio_q.put(pcm16)
+                logger.info(
+                    "[STT] Trailing silence sent (%sms, %s samples, %s bytes)",
+                    silence_ms,
+                    silence_samples,
+                    len(pcm16),
+                )
+        else:
+            silence_ms = max(int(trailing_silence_ms), 0)
 
-        await self._audio_q.put(_FINALIZE)
+        await self._audio_q.put(
+            _FinalizeRequest(trailing_silence_ms=silence_ms if silence_ms > 0 else None)
+        )
 
     async def stop(self) -> None:
         if self._stopped:

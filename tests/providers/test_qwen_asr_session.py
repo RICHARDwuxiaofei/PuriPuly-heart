@@ -21,15 +21,14 @@ def _make_session() -> _QwenASRSession:
 
 
 @pytest.mark.asyncio
-async def test_qwen_asr_session_on_speech_end_enqueues_commit(monkeypatch):
-    async def fake_sleep(_):
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-
+async def test_qwen_asr_session_on_speech_end_enqueues_commit():
     session = _make_session()
-    await session.on_speech_end()
 
+    await session.on_speech_end(trailing_silence_ms=200)
+    commit = session._audio_q.get_nowait()
+    assert commit is _COMMIT
+
+    await session.on_speech_end(trailing_silence_ms=0)
     silence = session._audio_q.get_nowait()
     commit = session._audio_q.get_nowait()
 

@@ -152,8 +152,12 @@ class ManagedSTTProvider:
 
         # Delegate end-of-speech handling to the backend (silence + finalize etc.)
         if self._active_session is not None:
-            logger.info(f"[STT] Speech end handling for id={str(event.utterance_id)[:8]}")
-            await self._active_session.on_speech_end()
+            logger.info(
+                "[STT] Speech end handling for id=%s (trailing_silence_ms=%s)",
+                str(event.utterance_id)[:8],
+                event.trailing_silence_ms,
+            )
+            await self._active_session.on_speech_end(trailing_silence_ms=event.trailing_silence_ms)
 
     async def _send_audio(self, samples_f32: np.ndarray) -> None:
         samples_f32 = np.asarray(samples_f32, dtype=np.float32).reshape(-1)

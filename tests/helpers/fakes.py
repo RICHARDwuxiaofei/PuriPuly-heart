@@ -45,7 +45,8 @@ class SpeechAwareFakeSession:
             await self._queue.put(STTBackendTranscriptEvent(text="FINAL", is_final=True))
             self._seen_speech = False
 
-    async def on_speech_end(self) -> None:
+    async def on_speech_end(self, *, trailing_silence_ms: int | None = None) -> None:
+        _ = trailing_silence_ms
         if self._seen_speech:
             await self._queue.put(STTBackendTranscriptEvent(text="FINAL", is_final=True))
             self._seen_speech = False

@@ -20,15 +20,14 @@ def _make_session() -> _DeepgramSDKSession:
 
 
 @pytest.mark.asyncio
-async def test_deepgram_session_on_speech_end_enqueues_finalize(monkeypatch):
-    async def fake_sleep(_):
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-
+async def test_deepgram_session_on_speech_end_enqueues_finalize():
     session = _make_session()
-    await session.on_speech_end()
 
+    await session.on_speech_end(trailing_silence_ms=200)
+    finalize = session._audio_q.get_nowait()
+    assert finalize is _FINALIZE
+
+    await session.on_speech_end(trailing_silence_ms=0)
     silence = session._audio_q.get_nowait()
     finalize = session._audio_q.get_nowait()
 
