@@ -306,7 +306,10 @@ class SettingsView(ft.Column):
             height=280,
         )
 
-        # === Row 4: VAD (1x1) ===
+        # === Row 4: Empty (1x1) + VAD (1x1) ===
+        empty_card = self._wrap_card(ft.Container())
+
+        # VAD Box
         self._vad_title = ft.Text(
             t("settings.vad_sensitivity"),
             size=24,
@@ -339,7 +342,7 @@ class SettingsView(ft.Column):
         )
 
         row4 = ft.Container(
-            content=ft.Row([vad_card], spacing=16, expand=True),
+            content=ft.Row([empty_card, vad_card], spacing=16, expand=True),
             height=280,
         )
 
