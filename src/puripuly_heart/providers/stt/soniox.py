@@ -248,6 +248,9 @@ class _SonioxSession(STTBackendSession):
         if not isinstance(tokens, list):
             return
 
+        if tokens:
+            logger.debug("[STT] Soniox tokens received count=%s", len(tokens))
+
         for token in tokens:
             if not isinstance(token, dict):
                 continue
@@ -256,24 +259,42 @@ class _SonioxSession(STTBackendSession):
             if not is_final:
                 continue
             if text in ("<fin>", "<end>"):
+                logger.debug(
+                    "[STT] Soniox token finalize pending_tokens=%s", len(self._final_tokens)
+                )
                 self._flush_final()
                 continue
             end_ms = token.get("end_ms")
             if isinstance(end_ms, (int, float)):
                 end_ms = int(end_ms)
                 if self._last_final_end_ms is not None and end_ms <= self._last_final_end_ms:
+                    logger.debug(
+                        "[STT] Soniox token skipped end_ms=%s last_end_ms=%s",
+                        end_ms,
+                        self._last_final_end_ms,
+                    )
                     continue
                 self._last_final_end_ms = end_ms
+            preview = text if len(text) <= 80 else f"{text[:80]}..."
+            logger.debug(
+                "[STT] Soniox token final text=%r end_ms=%s pending_tokens=%s",
+                preview,
+                end_ms,
+                len(self._final_tokens) + 1,
+            )
             self._final_tokens.append(text)
 
     def _flush_final(self) -> None:
         if not self._final_tokens:
             return
+        token_count = len(self._final_tokens)
         text = "".join(self._final_tokens).strip()
         self._final_tokens.clear()
         self._last_final_end_ms = None
         if not text:
             return
+        logger.info("[STT] Transcript: '%s' (final)", text)
+        logger.debug("[STT] Soniox final flush tokens=%s text_len=%s", token_count, len(text))
         self._put_event(STTBackendTranscriptEvent(text=text, is_final=True))
 
     def _put_event(self, event: STTBackendTranscriptEvent | BaseException | None) -> None:
@@ -288,8 +309,8 @@ class _SonioxSession(STTBackendSession):
         if self._stopped:
             return
 
-        if trailing_silence_ms is None:
-            silence_ms = max(int(self.trailing_silence_ms), 0)
+        silence_ms = max(int(self.trailing_silence_ms), 0)
+        if trailing_silence_ms is None and silence_ms > 0:
             silence_samples = int(self.sample_rate_hz * (silence_ms / 1000.0))
             if silence_samples > 0:
                 import numpy as np
@@ -303,8 +324,6 @@ class _SonioxSession(STTBackendSession):
                     silence_samples,
                     len(pcm16),
                 )
-        else:
-            silence_ms = max(int(trailing_silence_ms), 0)
 
         await self._audio_q.put(
             _FinalizeRequest(trailing_silence_ms=silence_ms if silence_ms > 0 else None)
