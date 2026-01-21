@@ -91,7 +91,10 @@ class GuiController:
             # Set needs_key flags based on saved verification status & key existence
             # STT: check current provider's verification status
             stt_provider = self.settings.provider.stt.value
-            stt_verified = getattr(self.settings.api_key_verified, stt_provider, False)
+            # Map stt provider to api_key_verified field name (qwen_asr uses alibaba keys)
+            stt_key_map = {"qwen_asr": self._get_alibaba_verified_key()}
+            stt_verified_key = stt_key_map.get(stt_provider, stt_provider)
+            stt_verified = getattr(self.settings.api_key_verified, stt_verified_key, False)
             dash.stt_needs_key = (self.hub.stt is None) or (not stt_verified)
 
             # LLM: check current provider's verification status
