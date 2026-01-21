@@ -52,7 +52,7 @@ Interpret ${sourceName} input into the ${targetName} naturally, preserving the s
 
  5. 요즘은아무리쉬어도피로가.풀리지않는기분이들어서좀우울해요 => 最近、いくら休んでも疲れが取れないような気がして、ちょっと落ち込んでるんだよね。
  
-    (STT & Register: Parsed unspaced stream and fixed misplaced punctuation. Applied casual '~んだよね' ending with 終助詞 to express soft emotional sharing.)
+    (Preprocessing & Tone: Parsed unspaced stream and fixed misplaced punctuation. Applied casual '~んだよね' ending with 終助詞 to express soft emotional sharing.)
 
  6. 저 혹시 이거 좀 봐줄래요 => 能帮我看一下这个吗？
 
