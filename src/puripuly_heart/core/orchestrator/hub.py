@@ -70,8 +70,8 @@ class _MergeBuffer:
     resume_utterance_id: UUID | None = None
     resume_chunk_count: int = 0
     resume_started_at: float | None = None
-    awaiting_post_end: bool = False
-    awaiting_utterance_id: UUID | None = None
+    awaiting_vad_end: bool = False
+    awaiting_vad_utterance_id: UUID | None = None
     finalize_wait_task: asyncio.Task[None] | None = None
     finalize_wait_started_at: float | None = None
 
@@ -105,7 +105,7 @@ class ClientHub:
     low_latency_mode: bool = False
     low_latency_merge_gap_ms: int = 600
     low_latency_spec_retry_max: int = 1
-    low_latency_finalize_wait_ms: int = 300
+    low_latency_finalize_wait_ms: int = 400
 
     ui_events: asyncio.Queue[UIEvent] = field(default_factory=asyncio.Queue)
 
@@ -430,13 +430,22 @@ class ClientHub:
             return
         for idx in range(len(buffer.utterance_ids) - 1, -1, -1):
             if buffer.utterance_ids[idx] == utterance_id:
-                if buffer.parts[idx] != text:
-                    buffer.parts[idx] = text
+                existing = buffer.parts[idx]
+                if existing == text:
+                    return
+                if text in existing:
+                    return
+                if existing in text:
+                    merged = text
+                else:
+                    merged = self._merge_with_overlap(existing, text)
+                if merged != existing:
+                    buffer.parts[idx] = merged
                     logger.info(
                         "[Metric] final_update id=%s index=%s text_len=%s",
                         str(buffer.merge_id)[:8],
                         idx,
-                        len(text),
+                        len(merged),
                     )
                 return
         buffer.parts.append(text)
@@ -473,20 +482,28 @@ class ClientHub:
         buffer = self._merge_buffer
         if buffer is None:
             return
-        if not buffer.awaiting_post_end or buffer.awaiting_utterance_id != utterance_id:
+        if not buffer.awaiting_vad_end or buffer.awaiting_vad_utterance_id != utterance_id:
+            return
+        buffer.awaiting_vad_end = False
+        buffer.awaiting_vad_utterance_id = None
+        self._restart_post_end_grace(buffer)
+
+    def _restart_post_end_grace(self, buffer: _MergeBuffer) -> None:
+        if self.low_latency_finalize_wait_ms <= 0:
+            self._cancel_finalize_wait(buffer)
             return
         self._cancel_finalize_wait(buffer)
         buffer.finalize_wait_started_at = self.clock.now()
         buffer.finalize_wait_task = asyncio.create_task(
-            self._finalize_wait_timeout(buffer.merge_id, utterance_id)
+            self._finalize_wait_timeout(buffer.merge_id, buffer.finalize_wait_started_at)
         )
         logger.info(
-            "[Metric] finalize_wait_start id=%s wait_ms=%s",
+            "[Metric] post_end_grace_start id=%s wait_ms=%s",
             str(buffer.merge_id)[:8],
             self.low_latency_finalize_wait_ms,
         )
 
-    async def _finalize_wait_timeout(self, merge_id: UUID, utterance_id: UUID) -> None:
+    async def _finalize_wait_timeout(self, merge_id: UUID, started_at: float) -> None:
         try:
             await asyncio.sleep(self.low_latency_finalize_wait_ms / 1000.0)
         except asyncio.CancelledError:
@@ -494,21 +511,19 @@ class ClientHub:
         buffer = self._merge_buffer
         if buffer is None or buffer.merge_id != merge_id:
             return
-        if not buffer.awaiting_post_end or buffer.awaiting_utterance_id != utterance_id:
+        if buffer.finalize_wait_started_at != started_at:
             return
-        buffer.awaiting_post_end = False
-        buffer.awaiting_utterance_id = None
         buffer.finalize_wait_task = None
         buffer.finalize_wait_started_at = None
         logger.info(
-            "[Metric] finalize_wait_timeout id=%s wait_ms=%s",
+            "[Metric] post_end_grace_timeout id=%s wait_ms=%s",
             str(merge_id)[:8],
             self.low_latency_finalize_wait_ms,
         )
         if self.llm is None or not self.translation_enabled:
-            await self._commit_merge(buffer, reason="finalize_timeout")
+            await self._commit_merge(buffer, reason="post_end_grace")
             return
-        await self._try_commit_after_spec(buffer, reason="finalize_timeout", allow_fallback=False)
+        await self._try_commit_after_spec(buffer, reason="post_end_grace", allow_fallback=False)
 
     def _mark_resume_pending(self, event: SpeechStart) -> None:
         buffer = self._merge_buffer
@@ -602,8 +617,8 @@ class ClientHub:
 
         end_time = self._utterance_start_times.get(transcript.utterance_id)
         if end_time is None:
-            buffer.awaiting_post_end = True
-            buffer.awaiting_utterance_id = transcript.utterance_id
+            buffer.awaiting_vad_end = True
+            buffer.awaiting_vad_utterance_id = transcript.utterance_id
             self._cancel_finalize_wait(buffer)
             logger.info(
                 "[Metric] final_phase id=%s phase=pre_end vad_id=%s",
@@ -612,10 +627,13 @@ class ClientHub:
             )
         else:
             self._maybe_update_buffer_end_time(transcript.utterance_id)
-            if buffer.awaiting_post_end and buffer.awaiting_utterance_id == transcript.utterance_id:
-                buffer.awaiting_post_end = False
-                buffer.awaiting_utterance_id = None
-            self._cancel_finalize_wait(buffer)
+            if (
+                buffer.awaiting_vad_end
+                and buffer.awaiting_vad_utterance_id == transcript.utterance_id
+            ):
+                buffer.awaiting_vad_end = False
+                buffer.awaiting_vad_utterance_id = None
+            self._restart_post_end_grace(buffer)
             logger.info(
                 "[Metric] final_phase id=%s phase=post_end vad_id=%s",
                 str(buffer.merge_id)[:8],
@@ -640,19 +658,29 @@ class ClientHub:
                 hold_ms,
             )
             return
-        if buffer.awaiting_post_end:
+        if buffer.awaiting_vad_end:
             hold_ms = 0
             if buffer.finalize_wait_started_at is not None:
                 hold_ms = int((self.clock.now() - buffer.finalize_wait_started_at) * 1000)
             logger.info(
-                "[Metric] commit_blocked id=%s reason=await_post_end hold_ms=%s",
+                "[Metric] commit_blocked id=%s reason=await_vad_end hold_ms=%s",
+                str(buffer.merge_id)[:8],
+                hold_ms,
+            )
+            return
+        if buffer.finalize_wait_task is not None:
+            hold_ms = 0
+            if buffer.finalize_wait_started_at is not None:
+                hold_ms = int((self.clock.now() - buffer.finalize_wait_started_at) * 1000)
+            logger.info(
+                "[Metric] commit_deferred id=%s reason=post_end_grace hold_ms=%s",
                 str(buffer.merge_id)[:8],
                 hold_ms,
             )
             return
         self._cancel_finalize_wait(buffer)
-        buffer.awaiting_post_end = False
-        buffer.awaiting_utterance_id = None
+        buffer.awaiting_vad_end = False
+        buffer.awaiting_vad_utterance_id = None
         for utterance_id in buffer.utterance_ids:
             self._utterance_start_times.pop(utterance_id, None)
         if self._merge_buffer is buffer:
@@ -828,12 +856,22 @@ class ClientHub:
                 hold_ms,
             )
             return
-        if buffer.awaiting_post_end:
+        if buffer.awaiting_vad_end:
             hold_ms = 0
             if buffer.finalize_wait_started_at is not None:
                 hold_ms = int((self.clock.now() - buffer.finalize_wait_started_at) * 1000)
             logger.info(
-                "[Metric] commit_blocked id=%s reason=await_post_end hold_ms=%s",
+                "[Metric] commit_blocked id=%s reason=await_vad_end hold_ms=%s",
+                str(buffer.merge_id)[:8],
+                hold_ms,
+            )
+            return
+        if buffer.finalize_wait_task is not None:
+            hold_ms = 0
+            if buffer.finalize_wait_started_at is not None:
+                hold_ms = int((self.clock.now() - buffer.finalize_wait_started_at) * 1000)
+            logger.info(
+                "[Metric] commit_deferred id=%s reason=post_end_grace hold_ms=%s",
                 str(buffer.merge_id)[:8],
                 hold_ms,
             )
