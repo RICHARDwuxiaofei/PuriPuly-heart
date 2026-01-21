@@ -33,7 +33,7 @@
   "settings.audio_host_api": "오디오 호스트 API",
   "settings.microphone": "마이크",
   "settings.vad_sensitivity": "음성 감지 민감도",
-  "settings.low_latency_mode": "저지연 모드",
+  "settings.low_latency_mode": "모드",
   "settings.prompt_for": "프롬프트: {provider}",
   "settings.system_prompt": "시스템 프롬프트",
   "settings.reset_prompt": "프롬프트 초기화",
@@ -124,5 +124,7 @@
   "about.developed_by": "Developed by",
   "about.inspired_by": "Inspired by",
   "about.special_thanks": "Special Thanks",
-  "about.licenses": "Licenses"
+  "about.licenses": "Licenses",
+  "toggle.on": "저지연",
+  "toggle.off": "표준"
 }
