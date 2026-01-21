@@ -306,31 +306,19 @@ class SettingsView(ft.Column):
             height=280,
         )
 
-        # === Row 4: Empty (1x1) + VAD (1x1) ===
+        # === Row 4: Low Latency (1x1) + VAD (1x1) ===
+        self._low_latency_text = self._build_clickable_text(
+            t("toggle.off"),
+            self._on_low_latency_click,
+        )
         self._low_latency_title = ft.Text(
             t("settings.low_latency_mode"),
             size=24,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
-        self._low_latency_switch = ft.Switch(
-            value=False,
-            active_color=COLOR_PRIMARY,
-            on_change=self._on_low_latency_change,
-        )
         low_latency_card = self._wrap_card(
-            ft.Column(
-                [
-                    self._low_latency_title,
-                    ft.Container(
-                        content=self._low_latency_switch,
-                        alignment=ft.alignment.center,
-                        expand=True,
-                    ),
-                ],
-                spacing=0,
-                expand=True,
-            )
+            ft.Column([self._low_latency_title, self._low_latency_text], spacing=0, expand=True)
         )
 
         # VAD Box
@@ -461,7 +449,9 @@ class SettingsView(ft.Column):
         # VAD
         self._vad_slider.value = settings.stt.vad_speech_threshold
         self._vad_slider.label = f"{settings.stt.vad_speech_threshold:.2f}"
-        self._low_latency_switch.value = settings.stt.low_latency_mode
+        self._low_latency_text.content.value = t(
+            "toggle.on" if settings.stt.low_latency_mode else "toggle.off"
+        )
 
         # Prompt
         provider_name = "gemini" if settings.provider.llm == LLMProviderName.GEMINI else "qwen"
@@ -782,16 +772,38 @@ class SettingsView(ft.Column):
         self._settings.stt.vad_speech_threshold = new_vad
         self._emit_settings_changed()
 
-    def _on_low_latency_change(self, e) -> None:
+    def _on_low_latency_click(self, e) -> None:
+        """Open low latency mode selection modal."""
+        if not self.page:
+            return
+        options = [
+            OptionItem(value="on", label=t("toggle.on")),
+            OptionItem(value="off", label=t("toggle.off")),
+        ]
+        current = "on" if self._settings.stt.low_latency_mode else "off"
+        modal = SettingsModal(
+            self.page,
+            t("settings.low_latency_mode"),
+            options,
+            self._on_low_latency_selected,
+            show_description=False,
+        )
+        modal.open(current)
+
+    def _on_low_latency_selected(self, value: str) -> None:
+        """Handle low latency mode selection from modal."""
         if not self._settings:
             return
-
-        new_value = bool(e.control.value)
+        new_value = value == "on"
         old_value = self._settings.stt.low_latency_mode
         if new_value != old_value:
             logger.info(f"[Settings] Low latency mode changed: {old_value} -> {new_value}")
-
         self._settings.stt.low_latency_mode = new_value
+
+        # Update text
+        self._low_latency_text.content.value = t("toggle.on" if new_value else "toggle.off")
+        if self.page:
+            self._low_latency_text.update()
         self._emit_settings_changed()
 
     def _on_prompt_change(self, value: str) -> None:
@@ -847,6 +859,9 @@ class SettingsView(ft.Column):
             self._stt_text.content.value = provider_label(self._settings.provider.stt.value)
             self._llm_text.content.value = provider_label(self._settings.provider.llm.value)
             self._ui_text.content.value = locale_label(self._settings.ui.locale)
+            self._low_latency_text.content.value = t(
+                "toggle.on" if self._settings.stt.low_latency_mode else "toggle.off"
+            )
 
         # Qwen Region label
         if self._settings:
