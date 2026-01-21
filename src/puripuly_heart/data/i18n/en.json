@@ -33,7 +33,7 @@
   "settings.audio_host_api": "Audio Host API",
   "settings.microphone": "Microphone",
   "settings.vad_sensitivity": "Voice Detection Sensitivity",
-  "settings.low_latency_mode": "Low Latency Mode",
+  "settings.low_latency_mode": "Mode",
   "settings.prompt_for": "Prompt for: {provider}",
   "settings.system_prompt": "System Prompt",
   "settings.reset_prompt": "Reset Prompt",
@@ -124,5 +124,7 @@
   "about.developed_by": "Developed by",
   "about.inspired_by": "Inspired by",
   "about.special_thanks": "Special Thanks",
-  "about.licenses": "Licenses"
+  "about.licenses": "Licenses",
+  "toggle.on": "Low Latency",
+  "toggle.off": "Standard"
 }
