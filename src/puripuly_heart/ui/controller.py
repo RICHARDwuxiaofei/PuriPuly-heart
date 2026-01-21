@@ -234,8 +234,29 @@ class GuiController:
 
     async def apply_settings(self, settings: AppSettings) -> None:
         prev_locale = get_locale()
+        # hub.source_language를 기준으로 비교 (settings 객체는 이미 수정되어 전달될 수 있음)
+        prev_source_lang = self.hub.source_language if self.hub else None
         self.settings = settings
         self._save_settings()
+
+        # Source language 변경 시 STT 백엔드 재구축 필요 (언어는 백엔드 생성 시점에 설정됨)
+        if prev_source_lang is not None and prev_source_lang != settings.languages.source_language:
+            logger.info(
+                "[Settings] Source language changed: %s -> %s, rebuilding STT pipeline",
+                prev_source_lang,
+                settings.languages.source_language,
+            )
+            await self._rebuild_pipeline(rebuild_stt=True)
+            # Locale 변경 처리 후 리턴 (나머지는 rebuild에서 처리됨)
+            if prev_locale != settings.ui.locale:
+                set_locale(settings.ui.locale)
+                apply_locale = getattr(self.app, "apply_locale", None)
+                if callable(apply_locale):
+                    try:
+                        apply_locale()
+                    except Exception as exc:
+                        self._log_error(f"Failed to apply locale: {exc}")
+            return
 
         if self.hub is not None:
             self.hub.source_language = settings.languages.source_language
