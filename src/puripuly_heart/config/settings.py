@@ -67,12 +67,22 @@ class AudioSettings:
 class STTSettings:
     drain_timeout_s: float = 2.0
     vad_speech_threshold: float = 0.5
+    low_latency_mode: bool = False
+    low_latency_vad_hangover_ms: int = 600
+    low_latency_merge_gap_ms: int = 600
+    low_latency_spec_retry_max: int = 10
 
     def validate(self) -> None:
         if self.drain_timeout_s <= 0:
             raise ValueError("drain_timeout_s must be > 0")
         if not (0.0 <= self.vad_speech_threshold <= 1.0):
             raise ValueError("vad_speech_threshold must be in 0.0..1.0")
+        if self.low_latency_vad_hangover_ms < 0:
+            raise ValueError("low_latency_vad_hangover_ms must be >= 0")
+        if self.low_latency_merge_gap_ms < 0:
+            raise ValueError("low_latency_merge_gap_ms must be >= 0")
+        if self.low_latency_spec_retry_max < 0:
+            raise ValueError("low_latency_spec_retry_max must be >= 0")
 
 
 @dataclass(slots=True)
@@ -277,6 +287,10 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         "stt": {
             "drain_timeout_s": settings.stt.drain_timeout_s,
             "vad_speech_threshold": settings.stt.vad_speech_threshold,
+            "low_latency_mode": settings.stt.low_latency_mode,
+            "low_latency_vad_hangover_ms": settings.stt.low_latency_vad_hangover_ms,
+            "low_latency_merge_gap_ms": settings.stt.low_latency_merge_gap_ms,
+            "low_latency_spec_retry_max": settings.stt.low_latency_spec_retry_max,
         },
         "deepgram_stt": {
             "model": settings.deepgram_stt.model,
@@ -375,6 +389,10 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         stt=STTSettings(
             drain_timeout_s=float(stt_data.get("drain_timeout_s", 2.0)),
             vad_speech_threshold=float(vad_threshold_raw) if vad_threshold_raw is not None else 0.5,
+            low_latency_mode=bool(stt_data.get("low_latency_mode", False)),
+            low_latency_vad_hangover_ms=int(stt_data.get("low_latency_vad_hangover_ms", 600)),
+            low_latency_merge_gap_ms=int(stt_data.get("low_latency_merge_gap_ms", 600)),
+            low_latency_spec_retry_max=int(stt_data.get("low_latency_spec_retry_max", 10)),
         ),
         deepgram_stt=DeepgramSTTSettings(
             model=str(data.get("deepgram_stt", {}).get("model", "nova-3")),

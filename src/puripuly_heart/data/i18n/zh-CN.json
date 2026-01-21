@@ -33,6 +33,7 @@
     "settings.audio_host_api": "应用音频接口",
     "settings.microphone": "麦克风",
     "settings.vad_sensitivity": "语音检测灵敏度",
+    "settings.low_latency_mode": "低延迟模式",
     "settings.prompt_for": "提示词用于：{provider}",
     "settings.system_prompt": "系统提示词",
     "settings.reset_prompt": "重置提示词",

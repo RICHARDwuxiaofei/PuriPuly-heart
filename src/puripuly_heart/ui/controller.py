@@ -241,6 +241,14 @@ class GuiController:
             self.hub.source_language = settings.languages.source_language
             self.hub.target_language = settings.languages.target_language
             self.hub.system_prompt = settings.system_prompt
+            self.hub.low_latency_mode = settings.stt.low_latency_mode
+            self.hub.low_latency_merge_gap_ms = settings.stt.low_latency_merge_gap_ms
+            self.hub.low_latency_spec_retry_max = settings.stt.low_latency_spec_retry_max
+            self.hub.hangover_s = (
+                settings.stt.low_latency_vad_hangover_ms / 1000.0
+                if settings.stt.low_latency_mode
+                else 1.1
+            )
 
         # Audio/VAD changes apply on next STT start; if STT is running, restart mic loop.
         if self._mic_task is not None and self._stt_desired:
@@ -390,7 +398,14 @@ class GuiController:
             system_prompt=self.settings.system_prompt,
             fallback_transcript_only=True,
             translation_enabled=True,
-            hangover_s=1.1,  # Match VadGating.hangover_ms (1100ms)
+            low_latency_mode=self.settings.stt.low_latency_mode,
+            low_latency_merge_gap_ms=self.settings.stt.low_latency_merge_gap_ms,
+            low_latency_spec_retry_max=self.settings.stt.low_latency_spec_retry_max,
+            hangover_s=(
+                self.settings.stt.low_latency_vad_hangover_ms / 1000.0
+                if self.settings.stt.low_latency_mode
+                else 1.1
+            ),
         )
 
         self.sender = sender
@@ -414,6 +429,11 @@ class GuiController:
             sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
             ring_buffer_ms=self.settings.audio.ring_buffer_ms,
             speech_threshold=self.settings.stt.vad_speech_threshold,
+            hangover_ms=(
+                self.settings.stt.low_latency_vad_hangover_ms
+                if self.settings.stt.low_latency_mode
+                else 1100
+            ),
         )
 
         def _resolve_device(host_api: str, device: str) -> int | None:

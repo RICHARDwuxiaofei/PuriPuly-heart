@@ -81,6 +81,14 @@ class HeadlessMicRunner:
             target_language=self.settings.languages.target_language,
             system_prompt=self.settings.system_prompt,
             fallback_transcript_only=not self.use_llm,
+            low_latency_mode=self.settings.stt.low_latency_mode,
+            low_latency_merge_gap_ms=self.settings.stt.low_latency_merge_gap_ms,
+            low_latency_spec_retry_max=self.settings.stt.low_latency_spec_retry_max,
+            hangover_s=(
+                self.settings.stt.low_latency_vad_hangover_ms / 1000.0
+                if self.settings.stt.low_latency_mode
+                else 1.1
+            ),
         )
 
         if self.vad_model_path == default_vad_model_path():
@@ -99,6 +107,11 @@ class HeadlessMicRunner:
             sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
             ring_buffer_ms=self.settings.audio.ring_buffer_ms,
             speech_threshold=self.settings.stt.vad_speech_threshold,
+            hangover_ms=(
+                self.settings.stt.low_latency_vad_hangover_ms
+                if self.settings.stt.low_latency_mode
+                else 1100
+            ),
         )
 
         def _resolve_device(host_api: str, device: str) -> int | None:

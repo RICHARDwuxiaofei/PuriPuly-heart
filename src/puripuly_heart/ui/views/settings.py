@@ -307,7 +307,31 @@ class SettingsView(ft.Column):
         )
 
         # === Row 4: Empty (1x1) + VAD (1x1) ===
-        empty_card = self._wrap_card(ft.Container())
+        self._low_latency_title = ft.Text(
+            t("settings.low_latency_mode"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._low_latency_switch = ft.Switch(
+            value=False,
+            active_color=COLOR_PRIMARY,
+            on_change=self._on_low_latency_change,
+        )
+        low_latency_card = self._wrap_card(
+            ft.Column(
+                [
+                    self._low_latency_title,
+                    ft.Container(
+                        content=self._low_latency_switch,
+                        alignment=ft.alignment.center,
+                        expand=True,
+                    ),
+                ],
+                spacing=0,
+                expand=True,
+            )
+        )
 
         # VAD Box
         self._vad_title = ft.Text(
@@ -342,7 +366,7 @@ class SettingsView(ft.Column):
         )
 
         row4 = ft.Container(
-            content=ft.Row([empty_card, vad_card], spacing=16, expand=True),
+            content=ft.Row([low_latency_card, vad_card], spacing=16, expand=True),
             height=280,
         )
 
@@ -437,6 +461,7 @@ class SettingsView(ft.Column):
         # VAD
         self._vad_slider.value = settings.stt.vad_speech_threshold
         self._vad_slider.label = f"{settings.stt.vad_speech_threshold:.2f}"
+        self._low_latency_switch.value = settings.stt.low_latency_mode
 
         # Prompt
         provider_name = "gemini" if settings.provider.llm == LLMProviderName.GEMINI else "qwen"
@@ -757,6 +782,18 @@ class SettingsView(ft.Column):
         self._settings.stt.vad_speech_threshold = new_vad
         self._emit_settings_changed()
 
+    def _on_low_latency_change(self, e) -> None:
+        if not self._settings:
+            return
+
+        new_value = bool(e.control.value)
+        old_value = self._settings.stt.low_latency_mode
+        if new_value != old_value:
+            logger.info(f"[Settings] Low latency mode changed: {old_value} -> {new_value}")
+
+        self._settings.stt.low_latency_mode = new_value
+        self._emit_settings_changed()
+
     def _on_prompt_change(self, value: str) -> None:
         if not self._settings:
             return
@@ -790,6 +827,7 @@ class SettingsView(ft.Column):
         self._ui_title.value = t("settings.section.ui")
         self._audio_title.value = t("settings.section.audio")
         self._vad_title.value = t("settings.vad_sensitivity")
+        self._low_latency_title.value = t("settings.low_latency_mode")
         self._persona_title.value = t("settings.section.persona")
         self._reset_prompt_btn.text = t("settings.reset_prompt")
 
