@@ -33,6 +33,7 @@
   "settings.audio_host_api": "Audio Host API",
   "settings.microphone": "Microphone",
   "settings.vad_sensitivity": "Voice Detection Sensitivity",
+  "settings.low_latency_mode": "Low Latency Mode",
   "settings.prompt_for": "Prompt for: {provider}",
   "settings.system_prompt": "System Prompt",
   "settings.reset_prompt": "Reset Prompt",

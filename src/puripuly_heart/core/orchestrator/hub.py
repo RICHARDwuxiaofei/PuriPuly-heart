@@ -12,7 +12,7 @@ from puripuly_heart.core.clock import Clock, SystemClock
 from puripuly_heart.core.language import get_llm_language_name
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
-from puripuly_heart.core.vad.gating import SpeechEnd, SpeechStart, VadEvent
+from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadEvent
 from puripuly_heart.domain.events import (
     STTErrorEvent,
     STTFinalEvent,
@@ -25,6 +25,7 @@ from puripuly_heart.domain.events import (
 from puripuly_heart.domain.models import (
     OSCMessage,
     Transcript,
+    Translation,
     UtteranceBundle,
 )
 
@@ -48,6 +49,27 @@ class TranslationMemoryEntry:
     source_language: str
     target_language: str
     timestamp: float  # When the translation was completed
+
+
+@dataclass(slots=True)
+class _MergeBuffer:
+    merge_id: UUID
+    parts: list[str] = field(default_factory=list)
+    utterance_ids: list[UUID] = field(default_factory=list)
+    start_time: float | None = None
+    last_end_time: float | None = None
+    last_final_at: float = 0.0
+    spec_task: asyncio.Task[None] | None = None
+    spec_text: str | None = None
+    spec_translation: Translation | None = None
+    spec_attempts: int = 0
+    spec_started_at: float | None = None
+    spec_done_at: float | None = None
+    resume_pending: bool = False
+    resume_confirmed: bool = False
+    resume_utterance_id: UUID | None = None
+    resume_chunk_count: int = 0
+    resume_started_at: float | None = None
 
 
 class STTProvider(Protocol):
@@ -76,6 +98,9 @@ class ClientHub:
     # Context memory settings
     context_time_window_s: float = 20.0  # Only include entries within this time window
     context_max_entries: int = 3  # Maximum number of context entries to include
+    low_latency_mode: bool = False
+    low_latency_merge_gap_ms: int = 600
+    low_latency_spec_retry_max: int = 1
 
     ui_events: asyncio.Queue[UIEvent] = field(default_factory=asyncio.Queue)
 
@@ -92,6 +117,7 @@ class ClientHub:
     _running: bool = False
     _last_promo_time: float | None = None
     _promo_eligible: bool = False
+    _merge_buffer: _MergeBuffer | None = None
 
     async def start(self, *, auto_flush_osc: bool = False) -> None:
         if self._running:
@@ -121,6 +147,14 @@ class ClientHub:
             task.cancel()
         await asyncio.gather(*self._translation_tasks.values(), return_exceptions=True)
         self._translation_tasks.clear()
+
+        if self._merge_buffer is not None:
+            merge_tasks = [self._merge_buffer.spec_task]
+            for task in merge_tasks:
+                if task is not None and not task.done():
+                    task.cancel()
+            await asyncio.gather(*(t for t in merge_tasks if t is not None), return_exceptions=True)
+            self._merge_buffer = None
 
         if self.stt is not None:
             await self.stt.close()
@@ -213,10 +247,18 @@ class ClientHub:
         # Start typing indicator when speech begins
         if isinstance(event, SpeechStart):
             self.osc.send_typing(True)
+            if self.low_latency_mode:
+                self._mark_resume_pending(event)
+
+        if isinstance(event, SpeechChunk):
+            if self.low_latency_mode:
+                self._maybe_confirm_resume(event)
 
         # Record start time for E2E latency tracking (from speech end)
         if isinstance(event, SpeechEnd):
             self._utterance_start_times[event.utterance_id] = self.clock.now()
+            if self.low_latency_mode:
+                await self._maybe_clear_resume_on_end(event)
 
         if self.stt is not None:
             await self.stt.handle_vad_event(event)
@@ -275,6 +317,8 @@ class ClientHub:
 
         if isinstance(event, STTPartialEvent):
             self._send_stt_connected_notification()
+            if self.low_latency_mode:
+                return
             logger.debug(
                 f"[Hub] STT Partial: '{event.transcript.text[:50]}...' id={str(event.transcript.utterance_id)[:8]}"
             )
@@ -283,6 +327,9 @@ class ClientHub:
 
         if isinstance(event, STTFinalEvent):
             self._send_stt_connected_notification()
+            if self.low_latency_mode:
+                await self._handle_low_latency_final(event.transcript)
+                return
             await self._handle_transcript(event.transcript, is_final=True, source="Mic")
             if self.llm is None or not self.translation_enabled:
                 logger.info(
@@ -325,6 +372,365 @@ class ClientHub:
             )
         )
 
+    def _merge_text(self, parts: list[str]) -> str:
+        merged = ""
+        for part in parts:
+            part_clean = part.strip()
+            if not part_clean:
+                continue
+            if not merged:
+                merged = part_clean
+                continue
+            merged = self._merge_with_overlap(merged, part_clean)
+        return merged.strip()
+
+    def _merge_with_overlap(self, existing: str, addition: str) -> str:
+        if not existing:
+            return addition
+        if not addition:
+            return existing
+        if existing.endswith(addition):
+            return existing
+
+        max_overlap = min(len(existing), len(addition))
+        overlap_len = 0
+        for i in range(1, max_overlap + 1):
+            if existing[-i:] == addition[:i]:
+                overlap_len = i
+        if overlap_len:
+            return existing + addition[overlap_len:]
+
+        if self._needs_space(existing, addition):
+            return f"{existing} {addition}"
+        return f"{existing}{addition}"
+
+    def _needs_space(self, left: str, right: str) -> bool:
+        if not left or not right:
+            return False
+        left_ch = left[-1]
+        right_ch = right[0]
+        if self._is_ascii_alnum(left_ch) and self._is_ascii_alnum(right_ch):
+            return True
+        if (" " in left or " " in right) and left_ch.isalnum() and right_ch.isalnum():
+            return True
+        return False
+
+    def _is_ascii_alnum(self, ch: str) -> bool:
+        return ord(ch) < 128 and ch.isalnum()
+
+    def _clear_resume_state(self, buffer: _MergeBuffer) -> None:
+        buffer.resume_pending = False
+        buffer.resume_confirmed = False
+        buffer.resume_utterance_id = None
+        buffer.resume_chunk_count = 0
+        buffer.resume_started_at = None
+
+    def _mark_resume_pending(self, event: SpeechStart) -> None:
+        buffer = self._merge_buffer
+        if buffer is None:
+            return
+        if buffer.resume_pending and buffer.resume_utterance_id == event.utterance_id:
+            return
+        buffer.resume_pending = True
+        buffer.resume_confirmed = False
+        buffer.resume_utterance_id = event.utterance_id
+        buffer.resume_chunk_count = 0
+        buffer.resume_started_at = self.clock.now()
+        logger.info(
+            "[Metric] resume_pending id=%s vad_id=%s",
+            str(buffer.merge_id)[:8],
+            str(event.utterance_id)[:8],
+        )
+
+    def _maybe_confirm_resume(self, event: SpeechChunk) -> None:
+        buffer = self._merge_buffer
+        if buffer is None or not buffer.resume_pending:
+            return
+        if buffer.resume_utterance_id != event.utterance_id:
+            return
+        if buffer.resume_confirmed:
+            return
+        buffer.resume_chunk_count += 1
+        if buffer.resume_chunk_count < 3:
+            return
+        buffer.resume_confirmed = True
+        confirm_ms = 0
+        if buffer.resume_started_at is not None:
+            confirm_ms = int((self.clock.now() - buffer.resume_started_at) * 1000)
+        logger.info(
+            "[Metric] resume_confirmed id=%s confirm_ms=%s chunk_count=%s",
+            str(buffer.merge_id)[:8],
+            confirm_ms,
+            buffer.resume_chunk_count,
+        )
+        if buffer.spec_task is not None and not buffer.spec_task.done():
+            buffer.spec_task.cancel()
+            logger.info(
+                "[Metric] spec_cancel id=%s reason=resume_confirmed",
+                str(buffer.merge_id)[:8],
+            )
+        elif buffer.spec_translation is not None:
+            logger.info(
+                "[Metric] spec_cancel id=%s reason=resume_confirmed",
+                str(buffer.merge_id)[:8],
+            )
+        buffer.spec_task = None
+        buffer.spec_translation = None
+        buffer.spec_text = None
+        buffer.spec_started_at = None
+        buffer.spec_done_at = None
+
+    async def _maybe_clear_resume_on_end(self, event: SpeechEnd) -> None:
+        buffer = self._merge_buffer
+        if buffer is None or not buffer.resume_pending:
+            return
+        if buffer.resume_utterance_id != event.utterance_id:
+            return
+        if buffer.resume_confirmed:
+            return
+        false_ms = 0
+        if buffer.resume_started_at is not None:
+            false_ms = int((self.clock.now() - buffer.resume_started_at) * 1000)
+        logger.info(
+            "[Metric] resume_false_start id=%s false_ms=%s chunk_count=%s",
+            str(buffer.merge_id)[:8],
+            false_ms,
+            buffer.resume_chunk_count,
+        )
+        self._clear_resume_state(buffer)
+        await self._try_commit_after_spec(buffer, reason="resume_false_start", allow_fallback=True)
+
+    async def _handle_low_latency_final(self, transcript: Transcript) -> None:
+        text = transcript.text.strip()
+        if not text:
+            return
+
+        now = self.clock.now()
+        buffer = self._merge_buffer
+        if buffer is None:
+            buffer = _MergeBuffer(merge_id=uuid4(), start_time=now, last_final_at=now)
+            self._merge_buffer = buffer
+        if buffer.resume_pending or buffer.resume_confirmed:
+            self._clear_resume_state(buffer)
+        buffer.parts.append(text)
+        buffer.utterance_ids.append(transcript.utterance_id)
+        buffer.last_final_at = now
+
+        end_time = self._utterance_start_times.pop(transcript.utterance_id, None)
+        if end_time is None:
+            end_time = now
+        if buffer.start_time is None or end_time < buffer.start_time:
+            buffer.start_time = end_time
+        if buffer.last_end_time is None or end_time > buffer.last_end_time:
+            buffer.last_end_time = end_time
+
+        if self.llm is None or not self.translation_enabled:
+            await self._commit_merge(buffer, reason="final_no_llm")
+            return
+
+        await self._maybe_restart_spec(buffer)
+
+    async def _commit_merge(self, buffer: _MergeBuffer, *, reason: str) -> None:
+        if buffer.resume_pending or buffer.resume_confirmed:
+            hold_ms = 0
+            if buffer.spec_done_at is not None:
+                hold_ms = int((self.clock.now() - buffer.spec_done_at) * 1000)
+            logger.info(
+                "[Metric] commit_blocked id=%s reason=%s hold_ms=%s",
+                str(buffer.merge_id)[:8],
+                reason,
+                hold_ms,
+            )
+            return
+        if self._merge_buffer is buffer:
+            self._merge_buffer = None
+
+        final_text = self._merge_text(buffer.parts)
+        if not final_text:
+            return
+
+        if buffer.spec_task is not None and not buffer.spec_task.done():
+            buffer.spec_task.cancel()
+
+        if buffer.last_end_time is not None:
+            self._utterance_start_times[buffer.merge_id] = buffer.last_end_time
+        elif buffer.start_time is not None:
+            self._utterance_start_times[buffer.merge_id] = buffer.start_time
+
+        transcript = Transcript(
+            utterance_id=buffer.merge_id,
+            text=final_text,
+            is_final=True,
+            created_at=self.clock.now(),
+        )
+        await self._handle_transcript(transcript, is_final=True, source="Mic")
+
+        if self.llm is None or not self.translation_enabled:
+            logger.info(
+                "[Hub] Skipping translation (llm=%s, enabled=%s)",
+                self.llm is not None,
+                self.translation_enabled,
+            )
+            await self._enqueue_osc(
+                buffer.merge_id, transcript_text=final_text, translation_text=None
+            )
+            return
+
+        reuse_spec = buffer.spec_translation is not None and buffer.spec_text == final_text
+        commit_delay_ms = 0
+        if buffer.start_time is not None:
+            commit_delay_ms = int((self.clock.now() - buffer.start_time) * 1000)
+        logger.info(
+            "[Metric] merge_commit id=%s used_spec=%s parts=%s text_len=%s commit_delay_ms=%s reason=%s",
+            str(buffer.merge_id)[:8],
+            reuse_spec,
+            len(buffer.parts),
+            len(final_text),
+            commit_delay_ms,
+            reason,
+        )
+        if reuse_spec:
+            translation = buffer.spec_translation
+            if translation is not None:
+                logger.info(
+                    "[Metric] spec_reuse id=%s translation_len=%s after_final=%s",
+                    str(buffer.merge_id)[:8],
+                    len(translation.text),
+                    True,
+                )
+                bundle = self.get_or_create_bundle(buffer.merge_id)
+                bundle.with_translation(translation)
+                self._remember_context_entry(final_text, self.clock.now())
+                self._remember_translation_pair(final_text, translation.text)
+                await self.ui_events.put(
+                    UIEvent(
+                        type=UIEventType.TRANSLATION_DONE,
+                        utterance_id=buffer.merge_id,
+                        payload=translation,
+                        source=self._get_source(buffer.merge_id),
+                    )
+                )
+                await self._enqueue_osc(
+                    buffer.merge_id,
+                    transcript_text=final_text,
+                    translation_text=translation.text,
+                )
+                return
+
+        if buffer.spec_translation is not None and buffer.spec_text != final_text:
+            logger.info(
+                "[Metric] spec_cancel id=%s reason=final_mismatch", str(buffer.merge_id)[:8]
+            )
+
+        await self._translate_and_enqueue(buffer.merge_id, final_text)
+
+    async def _maybe_restart_spec(self, buffer: _MergeBuffer) -> None:
+        if self.llm is None or not self.translation_enabled:
+            return
+
+        if buffer.spec_task is not None:
+            if not buffer.spec_task.done():
+                buffer.spec_task.cancel()
+                logger.info(
+                    "[Metric] spec_cancel id=%s reason=spec_retry", str(buffer.merge_id)[:8]
+                )
+            elif buffer.spec_translation is not None:
+                logger.info(
+                    "[Metric] spec_cancel id=%s reason=spec_retry", str(buffer.merge_id)[:8]
+                )
+            buffer.spec_task = None
+            buffer.spec_translation = None
+            buffer.spec_text = None
+            buffer.spec_started_at = None
+            buffer.spec_done_at = None
+
+        merged_text = self._merge_text(buffer.parts)
+        if not merged_text:
+            return
+
+        buffer.spec_attempts += 1
+        buffer.spec_text = merged_text
+        buffer.spec_started_at = self.clock.now()
+        logger.info(
+            "[Metric] spec_start id=%s text_len=%s attempt=%s",
+            str(buffer.merge_id)[:8],
+            len(merged_text),
+            buffer.spec_attempts,
+        )
+        buffer.spec_task = asyncio.create_task(
+            self._run_spec_translation(buffer.merge_id, merged_text, buffer.spec_attempts)
+        )
+
+    async def _run_spec_translation(self, merge_id: UUID, text: str, attempt: int) -> None:
+        if self.llm is None:
+            return
+        try:
+            translation = await self._translate_text(merge_id, text)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.error(f"[Hub] Spec translation failed: {exc}")
+            buffer = self._merge_buffer
+            if buffer is None or buffer.merge_id != merge_id:
+                return
+            if buffer.spec_text != text or buffer.spec_attempts != attempt:
+                return
+            buffer.spec_done_at = self.clock.now()
+            await self._try_commit_after_spec(buffer, reason="spec_failed", allow_fallback=True)
+            return
+
+        buffer = self._merge_buffer
+        if buffer is None or buffer.merge_id != merge_id:
+            return
+        if buffer.spec_text != text or buffer.spec_attempts != attempt:
+            return
+
+        buffer.spec_translation = translation
+        buffer.spec_done_at = self.clock.now()
+        if buffer.spec_started_at is None:
+            latency_ms = 0
+        else:
+            latency_ms = int((self.clock.now() - buffer.spec_started_at) * 1000)
+        logger.info(
+            "[Metric] spec_done id=%s spec_latency_ms=%s translation_len=%s",
+            str(merge_id)[:8],
+            latency_ms,
+            len(translation.text),
+        )
+        await self._try_commit_after_spec(buffer, reason="spec_done", allow_fallback=False)
+
+    async def _try_commit_after_spec(
+        self, buffer: _MergeBuffer, *, reason: str, allow_fallback: bool
+    ) -> None:
+        if self._merge_buffer is None or self._merge_buffer is not buffer:
+            return
+        if buffer.resume_pending or buffer.resume_confirmed:
+            hold_ms = 0
+            if buffer.spec_done_at is not None:
+                hold_ms = int((self.clock.now() - buffer.spec_done_at) * 1000)
+            logger.info(
+                "[Metric] commit_blocked id=%s reason=%s hold_ms=%s",
+                str(buffer.merge_id)[:8],
+                reason,
+                hold_ms,
+            )
+            return
+
+        final_text = self._merge_text(buffer.parts)
+        if not final_text:
+            return
+
+        if buffer.spec_translation is None:
+            if not allow_fallback:
+                return
+            await self._commit_merge(buffer, reason=reason)
+            return
+
+        if buffer.spec_text != final_text:
+            return
+
+        await self._commit_merge(buffer, reason=reason)
+
     def _remember_source(self, utterance_id: UUID, source: str | None) -> None:
         if not source:
             return
@@ -332,6 +738,48 @@ class ClientHub:
 
     def _get_source(self, utterance_id: UUID) -> str | None:
         return self._utterance_sources.get(utterance_id)
+
+    def _format_system_prompt(self) -> str:
+        formatted_prompt = self.system_prompt
+        formatted_prompt = formatted_prompt.replace(
+            "${sourceName}", get_llm_language_name(self.source_language)
+        )
+        formatted_prompt = formatted_prompt.replace(
+            "${targetName}", get_llm_language_name(self.target_language)
+        )
+        return formatted_prompt
+
+    def _prepare_llm_request(self, text: str) -> tuple[str, str, list[dict[str, str]], float]:
+        _ = text
+        valid_context = self._get_valid_context()
+        now = self.clock.now()
+
+        logger.info(
+            f"[Hub] Context: {len(valid_context)} entries within {self.context_time_window_s}s window"
+        )
+        for i, entry in enumerate(valid_context):
+            age = now - entry.timestamp
+            logger.info(f'[Hub] Context[{i}]: "{entry.text}" ({age:.1f}s ago)')
+
+        context_str = self._format_context_for_llm(valid_context)
+        tm_list = self._get_tm_list()
+        formatted_prompt = self._format_system_prompt()
+        return formatted_prompt, context_str, tm_list, now
+
+    async def _translate_text(self, utterance_id: UUID, text: str) -> Translation:
+        if self.llm is None:
+            raise RuntimeError("LLM is not configured")
+
+        formatted_prompt, context_str, tm_list, _ = self._prepare_llm_request(text)
+        return await self.llm.translate(
+            utterance_id=utterance_id,
+            text=text,
+            system_prompt=formatted_prompt,
+            source_language=self.source_language,
+            target_language=self.target_language,
+            context=context_str,
+            context_pairs=tm_list,
+        )
 
     async def _ensure_translation(self, transcript: Transcript) -> None:
         if self.llm is None:
@@ -347,33 +795,10 @@ class ClientHub:
         if self.llm is None:
             return
         try:
-            # Get valid context for this translation
-            valid_context = self._get_valid_context()
-            now = self.clock.now()
-
-            # Log context information
-            logger.info(
-                f"[Hub] Context: {len(valid_context)} entries within {self.context_time_window_s}s window"
-            )
-            for i, entry in enumerate(valid_context):
-                age = now - entry.timestamp
-                logger.info(f'[Hub] Context[{i}]: "{entry.text}" ({age:.1f}s ago)')
+            formatted_prompt, context_str, tm_list, now = self._prepare_llm_request(text)
 
             # Add current text to context history at REQUEST time
             self._remember_context_entry(text, now)
-
-            # Format context for LLM
-            context_str = self._format_context_for_llm(valid_context)
-            tm_list = self._get_tm_list()
-
-            # Substitute language placeholders in system prompt
-            formatted_prompt = self.system_prompt
-            formatted_prompt = formatted_prompt.replace(
-                "${sourceName}", get_llm_language_name(self.source_language)
-            )
-            formatted_prompt = formatted_prompt.replace(
-                "${targetName}", get_llm_language_name(self.target_language)
-            )
 
             translation = await self.llm.translate(
                 utterance_id=utterance_id,
