@@ -28,6 +28,12 @@ class _FinalizeRequest:
     trailing_silence_ms: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _FinalToken:
+    text: str
+    end_ms: int | None
+
+
 @dataclass(slots=True)
 class SonioxRealtimeSTTBackend(STTBackend):
     """Soniox Realtime STT Backend using WebSocket API."""
@@ -128,8 +134,10 @@ class _SonioxSession(STTBackendSession):
     _keepalive_task: asyncio.Task[None] | None = field(init=False, default=None, repr=False)
     _stopped: bool = field(init=False, default=False)
     _last_send_at: float | None = field(init=False, default=None)
-    _final_tokens: list[str] = field(init=False, default_factory=list)
-    _last_final_end_ms: int | None = field(init=False, default=None)
+    _pending_tokens: list[_FinalToken] = field(init=False, default_factory=list)
+    _pending_last_end_ms: int | None = field(init=False, default=None)
+    _final_tokens: list[_FinalToken] = field(init=False, default_factory=list)
+    _finalize_requested: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         self._events = asyncio.Queue()
@@ -260,42 +268,121 @@ class _SonioxSession(STTBackendSession):
                 continue
             if text in ("<fin>", "<end>"):
                 logger.debug(
-                    "[STT] Soniox token finalize pending_tokens=%s", len(self._final_tokens)
+                    "[STT] Soniox token finalize pending_tokens=%s", len(self._pending_tokens)
                 )
                 self._flush_final()
                 continue
             end_ms = token.get("end_ms")
             if isinstance(end_ms, (int, float)):
                 end_ms = int(end_ms)
-                if self._last_final_end_ms is not None and end_ms <= self._last_final_end_ms:
+                if self._pending_last_end_ms is not None and end_ms <= self._pending_last_end_ms:
                     logger.debug(
                         "[STT] Soniox token skipped end_ms=%s last_end_ms=%s",
                         end_ms,
-                        self._last_final_end_ms,
+                        self._pending_last_end_ms,
                     )
                     continue
-                self._last_final_end_ms = end_ms
+                self._pending_last_end_ms = end_ms
             preview = text if len(text) <= 80 else f"{text[:80]}..."
             logger.debug(
                 "[STT] Soniox token final text=%r end_ms=%s pending_tokens=%s",
                 preview,
                 end_ms,
-                len(self._final_tokens) + 1,
+                len(self._pending_tokens) + 1,
             )
-            self._final_tokens.append(text)
+            self._pending_tokens.append(_FinalToken(text=text, end_ms=end_ms))
 
     def _flush_final(self) -> None:
+        if not self._pending_tokens:
+            if self._finalize_requested:
+                self._finalize_requested = False
+                self._final_tokens.clear()
+            return
+        updated = self._merge_pending_tokens()
+        self._pending_tokens.clear()
+        self._pending_last_end_ms = None
+        if not updated:
+            if self._finalize_requested:
+                self._emit_final_text()
+                self._finalize_requested = False
+                self._final_tokens.clear()
+            return
+        self._emit_final_text()
+        if self._finalize_requested:
+            self._finalize_requested = False
+            self._final_tokens.clear()
+
+    def _merge_pending_tokens(self) -> bool:
+        new_tokens = self._pending_tokens
+        if not new_tokens:
+            return False
+        if not self._final_tokens:
+            self._final_tokens = list(new_tokens)
+            return True
+
+        new_max = self._max_end_ms(new_tokens)
+        existing_max = self._max_end_ms(self._final_tokens)
+        if new_max is not None and existing_max is not None and new_max < existing_max:
+            logger.debug(
+                "[STT] Soniox final batch out-of-order max_end_ms=%s existing_max_end_ms=%s",
+                new_max,
+                existing_max,
+            )
+            return False
+
+        new_first = self._min_end_ms(new_tokens)
+        if new_first is None:
+            self._final_tokens.extend(new_tokens)
+            return True
+
+        cut_idx = None
+        for idx, token in enumerate(self._final_tokens):
+            if token.end_ms is None:
+                continue
+            if token.end_ms >= new_first:
+                cut_idx = idx
+                break
+
+        logger.debug(
+            "[STT] Soniox final merge cut_idx=%s new_first_end_ms=%s new_max_end_ms=%s existing_max_end_ms=%s",
+            cut_idx,
+            new_first,
+            new_max,
+            existing_max,
+        )
+        if cut_idx is None:
+            self._final_tokens.extend(new_tokens)
+        elif cut_idx == 0:
+            self._final_tokens = list(new_tokens)
+        else:
+            self._final_tokens = self._final_tokens[:cut_idx] + list(new_tokens)
+        return True
+
+    def _emit_final_text(self) -> None:
         if not self._final_tokens:
             return
-        token_count = len(self._final_tokens)
-        text = "".join(self._final_tokens).strip()
-        self._final_tokens.clear()
-        self._last_final_end_ms = None
+        text = "".join(token.text for token in self._final_tokens).strip()
         if not text:
             return
         logger.info("[STT] Transcript: '%s' (final)", text)
-        logger.debug("[STT] Soniox final flush tokens=%s text_len=%s", token_count, len(text))
+        logger.debug(
+            "[STT] Soniox final flush tokens=%s text_len=%s",
+            len(self._final_tokens),
+            len(text),
+        )
         self._put_event(STTBackendTranscriptEvent(text=text, is_final=True))
+
+    def _min_end_ms(self, tokens: Sequence[_FinalToken]) -> int | None:
+        values = [token.end_ms for token in tokens if token.end_ms is not None]
+        if not values:
+            return None
+        return min(values)
+
+    def _max_end_ms(self, tokens: Sequence[_FinalToken]) -> int | None:
+        values = [token.end_ms for token in tokens if token.end_ms is not None]
+        if not values:
+            return None
+        return max(values)
 
     def _put_event(self, event: STTBackendTranscriptEvent | BaseException | None) -> None:
         self._events.put_nowait(event)
@@ -309,6 +396,7 @@ class _SonioxSession(STTBackendSession):
         if self._stopped:
             return
 
+        self._finalize_requested = True
         silence_ms = max(int(self.trailing_silence_ms), 0)
         if trailing_silence_ms is None and silence_ms > 0:
             silence_samples = int(self.sample_rate_hz * (silence_ms / 1000.0))
