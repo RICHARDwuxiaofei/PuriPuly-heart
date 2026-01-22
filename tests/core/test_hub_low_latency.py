@@ -356,3 +356,221 @@ class TestLowLatencyCommitBlocking:
         assert hub._merge_buffer is None
 
         await hub.stop()
+
+
+class TestLowLatencyMergeOverlap:
+    """Test relaxed overlap merge behavior."""
+
+    def test_relaxed_overlap_strips_boundary_punct(self):
+        hub = ClientHub(stt=None, llm=None, osc=FakeOscQueue())
+        merged = hub._merge_with_overlap("같으면서.", "같으면서도 안.")
+        assert merged == "같으면서도 안."
+
+    def test_relaxed_overlap_min_length(self):
+        hub = ClientHub(stt=None, llm=None, osc=FakeOscQueue())
+        merged = hub._merge_with_overlap("가다.", "가다고")
+        assert merged == "가다.가다고"
+
+
+class TestResumeEndTimeout:
+    """Test resume_confirmed timeout when STT Final doesn't arrive (Pattern A)."""
+
+    @pytest.mark.asyncio
+    async def test_resume_confirmed_without_stt_final_times_out(self):
+        """resume_confirmed 상태에서 STT Final 안 오면 타임아웃 후 커밋."""
+        clock = FakeClock(initial_time=10.0)
+        osc = FakeOscQueue()
+        hub = ClientHub(
+            stt=None,
+            llm=None,  # 번역 없이 직접 커밋
+            osc=osc,
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=5000,  # 긴 grace period (커밋 안 되게)
+            low_latency_awaiting_vad_timeout_s=0.1,  # 100ms 타임아웃
+        )
+
+        uid1 = uuid4()
+        uid2 = uuid4()
+
+        # 1. 첫 번째 발화 시작 및 STT Final
+        await hub.handle_vad_event(SpeechStart(uid1, pre_roll=samples(0.0), chunk=samples(1.0)))
+        await hub.handle_vad_event(SpeechEnd(uid1))
+        transcript1 = Transcript(
+            utterance_id=uid1, text="첫 번째 발화", is_final=True, created_at=clock.now()
+        )
+        await hub._handle_low_latency_final(transcript1)
+
+        # 버퍼에 텍스트가 있음 (grace period가 길어서 아직 커밋 안 됨)
+        buffer = hub._merge_buffer
+        assert buffer is not None
+        assert "첫 번째 발화" in hub._merge_text(buffer.parts)
+
+        # 2. 두 번째 발화 (resume) - SpeechStart
+        await hub.handle_vad_event(SpeechStart(uid2, pre_roll=samples(0.0), chunk=samples(1.0)))
+        assert buffer.resume_pending is True
+
+        # 3. SpeechChunk 3개 → resume_confirmed
+        for _ in range(3):
+            await hub.handle_vad_event(SpeechChunk(uid2, chunk=samples(0.5)))
+        assert buffer.resume_confirmed is True
+
+        # 4. SpeechEnd (STT Final 없이) → 타임아웃 시작
+        await hub.handle_vad_event(SpeechEnd(uid2))
+        assert buffer.resume_end_timeout_task is not None
+        assert buffer.resume_end_utterance_id == uid2
+
+        # 5. 타임아웃 대기 (150ms)
+        await asyncio.sleep(0.15)
+
+        # 6. 타임아웃으로 커밋됨
+        assert hub._merge_buffer is None
+        assert len(osc.messages) == 1
+        assert "첫 번째 발화" in osc.messages[0].text
+
+        await hub.stop()
+
+    @pytest.mark.asyncio
+    async def test_resume_end_timeout_cancelled_when_stt_final_arrives(self):
+        """STT Final이 오면 타임아웃 취소."""
+        clock = FakeClock(initial_time=10.0)
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=5000,  # 긴 grace period
+            low_latency_awaiting_vad_timeout_s=0.5,  # 500ms 타임아웃
+        )
+
+        uid1 = uuid4()
+        uid2 = uuid4()
+
+        # 1. 첫 번째 발화
+        await hub.handle_vad_event(SpeechStart(uid1, pre_roll=samples(0.0), chunk=samples(1.0)))
+        await hub.handle_vad_event(SpeechEnd(uid1))
+        transcript1 = Transcript(
+            utterance_id=uid1, text="첫 번째", is_final=True, created_at=clock.now()
+        )
+        await hub._handle_low_latency_final(transcript1)
+
+        buffer = hub._merge_buffer
+        assert buffer is not None
+
+        # 2. resume_confirmed 상태로 만들기
+        await hub.handle_vad_event(SpeechStart(uid2, pre_roll=samples(0.0), chunk=samples(1.0)))
+        for _ in range(3):
+            await hub.handle_vad_event(SpeechChunk(uid2, chunk=samples(0.5)))
+        assert buffer.resume_confirmed is True
+
+        # 3. SpeechEnd → 타임아웃 시작
+        await hub.handle_vad_event(SpeechEnd(uid2))
+        assert buffer.resume_end_timeout_task is not None
+
+        # 4. STT Final 도착 → 타임아웃 취소 (via _clear_resume_state)
+        transcript2 = Transcript(
+            utterance_id=uid2, text="두 번째", is_final=True, created_at=clock.now()
+        )
+        await hub._handle_low_latency_final(transcript2)
+
+        # resume 상태 클리어됨 → 타임아웃도 취소됨
+        assert buffer.resume_end_timeout_task is None
+        assert buffer.resume_confirmed is False
+
+        await hub.stop()
+
+    @pytest.mark.asyncio
+    async def test_new_resume_cancels_previous_timeout(self):
+        """새 resume 시작 시 이전 타임아웃 취소."""
+        clock = FakeClock(initial_time=10.0)
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=5000,  # 긴 grace period
+            low_latency_awaiting_vad_timeout_s=0.5,  # 500ms 타임아웃
+        )
+
+        uid1 = uuid4()
+        uid2 = uuid4()
+        uid3 = uuid4()
+
+        # 1. 첫 번째 발화
+        await hub.handle_vad_event(SpeechStart(uid1, pre_roll=samples(0.0), chunk=samples(1.0)))
+        await hub.handle_vad_event(SpeechEnd(uid1))
+        transcript1 = Transcript(
+            utterance_id=uid1, text="첫 번째", is_final=True, created_at=clock.now()
+        )
+        await hub._handle_low_latency_final(transcript1)
+
+        buffer = hub._merge_buffer
+        assert buffer is not None
+
+        # 2. uid2로 resume_confirmed + SpeechEnd → 타임아웃 시작
+        await hub.handle_vad_event(SpeechStart(uid2, pre_roll=samples(0.0), chunk=samples(1.0)))
+        for _ in range(3):
+            await hub.handle_vad_event(SpeechChunk(uid2, chunk=samples(0.5)))
+        await hub.handle_vad_event(SpeechEnd(uid2))
+
+        old_timeout_task = buffer.resume_end_timeout_task
+        assert old_timeout_task is not None
+        assert buffer.resume_end_utterance_id == uid2
+
+        # 3. uid3로 새 resume 시작 → 이전 타임아웃 취소
+        await hub.handle_vad_event(SpeechStart(uid3, pre_roll=samples(0.0), chunk=samples(1.0)))
+
+        # 이전 타임아웃 취소됨
+        assert buffer.resume_end_timeout_task is None
+        assert buffer.resume_end_utterance_id is None
+        # 새 resume 상태
+        assert buffer.resume_pending is True
+        assert buffer.resume_utterance_id == uid3
+
+        await hub.stop()
+
+    @pytest.mark.asyncio
+    async def test_timeout_only_triggers_for_matched_utterance_id(self):
+        """타임아웃은 정확히 매칭되는 utterance_id에서만 트리거."""
+        clock = FakeClock(initial_time=10.0)
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=5000,  # 긴 grace period
+            low_latency_awaiting_vad_timeout_s=0.1,
+        )
+
+        uid1 = uuid4()
+        uid2 = uuid4()
+
+        # 1. 첫 번째 발화
+        await hub.handle_vad_event(SpeechStart(uid1, pre_roll=samples(0.0), chunk=samples(1.0)))
+        await hub.handle_vad_event(SpeechEnd(uid1))
+        transcript1 = Transcript(
+            utterance_id=uid1, text="첫 번째", is_final=True, created_at=clock.now()
+        )
+        await hub._handle_low_latency_final(transcript1)
+
+        buffer = hub._merge_buffer
+        assert buffer is not None
+
+        # 2. uid2로 resume_confirmed
+        await hub.handle_vad_event(SpeechStart(uid2, pre_roll=samples(0.0), chunk=samples(1.0)))
+        for _ in range(3):
+            await hub.handle_vad_event(SpeechChunk(uid2, chunk=samples(0.5)))
+
+        # 3. 다른 uid의 SpeechEnd → 타임아웃 시작 안 됨
+        await hub.handle_vad_event(SpeechEnd(uid1))  # uid1의 SpeechEnd
+        assert buffer.resume_end_timeout_task is None
+
+        # 4. 정확한 uid의 SpeechEnd → 타임아웃 시작
+        await hub.handle_vad_event(SpeechEnd(uid2))
+        assert buffer.resume_end_timeout_task is not None
+        assert buffer.resume_end_utterance_id == uid2
+
+        await hub.stop()
