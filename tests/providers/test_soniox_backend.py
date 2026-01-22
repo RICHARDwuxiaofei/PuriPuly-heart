@@ -80,6 +80,42 @@ async def test_soniox_session_collects_final_tokens() -> None:
 
 
 @pytest.mark.asyncio
+async def test_soniox_session_merges_final_batches_by_end_ms() -> None:
+    session = _make_session()
+
+    session._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": "Hello", "is_final": True, "end_ms": 100},
+                    {"text": " world", "is_final": True, "end_ms": 200},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+    event = session._events.get_nowait()
+    assert isinstance(event, STTBackendTranscriptEvent)
+    assert event.text == "Hello world"
+
+    session._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": ". ", "is_final": True, "end_ms": 150},
+                    {"text": "world", "is_final": True, "end_ms": 200},
+                    {"text": "!", "is_final": True, "end_ms": 260},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+    event = session._events.get_nowait()
+    assert isinstance(event, STTBackendTranscriptEvent)
+    assert event.text == "Hello. world!"
+
+
+@pytest.mark.asyncio
 async def test_soniox_session_skips_out_of_order_tokens() -> None:
     session = _make_session()
 
@@ -111,7 +147,7 @@ async def test_soniox_session_on_speech_end_enqueues_finalize() -> None:
     finalize = await session._audio_q.get()
 
     assert isinstance(finalize, _FinalizeRequest)
-    assert finalize.trailing_silence_ms == 240
+    assert finalize.trailing_silence_ms == session.trailing_silence_ms
 
 
 @pytest.mark.asyncio
