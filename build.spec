@@ -37,6 +37,7 @@ hiddenimports = [
     "puripuly_heart.providers.stt.soniox",
     "puripuly_heart.providers.llm.gemini",
     "puripuly_heart.providers.llm.qwen",
+    "puripuly_heart.providers.llm.qwen_async",
     "google.genai",
     "dashscope",
     "deepgram",
