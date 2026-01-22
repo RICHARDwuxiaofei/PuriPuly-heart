@@ -20,6 +20,7 @@ from puripuly_heart.core.storage.secrets import (
 from puripuly_heart.core.stt.backend import STTBackend
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
+from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 
 SECRETS_PASSPHRASE_ENV = "PURIPULY_HEART_SECRETS_PASSPHRASE"
 
@@ -124,10 +125,21 @@ def create_llm_provider(settings: AppSettings, *, secrets: SecretStore) -> LLMPr
                 key="alibaba_api_key_singapore",
                 env_vars=("ALIBABA_API_KEY_SINGAPORE", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
             )
-        base = QwenLLMProvider(
-            api_key=api_key,
-            base_url=settings.qwen.get_llm_base_url(),
-        )
+        if settings.stt.low_latency_mode:
+            # Low-latency mode: use httpx async client for immediate cancellation
+            base_url = settings.qwen.get_llm_base_url()
+            # Convert SDK URL to OpenAI-compatible URL
+            async_base_url = base_url.replace("/api/v1", "/compatible-mode/v1")
+            base = AsyncQwenLLMProvider(
+                api_key=api_key,
+                base_url=async_base_url,
+            )
+        else:
+            # Standard mode: use DashScope SDK
+            base = QwenLLMProvider(
+                api_key=api_key,
+                base_url=settings.qwen.get_llm_base_url(),
+            )
     else:
         raise ValueError(f"Unsupported LLM provider: {settings.provider.llm}")
 
