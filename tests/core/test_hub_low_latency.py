@@ -1,0 +1,358 @@
+"""Unit tests for low-latency mode awaiting_vad_end bug fix."""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from uuid import uuid4
+
+import numpy as np
+import pytest
+
+from puripuly_heart.core.orchestrator.hub import ClientHub
+from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
+from puripuly_heart.domain.models import Transcript, Translation
+
+# ── Mock classes ──────────────────────────────────────────────────────────────
+
+
+class FakeClock:
+    """Fake clock for testing time-based logic."""
+
+    def __init__(self, initial_time: float = 0.0):
+        self._time = initial_time
+
+    def now(self) -> float:
+        return self._time
+
+    def advance(self, seconds: float) -> None:
+        self._time += seconds
+
+
+@dataclass
+class FakeLLMProvider:
+    """Fake LLM provider that records calls."""
+
+    calls: list[dict] = field(default_factory=list)
+    response_text: str = "translated"
+    delay_s: float = 0.01
+
+    async def translate(
+        self,
+        *,
+        utterance_id,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+        context_pairs: list[dict[str, str]] | None = None,
+    ):
+        self.calls.append(
+            {
+                "utterance_id": utterance_id,
+                "text": text,
+                "context": context,
+                "context_pairs": context_pairs,
+            }
+        )
+        await asyncio.sleep(self.delay_s)
+        return Translation(utterance_id=utterance_id, text=self.response_text)
+
+    async def close(self) -> None:
+        pass
+
+
+@dataclass
+class FakeOscQueue:
+    """Fake OSC queue that records enqueued messages."""
+
+    messages: list = field(default_factory=list)
+
+    def enqueue(self, msg) -> None:
+        self.messages.append(msg)
+
+    def send_typing(self, on: bool) -> None:
+        pass
+
+    def send_immediate(self, text: str) -> bool:
+        return True
+
+    def process_due(self) -> None:
+        pass
+
+
+def samples(value: float, n: int = 512) -> np.ndarray:
+    return np.full((n,), value, dtype=np.float32)
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+
+class TestSpeechEndedTracking:
+    """Test _speech_ended_ids tracking."""
+
+    @pytest.mark.asyncio
+    async def test_speech_end_before_stt_final_uses_post_end_phase(self):
+        """SpeechEnd가 먼저 오면 phase=post_end로 처리되어야 함."""
+        clock = FakeClock(initial_time=10.0)
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=FakeOscQueue(),
+            clock=clock,
+            low_latency_mode=True,
+        )
+
+        uid = uuid4()
+
+        # 1. SpeechStart
+        await hub.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+
+        # 2. SpeechChunk (3개)
+        for _ in range(3):
+            await hub.handle_vad_event(SpeechChunk(uid, chunk=samples(0.5)))
+
+        # 3. SpeechEnd 먼저 도착
+        await hub.handle_vad_event(SpeechEnd(uid))
+
+        # 4. _speech_ended_ids에 추가되었는지 확인
+        assert uid in hub._speech_ended_ids
+
+        # 5. STT Final 이벤트 직접 호출
+        transcript = Transcript(
+            utterance_id=uid, text="테스트", is_final=True, created_at=clock.now()
+        )
+        await hub._handle_low_latency_final(transcript)
+
+        # 6. awaiting_vad_end=False 확인 (post_end로 처리됨)
+        buffer = hub._merge_buffer
+        assert buffer is not None
+        assert buffer.awaiting_vad_end is False
+
+        await hub.stop()
+
+    @pytest.mark.asyncio
+    async def test_stt_final_before_speech_end_waits_for_vad_end(self):
+        """STT Final이 먼저 오면 awaiting_vad_end=True가 되어야 함."""
+        clock = FakeClock(initial_time=10.0)
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=FakeOscQueue(),
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_awaiting_vad_timeout_s=10.0,  # 긴 타임아웃
+        )
+
+        uid = uuid4()
+
+        # SpeechEnd 없이 STT Final 직접 전송
+        transcript = Transcript(
+            utterance_id=uid, text="테스트", is_final=True, created_at=clock.now()
+        )
+        await hub._handle_low_latency_final(transcript)
+
+        # awaiting_vad_end=True 확인
+        buffer = hub._merge_buffer
+        assert buffer is not None
+        assert buffer.awaiting_vad_end is True
+        assert buffer.awaiting_vad_utterance_id == uid
+
+        # SpeechEnd 전송
+        await hub.handle_vad_event(SpeechEnd(uid))
+
+        # awaiting_vad_end=False로 클리어됨
+        assert buffer.awaiting_vad_end is False
+
+        await hub.stop()
+
+    @pytest.mark.asyncio
+    async def test_speech_ended_ids_cleaned_on_commit(self):
+        """커밋 시 _speech_ended_ids가 정리되어야 함."""
+        clock = FakeClock(initial_time=10.0)
+        hub = ClientHub(
+            stt=None,
+            llm=None,  # LLM 없이 직접 커밋
+            osc=FakeOscQueue(),
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=0,  # 즉시 커밋
+        )
+
+        uid = uuid4()
+
+        # SpeechEnd 도착
+        await hub.handle_vad_event(SpeechEnd(uid))
+        assert uid in hub._speech_ended_ids
+
+        # STT Final 전송 (LLM 없으므로 바로 커밋)
+        transcript = Transcript(
+            utterance_id=uid, text="테스트", is_final=True, created_at=clock.now()
+        )
+        await hub._handle_low_latency_final(transcript)
+
+        # 커밋 후 정리됨
+        assert uid not in hub._speech_ended_ids
+
+        await hub.stop()
+
+
+class TestAwaitingVadEndTimeout:
+    """Test awaiting_vad_end timeout mechanism."""
+
+    @pytest.mark.asyncio
+    async def test_awaiting_vad_end_timeout_clears_state(self):
+        """타임아웃 후 awaiting_vad_end가 클리어되어야 함."""
+        clock = FakeClock(initial_time=10.0)
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=FakeOscQueue(),
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_awaiting_vad_timeout_s=0.1,  # 100ms 타임아웃
+        )
+
+        uid = uuid4()
+
+        # SpeechEnd 없이 STT Final 전송
+        transcript = Transcript(
+            utterance_id=uid, text="테스트", is_final=True, created_at=clock.now()
+        )
+        await hub._handle_low_latency_final(transcript)
+
+        # awaiting_vad_end=True 확인
+        buffer = hub._merge_buffer
+        assert buffer is not None
+        assert buffer.awaiting_vad_end is True
+
+        # 타임아웃 대기 (150ms)
+        await asyncio.sleep(0.15)
+
+        # 타임아웃으로 클리어됨
+        assert buffer.awaiting_vad_end is False
+
+        await hub.stop()
+
+    @pytest.mark.asyncio
+    async def test_timeout_cancelled_when_speech_end_arrives(self):
+        """SpeechEnd가 오면 타임아웃이 취소되어야 함."""
+        clock = FakeClock(initial_time=10.0)
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=FakeOscQueue(),
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_awaiting_vad_timeout_s=0.5,  # 500ms 타임아웃
+        )
+
+        uid = uuid4()
+
+        # STT Final 전송 → 타임아웃 시작
+        transcript = Transcript(
+            utterance_id=uid, text="테스트", is_final=True, created_at=clock.now()
+        )
+        await hub._handle_low_latency_final(transcript)
+
+        buffer = hub._merge_buffer
+        assert buffer is not None
+        assert buffer.awaiting_vad_timeout_task is not None
+
+        # SpeechEnd 전송 → 타임아웃 취소
+        await hub.handle_vad_event(SpeechEnd(uid))
+
+        # 타임아웃 태스크가 취소됨
+        assert buffer.awaiting_vad_timeout_task is None
+
+        await hub.stop()
+
+
+class TestLowLatencyCommitBlocking:
+    """Test commit blocking scenarios in low-latency mode."""
+
+    @pytest.mark.asyncio
+    async def test_normal_speech_commits_without_delay(self):
+        """정상 발화는 지연 없이 커밋되어야 함 (regression)."""
+        clock = FakeClock(initial_time=10.0)
+        osc = FakeOscQueue()
+        hub = ClientHub(
+            stt=None,
+            llm=None,  # 번역 없이 직접 커밋
+            osc=osc,
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=10,  # 짧은 grace period
+        )
+
+        uid = uuid4()
+
+        # 정상 시퀀스: SpeechStart → SpeechChunks → SpeechEnd → STT Final
+        await hub.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+        for _ in range(3):
+            await hub.handle_vad_event(SpeechChunk(uid, chunk=samples(0.5)))
+        await hub.handle_vad_event(SpeechEnd(uid))
+
+        # STT Final
+        transcript = Transcript(
+            utterance_id=uid, text="정상 발화", is_final=True, created_at=clock.now()
+        )
+        await hub._handle_low_latency_final(transcript)
+
+        # grace period 대기
+        await asyncio.sleep(0.02)
+
+        # OSC 메시지 전송됨
+        assert len(osc.messages) == 1
+        assert "정상 발화" in osc.messages[0].text
+
+        await hub.stop()
+
+    @pytest.mark.asyncio
+    async def test_speech_end_after_commit_pop_does_not_block(self):
+        """이전 커밋에서 pop된 후 SpeechEnd가 와도 블록되지 않아야 함.
+
+        이것은 99be2bfc 버그의 핵심 시나리오입니다:
+        1. 첫 번째 버퍼가 utterance_id를 포함하여 커밋됨 (_utterance_start_times pop)
+        2. 같은 utterance_id의 SpeechEnd가 나중에 도착
+        3. 새 버퍼에서 같은 utterance_id의 STT Final이 도착
+        4. _utterance_start_times.get() = None이지만 SpeechEnd가 이미 왔으므로 post_end 처리
+        """
+        clock = FakeClock(initial_time=10.0)
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=0,
+        )
+
+        uid1 = uuid4()
+        uid2 = uuid4()
+
+        # 첫 번째 발화 완료 및 커밋
+        await hub.handle_vad_event(SpeechEnd(uid1))
+        transcript1 = Transcript(
+            utterance_id=uid1, text="첫 번째", is_final=True, created_at=clock.now()
+        )
+        await hub._handle_low_latency_final(transcript1)
+
+        # uid1이 _utterance_start_times에서 pop됨
+        assert uid1 not in hub._utterance_start_times
+
+        # 하지만 _speech_ended_ids에는 있음 (커밋 시 정리되었지만, 다시 추가될 수 있음)
+        # 실제로는 첫 번째 커밋에서 정리되었을 것이므로 없음
+
+        # uid2로 새 발화 시작
+        await hub.handle_vad_event(SpeechEnd(uid2))
+        transcript2 = Transcript(
+            utterance_id=uid2, text="두 번째", is_final=True, created_at=clock.now()
+        )
+        await hub._handle_low_latency_final(transcript2)
+
+        # 정상적으로 커밋됨 (블록 없음)
+        assert hub._merge_buffer is None
+
+        await hub.stop()

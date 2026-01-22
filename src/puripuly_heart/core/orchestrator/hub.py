@@ -72,6 +72,7 @@ class _MergeBuffer:
     resume_started_at: float | None = None
     awaiting_vad_end: bool = False
     awaiting_vad_utterance_id: UUID | None = None
+    awaiting_vad_timeout_task: asyncio.Task[None] | None = None
     finalize_wait_task: asyncio.Task[None] | None = None
     finalize_wait_started_at: float | None = None
 
@@ -106,6 +107,7 @@ class ClientHub:
     low_latency_merge_gap_ms: int = 600
     low_latency_spec_retry_max: int = 1
     low_latency_finalize_wait_ms: int = 400
+    low_latency_awaiting_vad_timeout_s: float = 2.0  # Timeout for awaiting_vad_end state
 
     ui_events: asyncio.Queue[UIEvent] = field(default_factory=asyncio.Queue)
 
@@ -117,6 +119,7 @@ class ClientHub:
     )  # For E2E latency tracking
     _translation_history: list[ContextEntry] = field(default_factory=list)  # Context memory
     _translation_memory: list[TranslationMemoryEntry] = field(default_factory=list)  # TM list
+    _speech_ended_ids: set[UUID] = field(default_factory=set)  # Track SpeechEnd arrivals
     _stt_task: asyncio.Task[None] | None = None
     _osc_flush_task: asyncio.Task[None] | None = None
     _running: bool = False
@@ -154,7 +157,11 @@ class ClientHub:
         self._translation_tasks.clear()
 
         if self._merge_buffer is not None:
-            merge_tasks = [self._merge_buffer.spec_task, self._merge_buffer.finalize_wait_task]
+            merge_tasks = [
+                self._merge_buffer.spec_task,
+                self._merge_buffer.finalize_wait_task,
+                self._merge_buffer.awaiting_vad_timeout_task,
+            ]
             for task in merge_tasks:
                 if task is not None and not task.done():
                     task.cancel()
@@ -262,6 +269,7 @@ class ClientHub:
         # Record start time for E2E latency tracking (from speech end)
         if isinstance(event, SpeechEnd):
             self._utterance_start_times[event.utterance_id] = self.clock.now()
+            self._speech_ended_ids.add(event.utterance_id)
             if self.low_latency_mode:
                 self._maybe_update_buffer_end_time(event.utterance_id)
                 self._maybe_start_finalize_wait(event.utterance_id)
@@ -486,6 +494,42 @@ class ClientHub:
             return
         buffer.awaiting_vad_end = False
         buffer.awaiting_vad_utterance_id = None
+        self._cancel_awaiting_vad_timeout(buffer)
+        self._restart_post_end_grace(buffer)
+
+    def _cancel_awaiting_vad_timeout(self, buffer: _MergeBuffer) -> None:
+        task = buffer.awaiting_vad_timeout_task
+        if task is not None and task is not asyncio.current_task():
+            if not task.done():
+                task.cancel()
+        buffer.awaiting_vad_timeout_task = None
+
+    def _start_awaiting_vad_timeout(self, buffer: _MergeBuffer) -> None:
+        if self.low_latency_awaiting_vad_timeout_s <= 0:
+            return
+        self._cancel_awaiting_vad_timeout(buffer)
+        buffer.awaiting_vad_timeout_task = asyncio.create_task(
+            self._awaiting_vad_timeout(buffer.merge_id)
+        )
+
+    async def _awaiting_vad_timeout(self, merge_id: UUID) -> None:
+        try:
+            await asyncio.sleep(self.low_latency_awaiting_vad_timeout_s)
+        except asyncio.CancelledError:
+            return
+        buffer = self._merge_buffer
+        if buffer is None or buffer.merge_id != merge_id:
+            return
+        if not buffer.awaiting_vad_end:
+            return
+        logger.info(
+            "[Metric] awaiting_vad_timeout id=%s timeout_s=%s",
+            str(merge_id)[:8],
+            self.low_latency_awaiting_vad_timeout_s,
+        )
+        buffer.awaiting_vad_end = False
+        buffer.awaiting_vad_utterance_id = None
+        buffer.awaiting_vad_timeout_task = None
         self._restart_post_end_grace(buffer)
 
     def _restart_post_end_grace(self, buffer: _MergeBuffer) -> None:
@@ -616,16 +660,21 @@ class ClientHub:
         buffer.last_final_at = now
 
         end_time = self._utterance_start_times.get(transcript.utterance_id)
-        if end_time is None:
+        speech_already_ended = transcript.utterance_id in self._speech_ended_ids
+
+        if end_time is None and not speech_already_ended:
+            # SpeechEnd has not arrived yet - wait for it
             buffer.awaiting_vad_end = True
             buffer.awaiting_vad_utterance_id = transcript.utterance_id
             self._cancel_finalize_wait(buffer)
+            self._start_awaiting_vad_timeout(buffer)
             logger.info(
                 "[Metric] final_phase id=%s phase=pre_end vad_id=%s",
                 str(buffer.merge_id)[:8],
                 str(transcript.utterance_id)[:8],
             )
         else:
+            # SpeechEnd already arrived (or end_time exists) - proceed to post_end
             self._maybe_update_buffer_end_time(transcript.utterance_id)
             if (
                 buffer.awaiting_vad_end
@@ -683,6 +732,7 @@ class ClientHub:
         buffer.awaiting_vad_utterance_id = None
         for utterance_id in buffer.utterance_ids:
             self._utterance_start_times.pop(utterance_id, None)
+            self._speech_ended_ids.discard(utterance_id)
         if self._merge_buffer is buffer:
             self._merge_buffer = None
 
