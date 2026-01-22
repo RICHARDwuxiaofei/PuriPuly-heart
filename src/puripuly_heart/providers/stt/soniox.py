@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Sequence
@@ -362,6 +363,11 @@ class _SonioxSession(STTBackendSession):
         if not self._final_tokens:
             return
         text = "".join(token.text for token in self._final_tokens).strip()
+        if not text:
+            return
+        # 문두 문장부호+공백 패턴 제거 (이전 발화의 잔여 문장부호 방어)
+        # 예: ". 안녕" -> "안녕", "? 다음" -> "다음"
+        text = re.sub(r"^[.,:;!?。，；：！？]+\s+", "", text)
         if not text:
             return
         logger.info("[STT] Transcript: '%s' (final)", text)
