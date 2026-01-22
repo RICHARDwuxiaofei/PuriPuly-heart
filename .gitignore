@@ -212,6 +212,7 @@ marimo/_lsp/
 __marimo__/
 
 .specs/
+.data/
 .test_audio/
 Installer_output/
 .references/
