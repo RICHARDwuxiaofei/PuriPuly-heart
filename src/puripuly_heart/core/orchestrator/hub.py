@@ -75,6 +75,8 @@ class _MergeBuffer:
     awaiting_vad_timeout_task: asyncio.Task[None] | None = None
     finalize_wait_task: asyncio.Task[None] | None = None
     finalize_wait_started_at: float | None = None
+    resume_end_timeout_task: asyncio.Task[None] | None = None
+    resume_end_utterance_id: UUID | None = None
 
 
 class STTProvider(Protocol):
@@ -84,6 +86,8 @@ class STTProvider(Protocol):
 
 
 _PROMO_INTERVAL_SEC: float = 300.0  # 5 minutes
+_RELAXED_OVERLAP_MIN_CHARS: int = 3
+_BOUNDARY_PUNCT = {".", ",", ";", ":", "!", "?"}
 
 
 @dataclass(slots=True)
@@ -107,7 +111,7 @@ class ClientHub:
     low_latency_merge_gap_ms: int = 600
     low_latency_spec_retry_max: int = 1
     low_latency_finalize_wait_ms: int = 400
-    low_latency_awaiting_vad_timeout_s: float = 2.0  # Timeout for awaiting_vad_end state
+    low_latency_awaiting_vad_timeout_s: float = 3.0  # Timeout for awaiting_vad_end state
 
     ui_events: asyncio.Queue[UIEvent] = field(default_factory=asyncio.Queue)
 
@@ -161,6 +165,7 @@ class ClientHub:
                 self._merge_buffer.spec_task,
                 self._merge_buffer.finalize_wait_task,
                 self._merge_buffer.awaiting_vad_timeout_task,
+                self._merge_buffer.resume_end_timeout_task,
             ]
             for task in merge_tasks:
                 if task is not None and not task.done():
@@ -415,9 +420,57 @@ class ClientHub:
         if overlap_len:
             return existing + addition[overlap_len:]
 
+        relaxed_merge = self._relaxed_overlap_merge(existing, addition)
+        if relaxed_merge is not None:
+            return relaxed_merge
+
         if self._needs_space(existing, addition):
             return f"{existing} {addition}"
         return f"{existing}{addition}"
+
+    def _relaxed_overlap_merge(self, existing: str, addition: str) -> str | None:
+        if not existing or not addition:
+            return None
+
+        left_trimmed, left_trimmed_len = self._strip_trailing_boundary(existing)
+        right_trimmed, right_trimmed_len = self._strip_leading_boundary(addition)
+        if left_trimmed_len == 0 and right_trimmed_len == 0:
+            return None
+        if not left_trimmed or not right_trimmed:
+            return None
+
+        max_overlap = min(len(left_trimmed), len(right_trimmed))
+        overlap_len = 0
+        for i in range(1, max_overlap + 1):
+            if left_trimmed[-i:] == right_trimmed[:i]:
+                overlap_len = i
+
+        if overlap_len < _RELAXED_OVERLAP_MIN_CHARS:
+            return None
+
+        cut = right_trimmed_len + overlap_len
+        if cut <= 0 or cut > len(addition):
+            return None
+
+        base = existing[:-left_trimmed_len] if left_trimmed_len else existing
+        if cut >= len(addition):
+            return base
+        return f"{base}{addition[cut:]}"
+
+    def _strip_trailing_boundary(self, text: str) -> tuple[str, int]:
+        idx = len(text)
+        while idx > 0 and self._is_boundary_char(text[idx - 1]):
+            idx -= 1
+        return text[:idx], len(text) - idx
+
+    def _strip_leading_boundary(self, text: str) -> tuple[str, int]:
+        idx = 0
+        while idx < len(text) and self._is_boundary_char(text[idx]):
+            idx += 1
+        return text[idx:], idx
+
+    def _is_boundary_char(self, ch: str) -> bool:
+        return ch.isspace() or ch in _BOUNDARY_PUNCT
 
     def _needs_space(self, left: str, right: str) -> bool:
         if not left or not right:
@@ -465,6 +518,7 @@ class ClientHub:
         buffer.resume_utterance_id = None
         buffer.resume_chunk_count = 0
         buffer.resume_started_at = None
+        self._cancel_resume_end_timeout(buffer)
 
     def _maybe_update_buffer_end_time(self, utterance_id: UUID) -> None:
         buffer = self._merge_buffer
@@ -532,6 +586,43 @@ class ClientHub:
         buffer.awaiting_vad_timeout_task = None
         self._restart_post_end_grace(buffer)
 
+    def _cancel_resume_end_timeout(self, buffer: _MergeBuffer) -> None:
+        task = buffer.resume_end_timeout_task
+        if task is not None and task is not asyncio.current_task():
+            if not task.done():
+                task.cancel()
+        buffer.resume_end_timeout_task = None
+        buffer.resume_end_utterance_id = None
+
+    def _start_resume_end_timeout(self, buffer: _MergeBuffer, utterance_id: UUID) -> None:
+        self._cancel_resume_end_timeout(buffer)
+        buffer.resume_end_utterance_id = utterance_id
+        buffer.resume_end_timeout_task = asyncio.create_task(
+            self._resume_end_timeout(buffer.merge_id, utterance_id)
+        )
+
+    async def _resume_end_timeout(self, merge_id: UUID, utterance_id: UUID) -> None:
+        try:
+            await asyncio.sleep(self.low_latency_awaiting_vad_timeout_s)
+        except asyncio.CancelledError:
+            return
+        buffer = self._merge_buffer
+        if buffer is None or buffer.merge_id != merge_id:
+            return
+        if buffer.resume_end_utterance_id != utterance_id:
+            return
+        if not buffer.resume_confirmed:
+            return
+        logger.info(
+            "[Metric] resume_end_timeout id=%s vad_id=%s timeout_s=%s",
+            str(merge_id)[:8],
+            str(utterance_id)[:8],
+            self.low_latency_awaiting_vad_timeout_s,
+        )
+        self._clear_resume_state(buffer)
+        self._cancel_finalize_wait(buffer)
+        await self._try_commit_after_spec(buffer, reason="resume_end_timeout", allow_fallback=True)
+
     def _restart_post_end_grace(self, buffer: _MergeBuffer) -> None:
         if self.low_latency_finalize_wait_ms <= 0:
             self._cancel_finalize_wait(buffer)
@@ -575,6 +666,8 @@ class ClientHub:
             return
         if buffer.resume_pending and buffer.resume_utterance_id == event.utterance_id:
             return
+        # 새 resume 시작 시 이전 타임아웃 취소
+        self._cancel_resume_end_timeout(buffer)
         buffer.resume_pending = True
         buffer.resume_confirmed = False
         buffer.resume_utterance_id = event.utterance_id
@@ -626,11 +719,15 @@ class ClientHub:
 
     async def _maybe_clear_resume_on_end(self, event: SpeechEnd) -> None:
         buffer = self._merge_buffer
-        if buffer is None or not buffer.resume_pending:
+        if buffer is None:
             return
         if buffer.resume_utterance_id != event.utterance_id:
             return
         if buffer.resume_confirmed:
+            # resume_confirmed 상태에서 SpeechEnd → STT Final 대기 타임아웃 시작
+            self._start_resume_end_timeout(buffer, event.utterance_id)
+            return
+        if not buffer.resume_pending:
             return
         false_ms = 0
         if buffer.resume_started_at is not None:
