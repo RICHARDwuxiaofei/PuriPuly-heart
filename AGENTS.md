@@ -84,7 +84,7 @@ audio/VAD -> STT -> LLM -> OSC. It ships a GUI using Flet and CLI entry points.
 ### 2.7 Context Memory
 
 - Implemented in `ClientHub` as `_translation_history`
-- Defaults: `context_time_window_s = 20.0`, `context_max_entries = 3`
+- Defaults: `context_time_window_s = 25.0`, `context_max_entries = 3`
 - Only recent entries within the time window are formatted and passed to the LLM
 - Update `tests/core/test_context_memory.py` when changing window size or behavior
 
