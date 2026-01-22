@@ -125,6 +125,9 @@
     "about.inspired_by": "Inspired by",
     "about.special_thanks": "Special Thanks",
     "about.licenses": "Licenses",
+    "about.version": "Version",
     "toggle.on": "低延迟",
-    "toggle.off": "标准"
+    "toggle.on.description": "⚠️ 语音识别稳定性略有下降，翻译成本增加",
+    "toggle.off": "标准",
+    "toggle.off.description": "稳定运行"
 }

@@ -75,30 +75,54 @@ class AboutView(ft.Column):
         ]
 
     def _build_header(self) -> ft.Control:
-        """Build app name and version header in a card."""
-        header_content = ft.Column(
-            controls=[
-                ft.Text(
+        """Build app name and version header as two separate cards."""
+        # Left card: App name
+        app_name_card = self._wrap_card(
+            ft.Container(
+                content=ft.Text(
                     t("app.title"),
                     size=48,
                     weight=ft.FontWeight.BOLD,
                     color=COLOR_PRIMARY,
                 ),
-                ft.Text(
-                    f"v{__version__}",
-                    size=24,
-                    color=COLOR_ON_BACKGROUND,
-                ),
-            ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=8,
-        )
-
-        return self._wrap_card(
-            ft.Container(
-                content=header_content,
                 alignment=ft.alignment.center,
             )
+        )
+
+        # Right card: Version (clickable, opens git repo)
+        # Same structure as settings view 1x1 boxes
+        version_title = ft.Text(
+            t("about.version"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        version_text = ft.Container(
+            content=ft.Text(
+                f"v{__version__}",
+                size=28,
+                color=COLOR_ON_BACKGROUND,
+                text_align=ft.TextAlign.CENTER,
+            ),
+            alignment=ft.alignment.center,
+            expand=True,
+            on_click=lambda _: webbrowser.open("https://github.com/kapitalismho/PuriPuly-heart"),
+            on_hover=self._on_version_hover,
+        )
+        version_card = self._wrap_card(
+            ft.Column([version_title, version_text], spacing=0, expand=True)
+        )
+
+        return ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Container(content=app_name_card, expand=True),
+                    ft.Container(content=version_card, expand=True),
+                ],
+                spacing=16,
+                expand=True,
+            ),
+            height=280,
         )
 
     def _build_credits_card(self) -> ft.Control:
@@ -306,6 +330,12 @@ class AboutView(ft.Column):
 
     def _on_link_hover(self, e):
         """Handle hover on project links."""
+        text = e.control.content
+        text.color = COLOR_PRIMARY if e.data == "true" else COLOR_ON_BACKGROUND
+        text.update()
+
+    def _on_version_hover(self, e):
+        """Handle hover on version link."""
         text = e.control.content
         text.color = COLOR_PRIMARY if e.data == "true" else COLOR_ON_BACKGROUND
         text.update()

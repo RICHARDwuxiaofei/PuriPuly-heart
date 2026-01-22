@@ -125,6 +125,9 @@
   "about.inspired_by": "Inspired by",
   "about.special_thanks": "Special Thanks",
   "about.licenses": "Licenses",
+  "about.version": "Version",
   "toggle.on": "저지연",
-  "toggle.off": "표준"
+  "toggle.on.description": "⚠️ 음성 인식의 안정성이 약간 낮아지고 번역 비용이 늘어나요",
+  "toggle.off": "표준",
+  "toggle.off.description": "안정적으로 동작해요"
 }

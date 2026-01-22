@@ -777,8 +777,16 @@ class SettingsView(ft.Column):
         if not self.page:
             return
         options = [
-            OptionItem(value="on", label=t("toggle.on")),
-            OptionItem(value="off", label=t("toggle.off")),
+            OptionItem(
+                value="on",
+                label=t("toggle.on"),
+                description=t("toggle.on.description", default=""),
+            ),
+            OptionItem(
+                value="off",
+                label=t("toggle.off"),
+                description=t("toggle.off.description", default=""),
+            ),
         ]
         current = "on" if self._settings.stt.low_latency_mode else "off"
         modal = SettingsModal(
@@ -786,7 +794,7 @@ class SettingsView(ft.Column):
             t("settings.low_latency_mode"),
             options,
             self._on_low_latency_selected,
-            show_description=False,
+            show_description=True,
         )
         modal.open(current)
 
