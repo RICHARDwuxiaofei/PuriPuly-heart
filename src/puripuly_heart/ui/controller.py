@@ -239,6 +239,7 @@ class GuiController:
         prev_locale = get_locale()
         # hub.source_language를 기준으로 비교 (settings 객체는 이미 수정되어 전달될 수 있음)
         prev_source_lang = self.hub.source_language if self.hub else None
+        prev_low_latency = self.hub.low_latency_mode if self.hub else None
         self.settings = settings
         self._save_settings()
 
@@ -260,6 +261,20 @@ class GuiController:
                     except Exception as exc:
                         self._log_error(f"Failed to apply locale: {exc}")
             return
+
+        # low_latency_mode 변경 시 Qwen LLM 프로바이더 재생성 필요
+        # (AsyncQwenLLMProvider vs QwenLLMProvider 전환)
+        if (
+            prev_low_latency is not None
+            and prev_low_latency != settings.stt.low_latency_mode
+            and self.settings.provider.llm.value == "qwen"
+        ):
+            logger.info(
+                "[Settings] Low latency mode changed: %s -> %s, rebuilding LLM provider",
+                prev_low_latency,
+                settings.stt.low_latency_mode,
+            )
+            await self._rebuild_llm_provider()
 
         if self.hub is not None:
             self.hub.source_language = settings.languages.source_language
@@ -336,6 +351,32 @@ class GuiController:
         path.parent.mkdir(parents=True, exist_ok=True)
         save_settings(path, settings)
         return settings
+
+    async def _rebuild_llm_provider(self) -> None:
+        """Rebuild only the LLM provider without tearing down the entire pipeline."""
+        if self.hub is None or self.settings is None:
+            return
+
+        # Close existing LLM provider
+        if self.hub.llm is not None:
+            with contextlib.suppress(Exception):
+                await self.hub.llm.close()
+
+        # Create new LLM provider with current settings
+        secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+        llm = None
+        with contextlib.suppress(Exception):
+            llm = create_llm_provider(self.settings, secrets=secrets)
+
+        # Update hub's LLM provider
+        self.hub.llm = llm
+
+        # Update dashboard status
+        dash = getattr(self.app, "view_dashboard", None)
+        if dash is not None:
+            dash.set_translation_needs_key(llm is None)
+
+        logger.info("[Settings] LLM provider rebuilt successfully")
 
     async def _rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
         _ = rebuild_stt
