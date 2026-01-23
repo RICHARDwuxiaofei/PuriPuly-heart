@@ -261,9 +261,7 @@ class ClientHub:
             self._translation_memory.pop(0)
 
     async def handle_vad_event(self, event: VadEvent) -> None:
-        # Start typing indicator when speech begins
         if isinstance(event, SpeechStart):
-            self.osc.send_typing(True)
             if self.low_latency_mode:
                 self._mark_resume_pending(event)
 
@@ -273,6 +271,7 @@ class ClientHub:
 
         # Record start time for E2E latency tracking (from speech end)
         if isinstance(event, SpeechEnd):
+            self.osc.send_typing(True)
             self._utterance_start_times[event.utterance_id] = self.clock.now()
             self._speech_ended_ids.add(event.utterance_id)
             if self.low_latency_mode:
