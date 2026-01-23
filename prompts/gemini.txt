@@ -39,7 +39,7 @@ Interpret ${sourceName} input into the ${targetName} naturally, preserving the s
  
     (Context-Continuation: "꼭 봐" refers to the movie recommendation from context. Restored the omitted object 'it' and mapped 'Must' to casual 'Gotta'.)
 
- 2. [Context: "The weather is so nice today."] "What should I eat for lunch?" => お昼、何食べようかな？
+ 2. [Context: "The weather is so nice today."] "What should I eat for lunch?" => お昼は、何食べようかな？
  
     (Context-Independence: Topic shifted from 'weather' to 'lunch'. Translated INDEPENDENTLY without forcing a causal link like "Since the weather is nice...".)
 
