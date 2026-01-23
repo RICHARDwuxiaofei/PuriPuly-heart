@@ -123,9 +123,7 @@ class SettingsModal:
             bg_color = COLOR_PRIMARY if is_selected else COLOR_BACKGROUND
             text_color = ft.Colors.WHITE if is_selected else COLOR_ON_BACKGROUND
             desc_color = (
-                ft.Colors.with_opacity(0.8, ft.Colors.WHITE)
-                if is_selected
-                else COLOR_NEUTRAL_DARK
+                ft.Colors.with_opacity(0.8, ft.Colors.WHITE) if is_selected else COLOR_NEUTRAL_DARK
             )
 
             # Shadow for depth
@@ -160,7 +158,6 @@ class SettingsModal:
                     spacing=8,
                     horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 )
-                item_height = 100
             else:
                 content = ft.Text(
                     option.label,
@@ -169,7 +166,6 @@ class SettingsModal:
                     weight=ft.FontWeight.BOLD,
                     text_align=ft.TextAlign.CENTER,
                 )
-                item_height = 70
 
             item = ft.Container(
                 content=content,
