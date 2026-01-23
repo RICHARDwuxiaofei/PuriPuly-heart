@@ -242,6 +242,7 @@ class _DeepgramSDKSession(STTBackendSession):
                         logger.debug(
                             f"Deepgram: Stop signal received after {audio_chunks_sent} chunks"
                         )
+                        self._put_event(None)  # Signal consumer immediately before SDK cleanup
                         break
 
                     if data is _FINALIZE:
