@@ -86,7 +86,7 @@ def load_prompt(name: str = "default") -> str:
     default_file = prompts_dir / "default.md"
     if default_file.exists():
         return default_file.read_text(encoding="utf-8").strip()
-    
+
     # Legacy default.txt
     default_file = prompts_dir / "default.txt"
     if default_file.exists():
