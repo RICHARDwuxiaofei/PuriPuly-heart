@@ -37,6 +37,8 @@
   "settings.prompt_for": "Prompt for: {provider}",
   "settings.system_prompt": "System Prompt",
   "settings.reset_prompt": "Reset Prompt",
+  "settings.reset_examples": "Reset Examples",
+  "settings.few_shot_header": "Translation Examples",
   "settings.verify_key": "Verify Key",
   "settings.ui_language": "Language",
   "settings.default_option": "Auto",

@@ -10,7 +10,6 @@ import pytest
 from puripuly_heart.core.orchestrator.hub import (
     ClientHub,
     ContextEntry,
-    TranslationMemoryEntry,
 )
 
 # ── Mock classes ──────────────────────────────────────────────────────────────
@@ -189,20 +188,9 @@ class TestContextFiltering:
         hub._translation_history = [
             ContextEntry(text="test", source_language="ko", target_language="en", timestamp=1.0),
         ]
-        hub._translation_memory = [
-            TranslationMemoryEntry(
-                source="hi",
-                target="hello",
-                source_language="ko",
-                target_language="en",
-                timestamp=1.0,
-            )
-        ]
-
         hub.clear_context()
 
         assert len(hub._translation_history) == 0
-        assert len(hub._translation_memory) == 0
 
     def test_old_entries_removed_when_full(self):
         """When max_entries is exceeded, oldest should be removed."""
@@ -359,84 +347,34 @@ class TestContextFormatting:
         assert '"b"' in result
 
 
-class TestTranslationMemory:
-    """Test translation memory tm_list behavior."""
-
-    def test_tm_list_filters_by_language_and_length(self):
-        clock = FakeClock(initial_time=10.0)
-        hub = ClientHub(
-            stt=None,
-            llm=FakeLLMProvider(),
-            osc=FakeOscQueue(),
-            clock=clock,
-            context_time_window_s=5.0,
-            context_max_entries=3,
-        )
-        hub.source_language = "ko"
-        hub.target_language = "en"
-
-        hub._translation_memory = [
-            TranslationMemoryEntry(
-                source="old",
-                target="old",
-                source_language="ko",
-                target_language="en",
-                timestamp=1.0,
-            ),
-            TranslationMemoryEntry(
-                source="ok",
-                target="fine",
-                source_language="ko",
-                target_language="en",
-                timestamp=9.0,
-            ),
-            TranslationMemoryEntry(
-                source="no",
-                target="nah",
-                source_language="ja",
-                target_language="en",
-                timestamp=9.5,
-            ),
-            TranslationMemoryEntry(
-                source="a",
-                target="b",
-                source_language="ko",
-                target_language="en",
-                timestamp=9.7,
-            ),
-        ]
-
-        tm_list = hub._get_tm_list()
-
-        assert tm_list == [{"source": "ok", "target": "fine"}]
+class TestQwenFewShot:
+    """Test that static few-shot examples are passed to the Qwen LLM."""
 
     @pytest.mark.asyncio
-    async def test_tm_list_passed_to_llm(self):
+    async def test_qwen_few_shot_passed_to_llm(self):
+        """ClientHub should pass the static Qwen few-shot list to the LLM."""
+
+        # 1. Define mock data
+        mock_data = [{"source": "mock_src", "target": "mock_tgt"}]
+
         clock = FakeClock(initial_time=10.0)
         fake_llm = FakeLLMProvider()
+
+        # 2. Instantiate Hub with explicit few-shot list
+        # Since _qwen_few_shot is a field, we can pass it to __init__
         hub = ClientHub(
             stt=None,
             llm=fake_llm,
             osc=FakeOscQueue(),
             clock=clock,
-            context_time_window_s=5.0,
-            context_max_entries=3,
+            _qwen_few_shot=mock_data,
         )
-        hub.source_language = "ko"
-        hub.target_language = "en"
 
-        hub._translation_memory = [
-            TranslationMemoryEntry(
-                source="hello",
-                target="hi",
-                source_language="ko",
-                target_language="en",
-                timestamp=9.0,
-            )
-        ]
-
+        # 3. Trigger translation
         utterance_id = uuid4()
-        await hub._translate_and_enqueue(utterance_id, "world")
+        await hub._translate_and_enqueue(utterance_id, "test sentence")
 
+        # 4. Verify LLM received the mocked context_pairs
         assert len(fake_llm.calls) == 1
-        assert fake_llm.calls[0]["context_pairs"] == [{"source": "hello", "target": "hi"}]
+        call = fake_llm.calls[0]
+        assert call["context_pairs"] == mock_data

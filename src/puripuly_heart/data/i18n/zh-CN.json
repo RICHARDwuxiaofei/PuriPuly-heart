@@ -37,6 +37,8 @@
     "settings.prompt_for": "提示词用于：{provider}",
     "settings.system_prompt": "系统提示词",
     "settings.reset_prompt": "重置提示词",
+    "settings.reset_examples": "重置示例",
+    "settings.few_shot_header": "翻译示例",
     "settings.verify_key": "验证密钥",
     "settings.ui_language": "语言",
     "settings.default_option": "自动",
