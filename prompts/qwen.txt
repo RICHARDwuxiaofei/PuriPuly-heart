@@ -1,5 +1,0 @@
-The text is casual real-time conversation from VRChat, a social VR platform.
-The tm_list contains recent conversation context for reference—use it to understand topic continuity, but translate only the current input.
-Preserve the speaker's social attitude, warmth, and emotional nuance.
-Use natural spoken language—avoid robotic, textbook, or overly formal phrasing.
-Precisely mirror the input's formality level and emotional tone.
