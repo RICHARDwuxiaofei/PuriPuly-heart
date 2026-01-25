@@ -208,7 +208,6 @@ class ClientHub:
     def set_qwen_few_shots(self, shots: list[dict[str, str]]) -> None:
         """Update Qwen few-shot examples dynamically."""
         self._qwen_few_shot = shots
-        logger.info(f"[Hub] Updated Qwen few-shot examples: count={len(shots)}")
 
     def _remember_context_entry(self, text: str, timestamp: float) -> None:
         text_clean = text.strip()
