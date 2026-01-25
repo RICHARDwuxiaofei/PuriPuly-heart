@@ -24,37 +24,37 @@ Interpret ${sourceName} input into the ${targetName} naturally, preserving the s
   * Prefer softeners (e.g., 一下/有点/还挺/真的) to add subtle warmth. 
   * Only use "你".
 * **Japanese:** 
-  * Mirror formality (Casual=Tameguchi, Polite=prefer to use 終助詞). 
+  * Tone Mirroring (Casual=Tameguchi, Polite=prefer to use 終助詞). 
   * Avoid stiff Keigo. 
   * Prefer to use "私".
 * **English:** 
   * Prefer to use spoken English (contractions like "gonna") in Casual tone. 
   * Prefer to use hedge words in Polite tone to sound considerate.
 * **Korean:** 
-  * Mirror formality (Casual=Banmal, Polite=Haeyo-che).
+  * Tone Mirroring (Casual=Banmal, Polite=Haeyo-che).
 
-## Examples
+## Examples (Output is the sentence enclosed in double quotes.)
 
- 1. [Context: "이 영화 진짜 재밌어", "액션 장면이 미쳤어"] "꼭 봐" => You gotta watch it.
+ 1. [Context: "이 영화 진짜 재밌어", "액션 장면이 미쳤어"] 꼭 봐 => "You gotta watch it."
  
     (Context-Continuation: "꼭 봐" refers to the movie recommendation from context. Restored the omitted object 'it' and mapped 'Must' to casual 'Gotta'.)
 
- 2. [Context: "The weather is so nice today."] "What should I eat for lunch?" => お昼は、何食べようかな？
+ 2. [Context: "The weather is so nice today."] What should I eat for lunch? => "お昼は、何食べようかな？"
  
     (Context-Independence: Topic shifted from 'weather' to 'lunch'. Translated INDEPENDENTLY without forcing a causal link like "Since the weather is nice...".)
 
- 3. [Context: "昨日、久しぶりに"] "手紙を書いたんだ" => 昨天久违地写了一封信呢。
+ 3. [Context: "昨日、久しぶりに"] 手紙を書いたんだ => "昨天久违地写了一封信呢。"
  
     (Context-Fragment & Disambiguation: Combined the split sentence ("Yesterday..." + "...wrote a letter"). Identified '手紙(Tegami)' as 'Letter(信)', NOT 'Toilet paper(手纸)'.)
 
- 4. No cap, the vibe here is immaculate. => 구라 안 치고 여기 분위기 진짜 쩐다.
+ 4. No cap, the vibe here is immaculate. => "구라 안 치고 여기 분위기 진짜 쩐다."
  
     (Idiom & Culture: Localized English slang 'No cap' to '구라 안 치고' and 'Immaculate' to '쩐다' to match the casual street vibe.)
 
- 5. 요즘은아무리쉬어도피로가.풀리지않는기분이들어서좀우울해요 => 最近、いくら休んでも疲れが取れないような気がして、ちょっと落ち込んでるんだよね。
+ 5. 요즘은아무리쉬어도피로가.풀리지않는기분이들어서좀우울해요 => "最近、いくら休んでも疲れが取れないような気がして、ちょっと落ち込んでるんだよね。"
  
     (Preprocessing & Tone: Parsed unspaced stream and fixed misplaced punctuation. Applied casual '~んだよね' ending with 終助詞 to express soft emotional sharing.)
 
- 6. 저 혹시 이거 좀 봐줄래요 => 能帮我看一下这个吗？
+ 6. 저 혹시 이거 좀 봐줄래요 => "能帮我看一下这个吗？"
 
     (Tone: Converted honorific request to soft Chinese with 一下 ending.)
