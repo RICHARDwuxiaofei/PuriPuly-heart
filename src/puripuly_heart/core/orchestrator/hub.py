@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 logger = logging.getLogger(__name__)
 
+from puripuly_heart.config.prompts import load_qwen_few_shot
 from puripuly_heart.core.clock import Clock, SystemClock
 from puripuly_heart.core.language import get_llm_language_name
 from puripuly_heart.core.llm.provider import LLMProvider
@@ -38,17 +39,6 @@ class ContextEntry:
     source_language: str
     target_language: str
     timestamp: float  # When the translation was requested
-
-
-@dataclass(frozen=True, slots=True)
-class TranslationMemoryEntry:
-    """Represents a recent source/target pair for translation memory."""
-
-    source: str
-    target: str
-    source_language: str
-    target_language: str
-    timestamp: float  # When the translation was completed
 
 
 @dataclass(slots=True)
@@ -122,7 +112,7 @@ class ClientHub:
         default_factory=dict
     )  # For E2E latency tracking
     _translation_history: list[ContextEntry] = field(default_factory=list)  # Context memory
-    _translation_memory: list[TranslationMemoryEntry] = field(default_factory=list)  # TM list
+    _qwen_few_shot: list[dict[str, str]] = field(default_factory=load_qwen_few_shot)
     _speech_ended_ids: set[UUID] = field(default_factory=set)  # Track SpeechEnd arrivals
     _stt_task: asyncio.Task[None] | None = None
     _osc_flush_task: asyncio.Task[None] | None = None
@@ -184,9 +174,8 @@ class ClientHub:
         self._promo_eligible = True
 
     def clear_context(self) -> None:
-        """Clear the translation context history and translation memory."""
+        """Clear the translation context history."""
         self._translation_history.clear()
-        self._translation_memory.clear()
         logger.info("[Hub] Context history cleared")
 
     def _get_valid_context(self) -> list[ContextEntry]:
@@ -213,20 +202,13 @@ class ClientHub:
         return "\n".join(lines)
 
     def _get_tm_list(self) -> list[dict[str, str]]:
-        """Build a tm_list payload from recent translation memory."""
-        if not self._translation_memory:
-            return []
-        now = self.clock.now()
-        valid = [
-            entry
-            for entry in self._translation_memory[-self.context_max_entries :]
-            if (now - entry.timestamp) < self.context_time_window_s
-            and entry.source_language == self.source_language
-            and entry.target_language == self.target_language
-            and len(entry.source) >= 2
-            and len(entry.target) >= 2
-        ]
-        return [{"source": entry.source, "target": entry.target} for entry in valid]
+        """Return the fixed few-shot list for Qwen."""
+        return self._qwen_few_shot
+
+    def set_qwen_few_shots(self, shots: list[dict[str, str]]) -> None:
+        """Update Qwen few-shot examples dynamically."""
+        self._qwen_few_shot = shots
+        logger.info(f"[Hub] Updated Qwen few-shot examples: count={len(shots)}")
 
     def _remember_context_entry(self, text: str, timestamp: float) -> None:
         text_clean = text.strip()
@@ -242,23 +224,6 @@ class ClientHub:
         )
         if len(self._translation_history) > self.context_max_entries:
             self._translation_history.pop(0)
-
-    def _remember_translation_pair(self, source: str, target: str) -> None:
-        source_clean = source.strip()
-        target_clean = target.strip()
-        if len(source_clean) < 2 or len(target_clean) < 2:
-            return
-        self._translation_memory.append(
-            TranslationMemoryEntry(
-                source=source_clean,
-                target=target_clean,
-                source_language=self.source_language,
-                target_language=self.target_language,
-                timestamp=self.clock.now(),
-            )
-        )
-        if len(self._translation_memory) > self.context_max_entries:
-            self._translation_memory.pop(0)
 
     async def handle_vad_event(self, event: VadEvent) -> None:
         if isinstance(event, SpeechStart):
@@ -887,8 +852,8 @@ class ClientHub:
                 )
                 bundle = self.get_or_create_bundle(buffer.merge_id)
                 bundle.with_translation(translation)
+                bundle.with_translation(translation)
                 self._remember_context_entry(final_text, self.clock.now())
-                self._remember_translation_pair(final_text, translation.text)
                 await self.ui_events.put(
                     UIEvent(
                         type=UIEventType.TRANSLATION_DONE,
@@ -1134,7 +1099,7 @@ class ClientHub:
 
         bundle = self.get_or_create_bundle(utterance_id)
         bundle.with_translation(translation)
-        self._remember_translation_pair(text, translation.text)
+        bundle.with_translation(translation)
         await self.ui_events.put(
             UIEvent(
                 type=UIEventType.TRANSLATION_DONE,

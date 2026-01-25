@@ -288,6 +288,7 @@ class GuiController:
                 if settings.stt.low_latency_mode
                 else 1.1
             )
+            self.hub.set_qwen_few_shots(settings.qwen_few_shots)
 
         # Audio/VAD changes apply on next STT start; if STT is running, restart mic loop.
         if self._mic_task is not None and self._stt_desired:

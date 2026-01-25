@@ -25,6 +25,7 @@ from puripuly_heart.ui.components.settings import (
     PromptEditor,
     SettingsModal,
 )
+from puripuly_heart.ui.components.settings.few_shot_editor import FewShotEditor
 from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import (
     available_locales,
@@ -400,12 +401,32 @@ class SettingsView(ft.Column):
             width=float("inf"),
         )
 
+        # Few-Shot Editor (Qwen only) - now in its own card
+        self._few_shot_editor = FewShotEditor(on_change=self._on_few_shot_change)
+
+        # Wrap in card
+        self._few_shot_card = self._wrap_card(
+            ft.Container(
+                content=self._few_shot_editor,
+                # Add some top padding to match look (optional, _wrap_card already adds padding)
+            )
+        )
+        self._few_shot_card.visible = False  # Default hidden
+
         persona_card = self._wrap_card(
-            ft.Column([persona_header, ft.Container(height=16), prompt_container], spacing=0),
+            ft.Column(
+                [
+                    persona_header,
+                    ft.Container(height=16),
+                    prompt_container,
+                ],
+                spacing=0,
+            ),
         )
         row5 = persona_card
+        row6 = self._few_shot_card
 
-        self.controls = [row1, row2, row3, row4, row5]
+        self.controls = [row1, row2, row3, row4, row5, row6]
 
     def _populate_host_apis(self) -> None:
         """Legacy hook for tests; host APIs are handled by AudioSettings."""
@@ -460,7 +481,17 @@ class SettingsView(ft.Column):
             self._prompt_editor.value = settings.system_prompt
         else:
             self._prompt_editor.load_default_prompt()
+            self._prompt_editor.load_default_prompt()
             settings.system_prompt = self._prompt_editor.value
+
+        # Load Few-Shots
+        self._few_shot_editor.value = settings.qwen_few_shots
+
+        # Check visibility
+        provider_name = "gemini" if settings.provider.llm == LLMProviderName.GEMINI else "qwen"
+        # Check visibility
+        provider_name = "gemini" if settings.provider.llm == LLMProviderName.GEMINI else "qwen"
+        self._few_shot_card.visible = provider_name == "qwen"
 
         # Load secrets
         self._load_secrets(settings, config_path)
@@ -657,7 +688,16 @@ class SettingsView(ft.Column):
         if self.page:
             self._qwen_region_btn.update()
             self._api_keys_column.update()
+            self._qwen_region_btn.update()
+            self._api_keys_column.update()
             self._llm_text.update()
+
+        # Toggle Few-Shot editor visibility
+        # Toggle Few-Shot editor visibility
+        self._few_shot_card.visible = provider == LLMProviderName.QWEN
+        if self.page:
+            self._few_shot_card.update()
+
         self._emit_settings_changed()
 
     def _on_ui_click(self, e) -> None:
@@ -820,6 +860,12 @@ class SettingsView(ft.Column):
         self._settings.system_prompt = value
         self._emit_settings_changed()
 
+    def _on_few_shot_change(self, value: list[dict[str, str]]) -> None:
+        if not self._settings:
+            return
+        self._settings.qwen_few_shots = value
+        self._emit_settings_changed()
+
     def _on_reset_prompt(self, e) -> None:
         """Reset prompt to default for current provider."""
         self._prompt_editor.load_default_prompt()
@@ -884,6 +930,7 @@ class SettingsView(ft.Column):
         self._alibaba_key_singapore.apply_locale()
         self._audio_settings.apply_locale()
         self._prompt_editor.apply_locale()
+        self._few_shot_editor.apply_locale()
 
         if self.page:
             self.update()

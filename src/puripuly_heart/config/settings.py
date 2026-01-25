@@ -241,6 +241,7 @@ class AppSettings:
     ui: UiSettings = field(default_factory=UiSettings)
     api_key_verified: ApiKeyVerificationSettings = field(default_factory=ApiKeyVerificationSettings)
     system_prompt: str = ""
+    qwen_few_shots: list[dict[str, str]] = field(default_factory=list)
 
     def validate(self) -> None:
         self.provider.validate()
@@ -334,6 +335,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "alibaba_singapore": settings.api_key_verified.alibaba_singapore,
         },
         "system_prompt": settings.system_prompt,
+        "qwen_few_shots": settings.qwen_few_shots,
     }
     return _enum_to_value(data)  # type: ignore[return-value]
 
@@ -450,7 +452,17 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             ),
         ),
         system_prompt=str(data.get("system_prompt", "")),
+        qwen_few_shots=list(data.get("qwen_few_shots") or []),
     )
+    # Load default few-shots if empty (and not explicitly set to empty list by user previously ?
+    # Implementation decision: If missing in JSON (None), load default. If empty list in JSON, keep empty.
+    # The 'or []' above handles None -> [].
+    # But for first run, we want defaults.
+    if "qwen_few_shots" not in data:
+        from puripuly_heart.config.prompts import load_qwen_few_shot
+
+        settings.qwen_few_shots = load_qwen_few_shot()
+
     settings.validate()
     return settings
 
