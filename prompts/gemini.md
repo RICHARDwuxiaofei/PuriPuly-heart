@@ -35,7 +35,7 @@ Interpret ${sourceName} input into the ${targetName} naturally, preserving the s
 
 ## Examples (Output is the sentence enclosed in double quotes.)
 
- 1. [Context: "이 영화 진짜 재밌어", "액션 장면이 미쳤어"] 꼭 봐 => "You gotta watch it."
+ 1. [Context: 이 영화 진짜 재밌어, 액션 장면이 미쳤어] 꼭 봐 => "You gotta watch it."
  
     (Context-Continuation: "꼭 봐" refers to the movie recommendation from context. Restored the omitted object 'it' and mapped 'Must' to casual 'Gotta'.)
 
@@ -43,7 +43,7 @@ Interpret ${sourceName} input into the ${targetName} naturally, preserving the s
  
     (Context-Independence: Topic shifted from 'weather' to 'lunch'. Translated INDEPENDENTLY without forcing a causal link like "Since the weather is nice...".)
 
- 3. [Context: "昨日、久しぶりに"] 手紙を書いたんだ => "昨天久违地写了一封信呢。"
+ 3. [Context: 昨日、久しぶりに] 手紙を書いたんだ => "昨天久违地写了一封信呢。"
  
     (Context-Fragment & Disambiguation: Combined the split sentence ("Yesterday..." + "...wrote a letter"). Identified '手紙(Tegami)' as 'Letter(信)', NOT 'Toilet paper(手纸)'.)
 
