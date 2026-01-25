@@ -32,28 +32,28 @@ Interpret ${sourceName} input into the ${targetName} naturally, preserving the s
 * **Korean**
   * Tone Mirroring (Casual=반말, Polite=해요체).
 
-## Examples (Output is the sentence enclosed in double quotes.)
+## Examples
 
- 1. [Context: 이 영화 진짜 재밌어, 액션 장면이 미쳤어] 꼭 봐 => "You gotta watch it."
+ 1. [Context: 이 영화 진짜 재밌어, 액션 장면이 미쳤어] 꼭 봐 => You gotta watch it.
  
     (Rule: Context-Continuation, Action: Inferred the omitted object 'it' from the preceding 'Movie' context.)
 
- 2. [Context: "The weather is so nice today."] What should I eat for lunch? => "お昼は、何食べようかな？"
+ 2. [Context: The weather is so nice today.] What should I eat for lunch? => お昼は、何食べようかな？
  
     (Rule: Context-Independence, Action: Translated independently due to topic shift, avoiding forced causal links.)
 
- 3. [Context: 昨日、久しぶりに] 手紙を書いたんだ => "昨天久违地写了一封信呢。"
+ 3. [Context: 昨日、久しぶりに] 手紙を書いたんだ => 昨天久违地写了一封信呢。"
  
     (Rule: Context-Fragment, Action: Merged the context, which is an incomplete phrase lacking a predicate, with the input.)
 
- 4. No cap, the vibe here is immaculate. => "구라 안 치고 여기 분위기 진짜 쩐다."
+ 4. No cap, the vibe here is immaculate. => 구라 안 치고 여기 분위기 진짜 쩐다.
  
     (Rule: Idiom & Culture, Action: Localized 'No cap' and 'Immaculate' to matching Korean street slang.)
 
- 5. 요즘은아무리쉬어도피로가.풀리지않는기분이들어서좀우울해요 => "最近、いくら休んでも疲れが取れないような気がして、ちょっと落ち込んでるんだよね。"
+ 5. 요즘은아무리쉬어도피로가.풀리지않는기분이들어서좀우울해요 => 最近、いくら休んでも疲れが取れないような気がして、ちょっと落ち込んでるんだよね。
  
     (Rule: Preprocessing & Tone, Action: Parsed unspaced text and applied the soft emotional ending.)
 
- 6. 저 혹시 이거 좀 봐줄래요 => "能帮我看一下这个吗？"
+ 6. 저 혹시 이거 좀 봐줄래요 => 能帮我看一下这个吗？
 
     (Rule: Tone, Action: Converted honorific request to a soft Chinese form.)
