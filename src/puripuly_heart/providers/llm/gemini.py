@@ -129,7 +129,7 @@ class GoogleGenaiGeminiClient:
 
         # Build the message with context if provided
         if context:
-            user_message = f"context:\n{context}\n\nTranslate: {text}"
+            user_message = f"<context>\n{context}\n</context>\nInput: {text}"
             logger.info(
                 f"[LLM] Request with context: '{text}' -> {source_language} to {target_language}"
             )
