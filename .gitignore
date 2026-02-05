@@ -217,3 +217,5 @@ __marimo__/
 Installer_output/
 .references/
 /scripts
+.codex/
+.agent/
