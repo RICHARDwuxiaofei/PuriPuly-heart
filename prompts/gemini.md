@@ -21,7 +21,7 @@ Interpret ${sourceName} input into the ${targetName} naturally, preserving the s
 
 ### Language Rules
 * **Chinese**
-  * Use particles like "吧" and "呢" naturally to sound friendly. 
+  * Prefer to use particles like "吧" and "呢" naturally to sound friendly. 
   * Prefer softeners (e.g., 一下/有点/还挺/真的) to add subtle warmth. 
   * Only use "你".
 * **Japanese**
