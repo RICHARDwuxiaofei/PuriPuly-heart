@@ -128,8 +128,8 @@
     "about.special_thanks": "Special Thanks",
     "about.licenses": "Licenses",
     "about.version": "Version",
-    "toggle.on": "低延迟",
-    "toggle.on.description": "⚠️ 语音识别稳定性略有下降，翻译成本增加",
-    "toggle.off": "标准",
-    "toggle.off.description": "稳定运行"
+    "toggle.on": "快速响应",
+    "toggle.on.description": "说话时立即开始翻译",
+    "toggle.off": "稳定",
+    "toggle.off.description": "说完后再翻译，节省费用"
 }

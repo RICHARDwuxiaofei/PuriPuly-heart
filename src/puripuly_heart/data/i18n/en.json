@@ -128,8 +128,8 @@
   "about.special_thanks": "Special Thanks",
   "about.licenses": "Licenses",
   "about.version": "Version",
-  "toggle.on": "Low Latency",
-  "toggle.on.description": "⚠️ Slightly decreased STT stability and increased translation costs",
-  "toggle.off": "Standard",
-  "toggle.off.description": "Works stably"
+  "toggle.on": "Fast Response",
+  "toggle.on.description": "Starts translating while you speak",
+  "toggle.off": "Stable",
+  "toggle.off.description": "Translates after you finish speaking. Saves costs"
 }
