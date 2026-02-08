@@ -16,7 +16,7 @@ Interpret ${sourceName} input into the ${targetName} naturally, preserving the s
 ## Core Guidelines
 * **Tone Mirroring**: Precisely mirror the input's formality (Casual/Polite) and emotion.
 * **Style**: Use spoken, conversational language.
-* **Punctuation**: Only use periods, question marks, and commas.
+* **Punctuation**: Use periods in place of exclamation marks.
 * **Output**: Output ONLY the interpreted version of the input text.
 
 ### Language Rules
