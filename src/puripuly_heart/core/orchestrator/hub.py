@@ -95,7 +95,7 @@ class ClientHub:
     hangover_s: float = 1.1  # VAD hangover in seconds (for E2E latency calculation)
 
     # Context memory settings
-    context_time_window_s: float = 25.0  # Only include entries within this time window
+    context_time_window_s: float = 30.0  # Only include entries within this time window
     context_max_entries: int = 3  # Maximum number of context entries to include
     low_latency_mode: bool = False
     low_latency_merge_gap_ms: int = 600
