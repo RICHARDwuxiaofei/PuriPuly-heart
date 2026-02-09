@@ -31,9 +31,11 @@ class LanguageCard(ft.Container):
         self,
         on_source_click: Callable[[], None],
         on_target_click: Callable[[], None],
+        on_swap_click: Callable[[], None] | None = None,
     ):
         self._on_source_click = on_source_click
         self._on_target_click = on_target_click
+        self._on_swap_click = on_swap_click
         self._source = "Korean"
         self._target = "English"
 
@@ -57,7 +59,7 @@ class LanguageCard(ft.Container):
             overflow=ft.TextOverflow.ELLIPSIS,  # Fallback: truncate with ... if still too long
         )
 
-        # Arrow icon (Wrapped in container to match text padding for alignment)
+        # Arrow icon (clickable swap button)
         self._arrow_icon = ft.Icon(
             name=ft.Icons.ARROW_RIGHT_ALT,
             size=48,
@@ -66,6 +68,8 @@ class LanguageCard(ft.Container):
         self._arrow = ft.Container(
             content=self._arrow_icon,
             padding=ft.padding.symmetric(vertical=12),
+            on_click=lambda _: self._on_swap_click() if self._on_swap_click else None,
+            on_hover=self._on_arrow_hover,
         )
 
         # Source button area (left side)
@@ -129,6 +133,11 @@ class LanguageCard(ft.Container):
         """Handle hover state for target language."""
         self._target_text.color = COLOR_PRIMARY if e.data == "true" else COLOR_NEUTRAL_DARK
         self._target_text.update()
+
+    def _on_arrow_hover(self, e):
+        """Handle hover state for swap arrow."""
+        self._arrow_icon.color = COLOR_PRIMARY if e.data == "true" else COLOR_SECONDARY
+        self._arrow_icon.update()
 
     def set_languages(self, source: str, target: str):
         """Update displayed languages with dynamic sizing."""

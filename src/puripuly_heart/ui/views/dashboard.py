@@ -77,6 +77,7 @@ class DashboardView(ft.Column):
         self.language_card = LanguageCard(
             on_source_click=self._open_source_dialog,
             on_target_click=self._open_target_dialog,
+            on_swap_click=self._swap_languages,
         )
         self.language_card.set_languages(
             language_name(self._source_lang_code),
@@ -186,6 +187,19 @@ class DashboardView(ft.Column):
         """Handle target language selection."""
         self._target_lang_code = lang_code
         self._add_to_recent(lang_code, is_source=False)
+        self.language_card.set_languages(
+            language_name(self._source_lang_code),
+            language_name(self._target_lang_code),
+        )
+        self._notify_language_change()
+
+    def _swap_languages(self):
+        """Swap source and target languages."""
+        self._source_lang_code, self._target_lang_code = (
+            self._target_lang_code,
+            self._source_lang_code,
+        )
+        self._update_input_font()
         self.language_card.set_languages(
             language_name(self._source_lang_code),
             language_name(self._target_lang_code),
