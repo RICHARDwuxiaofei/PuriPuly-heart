@@ -96,7 +96,8 @@ This app uses cloud AI services. You pay directly for what you use with your own
 1. Download and install the latest version from the [Download Page](https://github.com/kapitalismho/PuriPuly-heart/releases/latest).
 2. Get a Deepgram API Key from [Deepgram](https://console.deepgram.com).
 3. Get a Gemini API Key from [Google AI Studio](https://aistudio.google.com/apikey).
-4. **Upgrade Gemini API plan** to paid tier (Optional but recommended).
+4. **Upgrade Gemini API plan** to paid tier (Highly recommended).
+  - The free tier has rate limits too restrictive for practical use.
 5. Enter and verify API keys in the PuriPuly **Settings** tab.
   - Paste the key and press Enter or unfocus the input box.
 6. Select Source/Target languages on the **Dashboard**.
