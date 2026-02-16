@@ -151,7 +151,7 @@ async def test_google_genai_client_formats_prompt_and_context(monkeypatch):
     )
 
     assert result == "OK"
-    assert state["contents"] == "context:\na -> b\n\nTranslate: hello"
+    assert state["contents"] == "<context>\na -> b\n</context>\nInput: hello"
     assert state["config"].system_instruction == "Translate ko to en."
 
 
