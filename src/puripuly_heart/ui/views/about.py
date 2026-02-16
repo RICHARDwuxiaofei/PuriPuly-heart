@@ -155,7 +155,7 @@ class AboutView(ft.Column):
                 weight=ft.FontWeight.BOLD,
                 color=COLOR_ON_BACKGROUND,
             ),
-            on_click=lambda _: webbrowser.open("https://github.com/kapitalismho"),
+            on_click=lambda _: webbrowser.open("https://discord.com/users/377814093182140416"),
             on_hover=self._on_name_hover,
         )
 
