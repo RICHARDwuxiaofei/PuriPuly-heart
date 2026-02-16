@@ -51,6 +51,8 @@ After the free credits run out, a small fee is charged per utterance.
 
 This app uses cloud AI services. You pay directly for what you use with your own API keys.
 
+---
+
 ### Recommended: Deepgram + Gemini (Fast Response)
 
 | Status | Cost/Utterance |
@@ -146,25 +148,25 @@ If Gemini/Deepgram/Soniox are blocked in your region:
 <details>
 <summary><h3>Gemini</h3></summary>
 
-1. Go to [Google AI Studio](https://aistudio.google.com/apikey).
+1. Go to [Google AI Studio](https://aistudio.google.com/apikey) and click the **Get API key** button.
    ![step1](docs/images/gemini/1.png)
 
-2. Click the **Get API key** button.
+2. Create a new project.
    ![step2](docs/images/gemini/2.png)
 
-3. Click **Create API key**.
+3. Choose any name for the project.
    ![step3](docs/images/gemini/3.png)
 
-4. Select **Create API key in new project**.
+4. Select the project you created and click **Create key**.
    ![step4](docs/images/gemini/4.png)
 
-5. Copy the generated key.
+5. Click the circled area.
    ![step5](docs/images/gemini/5.png)
 
-6. Paste the copied key into the Gemini API key field in PuriPuly's **Settings** tab.
+6. Click the circled area to copy the key.
    ![step6](docs/images/gemini/6.png)
 
-7. (Highly Recommended) Click the yellow **Set Up Billing** button to link a payment account.
+7. (Highly Recommended) Click the yellow **Set Up Billing** button to upgrade to the paid tier.
    ![step7](docs/images/gemini/7.png)
 
 </details>
@@ -184,10 +186,10 @@ If Gemini/Deepgram/Soniox are blocked in your region:
 4. Click **Create API Key**.
    ![step4](docs/images/qwen/4.png)
 
-5. Copy the generated key.
+5. Assign an account and workspace, then click OK.
    ![step5](docs/images/qwen/5.png)
 
-6. Paste it into the Qwen API key (Beijing) field in PuriPuly's **Settings** tab.
+6. Click the circled area to copy the key.
    ![step6](docs/images/qwen/6.png)
 
 </details>

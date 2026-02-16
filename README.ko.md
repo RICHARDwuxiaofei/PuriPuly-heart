@@ -50,6 +50,8 @@
 
 이 앱은 클라우드 AI 서비스를 활용해요. 사용자가 발급받은 API 키로 사용한 만큼만 직접 과금되는 구조에요.
 
+---
+
 ### 추천 조합: Deepgram + Gemini (빠른 응답)
 
 | Status | Cost/Utterance |
@@ -145,25 +147,25 @@ Gemini/Deepgram/Soniox가 차단된 지역이라면:
 <details>
 <summary><h3>Gemini</h3></summary>
 
-1. [Google AI Studio](https://aistudio.google.com/apikey)에 접속하세요.
+1. [Google AI Studio](https://aistudio.google.com/apikey)에 접속해서 **Get API key** 버튼을 클릭하세요.
    ![step1](docs/images/gemini/1.png)
 
-2. **Get API key** 버튼을 클릭하세요.
+2. 새로운 프로젝트를 만드세요.
    ![step2](docs/images/gemini/2.png)
 
-3. **Create API key** 버튼을 누르세요.
+3. 임의의 이름을 지어주세요.
    ![step3](docs/images/gemini/3.png)
 
-4. **Create API key in new project**를 선택하세요.
+4. 만든 프로젝트를 선택하고 **Create key**를 눌러주세요
    ![step4](docs/images/gemini/4.png)
 
-5. 생성된 키를 복사하세요.
+5. 동그라미 친 곳을 눌러주세요.
    ![step5](docs/images/gemini/5.png)
 
-6. PuriPuly의 **설정** 탭에서 Gemini API 키 입력칸에 복사한 키를 붙여넣으세요.
+6. 동그라미 친 곳을 눌러 key를 복사하세요.
    ![step6](docs/images/gemini/6.png)
 
-7. (매우 권장) 노란색으로 강조된 **Set Up Billing** 버튼을 눌러 결제 계정을 연결하세요.
+7. (매우 권장) 노란색으로 강조된 **Set Up Billing** 버튼을 눌러 유료 티어로 전환하세요.
    ![step7](docs/images/gemini/7.png)
 
 </details>
@@ -183,10 +185,10 @@ Gemini/Deepgram/Soniox가 차단된 지역이라면:
 4. **Create API Key**를 클릭하세요.
    ![step4](docs/images/qwen/4.png)
 
-5. 생성된 키를 복사하세요.
+5. 어카운트와 워크스페이스를 할당하고 OK 버튼을 눌러주세요
    ![step5](docs/images/qwen/5.png)
 
-6. PuriPuly의 **설정** 탭에서 Qwen API 키(Beijing) 입력칸에 붙여넣으세요.
+6. 동그라미 친 곳을 눌러 key를 복사하세요.
    ![step6](docs/images/qwen/6.png)
 
 </details>
@@ -203,7 +205,7 @@ Gemini/Deepgram/Soniox가 차단된 지역이라면:
 3. **Add Funds** 버튼을 눌러 결제 수단을 연결하세요.
    ![step3](docs/images/soniox/3.png)
 
-4. 소니옥스는 선불금 충전이 필요합니다. 충전이 완료되면 **API Keys** 메뉴로 이동하세요.
+4. 소니옥스는 선불금 충전이 필요해요. 충전 후에 **API Keys** 메뉴로 이동하세요.
    ![step4](docs/images/soniox/4.png)
 
 5. 새로운 API Key를 생성하세요.
