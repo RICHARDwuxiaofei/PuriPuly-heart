@@ -72,7 +72,7 @@
 
 *   *Qwen의 API 비용은 베이징 리전 기준*
 *   *Soniox는 연결 시간당 과금이 발생*
-*   *입력 850 토큰 + 출력 20토큰 x 발화 1회당 평균 LLM 호출 횟수 1.3회 가정*
+*   *(입력 850 토큰 + 출력 20토큰) x 발화 1회당 평균 LLM 호출 횟수 1.3회 가정*
 *   *요금표 기준: 2026년 2월 8일 / 빠른 응답 모드 활성화*
 *   *1 달러 = 1500원*
 
@@ -102,13 +102,13 @@
 7. **STT**와 **Trans** 버튼 클릭
 8. VRChat에서 OSC 활성화: Settings → OSC → Enable
 
-* 음성이 인식되지 않는다면 설정 탭에서 올바른 마이크를 선택해주세요.
+* 음성이 인식되지 않는다면 PuriPuly 설정 탭에서 올바른 마이크를 선택해주세요.
 
 ---
 
 ### 중국 사용자를 위한 안내
 
-Gemini/Deepgram/Soniox가 차단된 지역이라면:
+Gemini/Deepgram/Soniox가 차단된 지역이라면
 
 1. [Alibaba Cloud Model Studio](https://bailian.console.alibabacloud.com)에서 API 키 발급 (베이징 리전 API 키를 발급 받으세요)
 2. **설정**에서 제공자 변경:
