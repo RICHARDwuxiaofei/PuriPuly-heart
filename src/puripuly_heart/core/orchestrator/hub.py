@@ -465,7 +465,7 @@ class ClientHub:
                     merged = self._merge_with_overlap(existing, text)
                 if merged != existing:
                     buffer.parts[idx] = merged
-                    logger.info(
+                    logger.debug(
                         "[Metric] final_update id=%s index=%s text_len=%s",
                         str(buffer.merge_id)[:8],
                         idx,
@@ -539,7 +539,7 @@ class ClientHub:
             return
         if not buffer.awaiting_vad_end:
             return
-        logger.info(
+        logger.debug(
             "[Metric] awaiting_vad_timeout id=%s timeout_s=%s",
             str(merge_id)[:8],
             self.low_latency_awaiting_vad_timeout_s,
@@ -576,7 +576,7 @@ class ClientHub:
             return
         if not buffer.resume_confirmed:
             return
-        logger.info(
+        logger.debug(
             "[Metric] resume_end_timeout id=%s vad_id=%s timeout_s=%s",
             str(merge_id)[:8],
             str(utterance_id)[:8],
@@ -595,7 +595,7 @@ class ClientHub:
         buffer.finalize_wait_task = asyncio.create_task(
             self._finalize_wait_timeout(buffer.merge_id, buffer.finalize_wait_started_at)
         )
-        logger.info(
+        logger.debug(
             "[Metric] post_end_grace_start id=%s wait_ms=%s",
             str(buffer.merge_id)[:8],
             self.low_latency_finalize_wait_ms,
@@ -613,7 +613,7 @@ class ClientHub:
             return
         buffer.finalize_wait_task = None
         buffer.finalize_wait_started_at = None
-        logger.info(
+        logger.debug(
             "[Metric] post_end_grace_timeout id=%s wait_ms=%s",
             str(merge_id)[:8],
             self.low_latency_finalize_wait_ms,
@@ -636,7 +636,7 @@ class ClientHub:
         buffer.resume_utterance_id = event.utterance_id
         buffer.resume_chunk_count = 0
         buffer.resume_started_at = self.clock.now()
-        logger.info(
+        logger.debug(
             "[Metric] resume_pending id=%s vad_id=%s",
             str(buffer.merge_id)[:8],
             str(event.utterance_id)[:8],
@@ -657,7 +657,7 @@ class ClientHub:
         confirm_ms = 0
         if buffer.resume_started_at is not None:
             confirm_ms = int((self.clock.now() - buffer.resume_started_at) * 1000)
-        logger.info(
+        logger.debug(
             "[Metric] resume_confirmed id=%s confirm_ms=%s chunk_count=%s",
             str(buffer.merge_id)[:8],
             confirm_ms,
@@ -665,12 +665,12 @@ class ClientHub:
         )
         if buffer.spec_task is not None and not buffer.spec_task.done():
             buffer.spec_task.cancel()
-            logger.info(
+            logger.debug(
                 "[Metric] spec_cancel id=%s reason=resume_confirmed",
                 str(buffer.merge_id)[:8],
             )
         elif buffer.spec_translation is not None:
-            logger.info(
+            logger.debug(
                 "[Metric] spec_cancel id=%s reason=resume_confirmed",
                 str(buffer.merge_id)[:8],
             )
@@ -695,7 +695,7 @@ class ClientHub:
         false_ms = 0
         if buffer.resume_started_at is not None:
             false_ms = int((self.clock.now() - buffer.resume_started_at) * 1000)
-        logger.info(
+        logger.debug(
             "[Metric] resume_false_start id=%s false_ms=%s chunk_count=%s",
             str(buffer.merge_id)[:8],
             false_ms,
@@ -728,7 +728,7 @@ class ClientHub:
             buffer.awaiting_vad_utterance_id = transcript.utterance_id
             self._cancel_finalize_wait(buffer)
             self._start_awaiting_vad_timeout(buffer)
-            logger.info(
+            logger.debug(
                 "[Metric] final_phase id=%s phase=pre_end vad_id=%s",
                 str(buffer.merge_id)[:8],
                 str(transcript.utterance_id)[:8],
@@ -743,7 +743,7 @@ class ClientHub:
                 buffer.awaiting_vad_end = False
                 buffer.awaiting_vad_utterance_id = None
             self._restart_post_end_grace(buffer)
-            logger.info(
+            logger.debug(
                 "[Metric] final_phase id=%s phase=post_end vad_id=%s",
                 str(buffer.merge_id)[:8],
                 str(transcript.utterance_id)[:8],
@@ -760,7 +760,7 @@ class ClientHub:
             hold_ms = 0
             if buffer.spec_done_at is not None:
                 hold_ms = int((self.clock.now() - buffer.spec_done_at) * 1000)
-            logger.info(
+            logger.debug(
                 "[Metric] commit_blocked id=%s reason=%s hold_ms=%s",
                 str(buffer.merge_id)[:8],
                 reason,
@@ -771,7 +771,7 @@ class ClientHub:
             hold_ms = 0
             if buffer.finalize_wait_started_at is not None:
                 hold_ms = int((self.clock.now() - buffer.finalize_wait_started_at) * 1000)
-            logger.info(
+            logger.debug(
                 "[Metric] commit_blocked id=%s reason=await_vad_end hold_ms=%s",
                 str(buffer.merge_id)[:8],
                 hold_ms,
@@ -781,7 +781,7 @@ class ClientHub:
             hold_ms = 0
             if buffer.finalize_wait_started_at is not None:
                 hold_ms = int((self.clock.now() - buffer.finalize_wait_started_at) * 1000)
-            logger.info(
+            logger.debug(
                 "[Metric] commit_deferred id=%s reason=post_end_grace hold_ms=%s",
                 str(buffer.merge_id)[:8],
                 hold_ms,
@@ -831,7 +831,7 @@ class ClientHub:
         commit_delay_ms = 0
         if buffer.start_time is not None:
             commit_delay_ms = int((self.clock.now() - buffer.start_time) * 1000)
-        logger.info(
+        logger.debug(
             "[Metric] merge_commit id=%s used_spec=%s parts=%s text_len=%s commit_delay_ms=%s reason=%s",
             str(buffer.merge_id)[:8],
             reuse_spec,
@@ -843,7 +843,7 @@ class ClientHub:
         if reuse_spec:
             translation = buffer.spec_translation
             if translation is not None:
-                logger.info(
+                logger.debug(
                     "[Metric] spec_reuse id=%s translation_len=%s after_final=%s",
                     str(buffer.merge_id)[:8],
                     len(translation.text),
@@ -869,7 +869,7 @@ class ClientHub:
                 return
 
         if buffer.spec_translation is not None and buffer.spec_text != final_text:
-            logger.info(
+            logger.debug(
                 "[Metric] spec_cancel id=%s reason=final_mismatch", str(buffer.merge_id)[:8]
             )
 
@@ -882,11 +882,11 @@ class ClientHub:
         if buffer.spec_task is not None:
             if not buffer.spec_task.done():
                 buffer.spec_task.cancel()
-                logger.info(
+                logger.debug(
                     "[Metric] spec_cancel id=%s reason=spec_retry", str(buffer.merge_id)[:8]
                 )
             elif buffer.spec_translation is not None:
-                logger.info(
+                logger.debug(
                     "[Metric] spec_cancel id=%s reason=spec_retry", str(buffer.merge_id)[:8]
                 )
             buffer.spec_task = None
@@ -902,7 +902,7 @@ class ClientHub:
         buffer.spec_attempts += 1
         buffer.spec_text = merged_text
         buffer.spec_started_at = self.clock.now()
-        logger.info(
+        logger.debug(
             "[Metric] spec_start id=%s text_len=%s attempt=%s",
             str(buffer.merge_id)[:8],
             len(merged_text),
@@ -942,7 +942,7 @@ class ClientHub:
             latency_ms = 0
         else:
             latency_ms = int((self.clock.now() - buffer.spec_started_at) * 1000)
-        logger.info(
+        logger.debug(
             "[Metric] spec_done id=%s spec_latency_ms=%s translation_len=%s",
             str(merge_id)[:8],
             latency_ms,
@@ -959,7 +959,7 @@ class ClientHub:
             hold_ms = 0
             if buffer.spec_done_at is not None:
                 hold_ms = int((self.clock.now() - buffer.spec_done_at) * 1000)
-            logger.info(
+            logger.debug(
                 "[Metric] commit_blocked id=%s reason=%s hold_ms=%s",
                 str(buffer.merge_id)[:8],
                 reason,
@@ -970,7 +970,7 @@ class ClientHub:
             hold_ms = 0
             if buffer.finalize_wait_started_at is not None:
                 hold_ms = int((self.clock.now() - buffer.finalize_wait_started_at) * 1000)
-            logger.info(
+            logger.debug(
                 "[Metric] commit_blocked id=%s reason=await_vad_end hold_ms=%s",
                 str(buffer.merge_id)[:8],
                 hold_ms,
@@ -980,7 +980,7 @@ class ClientHub:
             hold_ms = 0
             if buffer.finalize_wait_started_at is not None:
                 hold_ms = int((self.clock.now() - buffer.finalize_wait_started_at) * 1000)
-            logger.info(
+            logger.debug(
                 "[Metric] commit_deferred id=%s reason=post_end_grace hold_ms=%s",
                 str(buffer.merge_id)[:8],
                 hold_ms,
