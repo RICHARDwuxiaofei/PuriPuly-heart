@@ -15,7 +15,7 @@ from puripuly_heart.config.prompts import (
 
 def test_load_prompt_for_qwen_matches_file() -> None:
     prompt = load_prompt_for_provider("qwen")
-    raw = Path("prompts/qwen.txt").read_text(encoding="utf-8").strip()
+    raw = Path("prompts/qwen.md").read_text(encoding="utf-8").strip()
     assert prompt == raw
     assert prompt
 
@@ -33,8 +33,8 @@ def test_get_prompts_dir_prefers_env(tmp_path, monkeypatch) -> None:
 def test_list_prompts_returns_sorted_names(tmp_path, monkeypatch) -> None:
     prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir()
-    (prompts_dir / "b.txt").write_text("B", encoding="utf-8")
-    (prompts_dir / "a.txt").write_text("A", encoding="utf-8")
+    (prompts_dir / "b.md").write_text("B", encoding="utf-8")
+    (prompts_dir / "a.md").write_text("A", encoding="utf-8")
 
     monkeypatch.setenv("PURIPULY_HEART_PROMPTS_DIR", str(prompts_dir))
 
