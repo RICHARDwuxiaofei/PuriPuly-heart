@@ -108,7 +108,7 @@ class QwenASRSTTSettings:
 
 @dataclass(slots=True)
 class SonioxSTTSettings:
-    model: str = "stt-rt-v3"
+    model: str = "stt-rt-v4"
     endpoint: str = "wss://stt-rt.soniox.com/transcribe-websocket"
     keepalive_interval_s: float = 10.0
     trailing_silence_ms: int = 100
@@ -408,7 +408,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             ),
         ),
         soniox_stt=SonioxSTTSettings(
-            model=str(data.get("soniox_stt", {}).get("model", "stt-rt-v3")),
+            model=str(data.get("soniox_stt", {}).get("model", "stt-rt-v4")),
             endpoint=str(
                 data.get("soniox_stt", {}).get(
                     "endpoint", "wss://stt-rt.soniox.com/transcribe-websocket"

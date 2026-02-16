@@ -130,7 +130,7 @@ def test_create_stt_backend_qwen_asr_uses_singapore_region() -> None:
 def test_create_stt_backend_soniox_uses_secret() -> None:
     settings = AppSettings(
         provider=ProviderSettings(stt=STTProviderName.SONIOX),
-        soniox_stt=SonioxSTTSettings(model="stt-rt-v3"),
+        soniox_stt=SonioxSTTSettings(model="stt-rt-v4"),
     )
     secrets = InMemorySecretStore()
     secrets.set("soniox_api_key", "k6")

@@ -41,7 +41,7 @@ class SonioxRealtimeSTTBackend(STTBackend):
 
     api_key: str
     language_hints: Sequence[str]
-    model: str = "stt-rt-v3"
+    model: str = "stt-rt-v4"
     endpoint: str = "wss://stt-rt.soniox.com/transcribe-websocket"
     sample_rate_hz: int = 16000
     keepalive_interval_s: float = 10.0
@@ -89,7 +89,7 @@ class SonioxRealtimeSTTBackend(STTBackend):
                 async with websockets.connect(endpoint, ping_interval=None, open_timeout=5) as ws:
                     config = {
                         "api_key": api_key,
-                        "model": "stt-rt-v3",
+                        "model": "stt-rt-v4",
                         "audio_format": "pcm_s16le",
                         "sample_rate": 16000,
                         "num_channels": 1,
