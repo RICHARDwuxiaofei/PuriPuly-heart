@@ -95,7 +95,8 @@
 1. [다운로드 페이지](https://github.com/kapitalismho/PuriPuly-heart/releases/latest)에서 최신 버전 다운로드 및 설치
 2. [Deepgram](https://console.deepgram.com)에서 Deepgram API 키 발급
 3. [Google AI Studio](https://aistudio.google.com/apikey)에서 Gemini API 키 발급
-4. **Gemini API 결제 플랜**을 유료로 전환 (선택 사항이지만 권장)
+4. **Gemini API 결제 플랜**을 유료로 전환
+  - 무료 티어는 분당 호출 제한이 15회로 제한되어있으므로 전환을 매우 권장해요.
 5. PuriPuly **설정** 탭에서 API 키 입력 후 검증
   - 입력 칸에 API 키를 붙여넣기 한 후 엔터를 누르거나 포커스를 해제해주세요.
 6. **대시보드**에서 원본/대상 언어 선택
@@ -110,7 +111,7 @@
 
 Gemini/Deepgram/Soniox가 차단된 지역이라면
 
-1. [Alibaba Cloud Model Studio](https://bailian.console.alibabacloud.com)에서 API 키 발급 (베이징 리전 API 키를 발급 받으세요)
+1. [Alibaba Cloud Model Studio](https://bailian.console.alibabacloud.com)에서 API 키 발급 (베이징 리전)
 2. **설정**에서 제공자 변경:
    - STT: **Qwen ASR**
    - LLM: **Qwen MT Flash**
