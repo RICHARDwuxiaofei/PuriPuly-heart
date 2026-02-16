@@ -74,7 +74,7 @@ This app uses cloud AI services. You pay directly for what you use with your own
 
 *   *Qwen API costs represent the Beijing region.*
 *   *Soniox charges per connection time.*
-*   *Based on: Input 850 tokens + Output 20 tokens x avg 1.3 LLM calls per utterance.*
+*   *Based on: (Input 850 tokens + Output 20 tokens) x avg 1.3 LLM calls per utterance.*
 *   *Based on pricing as of Feb 8, 2026 / Fast Response mode active.*
 
 ---
@@ -103,7 +103,7 @@ This app uses cloud AI services. You pay directly for what you use with your own
 7. Click **STT** and **Trans** buttons.
 8. Enable OSC in VRChat: Settings → OSC → Enable.
 
-* If voice is not recognized, select the correct microphone in the Settings tab.
+* If voice is not recognized, select the correct microphone in the PuriPuly Settings tab.
 
 ---
 
