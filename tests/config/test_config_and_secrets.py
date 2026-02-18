@@ -5,11 +5,13 @@ import json
 import pytest
 
 from puripuly_heart.config.settings import (
+    SETTINGS_SCHEMA_VERSION,
     AppSettings,
     AudioSettings,
     OSCSettings,
     load_settings,
     save_settings,
+    to_dict,
 )
 from puripuly_heart.core.storage.secrets import EncryptedFileSecretStore, mask_secret
 
@@ -37,6 +39,38 @@ def test_settings_validation_rejects_invalid_osc():
     settings = AppSettings(osc=OSCSettings(ttl_s=-1))
     with pytest.raises(ValueError):
         settings.validate()
+
+
+def test_load_settings_migrates_legacy_concurrency_limit_and_persists(tmp_path):
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy.pop("settings_version", None)
+    legacy["llm"]["concurrency_limit"] = 1
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
+    assert loaded.llm.concurrency_limit == 2
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert persisted["llm"]["concurrency_limit"] == 2
+
+
+def test_load_settings_migration_preserves_custom_concurrency_limit(tmp_path):
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy.pop("settings_version", None)
+    legacy["llm"]["concurrency_limit"] = 3
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
+    assert loaded.llm.concurrency_limit == 3
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert persisted["llm"]["concurrency_limit"] == 3
 
 
 def test_mask_secret():

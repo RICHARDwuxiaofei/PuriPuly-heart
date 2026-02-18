@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+SETTINGS_SCHEMA_VERSION = 2
 
 
 class STTProviderName(str, Enum):
@@ -126,7 +129,7 @@ class SonioxSTTSettings:
 
 @dataclass(slots=True)
 class LLMSettings:
-    concurrency_limit: int = 1
+    concurrency_limit: int = 2
 
     def validate(self) -> None:
         if self.concurrency_limit <= 0:
@@ -227,6 +230,7 @@ class ApiKeyVerificationSettings:
 
 @dataclass(slots=True)
 class AppSettings:
+    settings_version: int = SETTINGS_SCHEMA_VERSION
     provider: ProviderSettings = field(default_factory=ProviderSettings)
     languages: LanguageSettings = field(default_factory=LanguageSettings)
     audio: AudioSettings = field(default_factory=AudioSettings)
@@ -244,6 +248,8 @@ class AppSettings:
     qwen_few_shots: list[dict[str, str]] = field(default_factory=list)
 
     def validate(self) -> None:
+        if self.settings_version <= 0:
+            raise ValueError("settings_version must be > 0")
         self.provider.validate()
         self.languages.validate()
         self.audio.validate()
@@ -271,6 +277,7 @@ def _enum_to_value(obj: object) -> object:
 
 def to_dict(settings: AppSettings) -> dict[str, Any]:
     data: dict[str, Any] = {
+        "settings_version": settings.settings_version,
         "provider": {"stt": settings.provider.stt.value, "llm": settings.provider.llm.value},
         "languages": {
             "source_language": settings.languages.source_language,
@@ -350,6 +357,43 @@ def _parse_stt_provider(value: str) -> STTProviderName:
         return STTProviderName.DEEPGRAM
 
 
+def _coerce_int(value: object, fallback: int) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    data: dict[str, Any] = copy.deepcopy(raw)
+    changed = False
+
+    version = _coerce_int(data.get("settings_version"), 1)
+    if version < 1:
+        version = 1
+
+    if version < 2:
+        llm_data = data.get("llm")
+        if not isinstance(llm_data, dict):
+            llm_data = {}
+            data["llm"] = llm_data
+            changed = True
+
+        concurrency_limit = _coerce_int(llm_data.get("concurrency_limit"), 1)
+        # Preserve explicit custom limits (>1), migrate legacy default 1 to new default 2.
+        if concurrency_limit <= 1:
+            llm_data["concurrency_limit"] = 2
+            changed = True
+
+        version = 2
+
+    if data.get("settings_version") != version:
+        data["settings_version"] = version
+        changed = True
+
+    return data, changed
+
+
 def from_dict(data: dict[str, Any]) -> AppSettings:
     audio_data = data.get("audio") or {}
     stt_data = data.get("stt") or {}
@@ -359,6 +403,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     vad_threshold_raw = stt_data.get("vad_speech_threshold")
 
     settings = AppSettings(
+        settings_version=_coerce_int(data.get("settings_version"), SETTINGS_SCHEMA_VERSION),
         provider=ProviderSettings(
             stt=_parse_stt_provider(
                 data.get("provider", {}).get("stt", STTProviderName.DEEPGRAM.value)
@@ -422,7 +467,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         qwen=QwenSettings(
             region=QwenRegion(data.get("qwen", {}).get("region", QwenRegion.BEIJING.value)),
         ),
-        llm=LLMSettings(concurrency_limit=int(data.get("llm", {}).get("concurrency_limit", 1))),
+        llm=LLMSettings(concurrency_limit=int(data.get("llm", {}).get("concurrency_limit", 2))),
         osc=OSCSettings(
             host=str(data.get("osc", {}).get("host", "127.0.0.1")),
             port=int(data.get("osc", {}).get("port", 9000)),
@@ -471,7 +516,11 @@ def load_settings(path: Path) -> AppSettings:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("settings file must contain a JSON object")
-    return from_dict(raw)
+    migrated, changed = _migrate_settings_dict(raw)
+    settings = from_dict(migrated)
+    if changed:
+        save_settings(path, settings)
+    return settings
 
 
 def save_settings(path: Path, settings: AppSettings) -> None:
