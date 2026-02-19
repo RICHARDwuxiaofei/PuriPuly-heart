@@ -73,6 +73,38 @@ def test_load_settings_migration_preserves_custom_concurrency_limit(tmp_path):
     assert persisted["llm"]["concurrency_limit"] == 3
 
 
+def test_load_settings_migrates_legacy_soniox_model_and_persists(tmp_path):
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["settings_version"] = 2
+    legacy["soniox_stt"]["model"] = "stt-rt-v3"
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
+    assert loaded.soniox_stt.model == "stt-rt-v4"
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert persisted["soniox_stt"]["model"] == "stt-rt-v4"
+
+
+def test_load_settings_migration_preserves_custom_soniox_model(tmp_path):
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["settings_version"] = 2
+    legacy["soniox_stt"]["model"] = "stt-rt-experimental"
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
+    assert loaded.soniox_stt.model == "stt-rt-experimental"
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert persisted["soniox_stt"]["model"] == "stt-rt-experimental"
+
+
 def test_mask_secret():
     assert mask_secret("sk-123456") == "sk-****"
     assert mask_secret("abc", unmasked_prefix=3) == "***"

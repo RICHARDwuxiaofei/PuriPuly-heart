@@ -387,6 +387,15 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 2
 
+    # Keep schema at v2 but backfill Soniox legacy default model upgrade.
+    soniox_data = data.get("soniox_stt")
+    if isinstance(soniox_data, dict):
+        model = soniox_data.get("model")
+        # Preserve explicit custom model values and only upgrade legacy default v3.
+        if isinstance(model, str) and model.strip() == "stt-rt-v3":
+            soniox_data["model"] = "stt-rt-v4"
+            changed = True
+
     if data.get("settings_version") != version:
         data["settings_version"] = version
         changed = True
