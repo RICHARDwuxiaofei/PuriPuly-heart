@@ -14,7 +14,7 @@
 <p align="center">LLM-based real-time translator for VRChat</p>
 
 <p align="center">
-  <a href="README.md">English</a> | <b>한국어</b>
+  <a href="README.md">English</a> | <b>한국어</b> | <a href="README.ja.md">日本語</a> | <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 ---
@@ -236,7 +236,7 @@ Gemini/Deepgram/Soniox가 차단된 지역이라면
 ## Q&A
 
 - **음성 인식이 잘 안 돼요**
-→ 대안으로 Soniox를 사용해보세요. 특히 한국어 사용자에게 추천해요.
+→ 대안으로 Soniox를 사용해보세요. 특히 한국어 사용자에게 추천해요. 또한 중국어 사용자는 Qwen ASR을 권장합니다.
 
 - **번역 말투가 마음에 안들어요**
 → 설정 → 프롬프트 에디터에서 원하는 말투를 직접 지정할 수 있어요.
