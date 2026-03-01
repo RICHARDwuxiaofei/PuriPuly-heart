@@ -60,6 +60,7 @@
     "warning.soniox_not_supported": "Soniox 不支持 {language}",
     "error.unknown": "未知错误",
     "error.api_key_invalid": "API密钥无效",
+    "error.qwen_model_unavailable": "API密钥有效，但无法访问 {model} 模型",
     "error.network_timeout": "网络超时",
     "error.network_error": "网络连接错误",
     "log.error_prefix": "错误",

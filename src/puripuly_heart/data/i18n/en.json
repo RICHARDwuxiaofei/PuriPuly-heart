@@ -60,6 +60,7 @@
   "warning.soniox_not_supported": "{language} is not supported by Soniox",
   "error.unknown": "Unknown error",
   "error.api_key_invalid": "API key is invalid",
+  "error.qwen_model_unavailable": "API key is valid, but {model} access is unavailable",
   "error.network_timeout": "Network timeout",
   "error.network_error": "Network connection error",
   "log.error_prefix": "ERROR",

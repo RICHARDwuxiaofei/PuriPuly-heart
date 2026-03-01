@@ -60,6 +60,7 @@
   "warning.soniox_not_supported": "{language}은(는) Soniox에서 지원하지 않아요",
   "error.unknown": "알 수 없는 오류",
   "error.api_key_invalid": "API 키가 유효하지 않아요",
+  "error.qwen_model_unavailable": "API 키는 유효하지만 {model} 모델 접근 권한이 없어요",
   "error.network_timeout": "네트워크 시간이 초과됐어요",
   "error.network_error": "네트워크 연결 오류에요",
   "log.error_prefix": "오류",

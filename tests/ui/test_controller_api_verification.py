@@ -59,7 +59,7 @@ class DummyHub:
 async def test_verify_qwen_llm_api_key_uses_async_verifier_in_low_latency(monkeypatch) -> None:
     settings = AppSettings()
     settings.stt.low_latency_mode = True
-    settings.qwen.llm_model = QwenLLMModel.QWEN_35_PLUS
+    settings.qwen.llm_model = QwenLLMModel.QWEN_35_FLASH
     app = SimpleNamespace(view_dashboard=DummyDashboard())
 
     controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
@@ -87,7 +87,7 @@ async def test_verify_qwen_llm_api_key_uses_async_verifier_in_low_latency(monkey
     assert seen == {
         "api_key": "secret",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "model": "qwen3.5-plus",
+        "model": "qwen3.5-flash",
     }
 
 
@@ -110,7 +110,7 @@ async def test_verify_and_update_status_uses_qwen_specific_verifiers(monkeypatch
 
     llm_seen: list[tuple[str, str]] = []
 
-    async def fake_verify_qwen_llm(self, api_key: str, *, base_url: str) -> bool:
+    async def fake_verify_qwen_llm(self, api_key: str, *, base_url: str, model: str) -> bool:
         llm_seen.append((api_key, base_url))
         return True
 
@@ -131,3 +131,68 @@ async def test_verify_and_update_status_uses_qwen_specific_verifiers(monkeypatch
     assert llm_seen == [("secret", "https://dashscope.aliyuncs.com/api/v1")]
     assert app.view_dashboard.translation_needs_key is False
     assert app.view_dashboard.stt_needs_key is False
+
+
+@pytest.mark.asyncio
+async def test_verify_api_key_returns_model_unavailable_when_fallback_model_works(
+    monkeypatch,
+) -> None:
+    settings = AppSettings()
+    settings.stt.low_latency_mode = True
+    settings.qwen.llm_model = QwenLLMModel.QWEN_35_FLASH
+    app = SimpleNamespace(view_dashboard=DummyDashboard())
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+
+    seen_models: list[str] = []
+
+    async def fake_async_verify(api_key: str, *, base_url: str, model: str) -> bool:
+        _ = api_key, base_url
+        seen_models.append(model)
+        return model == QwenLLMModel.QWEN_35_PLUS.value
+
+    monkeypatch.setattr(AsyncQwenLLMProvider, "verify_api_key", staticmethod(fake_async_verify))
+
+    success, msg = await controller.verify_api_key("alibaba_beijing", "secret")
+
+    assert success is False
+    assert msg == "qwen_model_unavailable:qwen3.5-flash"
+    assert seen_models == ["qwen3.5-flash", "qwen3.5-plus"]
+
+
+@pytest.mark.asyncio
+async def test_verify_and_update_status_splits_llm_model_access_from_stt_key_validity(
+    monkeypatch,
+) -> None:
+    settings = AppSettings()
+    settings.stt.low_latency_mode = True
+    settings.provider.llm = LLMProviderName.QWEN
+    settings.provider.stt = STTProviderName.QWEN_ASR
+    settings.qwen.llm_model = QwenLLMModel.QWEN_35_FLASH
+    app = SimpleNamespace(view_dashboard=DummyDashboard())
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyHub()
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({"alibaba_api_key": "secret"}),
+    )
+
+    seen_models: list[str] = []
+
+    async def fake_async_verify(api_key: str, *, base_url: str, model: str) -> bool:
+        _ = api_key, base_url
+        seen_models.append(model)
+        return model == QwenLLMModel.QWEN_35_PLUS.value
+
+    monkeypatch.setattr(AsyncQwenLLMProvider, "verify_api_key", staticmethod(fake_async_verify))
+
+    await controller._verify_and_update_status()
+
+    assert app.view_dashboard.translation_needs_key is True
+    assert app.view_dashboard.stt_needs_key is False
+    assert seen_models == ["qwen3.5-flash", "qwen3.5-plus"]
