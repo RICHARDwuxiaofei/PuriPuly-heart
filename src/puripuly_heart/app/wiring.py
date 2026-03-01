@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from pathlib import Path
 
@@ -70,10 +71,18 @@ def _get_secret_any(
     *,
     key: str,
     env_vars: tuple[str, ...],
+    legacy_keys: tuple[str, ...] = (),
 ) -> str | None:
     value = secrets.get(key)
     if value:
         return value
+    for legacy_key in legacy_keys:
+        legacy_value = secrets.get(legacy_key)
+        if legacy_value:
+            # Backfill to the new key so subsequent runs do not rely on fallback.
+            with contextlib.suppress(Exception):
+                secrets.set(key, legacy_value)
+            return legacy_value
     for env_var in env_vars:
         env = os.getenv(env_var)
         if env:
@@ -86,8 +95,9 @@ def require_secret_any(
     *,
     key: str,
     env_vars: tuple[str, ...],
+    legacy_keys: tuple[str, ...] = (),
 ) -> str:
-    value = _get_secret_any(secrets, key=key, env_vars=env_vars)
+    value = _get_secret_any(secrets, key=key, env_vars=env_vars, legacy_keys=legacy_keys)
     if value:
         return value
     env_list = ", ".join(env_vars)
@@ -118,12 +128,14 @@ def create_llm_provider(settings: AppSettings, *, secrets: SecretStore) -> LLMPr
                 secrets,
                 key="alibaba_api_key_beijing",
                 env_vars=("ALIBABA_API_KEY_BEIJING", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
+                legacy_keys=("alibaba_api_key",),
             )
         else:
             api_key = require_secret_any(
                 secrets,
                 key="alibaba_api_key_singapore",
                 env_vars=("ALIBABA_API_KEY_SINGAPORE", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
+                legacy_keys=("alibaba_api_key",),
             )
         if settings.stt.low_latency_mode:
             # Low-latency mode: use httpx async client for immediate cancellation
@@ -174,12 +186,14 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
                 secrets,
                 key="alibaba_api_key_beijing",
                 env_vars=("ALIBABA_API_KEY_BEIJING", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
+                legacy_keys=("alibaba_api_key",),
             )
         else:
             api_key = require_secret_any(
                 secrets,
                 key="alibaba_api_key_singapore",
                 env_vars=("ALIBABA_API_KEY_SINGAPORE", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
+                legacy_keys=("alibaba_api_key",),
             )
         endpoint = settings.qwen.get_asr_endpoint()
         return QwenASRRealtimeSTTBackend(
