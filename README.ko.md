@@ -25,9 +25,9 @@
 
 ---
 
-<video src="docs/videos/jp-ko_demo1.mp4" controls width="100%"></video>
+<video src="https://github.com/kapitalismho/PuriPuly-heart/releases/download/v1.2.0/jp-ko_demo1.mp4" controls width="100%"></video>
 
-<video src="docs/videos/jp-ko_demo2.mp4" controls width="100%"></video>
+<video src="https://github.com/kapitalismho/PuriPuly-heart/releases/download/v1.2.0/jp-ko_demo2.mp4" controls width="100%"></video>
 
 ---
 
