@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any
 
 SETTINGS_SCHEMA_VERSION = 2
+LEGACY_QWEN_DEFAULT_PROMPT = (
+    "VRChat social voice chat interpretation. Use spoken, conversational language and mirror "
+    "the speaker's tone and formality. Fix voice recognition errors like missing punctuation "
+    "and typos."
+)
 
 
 class STTProviderName(str, Enum):
@@ -29,6 +34,11 @@ class SecretsBackend(str, Enum):
 class QwenRegion(str, Enum):
     BEIJING = "beijing"
     SINGAPORE = "singapore"
+
+
+class QwenLLMModel(str, Enum):
+    QWEN_35_FLASH = "qwen3.5-flash"
+    QWEN_35_PLUS = "qwen3.5-plus"
 
 
 @dataclass(slots=True)
@@ -189,10 +199,13 @@ class SecretsSettings:
 @dataclass(slots=True)
 class QwenSettings:
     region: QwenRegion = QwenRegion.BEIJING
+    llm_model: QwenLLMModel = QwenLLMModel.QWEN_35_PLUS
 
     def validate(self) -> None:
         if not isinstance(self.region, QwenRegion):
             raise ValueError("invalid qwen region")
+        if not isinstance(self.llm_model, QwenLLMModel):
+            raise ValueError("invalid qwen llm model")
 
     def get_llm_base_url(self) -> str:
         if self.region == QwenRegion.BEIJING:
@@ -245,7 +258,7 @@ class AppSettings:
     ui: UiSettings = field(default_factory=UiSettings)
     api_key_verified: ApiKeyVerificationSettings = field(default_factory=ApiKeyVerificationSettings)
     system_prompt: str = ""
-    qwen_few_shots: list[dict[str, str]] = field(default_factory=list)
+    system_prompts: dict[str, str] = field(default_factory=dict)
 
     def validate(self) -> None:
         if self.settings_version <= 0:
@@ -263,6 +276,11 @@ class AppSettings:
         self.secrets.validate()
         self.ui.validate()
         self.api_key_verified.validate()
+        for key, value in self.system_prompts.items():
+            if not isinstance(key, str):
+                raise ValueError("system_prompts keys must be strings")
+            if not isinstance(value, str):
+                raise ValueError("system_prompts values must be strings")
 
 
 def _enum_to_value(obj: object) -> object:
@@ -315,6 +333,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         },
         "qwen": {
             "region": settings.qwen.region.value,
+            "llm_model": settings.qwen.llm_model.value,
         },
         "llm": {"concurrency_limit": settings.llm.concurrency_limit},
         "osc": {
@@ -342,7 +361,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "alibaba_singapore": settings.api_key_verified.alibaba_singapore,
         },
         "system_prompt": settings.system_prompt,
-        "qwen_few_shots": settings.qwen_few_shots,
+        "system_prompts": settings.system_prompts,
     }
     return _enum_to_value(data)  # type: ignore[return-value]
 
@@ -355,6 +374,32 @@ def _parse_stt_provider(value: str) -> STTProviderName:
         return STTProviderName(value)
     except ValueError:
         return STTProviderName.DEEPGRAM
+
+
+def _parse_qwen_llm_model(value: object) -> QwenLLMModel:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized == "qwen-mt-flash":
+            normalized = QwenLLMModel.QWEN_35_PLUS.value
+        try:
+            return QwenLLMModel(normalized)
+        except ValueError:
+            pass
+    return QwenLLMModel.QWEN_35_PLUS
+
+
+def _llm_prompt_key(provider: LLMProviderName) -> str:
+    return "gemini" if provider == LLMProviderName.GEMINI else "qwen"
+
+
+def _parse_system_prompts(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, prompt in value.items():
+        if isinstance(key, str) and isinstance(prompt, str):
+            out[key] = prompt
+    return out
 
 
 def _coerce_int(value: object, fallback: int) -> int:
@@ -396,6 +441,18 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             soniox_data["model"] = "stt-rt-v4"
             changed = True
 
+    qwen_data = data.get("qwen")
+    if not isinstance(qwen_data, dict):
+        qwen_data = {}
+        data["qwen"] = qwen_data
+        changed = True
+
+    raw_qwen_model = qwen_data.get("llm_model")
+    normalized_qwen_model = _parse_qwen_llm_model(raw_qwen_model).value
+    if raw_qwen_model != normalized_qwen_model:
+        qwen_data["llm_model"] = normalized_qwen_model
+        changed = True
+
     if data.get("settings_version") != version:
         data["settings_version"] = version
         changed = True
@@ -410,6 +467,8 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     input_host_api_raw = audio_data.get("input_host_api")
     input_device_raw = audio_data.get("input_device")
     vad_threshold_raw = stt_data.get("vad_speech_threshold")
+    legacy_system_prompt = str(data.get("system_prompt", ""))
+    system_prompts = _parse_system_prompts(data.get("system_prompts"))
 
     settings = AppSettings(
         settings_version=_coerce_int(data.get("settings_version"), SETTINGS_SCHEMA_VERSION),
@@ -475,6 +534,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         ),
         qwen=QwenSettings(
             region=QwenRegion(data.get("qwen", {}).get("region", QwenRegion.BEIJING.value)),
+            llm_model=_parse_qwen_llm_model(
+                data.get("qwen", {}).get("llm_model", QwenLLMModel.QWEN_35_PLUS.value)
+            ),
         ),
         llm=LLMSettings(concurrency_limit=int(data.get("llm", {}).get("concurrency_limit", 2))),
         osc=OSCSettings(
@@ -505,18 +567,22 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 data.get("api_key_verified", {}).get("alibaba_singapore", False)
             ),
         ),
-        system_prompt=str(data.get("system_prompt", "")),
-        qwen_few_shots=list(data.get("qwen_few_shots") or []),
+        system_prompt=legacy_system_prompt,
+        system_prompts=system_prompts,
     )
-    # Load default few-shots if empty (and not explicitly set to empty list by user previously ?
-    # Implementation decision: If missing in JSON (None), load default. If empty list in JSON, keep empty.
-    # The 'or []' above handles None -> [].
-    # But for first run, we want defaults.
-    if "qwen_few_shots" not in data:
-        from puripuly_heart.config.prompts import load_qwen_few_shot
 
-        settings.qwen_few_shots = load_qwen_few_shot()
+    selected_prompt_key = _llm_prompt_key(settings.provider.llm)
+    if legacy_system_prompt and selected_prompt_key not in settings.system_prompts:
+        settings.system_prompts[selected_prompt_key] = legacy_system_prompt
 
+    if settings.system_prompts.get("qwen", "").strip() == LEGACY_QWEN_DEFAULT_PROMPT:
+        from puripuly_heart.config.prompts import load_prompt_for_provider
+
+        settings.system_prompts["qwen"] = load_prompt_for_provider("qwen")
+
+    selected_prompt = settings.system_prompts.get(selected_prompt_key, "").strip()
+    if selected_prompt:
+        settings.system_prompt = selected_prompt
     settings.validate()
     return settings
 

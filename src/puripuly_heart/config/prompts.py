@@ -127,32 +127,3 @@ def load_prompt_for_provider(provider: str) -> str:
 
     # Fallback to default
     return load_prompt("default")
-
-
-def load_qwen_few_shot() -> list[dict[str, str]]:
-    """Load Qwen few-shot examples from Qwen_few_shots.json.
-
-    Returns:
-        List of dictionaries with 'source' and 'target' keys.
-        Returns empty list if file not found or invalid.
-    """
-    import json
-
-    prompts_dir = get_prompts_dir()
-    fs_file = prompts_dir / "qwen_few_shots.json"
-
-    if not fs_file.exists():
-        return []
-
-    try:
-        data = json.loads(fs_file.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            # Validate basic structure
-            valid: list[dict[str, str]] = []
-            for item in data:
-                if isinstance(item, dict) and "source" in item and "target" in item:
-                    valid.append({"source": str(item["source"]), "target": str(item["target"])})
-            return valid
-        return []
-    except Exception:
-        return []
