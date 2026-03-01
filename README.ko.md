@@ -183,7 +183,7 @@ Gemini/Deepgram/Soniox가 차단된 지역이라면
 <details>
 <summary><h3>Qwen</h3></summary>
 
-1. 지역에 따라 알맞는 경로로 Alibaba Cloud Model Studio에 접속하세요.
+1 지역에 따라 알맞는 경로로 Alibaba Cloud Model Studio에 접속하세요.
    - [중국 본토](https://bailian.console.aliyun.com/cn-beijing)
    - [중국 본토 외 다른 지역](https://bailian.console.alibabacloud.com)
 

@@ -183,9 +183,9 @@ Gemini / Deepgram / Sonioxへのアクセスがブロックされている地域
 <details>
 <summary><h3>Qwen</h3></summary>
 
-1. 地域に合った経路でAlibaba Cloud Model Studioにアクセスします。
+1 地域に合った経路でAlibaba Cloud Model Studioにアクセスします。
    - [中国本土](https://bailian.console.aliyun.com/cn-beijing)
-   - [中国本土以外](https://bailian.console.alibabacloud.com)
+   - [中国本土以外の地域](https://bailian.console.alibabacloud.com)
 
 2. アクセスしたアドレスからログインします。APIキーを発行したいリージョン（Region）を正確に選択してください（例：Beijing）。
    ![step2](docs/images/qwen/1.png)
