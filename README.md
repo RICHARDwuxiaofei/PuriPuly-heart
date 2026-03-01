@@ -35,7 +35,7 @@ can't carry what you really meant to say.
 So I built one that can.
 
 - **LLM-based Localization** — Slang, colloquialisms, and casual/formal speech handled naturally.
-- **Context Awareness** — Maintains natural conversation flow by considering context (Only in Gemini).
+- **Context Awareness** — Maintains natural conversation flow by considering context.
 - **Robust Input Handling** — Restores meaning even with typos or truncated text.
 - **Personalized Translation** — Define your own specific style in the Prompt Editor.
 
@@ -70,7 +70,8 @@ This app uses cloud AI services. You pay directly for what you use with your own
 | :--- | :--- | :--- | :--- | :--- |
 | **Deepgram + Gemini 3 Flash** | ~$0.0015 | ~$0.0007 | ~$0.0008 | $0.00 |
 | **Soniox + Gemini 3 Flash** | ~$0.0013 | - | ~$0.0006 | - |
-| **Qwen ASR + MT Flash** | ~$0.0006 | - | - | $0.00 |
+| **Qwen ASR + Qwen 3.5 Plus** | ~$0.0006 | - | - | $0.00 |
+| **Qwen ASR + Qwen 3.5 Flash** | ~$0.0005 | - | - | $0.00 |
 
 *   *Qwen API costs represent the Beijing region.*
 *   *Soniox charges per connection time.*
@@ -115,7 +116,7 @@ If Gemini/Deepgram/Soniox are blocked in your region:
 1. Get an API Key from [Alibaba Cloud Model Studio](https://bailian.console.alibabacloud.com) (Select Beijing region for the key).
 2. Change providers in **Settings**:
    - STT: **Qwen ASR**
-   - LLM: **Qwen MT Flash**
+   - LLM: **Qwen 3.5 Plus**
    - Qwen Server Region: **Beijing**
 3. Enter and verify your Qwen API key (Beijing).
 
@@ -175,23 +176,27 @@ If Gemini/Deepgram/Soniox are blocked in your region:
 <details>
 <summary><h3>Qwen</h3></summary>
 
-1. Login to [Alibaba Cloud Model Studio](https://bailian.console.alibabacloud.com). Make sure to select the correct Region for your API key (e.g., Beijing).
-   ![step1](docs/images/qwen/1.png)
+1. Access Alibaba Cloud Model Studio via the appropriate path for your region:
+   - [Mainland China](https://bailian.console.aliyun.com/cn-beijing)
+   - [Outside Mainland China](https://bailian.console.alibabacloud.com)
 
-2. Click the **gear icon** in the top right.
-   ![step2](docs/images/qwen/2.png)
+2. Login at the URL above. Make sure to select the correct Region for your API key (e.g., Beijing).
+   ![step2](docs/images/qwen/1.png)
 
-3. Create a workspace and go to the **API-KEY** page.
-   ![step3](docs/images/qwen/3.png)
+3. Click the **gear icon** in the top right.
+   ![step3](docs/images/qwen/2.png)
 
-4. Click **Create API Key**.
-   ![step4](docs/images/qwen/4.png)
+4. Create a workspace and go to the **API-KEY** page.
+   ![step4](docs/images/qwen/3.png)
 
-5. Assign an account and workspace, then click OK.
-   ![step5](docs/images/qwen/5.png)
+5. Click **Create API Key**.
+   ![step5](docs/images/qwen/4.png)
 
-6. Click the circled area to copy the key.
-   ![step6](docs/images/qwen/6.png)
+6. Assign an account and workspace, then click OK.
+   ![step6](docs/images/qwen/5.png)
+
+7. Click the circled area to copy the key.
+   ![step7](docs/images/qwen/6.png)
 
 </details>
 
@@ -230,7 +235,7 @@ If Gemini/Deepgram/Soniox are blocked in your region:
 → You can define your own style directly in Settings → Prompt Editor.
 
 - **What is Fast Response mode?**
-→ It starts translating before your sentence is finished to reduce latency. Switching to Stable mode can verify the full sentence first, potentially saving costs slightly.
+→ It starts translating before your sentence is finished to reduce latency. Switching to Stable mode can save costs slightly.
 
 - **Spacing or punctuation in voice recognition looks weird**
 → That's fine. LLMs are robust to such noise and handle translation well regardless.
