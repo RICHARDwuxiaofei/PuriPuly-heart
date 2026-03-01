@@ -21,6 +21,14 @@
 
 ## Demo
 
+![](docs/images/demo/jp-ko_screenshot.png)
+
+---
+
+<video src="docs/videos/jp-ko_demo1.mp4" controls width="100%"></video>
+
+<video src="docs/videos/jp-ko_demo2.mp4" controls width="100%"></video>
+
 ---
 
 ## Finally, talk like real friends.
@@ -34,7 +42,7 @@
 그래서 만들었어요.
 
 - **LLM 기반 현지화** — 슬랭, 구어체, 반말/존댓말까지 자연스럽게
-- **맥락 기억** — 문맥를 고려한 자연스러운 대화 흐름 유지 (Only in Gemini)
+- **맥락 기억** — 문맥를 고려한 자연스러운 대화 흐름 유지
 - **거친 입력도 OK** — 띄어쓰기가 잘못 되어도, 글자가 하나씩 잘려도 복원 가능
 - **내 말투로 번역** — 프롬프트 에디터에서 스타일 직접 지정
 
@@ -68,7 +76,8 @@
 | :--- | :--- | :--- | :--- | :--- |
 | **Deepgram + Gemini 3 Flash** | ~$0.0015 (2.3원) | ~$0.0007 (1.0원) | ~$0.0008 (1.2원) | $0.00 |
 | **Soniox + Gemini 3 Flash** | ~$0.0013 (1.9원) | - | ~$0.0006 (0.9원) | - |
-| **Qwen ASR + MT Flash** | ~$0.0006 (0.9원) | - | - | $0.00 |
+| **Qwen ASR + Qwen 3.5 Plus** | ~$0.0006 (0.9원) | - | - | $0.00 |
+| **Qwen ASR + Qwen 3.5 Flash** | ~$0.0005 (0.8원) | - | - | $0.00 |
 
 *   *Qwen의 API 비용은 베이징 리전 기준*
 *   *Soniox는 연결 시간당 과금이 발생*
@@ -114,7 +123,7 @@ Gemini/Deepgram/Soniox가 차단된 지역이라면
 1. [Alibaba Cloud Model Studio](https://bailian.console.alibabacloud.com)에서 API 키 발급 (베이징 리전)
 2. **설정**에서 제공자 변경:
    - STT: **Qwen ASR**
-   - LLM: **Qwen MT Flash**
+   - LLM: **Qwen 3.5 Plus**
    - Qwen 서버 리전: **Beijing**
 3. Qwen API 키 (Beijing) 입력 후 검증
 
@@ -174,23 +183,27 @@ Gemini/Deepgram/Soniox가 차단된 지역이라면
 <details>
 <summary><h3>Qwen</h3></summary>
 
-1. [Alibaba Cloud Model Studio](https://bailian.console.alibabacloud.com)에 로그인 하세요. 본인이 API 키를 발급받으려는 리전(Region)을 정확히 선택해주세요. (예: Beijing)
-   ![step1](docs/images/qwen/1.png)
+1. 지역에 따라 알맞는 경로로 Alibaba Cloud Model Studio에 접속하세요.
+   - [중국 본토](https://bailian.console.aliyun.com/cn-beijing)
+   - [중국 본토 외 다른 지역](https://bailian.console.alibabacloud.com)
 
-2. 우측 상단의 **톱니바퀴 아이콘**을 클릭하세요.
-   ![step2](docs/images/qwen/2.png)
+2 [Alibaba Cloud Model Studio](https://bailian.console.alibabacloud.com)접속한 주소에서 로그인 하세요. 본인이 API 키를 발급받으려는 리전(Region)을 정확히 선택해주세요. (예: Beijing)
+   ![step2](docs/images/qwen/1.png)
 
-3. 워크스페이스를 생성하고 **API-KEY** 페이지로 넘어가세요.
-   ![step3](docs/images/qwen/3.png)
+3 우측 상단의 **톱니바퀴 아이콘**을 클릭하세요.
+   ![step3](docs/images/qwen/2.png)
 
-4. **Create API Key**를 클릭하세요.
-   ![step4](docs/images/qwen/4.png)
+4 워크스페이스를 생성하고 **API-KEY** 페이지로 넘어가세요.
+   ![step4](docs/images/qwen/3.png)
 
-5. 어카운트와 워크스페이스를 할당하고 OK 버튼을 눌러주세요
-   ![step5](docs/images/qwen/5.png)
+5 **Create API Key**를 클릭하세요.
+   ![step5](docs/images/qwen/4.png)
 
-6. 동그라미 친 곳을 눌러 key를 복사하세요.
-   ![step6](docs/images/qwen/6.png)
+6 어카운트와 워크스페이스를 할당하고 OK 버튼을 눌러주세요
+   ![step6](docs/images/qwen/5.png)
+
+7 동그라미 친 곳을 눌러 key를 복사하세요.
+   ![step7](docs/images/qwen/6.png)
 
 </details>
 
