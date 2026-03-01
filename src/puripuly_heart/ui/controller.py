@@ -337,14 +337,14 @@ class GuiController:
             if provider == "google":
                 success = await GeminiLLMProvider.verify_api_key(key)
             elif provider == "alibaba_beijing":
-                # Beijing region endpoint
-                success = await self._verify_qwen_llm_api_key(
-                    key, base_url="https://dashscope.aliyuncs.com/api/v1"
+                return await self._verify_qwen_key_with_model_fallback(
+                    key,
+                    base_url="https://dashscope.aliyuncs.com/api/v1",
                 )
             elif provider == "alibaba_singapore":
-                # Singapore region endpoint
-                success = await self._verify_qwen_llm_api_key(
-                    key, base_url="https://dashscope-intl.aliyuncs.com/api/v1"
+                return await self._verify_qwen_key_with_model_fallback(
+                    key,
+                    base_url="https://dashscope-intl.aliyuncs.com/api/v1",
                 )
             elif provider == "deepgram":
                 success = await DeepgramRealtimeSTTBackend.verify_api_key(key)
@@ -668,22 +668,72 @@ class GuiController:
         if self.settings is None:
             return "", ""
         if self.settings.qwen.region == QwenRegion.BEIJING:
-            api_key = secrets.get("alibaba_api_key_beijing") or ""
+            target_key = "alibaba_api_key_beijing"
         else:
-            api_key = secrets.get("alibaba_api_key_singapore") or ""
-        return api_key, self.settings.qwen.get_llm_base_url()
+            target_key = "alibaba_api_key_singapore"
 
-    async def _verify_qwen_llm_api_key(self, api_key: str, *, base_url: str) -> bool:
+        api_key = secrets.get(target_key) or ""
+        if api_key:
+            return api_key, self.settings.qwen.get_llm_base_url()
+
+        # Backward compatibility: legacy single-key storage from older versions.
+        legacy_key = secrets.get("alibaba_api_key") or ""
+        if legacy_key:
+            setter = getattr(secrets, "set", None)
+            if callable(setter):
+                with contextlib.suppress(Exception):
+                    setter(target_key, legacy_key)
+            return legacy_key, self.settings.qwen.get_llm_base_url()
+
+        return "", self.settings.qwen.get_llm_base_url()
+
+    async def _verify_qwen_key_with_model_fallback(
+        self,
+        api_key: str,
+        *,
+        base_url: str,
+    ) -> tuple[bool, str]:
+        if self.settings is None:
+            return False, "Verification failed (check logs/console for details)"
+
+        selected_model = self.settings.qwen.llm_model.value
+        if await self._verify_qwen_llm_api_key(api_key, base_url=base_url, model=selected_model):
+            return True, "Verification successful"
+
+        for fallback_model in (
+            model.value for model in QwenLLMModel if model.value != selected_model
+        ):
+            if await self._verify_qwen_llm_api_key(
+                api_key,
+                base_url=base_url,
+                model=fallback_model,
+            ):
+                return False, f"qwen_model_unavailable:{selected_model}"
+
+        return False, "Verification failed (check logs/console for details)"
+
+    async def _verify_qwen_llm_api_key(
+        self,
+        api_key: str,
+        *,
+        base_url: str,
+        model: str | None = None,
+    ) -> bool:
         if self.settings is None:
             return False
-        # Verify against the default runtime model.
-        model = QwenLLMModel.QWEN_35_PLUS.value
+        runtime_model = model or self.settings.qwen.llm_model.value
         if self.settings.stt.low_latency_mode:
             async_base_url = base_url.replace("/api/v1", "/compatible-mode/v1")
             return await AsyncQwenLLMProvider.verify_api_key(
-                api_key, base_url=async_base_url, model=model
+                api_key,
+                base_url=async_base_url,
+                model=runtime_model,
             )
-        return await QwenLLMProvider.verify_api_key(api_key, base_url=base_url, model=model)
+        return await QwenLLMProvider.verify_api_key(
+            api_key,
+            base_url=base_url,
+            model=runtime_model,
+        )
 
     async def _verify_and_update_status(self) -> None:
         """Background task to verify keys and update dashboard status."""
@@ -698,18 +748,49 @@ class GuiController:
         with contextlib.suppress(Exception):
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
 
-        alibaba_valid_cache: bool | None = None
+        alibaba_selected_valid_cache: bool | None = None
+        alibaba_any_valid_cache: bool | None = None
 
-        async def _verify_alibaba_shared() -> bool:
-            nonlocal alibaba_valid_cache
-            if alibaba_valid_cache is not None:
-                return alibaba_valid_cache
+        async def _verify_alibaba_selected() -> bool:
+            nonlocal alibaba_selected_valid_cache
+            if alibaba_selected_valid_cache is not None:
+                return alibaba_selected_valid_cache
             if secrets is None:
-                alibaba_valid_cache = False
+                alibaba_selected_valid_cache = False
                 return False
             key, base_url = self._get_qwen_key_and_base_url(secrets)
-            alibaba_valid_cache = await self._verify_qwen_llm_api_key(key, base_url=base_url)
-            return alibaba_valid_cache
+            selected_model = self.settings.qwen.llm_model.value
+            alibaba_selected_valid_cache = await self._verify_qwen_llm_api_key(
+                key,
+                base_url=base_url,
+                model=selected_model,
+            )
+            return alibaba_selected_valid_cache
+
+        async def _verify_alibaba_any_model() -> bool:
+            nonlocal alibaba_any_valid_cache
+            if alibaba_any_valid_cache is not None:
+                return alibaba_any_valid_cache
+            if await _verify_alibaba_selected():
+                alibaba_any_valid_cache = True
+                return True
+            if secrets is None:
+                alibaba_any_valid_cache = False
+                return False
+            key, base_url = self._get_qwen_key_and_base_url(secrets)
+            selected_model = self.settings.qwen.llm_model.value
+            for fallback_model in (
+                model.value for model in QwenLLMModel if model.value != selected_model
+            ):
+                if await self._verify_qwen_llm_api_key(
+                    key,
+                    base_url=base_url,
+                    model=fallback_model,
+                ):
+                    alibaba_any_valid_cache = True
+                    return True
+            alibaba_any_valid_cache = False
+            return False
 
         # 1. Verify LLM
         llm_valid = False
@@ -722,7 +803,7 @@ class GuiController:
                     key = secrets.get("google_api_key") or "" if secrets is not None else ""
                     llm_valid = await GeminiLLMProvider.verify_api_key(key)
                 elif provider_name == "qwen":
-                    llm_valid = await _verify_alibaba_shared()
+                    llm_valid = await _verify_alibaba_selected()
                 else:
                     # Assume valid for others or if no key usage known
                     llm_valid = True
@@ -752,7 +833,7 @@ class GuiController:
                     key = secrets.get("deepgram_api_key") or "" if secrets is not None else ""
                     stt_valid = await DeepgramRealtimeSTTBackend.verify_api_key(key)
                 elif provider_name == STTProviderName.QWEN_ASR:
-                    stt_valid = await _verify_alibaba_shared()
+                    stt_valid = await _verify_alibaba_any_model()
                 elif provider_name == STTProviderName.SONIOX:
                     key = secrets.get("soniox_api_key") or "" if secrets is not None else ""
                     stt_valid = await SonioxRealtimeSTTBackend.verify_api_key(key)
