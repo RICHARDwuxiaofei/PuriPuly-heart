@@ -25,9 +25,9 @@
 
 ---
 
-![jp-ko_demo1](https://github.com/user-attachments/assets/c1e7117f-496b-4086-97bc-96e72b19ffc7)
+<video src="https://github.com/user-attachments/assets/c1e7117f-496b-4086-97bc-96e72b19ffc7" controls width="100%"></video>
 
-![jp-ko_demo2](https://github.com/user-attachments/assets/5c313883-9486-4523-bd66-911484cd5226)
+<video src="https://github.com/user-attachments/assets/5c313883-9486-4523-bd66-911484cd5226" controls width="100%"></video>
 
 ---
 
