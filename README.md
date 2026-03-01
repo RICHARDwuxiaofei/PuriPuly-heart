@@ -14,7 +14,7 @@
 <p align="center">LLM-based real-time translator for VRChat</p>
 
 <p align="center">
-  <b>English</b> | <a href="README.ko.md">한국어</a>
+  <b>English</b> | <a href="README.ko.md">한국어</a> | <a href="README.ja.md">日本語</a>
 </p>
 
 ---
@@ -30,14 +30,14 @@ Wanting to comfort a friend,
 but only managing — "Are you okay?"
 
 You already know a 'translator'  
-can't carry what you really meant to say.
+can't carry what's truly in your heart.
 
 So I built one that can.
 
-- **LLM-based Localization** — Slang, colloquialisms, and casual/formal speech handled naturally.
-- **Context Awareness** — Maintains natural conversation flow by considering context.
-- **Robust Input Handling** — Restores meaning even with typos or truncated text.
-- **Personalized Translation** — Define your own specific style in the Prompt Editor.
+- **LLM-Powered Localization** — Naturally translates slang, colloquialisms, and casual/formal tones.
+- **Deep Context Awareness** — Remembers the flow of conversation, keeping every response in context.
+- **Robust Input Handling** — Restores your true meaning even through typos or truncated speech.
+- **Personalized Persona** — Define your exact speaking style and vibe in the Prompt Editor.
 
 ### [📥 Download](https://github.com/kapitalismho/PuriPuly-heart/releases/latest)
 
@@ -45,7 +45,7 @@ So I built one that can.
 
 ## Is there a cost?
 
-You can use it for free over **250,000 times** using free credits provided upon signing up (Deepgram, Google AI Studio).
+You can use it for free for up to **250,000 times** using free credits provided upon signing up (Deepgram, Google AI Studio).
 
 After the free credits run out, a small fee is charged per utterance.
 
@@ -229,7 +229,7 @@ If Gemini/Deepgram/Soniox are blocked in your region:
 ## Q&A
 
 - **Voice recognition is poor**
-→ Try using Soniox as an alternative. It is especially recommended for Korean speakers.
+→ Try using Soniox as an alternative. It is especially recommended for Korean speakers. Also, Qwen ASR is recommended for Chinese speakers.
 
 - **I don't like the translation style**
 → You can define your own style directly in Settings → Prompt Editor.
