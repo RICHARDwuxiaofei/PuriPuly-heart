@@ -25,9 +25,9 @@
 
 ---
 
-[![Demo 1](https://img.youtube.com/vi/VIDEO_ID_1/maxresdefault.jpg)](https://www.youtube.com/watch?v=https://youtu.be/Wc6b8lGu_90)
+[![Demo 1](https://img.youtube.com/vi/Wc6b8lGu_90/maxresdefault.jpg)](https://youtu.be/Wc6b8lGu_90)
 
-[![Demo 2](https://img.youtube.com/vi/VIDEO_ID_2/maxresdefault.jpg)](https://www.youtube.com/watch?v=https://youtu.be/vLZ4XPaeTa0)
+[![Demo 2](https://img.youtube.com/vi/vLZ4XPaeTa0/maxresdefault.jpg)](https://youtu.be/vLZ4XPaeTa0)
 
 ---
 
