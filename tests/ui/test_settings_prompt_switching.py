@@ -7,7 +7,8 @@ import pytest
 pytest.importorskip("flet")
 
 from puripuly_heart.config.prompts import load_prompt_for_provider
-from puripuly_heart.config.settings import AppSettings, LLMProviderName
+from puripuly_heart.config.settings import AppSettings, LLMProviderName, QwenLLMModel
+from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.views import settings as settings_view
 
 
@@ -35,6 +36,7 @@ def test_settings_view_loads_qwen_prompt(monkeypatch) -> None:
 
     assert view._prompt_editor.value == load_prompt_for_provider("qwen")
     assert settings.system_prompt == view._prompt_editor.value
+    assert settings.system_prompts["qwen"] == view._prompt_editor.value
 
 
 def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
@@ -45,12 +47,50 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
 
     assert view._prompt_editor.value == load_prompt_for_provider("gemini")
 
-    view._on_llm_selected(LLMProviderName.QWEN.value)
+    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
 
     assert view._prompt_editor.value == load_prompt_for_provider("qwen")
     assert settings.provider.llm == LLMProviderName.QWEN
+    assert settings.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS
 
     view._on_llm_selected(LLMProviderName.GEMINI.value)
 
     assert view._prompt_editor.value == load_prompt_for_provider("gemini")
     assert settings.provider.llm == LLMProviderName.GEMINI
+
+
+def test_settings_view_shows_qwen_model_label(monkeypatch) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.QWEN
+    settings.qwen.llm_model = QwenLLMModel.QWEN_35_PLUS
+
+    view = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._llm_text.content.value == t("provider.qwen35_plus")
+
+
+def test_settings_view_preserves_provider_specific_prompts(monkeypatch) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.system_prompts = {
+        "gemini": "GEMINI CUSTOM",
+        "qwen": "QWEN CUSTOM",
+    }
+    settings.system_prompt = "GEMINI CUSTOM"
+
+    view = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._prompt_editor.value == "GEMINI CUSTOM"
+
+    view._on_llm_selected(QwenLLMModel.QWEN_35_FLASH.value)
+    assert view._prompt_editor.value == "QWEN CUSTOM"
+    assert settings.system_prompt == "QWEN CUSTOM"
+
+    view._on_prompt_change("QWEN EDITED")
+    assert settings.system_prompts["qwen"] == "QWEN EDITED"
+
+    view._on_llm_selected(LLMProviderName.GEMINI.value)
+    assert view._prompt_editor.value == "GEMINI CUSTOM"
+    assert settings.system_prompt == "GEMINI CUSTOM"

@@ -15,6 +15,7 @@ from puripuly_heart.app.wiring import (
 )
 from puripuly_heart.config.settings import (
     AppSettings,
+    QwenLLMModel,
     QwenRegion,
     STTProviderName,
     load_settings,
@@ -35,6 +36,7 @@ from puripuly_heart.core.vad.gating import VadGating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
+from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
 from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 from puripuly_heart.ui.event_bridge import UIEventBridge
@@ -67,6 +69,7 @@ class GuiController:
     _stt_switch_lock: asyncio.Lock | None = None
     _stt_switch_task: asyncio.Task[None] | None = None
     _stt_restart_requested: bool = False
+    _last_stt_runtime_signature: tuple[object, ...] | None = None
 
     async def start(self) -> None:
         self.settings = self._load_or_init_settings(self.config_path)
@@ -123,6 +126,21 @@ class GuiController:
             return "alibaba_beijing"
         return "alibaba_singapore"
 
+    def _build_stt_runtime_signature(self, settings: AppSettings) -> tuple[object, ...]:
+        return (
+            settings.audio.input_host_api,
+            settings.audio.input_device,
+            settings.stt.vad_speech_threshold,
+            settings.stt.low_latency_mode,
+            settings.stt.low_latency_merge_gap_ms,
+            settings.stt.low_latency_spec_retry_max,
+            settings.stt.low_latency_vad_hangover_ms,
+            settings.stt.drain_timeout_s,
+            settings.audio.ring_buffer_ms,
+            settings.audio.internal_sample_rate_hz,
+            settings.audio.internal_channels,
+        )
+
     async def stop(self) -> None:
         await self.set_stt_enabled(False)
 
@@ -169,7 +187,7 @@ class GuiController:
             llm = self.hub.llm
             if isinstance(llm, SemaphoreLLMProvider):
                 llm = llm.inner
-            if isinstance(llm, GeminiLLMProvider):
+            if isinstance(llm, (GeminiLLMProvider, QwenLLMProvider, AsyncQwenLLMProvider)):
                 with contextlib.suppress(Exception):
                     await llm.warmup()
 
@@ -288,10 +306,15 @@ class GuiController:
                 if settings.stt.low_latency_mode
                 else 1.1
             )
-            self.hub.set_qwen_few_shots(settings.qwen_few_shots)
 
-        # Audio/VAD changes apply on next STT start; if STT is running, restart mic loop.
-        if self._mic_task is not None and self._stt_desired:
+        # Restart STT only when runtime STT-relevant settings changed.
+        current_signature = self._build_stt_runtime_signature(settings)
+        should_restart_stt = (
+            self._last_stt_runtime_signature is not None
+            and current_signature != self._last_stt_runtime_signature
+        )
+        self._last_stt_runtime_signature = current_signature
+        if should_restart_stt and self._mic_task is not None and self._stt_desired:
             self._stt_restart_requested = True
             await self._ensure_stt_switch()
 
@@ -315,12 +338,12 @@ class GuiController:
                 success = await GeminiLLMProvider.verify_api_key(key)
             elif provider == "alibaba_beijing":
                 # Beijing region endpoint
-                success = await QwenLLMProvider.verify_api_key(
+                success = await self._verify_qwen_llm_api_key(
                     key, base_url="https://dashscope.aliyuncs.com/api/v1"
                 )
             elif provider == "alibaba_singapore":
                 # Singapore region endpoint
-                success = await QwenLLMProvider.verify_api_key(
+                success = await self._verify_qwen_llm_api_key(
                     key, base_url="https://dashscope-intl.aliyuncs.com/api/v1"
                 )
             elif provider == "deepgram":
@@ -339,11 +362,13 @@ class GuiController:
             self._log_error(msg)
             return False, str(exc)
 
-    async def apply_providers(self) -> None:
+    async def apply_providers(self, *, rebuild_stt: bool = True) -> None:
         if self.settings is None:
             return
-        # Rebuild LLM provider on the fly; STT provider changes require full pipeline rebuild.
-        await self._rebuild_pipeline(rebuild_stt=True)
+        if rebuild_stt:
+            await self._rebuild_pipeline(rebuild_stt=True)
+            return
+        await self._rebuild_llm_provider()
 
     def _load_or_init_settings(self, path: Path) -> AppSettings:
         if path.exists():
@@ -419,6 +444,7 @@ class GuiController:
 
     async def _init_pipeline(self) -> None:
         assert self.settings is not None
+        self._last_stt_runtime_signature = self._build_stt_runtime_signature(self.settings)
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
 
         llm = None
@@ -647,6 +673,18 @@ class GuiController:
             api_key = secrets.get("alibaba_api_key_singapore") or ""
         return api_key, self.settings.qwen.get_llm_base_url()
 
+    async def _verify_qwen_llm_api_key(self, api_key: str, *, base_url: str) -> bool:
+        if self.settings is None:
+            return False
+        # Verify against the default runtime model.
+        model = QwenLLMModel.QWEN_35_PLUS.value
+        if self.settings.stt.low_latency_mode:
+            async_base_url = base_url.replace("/api/v1", "/compatible-mode/v1")
+            return await AsyncQwenLLMProvider.verify_api_key(
+                api_key, base_url=async_base_url, model=model
+            )
+        return await QwenLLMProvider.verify_api_key(api_key, base_url=base_url, model=model)
+
     async def _verify_and_update_status(self) -> None:
         """Background task to verify keys and update dashboard status."""
         if self.settings is None:
@@ -656,20 +694,35 @@ class GuiController:
         if dash is None:
             return
 
+        secrets = None
+        with contextlib.suppress(Exception):
+            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+
+        alibaba_valid_cache: bool | None = None
+
+        async def _verify_alibaba_shared() -> bool:
+            nonlocal alibaba_valid_cache
+            if alibaba_valid_cache is not None:
+                return alibaba_valid_cache
+            if secrets is None:
+                alibaba_valid_cache = False
+                return False
+            key, base_url = self._get_qwen_key_and_base_url(secrets)
+            alibaba_valid_cache = await self._verify_qwen_llm_api_key(key, base_url=base_url)
+            return alibaba_valid_cache
+
         # 1. Verify LLM
         llm_valid = False
         if self.hub and self.hub.llm:
             # It was created, but is the key valid?
             try:
-                secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
                 provider_name = self.settings.provider.llm
                 key = ""
                 if provider_name == "gemini":
-                    key = secrets.get("google_api_key") or ""
+                    key = secrets.get("google_api_key") or "" if secrets is not None else ""
                     llm_valid = await GeminiLLMProvider.verify_api_key(key)
                 elif provider_name == "qwen":
-                    key, base_url = self._get_qwen_key_and_base_url(secrets)
-                    llm_valid = await QwenLLMProvider.verify_api_key(key, base_url=base_url)
+                    llm_valid = await _verify_alibaba_shared()
                 else:
                     # Assume valid for others or if no key usage known
                     llm_valid = True
@@ -693,17 +746,15 @@ class GuiController:
         stt_valid = False
         if self.hub and self.hub.stt:
             try:
-                secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
                 provider_name = self.settings.provider.stt
 
                 if provider_name == STTProviderName.DEEPGRAM:
-                    key = secrets.get("deepgram_api_key") or ""
+                    key = secrets.get("deepgram_api_key") or "" if secrets is not None else ""
                     stt_valid = await DeepgramRealtimeSTTBackend.verify_api_key(key)
                 elif provider_name == STTProviderName.QWEN_ASR:
-                    key, base_url = self._get_qwen_key_and_base_url(secrets)
-                    stt_valid = await QwenLLMProvider.verify_api_key(key, base_url=base_url)
+                    stt_valid = await _verify_alibaba_shared()
                 elif provider_name == STTProviderName.SONIOX:
-                    key = secrets.get("soniox_api_key") or ""
+                    key = secrets.get("soniox_api_key") or "" if secrets is not None else ""
                     stt_valid = await SonioxRealtimeSTTBackend.verify_api_key(key)
                 else:
                     stt_valid = True
