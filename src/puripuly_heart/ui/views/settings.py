@@ -654,14 +654,14 @@ class SettingsView(ft.Column):
                 description=t("provider.gemini.description", default=""),
             ),
             OptionItem(
-                value=QwenLLMModel.QWEN_35_FLASH.value,
-                label=t("provider.qwen35_flash"),
-                description=t("provider.qwen35_flash.description", default=""),
-            ),
-            OptionItem(
                 value=QwenLLMModel.QWEN_35_PLUS.value,
                 label=t("provider.qwen35_plus"),
                 description=t("provider.qwen35_plus.description", default=""),
+            ),
+            OptionItem(
+                value=QwenLLMModel.QWEN_35_FLASH.value,
+                label=t("provider.qwen35_flash"),
+                description=t("provider.qwen35_flash.description", default=""),
             ),
         ]
         current = self._get_llm_modal_value(self._settings) if self._settings else "gemini"
