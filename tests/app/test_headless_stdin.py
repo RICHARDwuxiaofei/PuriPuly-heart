@@ -44,9 +44,8 @@ class FakeLLM:
         source_language: str,
         target_language: str,
         context: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
     ) -> Translation:
-        _ = (system_prompt, source_language, target_language, context, context_pairs)
+        _ = (system_prompt, source_language, target_language, context)
         return Translation(utterance_id=utterance_id, text="OK")
 
     async def close(self) -> None:

@@ -19,7 +19,6 @@ class GeminiClient(Protocol):
         source_language: str,
         target_language: str,
         context: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
     ) -> str: ...
 
     async def close(self) -> None: ...
@@ -48,7 +47,6 @@ class GeminiLLMProvider:
         source_language: str,
         target_language: str,
         context: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
     ) -> Translation:
         client = self._get_client()
         translated = await client.translate(
@@ -57,7 +55,6 @@ class GeminiLLMProvider:
             source_language=source_language,
             target_language=target_language,
             context=context,
-            context_pairs=context_pairs,
         )
         return Translation(utterance_id=utterance_id, text=translated)
 
@@ -113,7 +110,6 @@ class GoogleGenaiGeminiClient:
         source_language: str,
         target_language: str,
         context: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
     ) -> str:
         from google.genai import types  # type: ignore
 

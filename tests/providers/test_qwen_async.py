@@ -20,17 +20,17 @@ class FakeAsyncQwenClient(AsyncQwenClient):
         self,
         *,
         text: str,
+        system_prompt: str,
         source_language: str,
         target_language: str,
-        domain_prompt: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
+        context: str = "",
     ) -> str:
         self.last_call = {
             "text": text,
+            "system_prompt": system_prompt,
             "source_language": source_language,
             "target_language": target_language,
-            "domain_prompt": domain_prompt,
-            "context_pairs": context_pairs,
+            "context": context,
         }
         return "TRANSLATED"
 
@@ -56,30 +56,30 @@ async def test_async_qwen_provider_uses_injected_client():
     assert out.text == "TRANSLATED"
     assert fake.last_call == {
         "text": "hello",
+        "system_prompt": "PROMPT",
         "source_language": "ko-KR",
         "target_language": "en",
-        "domain_prompt": "PROMPT",
-        "context_pairs": None,
+        "context": "",
     }
 
 
 @pytest.mark.asyncio
-async def test_async_qwen_provider_passes_context_pairs():
+async def test_async_qwen_provider_passes_context():
     fake = FakeAsyncQwenClient()
     provider = AsyncQwenLLMProvider(api_key="k", client=fake)
 
-    context_pairs = [{"source": "원문", "target": "translation"}]
     await provider.translate(
         utterance_id=uuid4(),
         text="hello",
         system_prompt="PROMPT",
         source_language="ko",
         target_language="en",
-        context_pairs=context_pairs,
+        context='- "안녕"',
     )
 
     assert fake.last_call is not None
-    assert fake.last_call["context_pairs"] == context_pairs
+    assert fake.last_call["system_prompt"] == "PROMPT"
+    assert fake.last_call["context"] == '- "안녕"'
 
 
 @pytest.mark.asyncio
@@ -92,3 +92,66 @@ async def test_async_qwen_provider_close_cleans_up():
 
     assert fake.closed is True
     assert provider._internal_client is None
+
+
+@pytest.mark.asyncio
+async def test_async_qwen_verify_api_key_uses_model_and_base_url(monkeypatch):
+    seen: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            seen["url"] = url
+            seen["json"] = kwargs["json"]
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    ok = await AsyncQwenLLMProvider.verify_api_key(
+        "secret",
+        base_url="https://example/compatible-mode/v1",
+        model="qwen3.5-plus",
+    )
+
+    assert ok is True
+    assert seen["url"] == "https://example/compatible-mode/v1/chat/completions"
+    body = seen["json"]
+    assert body["model"] == "qwen3.5-plus"
+    assert body["enable_thinking"] is False
+
+
+@pytest.mark.asyncio
+async def test_async_qwen_warmup_always_uses_plus_model(monkeypatch):
+    seen: dict[str, str] = {}
+
+    async def fake_verify(api_key: str, *, base_url: str, model: str) -> bool:
+        seen["api_key"] = api_key
+        seen["base_url"] = base_url
+        seen["model"] = model
+        return True
+
+    monkeypatch.setattr(AsyncQwenLLMProvider, "verify_api_key", staticmethod(fake_verify))
+
+    provider = AsyncQwenLLMProvider(
+        api_key="secret",
+        base_url="https://example/compatible-mode/v1",
+        model="qwen3.5-plus",
+    )
+    await provider.warmup()
+
+    assert seen == {
+        "api_key": "secret",
+        "base_url": "https://example/compatible-mode/v1",
+        "model": "qwen3.5-plus",
+    }

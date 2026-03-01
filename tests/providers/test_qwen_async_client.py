@@ -51,13 +51,13 @@ async def test_httpx_client_builds_correct_request(monkeypatch):
     fake_client = FakeAsyncClient()
     monkeypatch.setattr("httpx.AsyncClient", lambda **kw: fake_client)
 
-    client = HttpxQwenClient(api_key="test-key", model="qwen-mt-flash", base_url="https://example")
+    client = HttpxQwenClient(api_key="test-key", model="qwen3.5-flash", base_url="https://example")
     result = await client.translate(
         text="hello",
+        system_prompt="SYSTEM",
         source_language="ko-KR",
         target_language="en",
-        domain_prompt="domain prompt",
-        context_pairs=[{"source": "a", "target": "b"}],
+        context='- "previous"',
     )
 
     assert result == "OK"
@@ -72,14 +72,13 @@ async def test_httpx_client_builds_correct_request(monkeypatch):
 
     # Check body
     body = fake_client.last_request["json"]
-    assert body["model"] == "qwen-mt-flash"
-    assert body["messages"] == [{"role": "user", "content": "hello"}]
-
-    translation_options = body["translation_options"]
-    assert translation_options["source_lang"] == "ko"
-    assert translation_options["target_lang"] == "en"
-    assert translation_options["domains"] == "domain prompt"
-    assert translation_options["tm_list"] == [{"source": "a", "target": "b"}]
+    assert body["model"] == "qwen3.5-flash"
+    assert body["enable_thinking"] is False
+    assert body["messages"][0]["role"] == "system"
+    assert "SYSTEM" in body["messages"][0]["content"]
+    assert body["messages"][1]["role"] == "user"
+    assert "<context>" in body["messages"][1]["content"]
+    assert "Input: hello" in body["messages"][1]["content"]
 
 
 @pytest.mark.asyncio
@@ -90,16 +89,17 @@ async def test_httpx_client_omits_empty_options(monkeypatch):
     client = HttpxQwenClient(api_key="k", model="m", base_url="https://example")
     await client.translate(
         text="hello",
+        system_prompt="SYSTEM",
         source_language="ko",
         target_language="en",
-        domain_prompt="",  # Empty
-        context_pairs=None,  # None
+        context="",
     )
 
     body = fake_client.last_request["json"]
-    translation_options = body["translation_options"]
-    assert "domains" not in translation_options
-    assert "tm_list" not in translation_options
+    assert body["messages"] == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "hello"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -118,7 +118,12 @@ async def test_httpx_client_raises_on_empty_choices(monkeypatch):
 
     client = HttpxQwenClient(api_key="k", model="m", base_url="https://example")
     with pytest.raises(RuntimeError, match="did not contain choices"):
-        await client.translate(text="hello", source_language="ko", target_language="en")
+        await client.translate(
+            text="hello",
+            system_prompt="SYSTEM",
+            source_language="ko",
+            target_language="en",
+        )
 
 
 @pytest.mark.asyncio
@@ -137,7 +142,12 @@ async def test_httpx_client_raises_on_empty_content(monkeypatch):
 
     client = HttpxQwenClient(api_key="k", model="m", base_url="https://example")
     with pytest.raises(RuntimeError, match="message content"):
-        await client.translate(text="hello", source_language="ko", target_language="en")
+        await client.translate(
+            text="hello",
+            system_prompt="SYSTEM",
+            source_language="ko",
+            target_language="en",
+        )
 
 
 @pytest.mark.asyncio
@@ -158,7 +168,12 @@ async def test_httpx_client_handles_cancellation(monkeypatch):
     client = HttpxQwenClient(api_key="k", model="m", base_url="https://example")
 
     async def translate_task():
-        return await client.translate(text="hello", source_language="ko", target_language="en")
+        return await client.translate(
+            text="hello",
+            system_prompt="SYSTEM",
+            source_language="ko",
+            target_language="en",
+        )
 
     task = asyncio.create_task(translate_task())
     await asyncio.sleep(0.05)  # Let it start

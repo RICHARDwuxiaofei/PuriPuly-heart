@@ -10,6 +10,50 @@ import httpx
 from puripuly_heart.domain.models import Translation
 
 logger = logging.getLogger(__name__)
+_QWEN_PROBE_MODEL = "qwen3.5-plus"
+
+
+def _build_system_prompt(
+    *,
+    system_prompt: str,
+    source_language: str,
+    target_language: str,
+) -> str:
+    formatted = (
+        system_prompt.format(
+            source_language=source_language,
+            target_language=target_language,
+        )
+        if "{source_language}" in system_prompt
+        else system_prompt
+    )
+    return formatted
+
+
+def _build_user_message(*, text: str, context: str) -> str:
+    if context:
+        return f"<context>\n{context}\n</context>\nInput: {text}"
+    return text
+
+
+def _extract_message_content(content: object) -> str:
+    if isinstance(content, str):
+        result = content.strip()
+        if result:
+            return result
+        raise RuntimeError("DashScope response contained empty message content")
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        if parts:
+            return "\n".join(parts)
+
+    raise RuntimeError("DashScope response did not contain message content")
 
 
 class AsyncQwenClient(Protocol):
@@ -17,10 +61,10 @@ class AsyncQwenClient(Protocol):
         self,
         *,
         text: str,
+        system_prompt: str,
         source_language: str,
         target_language: str,
-        domain_prompt: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
+        context: str = "",
     ) -> str: ...
 
     async def close(self) -> None: ...
@@ -35,7 +79,7 @@ class AsyncQwenLLMProvider:
 
     api_key: str
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    model: str = "qwen-mt-flash"
+    model: str = "qwen3.5-plus"
     timeout: float = 30.0
     client: AsyncQwenClient | None = None
     _internal_client: AsyncQwenClient | None = field(init=False, default=None, repr=False)
@@ -61,17 +105,14 @@ class AsyncQwenLLMProvider:
         source_language: str,
         target_language: str,
         context: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
     ) -> Translation:
-        _ = context  # Not used in Qwen MT API
-        domain_prompt = system_prompt
         client = self._get_client()
         translated = await client.translate(
             text=text,
+            system_prompt=system_prompt,
             source_language=source_language,
             target_language=target_language,
-            domain_prompt=domain_prompt,
-            context_pairs=context_pairs,
+            context=context,
         )
         return Translation(utterance_id=utterance_id, text=translated)
 
@@ -80,9 +121,15 @@ class AsyncQwenLLMProvider:
             await self._internal_client.close()
             self._internal_client = None
 
+    async def warmup(self) -> None:
+        # Warmup probes the default model.
+        await self.verify_api_key(self.api_key, base_url=self.base_url, model=_QWEN_PROBE_MODEL)
+
     @staticmethod
     async def verify_api_key(
-        api_key: str, base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        api_key: str,
+        base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model: str = _QWEN_PROBE_MODEL,
     ) -> bool:
         if not api_key:
             return False
@@ -95,13 +142,10 @@ class AsyncQwenLLMProvider:
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "qwen-mt-lite",
-                        "messages": [{"role": "user", "content": "test"}],
+                        "model": model,
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "enable_thinking": False,
                         "max_tokens": 1,
-                        "translation_options": {
-                            "source_lang": "en",
-                            "target_lang": "zh",
-                        },
                     },
                 )
                 return response.status_code == 200
@@ -136,26 +180,32 @@ class HttpxQwenClient:
         self,
         *,
         text: str,
+        system_prompt: str,
         source_language: str,
         target_language: str,
-        domain_prompt: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
+        context: str = "",
     ) -> str:
-        logger.info(f"[LLM] Request: '{text}' -> {source_language} to {target_language}")
+        if context:
+            logger.info(
+                f"[LLM] Request with context: '{text}' -> {source_language} to {target_language}"
+            )
+        else:
+            logger.info(f"[LLM] Request: '{text}' -> {source_language} to {target_language}")
 
-        translation_options: dict[str, object] = {
-            "source_lang": self._normalize_language_code(source_language),
-            "target_lang": self._normalize_language_code(target_language),
-        }
-        if domain_prompt:
-            translation_options["domains"] = domain_prompt
-        if context_pairs:
-            translation_options["tm_list"] = context_pairs
+        system_content = _build_system_prompt(
+            system_prompt=system_prompt,
+            source_language=source_language,
+            target_language=target_language,
+        )
+        user_message = _build_user_message(text=text, context=context)
 
         request_body = {
             "model": self.model,
-            "messages": [{"role": "user", "content": text}],
-            "translation_options": translation_options,
+            "messages": [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_message},
+            ],
+            "enable_thinking": False,
         }
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -175,11 +225,7 @@ class HttpxQwenClient:
             raise RuntimeError("DashScope response did not contain choices")
 
         message = choices[0].get("message", {})
-        content = message.get("content")
-        if not content:
-            raise RuntimeError("DashScope response did not contain message content")
-
-        result = str(content).strip()
+        result = _extract_message_content(message.get("content"))
         logger.info(f"[LLM] Response: '{result}'")
         return result
 

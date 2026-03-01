@@ -8,7 +8,6 @@ from uuid import UUID, uuid4
 
 logger = logging.getLogger(__name__)
 
-from puripuly_heart.config.prompts import load_qwen_few_shot
 from puripuly_heart.core.clock import Clock, SystemClock
 from puripuly_heart.core.language import get_llm_language_name
 from puripuly_heart.core.llm.provider import LLMProvider
@@ -112,7 +111,6 @@ class ClientHub:
         default_factory=dict
     )  # For E2E latency tracking
     _translation_history: list[ContextEntry] = field(default_factory=list)  # Context memory
-    _qwen_few_shot: list[dict[str, str]] = field(default_factory=load_qwen_few_shot)
     _speech_ended_ids: set[UUID] = field(default_factory=set)  # Track SpeechEnd arrivals
     _stt_task: asyncio.Task[None] | None = None
     _osc_flush_task: asyncio.Task[None] | None = None
@@ -200,14 +198,6 @@ class ClientHub:
         for entry in context:
             lines.append(f'- "{entry.text}"')
         return "\n".join(lines)
-
-    def _get_tm_list(self) -> list[dict[str, str]]:
-        """Return the fixed few-shot list for Qwen."""
-        return self._qwen_few_shot
-
-    def set_qwen_few_shots(self, shots: list[dict[str, str]]) -> None:
-        """Update Qwen few-shot examples dynamically."""
-        self._qwen_few_shot = shots
 
     def _remember_context_entry(self, text: str, timestamp: float) -> None:
         text_clean = text.strip()
@@ -1020,7 +1010,7 @@ class ClientHub:
         )
         return formatted_prompt
 
-    def _prepare_llm_request(self, text: str) -> tuple[str, str, list[dict[str, str]], float]:
+    def _prepare_llm_request(self, text: str) -> tuple[str, str, float]:
         _ = text
         valid_context = self._get_valid_context()
         now = self.clock.now()
@@ -1033,15 +1023,14 @@ class ClientHub:
             logger.info(f'[Hub] Context[{i}]: "{entry.text}" ({age:.1f}s ago)')
 
         context_str = self._format_context_for_llm(valid_context)
-        tm_list = self._get_tm_list()
         formatted_prompt = self._format_system_prompt()
-        return formatted_prompt, context_str, tm_list, now
+        return formatted_prompt, context_str, now
 
     async def _translate_text(self, utterance_id: UUID, text: str) -> Translation:
         if self.llm is None:
             raise RuntimeError("LLM is not configured")
 
-        formatted_prompt, context_str, tm_list, _ = self._prepare_llm_request(text)
+        formatted_prompt, context_str, _ = self._prepare_llm_request(text)
         return await self.llm.translate(
             utterance_id=utterance_id,
             text=text,
@@ -1049,7 +1038,6 @@ class ClientHub:
             source_language=self.source_language,
             target_language=self.target_language,
             context=context_str,
-            context_pairs=tm_list,
         )
 
     async def _ensure_translation(self, transcript: Transcript) -> None:
@@ -1066,7 +1054,7 @@ class ClientHub:
         if self.llm is None:
             return
         try:
-            formatted_prompt, context_str, tm_list, now = self._prepare_llm_request(text)
+            formatted_prompt, context_str, now = self._prepare_llm_request(text)
 
             # Add current text to context history at REQUEST time
             self._remember_context_entry(text, now)
@@ -1078,7 +1066,6 @@ class ClientHub:
                 source_language=self.source_language,
                 target_language=self.target_language,
                 context=context_str,
-                context_pairs=tm_list,
             )
         except asyncio.CancelledError:
             raise
