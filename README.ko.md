@@ -25,9 +25,9 @@
 
 ---
 
-<video src="https://github.com/user-attachments/assets/c1e7117f-496b-4086-97bc-96e72b19ffc7" controls width="100%"></video>
+[![Demo 1](https://img.youtube.com/vi/VIDEO_ID_1/maxresdefault.jpg)](https://www.youtube.com/watch?v=https://youtu.be/Wc6b8lGu_90)
 
-<video src="https://github.com/user-attachments/assets/5c313883-9486-4523-bd66-911484cd5226" controls width="100%"></video>
+[![Demo 2](https://img.youtube.com/vi/VIDEO_ID_2/maxresdefault.jpg)](https://www.youtube.com/watch?v=https://youtu.be/vLZ4XPaeTa0)
 
 ---
 
