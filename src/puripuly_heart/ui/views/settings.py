@@ -13,6 +13,7 @@ from puripuly_heart.app.wiring import create_secret_store
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
+    QwenLLMModel,
     QwenRegion,
     STTProviderName,
 )
@@ -25,7 +26,6 @@ from puripuly_heart.ui.components.settings import (
     PromptEditor,
     SettingsModal,
 )
-from puripuly_heart.ui.components.settings.few_shot_editor import FewShotEditor
 from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import (
     available_locales,
@@ -77,6 +77,7 @@ class SettingsView(ft.Column):
         self._settings: AppSettings | None = None
         self._config_path: Path | None = None
         self.has_provider_changes: bool = False
+        self.provider_change_requires_pipeline: bool = False
 
         # Build UI components
         self._build_ui()
@@ -161,7 +162,7 @@ class SettingsView(ft.Column):
         )
 
         self._llm_text = self._build_clickable_text(
-            provider_label(LLMProviderName.GEMINI.value),
+            t("provider.gemini"),
             self._on_llm_click,
         )
         self._trans_title = ft.Text(
@@ -401,18 +402,6 @@ class SettingsView(ft.Column):
             width=float("inf"),
         )
 
-        # Few-Shot Editor (Qwen only) - now in its own card
-        self._few_shot_editor = FewShotEditor(on_change=self._on_few_shot_change)
-
-        # Wrap in card
-        self._few_shot_card = self._wrap_card(
-            ft.Container(
-                content=self._few_shot_editor,
-                # Add some top padding to match look (optional, _wrap_card already adds padding)
-            )
-        )
-        self._few_shot_card.visible = False  # Default hidden
-
         persona_card = self._wrap_card(
             ft.Column(
                 [
@@ -424,9 +413,8 @@ class SettingsView(ft.Column):
             ),
         )
         row5 = persona_card
-        row6 = self._few_shot_card
 
-        self.controls = [row1, row2, row3, row4, row5, row6]
+        self.controls = [row1, row2, row3, row4, row5]
 
     def _populate_host_apis(self) -> None:
         """Legacy hook for tests; host APIs are handled by AudioSettings."""
@@ -442,12 +430,30 @@ class SettingsView(ft.Column):
             ft.dropdown.Option(key=code, text=locale_label(code)) for code in available_locales()
         ]
 
+    def _get_llm_modal_value(self, settings: AppSettings) -> str:
+        if settings.provider.llm == LLMProviderName.GEMINI:
+            return LLMProviderName.GEMINI.value
+        return settings.qwen.llm_model.value
+
+    def _get_llm_display_label(self, settings: AppSettings) -> str:
+        if settings.provider.llm == LLMProviderName.GEMINI:
+            return provider_label(LLMProviderName.GEMINI.value)
+        if settings.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS:
+            return t("provider.qwen35_plus")
+        return t("provider.qwen35_flash")
+
+    def _active_prompt_key(self) -> str:
+        if not self._settings or self._settings.provider.llm == LLMProviderName.GEMINI:
+            return "gemini"
+        return "qwen"
+
     # --- Load Settings ---
     def load_from_settings(self, settings: AppSettings, *, config_path: Path) -> None:
         """Load current settings into the UI."""
         self._settings = settings
         self._config_path = config_path
         self.has_provider_changes = False
+        self.provider_change_requires_pipeline = False
 
         # UI Language
         self._ui_text.content.value = locale_label(settings.ui.locale)
@@ -457,7 +463,7 @@ class SettingsView(ft.Column):
         self._update_api_visibility()
 
         # LLM Provider
-        self._llm_text.content.value = provider_label(settings.provider.llm.value)
+        self._llm_text.content.value = self._get_llm_display_label(settings)
 
         # Qwen Region
         region_label = t(f"region.{settings.qwen.region.value}")
@@ -477,21 +483,17 @@ class SettingsView(ft.Column):
         # Prompt
         provider_name = "gemini" if settings.provider.llm == LLMProviderName.GEMINI else "qwen"
         self._prompt_editor.set_provider(provider_name)
-        if settings.system_prompt.strip():
+        stored_prompt = settings.system_prompts.get(provider_name, "").strip()
+        if stored_prompt:
+            self._prompt_editor.value = stored_prompt
+            settings.system_prompt = stored_prompt
+        elif settings.system_prompt.strip():
             self._prompt_editor.value = settings.system_prompt
+            settings.system_prompts[provider_name] = settings.system_prompt
         else:
             self._prompt_editor.load_default_prompt()
-            self._prompt_editor.load_default_prompt()
             settings.system_prompt = self._prompt_editor.value
-
-        # Load Few-Shots
-        self._few_shot_editor.value = settings.qwen_few_shots
-
-        # Check visibility
-        provider_name = "gemini" if settings.provider.llm == LLMProviderName.GEMINI else "qwen"
-        # Check visibility
-        provider_name = "gemini" if settings.provider.llm == LLMProviderName.GEMINI else "qwen"
-        self._few_shot_card.visible = provider_name == "qwen"
+            settings.system_prompts[provider_name] = settings.system_prompt
 
         # Load secrets
         self._load_secrets(settings, config_path)
@@ -612,6 +614,7 @@ class SettingsView(ft.Column):
         self._settings.provider.stt = provider
         self._update_api_visibility()
         self.has_provider_changes = True
+        self.provider_change_requires_pipeline = True
 
         # Update text
         self._stt_text.content.value = provider_label(provider.value)
@@ -646,15 +649,22 @@ class SettingsView(ft.Column):
             return
         options = [
             OptionItem(
-                value=p.value,
-                label=provider_label(p.value),
-                description=t(f"provider.{p.value}.description", default=""),
-            )
-            for p in LLMProviderName
+                value=LLMProviderName.GEMINI.value,
+                label=t("provider.gemini"),
+                description=t("provider.gemini.description", default=""),
+            ),
+            OptionItem(
+                value=QwenLLMModel.QWEN_35_FLASH.value,
+                label=t("provider.qwen35_flash"),
+                description=t("provider.qwen35_flash.description", default=""),
+            ),
+            OptionItem(
+                value=QwenLLMModel.QWEN_35_PLUS.value,
+                label=t("provider.qwen35_plus"),
+                description=t("provider.qwen35_plus.description", default=""),
+            ),
         ]
-        current = (
-            self._settings.provider.llm.value if self._settings else LLMProviderName.GEMINI.value
-        )
+        current = self._get_llm_modal_value(self._settings) if self._settings else "gemini"
         modal = SettingsModal(
             self.page,
             t("settings.section.translation"),
@@ -668,35 +678,55 @@ class SettingsView(ft.Column):
         """Handle LLM provider selection from modal."""
         if not self._settings:
             return
-        provider = LLMProviderName(value)
         old_provider = self._settings.provider.llm
-        logger.info(f"[Settings] LLM provider changed: {old_provider.value} -> {provider.value}")
+        old_qwen_model = self._settings.qwen.llm_model
+
+        if value == LLMProviderName.GEMINI.value:
+            provider = LLMProviderName.GEMINI
+            qwen_model = old_qwen_model
+        elif value == QwenLLMModel.QWEN_35_PLUS.value:
+            provider = LLMProviderName.QWEN
+            qwen_model = QwenLLMModel.QWEN_35_PLUS
+        else:
+            provider = LLMProviderName.QWEN
+            qwen_model = QwenLLMModel.QWEN_35_FLASH
+
+        logger.info(
+            "[Settings] LLM selection changed: provider=%s->%s, qwen_model=%s->%s",
+            old_provider.value,
+            provider.value,
+            old_qwen_model.value,
+            qwen_model.value,
+        )
         self._settings.provider.llm = provider
+        if provider == LLMProviderName.QWEN:
+            self._settings.qwen.llm_model = qwen_model
+        llm_changed = old_provider != provider or (
+            provider == LLMProviderName.QWEN and old_qwen_model != self._settings.qwen.llm_model
+        )
         self._update_api_visibility()
-        self.has_provider_changes = True
+        self.has_provider_changes = llm_changed
 
         # Update text
-        self._llm_text.content.value = provider_label(provider.value)
+        self._llm_text.content.value = self._get_llm_display_label(self._settings)
 
         # Update prompt if provider changed
         if old_provider != provider:
             provider_name = "gemini" if provider == LLMProviderName.GEMINI else "qwen"
             self._prompt_editor.set_provider(provider_name)
-            self._prompt_editor.load_default_prompt()
-            self._settings.system_prompt = self._prompt_editor.value
+            next_prompt = self._settings.system_prompts.get(provider_name, "").strip()
+            if next_prompt:
+                self._prompt_editor.value = next_prompt
+            else:
+                self._prompt_editor.load_default_prompt()
+                next_prompt = self._prompt_editor.value
+                self._settings.system_prompts[provider_name] = next_prompt
+            self._settings.system_prompt = next_prompt
 
         if self.page:
-            self._qwen_region_btn.update()
-            self._api_keys_column.update()
             self._qwen_region_btn.update()
             self._api_keys_column.update()
             self._llm_text.update()
-
-        # Toggle Few-Shot editor visibility
-        # Toggle Few-Shot editor visibility
-        self._few_shot_card.visible = provider == LLMProviderName.QWEN
-        if self.page:
-            self._few_shot_card.update()
 
         self._emit_settings_changed()
 
@@ -752,6 +782,7 @@ class SettingsView(ft.Column):
         logger.info(f"[Settings] Qwen region changed: {old_region} -> {value}")
         self._settings.qwen.region = QwenRegion(value)
         self.has_provider_changes = True
+        self.provider_change_requires_pipeline = True
 
         # Update text
         self._qwen_region_btn.text = f"{t('settings.qwen_region')} {t(f'region.{value}')}"
@@ -858,12 +889,7 @@ class SettingsView(ft.Column):
         if not self._settings:
             return
         self._settings.system_prompt = value
-        self._emit_settings_changed()
-
-    def _on_few_shot_change(self, value: list[dict[str, str]]) -> None:
-        if not self._settings:
-            return
-        self._settings.qwen_few_shots = value
+        self._settings.system_prompts[self._active_prompt_key()] = value
         self._emit_settings_changed()
 
     def _on_reset_prompt(self, e) -> None:
@@ -871,6 +897,7 @@ class SettingsView(ft.Column):
         self._prompt_editor.load_default_prompt()
         if self._settings:
             self._settings.system_prompt = self._prompt_editor.value
+            self._settings.system_prompts[self._active_prompt_key()] = self._prompt_editor.value
             self._emit_settings_changed()
 
     async def _verify_key(self, provider: str, key: str) -> tuple[bool, str]:
@@ -911,7 +938,7 @@ class SettingsView(ft.Column):
         # Update text controls with current selection labels
         if self._settings:
             self._stt_text.content.value = provider_label(self._settings.provider.stt.value)
-            self._llm_text.content.value = provider_label(self._settings.provider.llm.value)
+            self._llm_text.content.value = self._get_llm_display_label(self._settings)
             self._ui_text.content.value = locale_label(self._settings.ui.locale)
             self._low_latency_text.content.value = t(
                 "toggle.on" if self._settings.stt.low_latency_mode else "toggle.off"
@@ -930,7 +957,6 @@ class SettingsView(ft.Column):
         self._alibaba_key_singapore.apply_locale()
         self._audio_settings.apply_locale()
         self._prompt_editor.apply_locale()
-        self._few_shot_editor.apply_locale()
 
         if self.page:
             self.update()

@@ -133,12 +133,14 @@ def create_llm_provider(settings: AppSettings, *, secrets: SecretStore) -> LLMPr
             base = AsyncQwenLLMProvider(
                 api_key=api_key,
                 base_url=async_base_url,
+                model=settings.qwen.llm_model.value,
             )
         else:
             # Standard mode: use DashScope SDK
             base = QwenLLMProvider(
                 api_key=api_key,
                 base_url=settings.qwen.get_llm_base_url(),
+                model=settings.qwen.llm_model.value,
             )
     else:
         raise ValueError(f"Unsupported LLM provider: {settings.provider.llm}")

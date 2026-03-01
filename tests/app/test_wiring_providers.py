@@ -10,6 +10,7 @@ from puripuly_heart.config.settings import (
     LLMSettings,
     ProviderSettings,
     QwenASRSTTSettings,
+    QwenLLMModel,
     QwenRegion,
     QwenSettings,
     SonioxSTTSettings,
@@ -53,12 +54,13 @@ def test_create_llm_provider_qwen_uses_secret() -> None:
     assert isinstance(provider.inner, AsyncQwenLLMProvider)
     assert provider.inner.api_key == "k2"
     assert provider.inner.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert provider.inner.model == "qwen3.5-plus"
 
 
 def test_create_llm_provider_qwen_uses_singapore_region() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.QWEN),
-        qwen=QwenSettings(region=QwenRegion.SINGAPORE),
+        qwen=QwenSettings(region=QwenRegion.SINGAPORE, llm_model=QwenLLMModel.QWEN_35_PLUS),
     )
     secrets = InMemorySecretStore()
     secrets.set("alibaba_api_key_singapore", "k3")
@@ -68,12 +70,14 @@ def test_create_llm_provider_qwen_uses_singapore_region() -> None:
     assert isinstance(provider.inner, AsyncQwenLLMProvider)
     assert provider.inner.api_key == "k3"
     assert provider.inner.base_url == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    assert provider.inner.model == "qwen3.5-plus"
 
 
 def test_create_llm_provider_qwen_standard_mode_uses_sync_provider() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.QWEN),
         stt=STTSettings(low_latency_mode=False),
+        qwen=QwenSettings(llm_model=QwenLLMModel.QWEN_35_PLUS),
     )
     secrets = InMemorySecretStore()
     secrets.set("alibaba_api_key_beijing", "k2")
@@ -83,12 +87,13 @@ def test_create_llm_provider_qwen_standard_mode_uses_sync_provider() -> None:
     assert isinstance(provider.inner, QwenLLMProvider)
     assert provider.inner.api_key == "k2"
     assert provider.inner.base_url == "https://dashscope.aliyuncs.com/api/v1"
+    assert provider.inner.model == "qwen3.5-plus"
 
 
 def test_create_llm_provider_qwen_standard_mode_singapore() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.QWEN),
-        qwen=QwenSettings(region=QwenRegion.SINGAPORE),
+        qwen=QwenSettings(region=QwenRegion.SINGAPORE, llm_model=QwenLLMModel.QWEN_35_FLASH),
         stt=STTSettings(low_latency_mode=False),
     )
     secrets = InMemorySecretStore()
@@ -99,6 +104,7 @@ def test_create_llm_provider_qwen_standard_mode_singapore() -> None:
     assert isinstance(provider.inner, QwenLLMProvider)
     assert provider.inner.api_key == "k3"
     assert provider.inner.base_url == "https://dashscope-intl.aliyuncs.com/api/v1"
+    assert provider.inner.model == "qwen3.5-flash"
 
 
 def test_create_llm_provider_requires_secret(monkeypatch: pytest.MonkeyPatch) -> None:
