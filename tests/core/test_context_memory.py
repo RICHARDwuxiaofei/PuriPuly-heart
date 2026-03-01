@@ -44,7 +44,6 @@ class FakeLLMProvider:
         source_language: str,
         target_language: str,
         context: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
     ):
         from puripuly_heart.domain.models import Translation
 
@@ -53,7 +52,6 @@ class FakeLLMProvider:
                 "utterance_id": utterance_id,
                 "text": text,
                 "context": context,
-                "context_pairs": context_pairs,
             }
         )
         return Translation(utterance_id=utterance_id, text=self.response_text)
@@ -345,36 +343,3 @@ class TestContextFormatting:
 
         assert '"a"' in result
         assert '"b"' in result
-
-
-class TestQwenFewShot:
-    """Test that static few-shot examples are passed to the Qwen LLM."""
-
-    @pytest.mark.asyncio
-    async def test_qwen_few_shot_passed_to_llm(self):
-        """ClientHub should pass the static Qwen few-shot list to the LLM."""
-
-        # 1. Define mock data
-        mock_data = [{"source": "mock_src", "target": "mock_tgt"}]
-
-        clock = FakeClock(initial_time=10.0)
-        fake_llm = FakeLLMProvider()
-
-        # 2. Instantiate Hub with explicit few-shot list
-        # Since _qwen_few_shot is a field, we can pass it to __init__
-        hub = ClientHub(
-            stt=None,
-            llm=fake_llm,
-            osc=FakeOscQueue(),
-            clock=clock,
-            _qwen_few_shot=mock_data,
-        )
-
-        # 3. Trigger translation
-        utterance_id = uuid4()
-        await hub._translate_and_enqueue(utterance_id, "test sentence")
-
-        # 4. Verify LLM received the mocked context_pairs
-        assert len(fake_llm.calls) == 1
-        call = fake_llm.calls[0]
-        assert call["context_pairs"] == mock_data

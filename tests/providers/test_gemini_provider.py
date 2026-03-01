@@ -27,9 +27,7 @@ class FakeGeminiClient(GeminiClient):
         source_language: str,
         target_language: str,
         context: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
     ) -> str:
-        _ = context_pairs
         self.last_call = {
             "text": text,
             "system_prompt": system_prompt,

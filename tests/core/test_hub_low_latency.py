@@ -46,14 +46,12 @@ class FakeLLMProvider:
         source_language: str,
         target_language: str,
         context: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
     ):
         self.calls.append(
             {
                 "utterance_id": utterance_id,
                 "text": text,
                 "context": context,
-                "context_pairs": context_pairs,
             }
         )
         await asyncio.sleep(self.delay_s)

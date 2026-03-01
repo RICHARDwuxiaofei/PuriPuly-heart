@@ -28,7 +28,7 @@ async def test_qwen_llm_translation_smoke() -> None:
     provider = QwenLLMProvider(
         api_key=api_key,
         base_url=get_qwen_base_url(),
-        model=os.getenv("QWEN_LLM_MODEL", "qwen-mt-flash"),
+        model=os.getenv("QWEN_LLM_MODEL", "qwen3.5-plus"),
     )
 
     translation = await provider.translate(
@@ -38,7 +38,6 @@ async def test_qwen_llm_translation_smoke() -> None:
         source_language="ko",
         target_language="en",
         context="",
-        context_pairs=[{"source": "안녕하세요", "target": "hello"}],
     )
 
     assert translation.text

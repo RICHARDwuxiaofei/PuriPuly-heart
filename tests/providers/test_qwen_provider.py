@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -20,17 +21,17 @@ class FakeQwenClient(QwenClient):
         self,
         *,
         text: str,
+        system_prompt: str,
         source_language: str,
         target_language: str,
-        domain_prompt: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
+        context: str = "",
     ) -> str:
         self.last_call = {
             "text": text,
+            "system_prompt": system_prompt,
             "source_language": source_language,
             "target_language": target_language,
-            "domain_prompt": domain_prompt,
-            "context_pairs": context_pairs,
+            "context": context,
         }
         return "TRANSLATED"
 
@@ -53,10 +54,10 @@ async def test_qwen_provider_uses_injected_client():
     assert out.text == "TRANSLATED"
     assert fake.last_call == {
         "text": "hello",
+        "system_prompt": "PROMPT",
         "source_language": "ko-KR",
         "target_language": "en",
-        "domain_prompt": "PROMPT",
-        "context_pairs": None,
+        "context": "",
     }
 
 
@@ -92,18 +93,19 @@ async def test_qwen_client_translates_with_options(monkeypatch):
     client = DashScopeQwenClient(api_key="k", model="m", base_url="https://example")
     result = await client.translate(
         text="hello",
+        system_prompt="Translate naturally",
         source_language="ko-KR",
         target_language="en",
-        domain_prompt="domain",
-        context_pairs=[{"source": "a", "target": "b"}],
+        context='- "이전 문장"',
     )
 
     assert result == "OK"
-    options = calls["translation_options"]
-    assert options["source_lang"] == "ko"
-    assert options["target_lang"] == "en"
-    assert options["domains"] == "domain"
-    assert options["tm_list"] == [{"source": "a", "target": "b"}]
+    messages = calls["messages"]
+    assert messages[0]["role"] == "system"
+    assert "Translate naturally" in messages[0]["content"]
+    assert messages[1]["role"] == "user"
+    assert "<context>" in messages[1]["content"]
+    assert "Input: hello" in messages[1]["content"]
 
 
 @pytest.mark.asyncio
@@ -125,17 +127,76 @@ async def test_qwen_client_raises_when_missing_content(monkeypatch):
 
     client = DashScopeQwenClient(api_key="k", model="m")
     with pytest.raises(RuntimeError, match="message content"):
-        await client.translate(text="hello", source_language="en", target_language="ko")
+        await client.translate(
+            text="hello",
+            system_prompt="Translate",
+            source_language="en",
+            target_language="ko",
+        )
 
 
 @pytest.mark.asyncio
-async def test_qwen_verify_api_key_handles_status(monkeypatch):
+async def test_qwen_client_uses_compatible_mode_for_qwen35(monkeypatch):
+    calls: dict[str, object] = {}
+
+    class FakeHttpxResponse:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json() -> dict:
+            return {"choices": [{"message": {"content": "OK35"}}]}
+
+    def fake_httpx_post(url, **kwargs):
+        calls["url"] = url
+        calls.update(kwargs)
+        return FakeHttpxResponse()
+
+    class DummyGeneration:
+        @staticmethod
+        def call(**_kwargs):
+            raise AssertionError("Generation.call must not be used for qwen3.5 models")
+
+    dummy = type(
+        "DummyDashScope",
+        (),
+        {"api_key": "", "base_http_api_url": "", "Generation": DummyGeneration},
+    )
+    monkeypatch.setitem(sys.modules, "dashscope", dummy)
+    monkeypatch.setattr("httpx.post", fake_httpx_post)
+
+    client = DashScopeQwenClient(
+        api_key="k", model="qwen3.5-plus", base_url="https://example/api/v1"
+    )
+    result = await client.translate(
+        text="hello",
+        system_prompt="Translate naturally",
+        source_language="ko",
+        target_language="en",
+        context='- "이전 문장"',
+    )
+
+    assert result == "OK35"
+    assert calls["url"] == "https://example/compatible-mode/v1/chat/completions"
+    body = calls["json"]
+    assert body["model"] == "qwen3.5-plus"
+    assert body["enable_thinking"] is False
+    assert body["messages"][0]["role"] == "system"
+    assert body["messages"][1]["role"] == "user"
+    assert "<context>" in body["messages"][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_qwen_verify_api_key_handles_status_for_legacy_model(monkeypatch):
+    calls: dict[str, object] = {}
+
     class FakeResponse:
         status_code = 200
 
     class FakeGeneration:
         @staticmethod
-        def call(**_kwargs):
+        def call(**kwargs):
+            calls.update(kwargs)
             return FakeResponse()
 
     class FakeDashScope:
@@ -145,4 +206,72 @@ async def test_qwen_verify_api_key_handles_status(monkeypatch):
 
     monkeypatch.setitem(__import__("sys").modules, "dashscope", FakeDashScope)
 
-    assert await QwenLLMProvider.verify_api_key("secret") is True
+    assert (
+        await QwenLLMProvider.verify_api_key(
+            "secret", base_url="https://example/api/v1", model="qwen-plus"
+        )
+        is True
+    )
+    assert calls["model"] == "qwen-plus"
+    assert FakeDashScope.base_http_api_url == "https://example/api/v1"
+
+
+@pytest.mark.asyncio
+async def test_qwen_verify_api_key_uses_compatible_mode_for_qwen35(monkeypatch):
+    calls: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            calls["url"] = url
+            calls["json"] = kwargs["json"]
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    assert (
+        await QwenLLMProvider.verify_api_key(
+            "secret", base_url="https://example/api/v1", model="qwen3.5-plus"
+        )
+        is True
+    )
+    assert calls["url"] == "https://example/compatible-mode/v1/chat/completions"
+    assert calls["json"]["model"] == "qwen3.5-plus"
+    assert calls["json"]["enable_thinking"] is False
+
+
+@pytest.mark.asyncio
+async def test_qwen_warmup_always_uses_plus_model(monkeypatch):
+    seen: dict[str, str] = {}
+
+    async def fake_verify(api_key: str, *, base_url: str, model: str) -> bool:
+        seen["api_key"] = api_key
+        seen["base_url"] = base_url
+        seen["model"] = model
+        return True
+
+    monkeypatch.setattr(QwenLLMProvider, "verify_api_key", staticmethod(fake_verify))
+
+    provider = QwenLLMProvider(
+        api_key="secret",
+        base_url="https://example/api/v1",
+        model="qwen3.5-plus",
+    )
+    await provider.warmup()
+
+    assert seen == {
+        "api_key": "secret",
+        "base_url": "https://example/api/v1",
+        "model": "qwen3.5-plus",
+    }

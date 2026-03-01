@@ -41,9 +41,8 @@ class FakeLLMProvider:
         source_language: str,
         target_language: str,
         context: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
     ) -> Translation:
-        _ = (text, source_language, target_language, context, context_pairs)
+        _ = (text, source_language, target_language, context)
         self.last_prompt = system_prompt
         return Translation(utterance_id=utterance_id, text="ok")
 

@@ -21,9 +21,8 @@ class CountingLLM:
         source_language: str,
         target_language: str,
         context: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
     ) -> Translation:
-        _ = (system_prompt, source_language, target_language, context, context_pairs)
+        _ = (system_prompt, source_language, target_language, context)
         self.active += 1
         self.peak = max(self.peak, self.active)
         try:

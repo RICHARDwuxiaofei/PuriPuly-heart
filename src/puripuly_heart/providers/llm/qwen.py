@@ -1,14 +1,91 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+import httpx
+
 from puripuly_heart.domain.models import Translation
 
 logger = logging.getLogger(__name__)
+_QWEN35_MODELS = {"qwen3.5-flash", "qwen3.5-plus"}
+_QWEN_PROBE_MODEL = "qwen3.5-plus"
+
+
+def _build_system_prompt(
+    *,
+    system_prompt: str,
+    source_language: str,
+    target_language: str,
+) -> str:
+    formatted = (
+        system_prompt.format(
+            source_language=source_language,
+            target_language=target_language,
+        )
+        if "{source_language}" in system_prompt
+        else system_prompt
+    )
+    return formatted
+
+
+def _build_user_message(*, text: str, context: str) -> str:
+    if context:
+        return f"<context>\n{context}\n</context>\nInput: {text}"
+    return text
+
+
+def _extract_message_content(content: object) -> str:
+    if isinstance(content, str):
+        result = content.strip()
+        if result:
+            return result
+        raise RuntimeError("DashScope response contained empty message content")
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        if parts:
+            return "\n".join(parts)
+
+    raise RuntimeError("DashScope response did not contain message content")
+
+
+def _is_qwen35_model(model: str) -> bool:
+    return model.strip().lower() in _QWEN35_MODELS
+
+
+def _to_compatible_base_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/compatible-mode/v1"):
+        return normalized
+    if normalized.endswith("/api/v1"):
+        return normalized[: -len("/api/v1")] + "/compatible-mode/v1"
+    return normalized + "/compatible-mode/v1"
+
+
+def _extract_error_message(data: object) -> str:
+    if not isinstance(data, dict):
+        return ""
+    message = data.get("message")
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+    error = data.get("error")
+    if isinstance(error, dict):
+        nested = error.get("message")
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    return ""
 
 
 class QwenClient(Protocol):
@@ -16,10 +93,10 @@ class QwenClient(Protocol):
         self,
         *,
         text: str,
+        system_prompt: str,
         source_language: str,
         target_language: str,
-        domain_prompt: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
+        context: str = "",
     ) -> str: ...
 
 
@@ -27,7 +104,7 @@ class QwenClient(Protocol):
 class QwenLLMProvider:
     api_key: str
     base_url: str = "https://dashscope.aliyuncs.com/api/v1"
-    model: str = "qwen-mt-flash"
+    model: str = "qwen3.5-plus"
     client: QwenClient | None = None
 
     async def translate(
@@ -39,31 +116,56 @@ class QwenLLMProvider:
         source_language: str,
         target_language: str,
         context: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
     ) -> Translation:
-        _ = context
-        domain_prompt = system_prompt
         client = self.client or DashScopeQwenClient(
             api_key=self.api_key, model=self.model, base_url=self.base_url
         )
         translated = await client.translate(
             text=text,
+            system_prompt=system_prompt,
             source_language=source_language,
             target_language=target_language,
-            domain_prompt=domain_prompt,
-            context_pairs=context_pairs,
+            context=context,
         )
         return Translation(utterance_id=utterance_id, text=translated)
 
     async def close(self) -> None:
         pass
 
+    async def warmup(self) -> None:
+        # Warmup probes the default model.
+        await self.verify_api_key(self.api_key, base_url=self.base_url, model=_QWEN_PROBE_MODEL)
+
     @staticmethod
     async def verify_api_key(
-        api_key: str, base_url: str = "https://dashscope.aliyuncs.com/api/v1"
+        api_key: str,
+        base_url: str = "https://dashscope.aliyuncs.com/api/v1",
+        model: str = _QWEN_PROBE_MODEL,
     ) -> bool:
         if not api_key:
             return False
+
+        if _is_qwen35_model(model):
+            compatible_base_url = _to_compatible_base_url(base_url)
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(
+                        f"{compatible_base_url}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": model,
+                            "messages": [{"role": "user", "content": "ping"}],
+                            "enable_thinking": False,
+                            "max_tokens": 1,
+                        },
+                    )
+                    return response.status_code == 200
+            except Exception:
+                return False
+
         try:
             import dashscope  # type: ignore
 
@@ -71,11 +173,11 @@ class QwenLLMProvider:
                 try:
                     dashscope.api_key = api_key
                     dashscope.base_http_api_url = base_url
-                    # Use qwen-mt-lite for a cheap/fast check
                     response = dashscope.Generation.call(
-                        model="qwen-mt-lite",
-                        messages=[{"role": "user", "content": "test"}],
+                        model=model,
+                        messages=[{"role": "user", "content": "ping"}],
                         max_tokens=1,
+                        result_format="message",
                     )
                     return response.status_code == 200
                 except Exception:
@@ -109,41 +211,87 @@ class DashScopeQwenClient:
         self,
         *,
         text: str,
+        system_prompt: str,
         source_language: str,
         target_language: str,
-        domain_prompt: str = "",
-        context_pairs: list[dict[str, str]] | None = None,
+        context: str = "",
     ) -> str:
-        import dashscope  # type: ignore
-
-        logger.info(f"[LLM] Request: '{text}' -> {source_language} to {target_language}")
+        if context:
+            logger.info(
+                f"[LLM] Request with context: '{text}' -> {source_language} to {target_language}"
+            )
+        else:
+            logger.info(f"[LLM] Request: '{text}' -> {source_language} to {target_language}")
 
         def _call() -> str:
+            system_content = _build_system_prompt(
+                system_prompt=system_prompt,
+                source_language=source_language,
+                target_language=target_language,
+            )
+            user_message = _build_user_message(text=text, context=context)
+
+            if _is_qwen35_model(self.model):
+                compatible_base_url = _to_compatible_base_url(self.base_url)
+                response = httpx.post(
+                    f"{compatible_base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": system_content},
+                            {"role": "user", "content": user_message},
+                        ],
+                        "enable_thinking": False,
+                    },
+                    timeout=30.0,
+                )
+                if response.status_code != 200:
+                    error_message = ""
+                    with contextlib.suppress(Exception):
+                        error_message = _extract_error_message(response.json())
+                    if not error_message:
+                        error_message = response.text[:200]
+                    raise RuntimeError(
+                        "DashScope compatible-mode request failed "
+                        f"(status={response.status_code}, message={error_message})"
+                    )
+                data = response.json()
+                choices = data.get("choices", [])
+                if not choices:
+                    raise RuntimeError("DashScope response did not contain choices")
+                message = choices[0].get("message", {})
+                result = _extract_message_content(message.get("content"))
+                logger.info(f"[LLM] Response: '{result}'")
+                return result
+
+            import dashscope  # type: ignore
+
             dashscope.api_key = self.api_key
             dashscope.base_http_api_url = self.base_url
-            translation_options = {
-                "source_lang": self._normalize_language_code(source_language),
-                "target_lang": self._normalize_language_code(target_language),
-            }
-            if domain_prompt:
-                translation_options["domains"] = domain_prompt
-            if context_pairs:
-                translation_options["tm_list"] = context_pairs
             response = dashscope.Generation.call(
                 model=self.model,
-                messages=[{"role": "user", "content": text}],
+                messages=[
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": user_message},
+                ],
                 result_format="message",
-                translation_options=translation_options,
             )
             output = getattr(response, "output", None)
             if not output:
-                raise RuntimeError("DashScope response did not contain output")
+                status = getattr(response, "status_code", None)
+                code = getattr(response, "code", None)
+                message = getattr(response, "message", None)
+                raise RuntimeError(
+                    "DashScope response did not contain output "
+                    f"(status={status}, code={code}, message={message})"
+                )
             choice = output.get("choices", [{}])[0]
             message = choice.get("message", {})
-            content = message.get("content")
-            if not content:
-                raise RuntimeError("DashScope response did not contain message content")
-            result = str(content).strip()
+            result = _extract_message_content(message.get("content"))
             logger.info(f"[LLM] Response: '{result}'")
             return result
 
