@@ -73,6 +73,19 @@ def test_create_llm_provider_qwen_uses_singapore_region() -> None:
     assert provider.inner.model == "qwen3.5-plus"
 
 
+def test_create_llm_provider_qwen_uses_legacy_alibaba_secret_key() -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.QWEN))
+    secrets = InMemorySecretStore()
+    secrets.set("alibaba_api_key", "legacy-k2")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, AsyncQwenLLMProvider)
+    assert provider.inner.api_key == "legacy-k2"
+    # Legacy key should be backfilled to region-specific key for future runs.
+    assert secrets.get("alibaba_api_key_beijing") == "legacy-k2"
+
+
 def test_create_llm_provider_qwen_standard_mode_uses_sync_provider() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.QWEN),
@@ -164,6 +177,21 @@ def test_create_stt_backend_qwen_asr_uses_singapore_region() -> None:
     backend = create_stt_backend(settings, secrets=secrets)
     assert isinstance(backend, QwenASRRealtimeSTTBackend)
     assert backend.endpoint == "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+
+
+def test_create_stt_backend_qwen_asr_uses_legacy_alibaba_secret_key() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(stt=STTProviderName.QWEN_ASR),
+        qwen_asr_stt=QwenASRSTTSettings(model="qwen3-asr-flash-realtime"),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("alibaba_api_key", "legacy-k4")
+
+    backend = create_stt_backend(settings, secrets=secrets)
+    assert isinstance(backend, QwenASRRealtimeSTTBackend)
+    assert backend.api_key == "legacy-k4"
+    # Legacy key should be backfilled to region-specific key for future runs.
+    assert secrets.get("alibaba_api_key_beijing") == "legacy-k4"
 
 
 def test_create_stt_backend_soniox_uses_secret() -> None:
