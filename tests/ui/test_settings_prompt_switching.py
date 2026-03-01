@@ -94,3 +94,33 @@ def test_settings_view_preserves_provider_specific_prompts(monkeypatch) -> None:
     view._on_llm_selected(LLMProviderName.GEMINI.value)
     assert view._prompt_editor.value == "GEMINI CUSTOM"
     assert settings.system_prompt == "GEMINI CUSTOM"
+
+
+def test_settings_view_llm_modal_orders_qwen_plus_before_flash(monkeypatch) -> None:
+    settings = AppSettings()
+    view = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.page = object()
+
+    captured: dict[str, object] = {}
+
+    class DummyModal:
+        def __init__(self, _page, _title, options, _on_select, *, show_description=False):
+            captured["options"] = options
+            captured["show_description"] = show_description
+
+        def open(self, current: str) -> None:
+            captured["current"] = current
+
+    monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
+
+    view._on_llm_click(None)
+
+    assert captured["show_description"] is True
+    options = captured["options"]
+    values = [option.value for option in options]
+    assert values == [
+        LLMProviderName.GEMINI.value,
+        QwenLLMModel.QWEN_35_PLUS.value,
+        QwenLLMModel.QWEN_35_FLASH.value,
+    ]
