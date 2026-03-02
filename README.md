@@ -86,7 +86,7 @@ This app uses cloud AI services. You pay directly for what you use with your own
 |--------|------------|------|------|
 | **Deepgram** | $200 | None | - |
 | **Gemini** | $300 | 90 days | Received after upgrading to paid tier |
-| **Qwen** | 1M tokens/model | 90 days | Singapore region |
+| **Qwen** | 1M tokens/model | 90 days | - |
 
 ---
 
@@ -113,7 +113,7 @@ This app uses cloud AI services. You pay directly for what you use with your own
 
 If Gemini/Deepgram/Soniox are blocked in your region:
 
-1. Get an API Key from [Alibaba Cloud Model Studio](https://bailian.console.alibabacloud.com) (Select Beijing region for the key).
+1. Get an API Key from [Alibaba Cloud Model Studio](https://bailian.console.aliyun.com/cn-beijing) (Select Beijing region for the key).
 2. Change providers in **Settings**:
    - STT: **Qwen ASR**
    - LLM: **Qwen 3.5 Plus**

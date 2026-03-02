@@ -93,7 +93,7 @@
 |--------|------------|------|------|
 | **Deepgram** | $200 | 없음 | - |
 | **Gemini** | $300 | 90일 | 유료 티어로 전환 후 받음 |
-| **Qwen** | 모델당 100만 토큰 | 90일 | 싱가포르 리전 기준|
+| **Qwen** | 모델당 100만 토큰 | 90일 | - |
 
 ---
 
@@ -105,7 +105,7 @@
 2. [Deepgram](https://console.deepgram.com)에서 Deepgram API 키 발급
 3. [Google AI Studio](https://aistudio.google.com/apikey)에서 Gemini API 키 발급
 4. **Gemini API 결제 플랜**을 유료로 전환 (매우 권장)
-  - 무료 티어는 실사용이 어려울 정도로 분당 호출 제한이 걸려있어요.
+  - 무료 티어는 실사용이 어려울 정도로 호출 제한이 걸려있어요.
 5. PuriPuly **설정** 탭에서 API 키 입력 후 검증
   - 입력 칸에 API 키를 붙여넣기 한 후 엔터를 누르거나 포커스를 해제해주세요.
 6. **대시보드**에서 원본/대상 언어 선택
@@ -120,7 +120,7 @@
 
 Gemini/Deepgram/Soniox가 차단된 지역이라면
 
-1. [Alibaba Cloud Model Studio](https://bailian.console.alibabacloud.com)에서 API 키 발급 (베이징 리전)
+1. [Alibaba Cloud Model Studio](https://bailian.console.aliyun.com/cn-beijing)에서 API 키 발급 (베이징 리전)
 2. **설정**에서 제공자 변경:
    - STT: **Qwen ASR**
    - LLM: **Qwen 3.5 Plus**
@@ -183,26 +183,26 @@ Gemini/Deepgram/Soniox가 차단된 지역이라면
 <details>
 <summary><h3>Qwen</h3></summary>
 
-1 지역에 따라 알맞는 경로로 Alibaba Cloud Model Studio에 접속하세요.
+1. 지역에 따라 알맞는 경로로 Alibaba Cloud Model Studio에 접속하세요.
    - [중국 본토](https://bailian.console.aliyun.com/cn-beijing)
    - [중국 본토 외 다른 지역](https://bailian.console.alibabacloud.com)
 
-2 [Alibaba Cloud Model Studio](https://bailian.console.alibabacloud.com)접속한 주소에서 로그인 하세요. 본인이 API 키를 발급받으려는 리전(Region)을 정확히 선택해주세요. (예: Beijing)
+2. [Alibaba Cloud Model Studio](https://bailian.console.alibabacloud.com)접속한 주소에서 로그인 하세요. 본인이 API 키를 발급받으려는 리전(Region)을 정확히 선택해주세요. (예: Beijing)
    ![step2](docs/images/qwen/1.png)
 
-3 우측 상단의 **톱니바퀴 아이콘**을 클릭하세요.
+3. 우측 상단의 **톱니바퀴 아이콘**을 클릭하세요.
    ![step3](docs/images/qwen/2.png)
 
-4 워크스페이스를 생성하고 **API-KEY** 페이지로 넘어가세요.
+4. 워크스페이스를 생성하고 **API-KEY** 페이지로 넘어가세요.
    ![step4](docs/images/qwen/3.png)
 
-5 **Create API Key**를 클릭하세요.
+5. **Create API Key**를 클릭하세요.
    ![step5](docs/images/qwen/4.png)
 
-6 어카운트와 워크스페이스를 할당하고 OK 버튼을 눌러주세요
+6. 어카운트와 워크스페이스를 할당하고 OK 버튼을 눌러주세요
    ![step6](docs/images/qwen/5.png)
 
-7 동그라미 친 곳을 눌러 key를 복사하세요.
+7. 동그라미 친 곳을 눌러 key를 복사하세요.
    ![step7](docs/images/qwen/6.png)
 
 </details>
