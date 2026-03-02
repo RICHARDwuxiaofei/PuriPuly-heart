@@ -93,7 +93,7 @@
 |--------|------------|------|------|
 | **Deepgram** | $200 | なし | - |
 | **Gemini** | $300 | 90日 | 有料プランへ移行後に付与 |
-| **Qwen** | モデルごと100万トークン | 90日 | シンガポールリージョン基準 |
+| **Qwen** | モデルごと100万トークン | 90日 | - |
 
 ---
 
@@ -105,7 +105,7 @@
 2. [Deepgram](https://console.deepgram.com)でDeepgram APIキーを発行
 3. [Google AI Studio](https://aistudio.google.com/apikey)でGemini APIキーを発行
 4. **Gemini APIの支払いプラン**を有料プランに切り替え（強く推奨）
-  - 無料枠は、実用が困難なほど1分あたりの呼び出し制限が厳しく設定されています。
+  - 無料枠は、実用が困難なほど呼び出し制限が厳しく設定されています。
 5. PuriPulyの **Settings** タブにAPIキーを入力して検証
   - 入力欄にAPIキーを貼り付けた後、Enterキーを押すか、フォーカスを外してください。
 6. **Dashboard** で元の言語/対象の言語を選択
@@ -120,7 +120,7 @@
 
 Gemini / Deepgram / Sonioxへのアクセスがブロックされている地域の場合
 
-1. [Alibaba Cloud Model Studio](https://bailian.console.alibabacloud.com)でAPIキーを発行（北京リージョン）
+1. [Alibaba Cloud Model Studio](https://bailian.console.aliyun.com/cn-beijing)でAPIキーを発行（北京リージョン）
 2. **Settings** でプロバイダーを変更：
    - STT: **Qwen ASR**
    - LLM: **Qwen 3.5 Plus**
@@ -183,7 +183,7 @@ Gemini / Deepgram / Sonioxへのアクセスがブロックされている地域
 <details>
 <summary><h3>Qwen</h3></summary>
 
-1 地域に合った経路でAlibaba Cloud Model Studioにアクセスします。
+1. 地域に合った経路でAlibaba Cloud Model Studioにアクセスします。
    - [中国本土](https://bailian.console.aliyun.com/cn-beijing)
    - [中国本土以外の地域](https://bailian.console.alibabacloud.com)
 
