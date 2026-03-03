@@ -35,6 +35,21 @@ async def test_qwen_asr_backend_requires_valid_sample_rate() -> None:
 
 
 @pytest.mark.asyncio
+async def test_qwen_asr_backend_requires_positive_connect_timeout() -> None:
+    backend = QwenASRRealtimeSTTBackend(
+        api_key="k",
+        model="qwen3-asr-flash-realtime",
+        endpoint="wss://example",
+        language="en",
+        sample_rate_hz=16000,
+        connect_timeout_s=0.0,
+    )
+
+    with pytest.raises(ValueError):
+        await backend.open_session()
+
+
+@pytest.mark.asyncio
 async def test_qwen_asr_backend_verify_api_key_delegates(monkeypatch) -> None:
     seen: dict[str, str] = {}
 
@@ -48,3 +63,8 @@ async def test_qwen_asr_backend_verify_api_key_delegates(monkeypatch) -> None:
 
     assert ok is True
     assert seen == {"api_key": "secret"}
+
+
+@pytest.mark.asyncio
+async def test_qwen_asr_backend_verify_api_key_empty_returns_false() -> None:
+    assert await QwenASRRealtimeSTTBackend.verify_api_key("") is False

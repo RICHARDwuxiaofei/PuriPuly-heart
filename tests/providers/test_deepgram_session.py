@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
 
 import pytest
 
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.providers.stt import deepgram as deepgram_module
 from puripuly_heart.providers.stt.deepgram import _FINALIZE, _STOP, _DeepgramSDKSession
+from tests.helpers.fakes import NoopThread, TargetThread
 
 
 def _make_session() -> _DeepgramSDKSession:
@@ -70,17 +73,6 @@ async def test_deepgram_session_events_yield_and_raise() -> None:
 async def test_deepgram_session_start_success(monkeypatch) -> None:
     session = _make_session()
 
-    class DummyThread:
-        def __init__(self, target=None, name=None, daemon=None):
-            self._target = target
-
-        def start(self):
-            if self._target:
-                self._target()
-
-        def join(self, timeout=None):
-            return None
-
     def fake_run_sync():
         session._connected.set()
 
@@ -88,7 +80,7 @@ async def test_deepgram_session_start_success(monkeypatch) -> None:
         return func(*args, **kwargs)
 
     monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
-    monkeypatch.setattr(deepgram_module.threading, "Thread", DummyThread)
+    monkeypatch.setattr(deepgram_module.threading, "Thread", TargetThread)
     monkeypatch.setattr(session, "_run_sync", fake_run_sync)
 
     await session.start()
@@ -99,17 +91,6 @@ async def test_deepgram_session_start_success(monkeypatch) -> None:
 async def test_deepgram_session_start_timeout(monkeypatch) -> None:
     session = _make_session()
 
-    class DummyThread:
-        def __init__(self, target=None, name=None, daemon=None):
-            self._target = target
-
-        def start(self):
-            if self._target:
-                self._target()
-
-        def join(self, timeout=None):
-            return None
-
     def fake_run_sync():
         return None
 
@@ -117,8 +98,123 @@ async def test_deepgram_session_start_timeout(monkeypatch) -> None:
         return False
 
     monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
-    monkeypatch.setattr(deepgram_module.threading, "Thread", DummyThread)
+    monkeypatch.setattr(deepgram_module.threading, "Thread", TargetThread)
     monkeypatch.setattr(session, "_run_sync", fake_run_sync)
 
     with pytest.raises(RuntimeError, match="connection timeout"):
         await session.start()
+
+
+@pytest.mark.asyncio
+async def test_deepgram_session_report_error_is_emitted_once() -> None:
+    session = _make_session()
+    session._loop = asyncio.get_running_loop()
+
+    err = RuntimeError("boom")
+    session._report_error(err)
+    session._report_error(RuntimeError("second"))
+    await asyncio.sleep(0)
+
+    assert session._error_reported is True
+    assert await session._events.get() is err
+    assert session._events.empty()
+
+
+@pytest.mark.asyncio
+async def test_deepgram_session_run_sync_handles_message_finalize_and_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _make_session()
+    session._loop = asyncio.get_running_loop()
+    session._connect_started_at = 1.0
+
+    sent_media: list[bytes] = []
+    sent_controls: list[str] = []
+
+    class FakeEventType:
+        OPEN = "open"
+        MESSAGE = "message"
+        ERROR = "error"
+        CLOSE = "close"
+
+    class FakeControlMessage:
+        def __init__(self, type: str):
+            self.type = type
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def on(self, event_type, callback):
+            if event_type == FakeEventType.OPEN:
+                callback(object())
+            if event_type == FakeEventType.MESSAGE:
+                alt = types.SimpleNamespace(transcript="hello world")
+                result = types.SimpleNamespace(
+                    channel=types.SimpleNamespace(alternatives=[alt]),
+                    is_final=True,
+                    speech_final=False,
+                )
+                callback(result)
+
+        def start_listening(self):
+            return None
+
+        def send_control(self, message):
+            sent_controls.append(message.type)
+
+        def send_media(self, data: bytes):
+            sent_media.append(data)
+
+    class FakeV1:
+        def connect(self, **_kwargs):
+            return FakeConnection()
+
+    class FakeListen:
+        v1 = FakeV1()
+
+    class FakeClient:
+        def __init__(self, api_key: str):
+            _ = api_key
+            self.listen = FakeListen()
+
+    deepgram_pkg = types.ModuleType("deepgram")
+    deepgram_pkg.DeepgramClient = FakeClient
+    deepgram_core = types.ModuleType("deepgram.core")
+    deepgram_events = types.ModuleType("deepgram.core.events")
+    deepgram_events.EventType = FakeEventType
+    deepgram_ext = types.ModuleType("deepgram.extensions")
+    deepgram_ext_types = types.ModuleType("deepgram.extensions.types")
+    deepgram_sockets = types.ModuleType("deepgram.extensions.types.sockets")
+    deepgram_sockets.ListenV1ControlMessage = FakeControlMessage
+
+    monkeypatch.setitem(sys.modules, "deepgram", deepgram_pkg)
+    monkeypatch.setitem(sys.modules, "deepgram.core", deepgram_core)
+    monkeypatch.setitem(sys.modules, "deepgram.core.events", deepgram_events)
+    monkeypatch.setitem(sys.modules, "deepgram.extensions", deepgram_ext)
+    monkeypatch.setitem(sys.modules, "deepgram.extensions.types", deepgram_ext_types)
+    monkeypatch.setitem(sys.modules, "deepgram.extensions.types.sockets", deepgram_sockets)
+
+    monkeypatch.setattr(deepgram_module.threading, "Thread", NoopThread)
+
+    session._audio_q.put_nowait(_FINALIZE)
+    session._audio_q.put_nowait(b"pcm")
+    session._audio_q.put_nowait(_STOP)
+    session._run_sync()
+    await asyncio.sleep(0)
+
+    first = await session._events.get()
+    assert isinstance(first, STTBackendTranscriptEvent)
+    assert first.text == "hello world"
+    assert sent_controls == ["Finalize"]
+    assert sent_media == [b"pcm"]
+    assert session._connected.is_set() is True
+
+    # _run_sync posts termination markers in stop path/finally.
+    tail: list[object] = []
+    while not session._events.empty():
+        tail.append(session._events.get_nowait())
+    assert None in tail
