@@ -19,7 +19,7 @@
 
 ---
 
-## 演示
+## Demo
 
 ![](docs/images/demo/jp-ko_screenshot.png)
 
