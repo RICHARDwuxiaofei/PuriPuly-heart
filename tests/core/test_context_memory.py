@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -11,6 +12,8 @@ from puripuly_heart.core.orchestrator.hub import (
     ClientHub,
     ContextEntry,
 )
+from puripuly_heart.domain.events import UIEventType
+from puripuly_heart.domain.models import Transcript
 
 # ── Mock classes ──────────────────────────────────────────────────────────────
 
@@ -241,9 +244,8 @@ class TestContextPassedToLLM:
             ContextEntry(text="hello", source_language="ko", target_language="en", timestamp=8.0),
         ]
 
-        # Translate a new text
-        utterance_id = uuid4()
-        await hub._translate_and_enqueue(utterance_id, "world")
+        await hub.submit_text("world")
+        await asyncio.gather(*hub._translation_tasks.values(), return_exceptions=True)
 
         # Verify LLM was called with context
         assert len(fake_llm.calls) == 1
@@ -264,8 +266,8 @@ class TestContextPassedToLLM:
 
         hub._translation_history = []
 
-        utterance_id = uuid4()
-        await hub._translate_and_enqueue(utterance_id, "test")
+        await hub.submit_text("test")
+        await asyncio.gather(*hub._translation_tasks.values(), return_exceptions=True)
 
         assert len(fake_llm.calls) == 1
         assert fake_llm.calls[0]["context"] == ""
@@ -288,8 +290,8 @@ class TestContextPassedToLLM:
             ContextEntry(text="old", source_language="ko", target_language="en", timestamp=1.0),
         ]
 
-        utterance_id = uuid4()
-        await hub._translate_and_enqueue(utterance_id, "test")
+        await hub.submit_text("test")
+        await asyncio.gather(*hub._translation_tasks.values(), return_exceptions=True)
 
         assert len(fake_llm.calls) == 1
         assert fake_llm.calls[0]["context"] == ""
@@ -343,3 +345,82 @@ class TestContextFormatting:
 
         assert '"a"' in result
         assert '"b"' in result
+
+
+class TestContextInternalPaths:
+    def test_prepare_llm_request_formats_prompt_and_context(self):
+        clock = FakeClock(initial_time=20.0)
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=FakeOscQueue(),
+            clock=clock,
+            system_prompt="Translate ${sourceName} to ${targetName}",
+        )
+        hub._translation_history = [
+            ContextEntry(text="안녕", source_language="ko", target_language="en", timestamp=19.0),
+        ]
+
+        prompt, context, now = hub._prepare_llm_request("입력")
+
+        assert "${sourceName}" not in prompt
+        assert "${targetName}" not in prompt
+        assert '"안녕"' in context
+        assert now == 20.0
+
+    @pytest.mark.asyncio
+    async def test_submit_text_without_llm_enqueues_transcript_only(self):
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=FakeClock(),
+        )
+
+        utterance_id = await hub.submit_text("hello")
+        bundle = hub.get_or_create_bundle(utterance_id)
+        assert bundle.translation is None
+
+        events = [await hub.ui_events.get(), await hub.ui_events.get()]
+        assert [event.type for event in events] == [
+            UIEventType.TRANSCRIPT_FINAL,
+            UIEventType.OSC_SENT,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ensure_translation_deduplicates_same_utterance(self):
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=FakeOscQueue(),
+            clock=FakeClock(),
+        )
+        transcript = Transcript(utterance_id=uuid4(), text="hello", is_final=True)
+
+        await hub._ensure_translation(transcript)
+        await hub._ensure_translation(transcript)
+
+        assert len(hub._translation_tasks) == 1
+        await asyncio.gather(*hub._translation_tasks.values(), return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_submit_text_translation_success_updates_bundle_and_events(self):
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(response_text="OK"),
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=1.0),
+        )
+        utterance_id = await hub.submit_text("hello")
+        await asyncio.gather(*hub._translation_tasks.values(), return_exceptions=True)
+
+        bundle = hub.get_or_create_bundle(utterance_id)
+        assert bundle.translation is not None
+        assert bundle.translation.text == "OK"
+
+        events = [await hub.ui_events.get(), await hub.ui_events.get(), await hub.ui_events.get()]
+        assert [event.type for event in events] == [
+            UIEventType.TRANSCRIPT_FINAL,
+            UIEventType.TRANSLATION_DONE,
+            UIEventType.OSC_SENT,
+        ]

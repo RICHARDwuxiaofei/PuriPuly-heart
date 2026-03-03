@@ -9,7 +9,7 @@ from uuid import uuid4
 import numpy as np
 import pytest
 
-from puripuly_heart.core.orchestrator.hub import ClientHub
+from puripuly_heart.core.orchestrator.hub import ClientHub, _MergeBuffer
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
 from puripuly_heart.domain.models import Transcript, Translation
 
@@ -572,3 +572,94 @@ class TestResumeEndTimeout:
         assert buffer.resume_end_utterance_id == uid2
 
         await hub.stop()
+
+
+class TestSpecCommitPaths:
+    @pytest.mark.asyncio
+    async def test_commit_merge_reuses_spec_translation_when_text_matches(self):
+        clock = FakeClock(initial_time=10.0)
+        osc = FakeOscQueue()
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=osc,
+            clock=clock,
+            low_latency_mode=True,
+        )
+        uid = uuid4()
+        merge_id = uuid4()
+        buffer = _MergeBuffer(
+            merge_id=merge_id,
+            parts=["hello"],
+            utterance_ids=[uid],
+            start_time=clock.now(),
+            last_end_time=clock.now(),
+            spec_text="hello",
+            spec_translation=Translation(utterance_id=merge_id, text="hola"),
+        )
+        hub._merge_buffer = buffer
+        hub._utterance_start_times[uid] = clock.now()
+
+        await hub._commit_merge(buffer, reason="spec_done")
+
+        assert hub._merge_buffer is None
+        assert len(osc.messages) == 1
+        assert osc.messages[0].text == "hello (hola)"
+        assert len(hub._translation_history) == 1
+
+    @pytest.mark.asyncio
+    async def test_try_commit_after_spec_skips_when_spec_text_differs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=10.0),
+            low_latency_mode=True,
+        )
+        buffer = _MergeBuffer(
+            merge_id=uuid4(),
+            parts=["new"],
+            spec_text="old",
+            spec_translation=Translation(utterance_id=uuid4(), text="translated"),
+        )
+        hub._merge_buffer = buffer
+        called: list[str] = []
+
+        async def fake_commit(self, commit_buffer, *, reason: str):  # noqa: ANN001
+            _ = (self, commit_buffer)
+            called.append(reason)
+
+        monkeypatch.setattr(ClientHub, "_commit_merge", fake_commit)
+
+        await hub._try_commit_after_spec(buffer, reason="spec_done", allow_fallback=False)
+        assert called == []
+
+    @pytest.mark.asyncio
+    async def test_commit_merge_blocks_while_resume_or_waiting_states(self):
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=10.0),
+            low_latency_mode=True,
+        )
+        buffer = _MergeBuffer(merge_id=uuid4(), parts=["text"], utterance_ids=[uuid4()])
+        hub._merge_buffer = buffer
+
+        buffer.resume_pending = True
+        await hub._commit_merge(buffer, reason="blocked_resume")
+        assert hub._merge_buffer is buffer
+
+        buffer.resume_pending = False
+        buffer.awaiting_vad_end = True
+        await hub._commit_merge(buffer, reason="blocked_waiting")
+        assert hub._merge_buffer is buffer
+
+        buffer.awaiting_vad_end = False
+        buffer.finalize_wait_task = asyncio.create_task(asyncio.sleep(0.1))
+        await hub._commit_merge(buffer, reason="blocked_grace")
+        assert hub._merge_buffer is buffer
+        buffer.finalize_wait_task.cancel()
+        await asyncio.gather(buffer.finalize_wait_task, return_exceptions=True)
