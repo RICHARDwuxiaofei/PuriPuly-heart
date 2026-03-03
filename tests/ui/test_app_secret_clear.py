@@ -77,3 +77,21 @@ def test_on_secret_cleared_resets_alibaba_singapore_for_new_secret_key(
     assert app.view_dashboard.translation_calls == [(True, False)]
     assert app.view_dashboard.stt_calls == []
     assert len(saves) == 1
+
+
+def test_on_secret_cleared_ignores_unknown_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _make_app_with_verified_state()
+    saves: list[tuple[Path, object]] = []
+
+    def fake_save(path: Path, settings: object) -> None:
+        saves.append((path, settings))
+
+    monkeypatch.setattr(app_module, "save_settings", fake_save)
+
+    app._on_secret_cleared("unknown_key")
+
+    assert app.controller.settings.api_key_verified.alibaba_beijing is True
+    assert app.controller.settings.api_key_verified.alibaba_singapore is True
+    assert app.view_dashboard.translation_calls == []
+    assert app.view_dashboard.stt_calls == []
+    assert saves == []
