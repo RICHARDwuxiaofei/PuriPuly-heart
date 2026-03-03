@@ -11,6 +11,7 @@ from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
     QwenLLMModel,
+    QwenRegion,
     STTProviderName,
 )
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
@@ -196,3 +197,40 @@ async def test_verify_and_update_status_splits_llm_model_access_from_stt_key_val
     assert app.view_dashboard.translation_needs_key is True
     assert app.view_dashboard.stt_needs_key is False
     assert seen_models == ["qwen3.5-flash", "qwen3.5-plus"]
+
+
+@pytest.mark.asyncio
+async def test_verify_and_update_status_uses_selected_qwen_model_for_both_llm_and_stt_when_valid(
+    monkeypatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.QWEN
+    settings.provider.stt = STTProviderName.QWEN_ASR
+    settings.qwen.region = QwenRegion.SINGAPORE
+    app = SimpleNamespace(view_dashboard=DummyDashboard())
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyHub()
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({"alibaba_api_key_singapore": "secret"}),
+    )
+
+    seen_models: list[str] = []
+
+    async def fake_verify_qwen_llm(self, api_key: str, *, base_url: str, model: str) -> bool:
+        assert api_key == "secret"
+        assert base_url == "https://dashscope-intl.aliyuncs.com/api/v1"
+        seen_models.append(model)
+        return True
+
+    monkeypatch.setattr(GuiController, "_verify_qwen_llm_api_key", fake_verify_qwen_llm)
+
+    await controller._verify_and_update_status()
+
+    assert app.view_dashboard.translation_needs_key is False
+    assert app.view_dashboard.stt_needs_key is False
+    assert seen_models == ["qwen3.5-plus"]

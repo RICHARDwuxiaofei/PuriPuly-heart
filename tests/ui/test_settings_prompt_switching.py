@@ -7,7 +7,12 @@ import pytest
 pytest.importorskip("flet")
 
 from puripuly_heart.config.prompts import load_prompt_for_provider
-from puripuly_heart.config.settings import AppSettings, LLMProviderName, QwenLLMModel
+from puripuly_heart.config.settings import (
+    AppSettings,
+    LLMProviderName,
+    QwenLLMModel,
+    STTProviderName,
+)
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.views import settings as settings_view
 
@@ -124,3 +129,17 @@ def test_settings_view_llm_modal_orders_qwen_plus_before_flash(monkeypatch) -> N
         QwenLLMModel.QWEN_35_PLUS.value,
         QwenLLMModel.QWEN_35_FLASH.value,
     ]
+
+
+def test_settings_view_toggles_qwen_region_visibility_with_stt_provider(monkeypatch) -> None:
+    settings = AppSettings()
+    view = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._qwen_region_btn.visible is False
+
+    view._on_stt_selected(STTProviderName.QWEN_ASR.value)
+    assert view._qwen_region_btn.visible is True
+
+    view._on_stt_selected(STTProviderName.DEEPGRAM.value)
+    assert view._qwen_region_btn.visible is False
