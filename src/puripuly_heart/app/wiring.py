@@ -119,7 +119,10 @@ def require_secret(
 def create_llm_provider(settings: AppSettings, *, secrets: SecretStore) -> LLMProvider:
     if settings.provider.llm == LLMProviderName.GEMINI:
         api_key = require_secret(secrets, key="google_api_key", env_var="GOOGLE_API_KEY")
-        base: LLMProvider = GeminiLLMProvider(api_key=api_key)
+        base: LLMProvider = GeminiLLMProvider(
+            api_key=api_key,
+            model=settings.gemini.llm_model.value,
+        )
     elif settings.provider.llm == LLMProviderName.QWEN:
         from puripuly_heart.config.settings import QwenRegion
 

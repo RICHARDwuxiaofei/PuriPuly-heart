@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ pytest.importorskip("flet")
 
 from puripuly_heart.config.settings import (
     AppSettings,
+    GeminiLLMModel,
     LLMProviderName,
     QwenLLMModel,
     QwenRegion,
@@ -191,6 +193,63 @@ def test_on_llm_selected_updates_model_and_prompt_state(monkeypatch: pytest.Monk
 
     view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
     assert view.has_provider_changes is False
+
+
+def test_on_llm_selected_updates_gemini_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.gemini.llm_model = GeminiLLMModel.GEMINI_3_FLASH
+    settings.system_prompts = {"gemini": "G", "qwen": "Q"}
+    settings.system_prompt = "G"
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view._on_llm_selected(GeminiLLMModel.GEMINI_31_FLASH_LITE.value)
+
+    assert settings.provider.llm == LLMProviderName.GEMINI
+    assert settings.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
+    assert view._prompt_editor.value == "G"
+    assert settings.system_prompt == "G"
+    assert view.has_provider_changes is True
+
+
+def test_on_llm_selected_logs_only_changed_fields_for_provider_switch(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
+    settings.qwen.llm_model = QwenLLMModel.QWEN_35_PLUS
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.ui.views.settings"):
+        view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+
+    message = caplog.messages[-1]
+    assert "[Settings] LLM selection changed:" in message
+    assert "provider=gemini->qwen" in message
+    assert "gemini_model=" not in message
+    assert "qwen_model=" not in message
+
+
+def test_on_llm_selected_skips_log_when_selection_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.QWEN
+    settings.qwen.llm_model = QwenLLMModel.QWEN_35_PLUS
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.ui.views.settings"):
+        view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+
+    assert not any("LLM selection changed" in message for message in caplog.messages)
 
 
 def test_on_ui_and_region_selection_emit_changes(monkeypatch: pytest.MonkeyPatch) -> None:

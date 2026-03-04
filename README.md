@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.0-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.4.0-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -14,12 +14,20 @@
 <p align="center">LLM-based real-time translator for VRChat</p>
 
 <p align="center">
-  <b>English</b> | <a href="README.ko.md">한국어</a> | <a href="README.ja.md">日本語</a>
+  <b>English</b> | <a href="README.ko.md">한국어</a> | <a href="README.ja.md">日本語</a> | <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 ---
 
 ## Demo
+
+![](docs/images/demo/ko-en_screenshot.png)
+
+---
+
+<video src="https://github.com/user-attachments/assets/06ac600d-8c8b-49a4-bd8d-c74481b589a2" controls width="100%"></video>
+
+<video src="https://github.com/user-attachments/assets/3c0ea34b-2c43-41d1-a6c6-60fe100646af" controls width="100%"></video>
 
 ---
 
@@ -53,12 +61,14 @@ This app uses cloud AI services. You pay directly for what you use with your own
 
 ---
 
-### Recommended: Deepgram + Gemini (Fast Response)
+### Recommended: Deepgram + Gemini
 
-| Status | Cost/Utterance |
-|--------|----------------|
-| Using Free Credits | **$0.00** |
-| After Free Credits | ~$0.0015 |
+There is a trade-off between quality and speed. Choose **Gemini 3 Flash** for better quality, or **Gemini 3.1 Flash-Lite** for faster speed based on your preference.
+
+| Status | Cost/Utterance (Gemini 3 Flash) | Cost/Utterance (Gemini 3.1 Flash-Lite) |
+|--------|----------------|----------------|
+| Using Free Credits | **$0.00** | **$0.00** |
+| After Free Credits | ~$0.0015 | ~$0.0011 |
 
 * Deepgram offers $200 and Gemini offers $300 in free credits.
 

@@ -5,13 +5,13 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.0-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.4.0-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
 </p>
 
-<p align="center">VRChatのためのLLMベース リアルタイム翻訳ツール</p>
+<p align="center">LLM-based real-time translator for VRChat</p>
 
 <p align="center">
   <a href="README.md">English</a> | <a href="README.ko.md">한국어</a> | <b>日本語</b> | <a href="README.zh-CN.md">简体中文</a>
@@ -21,13 +21,13 @@
 
 ## Demo
 
-![](docs/images/demo/jp-ko_screenshot.png)
+![](docs/images/demo/ko-jp_screenshot.png)
 
 ---
 
-<video src="https://github.com/user-attachments/assets/9462c231-d788-440c-b3c5-9426448e0de8" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/0a3a8893-e9a6-4ecb-a2f1-bba3a49d2603" controls width="100%"></video>
 
-<video src="https://github.com/user-attachments/assets/5555753b-d09a-4f7a-ad4f-9c150d90d150" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/5e1ed02d-f1c5-46b3-98d1-3b34bafc6597" controls width="100%"></video>
 
 ---
 
@@ -60,12 +60,14 @@
 
 ---
 
-### おすすめの組み合わせ：Deepgram + Gemini（高速応答）
+### おすすめの組み合わせ：Deepgram + Gemini
 
-| Status | Cost/Utterance |
-|--------|----------------|
-| 無料クレジット使用時 | **$0.00** |
-| クレジット消費後 | ~$0.0015 (約0.23円) |
+品質と速度の間にはトレードオフがあります。好みに合わせて、品質重視の **Gemini 3 Flash** と速度重視の **Gemini 3.1 Flash-Lite** の中から選択して使用してください。
+
+| Status | Cost/Utterance (Gemini 3 Flash) | Cost/Utterance (Gemini 3.1 Flash-Lite) |
+|--------|----------------|----------------|
+| 無料クレジット使用時 | **$0.00** | **$0.00** |
+| クレジット消費後 | ~$0.0015 (約0.23円) | ~$0.0011 (約0.17円) |
 
 * Deepgramは$200、Geminiは$300の無料クレジットを提供しています。
 ---
