@@ -5,13 +5,13 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.0-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.4.0-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
 </p>
 
-<p align="center">基于 LLM 的 VRChat 实时翻译器</p>
+<p align="center">LLM-based real-time translator for VRChat</p>
 
 <p align="center">
   <a href="README.md">English</a> | <a href="README.ko.md">한국어</a> | <a href="README.ja.md">日本語</a> | <b>简体中文</b>
@@ -21,13 +21,13 @@
 
 ## Demo
 
-![](docs/images/demo/jp-ko_screenshot.png)
+![](docs/images/demo/ko-cn_screenshot.png)
 
 ---
 
-<video src="https://github.com/user-attachments/assets/9462c231-d788-440c-b3c5-9426448e0de8" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/3709c36d-7b27-4a10-b669-1c79ddb43ae0" controls width="100%"></video>
 
-<video src="https://github.com/user-attachments/assets/5555753b-d09a-4f7a-ad4f-9c150d90d150" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/86e847dc-0c7d-4eed-8125-9b219b8dde96" controls width="100%"></video>
 
 ---
 
@@ -65,7 +65,7 @@
 
 | 状态 | 单次说话成本 |
 |--------|----------------|
-| 使用免费额度 | **￥ 0.00** |
+| 使用免费额度 | **0.00** |
 | 免费额度耗尽后 | ~$0.0006 (约 0.004 元) |
 
 * 阿里云百炼平台通常会为新开通用户提供一定量（例如各个模型 100 万 Token）的免费额度，具体以官网活动为准。
@@ -77,6 +77,8 @@
 | :--- | :--- | :--- | :--- | :--- |
 | **Deepgram + Gemini 3 Flash** | ~$0.0015 (约 0.011 元) | ~$0.0007 (约 0.005 元) | ~$0.0008 (约 0.006 元) | $0.00 |
 | **Soniox + Gemini 3 Flash** | ~$0.0013 (约 0.009 元) | - | ~$0.0006 (约 0.004 元) | - |
+| **Deepgram + Gemini 3.1 Flash-Lite** | ~$0.0011 (约 0.008 元) | ~$0.0003 (约 0.002 元) | ~$0.0008 (约 0.006 元) | $0.00 |
+| **Soniox + Gemini 3.1 Flash-Lite** | ~$0.0005 (约 0.004 元) | - | ~$0.0002 (约 0.001 元) | - |
 | **Qwen ASR + Qwen 3.5 Plus** | ~$0.0006 (约 0.004 元) | - | - | $0.00 |
 | **Qwen ASR + Qwen 3.5 Flash** | ~$0.0005 (约 0.004 元) | - | - | $0.00 |
 
