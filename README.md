@@ -228,6 +228,9 @@ If Gemini/Deepgram/Soniox are blocked in your region:
 
 ## Q&A
 
+- **How long does it take from speaking to getting a translation?**
+→ With Gemini 3 Flash, the latency is around 2 seconds. However, if the server is unstable, it can spike beyond the normal range. In that case, try using a Qwen model as an alternative.
+
 - **Voice recognition is poor**
 → Try using Soniox as an alternative. It is especially recommended for Korean speakers. Also, Qwen ASR is recommended for Chinese speakers.
 
