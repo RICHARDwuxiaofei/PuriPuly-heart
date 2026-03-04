@@ -6,6 +6,8 @@ from puripuly_heart.app.wiring import create_llm_provider, create_stt_backend
 from puripuly_heart.config.settings import (
     AppSettings,
     DeepgramSTTSettings,
+    GeminiLLMModel,
+    GeminiSettings,
     LLMProviderName,
     LLMSettings,
     ProviderSettings,
@@ -40,7 +42,22 @@ def test_create_llm_provider_gemini_uses_secret_and_concurrency_limit() -> None:
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, GeminiLLMProvider)
     assert provider.inner.api_key == "k"
+    assert provider.inner.model == "gemini-3.1-flash-lite-preview"
     assert provider.semaphore._value == 3  # type: ignore[attr-defined]
+
+
+def test_create_llm_provider_gemini_uses_selected_model() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.GEMINI),
+        gemini=GeminiSettings(llm_model=GeminiLLMModel.GEMINI_31_FLASH_LITE),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("google_api_key", "k")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, GeminiLLMProvider)
+    assert provider.inner.model == "gemini-3.1-flash-lite-preview"
 
 
 def test_create_llm_provider_qwen_uses_secret() -> None:

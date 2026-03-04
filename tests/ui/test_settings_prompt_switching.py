@@ -9,6 +9,7 @@ pytest.importorskip("flet")
 from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
     AppSettings,
+    GeminiLLMModel,
     LLMProviderName,
     QwenLLMModel,
     STTProviderName,
@@ -58,7 +59,7 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
     assert settings.provider.llm == LLMProviderName.QWEN
     assert settings.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS
 
-    view._on_llm_selected(LLMProviderName.GEMINI.value)
+    view._on_llm_selected(GeminiLLMModel.GEMINI_3_FLASH.value)
 
     assert view._prompt_editor.value == load_prompt_for_provider("gemini")
     assert settings.provider.llm == LLMProviderName.GEMINI
@@ -125,10 +126,31 @@ def test_settings_view_llm_modal_orders_qwen_plus_before_flash(monkeypatch) -> N
     options = captured["options"]
     values = [option.value for option in options]
     assert values == [
-        LLMProviderName.GEMINI.value,
+        GeminiLLMModel.GEMINI_3_FLASH.value,
+        GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
         QwenLLMModel.QWEN_35_PLUS.value,
         QwenLLMModel.QWEN_35_FLASH.value,
     ]
+
+
+def test_settings_view_updates_gemini_model_without_provider_switch(monkeypatch) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.system_prompts = {
+        "gemini": "GEMINI CUSTOM",
+        "qwen": "QWEN CUSTOM",
+    }
+    settings.system_prompt = "GEMINI CUSTOM"
+
+    view = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_llm_selected(GeminiLLMModel.GEMINI_31_FLASH_LITE.value)
+
+    assert settings.provider.llm == LLMProviderName.GEMINI
+    assert settings.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
+    assert settings.system_prompt == "GEMINI CUSTOM"
+    assert view._prompt_editor.value == "GEMINI CUSTOM"
 
 
 def test_settings_view_toggles_qwen_region_visibility_with_stt_provider(monkeypatch) -> None:
