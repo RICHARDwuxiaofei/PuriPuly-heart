@@ -52,7 +52,7 @@ jobs:
     name: CodeRabbit CLI review (push)
     runs-on: ubuntu-latest
     needs: quality-gate
-    if: ${{ secrets.CODERABBIT_API_KEY != '' && github.event.before != '0000000000000000000000000000000000000000' }}
+    if: ${{ github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' }}
     continue-on-error: true
     steps:
       - name: Checkout
@@ -68,6 +68,11 @@ jobs:
           CODERABBIT_API_KEY: ${{ secrets.CODERABBIT_API_KEY }}
           BASE_COMMIT: ${{ github.event.before }}
         run: |
+          if [ -z "$CODERABBIT_API_KEY" ]; then
+            echo "CODERABBIT_API_KEY is not set; skipping CodeRabbit review."
+            exit 0
+          fi
+
           "$HOME/.local/bin/coderabbit" review \
             --plain \
             --base-commit "$BASE_COMMIT" \
