@@ -49,10 +49,10 @@ jobs:
             --cov-fail-under=80
 
   coderabbit-review:
-    name: CodeRabbit CLI review (push)
+    name: CodeRabbit CLI review
     runs-on: ubuntu-latest
     needs: quality-gate
-    if: ${{ github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000') }}
     continue-on-error: true
     steps:
       - name: Checkout
@@ -71,6 +71,11 @@ jobs:
           if [ -z "$CODERABBIT_API_KEY" ]; then
             echo "CODERABBIT_API_KEY is not set; skipping CodeRabbit review."
             exit 0
+          fi
+
+          if [ -z "$BASE_COMMIT" ]; then
+            BASE_COMMIT="$(git rev-parse HEAD^)"
+            echo "BASE_COMMIT is not provided by event; using previous commit: $BASE_COMMIT"
           fi
 
           "$HOME/.local/bin/coderabbit" review \
