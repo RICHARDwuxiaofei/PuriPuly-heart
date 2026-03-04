@@ -36,6 +36,11 @@ class QwenRegion(str, Enum):
     SINGAPORE = "singapore"
 
 
+class GeminiLLMModel(str, Enum):
+    GEMINI_3_FLASH = "gemini-3-flash-preview"
+    GEMINI_31_FLASH_LITE = "gemini-3.1-flash-lite-preview"
+
+
 class QwenLLMModel(str, Enum):
     QWEN_35_FLASH = "qwen3.5-flash"
     QWEN_35_PLUS = "qwen3.5-plus"
@@ -197,6 +202,15 @@ class SecretsSettings:
 
 
 @dataclass(slots=True)
+class GeminiSettings:
+    llm_model: GeminiLLMModel = GeminiLLMModel.GEMINI_31_FLASH_LITE
+
+    def validate(self) -> None:
+        if not isinstance(self.llm_model, GeminiLLMModel):
+            raise ValueError("invalid gemini llm model")
+
+
+@dataclass(slots=True)
 class QwenSettings:
     region: QwenRegion = QwenRegion.BEIJING
     llm_model: QwenLLMModel = QwenLLMModel.QWEN_35_PLUS
@@ -251,6 +265,7 @@ class AppSettings:
     deepgram_stt: DeepgramSTTSettings = field(default_factory=DeepgramSTTSettings)
     qwen_asr_stt: QwenASRSTTSettings = field(default_factory=QwenASRSTTSettings)
     soniox_stt: SonioxSTTSettings = field(default_factory=SonioxSTTSettings)
+    gemini: GeminiSettings = field(default_factory=GeminiSettings)
     qwen: QwenSettings = field(default_factory=QwenSettings)
     llm: LLMSettings = field(default_factory=LLMSettings)
     osc: OSCSettings = field(default_factory=OSCSettings)
@@ -270,6 +285,7 @@ class AppSettings:
         self.deepgram_stt.validate()
         self.qwen_asr_stt.validate()
         self.soniox_stt.validate()
+        self.gemini.validate()
         self.qwen.validate()
         self.llm.validate()
         self.osc.validate()
@@ -331,6 +347,9 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "keepalive_interval_s": settings.soniox_stt.keepalive_interval_s,
             "trailing_silence_ms": settings.soniox_stt.trailing_silence_ms,
         },
+        "gemini": {
+            "llm_model": settings.gemini.llm_model.value,
+        },
         "qwen": {
             "region": settings.qwen.region.value,
             "llm_model": settings.qwen.llm_model.value,
@@ -388,6 +407,20 @@ def _parse_qwen_llm_model(value: object) -> QwenLLMModel:
     return QwenLLMModel.QWEN_35_PLUS
 
 
+def _parse_gemini_llm_model(value: object) -> GeminiLLMModel:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized == "gemini-3-flash":
+            normalized = GeminiLLMModel.GEMINI_3_FLASH.value
+        elif normalized == "gemini-3.1-flash-lite":
+            normalized = GeminiLLMModel.GEMINI_31_FLASH_LITE.value
+        try:
+            return GeminiLLMModel(normalized)
+        except ValueError:
+            pass
+    return GeminiLLMModel.GEMINI_31_FLASH_LITE
+
+
 def _llm_prompt_key(provider: LLMProviderName) -> str:
     return "gemini" if provider == LLMProviderName.GEMINI else "qwen"
 
@@ -440,6 +473,18 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         if isinstance(model, str) and model.strip() == "stt-rt-v3":
             soniox_data["model"] = "stt-rt-v4"
             changed = True
+
+    gemini_data = data.get("gemini")
+    if not isinstance(gemini_data, dict):
+        gemini_data = {}
+        data["gemini"] = gemini_data
+        changed = True
+
+    raw_gemini_model = gemini_data.get("llm_model")
+    normalized_gemini_model = _parse_gemini_llm_model(raw_gemini_model).value
+    if raw_gemini_model != normalized_gemini_model:
+        gemini_data["llm_model"] = normalized_gemini_model
+        changed = True
 
     qwen_data = data.get("qwen")
     if not isinstance(qwen_data, dict):
@@ -531,6 +576,11 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 data.get("soniox_stt", {}).get("keepalive_interval_s", 10.0)
             ),
             trailing_silence_ms=int(data.get("soniox_stt", {}).get("trailing_silence_ms", 100)),
+        ),
+        gemini=GeminiSettings(
+            llm_model=_parse_gemini_llm_model(
+                data.get("gemini", {}).get("llm_model", GeminiLLMModel.GEMINI_31_FLASH_LITE.value)
+            ),
         ),
         qwen=QwenSettings(
             region=QwenRegion(data.get("qwen", {}).get("region", QwenRegion.BEIJING.value)),
