@@ -12,6 +12,7 @@ import flet as ft
 from puripuly_heart.app.wiring import create_secret_store
 from puripuly_heart.config.settings import (
     AppSettings,
+    GeminiLLMModel,
     LLMProviderName,
     QwenLLMModel,
     QwenRegion,
@@ -162,7 +163,7 @@ class SettingsView(ft.Column):
         )
 
         self._llm_text = self._build_clickable_text(
-            t("provider.gemini"),
+            t("provider.gemini3_flash"),
             self._on_llm_click,
         )
         self._trans_title = ft.Text(
@@ -432,12 +433,14 @@ class SettingsView(ft.Column):
 
     def _get_llm_modal_value(self, settings: AppSettings) -> str:
         if settings.provider.llm == LLMProviderName.GEMINI:
-            return LLMProviderName.GEMINI.value
+            return settings.gemini.llm_model.value
         return settings.qwen.llm_model.value
 
     def _get_llm_display_label(self, settings: AppSettings) -> str:
         if settings.provider.llm == LLMProviderName.GEMINI:
-            return provider_label(LLMProviderName.GEMINI.value)
+            if settings.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE:
+                return t("provider.gemini31_flash_lite")
+            return t("provider.gemini3_flash")
         if settings.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS:
             return t("provider.qwen35_plus")
         return t("provider.qwen35_flash")
@@ -649,9 +652,14 @@ class SettingsView(ft.Column):
             return
         options = [
             OptionItem(
-                value=LLMProviderName.GEMINI.value,
-                label=t("provider.gemini"),
-                description=t("provider.gemini.description", default=""),
+                value=GeminiLLMModel.GEMINI_3_FLASH.value,
+                label=t("provider.gemini3_flash"),
+                description=t("provider.gemini3_flash.description", default=""),
+            ),
+            OptionItem(
+                value=GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
+                label=t("provider.gemini31_flash_lite"),
+                description=t("provider.gemini31_flash_lite.description", default=""),
             ),
             OptionItem(
                 value=QwenLLMModel.QWEN_35_PLUS.value,
@@ -664,7 +672,11 @@ class SettingsView(ft.Column):
                 description=t("provider.qwen35_flash.description", default=""),
             ),
         ]
-        current = self._get_llm_modal_value(self._settings) if self._settings else "gemini"
+        current = (
+            self._get_llm_modal_value(self._settings)
+            if self._settings
+            else GeminiLLMModel.GEMINI_3_FLASH.value
+        )
         modal = SettingsModal(
             self.page,
             t("settings.section.translation"),
@@ -679,30 +691,54 @@ class SettingsView(ft.Column):
         if not self._settings:
             return
         old_provider = self._settings.provider.llm
+        old_gemini_model = self._settings.gemini.llm_model
         old_qwen_model = self._settings.qwen.llm_model
 
         if value == LLMProviderName.GEMINI.value:
             provider = LLMProviderName.GEMINI
+            gemini_model = GeminiLLMModel.GEMINI_3_FLASH
+            qwen_model = old_qwen_model
+        elif value == GeminiLLMModel.GEMINI_3_FLASH.value:
+            provider = LLMProviderName.GEMINI
+            gemini_model = GeminiLLMModel.GEMINI_3_FLASH
+            qwen_model = old_qwen_model
+        elif value == GeminiLLMModel.GEMINI_31_FLASH_LITE.value:
+            provider = LLMProviderName.GEMINI
+            gemini_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
             qwen_model = old_qwen_model
         elif value == QwenLLMModel.QWEN_35_PLUS.value:
             provider = LLMProviderName.QWEN
+            gemini_model = old_gemini_model
             qwen_model = QwenLLMModel.QWEN_35_PLUS
         else:
             provider = LLMProviderName.QWEN
+            gemini_model = old_gemini_model
             qwen_model = QwenLLMModel.QWEN_35_FLASH
 
-        logger.info(
-            "[Settings] LLM selection changed: provider=%s->%s, qwen_model=%s->%s",
-            old_provider.value,
-            provider.value,
-            old_qwen_model.value,
-            qwen_model.value,
-        )
+        changes: list[str] = []
+        if old_provider != provider:
+            changes.append(f"provider={old_provider.value}->{provider.value}")
+        if old_gemini_model != gemini_model:
+            changes.append(f"gemini_model={old_gemini_model.value}->{gemini_model.value}")
+        if old_qwen_model != qwen_model:
+            changes.append(f"qwen_model={old_qwen_model.value}->{qwen_model.value}")
+        if changes:
+            logger.info("[Settings] LLM selection changed: %s", ", ".join(changes))
+
         self._settings.provider.llm = provider
         if provider == LLMProviderName.QWEN:
             self._settings.qwen.llm_model = qwen_model
-        llm_changed = old_provider != provider or (
-            provider == LLMProviderName.QWEN and old_qwen_model != self._settings.qwen.llm_model
+        else:
+            self._settings.gemini.llm_model = gemini_model
+        llm_changed = (
+            old_provider != provider
+            or (
+                provider == LLMProviderName.QWEN and old_qwen_model != self._settings.qwen.llm_model
+            )
+            or (
+                provider == LLMProviderName.GEMINI
+                and old_gemini_model != self._settings.gemini.llm_model
+            )
         )
         self._update_api_visibility()
         self.has_provider_changes = llm_changed

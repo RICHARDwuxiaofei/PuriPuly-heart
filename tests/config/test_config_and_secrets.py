@@ -8,6 +8,7 @@ from puripuly_heart.config.settings import (
     SETTINGS_SCHEMA_VERSION,
     AppSettings,
     AudioSettings,
+    GeminiLLMModel,
     LLMProviderName,
     OSCSettings,
     QwenLLMModel,
@@ -89,6 +90,19 @@ def test_qwen_llm_model_roundtrip(tmp_path):
     assert persisted["qwen"]["llm_model"] == "qwen3.5-plus"
 
 
+def test_gemini_llm_model_roundtrip(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = AppSettings()
+    settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
+    save_settings(path, settings)
+
+    loaded = load_settings(path)
+    assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite-preview"
+
+
 def test_load_settings_migrates_legacy_qwen_mt_flash_model(tmp_path):
     path = tmp_path / "settings.json"
     legacy = to_dict(AppSettings())
@@ -100,6 +114,27 @@ def test_load_settings_migrates_legacy_qwen_mt_flash_model(tmp_path):
 
     persisted = json.loads(path.read_text(encoding="utf-8"))
     assert persisted["qwen"]["llm_model"] == "qwen3.5-plus"
+
+
+def test_load_settings_migrates_legacy_invalid_gemini_model(tmp_path):
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["gemini"]["llm_model"] = "gemini-legacy-foo"
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite-preview"
+
+
+def test_from_dict_defaults_missing_gemini_model_to_flash_lite():
+    data = to_dict(AppSettings())
+    data["gemini"] = {}
+
+    loaded = from_dict(data)
+    assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
 
 
 def test_system_prompts_roundtrip(tmp_path):
