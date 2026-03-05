@@ -58,5 +58,5 @@ Interpret ${sourceName} input into the ${targetName} naturally, preserving the s
 
     (Rule: Context-Clarify & Language Rules, Action: Resolved the ambiguous verb (써봐) based on the context and applied a softener for a warmer tone.)
 
-## **Output**:
+## **Output**
 - Output ONLY the interpreted text in ${targetName}.

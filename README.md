@@ -80,6 +80,8 @@ There is a trade-off between quality and speed. Choose **Gemini 3 Flash** for be
 | :--- | :--- | :--- | :--- | :--- |
 | **Deepgram + Gemini 3 Flash** | ~$0.0015 | ~$0.0007 | ~$0.0008 | $0.00 |
 | **Soniox + Gemini 3 Flash** | ~$0.0013 | - | ~$0.0006 | - |
+| **Deepgram + Gemini 3.1 Flash-Lite** | ~$0.0011 | ~$0.0003 | ~$0.0008 | $0.00 |
+| **Soniox + Gemini 3.1 Flash-Lite** | ~$0.0005 | - | ~$0.0002 | - |
 | **Qwen ASR + Qwen 3.5 Plus** | ~$0.0006 | - | - | $0.00 |
 | **Qwen ASR + Qwen 3.5 Flash** | ~$0.0005 | - | - | $0.00 |
 
