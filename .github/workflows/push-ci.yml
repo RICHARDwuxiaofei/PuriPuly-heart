@@ -33,18 +33,18 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+          python -m pip install --upgrade pip uv
+          uv sync --dev --frozen
 
       - name: Ruff
-        run: ruff check src tests
+        run: uv run ruff check src tests
 
       - name: Black (check)
-        run: black --check src tests
+        run: uv run black --check src tests
 
       - name: Pytest with coverage >= 80% (exclude integration)
         run: |
-          python -m pytest \
+          uv run python -m pytest \
             --ignore=tests/integration \
             --cov=src/puripuly_heart \
             --cov-report=term-missing \
