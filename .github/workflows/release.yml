@@ -110,11 +110,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[build]"
+          python -m pip install --upgrade pip uv
+          uv sync --extra build --frozen
 
       - name: Build executable
-        run: python -m PyInstaller build.spec
+        run: uv run python -m PyInstaller build.spec
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
