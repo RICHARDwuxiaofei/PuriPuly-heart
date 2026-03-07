@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "puripuly-heart"
-version = "1.4.0"
+version = "1.4.1"
 description = "LLM-based real-time translator for VRChat"
 readme = "README.md"
 license = "MIT"
@@ -20,7 +20,7 @@ dependencies = [
   "grpcio",
   "dashscope",
   "websockets",
-  "deepgram-sdk>=5.0.0",
+  "deepgram-sdk>=5.0.0,<6.0.0",
   "keyring>=25.0",
   "flet==0.28.3",
   "flet-desktop==0.28.3",
