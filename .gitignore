@@ -223,3 +223,4 @@ Installer_output/
 !/scripts/ci/read-project-version.py
 .codex/
 .agent/
+docs/plans/
