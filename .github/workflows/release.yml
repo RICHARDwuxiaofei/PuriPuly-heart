@@ -13,7 +13,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PYTHON_VERSION: "3.12"
+  PYTHON_VERSION: "3.12.10"
+  UV_VERSION: "0.9.17"
+  INNOSETUP_VERSION: "6.6.1"
 
 jobs:
   verify-version:
@@ -101,36 +103,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup UV environment
+        uses: ./.github/actions/setup-uv-environment
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"
-          cache-dependency-path: pyproject.toml
+          uv-version: ${{ env.UV_VERSION }}
+          sync-args: --extra build
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip uv
-          uv sync --extra build --frozen
-
-      - name: Build executable
-        run: uv run python -m PyInstaller build.spec
-
-      - name: Install Inno Setup
-        run: choco install innosetup --no-progress -y
-
-      - name: Build installer
-        run: |
-          $isccPath = Join-Path "${env:ProgramFiles(x86)}" "Inno Setup 6\ISCC.exe"
-          & $isccPath installer.iss
-
-      - name: Generate SHA256
+      - name: Build release artifacts
         env:
-          VERSION: ${{ needs.verify-version.outputs.version }}
+          APP_VERSION: ${{ needs.verify-version.outputs.version }}
+          INNOSETUP_VERSION: ${{ env.INNOSETUP_VERSION }}
+        shell: pwsh
         run: |
-          $installer = "installer_output/PuriPulyHeart-Setup-$env:VERSION.exe"
-          $hash = (Get-FileHash -Path $installer -Algorithm SHA256).Hash
-          "$hash  PuriPulyHeart-Setup-$env:VERSION.exe" | Out-File -FilePath "$installer.sha256" -Encoding ascii
+          ./scripts/ci/build-release-artifacts.ps1 `
+            -AppVersion $env:APP_VERSION `
+            -InnoSetupVersion $env:INNOSETUP_VERSION
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
