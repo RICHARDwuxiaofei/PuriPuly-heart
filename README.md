@@ -53,7 +53,14 @@ So I built one that can.
 
 ## Is there a cost?
 
-You can use it for free for up to **250,000 times** using free credits provided upon signing up (Deepgram, Google AI Studio).
+> **⚠️ Correction (2026-03-12)**
+> - As of March 2, 2026, the GCP new-user free credit ($300) can no longer be used with the Gemini Developer API (AI Studio).
+> - Cloud credits included with Google AI Pro/Ultra paid subscriptions can still be used in AI Studio.
+> - Google AI Pro/Ultra subscribers receive monthly cloud credits. Follow the [guide](#api-key-setup-guide) below to set up.
+> - Support for Vertex AI API keys is coming soon.
+> - You can also try the free tier: Using the Gemini 3.1 Flash-Lite model, you can use it for free up to 15 requests per minute / 500 requests per day.
+
+~~You can use it for free for up to **250,000 times** using free credits provided upon signing up (Deepgram, Google AI Studio).~~
 
 After the free credits run out, a small fee is charged per utterance.
 
@@ -63,14 +70,12 @@ This app uses cloud AI services. You pay directly for what you use with your own
 
 ### Recommended: Deepgram + Gemini
 
-There is a trade-off between quality and speed. Choose **Gemini 3 Flash** for better quality, or **Gemini 3.1 Flash-Lite** for faster speed based on your preference.
-
 | Status | Cost/Utterance (Gemini 3 Flash) | Cost/Utterance (Gemini 3.1 Flash-Lite) |
 |--------|----------------|----------------|
 | Using Free Credits | **$0.00** | **$0.00** |
 | After Free Credits | ~$0.0015 | ~$0.0011 |
 
-* Deepgram offers $200 and Gemini offers $300 in free credits.
+* Deepgram offers $200 ~~and Gemini offers $300~~ in free credits.
 
 ---
 
@@ -79,7 +84,7 @@ There is a trade-off between quality and speed. Choose **Gemini 3 Flash** for be
 | Combo | Full price | Deepgram Free Credit | Gemini Free Credit | Both Free Credits |
 | :--- | :--- | :--- | :--- | :--- |
 | **Deepgram + Gemini 3 Flash** | ~$0.0015 | ~$0.0007 | ~$0.0008 | $0.00 |
-| **Soniox + Gemini 3 Flash** | ~$0.0013 | - | ~$0.0006 | - |
+| **Soniox + Gemini 3 Flash** | ~$0.0008 | - | ~$0.0002 | - |
 | **Deepgram + Gemini 3.1 Flash-Lite** | ~$0.0011 | ~$0.0003 | ~$0.0008 | $0.00 |
 | **Soniox + Gemini 3.1 Flash-Lite** | ~$0.0005 | - | ~$0.0002 | - |
 | **Qwen ASR + Qwen 3.5 Plus** | ~$0.0006 | - | - | $0.00 |
@@ -88,7 +93,7 @@ There is a trade-off between quality and speed. Choose **Gemini 3 Flash** for be
 *   *Qwen API costs represent the Beijing region.*
 *   *Soniox charges per connection time.*
 *   *Based on: (Input 850 tokens + Output 20 tokens) x avg 1.3 LLM calls per utterance.*
-*   *Based on pricing as of Mar 2, 2026 / Fast Response mode active.*
+*   *Based on pricing as of Mar 5, 2026 / Fast Response mode active.*
 
 ---
 
@@ -97,7 +102,8 @@ There is a trade-off between quality and speed. Choose **Gemini 3 Flash** for be
 | Service | Free Credit | Duration | Note |
 |--------|------------|------|------|
 | **Deepgram** | $200 | None | - |
-| **Gemini** | $300 | 90 days | Received after upgrading to paid tier |
+| **Gemini** | ~~$300~~ | ~~90 days~~ | ~~Received after upgrading to paid tier~~ No longer available for AI Studio (2026-03-02~) |
+| **Gemini** | $10 | 1 year | Credited monthly |
 | **Qwen** | 1M tokens/model | 90 days | - |
 
 ---
@@ -109,8 +115,7 @@ There is a trade-off between quality and speed. Choose **Gemini 3 Flash** for be
 1. Download and install the latest version from the [Download Page](https://github.com/kapitalismho/PuriPuly-heart/releases/latest).
 2. Get a Deepgram API Key from [Deepgram](https://console.deepgram.com).
 3. Get a Gemini API Key from [Google AI Studio](https://aistudio.google.com/apikey).
-4. **Upgrade Gemini API plan** to paid tier (Highly recommended).
-  - The free tier has rate limits too restrictive for practical use.
+4. **Upgrade Gemini API plan** to paid tier (Recommended).
 5. Enter and verify API keys in the PuriPuly **Settings** tab.
   - Paste the key and press Enter or unfocus the input box.
 6. Select Source/Target languages on the **Dashboard**.
@@ -180,8 +185,19 @@ If Gemini/Deepgram/Soniox are blocked in your region:
 6. Click the circled area to copy the key.
    ![step6](docs/images/gemini/6.png)
 
-7. (Highly Recommended) Click the yellow **Set Up Billing** button to upgrade to the paid tier.
+7. (Recommended) Click the yellow **Set Up Billing** button to upgrade to the paid tier.
    ![step7](docs/images/gemini/7.png)
+
+<details>
+<summary><h3>For Gemini paid subscribers</h3></summary>
+
+8. Go to [Google Developer Program](https://developers.google.com/program/my-benefits) and join the program.
+![step8](docs/images/gemini/8.png)
+
+9. Select the paid tier project you set up in step 7.
+![step9](docs/images/gemini/9.png)
+
+</details>
 
 </details>
 
@@ -256,7 +272,7 @@ If Gemini/Deepgram/Soniox are blocked in your region:
 → That's fine. LLMs are robust to such noise and handle translation well regardless.
 
 - **Can I use my Gemini subscription instead of an API key?**
-→ No. Gemini subscription and API are separate services.
+→ The Gemini subscription and API are separate, but cloud credits included with Google AI Pro/Ultra subscriptions can be applied to API costs.
 
 - **Voice text appears but no translation follows.**
 → Did you upgrade your Gemini API to the paid tier? The free tier is limited to 15 requests per minute. Heavy usage can lead to temporary blocks. We recommend using the paid tier.
