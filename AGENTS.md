@@ -49,7 +49,7 @@
   - L3: L2 plus Windows build/installer verification using project `.venv`.
 - Default escalation guidance:
   - Code changes: at least L1.
-  - Provider, prompt, OSC, wiring changes: at least L2.
+  - Provider, OSC, wiring changes: at least L2.
   - Release/installer/build config changes: L3.
 - Skips are allowed only for real environment constraints; run the best lower level and record what was skipped and why.
 - Store verification evidence in `agents/logs/` as short Markdown notes including:
