@@ -52,7 +52,14 @@
 
 ## 사용하는데 돈이 드나요?
 
-신규 가입(Deepgram, Google AI studio) 시 제공되는 무료 크레딧으로 **약 25만 회까지 무료**로 사용할 수 있어요.
+> **⚠️ 정정 안내 (2026-03-12)**
+> - 2026년 3월 2일부로 GCP 신규 가입 무료 크레딧($300)은 더 이상 Gemini Developer API(AI Studio)에서 사용할 수 없습니다.
+> - Google AI Pro/Ultra 유료 구독에 포함된 클라우드 크레딧은 AI Studio에서 사용 가능합니다.
+> - Google AI Pro/Ultra 사용자는 매월 클라우드 크레딧을 제공받으므로, 아래 [가이드](#api-키-발급-가이드)를 따라 설정하시면 됩니다.
+> - Vertex AI를 통한 API 키 사용도 곧 지원할 예정입니다.
+> - 무료티어를 활용해보는 방안도 있습니다. Gemini 3.1 Flash-Lite 모델을 사용하면 분당 15회 이내 / 하루 500회까지 무료로 사용할 수 있습니다.
+
+~~신규 가입(Deepgram, Google AI studio) 시 제공되는 무료 크레딧으로 약 25만 회까지 무료로 사용할 수 있어요.~~
 
 무료 크레딧을 모두 사용한 이후에는 발화 한 번에 소량의 요금이 부과되어요.
 
@@ -62,14 +69,12 @@
 
 ### 추천 조합: Deepgram + Gemini
 
-품질과 속도 사이엔 트레이드 오프가 있어요. 선호에 맞게 품질의 **Gemini 3 Flash**와 속도의 **Gemini 3.1 Flash-Lite** 중에서 선택해서 사용하세요.
-
 | Status | Cost/Utterance (Gemini 3 Flash) | Cost/Utterance (Gemini 3.1 Flash-Lite) |
 |--------|----------------|----------------|
 | 무료 크레딧 사용 | **$0.00** | **$0.00** |
 | 크레딧 소진 후 | ~$0.0014 (2.1원) | ~$0.0011 (1.7원) |
 
-* Deepgram은 $200, Gemini는 $300 무료 크레딧을 제공해요.
+* Deepgram은 $200 ~~, Gemini는 $300~~ 무료 크레딧을 제공해요.
 ---
 
 ### 발화당 비용
@@ -96,7 +101,8 @@
 | 서비스 | 무료 크레딧 | 기한 | 비고 |
 |--------|------------|------|------|
 | **Deepgram** | $200 | 없음 | - |
-| **Gemini** | $300 | 90일 | 유료 티어로 전환 후 받음 |
+| **Gemini** | ~~$300~~ | ~~90일~~ | ~~유료 티어로 전환 후 받음~~ AI Studio 사용 불가 (2026-03-02~) |
+| **Gemini** | $10 | 1년 | 매월 지급 |
 | **Qwen** | 모델당 100만 토큰 | 90일 | 싱가포르 리전 기준|
 
 ---
@@ -108,8 +114,7 @@
 1. [다운로드 페이지](https://github.com/kapitalismho/PuriPuly-heart/releases/latest)에서 최신 버전 다운로드 및 설치
 2. [Deepgram](https://console.deepgram.com)에서 Deepgram API 키 발급
 3. [Google AI Studio](https://aistudio.google.com/apikey)에서 Gemini API 키 발급
-4. **Gemini API 결제 플랜**을 유료로 전환 (매우 권장)
-  - 무료 티어는 실사용이 어려울 정도로 분당 호출 제한이 걸려있어요.
+4. **Gemini API 결제 플랜**을 유료로 전환 (권장)
 5. PuriPuly **설정** 탭에서 API 키 입력 후 검증
   - 입력 칸에 API 키를 붙여넣기 한 후 엔터를 누르거나 포커스를 해제해주세요.
 6. **대시보드**에서 원본/대상 언어 선택
@@ -179,8 +184,20 @@ Gemini/Deepgram/Soniox가 차단된 지역이라면
 6. 동그라미 친 곳을 눌러 key를 복사하세요.
    ![step6](docs/images/gemini/6.png)
 
-7. (매우 권장) 노란색으로 강조된 **Set Up Billing** 버튼을 눌러 유료 티어로 전환하세요.
+7. (권장) 노란색으로 강조된 **Set Up Billing** 버튼을 눌러 유료 티어로 전환하세요.
+티어 전환에는 약간의 시간이 필요할 수 있어요.
    ![step7](docs/images/gemini/7.png)
+
+<details>
+<summary><h3>제미나이 유료 구독자라면</h3></summary>
+
+8. [Google Developer Program](https://developers.google.com/program/my-benefits) 에 들어가 프로그램에 참여하세요
+   ![step8](docs/images/gemini/8.png)
+
+9. 7 단계에서 설정한 유료 티어 프로젝트를 선택하세요
+   ![step9](docs/images/gemini/9.png)
+
+</details>
 
 </details>
 
@@ -243,7 +260,7 @@ Gemini/Deepgram/Soniox가 차단된 지역이라면
 → Gemini 3 Flash 사용 기준으로 지연시간은 2초 초반대예요. 다만 서버가 불안정하다면 범위 밖으로 치솟을 수 있어요. 그러한 상황에서는 대안으로 잠시 Gemini 3.1 Flash lite 혹은 Qwen Flash 모델을 사용해보세요.
 
 - **음성 인식이 잘 안 돼요**
-→ 대안으로 Soniox를 사용해보세요. 특히 한국어 사용자에게 추천해요.
+→ 대안으로 Soniox를 사용해보세요. 특히 한국어 사용자에게 추천해요. 또한 중국어 사용자에게는 Qwen ASR을 추천해요.
 
 - **번역 말투가 마음에 안들어요**
 → 설정 → 프롬프트 에디터에서 원하는 말투를 직접 지정할 수 있어요.
@@ -255,7 +272,7 @@ Gemini/Deepgram/Soniox가 차단된 지역이라면
 → 괜찮아요. LLM은 이러한 노이즈 처리에 강해서 번역엔 거의 영향이 없어요.
 
 - **Gemini 유료 구독자인데 API 키 대신 제 구독제를 쓸 수 있나요?**
-→ 아니요. Gemini 구독과 API는 별개예요.
+→ Gemini 구독과 API는 별개이지만, Google AI Pro/Ultra 구독에 포함된 클라우드 크레딧은 API 비용에 사용할 수 있어요.
 
 - **음성 인식된 텍스트는 나오는데 번역이 안나와요.**
 → Gemini API를 유료로 전환했나요? 무료 티어는 분당 요청 수가 15회로 제한되어 있어요. 요청이 많으면 일시적으로 차단될 수 있어요. 유료 티어로 사용하는 것을 권장해요.
