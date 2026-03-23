@@ -137,5 +137,7 @@
   "toggle.on": "Fast Response",
   "toggle.on.description": "Starts translating while you speak",
   "toggle.off": "Stable",
-  "toggle.off.description": "Translates after you finish speaking. Saves costs"
+  "toggle.off.description": "Translates after you finish speaking. Saves costs",
+  "settings.vrc_mic.on": "On",
+  "settings.vrc_mic.off": "Off"
 }
