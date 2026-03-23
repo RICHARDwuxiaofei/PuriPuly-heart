@@ -414,8 +414,25 @@ class SettingsView(ft.Column):
             ),
         )
         row5 = persona_card
-
-        self.controls = [row1, row2, row3, row4, row5]
+        # === Row 6: VRChat 同步开关 (1x1) ===
+        self._vrc_mic_text = self._build_clickable_text(
+            t("settings.vrc_mic.on"),
+            self._on_vrc_mic_click,
+        )
+        self._vrc_mic_title = ft.Text(
+            t("settings.vrc_mic_intercept"),  # <--- 去掉了的中文
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        vrc_mic_card = self._wrap_card(
+            ft.Column([self._vrc_mic_title, self._vrc_mic_text], spacing=0, expand=True)
+        )
+        row6 = ft.Container(
+            content=ft.Row([vrc_mic_card, ft.Container(expand=True)], spacing=16, expand=True),
+            height=280,
+        )
+        self.controls = [row1, row2, row3, row4, row5, row6]
 
     def _populate_host_apis(self) -> None:
         """Legacy hook for tests; host APIs are handled by AudioSettings."""
@@ -481,6 +498,10 @@ class SettingsView(ft.Column):
         self._vad_slider.label = f"{settings.stt.vad_speech_threshold:.2f}"
         self._low_latency_text.content.value = t(
             "toggle.on" if settings.stt.low_latency_mode else "toggle.off"
+        )
+        # --- 新增：读取 VRChat 同步开关状态 ---
+        self._vrc_mic_text.content.value = t(
+            "settings.vrc_mic.on" if settings.osc.vrc_mic_intercept else "settings.vrc_mic.off"
         )
 
         # Prompt
@@ -879,6 +900,36 @@ class SettingsView(ft.Column):
         self._settings.stt.vad_speech_threshold = new_vad
         self._emit_settings_changed()
 
+    def _on_vrc_mic_click(self, e) -> None:
+        """打开 VRC 闭麦同步选项框"""
+        if not self.page:
+            return
+        options = [
+            OptionItem(value="on", label=t("settings.vrc_mic.on")),   # 
+            OptionItem(value="off", label=t("settings.vrc_mic.off")), # new name
+        ]
+        current = "on" if self._settings.osc.vrc_mic_intercept else "off"
+        modal = SettingsModal(
+            self.page,
+            t("settings.vrc_mic_intercept"),  
+            options,
+            self._on_vrc_mic_selected,
+            show_description=False,
+        )
+        modal.open(current)
+
+    def _on_vrc_mic_selected(self, value: str) -> None:
+        """处理选项卡的选择结果"""
+        if not self._settings:
+            return
+        new_value = value == "on"
+        self._settings.osc.vrc_mic_intercept = new_value
+
+        self._vrc_mic_text.content.value = t("settings.vrc_mic.on" if new_value else "settings.vrc_mic.off")
+        if self.page:
+            self._vrc_mic_text.update()
+        self._emit_settings_changed()
+
     def _on_low_latency_click(self, e) -> None:
         """Open low latency mode selection modal."""
         if not self.page:
@@ -958,7 +1009,10 @@ class SettingsView(ft.Column):
         self._vad_title.value = t("settings.vad_sensitivity")
         self._low_latency_title.value = t("settings.low_latency_mode")
         self._persona_title.value = t("settings.section.persona")
+        self._vrc_mic_title.value = t("settings.vrc_mic_intercept")
         self._reset_prompt_btn.text = t("settings.reset_prompt")
+        
+        self._vrc_mic_title.value = t("settings.vrc_mic_intercept")
 
         # Update dynamic buttons by replacing the entire style object
         ui_font = font_for_language(get_locale())
@@ -979,6 +1033,8 @@ class SettingsView(ft.Column):
             self._low_latency_text.content.value = t(
                 "toggle.on" if self._settings.stt.low_latency_mode else "toggle.off"
             )
+            
+            "settings.vrc_mic.on" if self._settings.osc.vrc_mic_intercept else "settings.vrc_mic.off"
 
         # Qwen Region label
         if self._settings:
