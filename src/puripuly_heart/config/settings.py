@@ -153,6 +153,7 @@ class LLMSettings:
 
 @dataclass(slots=True)
 class OSCSettings:
+
     host: str = "127.0.0.1"
     port: int = 9000
     chatbox_address: str = "/chatbox/input"
@@ -161,7 +162,7 @@ class OSCSettings:
     chatbox_max_chars: int = 144
     cooldown_s: float = 1.5
     ttl_s: float = 7.0
-
+    vrc_mic_intercept: bool = True #mic switch开关
     def validate(self) -> None:
         if not self.host:
             raise ValueError("host must be non-empty")
@@ -364,6 +365,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "chatbox_max_chars": settings.osc.chatbox_max_chars,
             "cooldown_s": settings.osc.cooldown_s,
             "ttl_s": settings.osc.ttl_s,
+            "vrc_mic_intercept": settings.osc.vrc_mic_intercept,
         },
         "secrets": {
             "backend": settings.secrets.backend.value,
@@ -598,6 +600,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             chatbox_max_chars=int(data.get("osc", {}).get("chatbox_max_chars", 144)),
             cooldown_s=float(data.get("osc", {}).get("cooldown_s", 1.5)),
             ttl_s=float(data.get("osc", {}).get("ttl_s", 7.0)),
+            vrc_mic_intercept=bool(data.get("osc", {}).get("vrc_mic_intercept", True)),
         ),
         secrets=SecretsSettings(
             backend=SecretsBackend(
