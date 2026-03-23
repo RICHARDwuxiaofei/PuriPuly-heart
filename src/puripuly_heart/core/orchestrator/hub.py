@@ -118,7 +118,9 @@ class ClientHub:
     _last_promo_time: float | None = None
     _promo_eligible: bool = False
     _merge_buffer: _MergeBuffer | None = None
-
+    vrc_muted: bool = False  # VRChat mic mute state
+    _active_speech_id: object = None  # To track if user is actively speaking (for mic mute handling)
+    vrc_mic_intercept: bool = True  # Whether to intercept VRChat mic state changes (configurable via OSCSettings)
     async def start(self, *, auto_flush_osc: bool = False) -> None:
         if self._running:
             return
@@ -166,6 +168,8 @@ class ClientHub:
 
         if self.llm is not None:
             await self.llm.close()
+    
+
 
     def mark_promo_eligible(self) -> None:
         """Mark that user clicked STT button. Next STREAMING state will send promo."""
@@ -215,6 +219,24 @@ class ClientHub:
             self._translation_history.pop(0)
 
     async def handle_vad_event(self, event: VadEvent) -> None:
+        # === 闭麦拦截核心逻辑 ===
+        if getattr(self, "vrc_mic_intercept", True):
+            if isinstance(event, SpeechStart):
+                if self.vrc_muted:
+                    return  # 闭麦时，拒绝开始新的识别
+                self._active_speech_id = event.utterance_id
+
+            elif isinstance(event, SpeechChunk):
+                if self.vrc_muted or getattr(self, "_active_speech_id", None) != event.utterance_id:
+                    return  # 闭麦了，或者这段语音压根没开始过，丢弃声音数据
+
+            elif isinstance(event, SpeechEnd):
+                if getattr(self, "_active_speech_id", None) != event.utterance_id:
+                    return  # 如果这段语音一开始就被拦截了，就不要发结束信号给 STT
+                self._active_speech_id = None  # 正常结束，清理状态
+        # ==========================
+
+        # === 以下是原版底层逻辑 (请勿改动缩进) ===
         if isinstance(event, SpeechStart):
             if self.low_latency_mode:
                 self._mark_resume_pending(event)
