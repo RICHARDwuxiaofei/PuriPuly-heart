@@ -137,5 +137,7 @@
     "toggle.on": "快速响应",
     "toggle.on.description": "说话时立即开始翻译",
     "toggle.off": "稳定",
-    "toggle.off.description": "说完后再翻译，节省费用"
+    "toggle.off.description": "说完后再翻译，节省费用",
+    "settings.vrc_mic.on": "开启",
+    "settings.vrc_mic.off": "关闭"
 }
