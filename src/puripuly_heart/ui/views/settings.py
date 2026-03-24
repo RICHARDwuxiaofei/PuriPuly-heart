@@ -901,7 +901,10 @@ class SettingsView(ft.Column):
         self._emit_settings_changed()
 
     def _on_vrc_mic_click(self, e) -> None:
-        """打开 VRC 闭麦同步选项框"""
+        """打开 VRC 闭麦同步选项框
+        
+        Open VRC mic intercept selection modal.
+        """
         if not self.page:
             return
         options = [
@@ -919,7 +922,10 @@ class SettingsView(ft.Column):
         modal.open(current)
 
     def _on_vrc_mic_selected(self, value: str) -> None:
-        """处理选项卡的选择结果"""
+        """处理选项卡的选择结果
+        
+        Handle VRC mic intercept selection result.
+        """
         if not self._settings:
             return
         new_value = value == "on"
