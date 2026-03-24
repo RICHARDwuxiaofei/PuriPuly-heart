@@ -21,6 +21,7 @@ from puripuly_heart.config.settings import (
     load_settings,
     save_settings,
 )
+from puripuly_heart.core.osc.receiver import VrcOscReceiver
 from puripuly_heart.core.audio.source import (
     SoundDeviceAudioSource,
     resolve_sounddevice_input_device,
