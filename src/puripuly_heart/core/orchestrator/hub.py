@@ -219,7 +219,7 @@ class ClientHub:
             self._translation_history.pop(0)
 
     async def handle_vad_event(self, event: VadEvent) -> None:
-        # === 闭麦拦截核心逻辑 ===
+        # 闭麦拦截
         if getattr(self, "vrc_mic_intercept", True):
             if isinstance(event, SpeechStart):
                 if self.vrc_muted:
@@ -234,9 +234,7 @@ class ClientHub:
                 if getattr(self, "_active_speech_id", None) != event.utterance_id:
                     return  # 如果这段语音一开始就被拦截了，就不要发结束信号给 STT
                 self._active_speech_id = None  # 正常结束，清理状态
-        # ==========================
 
-        # === 以下是原版底层逻辑 (请勿改动缩进) ===
         if isinstance(event, SpeechStart):
             if self.low_latency_mode:
                 self._mark_resume_pending(event)
