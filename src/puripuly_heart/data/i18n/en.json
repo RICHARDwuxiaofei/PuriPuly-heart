@@ -138,6 +138,7 @@
   "toggle.on.description": "Starts translating while you speak",
   "toggle.off": "Stable",
   "toggle.off.description": "Translates after you finish speaking. Saves costs",
+  "settings.vrc_mic_intercept": "VRChat Mic Sync",
   "settings.vrc_mic.on": "On",
   "settings.vrc_mic.off": "Off"
 }
