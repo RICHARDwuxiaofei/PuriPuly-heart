@@ -19,7 +19,7 @@ class VrcOscReceiver:
         self.port = port
         self.transport = None
         self._mute_task: asyncio.Task | None = None
-        self.mute_delay = 1.2  # 延迟 1.2 秒闭麦，完美包容 PTT 习惯，可自行微调
+        self.mute_delay = 0.4  # 延迟 0.4 秒闭麦，完美包容 PTT 习惯，可自行微调
 
     def mute_handler(self, address: str, *args) -> None:
         if not args:
@@ -36,7 +36,7 @@ class VrcOscReceiver:
     async def _apply_mute_state(self, is_muted: bool) -> None:
         try:
             if is_muted:
-                # 核心逻辑：如果是闭麦，等待 1.2 秒，让尾音飞一会儿
+                # 核心逻辑：如果是闭麦，等待 0.4 秒，让尾音飞一会儿
                 await asyncio.sleep(self.mute_delay)
             
             # 如果是开麦，或者延时结束了，才真正修改 Hub 的状态
@@ -45,7 +45,7 @@ class VrcOscReceiver:
                 self.hub.vrc_muted = is_muted
 
         except asyncio.CancelledError:
-            # 如果在等待的 1.2 秒内，用户又按下了开麦键，任务会被取消，什么都不做
+            # 如果在等待的 0.4 秒内，用户又按下了开麦键，任务会被取消，什么都不做
             pass
 
     async def start(self) -> None:
