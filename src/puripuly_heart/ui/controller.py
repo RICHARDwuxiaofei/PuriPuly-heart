@@ -62,6 +62,7 @@ class GuiController:
     osc: SmartOscQueue | None = None
     hub: ClientHub | None = None
     receiver: VrcOscReceiver | None = None
+
     _bridge_task: asyncio.Task[None] | None = None
     _mic_task: asyncio.Task[None] | None = None
     _audio_source: SoundDeviceAudioSource | None = None
@@ -144,7 +145,7 @@ class GuiController:
 
     async def stop(self) -> None:
         await self.set_stt_enabled(False)
-        #CUT OFF
+        #cut off
         if getattr(self, "receiver", None) is not None:
             self.receiver.stop()
             self.receiver = None
@@ -311,6 +312,8 @@ class GuiController:
                 if settings.stt.low_latency_mode
                 else 1.1
             )
+            self.hub.vrc_mic_intercept = settings.osc.vrc_mic_intercept
+            logger.info(f"[Settings] VRC mic intercept: {settings.osc.vrc_mic_intercept}")
 
         # Restart STT only when runtime STT-relevant settings changed.
         current_signature = self._build_stt_runtime_signature(settings)
@@ -503,12 +506,13 @@ class GuiController:
                 if self.settings.stt.low_latency_mode
                 else 1.1
             ),
+            vrc_mic_intercept=self.settings.osc.vrc_mic_intercept,
         )
 
         self.sender = sender
         self.osc = osc
         self.hub = hub
-
+        # --- 新增：给接收器插电并启动！ ---
         self.receiver = VrcOscReceiver(hub=self.hub, host="127.0.0.1", port=9001)
         await self.receiver.start()
 
