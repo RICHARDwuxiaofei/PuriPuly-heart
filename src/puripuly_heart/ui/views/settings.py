@@ -420,7 +420,7 @@ class SettingsView(ft.Column):
             self._on_vrc_mic_click,
         )
         self._vrc_mic_title = ft.Text(
-            t("settings.vrc_mic_intercept"),  # <--- 去掉了的中文
+            t("settings.vrc_mic_intercept"), #new name
             size=24,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
