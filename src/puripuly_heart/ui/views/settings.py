@@ -923,6 +923,7 @@ class SettingsView(ft.Column):
         if not self._settings:
             return
         new_value = value == "on"
+        logger.info(f"[Settings] VRC mic intercept toggled: {new_value}")
         self._settings.osc.vrc_mic_intercept = new_value
 
         self._vrc_mic_text.content.value = t("settings.vrc_mic.on" if new_value else "settings.vrc_mic.off")
@@ -1033,8 +1034,9 @@ class SettingsView(ft.Column):
             self._low_latency_text.content.value = t(
                 "toggle.on" if self._settings.stt.low_latency_mode else "toggle.off"
             )
-            
-            "settings.vrc_mic.on" if self._settings.osc.vrc_mic_intercept else "settings.vrc_mic.off"
+            self._vrc_mic_text.content.value = t(
+                "settings.vrc_mic.on" if self._settings.osc.vrc_mic_intercept else "settings.vrc_mic.off"
+            )
 
         # Qwen Region label
         if self._settings:
