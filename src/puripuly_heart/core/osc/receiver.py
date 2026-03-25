@@ -2,33 +2,56 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Any
 
 from pythonosc.dispatcher import Dispatcher
 from pythonosc.osc_server import AsyncIOOSCUDPServer
 
-if TYPE_CHECKING:
-    from puripuly_heart.core.orchestrator.hub import ClientHub
-
 logger = logging.getLogger(__name__)
+
+VRC_OSC_RECEIVER_HOST = "127.0.0.1"
+VRC_OSC_RECEIVER_PORT = 9001
+VRC_OSC_MUTE_ADDRESS = "/avatar/parameters/MuteSelf"
+
+
+@dataclass(slots=True)
+class VrcMicState:
+    muted: bool | None = None
+
+    def update(self, muted: bool) -> bool:
+        if self.muted == muted:
+            return False
+        self.muted = muted
+        return True
+
+    def reset(self) -> None:
+        self.muted = None
 
 
 class VrcOscReceiver:
-    def __init__(self, hub: ClientHub, host: str = "127.0.0.1", port: int = 9001):
-        self.hub = hub
+    def __init__(
+        self,
+        state: VrcMicState,
+        *,
+        host: str = VRC_OSC_RECEIVER_HOST,
+        port: int = VRC_OSC_RECEIVER_PORT,
+        mute_delay_s: float = 0.4,
+    ) -> None:
+        self.state = state
         self.host = host
         self.port = port
+        self.mute_delay_s = mute_delay_s
         self.transport = None
-        self._mute_task: asyncio.Task | None = None
-        self.mute_delay = 0.4  # 延迟 0.4 秒闭麦，完美包容 PTT 习惯，可自行微调
+        self._mute_task: asyncio.Task[None] | None = None
 
-    def mute_handler(self, address: str, *args) -> None:
+    def mute_handler(self, address: str, *args: Any) -> None:
+        _ = address
         if not args:
             return
         is_muted = bool(args[0])
 
-        # 每次收到 OSC 信号，先取消之前的延时任务（防止快速开关麦导致状态错乱）
-        if self._mute_task and not self._mute_task.done():
+        if self._mute_task is not None and not self._mute_task.done():
             self._mute_task.cancel()
 
         loop = asyncio.get_running_loop()
@@ -37,21 +60,22 @@ class VrcOscReceiver:
     async def _apply_mute_state(self, is_muted: bool) -> None:
         try:
             if is_muted:
-                # 核心逻辑：如果是闭麦，等待 0.4 秒，让尾音飞一会儿
-                await asyncio.sleep(self.mute_delay)
+                await asyncio.sleep(self.mute_delay_s)
 
-            # 如果是开麦，或者延时结束了，才真正修改 Hub 的状态
-            if self.hub.vrc_muted != is_muted:
-                logger.info(f"[OSC Receiver] VRChat Mic Muted State Applied: {is_muted}")
-                self.hub.vrc_muted = is_muted
-
+            if self.state.update(is_muted):
+                logger.info("[OSC Receiver] VRChat mic muted state applied: %s", is_muted)
         except asyncio.CancelledError:
-            # 如果在等待的 0.4 秒内，用户又按下了开麦键，任务会被取消，什么都不做
-            pass
+            raise
 
     async def start(self) -> None:
+        if self.transport is not None:
+            return
+
+        # A restarted receiver must wait for a fresh VRChat mute edge.
+        self.state.reset()
+
         dispatcher = Dispatcher()
-        dispatcher.map("/avatar/parameters/MuteSelf", self.mute_handler)
+        dispatcher.map(VRC_OSC_MUTE_ADDRESS, self.mute_handler)
 
         loop = asyncio.get_running_loop()
         try:
@@ -64,11 +88,19 @@ class VrcOscReceiver:
                 self.port,
             )
             raise
-        logger.info(f"[OSC Receiver] Listening on {self.host}:{self.port} for VRChat parameters")
+
+        logger.info(
+            "[OSC Receiver] Listening on %s:%s for VRChat parameters",
+            self.host,
+            self.port,
+        )
 
     def stop(self) -> None:
-        if self._mute_task and not self._mute_task.done():
+        if self._mute_task is not None and not self._mute_task.done():
             self._mute_task.cancel()
-        if self.transport:
+        self._mute_task = None
+
+        if self.transport is not None:
             self.transport.close()
+            self.transport = None
             logger.info("[OSC Receiver] Stopped listening.")

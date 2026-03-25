@@ -44,7 +44,7 @@ async def test_headless_mic_pipeline_smoke():
     splits = [1000, 1000, 1000, audio.size - 3000]
     frames = make_frames(audio, sample_rate_hz=16000, splits=splits)
     source = FakeAudioSource(frames)
-    await run_audio_vad_loop(source=source, vad=vad, hub=hub, target_sample_rate_hz=16000)
+    await run_audio_vad_loop(source=source, vad=vad, sink=hub, target_sample_rate_hz=16000)
 
     for _ in range(50):
         if "FINAL" in sender.sent:

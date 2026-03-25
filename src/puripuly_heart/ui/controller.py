@@ -21,6 +21,7 @@ from puripuly_heart.config.settings import (
     load_settings,
     save_settings,
 )
+from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.audio.source import (
     SoundDeviceAudioSource,
     resolve_sounddevice_input_device,
@@ -28,7 +29,12 @@ from puripuly_heart.core.audio.source import (
 from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.orchestrator.hub import ClientHub
-from puripuly_heart.core.osc.receiver import VrcOscReceiver
+from puripuly_heart.core.osc.receiver import (
+    VRC_OSC_RECEIVER_HOST,
+    VRC_OSC_RECEIVER_PORT,
+    VrcMicState,
+    VrcOscReceiver,
+)
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
@@ -62,6 +68,8 @@ class GuiController:
     osc: SmartOscQueue | None = None
     hub: ClientHub | None = None
     receiver: VrcOscReceiver | None = None
+    vrc_mic_state: VrcMicState | None = None
+    vrc_mic_audio_gate: VrcMicAudioGate | None = None
 
     _bridge_task: asyncio.Task[None] | None = None
     _mic_task: asyncio.Task[None] | None = None
@@ -72,6 +80,7 @@ class GuiController:
     _stt_switch_task: asyncio.Task[None] | None = None
     _stt_restart_requested: bool = False
     _last_stt_runtime_signature: tuple[object, ...] | None = None
+    _vrc_receiver_lock: asyncio.Lock | None = None
 
     async def start(self) -> None:
         self.settings = self._load_or_init_settings(self.config_path)
@@ -145,10 +154,7 @@ class GuiController:
 
     async def stop(self) -> None:
         await self.set_stt_enabled(False)
-        if self.receiver is not None:
-            with contextlib.suppress(Exception):
-                self.receiver.stop()
-            self.receiver = None
+        await self._configure_vrc_mic_receiver(enabled=False)
 
         if self._bridge_task:
             self._bridge_task.cancel()
@@ -312,8 +318,11 @@ class GuiController:
                 if settings.stt.low_latency_mode
                 else 1.1
             )
-            self.hub.vrc_mic_intercept = settings.osc.vrc_mic_intercept
-            logger.info(f"[Settings] VRC mic intercept: {settings.osc.vrc_mic_intercept}")
+
+        if self.vrc_mic_audio_gate is not None:
+            self.vrc_mic_audio_gate.set_enabled(settings.osc.vrc_mic_intercept)
+        logger.info("[Settings] VRC mic sync enabled: %s", settings.osc.vrc_mic_intercept)
+        await self._configure_vrc_mic_receiver(enabled=settings.osc.vrc_mic_intercept)
 
         # Restart STT only when runtime STT-relevant settings changed.
         current_signature = self._build_stt_runtime_signature(settings)
@@ -420,10 +429,7 @@ class GuiController:
             self._bridge_task = None
 
         await self.set_stt_enabled(False)
-        if self.receiver is not None:
-            with contextlib.suppress(Exception):
-                self.receiver.stop()
-            self.receiver = None
+        await self._configure_vrc_mic_receiver(enabled=False)
         if self.hub is not None:
             with contextlib.suppress(Exception):
                 await self.hub.stop()
@@ -510,16 +516,25 @@ class GuiController:
                 if self.settings.stt.low_latency_mode
                 else 1.1
             ),
-            vrc_mic_intercept=self.settings.osc.vrc_mic_intercept,
         )
 
-        receiver = VrcOscReceiver(hub=hub, host="127.0.0.1", port=9001)
-        await receiver.start()
+        if self.vrc_mic_state is None:
+            self.vrc_mic_state = VrcMicState()
+        if self.vrc_mic_audio_gate is None:
+            self.vrc_mic_audio_gate = VrcMicAudioGate(
+                state=self.vrc_mic_state,
+                enabled=self.settings.osc.vrc_mic_intercept,
+            )
+        else:
+            self.vrc_mic_audio_gate.state = self.vrc_mic_state
+            self.vrc_mic_audio_gate.set_enabled(self.settings.osc.vrc_mic_intercept)
+        self.vrc_mic_audio_gate.set_receiver_active(self.receiver is not None)
+        self.vrc_mic_audio_gate.reset()
 
         self.sender = sender
         self.osc = osc
         self.hub = hub
-        self.receiver = receiver
+        await self._configure_vrc_mic_receiver(enabled=self.settings.osc.vrc_mic_intercept)
 
     async def _start_mic_loop(self) -> None:
         if self._mic_task is not None:
@@ -603,17 +618,18 @@ class GuiController:
         self._mic_task = asyncio.create_task(self._run_mic_loop())
 
     async def _stop_mic_loop(self) -> None:
-        if self._mic_task is None:
-            return
-        self._mic_task.cancel()
-        await asyncio.gather(self._mic_task, return_exceptions=True)
-        self._mic_task = None
+        if self._mic_task is not None:
+            self._mic_task.cancel()
+            await asyncio.gather(self._mic_task, return_exceptions=True)
+            self._mic_task = None
 
         if self._audio_source is not None:
             with contextlib.suppress(Exception):
                 await self._audio_source.close()
             self._audio_source = None
         self._vad = None
+        if self.vrc_mic_audio_gate is not None:
+            self.vrc_mic_audio_gate.reset()
 
     async def _run_mic_loop(self) -> None:
         assert self.hub is not None
@@ -626,13 +642,60 @@ class GuiController:
             await run_audio_vad_loop(
                 source=self._audio_source,
                 vad=self._vad,
-                hub=self.hub,
+                sink=self.hub,
                 target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,  # type: ignore[union-attr]
+                audio_gate=self.vrc_mic_audio_gate,
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._log_error(f"Mic loop error: {exc}")
+
+    async def _configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
+        if self._vrc_receiver_lock is None:
+            self._vrc_receiver_lock = asyncio.Lock()
+
+        async with self._vrc_receiver_lock:
+            if self.vrc_mic_audio_gate is not None:
+                self.vrc_mic_audio_gate.set_enabled(enabled)
+
+            if not enabled:
+                self._stop_vrc_mic_receiver()
+                return
+
+            if self.receiver is not None or self.vrc_mic_state is None:
+                if self.vrc_mic_audio_gate is not None:
+                    self.vrc_mic_audio_gate.set_receiver_active(self.receiver is not None)
+                return
+
+            receiver = VrcOscReceiver(
+                state=self.vrc_mic_state,
+                host=VRC_OSC_RECEIVER_HOST,
+                port=VRC_OSC_RECEIVER_PORT,
+            )
+            try:
+                await receiver.start()
+            except OSError as exc:
+                if self.vrc_mic_audio_gate is not None:
+                    self.vrc_mic_audio_gate.set_receiver_active(False)
+                self._log_error(
+                    "VRChat mic sync receiver unavailable on "
+                    f"{VRC_OSC_RECEIVER_HOST}:{VRC_OSC_RECEIVER_PORT}: {exc}"
+                )
+                return
+
+            self.receiver = receiver
+            if self.vrc_mic_audio_gate is not None:
+                self.vrc_mic_audio_gate.set_receiver_active(True)
+                self.vrc_mic_audio_gate.reset()
+
+    def _stop_vrc_mic_receiver(self) -> None:
+        if self.receiver is not None:
+            with contextlib.suppress(Exception):
+                self.receiver.stop()
+            self.receiver = None
+        if self.vrc_mic_audio_gate is not None:
+            self.vrc_mic_audio_gate.set_receiver_active(False)
 
     def _save_settings(self) -> None:
         assert self.settings is not None
