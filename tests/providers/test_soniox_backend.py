@@ -151,6 +151,21 @@ async def test_soniox_session_on_speech_end_enqueues_finalize() -> None:
 
 
 @pytest.mark.asyncio
+async def test_soniox_session_on_speech_end_none_injects_configured_trailing_silence() -> None:
+    session = _make_session()
+
+    await session.on_speech_end(trailing_silence_ms=None)
+
+    silence = await session._audio_q.get()
+    finalize = await session._audio_q.get()
+
+    assert isinstance(silence, bytes)
+    assert len(silence) > 0
+    assert isinstance(finalize, _FinalizeRequest)
+    assert finalize.trailing_silence_ms == session.trailing_silence_ms
+
+
+@pytest.mark.asyncio
 async def test_soniox_session_send_audio_and_stop() -> None:
     session = _make_session()
 

@@ -15,6 +15,7 @@ from puripuly_heart.app.wiring import (
 from puripuly_heart.config.paths import default_vad_model_path
 from puripuly_heart.config.settings import AppSettings
 from puripuly_heart.core.audio.format import normalize_audio_f32
+from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.audio.source import (
     AudioSource,
     SoundDeviceAudioSource,
@@ -22,12 +23,14 @@ from puripuly_heart.core.audio.source import (
 )
 from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.orchestrator.hub import ClientHub
+from puripuly_heart.core.osc.receiver import VrcMicState, VrcOscReceiver
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
 from puripuly_heart.core.vad.gating import VadGating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
+from puripuly_heart.core.vad.sink import VadEventSink
 
 logger = logging.getLogger(__name__)
 
@@ -167,13 +170,30 @@ class HeadlessMicRunner:
             logger.error("All microphone attempts failed")
             return 2
 
+        vrc_mic_state = VrcMicState()
+        vrc_mic_audio_gate = VrcMicAudioGate(
+            state=vrc_mic_state,
+            enabled=self.settings.osc.vrc_mic_intercept,
+        )
+        receiver: VrcOscReceiver | None = None
+        if self.settings.osc.vrc_mic_intercept:
+            receiver = VrcOscReceiver(state=vrc_mic_state)
+            try:
+                await receiver.start()
+            except OSError as exc:
+                logger.warning("VRChat mic sync receiver unavailable: %s", exc)
+                receiver = None
+            vrc_mic_audio_gate.set_receiver_active(receiver is not None)
+            vrc_mic_audio_gate.reset()
+
         await hub.start(auto_flush_osc=True)
         try:
             await run_audio_vad_loop(
                 source=source,
                 vad=vad,
-                hub=hub,
+                sink=hub,
                 target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                audio_gate=vrc_mic_audio_gate,
             )
         except KeyboardInterrupt:
             return 0
@@ -181,6 +201,8 @@ class HeadlessMicRunner:
             with contextlib.suppress(Exception):
                 await source.close()
             await hub.stop()
+            if receiver is not None:
+                receiver.stop()
             sender.close()
 
         return 0
@@ -190,8 +212,9 @@ async def run_audio_vad_loop(
     *,
     source: AudioSource,
     vad: VadGating,
-    hub: ClientHub,
+    sink: VadEventSink,
     target_sample_rate_hz: int,
+    audio_gate: VrcMicAudioGate | None = None,
 ) -> None:
     chunk_samples = vad.chunk_samples
     buffer = np.empty((0,), dtype=np.float32)
@@ -206,5 +229,7 @@ async def run_audio_vad_loop(
         while buffer.size >= chunk_samples:
             chunk = buffer[:chunk_samples]
             buffer = buffer[chunk_samples:]
+            if audio_gate is not None:
+                chunk = audio_gate.process_chunk(chunk)
             for ev in vad.process_chunk(chunk):
-                await hub.handle_vad_event(ev)
+                await sink.handle_vad_event(ev)

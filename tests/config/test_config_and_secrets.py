@@ -137,6 +137,21 @@ def test_from_dict_defaults_missing_gemini_model_to_flash_lite():
     assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
 
 
+def test_app_settings_defaults_vrc_mic_sync_to_off():
+    settings = AppSettings()
+
+    assert settings.osc.vrc_mic_intercept is False
+
+
+def test_from_dict_defaults_missing_vrc_mic_sync_to_off():
+    data = to_dict(AppSettings())
+    data.setdefault("osc", {}).pop("vrc_mic_intercept", None)
+
+    loaded = from_dict(data)
+
+    assert loaded.osc.vrc_mic_intercept is False
+
+
 def test_system_prompts_roundtrip(tmp_path):
     path = tmp_path / "settings.json"
     settings = AppSettings()
