@@ -349,3 +349,116 @@ def test_apply_locale_and_refresh_prompt_if_empty(monkeypatch: pytest.MonkeyPatc
     assert view._stt_title.value == t("settings.section.stt")
     assert view._reset_prompt_btn.text == t("settings.reset_prompt")
     assert bool(view._prompt_editor.value.strip())
+
+
+def test_load_from_settings_updates_vrc_mic_toggle_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    view, _ = _make_settings_view(monkeypatch)
+
+    settings.osc.vrc_mic_intercept = True
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    assert view._vrc_mic_text.content.value == t("settings.vrc_mic.on")
+
+    settings.osc.vrc_mic_intercept = False
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    assert view._vrc_mic_text.content.value == t("settings.vrc_mic.off")
+
+
+def test_on_vrc_mic_click_returns_when_page_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = AppSettings()
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    modal_calls: list[str] = []
+
+    class DummyModal:
+        def __init__(self, *_args, **_kwargs) -> None:
+            modal_calls.append("created")
+
+    monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
+
+    view._on_vrc_mic_click(None)
+
+    assert modal_calls == []
+
+
+def test_on_vrc_mic_click_opens_modal_with_current_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.osc.vrc_mic_intercept = True
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.page = object()
+
+    captured: dict[str, object] = {}
+
+    class DummyModal:
+        def __init__(self, _page, title, options, _on_select, *, show_description=False):
+            captured["title"] = title
+            captured["options"] = options
+            captured["show_description"] = show_description
+
+        def open(self, current: str) -> None:
+            captured["current"] = current
+
+    monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
+
+    view._on_vrc_mic_click(None)
+
+    options = captured["options"]
+    assert captured["title"] == t("settings.vrc_mic_intercept")
+    assert captured["show_description"] is False
+    assert [option.value for option in options] == ["on", "off"]
+    assert [option.label for option in options] == [
+        t("settings.vrc_mic.on"),
+        t("settings.vrc_mic.off"),
+    ]
+    assert captured["current"] == "on"
+
+
+def test_on_vrc_mic_selected_updates_setting_label_and_emits_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+    view.page = object()
+    monkeypatch.setattr(type(view._vrc_mic_text), "update", lambda self: None)
+
+    view._on_vrc_mic_selected("on")
+
+    assert settings.osc.vrc_mic_intercept is True
+    assert view._vrc_mic_text.content.value == t("settings.vrc_mic.on")
+    assert changed == [settings]
+
+
+def test_on_vrc_mic_selected_without_settings_returns_early(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._on_vrc_mic_selected("on")
+
+    assert changed == []
+
+
+def test_apply_locale_refreshes_vrc_mic_title_and_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.osc.vrc_mic_intercept = True
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view._vrc_mic_title.value = "stale-title"
+    view._vrc_mic_text.content.value = "stale-value"
+
+    view.apply_locale()
+
+    assert view._vrc_mic_title.value == t("settings.vrc_mic_intercept")
+    assert view._vrc_mic_text.content.value == t("settings.vrc_mic.on")
