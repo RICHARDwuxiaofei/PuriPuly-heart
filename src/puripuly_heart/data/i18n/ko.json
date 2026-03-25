@@ -139,6 +139,7 @@
   "toggle.off": "안정",
   "toggle.off.description": "말이 끝난 뒤 번역해요. 비용을 아낄 수 있어요",
   "settings.vrc_mic_intercept": "VRChat 마이크 동기화",
-  "settings.vrc_mic.on": "켜짐",
-  "settings.vrc_mic.off": "꺼짐"
+  "settings.vrc_mic.on": "ON",
+  "settings.vrc_mic.on.description": "VRChat에서 마이크를 끄면 음성 인식도 같이 멈춰요",
+  "settings.vrc_mic.off": "OFF"
 }

@@ -361,7 +361,27 @@ class SettingsView(ft.Column):
             height=280,
         )
 
-        # === Row 5: Persona (2x2) - Licenses style ===
+        # === Row 5: VRChat Mic Sync (1x1) + Empty (1x1) ===
+        self._vrc_mic_text = self._build_clickable_text(
+            t("settings.vrc_mic.on"),
+            self._on_vrc_mic_click,
+        )
+        self._vrc_mic_title = ft.Text(
+            t("settings.vrc_mic_intercept"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        vrc_mic_card = self._wrap_card(
+            ft.Column([self._vrc_mic_title, self._vrc_mic_text], spacing=0, expand=True)
+        )
+        empty_card = self._wrap_card(ft.Column([], expand=True))
+        row5 = ft.Container(
+            content=ft.Row([vrc_mic_card, empty_card], spacing=16, expand=True),
+            height=280,
+        )
+
+        # === Row 6: Persona (2x2) - Licenses style ===
         self._prompt_editor = PromptEditor(on_change=self._on_prompt_change)
         self._persona_title = ft.Text(
             t("settings.section.persona"), size=24, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL
@@ -413,25 +433,8 @@ class SettingsView(ft.Column):
                 spacing=0,
             ),
         )
-        row5 = persona_card
-        # === Row 6: VRChat 同步开关 (1x1) ===
-        self._vrc_mic_text = self._build_clickable_text(
-            t("settings.vrc_mic.on"),
-            self._on_vrc_mic_click,
-        )
-        self._vrc_mic_title = ft.Text(
-            t("settings.vrc_mic_intercept"),  # new name
-            size=24,
-            weight=ft.FontWeight.BOLD,
-            color=COLOR_NEUTRAL,
-        )
-        vrc_mic_card = self._wrap_card(
-            ft.Column([self._vrc_mic_title, self._vrc_mic_text], spacing=0, expand=True)
-        )
-        row6 = ft.Container(
-            content=ft.Row([vrc_mic_card, ft.Container(expand=True)], spacing=16, expand=True),
-            height=280,
-        )
+        row6 = persona_card
+
         self.controls = [row1, row2, row3, row4, row5, row6]
 
     def _populate_host_apis(self) -> None:
@@ -908,8 +911,12 @@ class SettingsView(ft.Column):
         if not self.page:
             return
         options = [
-            OptionItem(value="on", label=t("settings.vrc_mic.on")),  #
-            OptionItem(value="off", label=t("settings.vrc_mic.off")),  # new name
+            OptionItem(
+                value="on",
+                label=t("settings.vrc_mic.on"),
+                description=t("settings.vrc_mic.on.description", default=""),
+            ),
+            OptionItem(value="off", label=t("settings.vrc_mic.off")),
         ]
         current = "on" if self._settings.osc.vrc_mic_intercept else "off"
         modal = SettingsModal(
@@ -917,7 +924,7 @@ class SettingsView(ft.Column):
             t("settings.vrc_mic_intercept"),
             options,
             self._on_vrc_mic_selected,
-            show_description=False,
+            show_description=True,
         )
         modal.open(current)
 
