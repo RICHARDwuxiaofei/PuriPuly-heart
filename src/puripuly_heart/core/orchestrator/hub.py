@@ -119,8 +119,11 @@ class ClientHub:
     _promo_eligible: bool = False
     _merge_buffer: _MergeBuffer | None = None
     vrc_muted: bool = False  # VRChat mic mute state
-    _active_speech_id: object = None  # To track if user is actively speaking (for mic mute handling)
-    vrc_mic_intercept: bool = True  # Whether to intercept VRChat mic state changes (configurable via OSCSettings)
+    _active_speech_id: UUID | None = None  # Track active speech for mic mute handling
+    vrc_mic_intercept: bool = (
+        True  # Whether to intercept VRChat mic state changes (configurable via OSCSettings)
+    )
+
     async def start(self, *, auto_flush_osc: bool = False) -> None:
         if self._running:
             return
@@ -168,8 +171,6 @@ class ClientHub:
 
         if self.llm is not None:
             await self.llm.close()
-    
-
 
     def mark_promo_eligible(self) -> None:
         """Mark that user clicked STT button. Next STREAMING state will send promo."""

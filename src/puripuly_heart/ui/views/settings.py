@@ -420,7 +420,7 @@ class SettingsView(ft.Column):
             self._on_vrc_mic_click,
         )
         self._vrc_mic_title = ft.Text(
-            t("settings.vrc_mic_intercept"), #new name
+            t("settings.vrc_mic_intercept"),  # new name
             size=24,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
@@ -902,19 +902,19 @@ class SettingsView(ft.Column):
 
     def _on_vrc_mic_click(self, e) -> None:
         """打开 VRC 闭麦同步选项框
-        
+
         Open VRC mic intercept selection modal.
         """
         if not self.page:
             return
         options = [
-            OptionItem(value="on", label=t("settings.vrc_mic.on")),   # 
-            OptionItem(value="off", label=t("settings.vrc_mic.off")), # new name
+            OptionItem(value="on", label=t("settings.vrc_mic.on")),  #
+            OptionItem(value="off", label=t("settings.vrc_mic.off")),  # new name
         ]
         current = "on" if self._settings.osc.vrc_mic_intercept else "off"
         modal = SettingsModal(
             self.page,
-            t("settings.vrc_mic_intercept"),  
+            t("settings.vrc_mic_intercept"),
             options,
             self._on_vrc_mic_selected,
             show_description=False,
@@ -923,7 +923,7 @@ class SettingsView(ft.Column):
 
     def _on_vrc_mic_selected(self, value: str) -> None:
         """处理选项卡的选择结果
-        
+
         Handle VRC mic intercept selection result.
         """
         if not self._settings:
@@ -932,7 +932,9 @@ class SettingsView(ft.Column):
         logger.info(f"[Settings] VRC mic intercept toggled: {new_value}")
         self._settings.osc.vrc_mic_intercept = new_value
 
-        self._vrc_mic_text.content.value = t("settings.vrc_mic.on" if new_value else "settings.vrc_mic.off")
+        self._vrc_mic_text.content.value = t(
+            "settings.vrc_mic.on" if new_value else "settings.vrc_mic.off"
+        )
         if self.page:
             self._vrc_mic_text.update()
         self._emit_settings_changed()
@@ -1018,8 +1020,6 @@ class SettingsView(ft.Column):
         self._persona_title.value = t("settings.section.persona")
         self._vrc_mic_title.value = t("settings.vrc_mic_intercept")
         self._reset_prompt_btn.text = t("settings.reset_prompt")
-        
-        self._vrc_mic_title.value = t("settings.vrc_mic_intercept")
 
         # Update dynamic buttons by replacing the entire style object
         ui_font = font_for_language(get_locale())
@@ -1041,7 +1041,9 @@ class SettingsView(ft.Column):
                 "toggle.on" if self._settings.stt.low_latency_mode else "toggle.off"
             )
             self._vrc_mic_text.content.value = t(
-                "settings.vrc_mic.on" if self._settings.osc.vrc_mic_intercept else "settings.vrc_mic.off"
+                "settings.vrc_mic.on"
+                if self._settings.osc.vrc_mic_intercept
+                else "settings.vrc_mic.off"
             )
 
         # Qwen Region label
