@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
 class VrcOscReceiver:
     def __init__(self, hub: ClientHub, host: str = "127.0.0.1", port: int = 9001):
         self.hub = hub
@@ -38,7 +39,7 @@ class VrcOscReceiver:
             if is_muted:
                 # 核心逻辑：如果是闭麦，等待 0.4 秒，让尾音飞一会儿
                 await asyncio.sleep(self.mute_delay)
-            
+
             # 如果是开麦，或者延时结束了，才真正修改 Hub 的状态
             if self.hub.vrc_muted != is_muted:
                 logger.info(f"[OSC Receiver] VRChat Mic Muted State Applied: {is_muted}")
@@ -53,9 +54,16 @@ class VrcOscReceiver:
         dispatcher.map("/avatar/parameters/MuteSelf", self.mute_handler)
 
         loop = asyncio.get_running_loop()
-        server = AsyncIOOSCUDPServer((self.host, self.port), dispatcher, loop)
-        
-        self.transport, protocol = await server.create_serve_endpoint()
+        try:
+            server = AsyncIOOSCUDPServer((self.host, self.port), dispatcher, loop)
+            self.transport, _ = await server.create_serve_endpoint()
+        except OSError:
+            logger.exception(
+                "[OSC Receiver] Failed to start AsyncIOOSCUDPServer on %s:%s",
+                self.host,
+                self.port,
+            )
+            raise
         logger.info(f"[OSC Receiver] Listening on {self.host}:{self.port} for VRChat parameters")
 
     def stop(self) -> None:

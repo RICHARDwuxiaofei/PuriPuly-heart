@@ -21,7 +21,6 @@ from puripuly_heart.config.settings import (
     load_settings,
     save_settings,
 )
-from puripuly_heart.core.osc.receiver import VrcOscReceiver
 from puripuly_heart.core.audio.source import (
     SoundDeviceAudioSource,
     resolve_sounddevice_input_device,
@@ -29,6 +28,7 @@ from puripuly_heart.core.audio.source import (
 from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.orchestrator.hub import ClientHub
+from puripuly_heart.core.osc.receiver import VrcOscReceiver
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
@@ -145,9 +145,9 @@ class GuiController:
 
     async def stop(self) -> None:
         await self.set_stt_enabled(False)
-        #cut off
-        if getattr(self, "receiver", None) is not None:
-            self.receiver.stop()
+        if self.receiver is not None:
+            with contextlib.suppress(Exception):
+                self.receiver.stop()
             self.receiver = None
 
         if self._bridge_task:
@@ -420,6 +420,10 @@ class GuiController:
             self._bridge_task = None
 
         await self.set_stt_enabled(False)
+        if self.receiver is not None:
+            with contextlib.suppress(Exception):
+                self.receiver.stop()
+            self.receiver = None
         if self.hub is not None:
             with contextlib.suppress(Exception):
                 await self.hub.stop()
@@ -509,12 +513,13 @@ class GuiController:
             vrc_mic_intercept=self.settings.osc.vrc_mic_intercept,
         )
 
+        receiver = VrcOscReceiver(hub=hub, host="127.0.0.1", port=9001)
+        await receiver.start()
+
         self.sender = sender
         self.osc = osc
         self.hub = hub
-        # --- 新增：给接收器插电并启动！ ---
-        self.receiver = VrcOscReceiver(hub=self.hub, host="127.0.0.1", port=9001)
-        await self.receiver.start()
+        self.receiver = receiver
 
     async def _start_mic_loop(self) -> None:
         if self._mic_task is not None:
