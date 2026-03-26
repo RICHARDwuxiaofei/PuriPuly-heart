@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from puripuly_heart.core.clock import FakeClock
-from puripuly_heart.core.orchestrator.hub import ClientHub, _MergeBuffer
+from puripuly_heart.core.orchestrator.hub import ClientHub, ContextEntry, _MergeBuffer
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.core.vad.gating import SpeechEnd
 from puripuly_heart.domain.events import (
@@ -63,6 +63,30 @@ class StubSTT:
         while True:
             await asyncio.sleep(60.0)
             yield STTBackendTranscriptEvent(text="", is_final=False)
+
+
+@dataclass(slots=True)
+class QueueingSTT:
+    handled: list[object] = field(default_factory=list)
+    closed: bool = False
+    queue: asyncio.Queue[object | None] = field(default_factory=asyncio.Queue)
+
+    async def handle_vad_event(self, event: object) -> None:
+        self.handled.append(event)
+
+    async def close(self) -> None:
+        self.closed = True
+        await self.queue.put(None)
+
+    async def emit(self, event: object) -> None:
+        await self.queue.put(event)
+
+    async def events(self):
+        while True:
+            item = await self.queue.get()
+            if item is None:
+                return
+            yield item
 
 
 @pytest.mark.asyncio
@@ -127,6 +151,69 @@ async def test_start_is_idempotent_and_creates_background_tasks() -> None:
 
     assert hub._stt_task is stt_task
     assert hub._osc_flush_task is osc_task
+    await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_replace_stt_provider_running_restarts_event_loop_and_clears_runtime_state() -> None:
+    old_stt = QueueingSTT()
+    new_stt = QueueingSTT()
+    hub = ClientHub(stt=old_stt, llm=StubLLM(), osc=RecordingOscQueue(), clock=FakeClock())
+    await hub.start(auto_flush_osc=False)
+    old_task = hub._stt_task
+
+    utterance_id = uuid4()
+    hub.get_or_create_bundle(utterance_id)
+    hub._utterance_sources[utterance_id] = "Mic"
+    hub._utterance_start_times[utterance_id] = 1.0
+    hub._speech_ended_ids.add(utterance_id)
+    hub._translation_history.append(ContextEntry("hello", "ko", "en", 1.0))
+    hub._translation_tasks[utterance_id] = asyncio.create_task(asyncio.sleep(60.0))
+    buffer = _MergeBuffer(merge_id=uuid4(), parts=["hello"], utterance_ids=[utterance_id])
+    buffer.spec_task = asyncio.create_task(asyncio.sleep(60.0))
+    buffer.finalize_wait_task = asyncio.create_task(asyncio.sleep(60.0))
+    buffer.awaiting_vad_timeout_task = asyncio.create_task(asyncio.sleep(60.0))
+    buffer.resume_end_timeout_task = asyncio.create_task(asyncio.sleep(60.0))
+    hub._merge_buffer = buffer
+
+    await hub.replace_stt_provider(new_stt)
+
+    assert old_stt.closed is True
+    assert hub.stt is new_stt
+    assert hub._stt_task is not None
+    assert hub._stt_task is not old_task
+    assert hub._translation_tasks == {}
+    assert hub._utterances == {}
+    assert hub._utterance_sources == {}
+    assert hub._utterance_start_times == {}
+    assert hub._speech_ended_ids == set()
+    assert hub._translation_history == []
+    assert hub._merge_buffer is None
+
+    await new_stt.emit(STTSessionStateEvent(state=STTSessionState.STREAMING))
+    await asyncio.sleep(0)
+    event = await hub.ui_events.get()
+    assert event.type == UIEventType.SESSION_STATE_CHANGED
+
+    await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_replace_stt_provider_none_stops_event_loop_and_clears_runtime_state() -> None:
+    old_stt = QueueingSTT()
+    hub = ClientHub(stt=old_stt, llm=StubLLM(), osc=RecordingOscQueue(), clock=FakeClock())
+    await hub.start(auto_flush_osc=False)
+    hub._translation_history.append(ContextEntry("hello", "ko", "en", 1.0))
+    hub._translation_tasks[uuid4()] = asyncio.create_task(asyncio.sleep(60.0))
+
+    await hub.replace_stt_provider(None)
+
+    assert old_stt.closed is True
+    assert hub.stt is None
+    assert hub._stt_task is None
+    assert hub._translation_tasks == {}
+    assert hub._translation_history == []
+
     await hub.stop()
 
 

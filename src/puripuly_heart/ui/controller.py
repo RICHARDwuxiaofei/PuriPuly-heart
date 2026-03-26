@@ -38,6 +38,7 @@ from puripuly_heart.core.osc.receiver import (
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
+from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
 from puripuly_heart.core.vad.gating import VadGating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
@@ -80,6 +81,7 @@ class GuiController:
     _stt_switch_task: asyncio.Task[None] | None = None
     _stt_restart_requested: bool = False
     _last_stt_runtime_signature: tuple[object, ...] | None = None
+    _last_vrc_mic_sync_enabled: bool | None = None
     _vrc_receiver_lock: asyncio.Lock | None = None
 
     async def start(self) -> None:
@@ -137,8 +139,26 @@ class GuiController:
             return "alibaba_beijing"
         return "alibaba_singapore"
 
-    def _build_stt_runtime_signature(self, settings: AppSettings) -> tuple[object, ...]:
+    def _stt_provider_applies_custom_vocabulary(self, settings: AppSettings) -> bool:
+        return settings.provider.stt in (
+            STTProviderName.DEEPGRAM,
+            STTProviderName.SONIOX,
+        )
+
+    def _stt_runtime_custom_vocabulary_signature(
+        self, settings: AppSettings
+    ) -> tuple[bool, tuple[str, ...]]:
+        if not self._stt_provider_applies_custom_vocabulary(settings):
+            return False, ()
         return (
+            settings.stt.custom_vocabulary_enabled,
+            tuple(get_effective_custom_terms(settings, settings.languages.source_language)),
+        )
+
+    def _build_stt_runtime_signature(self, settings: AppSettings) -> tuple[object, ...]:
+        custom_vocab_enabled, custom_terms = self._stt_runtime_custom_vocabulary_signature(settings)
+        return (
+            settings.languages.source_language,
             settings.audio.input_host_api,
             settings.audio.input_device,
             settings.stt.vad_speech_threshold,
@@ -150,6 +170,8 @@ class GuiController:
             settings.audio.ring_buffer_ms,
             settings.audio.internal_sample_rate_hz,
             settings.audio.internal_channels,
+            custom_vocab_enabled,
+            custom_terms,
         )
 
     async def stop(self) -> None:
@@ -226,6 +248,14 @@ class GuiController:
             self._stt_switch_task = asyncio.create_task(self._run_stt_switch())
         await self._stt_switch_task
 
+    async def _replace_runtime_stt_provider(self) -> None:
+        if self._mic_task is not None:
+            await self._stop_mic_loop()
+        self._stt_restart_requested = False
+        await self._rebuild_stt_provider()
+        if self._stt_desired:
+            await self._ensure_stt_switch()
+
     async def _run_stt_switch(self) -> None:
         if self._stt_switch_lock is None:
             self._stt_switch_lock = asyncio.Lock()
@@ -270,27 +300,11 @@ class GuiController:
         # hub.source_language를 기준으로 비교 (settings 객체는 이미 수정되어 전달될 수 있음)
         prev_source_lang = self.hub.source_language if self.hub else None
         prev_low_latency = self.hub.low_latency_mode if self.hub else None
+        source_language_changed = (
+            prev_source_lang is not None and prev_source_lang != settings.languages.source_language
+        )
         self.settings = settings
         self._save_settings()
-
-        # Source language 변경 시 STT 백엔드 재구축 필요 (언어는 백엔드 생성 시점에 설정됨)
-        if prev_source_lang is not None and prev_source_lang != settings.languages.source_language:
-            logger.info(
-                "[Settings] Source language changed: %s -> %s, rebuilding STT pipeline",
-                prev_source_lang,
-                settings.languages.source_language,
-            )
-            await self._rebuild_pipeline(rebuild_stt=True)
-            # Locale 변경 처리 후 리턴 (나머지는 rebuild에서 처리됨)
-            if prev_locale != settings.ui.locale:
-                set_locale(settings.ui.locale)
-                apply_locale = getattr(self.app, "apply_locale", None)
-                if callable(apply_locale):
-                    try:
-                        apply_locale()
-                    except Exception as exc:
-                        self._log_error(f"Failed to apply locale: {exc}")
-            return
 
         # low_latency_mode 변경 시 Qwen LLM 프로바이더 재생성 필요
         # (AsyncQwenLLMProvider vs QwenLLMProvider 전환)
@@ -319,10 +333,11 @@ class GuiController:
                 else 1.1
             )
 
-        if self.vrc_mic_audio_gate is not None:
-            self.vrc_mic_audio_gate.set_enabled(settings.osc.vrc_mic_intercept)
-        logger.info("[Settings] VRC mic sync enabled: %s", settings.osc.vrc_mic_intercept)
-        await self._configure_vrc_mic_receiver(enabled=settings.osc.vrc_mic_intercept)
+        if self._last_vrc_mic_sync_enabled != settings.osc.vrc_mic_intercept:
+            if self.vrc_mic_audio_gate is not None:
+                self.vrc_mic_audio_gate.set_enabled(settings.osc.vrc_mic_intercept)
+            logger.info("[Settings] VRC mic sync enabled: %s", settings.osc.vrc_mic_intercept)
+            await self._configure_vrc_mic_receiver(enabled=settings.osc.vrc_mic_intercept)
 
         # Restart STT only when runtime STT-relevant settings changed.
         current_signature = self._build_stt_runtime_signature(settings)
@@ -331,9 +346,18 @@ class GuiController:
             and current_signature != self._last_stt_runtime_signature
         )
         self._last_stt_runtime_signature = current_signature
-        if should_restart_stt and self._mic_task is not None and self._stt_desired:
-            self._stt_restart_requested = True
-            await self._ensure_stt_switch()
+        if should_restart_stt:
+            await self._replace_runtime_stt_provider()
+
+        if source_language_changed:
+            view_settings = getattr(self.app, "view_settings", None)
+            if view_settings is not None:
+                with contextlib.suppress(Exception):
+                    view_settings.load_from_settings(
+                        settings,
+                        config_path=self.config_path,
+                        preserve_custom_vocab_draft=True,
+                    )
 
         if prev_locale != settings.ui.locale:
             set_locale(settings.ui.locale)
@@ -420,6 +444,36 @@ class GuiController:
             dash.set_translation_needs_key(llm is None)
 
         logger.info("[Settings] LLM provider rebuilt successfully")
+
+    async def _rebuild_stt_provider(self) -> None:
+        """Rebuild only the STT provider so later enable uses current settings."""
+        if self.hub is None or self.settings is None:
+            return
+
+        secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+        stt = None
+        try:
+            backend = create_stt_backend(self.settings, secrets=secrets)
+            stt = ManagedSTTProvider(
+                backend=backend,
+                sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                clock=self.clock,
+                reset_deadline_s=STT_RESET_DEADLINE_S,
+                drain_timeout_s=self.settings.stt.drain_timeout_s,
+                bridging_ms=self.settings.audio.ring_buffer_ms,
+            )
+        except Exception as exc:
+            self._log_error(f"STT backend not available: {exc}")
+
+        await self.hub.replace_stt_provider(stt)
+
+        dash = getattr(self.app, "view_dashboard", None)
+        if dash is not None:
+            dash.set_stt_needs_key(stt is None)
+            if stt is None:
+                dash.set_stt_enabled(False)
+
+        logger.info("[Settings] STT provider replacement completed successfully")
 
     async def _rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
         _ = rebuild_stt
@@ -656,6 +710,7 @@ class GuiController:
             self._vrc_receiver_lock = asyncio.Lock()
 
         async with self._vrc_receiver_lock:
+            self._last_vrc_mic_sync_enabled = enabled
             if self.vrc_mic_audio_gate is not None:
                 self.vrc_mic_audio_gate.set_enabled(enabled)
 

@@ -138,34 +138,26 @@ class ClientHub:
             await asyncio.gather(self._osc_flush_task, return_exceptions=True)
             self._osc_flush_task = None
 
-        if self._stt_task:
-            self._stt_task.cancel()
-            await asyncio.gather(self._stt_task, return_exceptions=True)
-            self._stt_task = None
-
-        for task in list(self._translation_tasks.values()):
-            task.cancel()
-        await asyncio.gather(*self._translation_tasks.values(), return_exceptions=True)
-        self._translation_tasks.clear()
-
-        if self._merge_buffer is not None:
-            merge_tasks = [
-                self._merge_buffer.spec_task,
-                self._merge_buffer.finalize_wait_task,
-                self._merge_buffer.awaiting_vad_timeout_task,
-                self._merge_buffer.resume_end_timeout_task,
-            ]
-            for task in merge_tasks:
-                if task is not None and not task.done():
-                    task.cancel()
-            await asyncio.gather(*(t for t in merge_tasks if t is not None), return_exceptions=True)
-            self._merge_buffer = None
+        await self._stop_stt_event_loop()
+        await self._reset_stt_runtime_state()
 
         if self.stt is not None:
             await self.stt.close()
 
         if self.llm is not None:
             await self.llm.close()
+
+    async def replace_stt_provider(self, stt: STTProvider | None) -> None:
+        old_stt = self.stt
+        await self._stop_stt_event_loop()
+        await self._reset_stt_runtime_state()
+
+        if old_stt is not None:
+            await old_stt.close()
+
+        self.stt = stt
+        if self._running and self.stt is not None:
+            self._stt_task = asyncio.create_task(self._run_stt_event_loop())
 
     def mark_promo_eligible(self) -> None:
         """Mark that user clicked STT button. Next STREAMING state will send promo."""
@@ -272,6 +264,44 @@ class ClientHub:
                 await self._handle_stt_event(ev)
         except asyncio.CancelledError:
             raise
+        except Exception:
+            logger.exception("[Hub] STT event loop crashed")
+            raise
+
+    async def _stop_stt_event_loop(self) -> None:
+        if self._stt_task is None:
+            return
+        task = self._stt_task
+        self._stt_task = None
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def _reset_stt_runtime_state(self) -> None:
+        translation_tasks = list(self._translation_tasks.values())
+        for task in translation_tasks:
+            task.cancel()
+        if translation_tasks:
+            await asyncio.gather(*translation_tasks, return_exceptions=True)
+        self._translation_tasks.clear()
+
+        if self._merge_buffer is not None:
+            merge_tasks = [
+                self._merge_buffer.spec_task,
+                self._merge_buffer.finalize_wait_task,
+                self._merge_buffer.awaiting_vad_timeout_task,
+                self._merge_buffer.resume_end_timeout_task,
+            ]
+            for task in merge_tasks:
+                if task is not None and not task.done():
+                    task.cancel()
+            await asyncio.gather(*(t for t in merge_tasks if t is not None), return_exceptions=True)
+            self._merge_buffer = None
+
+        self._utterances.clear()
+        self._utterance_sources.clear()
+        self._utterance_start_times.clear()
+        self._translation_history.clear()
+        self._speech_ended_ids.clear()
 
     async def _handle_stt_event(self, event: object) -> None:
         if isinstance(event, STTSessionStateEvent):

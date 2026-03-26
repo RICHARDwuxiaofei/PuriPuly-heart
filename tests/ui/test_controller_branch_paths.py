@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -72,10 +73,16 @@ class DummyDashboard:
 
 class DummySettingsView:
     def __init__(self) -> None:
-        self.calls: list[tuple[AppSettings, Path]] = []
+        self.calls: list[tuple[AppSettings, Path, bool]] = []
 
-    def load_from_settings(self, settings: AppSettings, *, config_path: Path) -> None:
-        self.calls.append((settings, config_path))
+    def load_from_settings(
+        self,
+        settings: AppSettings,
+        *,
+        config_path: Path,
+        preserve_custom_vocab_draft: bool = False,
+    ) -> None:
+        self.calls.append((settings, config_path, preserve_custom_vocab_draft))
 
 
 class DummyLogsView:
@@ -95,8 +102,16 @@ class DummyHub:
         self.llm = llm
         self.stt = stt
         self.translation_enabled = True
+        self.source_language = "ko"
+        self.target_language = "en"
+        self.system_prompt = ""
+        self.low_latency_mode = False
+        self.low_latency_merge_gap_ms = 600
+        self.low_latency_spec_retry_max = 10
+        self.hangover_s = 1.1
         self.clear_context_calls = 0
         self.promo_calls = 0
+        self.replace_stt_calls: list[object | None] = []
         self.start_calls: list[bool] = []
         self.stop_calls = 0
         self.submit_calls: list[tuple[str, str]] = []
@@ -116,6 +131,13 @@ class DummyHub:
 
     async def submit_text(self, text: str, *, source: str) -> None:
         self.submit_calls.append((text, source))
+
+    async def replace_stt_provider(self, stt: object | None) -> None:
+        old_stt = self.stt
+        self.replace_stt_calls.append(stt)
+        if old_stt is not None and hasattr(old_stt, "close"):
+            await old_stt.close()
+        self.stt = stt
 
 
 class DummyGate:
@@ -352,7 +374,7 @@ def test_sync_ui_from_settings_updates_dashboard_and_settings_view() -> None:
     assert dash.languages == ("ko", "en")
     assert dash.recent_languages == (["ko", "ja"], ["en", "zh"])
     assert dash.on_recent_languages_change is not None
-    assert settings_view.calls == [(settings, Path("settings.json"))]
+    assert settings_view.calls == [(settings, Path("settings.json"), False)]
 
 
 def test_on_recent_languages_change_persists_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -435,6 +457,56 @@ def test_verified_key_and_runtime_signature_depend_on_region_and_settings() -> N
     assert key_beijing == "alibaba_beijing"
     assert key_singapore == "alibaba_singapore"
     assert baseline != changed
+
+
+def test_stt_runtime_signature_includes_custom_vocabulary_state() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.DEEPGRAM
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": [" Puripuly ", "VRChat", "Puripuly"], "en": ["Avatar"]}
+    settings.stt.custom_vocabulary_enabled = False
+
+    disabled_signature = controller._build_stt_runtime_signature(settings)
+
+    settings.stt.custom_vocabulary_enabled = True
+    enabled_signature = controller._build_stt_runtime_signature(settings)
+
+    assert disabled_signature != enabled_signature
+    assert enabled_signature[-2] is True
+    assert enabled_signature[-1] == ("Puripuly", "VRChat")
+
+
+def test_stt_runtime_signature_includes_source_language() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.DEEPGRAM
+    settings.languages.source_language = "ko"
+
+    ko_signature = controller._build_stt_runtime_signature(settings)
+    settings.languages.source_language = "en"
+    en_signature = controller._build_stt_runtime_signature(settings)
+
+    assert ko_signature != en_signature
+    assert ko_signature[0] == "ko"
+    assert en_signature[0] == "en"
+
+
+def test_stt_runtime_signature_ignores_custom_vocabulary_for_qwen_asr() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.QWEN_ASR
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": ["Puripuly", "VRChat"]}
+
+    disabled_signature = controller._build_stt_runtime_signature(settings)
+
+    settings.stt.custom_vocabulary_enabled = True
+    enabled_signature = controller._build_stt_runtime_signature(settings)
+
+    assert disabled_signature == enabled_signature
+    assert enabled_signature[-2] is False
+    assert enabled_signature[-1] == ()
 
 
 @pytest.mark.asyncio
@@ -995,7 +1067,7 @@ async def test_submit_text_returns_without_hub_and_logs_errors(
 
 
 @pytest.mark.asyncio
-async def test_apply_settings_rebuilds_pipeline_when_source_language_changes_and_applies_locale(
+async def test_apply_settings_replaces_stt_provider_when_source_language_changes_and_applies_locale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -1003,24 +1075,68 @@ async def test_apply_settings_rebuilds_pipeline_when_source_language_changes_and
     settings.ui.locale = "ja"
     controller = _make_controller(app=SimpleNamespace(apply_locale=lambda: None))
     controller.settings = settings
-    controller.hub = SimpleNamespace(source_language="en", low_latency_mode=False)
+    controller.hub = DummyHub()
+    controller.hub.source_language = "en"
     saved: list[str] = []
-    rebuild_calls: list[bool] = []
+    replace_calls: list[str] = []
+    pipeline_calls: list[bool] = []
     locale_calls: list[str] = []
 
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        _ = self
+        replace_calls.append("replace")
+
     async def fake_rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
-        rebuild_calls.append(rebuild_stt)
+        pipeline_calls.append(rebuild_stt)
 
     monkeypatch.setattr(controller_module, "get_locale", lambda: "en")
     monkeypatch.setattr(controller_module, "set_locale", lambda locale: locale_calls.append(locale))
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: saved.append("saved"))
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
     monkeypatch.setattr(GuiController, "_rebuild_pipeline", fake_rebuild_pipeline)
+    controller._last_stt_runtime_signature = ("old",)
 
     await controller.apply_settings(settings)
 
     assert saved == ["saved"]
-    assert rebuild_calls == [True]
+    assert replace_calls == ["replace"]
+    assert pipeline_calls == []
     assert locale_calls == ["ja"]
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_source_language_change_reloads_settings_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": ["Puripuly"], "en": ["Avatar"]}
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_settings=settings_view, apply_locale=lambda: None)
+    )
+    controller.settings = settings
+    controller.hub = DummyHub()
+    controller.hub.source_language = "en"
+    replace_calls: list[str] = []
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        _ = self
+        replace_calls.append("replace")
+
+    monkeypatch.setattr(controller_module, "get_locale", lambda: settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
+    controller._last_stt_runtime_signature = ("old",)
+
+    await controller.apply_settings(settings)
+
+    assert replace_calls == ["replace"]
+    assert settings_view.calls == [(settings, Path("settings.json"), True)]
 
 
 @pytest.mark.asyncio
@@ -1042,15 +1158,14 @@ async def test_apply_settings_restarts_stt_and_reports_locale_failure(
     app = SimpleNamespace(apply_locale=lambda: (_ for _ in ()).throw(RuntimeError("locale boom")))
     controller = _make_controller(app=app)
     controller.settings = settings
-    controller.hub = SimpleNamespace(
-        source_language=settings.languages.source_language,
-        target_language=settings.languages.target_language,
-        system_prompt=settings.system_prompt,
-        low_latency_mode=False,
-        low_latency_merge_gap_ms=settings.stt.low_latency_merge_gap_ms,
-        low_latency_spec_retry_max=settings.stt.low_latency_spec_retry_max,
-        hangover_s=1.1,
-    )
+    controller.hub = DummyHub()
+    controller.hub.source_language = settings.languages.source_language
+    controller.hub.target_language = settings.languages.target_language
+    controller.hub.system_prompt = settings.system_prompt
+    controller.hub.low_latency_mode = False
+    controller.hub.low_latency_merge_gap_ms = settings.stt.low_latency_merge_gap_ms
+    controller.hub.low_latency_spec_retry_max = settings.stt.low_latency_spec_retry_max
+    controller.hub.hangover_s = 1.1
     controller._last_stt_runtime_signature = ("old",)
     controller._mic_task = object()
     controller._stt_desired = True
@@ -1058,21 +1173,32 @@ async def test_apply_settings_restarts_stt_and_reports_locale_failure(
     async def fake_rebuild_llm_provider(self) -> None:
         rebuild_llm_calls.append("rebuild_llm")
 
+    async def fake_stop_mic_loop(self) -> None:
+        _ = self
+        switch_calls.append("stop_mic")
+
     async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
         receiver_calls.append(enabled)
 
+    async def fake_rebuild_stt_provider(self) -> None:
+        _ = self
+        switch_calls.append("rebuild_stt")
+
     async def fake_ensure_stt_switch(self) -> None:
+        _ = self
         switch_calls.append("switch")
 
     monkeypatch.setattr(controller_module, "get_locale", lambda: "en")
     monkeypatch.setattr(controller_module, "set_locale", lambda locale: locale_calls.append(locale))
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
     monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+    monkeypatch.setattr(GuiController, "_stop_mic_loop", fake_stop_mic_loop)
     monkeypatch.setattr(
         GuiController,
         "_configure_vrc_mic_receiver",
         fake_configure_vrc_mic_receiver,
     )
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild_stt_provider)
     monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_ensure_stt_switch)
     monkeypatch.setattr(GuiController, "_log_error", lambda self, message: errors.append(message))
 
@@ -1080,11 +1206,232 @@ async def test_apply_settings_restarts_stt_and_reports_locale_failure(
 
     assert rebuild_llm_calls == ["rebuild_llm"]
     assert receiver_calls == [True]
-    assert controller._stt_restart_requested is True
-    assert switch_calls == ["switch"]
+    assert controller._stt_restart_requested is False
+    assert switch_calls == ["stop_mic", "rebuild_stt", "switch"]
     assert locale_calls == ["ko"]
     assert controller.hub.low_latency_mode is True
     assert any("Failed to apply locale: locale boom" in message for message in errors)
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_rebuilds_stt_provider_when_runtime_changes_while_stt_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.DEEPGRAM
+
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = settings
+
+    close_calls: list[str] = []
+    switch_calls: list[str] = []
+    backend_calls: list[str] = []
+    new_stt = object()
+
+    class OldStt:
+        async def close(self) -> None:
+            close_calls.append("close")
+
+    controller.hub = DummyHub(stt=OldStt())
+    controller.hub.source_language = settings.languages.source_language
+    controller.hub.target_language = settings.languages.target_language
+    controller.hub.system_prompt = settings.system_prompt
+    controller.hub.low_latency_mode = settings.stt.low_latency_mode
+    controller.hub.low_latency_merge_gap_ms = settings.stt.low_latency_merge_gap_ms
+    controller.hub.low_latency_spec_retry_max = settings.stt.low_latency_spec_retry_max
+    controller.hub.hangover_s = 1.1
+    controller._last_stt_runtime_signature = controller._build_stt_runtime_signature(settings)
+    controller._stt_desired = False
+    controller._mic_task = None
+
+    settings.stt.custom_vocabulary_enabled = True
+    settings.stt.custom_terms = {"ko": ["Puripuly"]}
+
+    async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
+        _ = (self, enabled)
+
+    async def fake_ensure_stt_switch(self) -> None:
+        _ = self
+        switch_calls.append("switch")
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        fake_configure_vrc_mic_receiver,
+    )
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_ensure_stt_switch)
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        controller_module,
+        "create_stt_backend",
+        lambda current_settings, **_kwargs: backend_calls.append(
+            current_settings.languages.source_language
+        )
+        or "backend",
+    )
+    monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: new_stt)
+
+    await controller.apply_settings(settings)
+
+    assert close_calls == ["close"]
+    assert backend_calls == ["ko"]
+    assert controller.hub.stt is new_stt
+    assert controller.hub.replace_stt_calls == [new_stt]
+    assert switch_calls == []
+    assert dash.stt_needs_key is False
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_replaces_running_stt_provider_for_custom_vocabulary_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.DEEPGRAM
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = settings
+    controller.hub = DummyHub(stt=object())
+    controller.hub.source_language = settings.languages.source_language
+    controller.hub.target_language = settings.languages.target_language
+    controller.hub.system_prompt = settings.system_prompt
+    controller.hub.low_latency_mode = settings.stt.low_latency_mode
+    controller.hub.low_latency_merge_gap_ms = settings.stt.low_latency_merge_gap_ms
+    controller.hub.low_latency_spec_retry_max = settings.stt.low_latency_spec_retry_max
+    controller.hub.hangover_s = 1.1
+    controller._last_stt_runtime_signature = controller._build_stt_runtime_signature(settings)
+    controller._stt_desired = True
+    controller._mic_task = object()
+
+    settings.stt.custom_vocabulary_enabled = True
+    settings.stt.custom_terms = {"ko": ["Puripuly", "VRChat"]}
+
+    calls: list[str] = []
+
+    async def fake_stop_mic_loop(self) -> None:
+        _ = self
+        calls.append("stop_mic")
+
+    async def fake_rebuild_stt_provider(self) -> None:
+        _ = self
+        calls.append("rebuild_stt")
+
+    async def fake_ensure_stt_switch(self) -> None:
+        _ = self
+        calls.append("switch")
+
+    async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
+        _ = (self, enabled)
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_stop_mic_loop", fake_stop_mic_loop)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild_stt_provider)
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_ensure_stt_switch)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        fake_configure_vrc_mic_receiver,
+    )
+
+    await controller.apply_settings(settings)
+
+    assert calls == ["stop_mic", "rebuild_stt", "switch"]
+    assert controller._stt_restart_requested is False
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_does_not_restart_stt_for_qwen_custom_vocabulary_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.QWEN_ASR
+
+    replace_calls: list[str] = []
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = settings
+    controller.hub = DummyHub()
+    controller.hub.source_language = settings.languages.source_language
+    controller.hub.target_language = settings.languages.target_language
+    controller.hub.system_prompt = settings.system_prompt
+    controller.hub.low_latency_mode = settings.stt.low_latency_mode
+    controller.hub.low_latency_merge_gap_ms = settings.stt.low_latency_merge_gap_ms
+    controller.hub.low_latency_spec_retry_max = settings.stt.low_latency_spec_retry_max
+    controller.hub.hangover_s = 1.1
+    controller._last_stt_runtime_signature = controller._build_stt_runtime_signature(settings)
+    controller._stt_desired = True
+    controller._mic_task = object()
+
+    settings.stt.custom_vocabulary_enabled = True
+    settings.stt.custom_terms = {"ko": ["Puripuly", "VRChat"]}
+
+    async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
+        _ = (self, enabled)
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        _ = self
+        replace_calls.append("replace")
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        fake_configure_vrc_mic_receiver,
+    )
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
+
+    await controller.apply_settings(settings)
+
+    assert controller._stt_restart_requested is False
+    assert replace_calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_skips_vrc_sync_when_setting_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.QWEN_ASR
+
+    receiver_calls: list[bool] = []
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = settings
+    controller.hub = SimpleNamespace(
+        source_language=settings.languages.source_language,
+        target_language=settings.languages.target_language,
+        system_prompt=settings.system_prompt,
+        low_latency_mode=settings.stt.low_latency_mode,
+        low_latency_merge_gap_ms=settings.stt.low_latency_merge_gap_ms,
+        low_latency_spec_retry_max=settings.stt.low_latency_spec_retry_max,
+        hangover_s=1.1,
+    )
+    controller._last_stt_runtime_signature = controller._build_stt_runtime_signature(settings)
+    controller._last_vrc_mic_sync_enabled = settings.osc.vrc_mic_intercept
+
+    settings.stt.custom_vocabulary_enabled = True
+    settings.stt.custom_terms = {"ko": ["Puripuly"]}
+
+    async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
+        _ = self
+        receiver_calls.append(enabled)
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        fake_configure_vrc_mic_receiver,
+    )
+
+    with caplog.at_level(logging.INFO, logger=controller_module.logger.name):
+        await controller.apply_settings(settings)
+
+    assert receiver_calls == []
+    assert all("VRC mic sync enabled" not in record.message for record in caplog.records)
 
 
 @pytest.mark.parametrize(
