@@ -11,6 +11,7 @@ import flet as ft
 
 from puripuly_heart.app.wiring import create_secret_store
 from puripuly_heart.config.settings import (
+    MAX_CUSTOM_VOCAB_TERMS,
     AppSettings,
     GeminiLLMModel,
     LLMProviderName,
@@ -37,6 +38,7 @@ from puripuly_heart.ui.i18n import (
     t,
 )
 from puripuly_heart.ui.theme import (
+    COLOR_DIVIDER,
     COLOR_NEUTRAL,
     COLOR_ON_BACKGROUND,
     COLOR_PRIMARY,
@@ -79,6 +81,7 @@ class SettingsView(ft.Column):
         self._config_path: Path | None = None
         self.has_provider_changes: bool = False
         self.provider_change_requires_pipeline: bool = False
+        self._custom_vocab_draft_terms: dict[str, str] = {}
 
         # Build UI components
         self._build_ui()
@@ -435,7 +438,53 @@ class SettingsView(ft.Column):
         )
         row6 = persona_card
 
-        self.controls = [row1, row2, row3, row4, row5, row6]
+        # === Row 7: Custom Vocabulary (2x1) ===
+        self._custom_vocab_title = ft.Text(
+            t("settings.section.custom_vocabulary"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._custom_vocab_info_icon = ft.Icon(
+            name=ft.Icons.INFO_OUTLINE,
+            color=COLOR_NEUTRAL,
+            size=24,
+            tooltip=t("settings.custom_vocabulary_tooltip"),
+        )
+        custom_vocab_header = ft.Row(
+            controls=[
+                self._custom_vocab_title,
+                ft.Container(expand=True),
+                self._custom_vocab_info_icon,
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self._custom_vocab_terms = ft.TextField(
+            multiline=True,
+            min_lines=5,
+            helper_text="",
+            border_radius=12,
+            border_color=COLOR_DIVIDER,
+            focused_border_color=COLOR_PRIMARY,
+            text_size=16,
+            color=COLOR_ON_BACKGROUND,
+            on_change=self._on_custom_vocabulary_terms_change,
+            on_blur=self._on_custom_vocabulary_terms_blur,
+        )
+        row7 = self._wrap_card(
+            ft.Column(
+                [
+                    custom_vocab_header,
+                    ft.Container(height=16),
+                    self._custom_vocab_terms,
+                ],
+                spacing=0,
+            ),
+            expand=False,
+        )
+
+        self.controls = [row1, row2, row3, row4, row5, row6, row7]
 
     def _populate_host_apis(self) -> None:
         """Legacy hook for tests; host APIs are handled by AudioSettings."""
@@ -470,8 +519,53 @@ class SettingsView(ft.Column):
             return "gemini"
         return "qwen"
 
+    def _current_source_language(self) -> str:
+        if not self._settings:
+            return "en"
+        return self._settings.languages.source_language
+
+    def _set_custom_vocabulary_draft_from_settings(self, *, preserve_existing: bool) -> None:
+        if not self._settings:
+            self._custom_vocab_draft_terms = {}
+            self._custom_vocab_terms.value = ""
+            return
+
+        source_language = self._current_source_language()
+        if not preserve_existing:
+            self._custom_vocab_draft_terms = {
+                language: "\n".join(terms)
+                for language, terms in self._settings.stt.custom_terms.items()
+            }
+        current_value = self._custom_vocab_draft_terms.get(
+            source_language,
+            "\n".join(self._settings.stt.custom_terms.get(source_language, [])),
+        )
+        self._custom_vocab_draft_terms[source_language] = current_value
+        self._custom_vocab_terms.value = current_value
+
+    def _parse_custom_vocabulary_terms(self) -> tuple[list[str], int]:
+        terms: list[str] = []
+        seen_terms: set[str] = set()
+        unique_count = 0
+        for line in (self._custom_vocab_terms.value or "").splitlines():
+            normalized = line.strip()
+            if not normalized or normalized in seen_terms:
+                continue
+            seen_terms.add(normalized)
+            unique_count += 1
+            if len(terms) >= MAX_CUSTOM_VOCAB_TERMS:
+                continue
+            terms.append(normalized)
+        return terms, unique_count
+
     # --- Load Settings ---
-    def load_from_settings(self, settings: AppSettings, *, config_path: Path) -> None:
+    def load_from_settings(
+        self,
+        settings: AppSettings,
+        *,
+        config_path: Path,
+        preserve_custom_vocab_draft: bool = False,
+    ) -> None:
         """Load current settings into the UI."""
         self._settings = settings
         self._config_path = config_path
@@ -521,6 +615,11 @@ class SettingsView(ft.Column):
             self._prompt_editor.load_default_prompt()
             settings.system_prompt = self._prompt_editor.value
             settings.system_prompts[provider_name] = settings.system_prompt
+
+        self._set_custom_vocabulary_draft_from_settings(
+            preserve_existing=preserve_custom_vocab_draft
+        )
+        self._custom_vocab_terms.helper_text = ""
 
         # Load secrets
         self._load_secrets(settings, config_path)
@@ -1003,6 +1102,68 @@ class SettingsView(ft.Column):
             self._settings.system_prompts[self._active_prompt_key()] = self._prompt_editor.value
             self._emit_settings_changed()
 
+    def _apply_custom_vocabulary(self) -> None:
+        if not self._settings:
+            return
+
+        source_language = self._current_source_language()
+        updated_terms = dict(self._settings.stt.custom_terms)
+        current_terms = list(updated_terms.get(source_language, []))
+        parsed_terms, unique_count = self._parse_custom_vocabulary_terms()
+        normalized_text = "\n".join(parsed_terms)
+        if self._custom_vocab_terms.value != normalized_text:
+            self._custom_vocab_terms.value = normalized_text
+            if self._custom_vocab_terms.page:
+                self._custom_vocab_terms.update()
+        updated_terms[source_language] = parsed_terms
+        next_enabled = any(bool(terms) for terms in updated_terms.values())
+        self._custom_vocab_draft_terms[source_language] = normalized_text
+
+        if unique_count > MAX_CUSTOM_VOCAB_TERMS:
+            logger.info(
+                "[Settings] Custom vocabulary capped: language=%s, requested=%d, applied=%d",
+                source_language,
+                unique_count,
+                MAX_CUSTOM_VOCAB_TERMS,
+            )
+            if self.show_snackbar:
+                self.show_snackbar(
+                    t(
+                        "snackbar.custom_vocabulary_limit",
+                        max_terms=MAX_CUSTOM_VOCAB_TERMS,
+                    ),
+                    ft.Colors.ORANGE_700,
+                )
+
+        if (
+            current_terms == parsed_terms
+            and self._settings.stt.custom_vocabulary_enabled == next_enabled
+        ):
+            return
+
+        self._settings.stt.custom_terms = updated_terms
+        self._settings.stt.custom_vocabulary_enabled = next_enabled
+        logger.info(
+            "[Settings] Custom vocabulary applied: language=%s, terms=%d",
+            source_language,
+            len(parsed_terms),
+        )
+        self._emit_settings_changed()
+
+    def _on_apply_custom_vocabulary(self, e) -> None:
+        _ = e
+        self._apply_custom_vocabulary()
+
+    def _on_custom_vocabulary_terms_change(self, e) -> None:
+        _ = e
+        self._custom_vocab_draft_terms[self._current_source_language()] = (
+            self._custom_vocab_terms.value or ""
+        )
+
+    def _on_custom_vocabulary_terms_blur(self, e) -> None:
+        _ = e
+        self._apply_custom_vocabulary()
+
     async def _verify_key(self, provider: str, key: str) -> tuple[bool, str]:
         """Verify API key."""
         if self.on_verify_api_key:
@@ -1025,8 +1186,12 @@ class SettingsView(ft.Column):
         self._vad_title.value = t("settings.vad_sensitivity")
         self._low_latency_title.value = t("settings.low_latency_mode")
         self._persona_title.value = t("settings.section.persona")
+        self._custom_vocab_title.value = t("settings.section.custom_vocabulary")
+        self._custom_vocab_info_icon.tooltip = t("settings.custom_vocabulary_tooltip")
         self._vrc_mic_title.value = t("settings.vrc_mic_intercept")
         self._reset_prompt_btn.text = t("settings.reset_prompt")
+        self._custom_vocab_terms.label = None
+        self._custom_vocab_terms.helper_text = ""
 
         # Update dynamic buttons by replacing the entire style object
         ui_font = font_for_language(get_locale())

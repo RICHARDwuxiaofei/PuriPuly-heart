@@ -13,7 +13,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Sequence
 
 from puripuly_heart.core.stt.backend import (
     STTBackend,
@@ -22,6 +22,7 @@ from puripuly_heart.core.stt.backend import (
 )
 
 logger = logging.getLogger(__name__)
+_DEEPGRAM_KEYTERM_MODEL = "nova-3"
 
 
 @dataclass(slots=True)
@@ -33,6 +34,7 @@ class DeepgramRealtimeSTTBackend(STTBackend):
     model: str = "nova-3"
     sample_rate_hz: int = 16000
     connect_timeout_s: float = 5.0
+    keyterms: Sequence[str] = ()
 
     async def open_session(self) -> STTBackendSession:
         if self.sample_rate_hz not in (8000, 16000):
@@ -48,6 +50,7 @@ class DeepgramRealtimeSTTBackend(STTBackend):
             language=self.language,
             sample_rate_hz=self.sample_rate_hz,
             connect_timeout_s=self.connect_timeout_s,
+            keyterms=list(self.keyterms),
         )
         await session.start()
         return session
@@ -91,6 +94,7 @@ class _DeepgramSDKSession(STTBackendSession):
     language: str
     sample_rate_hz: int
     connect_timeout_s: float
+    keyterms: list[str]
 
     _events: asyncio.Queue[STTBackendTranscriptEvent | BaseException | None] = field(
         init=False, repr=False
@@ -107,6 +111,9 @@ class _DeepgramSDKSession(STTBackendSession):
         self._events = asyncio.Queue()
         self._audio_q = queue.Queue()
         self._connected = threading.Event()
+
+    def _supports_keyterms(self) -> bool:
+        return self.model.strip().lower() == _DEEPGRAM_KEYTERM_MODEL
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -135,16 +142,22 @@ class _DeepgramSDKSession(STTBackendSession):
             client = DeepgramClient(api_key=self.api_key)
 
             # Connect with streaming options using v1.connect() API
+            connect_kwargs: dict[str, Any] = {
+                "model": self.model,
+                "language": self.language,
+                "encoding": "linear16",
+                "sample_rate": self.sample_rate_hz,
+                "channels": 1,
+                "interim_results": False,
+                "punctuate": True,
+                "vad_events": False,  # Disabled: using local VAD + Finalize
+                "endpointing": False,  # Disabled: using local VAD for speech boundaries
+            }
+            if self.keyterms and self._supports_keyterms():
+                connect_kwargs["keyterm"] = self.keyterms
+
             with client.listen.v1.connect(
-                model=self.model,
-                language=self.language,
-                encoding="linear16",
-                sample_rate=self.sample_rate_hz,
-                channels=1,
-                interim_results=False,
-                punctuate=True,
-                vad_events=False,  # Disabled: using local VAD + Finalize
-                endpointing=False,  # Disabled: using local VAD for speech boundaries
+                **connect_kwargs,
             ) as connection:
 
                 # Set up event handlers

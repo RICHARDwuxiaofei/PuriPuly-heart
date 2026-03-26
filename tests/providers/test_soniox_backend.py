@@ -16,13 +16,14 @@ from puripuly_heart.providers.stt.soniox import (
 )
 
 
-def _make_session() -> _SonioxSession:
+def _make_session(*, context_terms: list[str] | None = None) -> _SonioxSession:
     return _SonioxSession(
         api_key="k",
         model="m",
         endpoint="wss://example",
         sample_rate_hz=16000,
         language_hints=["en"],
+        context_terms=context_terms or [],
         keepalive_interval_s=10.0,
         trailing_silence_ms=100,
         connect_timeout_s=5.0,
@@ -259,6 +260,7 @@ async def test_soniox_session_start_send_recv_and_close(monkeypatch) -> None:
         endpoint="wss://example",
         sample_rate_hz=16000,
         language_hints=["en"],
+        context_terms=["Puripuly", "VRChat"],
         keepalive_interval_s=0.01,
         trailing_silence_ms=50,
         connect_timeout_s=5.0,
@@ -282,6 +284,9 @@ async def test_soniox_session_start_send_recv_and_close(monkeypatch) -> None:
     await recv_queue.put(None)
     await session.close()
 
+    config = json.loads(ws.sent[0])
+    assert config["context"]["terms"] == ["Puripuly", "VRChat"]
+
     payloads = [
         payload
         for payload in ws.sent
@@ -291,3 +296,38 @@ async def test_soniox_session_start_send_recv_and_close(monkeypatch) -> None:
     assert any(json.loads(p).get("type") == "keepalive" for p in payloads)
     assert b"abc" in ws.sent
     assert ws.closed is True
+
+
+@pytest.mark.asyncio
+async def test_soniox_session_start_omits_context_when_no_terms(monkeypatch) -> None:
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent: list[object] = []
+            self.closed = False
+
+        async def send(self, payload):
+            self.sent.append(payload)
+
+        async def recv(self):
+            return None
+
+        async def close(self):
+            self.closed = True
+
+    ws = FakeWebSocket()
+
+    async def connect(*_args, **_kwargs):
+        return ws
+
+    fake_websockets = SimpleNamespace(
+        connect=connect,
+        exceptions=SimpleNamespace(ConnectionClosedOK=type("ConnectionClosedOK", (Exception,), {})),
+    )
+    monkeypatch.setitem(sys.modules, "websockets", fake_websockets)
+
+    session = _make_session()
+    await session.start()
+    await session.close()
+
+    config = json.loads(ws.sent[0])
+    assert "context" not in config

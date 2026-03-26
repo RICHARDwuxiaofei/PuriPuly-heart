@@ -8,11 +8,21 @@ from pathlib import Path
 from typing import Any
 
 SETTINGS_SCHEMA_VERSION = 2
+MAX_CUSTOM_VOCAB_TERMS = 100
+DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
+    "ko": ("아이리", "시나노"),
+    "en": ("airi", "shinano"),
+    "zh-CN": ("airi", "shinano"),
+}
 LEGACY_QWEN_DEFAULT_PROMPT = (
     "VRChat social voice chat interpretation. Use spoken, conversational language and mirror "
     "the speaker's tone and formality. Fix voice recognition errors like missing punctuation "
     "and typos."
 )
+
+
+def _default_custom_terms() -> dict[str, list[str]]:
+    return {language: list(terms) for language, terms in DEFAULT_CUSTOM_VOCAB_TERMS.items()}
 
 
 class STTProviderName(str, Enum):
@@ -89,6 +99,8 @@ class STTSettings:
     low_latency_vad_hangover_ms: int = 600
     low_latency_merge_gap_ms: int = 600
     low_latency_spec_retry_max: int = 10
+    custom_vocabulary_enabled: bool = True
+    custom_terms: dict[str, list[str]] = field(default_factory=_default_custom_terms)
 
     def validate(self) -> None:
         if self.drain_timeout_s <= 0:
@@ -101,6 +113,18 @@ class STTSettings:
             raise ValueError("low_latency_merge_gap_ms must be >= 0")
         if self.low_latency_spec_retry_max < 0:
             raise ValueError("low_latency_spec_retry_max must be >= 0")
+        if not isinstance(self.custom_vocabulary_enabled, bool):
+            raise ValueError("custom_vocabulary_enabled must be a bool")
+        if not isinstance(self.custom_terms, dict):
+            raise ValueError("custom_terms must be a dict[str, list[str]]")
+        for language, terms in self.custom_terms.items():
+            if not isinstance(language, str):
+                raise ValueError("custom_terms keys must be strings")
+            if not isinstance(terms, list):
+                raise ValueError("custom_terms values must be lists of strings")
+            for term in terms:
+                if not isinstance(term, str):
+                    raise ValueError("custom_terms values must be lists of strings")
 
 
 @dataclass(slots=True)
@@ -334,6 +358,8 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "low_latency_vad_hangover_ms": settings.stt.low_latency_vad_hangover_ms,
             "low_latency_merge_gap_ms": settings.stt.low_latency_merge_gap_ms,
             "low_latency_spec_retry_max": settings.stt.low_latency_spec_retry_max,
+            "custom_vocabulary_enabled": settings.stt.custom_vocabulary_enabled,
+            "custom_terms": _parse_custom_terms(settings.stt.custom_terms),
         },
         "deepgram_stt": {
             "model": settings.deepgram_stt.model,
@@ -437,6 +463,36 @@ def _parse_system_prompts(value: object) -> dict[str, str]:
     return out
 
 
+def _parse_custom_terms(value: object) -> dict[str, list[str]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("custom_terms must be a dict[str, list[str]]")
+
+    out: dict[str, list[str]] = {}
+    for language, terms in value.items():
+        if not isinstance(language, str):
+            raise ValueError("custom_terms keys must be strings")
+        if not isinstance(terms, list):
+            raise ValueError("custom_terms values must be lists of strings")
+
+        normalized_terms: list[str] = []
+        seen_terms: set[str] = set()
+        for term in terms:
+            if not isinstance(term, str):
+                raise ValueError("custom_terms values must be lists of strings")
+            normalized_term = term.strip()
+            if not normalized_term or normalized_term in seen_terms:
+                continue
+            if len(normalized_terms) >= MAX_CUSTOM_VOCAB_TERMS:
+                break
+            seen_terms.add(normalized_term)
+            normalized_terms.append(normalized_term)
+
+        out[language] = normalized_terms
+    return out
+
+
 def _coerce_int(value: object, fallback: int) -> int:
     try:
         return int(value)  # type: ignore[arg-type]
@@ -466,6 +522,23 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             changed = True
 
         version = 2
+
+    stt_data = data.get("stt")
+    if not isinstance(stt_data, dict):
+        stt_data = {}
+        data["stt"] = stt_data
+        changed = True
+
+    if "custom_terms" not in stt_data:
+        stt_data["custom_terms"] = _default_custom_terms()
+        changed = True
+
+    if "custom_vocabulary_enabled" not in stt_data:
+        normalized_custom_terms = _parse_custom_terms(stt_data.get("custom_terms"))
+        stt_data["custom_vocabulary_enabled"] = any(
+            bool(terms) for terms in normalized_custom_terms.values()
+        )
+        changed = True
 
     # Keep schema at v2 but backfill Soniox legacy default model upgrade.
     soniox_data = data.get("soniox_stt")
@@ -516,6 +589,11 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     vad_threshold_raw = stt_data.get("vad_speech_threshold")
     legacy_system_prompt = str(data.get("system_prompt", ""))
     system_prompts = _parse_system_prompts(data.get("system_prompts"))
+    parsed_custom_terms = _parse_custom_terms(stt_data.get("custom_terms", _default_custom_terms()))
+    if "custom_vocabulary_enabled" in stt_data:
+        custom_vocabulary_enabled = bool(stt_data.get("custom_vocabulary_enabled"))
+    else:
+        custom_vocabulary_enabled = any(bool(terms) for terms in parsed_custom_terms.values())
 
     settings = AppSettings(
         settings_version=_coerce_int(data.get("settings_version"), SETTINGS_SCHEMA_VERSION),
@@ -555,6 +633,8 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             low_latency_vad_hangover_ms=int(stt_data.get("low_latency_vad_hangover_ms", 600)),
             low_latency_merge_gap_ms=int(stt_data.get("low_latency_merge_gap_ms", 600)),
             low_latency_spec_retry_max=int(stt_data.get("low_latency_spec_retry_max", 10)),
+            custom_vocabulary_enabled=custom_vocabulary_enabled,
+            custom_terms=parsed_custom_terms,
         ),
         deepgram_stt=DeepgramSTTSettings(
             model=str(data.get("deepgram_stt", {}).get("model", "nova-3")),

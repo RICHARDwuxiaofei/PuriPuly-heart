@@ -19,6 +19,7 @@ from puripuly_heart.core.storage.secrets import (
     SecretStore,
 )
 from puripuly_heart.core.stt.backend import STTBackend
+from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -167,6 +168,8 @@ def create_llm_provider(settings: AppSettings, *, secrets: SecretStore) -> LLMPr
 
 
 def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBackend:
+    effective_terms = get_effective_custom_terms(settings, settings.languages.source_language)
+
     if settings.provider.stt == STTProviderName.DEEPGRAM:
         from puripuly_heart.core.language import get_deepgram_language
         from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
@@ -177,6 +180,7 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
             model=settings.deepgram_stt.model,
             language=get_deepgram_language(settings.languages.source_language),
             sample_rate_hz=settings.audio.internal_sample_rate_hz,
+            keyterms=effective_terms,
         )
 
     if settings.provider.stt == STTProviderName.QWEN_ASR:
@@ -220,6 +224,7 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
             sample_rate_hz=settings.audio.internal_sample_rate_hz,
             keepalive_interval_s=settings.soniox_stt.keepalive_interval_s,
             trailing_silence_ms=settings.soniox_stt.trailing_silence_ms,
+            context_terms=effective_terms,
         )
 
     raise ValueError(f"Unsupported STT provider: {settings.provider.stt}")

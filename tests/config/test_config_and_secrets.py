@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -150,6 +151,129 @@ def test_from_dict_defaults_missing_vrc_mic_sync_to_off():
     loaded = from_dict(data)
 
     assert loaded.osc.vrc_mic_intercept is False
+
+
+def test_stt_custom_vocabulary_roundtrip(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = AppSettings()
+    settings.stt.custom_vocabulary_enabled = True
+    settings.stt.custom_terms = {
+        "ko": [" Puripuly ", "VRChat", "Puripuly", ""],
+        "en": ["OSC", " Soniox "],
+    }
+
+    save_settings(path, settings)
+
+    loaded = load_settings(path)
+
+    assert loaded.stt.custom_vocabulary_enabled is True
+    assert loaded.stt.custom_terms == {
+        "ko": ["Puripuly", "VRChat"],
+        "en": ["OSC", "Soniox"],
+    }
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["stt"]["custom_vocabulary_enabled"] is True
+    assert persisted["stt"]["custom_terms"] == {
+        "ko": ["Puripuly", "VRChat"],
+        "en": ["OSC", "Soniox"],
+    }
+
+
+def test_stt_custom_vocabulary_missing_keys_default():
+    data = to_dict(AppSettings())
+    data.setdefault("stt", {}).pop("custom_vocabulary_enabled", None)
+    data["stt"].pop("custom_terms", None)
+
+    loaded = from_dict(data)
+
+    assert loaded.stt.custom_vocabulary_enabled is True
+    assert loaded.stt.custom_terms == {
+        "ko": ["아이리", "시나노"],
+        "en": ["airi", "shinano"],
+        "zh-CN": ["airi", "shinano"],
+    }
+
+
+def test_load_settings_backfills_seeded_custom_vocabulary_defaults(tmp_path):
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy.setdefault("stt", {}).pop("custom_vocabulary_enabled", None)
+    legacy["stt"].pop("custom_terms", None)
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+
+    assert loaded.stt.custom_vocabulary_enabled is True
+    assert loaded.stt.custom_terms == {
+        "ko": ["아이리", "시나노"],
+        "en": ["airi", "shinano"],
+        "zh-CN": ["airi", "shinano"],
+    }
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["stt"]["custom_vocabulary_enabled"] is True
+    assert persisted["stt"]["custom_terms"] == {
+        "ko": ["아이리", "시나노"],
+        "en": ["airi", "shinano"],
+        "zh-CN": ["airi", "shinano"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("custom_terms", "message"),
+    [
+        (["Puripuly"], "custom_terms must be a dict[str, list[str]]"),
+        ({1: ["Puripuly"]}, "custom_terms keys must be strings"),
+        ({"ko": "Puripuly"}, "custom_terms values must be lists of strings"),
+        ({"ko": ["Puripuly", 1]}, "custom_terms values must be lists of strings"),
+    ],
+)
+def test_stt_custom_vocabulary_rejects_malformed_shapes(custom_terms, message):
+    data = to_dict(AppSettings())
+    data.setdefault("stt", {})["custom_terms"] = custom_terms
+
+    with pytest.raises(ValueError, match=re.escape(message)):
+        from_dict(data)
+
+
+def test_stt_custom_vocabulary_preserves_unrelated_language_buckets(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = AppSettings()
+    settings.stt.custom_terms = {
+        "ko": ["Puripuly"],
+        "zh-CN": ["Qwen"],
+        "en": ["OSC"],
+    }
+
+    save_settings(path, settings)
+
+    loaded = load_settings(path)
+    loaded.stt.custom_terms["ko"] = ["Puripuly", "VRChat"]
+    save_settings(path, loaded)
+
+    reloaded = load_settings(path)
+
+    assert reloaded.stt.custom_terms == {
+        "ko": ["Puripuly", "VRChat"],
+        "zh-CN": ["Qwen"],
+        "en": ["OSC"],
+    }
+
+
+def test_stt_custom_vocabulary_roundtrip_caps_terms_to_100(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = AppSettings()
+    settings.stt.custom_vocabulary_enabled = True
+    settings.stt.custom_terms = {"ko": [f"term-{i:03d}" for i in range(120)]}
+
+    save_settings(path, settings)
+
+    loaded = load_settings(path)
+
+    assert len(loaded.stt.custom_terms["ko"]) == 100
+    assert loaded.stt.custom_terms["ko"][0] == "term-000"
+    assert loaded.stt.custom_terms["ko"][-1] == "term-099"
 
 
 def test_system_prompts_roundtrip(tmp_path):

@@ -41,6 +41,7 @@ class SonioxRealtimeSTTBackend(STTBackend):
 
     api_key: str
     language_hints: Sequence[str]
+    context_terms: Sequence[str] = ()
     model: str = "stt-rt-v4"
     endpoint: str = "wss://stt-rt.soniox.com/transcribe-websocket"
     sample_rate_hz: int = 16000
@@ -68,6 +69,7 @@ class SonioxRealtimeSTTBackend(STTBackend):
             endpoint=self.endpoint,
             sample_rate_hz=self.sample_rate_hz,
             language_hints=list(self.language_hints),
+            context_terms=list(self.context_terms),
             keepalive_interval_s=self.keepalive_interval_s,
             trailing_silence_ms=self.trailing_silence_ms,
             connect_timeout_s=self.connect_timeout_s,
@@ -121,6 +123,7 @@ class _SonioxSession(STTBackendSession):
     endpoint: str
     sample_rate_hz: int
     language_hints: list[str]
+    context_terms: list[str]
     keepalive_interval_s: float
     trailing_silence_ms: int
     connect_timeout_s: float
@@ -157,6 +160,8 @@ class _SonioxSession(STTBackendSession):
         }
         if self.language_hints:
             config["language_hints"] = self.language_hints
+        if self.context_terms:
+            config["context"] = {"terms": self.context_terms}
 
         logger.info("[STT] Soniox connecting (timeout=%.1fs)", self.connect_timeout_s)
         start_at = time.monotonic()

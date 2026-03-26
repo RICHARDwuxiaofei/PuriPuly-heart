@@ -409,7 +409,7 @@ def test_on_vrc_mic_click_opens_modal_with_current_selection(
 
     options = captured["options"]
     assert captured["title"] == t("settings.vrc_mic_intercept")
-    assert captured["show_description"] is False
+    assert captured["show_description"] is True
     assert [option.value for option in options] == ["on", "off"]
     assert [option.label for option in options] == [
         t("settings.vrc_mic.on"),
@@ -462,3 +462,289 @@ def test_apply_locale_refreshes_vrc_mic_title_and_value(
 
     assert view._vrc_mic_title.value == t("settings.vrc_mic_intercept")
     assert view._vrc_mic_text.content.value == t("settings.vrc_mic.on")
+
+
+def test_custom_vocabulary_loads_current_source_language_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.SONIOX
+    settings.languages.source_language = "ko"
+    settings.stt.custom_vocabulary_enabled = True
+    settings.stt.custom_terms = {"ko": ["Puripuly", "VRChat"], "en": ["Avatar"]}
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._custom_vocab_terms.value == "Puripuly\nVRChat"
+    assert view._custom_vocab_terms.helper_text == ""
+    assert view._custom_vocab_terms.shift_enter is False
+    assert view._custom_vocab_terms.label is None
+    assert view._custom_vocab_terms.border_color == settings_view.COLOR_DIVIDER
+
+
+def test_custom_vocabulary_loads_seeded_settings_defaults_as_initial_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._custom_vocab_terms.value == "아이리\n시나노"
+    assert view._custom_vocab_terms.helper_text == ""
+
+
+def test_custom_vocabulary_loads_seeded_settings_defaults_for_zh_cn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "zh-CN"
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._custom_vocab_terms.value == "airi\nshinano"
+    assert view._custom_vocab_terms.helper_text == ""
+
+
+def test_custom_vocabulary_info_icon_is_in_card_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    row7 = view.controls[-1]
+    custom_vocab_column = row7.content.controls[1].content.content
+    header = custom_vocab_column.controls[0]
+
+    assert isinstance(header, settings_view.ft.Row)
+    assert header.controls[0] is view._custom_vocab_title
+    assert header.controls[-1] is view._custom_vocab_info_icon
+    assert view._custom_vocab_info_icon.tooltip == t("settings.custom_vocabulary_tooltip")
+
+
+def test_custom_vocabulary_switching_source_language_updates_editor_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": ["Puripuly"], "en": ["Avatar", "OSC"]}
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    assert view._custom_vocab_terms.value == "Puripuly"
+
+    settings.languages.source_language = "en"
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._custom_vocab_terms.value == "Avatar\nOSC"
+
+
+def test_custom_vocabulary_preserves_unsaved_drafts_across_source_language_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": ["Puripuly"], "en": ["Avatar"]}
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._custom_vocab_terms.value = "Puripuly\nVRChat"
+    view._on_custom_vocabulary_terms_change(None)
+
+    settings.languages.source_language = "en"
+    view.load_from_settings(
+        settings,
+        config_path=Path("settings.json"),
+        preserve_custom_vocab_draft=True,
+    )
+    assert view._custom_vocab_terms.value == "Avatar"
+
+    settings.languages.source_language = "ko"
+    view.load_from_settings(
+        settings,
+        config_path=Path("settings.json"),
+        preserve_custom_vocab_draft=True,
+    )
+
+    assert view._custom_vocab_terms.value == "Puripuly\nVRChat"
+
+
+def test_custom_vocabulary_default_load_refreshes_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": ["Puripuly"]}
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._custom_vocab_terms.value = "Puripuly\nVRChat"
+    view._on_custom_vocabulary_terms_change(None)
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._custom_vocab_terms.value == "Puripuly"
+
+
+def test_custom_vocabulary_apply_empty_terms_preserves_intentional_empty_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": ["Puripuly"]}
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._custom_vocab_terms.value = ""
+    view._on_custom_vocabulary_terms_change(None)
+    view._on_custom_vocabulary_terms_blur(None)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert settings.stt.custom_terms == {"ko": []}
+    assert settings.stt.custom_vocabulary_enabled is False
+    assert view._custom_vocab_terms.value == ""
+
+
+def test_custom_vocabulary_typing_does_not_emit_or_persist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": ["Puripuly"], "en": ["Avatar"]}
+    changed: list[AppSettings] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._custom_vocab_terms.value = "Puripuly\nVRChat"
+    view._on_custom_vocabulary_terms_change(None)
+
+    assert changed == []
+    assert settings.stt.custom_terms == {"ko": ["Puripuly"], "en": ["Avatar"]}
+    assert view._custom_vocab_terms.value == "Puripuly\nVRChat"
+
+
+def test_custom_vocabulary_blur_applies_updates_current_bucket_and_emits_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": ["Puripuly"], "en": ["Avatar"]}
+    changed: list[AppSettings] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._custom_vocab_terms.value = " Puripuly \nVRChat\n\nPuripuly "
+    view._on_custom_vocabulary_terms_change(None)
+    view._on_custom_vocabulary_terms_blur(None)
+
+    assert settings.stt.custom_vocabulary_enabled is True
+    assert settings.stt.custom_terms == {
+        "ko": ["Puripuly", "VRChat"],
+        "en": ["Avatar"],
+    }
+    assert view._custom_vocab_terms.value == "Puripuly\nVRChat"
+    assert changed == [settings]
+
+
+def test_custom_vocabulary_blur_updates_only_current_bucket_and_emits_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": ["Puripuly"], "en": ["Avatar"]}
+    changed: list[AppSettings] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._custom_vocab_terms.value = " Puripuly \nVRChat\n\nPuripuly "
+    view._on_custom_vocabulary_terms_change(None)
+    view._on_custom_vocabulary_terms_blur(None)
+
+    assert settings.stt.custom_vocabulary_enabled is True
+    assert settings.stt.custom_terms == {
+        "ko": ["Puripuly", "VRChat"],
+        "en": ["Avatar"],
+    }
+    assert changed == [settings]
+
+
+def test_custom_vocabulary_caps_to_100_terms_and_shows_snackbar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    changed: list[AppSettings] = []
+    snackbars: list[tuple[str, str]] = []
+    terms = [f"term-{i:03d}" for i in range(101)]
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+    view.show_snackbar = lambda msg, bg: snackbars.append((msg, bg))
+
+    view._custom_vocab_terms.value = "\n".join(terms)
+    view._on_custom_vocabulary_terms_change(None)
+    view._on_custom_vocabulary_terms_blur(None)
+
+    assert settings.stt.custom_terms == {
+        "ko": terms[:100],
+        "en": ["airi", "shinano"],
+        "zh-CN": ["airi", "shinano"],
+    }
+    assert settings.stt.custom_vocabulary_enabled is True
+    assert view._custom_vocab_terms.value == "\n".join(terms[:100])
+    assert changed == [settings]
+    assert snackbars == [
+        (t("snackbar.custom_vocabulary_limit", max_terms=100), settings_view.ft.Colors.ORANGE_700)
+    ]
+
+
+def test_custom_vocabulary_blur_logs_applied_state(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view._custom_vocab_terms.value = "Puripuly\nVRChat"
+    view._on_custom_vocabulary_terms_change(None)
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.ui.views.settings"):
+        view._on_custom_vocabulary_terms_blur(None)
+
+    assert "[Settings] Custom vocabulary applied: language=ko, terms=2" in caplog.messages
+
+
+def test_apply_locale_refreshes_custom_vocabulary_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.DEEPGRAM
+    settings.languages.source_language = "en"
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view._custom_vocab_title.value = "stale-title"
+    view._custom_vocab_terms.label = "stale-label"
+    view._custom_vocab_terms.helper_text = "stale-helper"
+    view._custom_vocab_info_icon.tooltip = "stale-tooltip"
+
+    view.apply_locale()
+
+    assert view._custom_vocab_title.value == t("settings.section.custom_vocabulary")
+    assert view._custom_vocab_terms.label is None
+    assert view._custom_vocab_terms.helper_text == ""
+    assert view._custom_vocab_info_icon.tooltip == t("settings.custom_vocabulary_tooltip")

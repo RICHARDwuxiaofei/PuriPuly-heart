@@ -159,6 +159,25 @@ def test_create_stt_backend_deepgram_uses_settings_and_secret() -> None:
     assert backend.model == "nova-3"
     assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
     assert backend.language == get_deepgram_language(settings.languages.source_language)
+    assert list(backend.keyterms) == ["아이리", "시나노"]
+
+
+def test_create_stt_backend_deepgram_passes_effective_custom_terms() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(stt=STTProviderName.DEEPGRAM),
+        deepgram_stt=DeepgramSTTSettings(model="nova-3"),
+        stt=STTSettings(
+            custom_vocabulary_enabled=True,
+            custom_terms={"ko": [" Puripuly ", "", "VRChat", "Puripuly"]},
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("deepgram_api_key", "k3")
+
+    backend = create_stt_backend(settings, secrets=secrets)
+
+    assert isinstance(backend, DeepgramRealtimeSTTBackend)
+    assert list(backend.keyterms) == ["Puripuly", "VRChat"]
 
 
 def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:
@@ -180,6 +199,28 @@ def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:
     assert backend.endpoint == "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
     assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
     assert backend.language == get_qwen_asr_language(settings.languages.source_language)
+
+
+def test_create_stt_backend_qwen_asr_ignores_custom_terms() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(stt=STTProviderName.QWEN_ASR),
+        stt=STTSettings(
+            custom_vocabulary_enabled=True,
+            custom_terms={"ko": ["Puripuly", "VRChat"]},
+        ),
+        qwen_asr_stt=QwenASRSTTSettings(model="qwen3-asr-flash-realtime"),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("alibaba_api_key_beijing", "k4")
+
+    backend = create_stt_backend(settings, secrets=secrets)
+
+    assert isinstance(backend, QwenASRRealtimeSTTBackend)
+    assert backend.api_key == "k4"
+    assert backend.model == "qwen3-asr-flash-realtime"
+    assert backend.language == get_qwen_asr_language(settings.languages.source_language)
+    assert not hasattr(backend, "keyterms")
+    assert not hasattr(backend, "context_terms")
 
 
 def test_create_stt_backend_qwen_asr_uses_singapore_region() -> None:
@@ -222,3 +263,22 @@ def test_create_stt_backend_soniox_uses_secret() -> None:
     backend = create_stt_backend(settings, secrets=secrets)
     assert isinstance(backend, SonioxRealtimeSTTBackend)
     assert backend.api_key == "k6"
+    assert list(backend.context_terms) == ["아이리", "시나노"]
+
+
+def test_create_stt_backend_soniox_passes_effective_custom_terms() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(stt=STTProviderName.SONIOX),
+        soniox_stt=SonioxSTTSettings(model="stt-rt-v4"),
+        stt=STTSettings(
+            custom_vocabulary_enabled=True,
+            custom_terms={"ko": [" Puripuly ", "VRChat", "Puripuly", " "]},
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("soniox_api_key", "k6")
+
+    backend = create_stt_backend(settings, secrets=secrets)
+
+    assert isinstance(backend, SonioxRealtimeSTTBackend)
+    assert list(backend.context_terms) == ["Puripuly", "VRChat"]
