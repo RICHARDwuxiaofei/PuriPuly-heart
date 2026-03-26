@@ -32,24 +32,32 @@ class FakeResponse:
 
 
 class FakeAsyncClient:
-    def __init__(self):
+    def __init__(self, response_data: dict | None = None):
         self.last_request: dict = {}
+        self.requests: list[dict] = []
+        self.closed = False
+        self._response_data = response_data
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass
+    async def aclose(self):
+        self.closed = True
 
     async def post(self, url, **kwargs):
-        self.last_request = {"url": url, **kwargs}
-        return FakeResponse()
+        request = {"url": url, **kwargs}
+        self.last_request = request
+        self.requests.append(request)
+        return FakeResponse(self._response_data)
 
 
 @pytest.mark.asyncio
 async def test_httpx_client_builds_correct_request(monkeypatch):
     fake_client = FakeAsyncClient()
-    monkeypatch.setattr("httpx.AsyncClient", lambda **kw: fake_client)
+    constructor_calls: list[dict] = []
+
+    def fake_async_client(**kwargs):
+        constructor_calls.append(kwargs)
+        return fake_client
+
+    monkeypatch.setattr("httpx.AsyncClient", fake_async_client)
 
     client = HttpxQwenClient(api_key="test-key", model="qwen3.5-flash", base_url="https://example")
     result = await client.translate(
@@ -61,6 +69,7 @@ async def test_httpx_client_builds_correct_request(monkeypatch):
     )
 
     assert result == "OK"
+    assert constructor_calls == [{"timeout": 30.0}]
 
     # Check URL
     assert fake_client.last_request["url"] == "https://example/chat/completions"
@@ -103,18 +112,75 @@ async def test_httpx_client_omits_empty_options(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_httpx_client_reuses_cached_async_client(monkeypatch):
+    fake_client = FakeAsyncClient()
+    created_clients: list[FakeAsyncClient] = []
+
+    def fake_async_client(**_kwargs):
+        created_clients.append(fake_client)
+        return fake_client
+
+    monkeypatch.setattr("httpx.AsyncClient", fake_async_client)
+
+    client = HttpxQwenClient(api_key="k", model="m", base_url="https://example")
+    await client.translate(
+        text="hello",
+        system_prompt="SYSTEM",
+        source_language="ko",
+        target_language="en",
+    )
+    await client.translate(
+        text="world",
+        system_prompt="SYSTEM",
+        source_language="ko",
+        target_language="en",
+    )
+
+    assert created_clients == [fake_client]
+    assert len(fake_client.requests) == 2
+    assert fake_client.requests[0]["json"]["messages"][1]["content"] == "hello"
+    assert fake_client.requests[1]["json"]["messages"][1]["content"] == "world"
+
+
+@pytest.mark.asyncio
+async def test_httpx_client_close_recreates_async_client(monkeypatch):
+    first_client = FakeAsyncClient()
+    second_client = FakeAsyncClient()
+    created_clients: list[FakeAsyncClient] = []
+
+    def fake_async_client(**_kwargs):
+        client = first_client if not created_clients else second_client
+        created_clients.append(client)
+        return client
+
+    monkeypatch.setattr("httpx.AsyncClient", fake_async_client)
+
+    client = HttpxQwenClient(api_key="k", model="m", base_url="https://example")
+    await client.translate(
+        text="hello",
+        system_prompt="SYSTEM",
+        source_language="ko",
+        target_language="en",
+    )
+    await client.close()
+    await client.translate(
+        text="again",
+        system_prompt="SYSTEM",
+        source_language="ko",
+        target_language="en",
+    )
+
+    assert created_clients == [first_client, second_client]
+    assert first_client.closed is True
+    assert second_client.closed is False
+
+
+@pytest.mark.asyncio
 async def test_httpx_client_raises_on_empty_choices(monkeypatch):
-    class EmptyChoicesFakeAsyncClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            pass
-
-        async def post(self, url, **kwargs):
-            return FakeResponse({"choices": []})
-
-    monkeypatch.setattr("httpx.AsyncClient", lambda **kw: EmptyChoicesFakeAsyncClient())
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda **kw: FakeAsyncClient(response_data={"choices": []}),
+    )
 
     client = HttpxQwenClient(api_key="k", model="m", base_url="https://example")
     with pytest.raises(RuntimeError, match="did not contain choices"):
@@ -128,17 +194,10 @@ async def test_httpx_client_raises_on_empty_choices(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_httpx_client_raises_on_empty_content(monkeypatch):
-    class EmptyContentFakeAsyncClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            pass
-
-        async def post(self, url, **kwargs):
-            return FakeResponse({"choices": [{"message": {}}]})
-
-    monkeypatch.setattr("httpx.AsyncClient", lambda **kw: EmptyContentFakeAsyncClient())
+    monkeypatch.setattr(
+        "httpx.AsyncClient",
+        lambda **kw: FakeAsyncClient(response_data={"choices": [{"message": {}}]}),
+    )
 
     client = HttpxQwenClient(api_key="k", model="m", base_url="https://example")
     with pytest.raises(RuntimeError, match="message content"):
@@ -153,11 +212,8 @@ async def test_httpx_client_raises_on_empty_content(monkeypatch):
 @pytest.mark.asyncio
 async def test_httpx_client_handles_cancellation(monkeypatch):
     class SlowFakeAsyncClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            pass
+        async def aclose(self):
+            return None
 
         async def post(self, url, **kwargs):
             await asyncio.sleep(10)  # Long wait

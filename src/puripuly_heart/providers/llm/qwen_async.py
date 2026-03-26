@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -162,6 +163,7 @@ class HttpxQwenClient:
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     timeout: float = 30.0
     _client: httpx.AsyncClient | None = field(init=False, default=None, repr=False)
+    _client_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock, repr=False)
 
     @staticmethod
     def _normalize_language_code(code: str) -> str:
@@ -175,6 +177,15 @@ class HttpxQwenClient:
         if normalized in {"zh-tw", "zh-hant", "zh_tw"}:
             return "zh_tw"
         return normalized.split("-")[0]
+
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        if self._client is not None:
+            return self._client
+
+        async with self._client_lock:
+            if self._client is None:
+                self._client = httpx.AsyncClient(timeout=self.timeout)
+            return self._client
 
     async def translate(
         self,
@@ -208,16 +219,16 @@ class HttpxQwenClient:
             "enable_thinking": False,
         }
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=request_body,
-            )
-            response.raise_for_status()
+        client = await self._get_http_client()
+        response = await client.post(
+            f"{self.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=request_body,
+        )
+        response.raise_for_status()
 
         data = response.json()
         choices = data.get("choices", [])
@@ -230,6 +241,8 @@ class HttpxQwenClient:
         return result
 
     async def close(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
+        async with self._client_lock:
+            client = self._client
             self._client = None
+        if client is not None:
+            await client.aclose()

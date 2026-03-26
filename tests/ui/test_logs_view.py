@@ -59,30 +59,32 @@ class TestLogsView:
     def test_open_log_folder_uses_platform_specific_launcher(self):
         view = LogsView()
         commands = []
+        log_dir = logs_module.Path("/tmp/logs")
 
         def fake_popen(cmd):
             commands.append(cmd)
 
         with (
             patch.object(type(view), "page", new_callable=PropertyMock, return_value=object()),
-            patch.object(logs_module, "_get_log_dir", return_value=logs_module.Path("/tmp/logs")),
+            patch.object(logs_module, "_get_log_dir", return_value=log_dir),
             patch.object(logs_module.subprocess, "Popen", side_effect=fake_popen),
             patch.object(logs_module.sys, "platform", "linux"),
         ):
             view._open_log_folder(None)
 
-        assert commands == [["xdg-open", "/tmp/logs"]]
+        assert commands == [["xdg-open", str(log_dir)]]
 
     def test_open_log_folder_windows_and_macos(self):
         view = LogsView()
         commands = []
+        log_dir = logs_module.Path("/tmp/logs")
 
         def fake_popen(cmd):
             commands.append(cmd)
 
         with (
             patch.object(type(view), "page", new_callable=PropertyMock, return_value=object()),
-            patch.object(logs_module, "_get_log_dir", return_value=logs_module.Path("/tmp/logs")),
+            patch.object(logs_module, "_get_log_dir", return_value=log_dir),
             patch.object(logs_module.subprocess, "Popen", side_effect=fake_popen),
             patch.object(logs_module.sys, "platform", "win32"),
         ):
@@ -90,13 +92,13 @@ class TestLogsView:
 
         with (
             patch.object(type(view), "page", new_callable=PropertyMock, return_value=object()),
-            patch.object(logs_module, "_get_log_dir", return_value=logs_module.Path("/tmp/logs")),
+            patch.object(logs_module, "_get_log_dir", return_value=log_dir),
             patch.object(logs_module.subprocess, "Popen", side_effect=fake_popen),
             patch.object(logs_module.sys, "platform", "darwin"),
         ):
             view._open_log_folder(None)
 
-        assert commands == [["explorer", "/tmp/logs"], ["open", "/tmp/logs"]]
+        assert commands == [["explorer", str(log_dir)], ["open", str(log_dir)]]
 
     def test_get_log_dir_delegates_to_user_config_dir(self):
         fake_paths = type(
