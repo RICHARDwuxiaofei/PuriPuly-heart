@@ -84,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.version:
-        from . import __version__
+        from puripuly_heart import __version__
 
         print(__version__)
         return 0
