@@ -77,6 +77,7 @@ class STTProvider(Protocol):
 _PROMO_INTERVAL_SEC: float = 300.0  # 5 minutes
 _RELAXED_OVERLAP_MIN_CHARS: int = 3
 _BOUNDARY_PUNCT = {".", ",", ";", ":", "!", "?"}
+_SOFT_REUSE_PUNCT = {".", ",", "…", "。", "，", "、"}
 
 
 @dataclass(slots=True)
@@ -454,6 +455,32 @@ class ClientHub:
 
     def _is_boundary_char(self, ch: str) -> bool:
         return ch.isspace() or ch in _BOUNDARY_PUNCT
+
+    def _soft_reuse_mode(self, spec_text: str | None, final_text: str) -> str | None:
+        if spec_text is None:
+            return None
+        if spec_text == final_text:
+            return "exact"
+
+        normalized_spec = self._normalize_soft_reuse_text(spec_text)
+        normalized_final = self._normalize_soft_reuse_text(final_text)
+        if not normalized_spec or not normalized_final:
+            return None
+        if normalized_spec == normalized_final:
+            return "soft_boundary"
+        return None
+
+    def _normalize_soft_reuse_text(self, text: str) -> str:
+        start = 0
+        end = len(text)
+        while start < end and self._is_soft_reuse_boundary_char(text[start]):
+            start += 1
+        while end > start and self._is_soft_reuse_boundary_char(text[end - 1]):
+            end -= 1
+        return text[start:end]
+
+    def _is_soft_reuse_boundary_char(self, ch: str) -> bool:
+        return ch.isspace() or ch in _SOFT_REUSE_PUNCT
 
     def _needs_space(self, left: str, right: str) -> bool:
         if not left or not right:
@@ -847,7 +874,10 @@ class ClientHub:
             )
             return
 
-        reuse_spec = buffer.spec_translation is not None and buffer.spec_text == final_text
+        reuse_mode = None
+        if buffer.spec_translation is not None:
+            reuse_mode = self._soft_reuse_mode(buffer.spec_text, final_text)
+        reuse_spec = reuse_mode is not None
         commit_delay_ms = 0
         if buffer.start_time is not None:
             commit_delay_ms = int((self.clock.now() - buffer.start_time) * 1000)
@@ -888,7 +918,7 @@ class ClientHub:
                 )
                 return
 
-        if buffer.spec_translation is not None and buffer.spec_text != final_text:
+        if buffer.spec_translation is not None and reuse_mode is None:
             logger.debug(
                 "[Metric] spec_cancel id=%s reason=final_mismatch", str(buffer.merge_id)[:8]
             )
@@ -1017,7 +1047,7 @@ class ClientHub:
             await self._commit_merge(buffer, reason=reason)
             return
 
-        if buffer.spec_text != final_text:
+        if self._soft_reuse_mode(buffer.spec_text, final_text) is None:
             return
 
         await self._commit_merge(buffer, reason=reason)
