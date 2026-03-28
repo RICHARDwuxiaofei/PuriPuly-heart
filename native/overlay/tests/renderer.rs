@@ -88,8 +88,21 @@ fn renderer_first_usable_frame_is_fully_transparent_before_real_caption_content(
     assert!(frame.is_fully_transparent());
 }
 
+#[cfg(windows)]
 #[test]
 fn renderer_returns_a_renderable_d3d11_texture_result() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let frame = renderer.render_blocks(vec![test_block("hello")]).unwrap();
+
+    assert!(frame.texture_ptr().is_some());
+    assert!(frame.d3d11_texture().is_some());
+    assert_eq!(frame.width(), 3840);
+    assert_eq!(frame.height(), 1024);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn renderer_returns_a_renderable_texture_contract_off_windows() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
     let frame = renderer.render_blocks(vec![test_block("hello")]).unwrap();
 
@@ -101,5 +114,13 @@ fn renderer_returns_a_renderable_d3d11_texture_result() {
 #[cfg(not(windows))]
 #[test]
 fn renderer_runtime_backend_is_rejected_outside_windows() {
-    assert!(CaptionRenderer::new().is_err());
+    let result = CaptionRenderer::new();
+    assert!(result.is_err());
+    let error = result.err().unwrap();
+
+    assert!(
+        error
+            .to_string()
+            .contains("Direct3D11 caption renderer is only available on Windows")
+    );
 }
