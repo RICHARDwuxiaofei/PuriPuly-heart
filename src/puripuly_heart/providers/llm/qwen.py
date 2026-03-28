@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
@@ -59,6 +61,23 @@ def _extract_message_content(content: object) -> str:
     raise RuntimeError("DashScope response did not contain message content")
 
 
+def _extract_stream_content(content: object) -> str:
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        if parts:
+            return "".join(parts)
+
+    return ""
+
+
 def _is_qwen35_model(model: str) -> bool:
     return model.strip().lower() in _QWEN35_MODELS
 
@@ -88,6 +107,31 @@ def _extract_error_message(data: object) -> str:
     return ""
 
 
+def _extract_stream_delta(data: object) -> str:
+    if not isinstance(data, dict):
+        return ""
+
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return ""
+
+    delta = choice.get("delta")
+    if isinstance(delta, dict):
+        content = _extract_stream_content(delta.get("content"))
+        if content:
+            return content
+
+    message = choice.get("message")
+    if isinstance(message, dict):
+        return _extract_stream_content(message.get("content"))
+
+    return ""
+
+
 class QwenClient(Protocol):
     async def translate(
         self,
@@ -99,6 +143,16 @@ class QwenClient(Protocol):
         context: str = "",
     ) -> str: ...
 
+    async def stream_translate(
+        self,
+        *,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ) -> AsyncIterator[str]: ...
+
 
 @dataclass(slots=True)
 class QwenLLMProvider:
@@ -106,6 +160,33 @@ class QwenLLMProvider:
     base_url: str = "https://dashscope.aliyuncs.com/api/v1"
     model: str = "qwen3.5-plus"
     client: QwenClient | None = None
+
+    async def stream_translate(
+        self,
+        *,
+        utterance_id: UUID,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ) -> AsyncIterator[str]:
+        _ = utterance_id
+        client = self.client or DashScopeQwenClient(
+            api_key=self.api_key, model=self.model, base_url=self.base_url
+        )
+        cumulative = ""
+        async for part in client.stream_translate(
+            text=text,
+            system_prompt=system_prompt,
+            source_language=source_language,
+            target_language=target_language,
+            context=context,
+        ):
+            if not part:
+                continue
+            cumulative += part
+            yield cumulative
 
     async def translate(
         self,
@@ -207,6 +288,86 @@ class DashScopeQwenClient:
             return "zh_tw"
         return normalized.split("-")[0]
 
+    def _build_messages(
+        self,
+        *,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str,
+    ) -> list[dict[str, str]]:
+        system_content = _build_system_prompt(
+            system_prompt=system_prompt,
+            source_language=source_language,
+            target_language=target_language,
+        )
+        user_message = _build_user_message(text=text, context=context)
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_message},
+        ]
+
+    async def _stream_legacy_generation(
+        self, *, messages: list[dict[str, str]]
+    ) -> AsyncIterator[str]:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
+
+        def _worker() -> None:
+            try:
+                import dashscope  # type: ignore
+
+                dashscope.api_key = self.api_key
+                dashscope.base_http_api_url = self.base_url
+                responses = dashscope.Generation.call(
+                    model=self.model,
+                    messages=messages,
+                    result_format="message",
+                    stream=True,
+                    incremental_output=True,
+                )
+                yielded = False
+                for response in responses:
+                    status = getattr(response, "status_code", None)
+                    if status != 200:
+                        code = getattr(response, "code", None)
+                        message = getattr(response, "message", None)
+                        raise RuntimeError(
+                            "DashScope response did not contain output "
+                            f"(status={status}, code={code}, message={message})"
+                        )
+                    output = getattr(response, "output", None)
+                    if not output:
+                        raise RuntimeError("DashScope response did not contain output")
+                    choice = output.get("choices", [{}])[0]
+                    message = choice.get("message", {})
+                    part = _extract_stream_content(message.get("content"))
+                    if not part:
+                        continue
+                    yielded = True
+                    asyncio.run_coroutine_threadsafe(queue.put(("data", part)), loop).result()
+                if not yielded:
+                    raise RuntimeError("DashScope response did not contain message content")
+                asyncio.run_coroutine_threadsafe(queue.put(("done", None)), loop).result()
+            except Exception as exc:
+                asyncio.run_coroutine_threadsafe(queue.put(("error", str(exc))), loop).result()
+
+        producer = asyncio.create_task(asyncio.to_thread(_worker))
+        try:
+            while True:
+                kind, payload = await queue.get()
+                if kind == "data" and payload is not None:
+                    yield payload
+                    continue
+                if kind == "done":
+                    break
+                if kind == "error" and payload is not None:
+                    raise RuntimeError(payload)
+                raise RuntimeError("DashScope legacy stream ended unexpectedly")
+        finally:
+            await asyncio.gather(producer, return_exceptions=True)
+
     async def translate(
         self,
         *,
@@ -224,13 +385,13 @@ class DashScopeQwenClient:
             logger.info(f"[LLM] Request: '{text}' -> {source_language} to {target_language}")
 
         def _call() -> str:
-            system_content = _build_system_prompt(
+            messages = self._build_messages(
+                text=text,
                 system_prompt=system_prompt,
                 source_language=source_language,
                 target_language=target_language,
+                context=context,
             )
-            user_message = _build_user_message(text=text, context=context)
-
             if _is_qwen35_model(self.model):
                 compatible_base_url = _to_compatible_base_url(self.base_url)
                 response = httpx.post(
@@ -241,10 +402,7 @@ class DashScopeQwenClient:
                     },
                     json={
                         "model": self.model,
-                        "messages": [
-                            {"role": "system", "content": system_content},
-                            {"role": "user", "content": user_message},
-                        ],
+                        "messages": messages,
                         "enable_thinking": False,
                     },
                     timeout=30.0,
@@ -274,10 +432,7 @@ class DashScopeQwenClient:
             dashscope.base_http_api_url = self.base_url
             response = dashscope.Generation.call(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": system_content},
-                    {"role": "user", "content": user_message},
-                ],
+                messages=messages,
                 result_format="message",
             )
             output = getattr(response, "output", None)
@@ -296,3 +451,80 @@ class DashScopeQwenClient:
             return result
 
         return await asyncio.to_thread(_call)
+
+    async def stream_translate(
+        self,
+        *,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ) -> AsyncIterator[str]:
+        if context:
+            logger.info(
+                f"[LLM] Streaming request with context: '{text}' -> {source_language} to {target_language}"
+            )
+        else:
+            logger.info(
+                f"[LLM] Streaming request: '{text}' -> {source_language} to {target_language}"
+            )
+
+        messages = self._build_messages(
+            text=text,
+            system_prompt=system_prompt,
+            source_language=source_language,
+            target_language=target_language,
+            context=context,
+        )
+
+        if _is_qwen35_model(self.model):
+            compatible_base_url = _to_compatible_base_url(self.base_url)
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                async with client.stream(
+                    "POST",
+                    f"{compatible_base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": messages,
+                        "enable_thinking": False,
+                        "stream": True,
+                    },
+                ) as response:
+                    if response.status_code != 200:
+                        body_text = (await response.aread()).decode(errors="ignore")
+                        error_message = ""
+                        with contextlib.suppress(Exception):
+                            error_message = _extract_error_message(json.loads(body_text))
+                        if not error_message:
+                            error_message = body_text[:200]
+                        raise RuntimeError(
+                            "DashScope compatible-mode request failed "
+                            f"(status={response.status_code}, message={error_message})"
+                        )
+
+                    saw_text = False
+                    async for line in response.aiter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        payload = line[len("data:") :].strip()
+                        if not payload or payload == "[DONE]":
+                            continue
+                        data = json.loads(payload)
+                        part = _extract_stream_delta(data)
+                        if not part:
+                            continue
+                        saw_text = True
+                        yield part
+                    if not saw_text:
+                        raise RuntimeError(
+                            "DashScope compatible-mode stream did not contain message content"
+                        )
+            return
+
+        async for part in self._stream_legacy_generation(messages=messages):
+            yield part
