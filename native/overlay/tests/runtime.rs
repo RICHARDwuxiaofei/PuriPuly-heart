@@ -258,6 +258,17 @@ async fn runtime_schedules_redraws_from_snapshot_and_live_events() {
 }
 
 #[tokio::test]
+async fn runtime_ignores_duplicate_snapshot_for_redraw() {
+    let snapshot = test_snapshot();
+    let mut runtime = OverlayRuntime::new(snapshot.clone());
+
+    runtime.clear_redraw_flag();
+    runtime.apply_snapshot(snapshot);
+
+    assert!(!runtime.redraw_requested());
+}
+
+#[tokio::test]
 async fn runtime_ignores_duplicate_live_events_for_redraw() {
     let mut runtime = OverlayRuntime::new(OverlayStateSnapshot::default());
     let event = test_peer_final_event();

@@ -131,22 +131,19 @@ pub struct OverlayState {
 
 impl OverlayState {
     pub fn apply_snapshot(&mut self, snapshot: &OverlayStateSnapshot) -> bool {
-        let mut changed = false;
+        let mut next_rows = BTreeMap::new();
         for event in &snapshot.events {
-            changed |= self.apply(event.clone());
+            apply_event_to_rows(&mut next_rows, event.clone());
         }
-        changed
+        if self.rows == next_rows {
+            return false;
+        }
+        self.rows = next_rows;
+        true
     }
 
     pub fn apply(&mut self, event: Event) -> bool {
-        match event {
-            Event::SelfTranscriptFinal(row_event)
-            | Event::PeerTranscriptFinal(row_event)
-            | Event::TranslationStreamUpdate(row_event)
-            | Event::TranslationFinal(row_event) => self.upsert_row(OverlayRow::from(&row_event)),
-            Event::UtteranceClosed(event) => self.close_row(event),
-            Event::Shutdown(_) => false,
-        }
+        apply_event_to_rows(&mut self.rows, event)
     }
 
     pub fn rows_for(&self, channel: &str) -> Vec<&OverlayRow> {
@@ -158,32 +155,43 @@ impl OverlayState {
         rows.sort_by(|left, right| left.seq.cmp(&right.seq));
         rows
     }
-
-    fn upsert_row(&mut self, row: OverlayRow) -> bool {
-        let key = OverlayRowKey::new(&row.channel, &row.utterance_id);
-        match self.rows.get(&key) {
-            Some(existing) if existing == &row => false,
-            _ => {
-                self.rows.insert(key, row);
-                true
-            }
-        }
-    }
-
-    fn close_row(&mut self, event: UtteranceClosedEvent) -> bool {
-        let key = OverlayRowKey::new(&event.channel, &event.utterance_id);
-        let Some(row) = self.rows.get_mut(&key) else {
-            return false;
-        };
-
-        let was_closed = row.closed;
-        let prior_final = row.is_final;
-        row.closed = true;
-        row.is_final = event.is_final;
-        !was_closed || prior_final != event.is_final
-    }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn apply_event_to_rows(rows: &mut BTreeMap<OverlayRowKey, OverlayRow>, event: Event) -> bool {
+    match event {
+        Event::SelfTranscriptFinal(row_event)
+        | Event::PeerTranscriptFinal(row_event)
+        | Event::TranslationStreamUpdate(row_event)
+        | Event::TranslationFinal(row_event) => upsert_row(rows, OverlayRow::from(&row_event)),
+        Event::UtteranceClosed(event) => close_row(rows, event),
+        Event::Shutdown(_) => false,
+    }
+}
+
+fn upsert_row(rows: &mut BTreeMap<OverlayRowKey, OverlayRow>, row: OverlayRow) -> bool {
+    let key = OverlayRowKey::new(&row.channel, &row.utterance_id);
+    match rows.get(&key) {
+        Some(existing) if existing == &row => false,
+        _ => {
+            rows.insert(key, row);
+            true
+        }
+    }
+}
+
+fn close_row(rows: &mut BTreeMap<OverlayRowKey, OverlayRow>, event: UtteranceClosedEvent) -> bool {
+    let key = OverlayRowKey::new(&event.channel, &event.utterance_id);
+    let Some(row) = rows.get_mut(&key) else {
+        return false;
+    };
+
+    let was_closed = row.closed;
+    let prior_final = row.is_final;
+    row.closed = true;
+    row.is_final = event.is_final;
+    !was_closed || prior_final != event.is_final
 }

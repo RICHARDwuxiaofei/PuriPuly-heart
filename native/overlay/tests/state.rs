@@ -60,3 +60,20 @@ fn overlay_state_ignores_shutdown_events_from_snapshots() {
     assert!(state.rows_for("self").is_empty());
     assert!(state.rows_for("peer").is_empty());
 }
+
+#[test]
+fn overlay_state_snapshot_replaces_stale_rows() {
+    let mut state = OverlayState::default();
+
+    state.apply(Event::SelfTranscriptFinal(test_row("self", "self-1", "hello")));
+    assert_eq!(state.rows_for("self").len(), 1);
+
+    let snapshot = OverlayStateSnapshot {
+        events: vec![Event::PeerTranscriptFinal(test_row("peer", "peer-1", "there"))],
+    };
+
+    assert!(state.apply_snapshot(&snapshot));
+    assert!(state.rows_for("self").is_empty());
+    assert_eq!(state.rows_for("peer").len(), 1);
+    assert_eq!(state.rows_for("peer")[0].text, "there");
+}
