@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +41,8 @@ from puripuly_heart.core.osc.receiver import (
 )
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
+from puripuly_heart.core.overlay.bridge import OverlayBridge
+from puripuly_heart.core.overlay.process import OverlayProcessManager
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
@@ -57,6 +60,22 @@ logger = logging.getLogger(__name__)
 
 # Hardcoded STT session reset deadline (not configurable via settings)
 STT_RESET_DEADLINE_S = 300.0
+OVERLAY_STARTUP_TIMEOUT_MS = 3000
+_OVERLAY_FAILURE_REASONS = frozenset(
+    {
+        "missing_executable",
+        "spawn_failed",
+        "manifest_invalid",
+        "contract_mismatch",
+        "bridge_auth_failed",
+        "startup_timeout",
+        "openvr_init_failed",
+        "renderer_init_failed",
+        "runtime_disconnected",
+        "runtime_crashed",
+        "unknown",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -101,6 +120,57 @@ class GuiController:
     _last_stt_runtime_signature: tuple[object, ...] | None = None
     _last_vrc_mic_sync_enabled: bool | None = None
     _vrc_receiver_lock: asyncio.Lock | None = None
+    _ui_event_bridge: UIEventBridge | None = None
+    _overlay_bridge: OverlayBridge | None = None
+    _overlay_manager: OverlayProcessManager | None = None
+    _overlay_start_task: asyncio.Task[None] | None = None
+    _overlay_monitor_task: asyncio.Task[None] | None = None
+    _overlay_lock: asyncio.Lock | None = None
+
+    overlay_state: str = "off"
+    failure_reason: str | None = None
+    auto_restart_scheduled: bool = False
+
+    @property
+    def effective_peer_translation_enabled(self) -> bool:
+        if self.settings is None:
+            return False
+        return self._effective_peer_translation_enabled_for(self.settings)
+
+    def _effective_peer_translation_enabled_for(self, settings: AppSettings) -> bool:
+        return bool(settings.ui.peer_translation_enabled and self.overlay_state == "connected")
+
+    def _effective_integrated_context_enabled_for(self, settings: AppSettings) -> bool:
+        return bool(
+            settings.ui.integrated_context_enabled
+            and self._effective_peer_translation_enabled_for(settings)
+        )
+
+    def _sync_effective_hub_flags(self, settings: AppSettings | None = None) -> None:
+        resolved_settings = settings or self.settings
+        if resolved_settings is None or self.hub is None:
+            return
+        self.hub.peer_translation_enabled = (
+            self._effective_peer_translation_enabled_for(resolved_settings)
+            and self.hub.peer_stt is not None
+        )
+        self.hub.integrated_context_enabled = self._effective_integrated_context_enabled_for(
+            resolved_settings
+        )
+
+    async def _refresh_overlay_runtime_dependencies(self) -> None:
+        if self.settings is None:
+            return
+
+        self._sync_effective_hub_flags(self.settings)
+        current_signature = self._build_stt_runtime_signature(self.settings)
+        should_restart_stt = (
+            self._last_stt_runtime_signature is not None
+            and current_signature != self._last_stt_runtime_signature
+        )
+        self._last_stt_runtime_signature = current_signature
+        if should_restart_stt:
+            await self._replace_runtime_stt_provider()
 
     async def start(self) -> None:
         self.settings = self._load_or_init_settings(self.config_path)
@@ -147,7 +217,11 @@ class GuiController:
         await self.hub.start(auto_flush_osc=True)
 
         bridge = UIEventBridge(app=self.app, event_queue=self.hub.ui_events)
+        self._ui_event_bridge = bridge
         self._bridge_task = asyncio.create_task(bridge.run())
+
+        if self.settings.ui.overlay_enabled:
+            await self.set_overlay_enabled(True)
 
     def _get_alibaba_verified_key(self) -> str:
         """Get the api_key_verified field name based on Qwen region."""
@@ -179,7 +253,7 @@ class GuiController:
             settings.languages.source_language,
             settings.audio.input_host_api,
             settings.audio.input_device,
-            settings.ui.peer_translation_enabled,
+            self._effective_peer_translation_enabled_for(settings),
             settings.stt.vad_speech_threshold,
             settings.stt.low_latency_mode,
             settings.stt.low_latency_merge_gap_ms,
@@ -200,11 +274,13 @@ class GuiController:
     async def stop(self) -> None:
         await self.set_stt_enabled(False)
         await self._configure_vrc_mic_receiver(enabled=False)
+        await self._shutdown_overlay_runtime(preserve_failure_reason=True)
 
         if self._bridge_task:
             self._bridge_task.cancel()
             await asyncio.gather(self._bridge_task, return_exceptions=True)
             self._bridge_task = None
+        self._ui_event_bridge = None
 
         if self.hub is not None:
             with contextlib.suppress(Exception):
@@ -216,6 +292,205 @@ class GuiController:
                 self.sender.close()
             self.sender = None
         self.osc = None
+
+    async def set_overlay_enabled(self, enabled: bool) -> None:
+        if self.settings is None:
+            return
+
+        self.settings.ui.overlay_enabled = bool(enabled)
+        self._save_settings()
+
+        if enabled:
+            await self._begin_overlay_start()
+            return
+
+        await self._shutdown_overlay_runtime(preserve_failure_reason=True)
+
+    def on_overlay_start_failed(self, failure_reason: str | None) -> None:
+        self.overlay_state = "failed"
+        self.failure_reason = self._normalize_overlay_failure_reason(failure_reason)
+        self.auto_restart_scheduled = False
+        self._sync_effective_hub_flags()
+        self._notify_overlay_state()
+
+    def on_overlay_runtime_disconnected(self) -> None:
+        self.on_overlay_start_failed("runtime_disconnected")
+
+    def on_overlay_runtime_crashed(self) -> None:
+        self.on_overlay_start_failed("runtime_crashed")
+
+    async def _begin_overlay_start(self) -> None:
+        if self._overlay_lock is None:
+            self._overlay_lock = asyncio.Lock()
+
+        async with self._overlay_lock:
+            if self.overlay_state in {"starting", "connected"}:
+                return
+
+            await self._teardown_overlay_runtime()
+            self.overlay_state = "starting"
+            self.auto_restart_scheduled = False
+            self._notify_overlay_state()
+            self._overlay_start_task = asyncio.create_task(self._run_overlay_start())
+
+    async def _run_overlay_start(self) -> None:
+        current_task = asyncio.current_task()
+        try:
+            if self.settings is None or self.hub is None:
+                self.on_overlay_start_failed("unknown")
+                return
+
+            bridge = OverlayBridge(
+                session_token=secrets.token_urlsafe(16),
+                initial_snapshot={"events": []},
+            )
+            await bridge.start()
+            self._overlay_bridge = bridge
+            self.hub.overlay_sink = bridge
+
+            manager = OverlayProcessManager(
+                bridge_url=bridge.url,
+                bridge_messages=bridge.messages,
+                session_token=bridge.session_token,
+                locale=self.settings.ui.locale,
+                startup_timeout_ms=OVERLAY_STARTUP_TIMEOUT_MS,
+            )
+            self._overlay_manager = manager
+            await manager.start()
+
+            if self._overlay_manager is not manager:
+                return
+
+            if manager.state != "connected":
+                await self._handle_overlay_start_failure(manager.failure_reason)
+                return
+
+            self._mark_overlay_connected()
+            await self._refresh_overlay_runtime_dependencies()
+            monitor_task = getattr(manager, "_monitor_task", None)
+            if monitor_task is not None:
+                self._overlay_monitor_task = asyncio.create_task(
+                    self._watch_overlay_runtime(manager, monitor_task)
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[Overlay] Failed to start overlay runtime")
+            await self._handle_overlay_start_failure("unknown")
+        finally:
+            if self._overlay_start_task is current_task:
+                self._overlay_start_task = None
+
+    async def _watch_overlay_runtime(
+        self,
+        manager: OverlayProcessManager,
+        monitor_task: asyncio.Task[None],
+    ) -> None:
+        current_task = asyncio.current_task()
+        try:
+            await monitor_task
+            if self._overlay_manager is not manager:
+                return
+            if manager.state != "failed":
+                return
+
+            reason = self._normalize_overlay_failure_reason(manager.failure_reason)
+            if reason == "runtime_disconnected":
+                self.on_overlay_runtime_disconnected()
+            elif reason == "runtime_crashed":
+                self.on_overlay_runtime_crashed()
+            else:
+                self.on_overlay_start_failed(reason)
+            await self._teardown_overlay_runtime()
+            await self._refresh_overlay_runtime_dependencies()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self._overlay_monitor_task is current_task:
+                self._overlay_monitor_task = None
+
+    async def _handle_overlay_start_failure(self, failure_reason: str | None) -> None:
+        self.on_overlay_start_failed(failure_reason)
+        await self._teardown_overlay_runtime()
+        await self._refresh_overlay_runtime_dependencies()
+
+    async def _shutdown_overlay_runtime(self, *, preserve_failure_reason: bool) -> None:
+        if self._overlay_lock is None:
+            self._overlay_lock = asyncio.Lock()
+
+        async with self._overlay_lock:
+            has_runtime = (
+                self._overlay_bridge is not None
+                or self._overlay_manager is not None
+                or (self._overlay_start_task is not None and not self._overlay_start_task.done())
+            )
+            if not has_runtime and self.overlay_state == "off":
+                return
+
+            self.overlay_state = "stopping"
+            self.auto_restart_scheduled = False
+            self._notify_overlay_state()
+
+            await self._teardown_overlay_runtime()
+            self.overlay_state = "off"
+            if not preserve_failure_reason:
+                self.failure_reason = None
+            self._sync_effective_hub_flags()
+            await self._refresh_overlay_runtime_dependencies()
+            self._notify_overlay_state()
+
+    async def _teardown_overlay_runtime(self) -> None:
+        current_task = asyncio.current_task()
+
+        start_task = self._overlay_start_task
+        if start_task is not None and start_task is not current_task and not start_task.done():
+            start_task.cancel()
+            await asyncio.gather(start_task, return_exceptions=True)
+        if start_task is not None and start_task.done():
+            self._overlay_start_task = None
+
+        monitor_task = self._overlay_monitor_task
+        if (
+            monitor_task is not None
+            and monitor_task is not current_task
+            and not monitor_task.done()
+        ):
+            monitor_task.cancel()
+            await asyncio.gather(monitor_task, return_exceptions=True)
+        if monitor_task is not None and monitor_task.done():
+            self._overlay_monitor_task = None
+
+        if self.hub is not None and getattr(self.hub, "overlay_sink", None) is self._overlay_bridge:
+            self.hub.overlay_sink = None
+
+        manager = self._overlay_manager
+        self._overlay_manager = None
+        if manager is not None:
+            with contextlib.suppress(Exception):
+                await manager.stop()
+
+        bridge = self._overlay_bridge
+        self._overlay_bridge = None
+        if bridge is not None:
+            with contextlib.suppress(Exception):
+                await bridge.stop()
+
+    def _mark_overlay_connected(self) -> None:
+        self.overlay_state = "connected"
+        self.failure_reason = None
+        self.auto_restart_scheduled = False
+        self._sync_effective_hub_flags()
+        self._notify_overlay_state()
+
+    def _normalize_overlay_failure_reason(self, failure_reason: str | None) -> str:
+        if isinstance(failure_reason, str) and failure_reason in _OVERLAY_FAILURE_REASONS:
+            return failure_reason
+        return "unknown"
+
+    def _notify_overlay_state(self) -> None:
+        bridge = self._ui_event_bridge
+        if bridge is not None:
+            bridge.report_overlay_state(self.overlay_state, failure_reason=self.failure_reason)
 
     async def set_translation_enabled(self, enabled: bool) -> None:
         if self.hub is None:
@@ -329,6 +604,9 @@ class GuiController:
 
     async def apply_settings(self, settings: AppSettings) -> None:
         prev_locale = get_locale()
+        prev_overlay_enabled = (
+            self.settings.ui.overlay_enabled if self.settings is not None else False
+        )
         # hub.source_language를 기준으로 비교 (settings 객체는 이미 수정되어 전달될 수 있음)
         prev_source_lang = self.hub.source_language if self.hub else None
         prev_low_latency = self.hub.low_latency_mode if self.hub else None
@@ -356,10 +634,6 @@ class GuiController:
             self.hub.source_language = settings.languages.source_language
             self.hub.target_language = settings.languages.target_language
             self.hub.system_prompt = settings.system_prompt
-            self.hub.peer_translation_enabled = (
-                settings.ui.peer_translation_enabled and self.hub.peer_stt is not None
-            )
-            self.hub.integrated_context_enabled = settings.ui.integrated_context_enabled
             self.hub.low_latency_mode = settings.stt.low_latency_mode
             self.hub.low_latency_merge_gap_ms = settings.stt.low_latency_merge_gap_ms
             self.hub.low_latency_spec_retry_max = settings.stt.low_latency_spec_retry_max
@@ -368,6 +642,10 @@ class GuiController:
                 if settings.stt.low_latency_mode
                 else 1.1
             )
+            self._sync_effective_hub_flags(settings)
+
+        if prev_overlay_enabled != settings.ui.overlay_enabled:
+            await self.set_overlay_enabled(settings.ui.overlay_enabled)
 
         if self._last_vrc_mic_sync_enabled != settings.osc.vrc_mic_intercept:
             if self.vrc_mic_audio_gate is not None:
@@ -501,7 +779,7 @@ class GuiController:
             )
         except Exception as exc:
             self._log_error(f"STT backend not available: {exc}")
-        if self.settings.ui.peer_translation_enabled:
+        if self._effective_peer_translation_enabled_for(self.settings):
             try:
                 peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
                 peer_stt = ManagedSTTProvider(
@@ -519,10 +797,7 @@ class GuiController:
 
         await self.hub.replace_stt_provider(stt)
         await self.hub.replace_peer_stt_provider(peer_stt)
-        self.hub.peer_translation_enabled = (
-            self.settings.ui.peer_translation_enabled and peer_stt is not None
-        )
-        self.hub.integrated_context_enabled = self.settings.ui.integrated_context_enabled
+        self._sync_effective_hub_flags(self.settings)
 
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
@@ -594,7 +869,7 @@ class GuiController:
             )
         except Exception as exc:
             self._log_error(f"STT backend not available: {exc}")
-        if self.settings.ui.peer_translation_enabled:
+        if self._effective_peer_translation_enabled_for(self.settings):
             try:
                 peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
                 peer_stt = ManagedSTTProvider(
@@ -636,9 +911,11 @@ class GuiController:
             system_prompt=self.settings.system_prompt,
             fallback_transcript_only=True,
             translation_enabled=True,
-            peer_translation_enabled=self.settings.ui.peer_translation_enabled
+            peer_translation_enabled=self._effective_peer_translation_enabled_for(self.settings)
             and peer_stt is not None,
-            integrated_context_enabled=self.settings.ui.integrated_context_enabled,
+            integrated_context_enabled=self._effective_integrated_context_enabled_for(
+                self.settings
+            ),
             low_latency_mode=self.settings.stt.low_latency_mode,
             low_latency_merge_gap_ms=self.settings.stt.low_latency_merge_gap_ms,
             low_latency_spec_retry_max=self.settings.stt.low_latency_spec_retry_max,
@@ -672,7 +949,7 @@ class GuiController:
         assert self.hub is not None
 
         if self._mic_task is not None and (
-            not self.settings.ui.peer_translation_enabled
+            not self._effective_peer_translation_enabled_for(self.settings)
             or self._peer_mic_task is not None
             or self.hub.peer_stt is None
         ):
@@ -761,7 +1038,7 @@ class GuiController:
             self._mic_task = asyncio.create_task(self._run_mic_loop())
 
         if (
-            self.settings.ui.peer_translation_enabled
+            self._effective_peer_translation_enabled_for(self.settings)
             and self.hub.peer_stt is not None
             and self._peer_mic_task is None
         ):

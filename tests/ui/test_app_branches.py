@@ -179,6 +179,9 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
     async def fake_stt(enabled: bool) -> None:
         seen.append(("stt", enabled))
 
+    async def fake_overlay(enabled: bool) -> None:
+        seen.append(("overlay", enabled))
+
     async def fake_apply_settings(settings) -> None:
         seen.append(("apply_settings", settings))
 
@@ -189,6 +192,7 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
         submit_text=fake_submit,
         set_translation_enabled=fake_translation,
         set_stt_enabled=fake_stt,
+        set_overlay_enabled=fake_overlay,
         apply_settings=fake_apply_settings,
         apply_providers=fake_apply_providers,
     )
@@ -196,10 +200,11 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
     app._on_manual_submit("You", "hello")
     app._on_translation_toggle(True)
     app._on_stt_toggle(False)
+    app._on_overlay_toggle(True)
     app._on_settings_changed("settings")
     app._on_providers_changed()
 
-    assert len(app.page.tasks) == 5
+    assert len(app.page.tasks) == 6
     for task_fn in app.page.tasks:
         await task_fn()
 
@@ -207,6 +212,7 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
         ("submit", "hello"),
         ("translation", True),
         ("stt", False),
+        ("overlay", True),
         ("apply_settings", "settings"),
         ("apply_providers", True),
     ]

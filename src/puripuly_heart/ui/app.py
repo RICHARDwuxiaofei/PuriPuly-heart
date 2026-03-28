@@ -33,6 +33,8 @@ class TranslatorApp:
     def __init__(self, page: ft.Page, *, config_path):
         self.page = page
         self.controller = GuiController(page=page, app=self, config_path=config_path)
+        self.overlay_state = "off"
+        self.overlay_failure_reason: str | None = None
         self._setup_page()
         self._build_layout()
 
@@ -160,6 +162,12 @@ class TranslatorApp:
 
         self.page.run_task(_task)
 
+    def _on_overlay_toggle(self, enabled: bool) -> None:
+        async def _task():
+            await self.controller.set_overlay_enabled(enabled)
+
+        self.page.run_task(_task)
+
     def _on_language_change(self, source_code: str, target_code: str) -> None:
         if self.controller.settings is None:
             return
@@ -248,6 +256,15 @@ class TranslatorApp:
                 padding=20,
             )
         )
+
+    def on_overlay_state_changed(
+        self,
+        *,
+        state: str,
+        failure_reason: str | None = None,
+    ) -> None:
+        self.overlay_state = state
+        self.overlay_failure_reason = failure_reason
 
 
 async def main_gui(page: ft.Page, *, config_path):

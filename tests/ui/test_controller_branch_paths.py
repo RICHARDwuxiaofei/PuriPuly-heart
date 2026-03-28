@@ -174,8 +174,116 @@ class DummyGate:
         self.reset_calls += 1
 
 
+class FakeOverlayBridge:
+    instances: list["FakeOverlayBridge"] = []
+
+    def __init__(self, *, session_token: str, initial_snapshot=None, **_kwargs) -> None:
+        self.session_token = session_token
+        self.initial_snapshot = initial_snapshot
+        self.messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        self.url = "ws://127.0.0.1:8765"
+        self.started = False
+        self.stopped = False
+        self.events: list[object] = []
+        self.__class__.instances.append(self)
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+    async def emit(self, event: object) -> None:
+        self.events.append(event)
+
+    def snapshot(self):
+        return {"events": list(self.events)}
+
+
+class FakeOverlayProcessManager:
+    instances: list["FakeOverlayProcessManager"] = []
+
+    def __init__(
+        self,
+        *,
+        bridge_url: str,
+        bridge_messages: asyncio.Queue[dict[str, object]],
+        session_token: str,
+        locale: str,
+        startup_timeout_ms: int,
+        **_kwargs,
+    ) -> None:
+        self.bridge_url = bridge_url
+        self.bridge_messages = bridge_messages
+        self.session_token = session_token
+        self.locale = locale
+        self.startup_timeout_ms = startup_timeout_ms
+        self.state = "off"
+        self.failure_reason: str | None = None
+        self.restart_scheduled = False
+        self.stop_calls = 0
+        self._start_gate = asyncio.Event()
+        self._start_failure_reason: str | None = None
+        self._runtime_failure_reason: str | None = None
+        self._monitor_release: asyncio.Event | None = None
+        self._monitor_task: asyncio.Task[None] | None = None
+        self.__class__.instances.append(self)
+
+    async def start(self) -> None:
+        self.state = "starting"
+        await self._start_gate.wait()
+        if self._start_failure_reason is not None:
+            self.state = "failed"
+            self.failure_reason = self._start_failure_reason
+            return
+
+        self.state = "connected"
+        self.failure_reason = None
+        self._monitor_release = asyncio.Event()
+
+        async def _monitor() -> None:
+            assert self._monitor_release is not None
+            await self._monitor_release.wait()
+            if self._runtime_failure_reason is not None:
+                self.state = "failed"
+                self.failure_reason = self._runtime_failure_reason
+
+        self._monitor_task = asyncio.create_task(_monitor())
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+        if self._monitor_task is not None and not self._monitor_task.done():
+            self._monitor_task.cancel()
+            await asyncio.gather(self._monitor_task, return_exceptions=True)
+        self.state = "off"
+
+    def complete_startup(self, *, failure_reason: str | None = None) -> None:
+        self._start_failure_reason = failure_reason
+        self._start_gate.set()
+
+    def trigger_runtime_failure(self, failure_reason: str) -> None:
+        self._runtime_failure_reason = failure_reason
+        assert self._monitor_release is not None
+        self._monitor_release.set()
+
+
 def _make_controller(*, app: object) -> GuiController:
     return GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+
+
+async def _wait_until(predicate, *, attempts: int = 20) -> None:
+    for _ in range(attempts):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition was not met in time")
+
+
+def _patch_overlay_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    FakeOverlayBridge.instances = []
+    FakeOverlayProcessManager.instances = []
+    monkeypatch.setattr(controller_module, "OverlayBridge", FakeOverlayBridge)
+    monkeypatch.setattr(controller_module, "OverlayProcessManager", FakeOverlayProcessManager)
 
 
 def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
@@ -558,6 +666,7 @@ async def test_apply_settings_updates_peer_translation_flags_on_hub(
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    controller.overlay_state = "connected"
     controller._last_stt_runtime_signature = controller._build_stt_runtime_signature(
         controller.settings
     )
@@ -574,6 +683,167 @@ async def test_apply_settings_updates_peer_translation_flags_on_hub(
 
     assert controller.hub.peer_translation_enabled is True
     assert controller.hub.integrated_context_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_overlay_toggle_starts_and_stops_overlay_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    manager = FakeOverlayProcessManager.instances[0]
+    bridge = FakeOverlayBridge.instances[0]
+
+    assert controller.settings.ui.overlay_enabled is True
+    assert controller.overlay_state == "starting"
+    assert controller.hub.overlay_sink is bridge
+    assert bridge.started is True
+
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    assert controller.failure_reason is None
+
+    await controller.set_overlay_enabled(False)
+
+    assert controller.settings.ui.overlay_enabled is False
+    assert controller.overlay_state == "off"
+    assert controller.hub.overlay_sink is None
+    assert bridge.stopped is True
+    assert manager.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_overlay_start_failure_keeps_saved_preferences_but_effective_state_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup(failure_reason="renderer_init_failed")
+    await _wait_until(lambda: controller.overlay_state == "failed")
+
+    assert controller.settings.ui.overlay_enabled is True
+    assert controller.failure_reason == "renderer_init_failed"
+    assert controller.effective_peer_translation_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_overlay_runtime_disconnect_keeps_saved_preferences_without_auto_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub(peer_stt=object())
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    assert controller.hub.peer_translation_enabled is True
+
+    manager.trigger_runtime_failure("runtime_disconnected")
+    await _wait_until(lambda: controller.overlay_state == "failed")
+
+    assert controller.settings.ui.overlay_enabled is True
+    assert controller.settings.ui.peer_translation_enabled is True
+    assert controller.failure_reason == "runtime_disconnected"
+    assert controller.effective_peer_translation_enabled is False
+    assert controller.hub.peer_translation_enabled is False
+    assert controller.auto_restart_scheduled is False
+
+
+@pytest.mark.asyncio
+async def test_overlay_runtime_crash_keeps_saved_preferences_without_auto_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub(peer_stt=object())
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    assert controller.hub.peer_translation_enabled is True
+
+    manager.trigger_runtime_failure("runtime_crashed")
+    await _wait_until(lambda: controller.overlay_state == "failed")
+
+    assert controller.settings.ui.overlay_enabled is True
+    assert controller.settings.ui.peer_translation_enabled is True
+    assert controller.failure_reason == "runtime_crashed"
+    assert controller.hub.peer_translation_enabled is False
+    assert controller.auto_restart_scheduled is False
+
+
+@pytest.mark.asyncio
+async def test_overlay_successful_recovery_clears_previous_failure_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    FakeOverlayProcessManager.instances[0].complete_startup(failure_reason="bridge_auth_failed")
+    await _wait_until(lambda: controller.overlay_state == "failed")
+
+    assert controller.failure_reason == "bridge_auth_failed"
+
+    await controller.set_overlay_enabled(False)
+    assert controller.overlay_state == "off"
+    assert controller.failure_reason == "bridge_auth_failed"
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 2)
+    FakeOverlayProcessManager.instances[1].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    assert controller.failure_reason is None
 
 
 @pytest.mark.asyncio

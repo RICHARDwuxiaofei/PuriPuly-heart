@@ -54,6 +54,8 @@ class DummyApp:
         self.view_dashboard = DummyDashboard()
         self.view_logs = DummyLogs()
         self.history: list[tuple[str, str, bool, str | None]] = []
+        self.overlay_state = "off"
+        self.overlay_failure_reason: str | None = None
         self.controller = SimpleNamespace(
             settings=SimpleNamespace(
                 languages=SimpleNamespace(source_language="ko", target_language="en")
@@ -73,6 +75,15 @@ class DummyApp:
         language_code: str | None = None,
     ) -> None:
         self.history.append((source, text, translated, language_code))
+
+    def on_overlay_state_changed(
+        self,
+        *,
+        state: str,
+        failure_reason: str | None = None,
+    ) -> None:
+        self.overlay_state = state
+        self.overlay_failure_reason = failure_reason
 
 
 @pytest.mark.asyncio
@@ -185,3 +196,14 @@ async def test_event_bridge_ignores_unknown_event_and_keeps_queue_alive() -> Non
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+def test_event_bridge_reports_overlay_state_to_app() -> None:
+    app = DummyApp()
+    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+
+    bridge.report_overlay_state("starting")
+    bridge.report_overlay_state("failed", failure_reason="runtime_crashed")
+
+    assert app.overlay_state == "failed"
+    assert app.overlay_failure_reason == "runtime_crashed"

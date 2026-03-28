@@ -28,6 +28,16 @@ class UIEventBridge:
         hub = getattr(controller, "hub", None)
         return bool(getattr(hub, "translation_enabled", False))
 
+    def report_overlay_state(
+        self,
+        state: str,
+        *,
+        failure_reason: str | None = None,
+    ) -> None:
+        state_handler = getattr(self.app, "on_overlay_state_changed", None)
+        if callable(state_handler):
+            state_handler(state=state, failure_reason=failure_reason)
+
     async def run(self) -> None:
         self._running = True
         logger.info("UI Event Bridge started")
