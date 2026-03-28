@@ -58,3 +58,32 @@ async def test_overlay_bridge_emits_heartbeat_after_authentication() -> None:
         await bridge.stop()
 
     assert message["type"] == "heartbeat"
+
+
+@pytest.mark.asyncio
+async def test_overlay_bridge_resets_one_time_token_after_stop_and_restart() -> None:
+    bridge = OverlayBridge(session_token="expected-token", initial_snapshot={"events": []})
+
+    await bridge.start()
+    try:
+        async with connect(bridge.url) as ws:
+            await ws.send(json.dumps({"type": "auth", "session_token": "expected-token"}))
+            first_message = json.loads(await asyncio.wait_for(ws.recv(), timeout=0.5))
+            await ws.send(json.dumps({"type": "runtime_error", "failure_reason": "boom"}))
+            queued = await asyncio.wait_for(bridge.messages.get(), timeout=0.5)
+            assert queued["type"] == "runtime_error"
+    finally:
+        await bridge.stop()
+
+    assert bridge.messages.empty()
+
+    await bridge.start()
+    try:
+        async with connect(bridge.url) as ws:
+            await ws.send(json.dumps({"type": "auth", "session_token": "expected-token"}))
+            second_message = json.loads(await asyncio.wait_for(ws.recv(), timeout=0.5))
+    finally:
+        await bridge.stop()
+
+    assert first_message["type"] == "snapshot"
+    assert second_message["type"] == "snapshot"

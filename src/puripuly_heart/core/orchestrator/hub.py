@@ -117,6 +117,7 @@ class ClientHub:
     active_chatbox_channel: ChannelId = field(init=False, default="self")
     overlay_event_adapter: OverlayEventAdapter = field(init=False)
     overlay_stream_coalesce_ms: int = 300
+    overlay_connected: bool = True
     last_error_source: str | None = None
 
     def __post_init__(self) -> None:
@@ -1215,7 +1216,11 @@ class ClientHub:
 
     def _translation_enabled_for_runtime(self, runtime: ChannelRuntime) -> bool:
         if runtime.channel == "peer":
-            return self.translation_enabled and self.peer_translation_enabled
+            return (
+                self.translation_enabled
+                and self.peer_translation_enabled
+                and self.overlay_connected
+            )
         return self.translation_enabled
 
     def advance_peer_session_epoch(self) -> int:

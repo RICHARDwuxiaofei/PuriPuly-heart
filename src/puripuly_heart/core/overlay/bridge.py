@@ -74,6 +74,8 @@ class OverlayBridge:
         if server is not None:
             server.close()
             await server.wait_closed()
+        self._drain_messages()
+        self._token_consumed = False
         self.url = ""
 
     async def emit(self, event: OverlayEventUnion) -> None:
@@ -148,3 +150,10 @@ class OverlayBridge:
 
         for connection in stale_connections:
             self._authenticated_connections.discard(connection)
+
+    def _drain_messages(self) -> None:
+        while True:
+            try:
+                self.messages.get_nowait()
+            except asyncio.QueueEmpty:
+                return
