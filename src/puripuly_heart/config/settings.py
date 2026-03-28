@@ -92,6 +92,24 @@ class AudioSettings:
 
 
 @dataclass(slots=True)
+class DesktopAudioSettings:
+    output_device: str = ""
+    vad_speech_threshold: float = 0.65
+    vad_hangover_ms: int = 900
+    vad_pre_roll_ms: int = 500
+
+    def validate(self) -> None:
+        if self.output_device is None:
+            raise ValueError("output_device must be a string")
+        if not (0.0 <= self.vad_speech_threshold <= 1.0):
+            raise ValueError("vad_speech_threshold must be in 0.0..1.0")
+        if self.vad_hangover_ms < 0:
+            raise ValueError("vad_hangover_ms must be >= 0")
+        if self.vad_pre_roll_ms < 0:
+            raise ValueError("vad_pre_roll_ms must be >= 0")
+
+
+@dataclass(slots=True)
 class STTSettings:
     drain_timeout_s: float = 2.0
     vad_speech_threshold: float = 0.5
@@ -260,6 +278,10 @@ class QwenSettings:
 @dataclass(slots=True)
 class UiSettings:
     locale: str = "en"
+    overlay_enabled: bool = False
+    peer_translation_enabled: bool = False
+    integrated_context_enabled: bool = False
+    integrated_context_bootstrapped: bool = False
 
     def validate(self) -> None:
         if not self.locale:
@@ -286,6 +308,7 @@ class AppSettings:
     provider: ProviderSettings = field(default_factory=ProviderSettings)
     languages: LanguageSettings = field(default_factory=LanguageSettings)
     audio: AudioSettings = field(default_factory=AudioSettings)
+    desktop_audio: DesktopAudioSettings = field(default_factory=DesktopAudioSettings)
     stt: STTSettings = field(default_factory=STTSettings)
     deepgram_stt: DeepgramSTTSettings = field(default_factory=DeepgramSTTSettings)
     qwen_asr_stt: QwenASRSTTSettings = field(default_factory=QwenASRSTTSettings)
@@ -306,6 +329,7 @@ class AppSettings:
         self.provider.validate()
         self.languages.validate()
         self.audio.validate()
+        self.desktop_audio.validate()
         self.stt.validate()
         self.deepgram_stt.validate()
         self.qwen_asr_stt.validate()
@@ -350,6 +374,12 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "ring_buffer_ms": settings.audio.ring_buffer_ms,
             "input_host_api": settings.audio.input_host_api,
             "input_device": settings.audio.input_device,
+        },
+        "desktop_audio": {
+            "output_device": settings.desktop_audio.output_device,
+            "vad_speech_threshold": settings.desktop_audio.vad_speech_threshold,
+            "vad_hangover_ms": settings.desktop_audio.vad_hangover_ms,
+            "vad_pre_roll_ms": settings.desktop_audio.vad_pre_roll_ms,
         },
         "stt": {
             "drain_timeout_s": settings.stt.drain_timeout_s,
@@ -399,6 +429,10 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         },
         "ui": {
             "locale": settings.ui.locale,
+            "overlay_enabled": settings.ui.overlay_enabled,
+            "peer_translation_enabled": settings.ui.peer_translation_enabled,
+            "integrated_context_enabled": settings.ui.integrated_context_enabled,
+            "integrated_context_bootstrapped": settings.ui.integrated_context_bootstrapped,
         },
         "api_key_verified": {
             "deepgram": settings.api_key_verified.deepgram,
@@ -582,6 +616,7 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
 def from_dict(data: dict[str, Any]) -> AppSettings:
     audio_data = data.get("audio") or {}
+    desktop_audio_data = data.get("desktop_audio") or {}
     stt_data = data.get("stt") or {}
 
     input_host_api_raw = audio_data.get("input_host_api")
@@ -625,6 +660,16 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             ring_buffer_ms=int(audio_data.get("ring_buffer_ms", 500)),
             input_host_api=str(input_host_api_raw) if input_host_api_raw is not None else "",
             input_device=str(input_device_raw) if input_device_raw is not None else "",
+        ),
+        desktop_audio=DesktopAudioSettings(
+            output_device=(
+                str(desktop_audio_data.get("output_device"))
+                if desktop_audio_data.get("output_device") is not None
+                else ""
+            ),
+            vad_speech_threshold=float(desktop_audio_data.get("vad_speech_threshold", 0.65)),
+            vad_hangover_ms=int(desktop_audio_data.get("vad_hangover_ms", 900)),
+            vad_pre_roll_ms=int(desktop_audio_data.get("vad_pre_roll_ms", 500)),
         ),
         stt=STTSettings(
             drain_timeout_s=float(stt_data.get("drain_timeout_s", 2.0)),
@@ -690,6 +735,16 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         ),
         ui=UiSettings(
             locale=str(data.get("ui", {}).get("locale", "en")),
+            overlay_enabled=bool(data.get("ui", {}).get("overlay_enabled", False)),
+            peer_translation_enabled=bool(
+                data.get("ui", {}).get("peer_translation_enabled", False)
+            ),
+            integrated_context_enabled=bool(
+                data.get("ui", {}).get("integrated_context_enabled", False)
+            ),
+            integrated_context_bootstrapped=bool(
+                data.get("ui", {}).get("integrated_context_bootstrapped", False)
+            ),
         ),
         api_key_verified=ApiKeyVerificationSettings(
             deepgram=bool(data.get("api_key_verified", {}).get("deepgram", False)),
