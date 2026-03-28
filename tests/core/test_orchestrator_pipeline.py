@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
@@ -15,6 +15,8 @@ from tests.helpers.fakes import FakeSender, SpeechAwareFakeBackend, samples
 
 @dataclass(slots=True)
 class FakeLLM:
+    calls: list[dict[str, str]] = field(default_factory=list)
+
     async def translate(
         self,
         *,
@@ -25,12 +27,80 @@ class FakeLLM:
         target_language: str,
         context: str = "",
     ) -> Translation:
-        _ = (system_prompt, source_language, target_language, context)
+        _ = (system_prompt, source_language, target_language)
+        self.calls.append({"text": text, "context": context})
         await asyncio.sleep(0.01)
         return Translation(utterance_id=utterance_id, text="TRANSLATED")
 
     async def close(self) -> None:
         pass
+
+
+async def test_client_hub_uses_local_context_when_peer_translation_is_off():
+    clock = FakeClock(_now=112.0)
+    sender = FakeSender()
+    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    inner = FakeLLM()
+    llm = SemaphoreLLMProvider(inner=inner, semaphore=asyncio.Semaphore(1))
+    hub = ClientHub(
+        stt=None,
+        llm=llm,
+        osc=osc,
+        clock=clock,
+        integrated_context_enabled=True,
+        peer_translation_enabled=False,
+    )
+    hub.self_runtime.remember_context(
+        "hello there",
+        timestamp=100.0,
+        source_language="ko",
+        target_language="en",
+    )
+
+    await hub.submit_text("world")
+    await asyncio.gather(*hub._translation_tasks.values(), return_exceptions=True)
+
+    assert inner.calls[0]["context"] == '- [12s ago] "hello there"'
+
+
+async def test_client_hub_uses_integrated_context_when_enabled_and_safe():
+    clock = FakeClock(_now=112.0)
+    sender = FakeSender()
+    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    inner = FakeLLM()
+    llm = SemaphoreLLMProvider(inner=inner, semaphore=asyncio.Semaphore(1))
+    hub = ClientHub(
+        stt=None,
+        llm=llm,
+        osc=osc,
+        clock=clock,
+        integrated_context_enabled=True,
+        peer_translation_enabled=True,
+    )
+    hub.source_language = "en"
+    hub.target_language = "ko"
+    hub.self_runtime.remember_context(
+        "I am ready",
+        timestamp=100.0,
+        source_language="en",
+        target_language="ko",
+    )
+    hub.peer_runtime.peer_epoch = 7
+    hub.peer_runtime.remember_context(
+        "hello from peer",
+        timestamp=105.0,
+        source_language="en",
+        target_language="ko",
+        speaker_label="Speaker 0",
+        peer_epoch=7,
+    )
+
+    await hub.submit_text("world")
+    await asyncio.gather(*hub.self_runtime.translation_tasks.values(), return_exceptions=True)
+
+    assert inner.calls[0]["context"] == (
+        '- [12s ago] "I am ready"\n' '- [Speaker 0, 7s ago] "hello from peer"'
+    )
 
 
 async def test_orchestrator_e2e_headless():

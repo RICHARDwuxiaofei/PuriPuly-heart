@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
+
+from puripuly_heart.core.clock import Clock, SystemClock
+from puripuly_heart.core.orchestrator.channel_runtime import ChannelRuntime, ContextEntry
+
+ContextMode = Literal["local", "integrated"]
+
+
+@dataclass(slots=True)
+class ContextResolver:
+    clock: Clock = SystemClock()
+    local_time_window_s: float = 30.0
+    local_max_entries: int = 3
+    integrated_time_window_s: float = 60.0
+    integrated_max_entries: int = 6
+
+    def get_local_entries(
+        self,
+        *,
+        runtime: ChannelRuntime,
+        source_language: str,
+        target_language: str,
+    ) -> list[ContextEntry]:
+        return runtime.get_valid_context(
+            now=self.clock.now(),
+            source_language=source_language,
+            target_language=target_language,
+            time_window_s=self.local_time_window_s,
+            max_entries=self.local_max_entries,
+        )
+
+    def format_local(self, entries: list[ContextEntry]) -> str:
+        return self._format_entries(entries)
+
+    def resolve_local(
+        self,
+        *,
+        runtime: ChannelRuntime,
+        source_language: str,
+        target_language: str,
+    ) -> tuple[str, ContextMode]:
+        entries = self.get_local_entries(
+            runtime=runtime,
+            source_language=source_language,
+            target_language=target_language,
+        )
+        return self.format_local(entries), "local"
+
+    def resolve_for_request(
+        self,
+        *,
+        runtime: ChannelRuntime,
+        other_runtime: ChannelRuntime,
+        requested_mode: ContextMode,
+        peer_translation_enabled: bool,
+        source_language: str,
+        target_language: str,
+        expected_peer_epoch: int | None = None,
+    ) -> tuple[str, ContextMode]:
+        if requested_mode != "integrated" or not peer_translation_enabled:
+            return self.resolve_local(
+                runtime=runtime,
+                source_language=source_language,
+                target_language=target_language,
+            )
+        integrated_entries = self._get_integrated_entries(
+            runtime=runtime,
+            other_runtime=other_runtime,
+            source_language=source_language,
+            target_language=target_language,
+        )
+        if not self._peer_entries_are_safe(
+            integrated_entries,
+            expected_peer_epoch=expected_peer_epoch,
+        ):
+            return self.resolve_local(
+                runtime=runtime,
+                source_language=source_language,
+                target_language=target_language,
+            )
+        return self.format_integrated(integrated_entries), "integrated"
+
+    def _format_entries(self, entries: list[ContextEntry]) -> str:
+        if not entries:
+            return ""
+        return "\n".join(
+            f'- [{self._relative_age(entry.timestamp)}s ago] "{entry.text}"' for entry in entries
+        )
+
+    def format_integrated(self, entries: list[tuple[ChannelRuntime, ContextEntry]]) -> str:
+        if not entries:
+            return ""
+        lines: list[str] = []
+        for runtime, entry in entries:
+            age_text = f"{self._relative_age(entry.timestamp)}s ago"
+            if runtime.channel == "peer" and entry.speaker_label:
+                prefix = f"{entry.speaker_label}, {age_text}"
+            else:
+                prefix = age_text
+            lines.append(f'- [{prefix}] "{entry.text}"')
+        return "\n".join(lines)
+
+    def _get_integrated_entries(
+        self,
+        *,
+        runtime: ChannelRuntime,
+        other_runtime: ChannelRuntime,
+        source_language: str,
+        target_language: str,
+    ) -> list[tuple[ChannelRuntime, ContextEntry]]:
+        combined: list[tuple[ChannelRuntime, ContextEntry]] = []
+        for channel_runtime in (runtime, other_runtime):
+            for entry in channel_runtime.get_valid_context(
+                now=self.clock.now(),
+                source_language=source_language,
+                target_language=target_language,
+                time_window_s=self.integrated_time_window_s,
+                max_entries=self.integrated_max_entries,
+            ):
+                combined.append((channel_runtime, entry))
+        combined.sort(key=lambda item: item[1].timestamp)
+        if self.integrated_max_entries > 0:
+            return combined[-self.integrated_max_entries :]
+        return combined
+
+    def _peer_entries_are_safe(
+        self,
+        entries: list[tuple[ChannelRuntime, ContextEntry]],
+        *,
+        expected_peer_epoch: int | None,
+    ) -> bool:
+        peer_entries = [entry for runtime, entry in entries if runtime.channel == "peer"]
+        if not peer_entries:
+            return True
+        if expected_peer_epoch is None:
+            return False
+        return all(
+            bool(entry.speaker_label) and entry.peer_epoch == expected_peer_epoch
+            for entry in peer_entries
+        )
+
+    def _relative_age(self, timestamp: float) -> int:
+        return max(0, int(self.clock.now() - timestamp))

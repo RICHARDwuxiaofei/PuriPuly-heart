@@ -11,6 +11,12 @@ logger = logging.getLogger(__name__)
 from puripuly_heart.core.clock import Clock, SystemClock
 from puripuly_heart.core.language import get_llm_language_name
 from puripuly_heart.core.llm.provider import LLMProvider
+from puripuly_heart.core.orchestrator.channel_runtime import (
+    ChannelRuntime,
+    ContextEntry,
+    _MergeBuffer,
+)
+from puripuly_heart.core.orchestrator.context import ContextMode, ContextResolver
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadEvent
 from puripuly_heart.domain.events import (
@@ -23,49 +29,12 @@ from puripuly_heart.domain.events import (
     UIEventType,
 )
 from puripuly_heart.domain.models import (
+    ChannelId,
     OSCMessage,
     Transcript,
     Translation,
     UtteranceBundle,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class ContextEntry:
-    """Represents a recent utterance for context memory."""
-
-    text: str  # Original text
-    source_language: str
-    target_language: str
-    timestamp: float  # When the translation was requested
-
-
-@dataclass(slots=True)
-class _MergeBuffer:
-    merge_id: UUID
-    parts: list[str] = field(default_factory=list)
-    utterance_ids: list[UUID] = field(default_factory=list)
-    start_time: float | None = None
-    last_end_time: float | None = None
-    last_final_at: float = 0.0
-    spec_task: asyncio.Task[None] | None = None
-    spec_text: str | None = None
-    spec_translation: Translation | None = None
-    spec_attempts: int = 0
-    spec_started_at: float | None = None
-    spec_done_at: float | None = None
-    resume_pending: bool = False
-    resume_confirmed: bool = False
-    resume_utterance_id: UUID | None = None
-    resume_chunk_count: int = 0
-    resume_started_at: float | None = None
-    awaiting_vad_end: bool = False
-    awaiting_vad_utterance_id: UUID | None = None
-    awaiting_vad_timeout_task: asyncio.Task[None] | None = None
-    finalize_wait_task: asyncio.Task[None] | None = None
-    finalize_wait_started_at: float | None = None
-    resume_end_timeout_task: asyncio.Task[None] | None = None
-    resume_end_utterance_id: UUID | None = None
 
 
 class STTProvider(Protocol):
@@ -78,6 +47,17 @@ _PROMO_INTERVAL_SEC: float = 300.0  # 5 minutes
 _RELAXED_OVERLAP_MIN_CHARS: int = 3
 _BOUNDARY_PUNCT = {".", ",", ";", ":", "!", "?"}
 _SOFT_REUSE_PUNCT = {".", ",", "…", "。", "，", "、"}
+_SELF_RUNTIME_FIELDS = {
+    "stt": "stt",
+    "_stt_task": "stt_task",
+    "_utterances": "utterances",
+    "_translation_tasks": "translation_tasks",
+    "_utterance_sources": "utterance_sources",
+    "_utterance_start_times": "utterance_start_times",
+    "_translation_history": "translation_history",
+    "_speech_ended_ids": "speech_ended_ids",
+    "_merge_buffer": "merge_buffer",
+}
 
 
 @dataclass(slots=True)
@@ -92,11 +72,15 @@ class ClientHub:
     system_prompt: str = ""
     fallback_transcript_only: bool = False
     translation_enabled: bool = True
+    peer_translation_enabled: bool = False
+    integrated_context_enabled: bool = False
     hangover_s: float = 1.1  # VAD hangover in seconds (for E2E latency calculation)
 
     # Context memory settings
     context_time_window_s: float = 30.0  # Only include entries within this time window
     context_max_entries: int = 3  # Maximum number of context entries to include
+    integrated_context_time_window_s: float = 60.0
+    integrated_context_max_entries: int = 6
     low_latency_mode: bool = False
     low_latency_merge_gap_ms: int = 600
     low_latency_spec_retry_max: int = 1
@@ -119,6 +103,77 @@ class ClientHub:
     _last_promo_time: float | None = None
     _promo_eligible: bool = False
     _merge_buffer: _MergeBuffer | None = None
+    self_runtime: ChannelRuntime = field(init=False)
+    peer_runtime: ChannelRuntime = field(init=False)
+    context_resolver: ContextResolver = field(init=False)
+    active_chatbox_channel: ChannelId = field(init=False, default="self")
+
+    def __post_init__(self) -> None:
+        self.self_runtime = ChannelRuntime(
+            channel="self",
+            stt=self.stt,
+            stt_task=self._stt_task,
+            utterances=self._utterances,
+            translation_tasks=self._translation_tasks,
+            utterance_sources=self._utterance_sources,
+            utterance_start_times=self._utterance_start_times,
+            translation_history=self._translation_history,
+            speech_ended_ids=self._speech_ended_ids,
+            merge_buffer=self._merge_buffer,
+            alias_target=self,
+        )
+        self.peer_runtime = ChannelRuntime(channel="peer")
+        self.context_resolver = ContextResolver(
+            clock=self.clock,
+            local_time_window_s=self.context_time_window_s,
+            local_max_entries=self.context_max_entries,
+            integrated_time_window_s=self.integrated_context_time_window_s,
+            integrated_max_entries=self.integrated_context_max_entries,
+        )
+        self._sync_self_runtime_aliases()
+
+    def __setattr__(self, name: str, value: object) -> None:
+        object.__setattr__(self, name, value)
+        if name in {
+            "clock",
+            "context_time_window_s",
+            "context_max_entries",
+            "integrated_context_time_window_s",
+            "integrated_context_max_entries",
+        }:
+            try:
+                resolver = object.__getattribute__(self, "context_resolver")
+            except AttributeError:
+                resolver = None
+            if resolver is not None:
+                if name == "clock":
+                    resolver.clock = value  # type: ignore[assignment]
+                elif name == "context_time_window_s":
+                    resolver.local_time_window_s = value  # type: ignore[assignment]
+                elif name == "context_max_entries":
+                    resolver.local_max_entries = value  # type: ignore[assignment]
+                elif name == "integrated_context_time_window_s":
+                    resolver.integrated_time_window_s = value  # type: ignore[assignment]
+                elif name == "integrated_context_max_entries":
+                    resolver.integrated_max_entries = value  # type: ignore[assignment]
+        runtime_field = _SELF_RUNTIME_FIELDS.get(name)
+        if runtime_field is None:
+            return
+        try:
+            runtime = object.__getattribute__(self, "self_runtime")
+        except AttributeError:
+            return
+        object.__setattr__(runtime, runtime_field, value)
+
+    def _sync_self_runtime_aliases(self) -> None:
+        self._stt_task = self.self_runtime.stt_task
+        self._utterances = self.self_runtime.utterances
+        self._translation_tasks = self.self_runtime.translation_tasks
+        self._utterance_sources = self.self_runtime.utterance_sources
+        self._utterance_start_times = self.self_runtime.utterance_start_times
+        self._translation_history = self.self_runtime.translation_history
+        self._speech_ended_ids = self.self_runtime.speech_ended_ids
+        self._merge_buffer = self.self_runtime.merge_buffer
 
     async def start(self, *, auto_flush_osc: bool = False) -> None:
         if self._running:
@@ -166,46 +221,41 @@ class ClientHub:
 
     def clear_context(self) -> None:
         """Clear the translation context history."""
-        self._translation_history.clear()
+        self.self_runtime.clear_context()
+        self.peer_runtime.clear_context()
         logger.info("[Hub] Context history cleared")
 
     def _get_valid_context(self) -> list[ContextEntry]:
         """Get context entries within time window and max entries limit."""
-        now = self.clock.now()
-        # Filter by time window and limit to max entries
-        valid = [
-            entry
-            for entry in self._translation_history[-self.context_max_entries :]
-            if (now - entry.timestamp) < self.context_time_window_s
-            and entry.source_language == self.source_language
-            and entry.target_language == self.target_language
-            and len(entry.text) >= 2
-        ]
-        return valid
+        return self.context_resolver.get_local_entries(
+            runtime=self.self_runtime,
+            source_language=self.source_language,
+            target_language=self.target_language,
+        )
 
     def _format_context_for_llm(self, context: list[ContextEntry]) -> str:
         """Format context entries as a string for LLM prompt."""
-        if not context:
-            return ""
-        lines = []
-        for entry in context:
-            lines.append(f'- "{entry.text}"')
-        return "\n".join(lines)
+        return self.context_resolver.format_local(context)
 
-    def _remember_context_entry(self, text: str, timestamp: float) -> None:
-        text_clean = text.strip()
-        if len(text_clean) < 2:
-            return
-        self._translation_history.append(
-            ContextEntry(
-                text=text_clean,
-                source_language=self.source_language,
-                target_language=self.target_language,
-                timestamp=timestamp,
-            )
+    def _remember_context_entry(
+        self,
+        text: str,
+        timestamp: float,
+        *,
+        runtime: ChannelRuntime | None = None,
+        speaker_label: str | None = None,
+        peer_epoch: int | None = None,
+    ) -> None:
+        runtime = runtime or self.self_runtime
+        runtime.remember_context(
+            text,
+            timestamp=timestamp,
+            source_language=self.source_language,
+            target_language=self.target_language,
+            max_entries=max(self.context_max_entries, self.integrated_context_max_entries),
+            speaker_label=speaker_label,
+            peer_epoch=peer_epoch,
         )
-        if len(self._translation_history) > self.context_max_entries:
-            self._translation_history.pop(0)
 
     async def handle_vad_event(self, event: VadEvent) -> None:
         if isinstance(event, SpeechStart):
@@ -252,12 +302,24 @@ class ClientHub:
 
         return utterance_id
 
-    def get_or_create_bundle(self, utterance_id: UUID) -> UtteranceBundle:
-        bundle = self._utterances.get(utterance_id)
-        if bundle is None:
-            bundle = UtteranceBundle(utterance_id=utterance_id)
-            self._utterances[utterance_id] = bundle
-        return bundle
+    def _runtime_for_channel(self, channel: ChannelId) -> ChannelRuntime:
+        return self.self_runtime if channel == "self" else self.peer_runtime
+
+    def _runtime_for_utterance(
+        self, utterance_id: UUID, *, default_channel: ChannelId = "self"
+    ) -> ChannelRuntime:
+        if utterance_id in self.self_runtime.utterances:
+            return self.self_runtime
+        if utterance_id in self.peer_runtime.utterances:
+            return self.peer_runtime
+        return self._runtime_for_channel(default_channel)
+
+    def get_or_create_bundle(
+        self, utterance_id: UUID, *, channel: ChannelId = "self"
+    ) -> UtteranceBundle:
+        return self._runtime_for_utterance(
+            utterance_id, default_channel=channel
+        ).get_or_create_bundle(utterance_id)
 
     async def _run_stt_event_loop(self) -> None:
         try:
@@ -278,31 +340,9 @@ class ClientHub:
         await asyncio.gather(task, return_exceptions=True)
 
     async def _reset_stt_runtime_state(self) -> None:
-        translation_tasks = list(self._translation_tasks.values())
-        for task in translation_tasks:
-            task.cancel()
-        if translation_tasks:
-            await asyncio.gather(*translation_tasks, return_exceptions=True)
-        self._translation_tasks.clear()
-
-        if self._merge_buffer is not None:
-            merge_tasks = [
-                self._merge_buffer.spec_task,
-                self._merge_buffer.finalize_wait_task,
-                self._merge_buffer.awaiting_vad_timeout_task,
-                self._merge_buffer.resume_end_timeout_task,
-            ]
-            for task in merge_tasks:
-                if task is not None and not task.done():
-                    task.cancel()
-            await asyncio.gather(*(t for t in merge_tasks if t is not None), return_exceptions=True)
-            self._merge_buffer = None
-
-        self._utterances.clear()
-        self._utterance_sources.clear()
-        self._utterance_start_times.clear()
-        self._translation_history.clear()
-        self._speech_ended_ids.clear()
+        await self.self_runtime.reset_runtime_state()
+        await self.peer_runtime.reset_runtime_state()
+        self._sync_self_runtime_aliases()
 
     async def _handle_stt_event(self, event: object) -> None:
         if isinstance(event, STTSessionStateEvent):
@@ -364,9 +404,9 @@ class ClientHub:
     async def _handle_transcript(
         self, transcript: Transcript, *, is_final: bool, source: str | None
     ) -> None:
-        bundle = self.get_or_create_bundle(transcript.utterance_id)
+        bundle = self.get_or_create_bundle(transcript.utterance_id, channel=transcript.channel)
         bundle.with_transcript(transcript)
-        self._remember_source(transcript.utterance_id, source)
+        self._remember_source(transcript.utterance_id, source, channel=transcript.channel)
         await self.ui_events.put(
             UIEvent(
                 type=UIEventType.TRANSCRIPT_FINAL if is_final else UIEventType.TRANSCRIPT_PARTIAL,
@@ -1052,13 +1092,24 @@ class ClientHub:
 
         await self._commit_merge(buffer, reason=reason)
 
-    def _remember_source(self, utterance_id: UUID, source: str | None) -> None:
-        if not source:
-            return
-        self._utterance_sources[utterance_id] = source
+    def _remember_source(
+        self,
+        utterance_id: UUID,
+        source: str | None,
+        *,
+        channel: ChannelId = "self",
+    ) -> None:
+        self._runtime_for_utterance(utterance_id, default_channel=channel).remember_source(
+            utterance_id, source
+        )
 
-    def _get_source(self, utterance_id: UUID) -> str | None:
-        return self._utterance_sources.get(utterance_id)
+    def _get_source(self, utterance_id: UUID, *, channel: ChannelId = "self") -> str | None:
+        runtime = self._runtime_for_utterance(utterance_id, default_channel=channel)
+        source = runtime.get_source(utterance_id)
+        if source is not None:
+            return source
+        other_runtime = self.peer_runtime if runtime is self.self_runtime else self.self_runtime
+        return other_runtime.get_source(utterance_id)
 
     def _format_system_prompt(self) -> str:
         formatted_prompt = self.system_prompt
@@ -1070,28 +1121,91 @@ class ClientHub:
         )
         return formatted_prompt
 
-    def _prepare_llm_request(self, text: str) -> tuple[str, str, float]:
+    def _other_runtime(self, runtime: ChannelRuntime) -> ChannelRuntime:
+        return self.peer_runtime if runtime is self.self_runtime else self.self_runtime
+
+    def _should_publish_to_chatbox(self, runtime: ChannelRuntime) -> bool:
+        return runtime.channel == self.active_chatbox_channel
+
+    def _expected_peer_epoch(
+        self,
+        runtime: ChannelRuntime,
+        *,
+        explicit_peer_epoch: int | None = None,
+    ) -> int | None:
+        if explicit_peer_epoch is not None:
+            return explicit_peer_epoch
+        if runtime.channel == "peer":
+            return runtime.peer_epoch
+        return self.peer_runtime.peer_epoch
+
+    def _prepare_llm_request(
+        self,
+        text: str,
+        *,
+        runtime: ChannelRuntime | None = None,
+        expected_peer_epoch: int | None = None,
+    ) -> tuple[str, str, float]:
         _ = text
-        valid_context = self._get_valid_context()
+        runtime = runtime or self.self_runtime
+        requested_mode: ContextMode = "integrated" if self.integrated_context_enabled else "local"
         now = self.clock.now()
-
-        logger.info(
-            f"[Hub] Context: {len(valid_context)} entries within {self.context_time_window_s}s window"
+        context_str, applied_mode = self.context_resolver.resolve_for_request(
+            runtime=runtime,
+            other_runtime=self._other_runtime(runtime),
+            requested_mode=requested_mode,
+            peer_translation_enabled=self.peer_translation_enabled,
+            source_language=self.source_language,
+            target_language=self.target_language,
+            expected_peer_epoch=self._expected_peer_epoch(
+                runtime,
+                explicit_peer_epoch=expected_peer_epoch,
+            ),
         )
-        for i, entry in enumerate(valid_context):
-            age = now - entry.timestamp
-            logger.info(f'[Hub] Context[{i}]: "{entry.text}" ({age:.1f}s ago)')
-
-        context_str = self._format_context_for_llm(valid_context)
+        logger.info("[Hub] Context mode: %s", applied_mode)
         formatted_prompt = self._format_system_prompt()
         return formatted_prompt, context_str, now
 
-    async def _translate_text(self, utterance_id: UUID, text: str) -> Translation:
+    def _normalize_translation(
+        self,
+        translation: Translation,
+        *,
+        runtime: ChannelRuntime,
+        text: str,
+        speaker_label: str | None,
+        peer_epoch: int | None,
+    ) -> Translation:
+        return Translation(
+            utterance_id=translation.utterance_id,
+            translated_text=translation.text,
+            source_text=text,
+            source_language=self.source_language,
+            target_language=self.target_language,
+            channel=runtime.channel,
+            speaker_label=speaker_label,
+            peer_epoch=peer_epoch,
+            created_at=translation.created_at,
+        )
+
+    async def _translate_text(
+        self,
+        utterance_id: UUID,
+        text: str,
+        *,
+        runtime: ChannelRuntime | None = None,
+        speaker_label: str | None = None,
+        peer_epoch: int | None = None,
+    ) -> Translation:
         if self.llm is None:
             raise RuntimeError("LLM is not configured")
 
-        formatted_prompt, context_str, _ = self._prepare_llm_request(text)
-        return await self.llm.translate(
+        runtime = runtime or self.self_runtime
+        formatted_prompt, context_str, _ = self._prepare_llm_request(
+            text,
+            runtime=runtime,
+            expected_peer_epoch=peer_epoch,
+        )
+        translation = await self.llm.translate(
             utterance_id=utterance_id,
             text=text,
             system_prompt=formatted_prompt,
@@ -1099,33 +1213,75 @@ class ClientHub:
             target_language=self.target_language,
             context=context_str,
         )
+        return self._normalize_translation(
+            translation,
+            runtime=runtime,
+            text=text,
+            speaker_label=speaker_label,
+            peer_epoch=peer_epoch,
+        )
 
     async def _ensure_translation(self, transcript: Transcript) -> None:
         if self.llm is None:
             return
+        runtime = self._runtime_for_channel(transcript.channel)
         utterance_id = transcript.utterance_id
-        if utterance_id in self._translation_tasks:
+        if utterance_id in runtime.translation_tasks:
             return
-        task = asyncio.create_task(self._translate_and_enqueue(utterance_id, transcript.text))
-        self._translation_tasks[utterance_id] = task
-        task.add_done_callback(lambda _t: self._translation_tasks.pop(utterance_id, None))
+        task = asyncio.create_task(
+            self._translate_and_enqueue(
+                utterance_id,
+                transcript.text,
+                runtime=runtime,
+                speaker_label=transcript.speaker_label,
+                peer_epoch=transcript.peer_epoch,
+            )
+        )
+        runtime.translation_tasks[utterance_id] = task
+        task.add_done_callback(lambda _t: runtime.translation_tasks.pop(utterance_id, None))
 
-    async def _translate_and_enqueue(self, utterance_id: UUID, text: str) -> None:
+    async def _translate_and_enqueue(
+        self,
+        utterance_id: UUID,
+        text: str,
+        *,
+        runtime: ChannelRuntime | None = None,
+        speaker_label: str | None = None,
+        peer_epoch: int | None = None,
+    ) -> None:
         if self.llm is None:
             return
+        runtime = runtime or self.self_runtime
         try:
-            formatted_prompt, context_str, now = self._prepare_llm_request(text)
+            formatted_prompt, context_str, now = self._prepare_llm_request(
+                text,
+                runtime=runtime,
+                expected_peer_epoch=peer_epoch,
+            )
 
             # Add current text to context history at REQUEST time
-            self._remember_context_entry(text, now)
+            self._remember_context_entry(
+                text,
+                now,
+                runtime=runtime,
+                speaker_label=speaker_label,
+                peer_epoch=peer_epoch,
+            )
 
-            translation = await self.llm.translate(
+            raw_translation = await self.llm.translate(
                 utterance_id=utterance_id,
                 text=text,
                 system_prompt=formatted_prompt,
                 source_language=self.source_language,
                 target_language=self.target_language,
                 context=context_str,
+            )
+            translation = self._normalize_translation(
+                raw_translation,
+                runtime=runtime,
+                text=text,
+                speaker_label=speaker_label,
+                peer_epoch=peer_epoch,
             )
         except asyncio.CancelledError:
             raise
@@ -1136,14 +1292,14 @@ class ClientHub:
                     type=UIEventType.ERROR,
                     utterance_id=utterance_id,
                     payload=str(exc),
-                    source=self._get_source(utterance_id),
+                    source=self._get_source(utterance_id, channel=runtime.channel),
                 )
             )
-            if self.fallback_transcript_only:
+            if self.fallback_transcript_only and self._should_publish_to_chatbox(runtime):
                 await self._enqueue_osc(utterance_id, transcript_text=text, translation_text=None)
             return
 
-        bundle = self.get_or_create_bundle(utterance_id)
+        bundle = self.get_or_create_bundle(utterance_id, channel=runtime.channel)
         bundle.with_translation(translation)
         bundle.with_translation(translation)
         await self.ui_events.put(
@@ -1151,12 +1307,13 @@ class ClientHub:
                 type=UIEventType.TRANSLATION_DONE,
                 utterance_id=utterance_id,
                 payload=translation,
-                source=self._get_source(utterance_id),
+                source=self._get_source(utterance_id, channel=runtime.channel),
             )
         )
-        await self._enqueue_osc(
-            utterance_id, transcript_text=text, translation_text=translation.text
-        )
+        if self._should_publish_to_chatbox(runtime):
+            await self._enqueue_osc(
+                utterance_id, transcript_text=text, translation_text=translation.text
+            )
 
     async def _enqueue_osc(
         self, utterance_id: UUID, *, transcript_text: str, translation_text: str | None

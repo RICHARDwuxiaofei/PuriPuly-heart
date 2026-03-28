@@ -91,6 +91,33 @@ class TestSpeechEndedTracking:
     """Test _speech_ended_ids tracking."""
 
     @pytest.mark.asyncio
+    async def test_low_latency_state_stays_on_self_runtime_only(self):
+        clock = FakeClock(initial_time=10.0)
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=0,
+        )
+
+        transcript = Transcript(
+            utterance_id=uuid4(),
+            text="self only",
+            is_final=True,
+            created_at=clock.now(),
+        )
+        await hub._handle_low_latency_final(transcript)
+
+        assert hub.self_runtime.merge_buffer is hub._merge_buffer
+        assert hub.peer_runtime.merge_buffer is None
+        assert hub.self_runtime.translation_history == []
+        assert hub.peer_runtime.translation_history == []
+
+        await hub.stop()
+
+    @pytest.mark.asyncio
     async def test_speech_end_before_stt_final_uses_post_end_phase(self):
         """SpeechEnd가 먼저 오면 phase=post_end로 처리되어야 함."""
         clock = FakeClock(initial_time=10.0)

@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 
+from puripuly_heart.core.orchestrator.context import ContextResolver
 from puripuly_heart.core.orchestrator.hub import (
     ClientHub,
     ContextEntry,
@@ -221,6 +222,28 @@ class TestContextFiltering:
         assert len(hub._translation_history) == 3
         assert hub._translation_history[0].text == "e2"  # e1 removed
 
+    def test_context_resolver_tracks_updated_hub_settings_after_init(self):
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=10.0),
+            context_time_window_s=20.0,
+            context_max_entries=3,
+        )
+        hub._translation_history = [
+            ContextEntry(text="first", source_language="ko", target_language="en", timestamp=8.0),
+            ContextEntry(text="second", source_language="ko", target_language="en", timestamp=9.0),
+            ContextEntry(text="third", source_language="ko", target_language="en", timestamp=9.5),
+        ]
+
+        hub.context_max_entries = 1
+        hub.context_time_window_s = 2.0
+        hub.clock = FakeClock(initial_time=11.0)
+        valid = hub._get_valid_context()
+
+        assert [entry.text for entry in valid] == ["third"]
+
 
 class TestContextPassedToLLM:
     """Test that context is correctly passed to LLM."""
@@ -250,7 +273,7 @@ class TestContextPassedToLLM:
         # Verify LLM was called with context
         assert len(fake_llm.calls) == 1
         call = fake_llm.calls[0]
-        assert "hello" in call["context"]
+        assert call["context"] == '- [2s ago] "hello"'
 
     @pytest.mark.asyncio
     async def test_empty_context_when_no_history(self):
@@ -318,15 +341,15 @@ class TestContextFormatting:
             stt=None,
             llm=FakeLLMProvider(),
             osc=FakeOscQueue(),
-            clock=FakeClock(),
+            clock=FakeClock(initial_time=20.0),
         )
 
         entries = [
-            ContextEntry(text="안녕", source_language="ko", target_language="en", timestamp=1.0)
+            ContextEntry(text="안녕", source_language="ko", target_language="en", timestamp=8.0)
         ]
         result = hub._format_context_for_llm(entries)
 
-        assert result == '- "안녕"'
+        assert result == '- [12s ago] "안녕"'
 
     def test_format_context_multiple_entries(self):
         """Multiple entries should all be included."""
@@ -334,20 +357,132 @@ class TestContextFormatting:
             stt=None,
             llm=FakeLLMProvider(),
             osc=FakeOscQueue(),
-            clock=FakeClock(),
+            clock=FakeClock(initial_time=20.0),
         )
 
         entries = [
-            ContextEntry(text="a", source_language="ko", target_language="en", timestamp=1.0),
-            ContextEntry(text="b", source_language="ko", target_language="en", timestamp=2.0),
+            ContextEntry(text="a", source_language="ko", target_language="en", timestamp=8.0),
+            ContextEntry(text="b", source_language="ko", target_language="en", timestamp=9.0),
         ]
         result = hub._format_context_for_llm(entries)
 
-        assert '"a"' in result
-        assert '"b"' in result
+        assert '- [12s ago] "a"' in result
+        assert '- [11s ago] "b"' in result
 
 
 class TestContextInternalPaths:
+    def test_context_resolver_formats_local_with_relative_age_only(self):
+        runtime = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=112.0),
+        ).self_runtime
+        runtime.remember_context("hello there", timestamp=100.0)
+        resolver = ContextResolver(clock=FakeClock(initial_time=112.0))
+
+        context, mode = resolver.resolve_local(
+            runtime=runtime,
+            source_language="en",
+            target_language="ko",
+        )
+
+        assert mode == "local"
+        assert context == '- [12s ago] "hello there"'
+
+    def test_client_hub_uses_local_context_when_peer_translation_is_off(self):
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=112.0),
+            integrated_context_enabled=True,
+            peer_translation_enabled=False,
+        )
+        hub.self_runtime.remember_context("self only", timestamp=100.0)
+
+        context, mode = hub.context_resolver.resolve_for_request(
+            runtime=hub.self_runtime,
+            other_runtime=hub.peer_runtime,
+            requested_mode="integrated",
+            peer_translation_enabled=hub.peer_translation_enabled,
+            source_language="en",
+            target_language="ko",
+        )
+
+        assert mode == "local"
+        assert context == '- [12s ago] "self only"'
+
+    def test_context_resolver_formats_integrated_with_speaker_label_and_relative_age(self):
+        self_runtime = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=112.0),
+        ).self_runtime
+        peer_runtime = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=112.0),
+        ).peer_runtime
+        self_runtime.remember_context("I am ready", timestamp=100.0)
+        peer_runtime.remember_context(
+            "hello from peer",
+            timestamp=105.0,
+            speaker_label="Speaker 0",
+            peer_epoch=7,
+        )
+        resolver = ContextResolver(clock=FakeClock(initial_time=112.0))
+
+        context, mode = resolver.resolve_for_request(
+            runtime=self_runtime,
+            other_runtime=peer_runtime,
+            requested_mode="integrated",
+            peer_translation_enabled=True,
+            source_language="en",
+            target_language="ko",
+            expected_peer_epoch=7,
+        )
+
+        assert mode == "integrated"
+        assert context == ('- [12s ago] "I am ready"\n' '- [Speaker 0, 7s ago] "hello from peer"')
+
+    def test_context_resolver_falls_back_to_local_when_integrated_peer_metadata_is_unsafe(self):
+        self_runtime = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=112.0),
+        ).self_runtime
+        peer_runtime = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=112.0),
+        ).peer_runtime
+        self_runtime.remember_context("safe local line", timestamp=100.0)
+        peer_runtime.remember_context(
+            "stale peer line",
+            timestamp=105.0,
+            speaker_label="Speaker 0",
+            peer_epoch=6,
+        )
+        resolver = ContextResolver(clock=FakeClock(initial_time=112.0))
+
+        context, mode = resolver.resolve_for_request(
+            runtime=self_runtime,
+            other_runtime=peer_runtime,
+            requested_mode="integrated",
+            peer_translation_enabled=True,
+            source_language="en",
+            target_language="ko",
+            expected_peer_epoch=7,
+        )
+
+        assert mode == "local"
+        assert context == '- [12s ago] "safe local line"'
+
     def test_prepare_llm_request_formats_prompt_and_context(self):
         clock = FakeClock(initial_time=20.0)
         hub = ClientHub(
@@ -365,7 +500,7 @@ class TestContextInternalPaths:
 
         assert "${sourceName}" not in prompt
         assert "${targetName}" not in prompt
-        assert '"안녕"' in context
+        assert context == '- [1s ago] "안녕"'
         assert now == 20.0
 
     @pytest.mark.asyncio
@@ -424,3 +559,73 @@ class TestContextInternalPaths:
             UIEventType.TRANSLATION_DONE,
             UIEventType.OSC_SENT,
         ]
+
+    @pytest.mark.asyncio
+    async def test_peer_translation_stays_off_chatbox_on_success(self):
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(response_text="OK"),
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=112.0),
+            integrated_context_enabled=True,
+            peer_translation_enabled=True,
+        )
+        hub.source_language = "en"
+        hub.target_language = "ko"
+        hub.peer_runtime.peer_epoch = 7
+        transcript = Transcript(
+            utterance_id=uuid4(),
+            text="peer hello",
+            is_final=True,
+            channel="peer",
+            speaker_label="Speaker 0",
+            peer_epoch=7,
+        )
+
+        await hub._handle_transcript(transcript, is_final=True, source="Peer")
+        await hub._ensure_translation(transcript)
+        await asyncio.gather(*hub.peer_runtime.translation_tasks.values(), return_exceptions=True)
+
+        bundle = hub.get_or_create_bundle(transcript.utterance_id, channel="peer")
+
+        assert bundle.translation is not None
+        assert hub.osc.messages == []
+
+        events = [await hub.ui_events.get(), await hub.ui_events.get()]
+        assert [event.type for event in events] == [
+            UIEventType.TRANSCRIPT_FINAL,
+            UIEventType.TRANSLATION_DONE,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_peer_translation_error_fallback_does_not_publish_chatbox(self):
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(response_text="OK"),
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=112.0),
+            fallback_transcript_only=True,
+            integrated_context_enabled=True,
+            peer_translation_enabled=True,
+        )
+        hub.llm = FakeLLMProvider(response_text="OK")
+        hub.source_language = "en"
+        hub.target_language = "ko"
+        transcript = Transcript(
+            utterance_id=uuid4(),
+            text="peer hello",
+            is_final=True,
+            channel="peer",
+            speaker_label="Speaker 0",
+            peer_epoch=7,
+        )
+
+        async def failing_translate(**kwargs):  # noqa: ANN003
+            raise RuntimeError("boom")
+
+        hub.llm.translate = failing_translate  # type: ignore[method-assign]
+
+        await hub._ensure_translation(transcript)
+        await asyncio.gather(*hub.peer_runtime.translation_tasks.values(), return_exceptions=True)
+
+        assert hub.osc.messages == []
