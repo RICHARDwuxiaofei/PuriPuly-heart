@@ -6,10 +6,12 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use puripuly_heart_overlay::{
-    run_with_manifest, validate_manifest, BridgeClient, Event, OverlayBridgeEvent,
-    OverlayManifest, OverlayRuntime, OverlayStateSnapshot, RowEvent, RuntimeFailure,
-    StartupError, EXPECTED_CONTRACT_VERSION,
+    run_with_manifest, submit_texture, validate_manifest, BridgeClient, CaptionBlock,
+    CaptionRenderer, Event, FakeOpenVr, OpenVrError, OverlayBridgeEvent,
+    OverlayFrameSubmitter, OverlayManifest, OverlayRuntime, OverlayStateSnapshot, RenderedFrame,
+    RowEvent, RuntimeFailure, StartupError, EXPECTED_CONTRACT_VERSION,
 };
+use puripuly_heart_overlay::logging::OverlayLogger;
 
 fn test_manifest() -> OverlayManifest {
     OverlayManifest {
@@ -92,6 +94,79 @@ fn test_peer_final_event() -> OverlayBridgeEvent {
     )))
 }
 
+#[derive(Default)]
+struct RecordingSubmitter {
+    calls: usize,
+    fail: bool,
+}
+
+impl RecordingSubmitter {
+    fn failing() -> Self {
+        Self {
+            calls: 0,
+            fail: true,
+        }
+    }
+}
+
+impl OverlayFrameSubmitter for RecordingSubmitter {
+    fn submit_frame(&mut self, frame: &RenderedFrame) -> Result<(), OpenVrError> {
+        self.calls += 1;
+        if self.fail {
+            return Err(OpenVrError::Submit("submit failed".into()));
+        }
+        assert_eq!(frame.width(), 3840);
+        assert_eq!(frame.height(), 1024);
+        Ok(())
+    }
+}
+
+async fn connect_test_bridge() -> (BridgeClient, tokio::task::JoinHandle<Vec<serde_json::Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+
+        let auth = ws.next().await.unwrap().unwrap();
+        let Message::Text(auth_text) = auth else {
+            panic!("expected auth text frame");
+        };
+        let auth_payload: serde_json::Value = serde_json::from_str(&auth_text).unwrap();
+        assert_eq!(auth_payload["type"], "auth");
+        assert_eq!(auth_payload["session_token"], "expected-token");
+
+        ws.send(Message::Text(
+            json!({"type": "snapshot", "payload": {"events": []}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+        let mut messages = Vec::new();
+        while let Some(message) = ws.next().await {
+            let Ok(Message::Text(text)) = message else {
+                break;
+            };
+            messages.push(serde_json::from_str(&text).unwrap());
+        }
+
+        messages
+    });
+
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{}", address);
+
+    let (client, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    assert!(snapshot.events.is_empty());
+    (client, server)
+}
+
+async fn test_logger(name: &str) -> OverlayLogger {
+    OverlayLogger::open(unique_log_dir(name)).await.unwrap()
+}
+
 #[test]
 fn runtime_accepts_app_version_mismatch_when_contract_version_matches() {
     let manifest = OverlayManifest {
@@ -136,6 +211,51 @@ async fn runtime_reports_bridge_loss_as_runtime_disconnect_after_ready() {
 }
 
 #[tokio::test]
+async fn runtime_emits_overlay_ready_only_after_first_texture_submit() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let logger = test_logger("ready-gating-success").await;
+    let (mut bridge, server) = connect_test_bridge().await;
+    let mut runtime = OverlayRuntime::new(OverlayStateSnapshot::default());
+    let mut submitter = RecordingSubmitter::default();
+
+    assert!(!runtime.ready_sent());
+
+    runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+
+    drop(bridge);
+    let messages = server.await.unwrap();
+
+    assert_eq!(submitter.calls, 1);
+    assert!(runtime.ready_sent());
+    assert!(messages.iter().any(|message| message["type"] == "overlay_ready"));
+}
+
+#[tokio::test]
+async fn runtime_does_not_emit_overlay_ready_when_first_texture_submit_fails() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let logger = test_logger("ready-gating-failure").await;
+    let (mut bridge, server) = connect_test_bridge().await;
+    let mut runtime = OverlayRuntime::new(OverlayStateSnapshot::default());
+    let mut submitter = RecordingSubmitter::failing();
+
+    let err = runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap_err();
+
+    drop(bridge);
+    let messages = server.await.unwrap();
+
+    assert_eq!(submitter.calls, 1);
+    assert!(matches!(err, RuntimeFailure::OpenVr(_)));
+    assert!(!runtime.ready_sent());
+    assert!(!messages.iter().any(|message| message["type"] == "overlay_ready"));
+}
+
+#[tokio::test]
 async fn bridge_client_authenticates_and_receives_initial_snapshot() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -175,6 +295,19 @@ fn runtime_disconnect_failure_reason_is_stable() {
         RuntimeFailure::RuntimeDisconnected.failure_reason(),
         "runtime_disconnected"
     );
+}
+
+#[test]
+fn openvr_submission_uses_set_overlay_texture_for_rendered_frames() {
+    let openvr = FakeOpenVr::default();
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let frame = renderer
+        .render_blocks(vec![CaptionBlock::new("peer-1", "hello")])
+        .unwrap();
+
+    submit_texture(&openvr, &frame).unwrap();
+
+    assert_eq!(openvr.last_call().as_deref(), Some("SetOverlayTexture"));
 }
 
 #[tokio::test]

@@ -7,6 +7,8 @@ use tokio::io::{self, AsyncWriteExt};
 use crate::bridge::{BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEvent};
 use crate::logging::OverlayLogger;
 use crate::manifest::{load_manifest, validate_manifest, OverlayManifest};
+use crate::openvr::{OpenVrOverlay, OverlayFrameSubmitter};
+use crate::renderer::{CaptionBlock, CaptionRenderer};
 use crate::state::{OverlayState, OverlayStateSnapshot};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -56,6 +58,10 @@ pub enum RuntimeFailure {
     Stopped,
     #[error("runtime bridge error: {0}")]
     Bridge(String),
+    #[error("renderer draw failed: {0}")]
+    Render(String),
+    #[error("openvr submit failed: {0}")]
+    OpenVr(String),
 }
 
 impl RuntimeFailure {
@@ -63,7 +69,7 @@ impl RuntimeFailure {
         match self {
             Self::RuntimeDisconnected => "runtime_disconnected",
             Self::Stopped => "stopped",
-            Self::Bridge(_) => "unknown",
+            Self::Bridge(_) | Self::Render(_) | Self::OpenVr(_) => "unknown",
         }
     }
 }
@@ -71,6 +77,7 @@ impl RuntimeFailure {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OverlayRuntime {
     ready: bool,
+    first_texture_submitted: bool,
     stopped: bool,
     state: OverlayState,
     redraw_requested: bool,
@@ -80,6 +87,7 @@ impl OverlayRuntime {
     pub fn new(snapshot: OverlayStateSnapshot) -> Self {
         let mut runtime = Self {
             ready: false,
+            first_texture_submitted: false,
             stopped: false,
             state: OverlayState::default(),
             redraw_requested: false,
@@ -98,6 +106,16 @@ impl OverlayRuntime {
 
     pub fn mark_ready_for_test(&mut self) {
         self.ready = true;
+    }
+
+    pub fn ready_sent(&self) -> bool {
+        self.ready
+    }
+
+    pub async fn submit_first_texture_for_test(&mut self) -> Result<(), RuntimeFailure> {
+        self.first_texture_submitted = true;
+        self.ready = true;
+        Ok(())
     }
 
     pub fn apply_snapshot(&mut self, snapshot: OverlayStateSnapshot) {
@@ -159,9 +177,49 @@ impl OverlayRuntime {
         Ok(())
     }
 
-    pub async fn run_event_loop(
+    pub async fn submit_frame_if_needed<S: OverlayFrameSubmitter>(
+        &mut self,
+        renderer: &CaptionRenderer,
+        openvr: &mut S,
+        bridge: &mut BridgeClient,
+        logger: &OverlayLogger,
+    ) -> Result<(), RuntimeFailure> {
+        if self.first_texture_submitted && !self.redraw_requested {
+            return Ok(());
+        }
+
+        let blocks = self.caption_blocks();
+        let frame = if blocks.is_empty() {
+            renderer
+                .render_empty_frame()
+                .map_err(|error| RuntimeFailure::Render(error.to_string()))?
+        } else {
+            renderer
+                .render_blocks(blocks)
+                .map_err(|error| RuntimeFailure::Render(error.to_string()))?
+        };
+        openvr
+            .submit_frame(&frame)
+            .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
+        self.redraw_requested = false;
+
+        if !self.first_texture_submitted {
+            logger
+                .info("first_texture_submitted")
+                .await
+                .map_err(|error| RuntimeFailure::Bridge(error.to_string()))?;
+            self.first_texture_submitted = true;
+            self.emit_ready(bridge, logger).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn run_event_loop<S: OverlayFrameSubmitter>(
         &mut self,
         bridge: &mut BridgeClient,
+        renderer: &CaptionRenderer,
+        openvr: &mut S,
         logger: &OverlayLogger,
     ) -> Result<(), RuntimeFailure> {
         loop {
@@ -169,12 +227,16 @@ impl OverlayRuntime {
                 Ok(BridgeIncoming::Heartbeat) => continue,
                 Ok(BridgeIncoming::Snapshot(snapshot)) => {
                     self.apply_snapshot(snapshot);
+                    self.submit_frame_if_needed(renderer, openvr, bridge, logger)
+                        .await?;
                 }
                 Ok(BridgeIncoming::Event(event)) => {
                     self.handle_event(event).await?;
                     if self.stopped {
                         return Ok(());
                     }
+                    self.submit_frame_if_needed(renderer, openvr, bridge, logger)
+                        .await?;
                 }
                 Err(BridgeError::Disconnected) => {
                     logger
@@ -243,22 +305,38 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
     let _ = logger.info("bridge_connected").await;
     let _ = logger.info("bridge_authenticated").await;
 
-    if let Err(error) = initialize_runtime_stubs(&logger).await {
-        emit_startup_failure(&logger, &error).await;
-        return error.exit_code();
-    }
+    let (renderer, mut openvr) = match initialize_runtime_resources(&manifest, &logger).await {
+        Ok(resources) => resources,
+        Err(error) => {
+            emit_startup_failure(&logger, &error).await;
+            return error.exit_code();
+        }
+    };
 
     let mut runtime = OverlayRuntime::new(snapshot);
-    if let Err(error) = runtime.emit_ready(&mut bridge, &logger).await {
-        let _ = logger.error(&error.to_string()).await;
-        return 1;
+    if let Err(error) = runtime
+        .submit_frame_if_needed(&renderer, &mut openvr, &mut bridge, &logger)
+        .await
+    {
+        let startup_error = startup_error_from_runtime_failure(error);
+        emit_startup_failure(&logger, &startup_error).await;
+        return startup_error.exit_code();
     }
 
-    match runtime.run_event_loop(&mut bridge, &logger).await {
+    match runtime
+        .run_event_loop(&mut bridge, &renderer, &mut openvr, &logger)
+        .await
+    {
         Ok(()) => 0,
         Err(RuntimeFailure::RuntimeDisconnected) => 1,
         Err(error) => {
             let _ = logger.error(&error.to_string()).await;
+            let _ = logger
+                .emit_stdout_event(&json!({
+                    "type": "runtime_error",
+                    "failure_reason": error.failure_reason(),
+                }))
+                .await;
             1
         }
     }
@@ -287,16 +365,69 @@ pub async fn run_cli(args: &[String]) -> i32 {
     run_with_manifest(manifest).await
 }
 
-async fn initialize_runtime_stubs(logger: &OverlayLogger) -> Result<(), StartupError> {
+fn startup_error_from_runtime_failure(error: RuntimeFailure) -> StartupError {
+    match error {
+        RuntimeFailure::Render(message) => StartupError::RendererInit(message),
+        RuntimeFailure::OpenVr(message) => StartupError::OpenVrInit(message),
+        RuntimeFailure::Bridge(message) => StartupError::Other(message),
+        RuntimeFailure::RuntimeDisconnected => {
+            StartupError::Other("runtime disconnected before ready".into())
+        }
+        RuntimeFailure::Stopped => StartupError::Other("runtime stopped before ready".into()),
+    }
+}
+
+async fn initialize_runtime_resources(
+    manifest: &OverlayManifest,
+    logger: &OverlayLogger,
+) -> Result<(CaptionRenderer, OpenVrOverlay), StartupError> {
+    let openvr = OpenVrOverlay::new(&manifest.overlay_instance_id)
+        .map_err(|error| StartupError::OpenVrInit(error.to_string()))?;
     logger
         .info("openvr_ready")
         .await
         .map_err(|error| StartupError::Other(error.to_string()))?;
+    let renderer = create_runtime_renderer()
+        .map_err(|error| StartupError::RendererInit(error.to_string()))?;
     logger
         .info("renderer_resources_ready")
         .await
         .map_err(|error| StartupError::Other(error.to_string()))?;
-    Ok(())
+    Ok((renderer, openvr))
+}
+
+fn create_runtime_renderer() -> Result<CaptionRenderer, crate::renderer::CaptionRenderError> {
+    #[cfg(windows)]
+    {
+        CaptionRenderer::new()
+    }
+
+    #[cfg(not(windows))]
+    {
+        CaptionRenderer::new_for_test()
+    }
+}
+
+impl OverlayRuntime {
+    fn caption_blocks(&self) -> Vec<CaptionBlock> {
+        let mut rows = self.state.rows_for("self");
+        rows.extend(self.state.rows_for("peer"));
+        rows.sort_by(|left, right| {
+            left.seq
+                .cmp(&right.seq)
+                .then_with(|| left.created_at.total_cmp(&right.created_at))
+                .then_with(|| left.channel.cmp(&right.channel))
+                .then_with(|| left.utterance_id.cmp(&right.utterance_id))
+        });
+        rows.into_iter()
+            .map(|row| {
+                CaptionBlock::new(
+                    format!("{}:{}", row.channel, row.utterance_id),
+                    row.text.clone(),
+                )
+            })
+            .collect()
+    }
 }
 
 async fn emit_startup_failure(logger: &OverlayLogger, error: &StartupError) {
