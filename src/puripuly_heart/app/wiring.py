@@ -171,15 +171,10 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
     effective_terms = get_effective_custom_terms(settings, settings.languages.source_language)
 
     if settings.provider.stt == STTProviderName.DEEPGRAM:
-        from puripuly_heart.core.language import get_deepgram_language
-        from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
-
         api_key = require_secret(secrets, key="deepgram_api_key", env_var="DEEPGRAM_API_KEY")
-        return DeepgramRealtimeSTTBackend(
+        return _create_deepgram_stt_backend(
+            settings=settings,
             api_key=api_key,
-            model=settings.deepgram_stt.model,
-            language=get_deepgram_language(settings.languages.source_language),
-            sample_rate_hz=settings.audio.internal_sample_rate_hz,
             keyterms=effective_terms,
         )
 
@@ -228,3 +223,34 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
         )
 
     raise ValueError(f"Unsupported STT provider: {settings.provider.stt}")
+
+
+def create_peer_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBackend:
+    api_key = require_secret(secrets, key="deepgram_api_key", env_var="DEEPGRAM_API_KEY")
+    effective_terms = get_effective_custom_terms(settings, settings.languages.source_language)
+    return _create_deepgram_stt_backend(
+        settings=settings,
+        api_key=api_key,
+        keyterms=effective_terms,
+        diarization=True,
+    )
+
+
+def _create_deepgram_stt_backend(
+    *,
+    settings: AppSettings,
+    api_key: str,
+    keyterms: tuple[str, ...] | list[str],
+    diarization: bool = False,
+) -> STTBackend:
+    from puripuly_heart.core.language import get_deepgram_language
+    from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
+
+    return DeepgramRealtimeSTTBackend(
+        api_key=api_key,
+        model=settings.deepgram_stt.model,
+        language=get_deepgram_language(settings.languages.source_language),
+        sample_rate_hz=settings.audio.internal_sample_rate_hz,
+        keyterms=keyterms,
+        diarization=diarization,
+    )

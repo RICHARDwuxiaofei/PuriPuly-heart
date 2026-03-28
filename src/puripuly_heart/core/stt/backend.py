@@ -5,9 +5,17 @@ from typing import AsyncIterator, Protocol
 
 
 @dataclass(frozen=True, slots=True)
+class STTBackendSpeakerSegment:
+    text: str
+    speaker_label: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class STTBackendTranscriptEvent:
     text: str
     is_final: bool
+    speaker_label: str | None = None
+    speaker_segments: tuple[STTBackendSpeakerSegment, ...] = ()
 
 
 class STTBackendSession(Protocol):

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from puripuly_heart.app.wiring import create_llm_provider, create_stt_backend
+from puripuly_heart.app.wiring import (
+    create_llm_provider,
+    create_peer_stt_backend,
+    create_stt_backend,
+)
 from puripuly_heart.config.settings import (
     AppSettings,
     DeepgramSTTSettings,
@@ -160,6 +164,7 @@ def test_create_stt_backend_deepgram_uses_settings_and_secret() -> None:
     assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
     assert backend.language == get_deepgram_language(settings.languages.source_language)
     assert list(backend.keyterms) == ["아이리", "시나노"]
+    assert backend.diarization is False
 
 
 def test_create_stt_backend_deepgram_passes_effective_custom_terms() -> None:
@@ -178,6 +183,41 @@ def test_create_stt_backend_deepgram_passes_effective_custom_terms() -> None:
 
     assert isinstance(backend, DeepgramRealtimeSTTBackend)
     assert list(backend.keyterms) == ["Puripuly", "VRChat"]
+
+
+def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(stt=STTProviderName.SONIOX),
+        deepgram_stt=DeepgramSTTSettings(model="nova-3"),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("deepgram_api_key", "peer-k")
+
+    backend = create_peer_stt_backend(settings, secrets=secrets)
+
+    assert isinstance(backend, DeepgramRealtimeSTTBackend)
+    assert backend.api_key == "peer-k"
+    assert backend.model == "nova-3"
+    assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
+    assert backend.language == get_deepgram_language(settings.languages.source_language)
+    assert list(backend.keyterms) == ["아이리", "시나노"]
+    assert backend.diarization is True
+
+
+def test_self_stt_provider_setting_does_not_change_peer_backend_choice() -> None:
+    secrets = InMemorySecretStore()
+    secrets.set("deepgram_api_key", "peer-k")
+
+    soniox_settings = AppSettings(provider=ProviderSettings(stt=STTProviderName.SONIOX))
+    qwen_settings = AppSettings(provider=ProviderSettings(stt=STTProviderName.QWEN_ASR))
+
+    soniox_backend = create_peer_stt_backend(soniox_settings, secrets=secrets)
+    qwen_backend = create_peer_stt_backend(qwen_settings, secrets=secrets)
+
+    assert isinstance(soniox_backend, DeepgramRealtimeSTTBackend)
+    assert isinstance(qwen_backend, DeepgramRealtimeSTTBackend)
+    assert soniox_backend.diarization is True
+    assert qwen_backend.diarization is True
 
 
 def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:
