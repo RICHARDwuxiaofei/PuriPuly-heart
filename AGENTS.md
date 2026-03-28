@@ -15,17 +15,13 @@
 - For documentation lookup and code generation, prefer MCP resources/templates first and use Context7 when available.
 - For browser or website automation tasks, use the `agent-browser` skill first.
 
-## Codex Subagent Routing
+## Codex Configuration
 
-- Default Codex CLI mode is `build`. Use it for implementation and any write-capable delegation.
-- `plan` is a CLI-profile-only analysis mode. If work becomes write-capable, switch back to `build` before delegating to `implement`.
-- Use `implement` for scoped edits, focused fix loops, and local verification.
-- Use `review` for read-only review. Findings come first, ordered by severity, with file references.
-- Use `web_research` for current documentation and source comparison. Prefer official docs and MCP-backed lookup when available.
-- Treat `default` and `worker` as locked fallback shims. They must only redirect back to `implement`, `review`, or `web_research`, not execute normal repo work.
-- Treat `explorer` as disabled in this repo. Re-route exploration requests to `review` or `web_research`.
+- Default Codex CLI mode is `build`. Use it for normal implementation work.
+- `plan` is a CLI-profile-only analysis mode. If work becomes write-capable, switch back to `build`.
+- Keep `.codex/config.toml` focused on baseline runtime defaults such as model, reasoning effort, approval policy, sandbox mode, and instruction files.
 - Keep `.codex/rules/default.rules` aligned with the repo safety policy. High-risk shell commands must stay gated there.
-- After changing `.codex/config.toml`, `.codex/agents/`, or `.codex/rules/`, restart/reload Codex with the repository trusted so the updated settings are actually applied.
+- After changing `.codex/config.toml`, `.codex/instructions/`, or `.codex/rules/`, restart/reload Codex with the repository trusted so the updated settings are actually applied.
 
 ## Verification Contract & Evidence
 
