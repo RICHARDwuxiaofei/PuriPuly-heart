@@ -344,6 +344,20 @@ fn binary_emits_structured_manifest_invalid_startup_error() {
     }));
 }
 
+#[test]
+fn binary_reports_startup_contract_for_smoke_checks() {
+    let output = Command::new(overlay_binary())
+        .arg("--check-startup-contract")
+        .output()
+        .unwrap();
+
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(payload["contract_version"], EXPECTED_CONTRACT_VERSION);
+    assert_eq!(payload["app_version"], env!("CARGO_PKG_VERSION"));
+}
+
 #[tokio::test]
 async fn binary_reports_non_auth_bridge_startup_failure_as_unknown() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

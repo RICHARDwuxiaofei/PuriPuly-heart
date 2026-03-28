@@ -38,6 +38,8 @@ dev = [
   "pre-commit>=3.7.0",
 ]
 build = [
+  "cmake>=3.31",
+  "libclang>=18.1",
   "pyinstaller>=6.0",
 ]
 

@@ -50,9 +50,12 @@ jobs:
           pyproject_path = root / "pyproject.toml"
           init_path = root / "src" / "puripuly_heart" / "__init__.py"
           installer_path = root / "installer.iss"
+          overlay_cargo_path = root / "native" / "overlay" / "Cargo.toml"
 
           pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
           pyproject_version = pyproject["project"]["version"]
+          overlay_cargo = tomllib.loads(overlay_cargo_path.read_text(encoding="utf-8"))
+          overlay_version = overlay_cargo["package"]["version"]
 
           init_match = re.search(
               r'^__version__\s*=\s*"([^"]+)"',
@@ -79,6 +82,7 @@ jobs:
               "pyproject.toml": pyproject_version,
               "src/puripuly_heart/__init__.py": init_version,
               "installer.iss": installer_version,
+              "native/overlay/Cargo.toml": overlay_version,
           }
 
           unique_versions = set(versions.values())
@@ -109,6 +113,9 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           uv-version: ${{ env.UV_VERSION }}
           sync-args: --extra build
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Build release artifacts
         env:

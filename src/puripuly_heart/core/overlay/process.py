@@ -150,16 +150,38 @@ class DefaultOverlayProcessRunner:
         )
         return _AsyncioOverlayProcess(process=process)
 
-    def _resolve_default_executable(self) -> Path:
-        packaged_sibling = Path(sys.executable).resolve().with_name(OVERLAY_EXECUTABLE_NAME)
+    @classmethod
+    def default_executable_candidates(
+        cls,
+        *,
+        sys_executable: Path | None = None,
+        repo_root: Path | None = None,
+    ) -> tuple[Path, Path]:
+        executable = (sys_executable or Path(sys.executable)).resolve()
+        root = repo_root or Path(__file__).resolve().parents[4]
+        return executable.with_name(OVERLAY_EXECUTABLE_NAME), root / "build" / "overlay" / (
+            OVERLAY_EXECUTABLE_NAME
+        )
+
+    @classmethod
+    def resolve_default_executable(
+        cls,
+        *,
+        sys_executable: Path | None = None,
+        repo_root: Path | None = None,
+    ) -> Path:
+        packaged_sibling, staged = cls.default_executable_candidates(
+            sys_executable=sys_executable,
+            repo_root=repo_root,
+        )
         if packaged_sibling.exists():
             return packaged_sibling
-
-        repo_root = Path(__file__).resolve().parents[4]
-        staged = repo_root / "build" / "overlay" / OVERLAY_EXECUTABLE_NAME
         if staged.exists():
             return staged
         return packaged_sibling
+
+    def _resolve_default_executable(self) -> Path:
+        return self.resolve_default_executable()
 
 
 @dataclass(slots=True)

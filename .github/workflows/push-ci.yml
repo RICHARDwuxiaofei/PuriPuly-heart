@@ -61,6 +61,9 @@ jobs:
           uv-version: ${{ env.UV_VERSION }}
           sync-args: --extra build
 
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Read project version
         id: version
         shell: bash

@@ -6,7 +6,7 @@ use tokio::io::{self, AsyncWriteExt};
 
 use crate::bridge::{BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEvent};
 use crate::logging::OverlayLogger;
-use crate::manifest::{load_manifest, validate_manifest, OverlayManifest};
+use crate::manifest::{load_manifest, validate_manifest, OverlayManifest, EXPECTED_CONTRACT_VERSION};
 use crate::openvr::{OpenVrOverlay, OverlayFrameSubmitter};
 use crate::renderer::{CaptionBlock, CaptionRenderer};
 use crate::state::{OverlayState, OverlayStateSnapshot};
@@ -348,8 +348,21 @@ pub async fn run_cli(args: &[String]) -> i32 {
         return 0;
     }
 
+    if args.len() == 2 && args[1] == "--check-startup-contract" {
+        println!(
+            "{}",
+            json!({
+                "contract_version": EXPECTED_CONTRACT_VERSION,
+                "app_version": env!("CARGO_PKG_VERSION"),
+            })
+        );
+        return 0;
+    }
+
     if args.len() != 3 || args[1] != "--config" {
-        eprintln!("usage: PuriPulyHeartOverlay --config <manifest.json>");
+        eprintln!(
+            "usage: PuriPulyHeartOverlay --config <manifest.json> | --check-startup-contract | --version"
+        );
         return 2;
     }
 

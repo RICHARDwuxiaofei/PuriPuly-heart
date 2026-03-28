@@ -18,6 +18,13 @@ from PyInstaller.utils.hooks import collect_data_files
 src_path = Path("src").resolve()
 sys.path.insert(0, str(src_path))
 
+overlay_staged_path = Path("build").resolve() / "overlay" / "PuriPulyHeartOverlay.exe"
+if not overlay_staged_path.exists():
+    raise SystemExit(
+        "Staged overlay executable not found at "
+        f"{overlay_staged_path}. Build and stage the Rust overlay before PyInstaller packaging."
+    )
+
 from puripuly_heart import __version__
 
 block_cipher = None

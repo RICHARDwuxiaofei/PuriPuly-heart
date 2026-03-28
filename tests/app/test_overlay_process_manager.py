@@ -261,6 +261,51 @@ async def test_overlay_process_manager_consumes_structured_stdout_events_from_de
         await manager.stop()
 
 
+def test_default_overlay_process_runner_prefers_packaged_sibling_over_staged_overlay(
+    tmp_path: Path,
+) -> None:
+    installed_dir = tmp_path / "installed"
+    installed_dir.mkdir()
+    app_executable = installed_dir / "PuriPulyHeart.exe"
+    app_executable.write_text("", encoding="utf-8")
+
+    packaged_sibling = installed_dir / "PuriPulyHeartOverlay.exe"
+    packaged_sibling.write_text("packaged", encoding="utf-8")
+
+    repo_root = tmp_path / "repo"
+    staged = repo_root / "build" / "overlay" / "PuriPulyHeartOverlay.exe"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("staged", encoding="utf-8")
+
+    resolved = DefaultOverlayProcessRunner.resolve_default_executable(
+        sys_executable=app_executable,
+        repo_root=repo_root,
+    )
+
+    assert resolved == packaged_sibling
+
+
+def test_default_overlay_process_runner_uses_staged_overlay_for_local_dev_when_sibling_missing(
+    tmp_path: Path,
+) -> None:
+    installed_dir = tmp_path / "installed"
+    installed_dir.mkdir()
+    app_executable = installed_dir / "PuriPulyHeart.exe"
+    app_executable.write_text("", encoding="utf-8")
+
+    repo_root = tmp_path / "repo"
+    staged = repo_root / "build" / "overlay" / "PuriPulyHeartOverlay.exe"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("staged", encoding="utf-8")
+
+    resolved = DefaultOverlayProcessRunner.resolve_default_executable(
+        sys_executable=app_executable,
+        repo_root=repo_root,
+    )
+
+    assert resolved == staged
+
+
 @pytest.mark.asyncio
 async def test_overlay_process_manager_logs_tagged_overlay_child_lines(
     tmp_path: Path,
