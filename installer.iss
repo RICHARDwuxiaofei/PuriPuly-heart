@@ -9,14 +9,8 @@
 #define MyAppURL "https://github.com/kapitalismho/PuriPuly-heart"
 #define MyAppExeName "PuriPulyHeart.exe"
 #define MyOverlayExeName "PuriPulyHeartOverlay.exe"
-
-#ifnexist "dist\PuriPulyHeart\{#MyAppExeName}"
-  #error Missing packaged main executable. Run scripts/ci/build-release-artifacts.ps1 first.
-#endif
-
-#ifnexist "dist\PuriPulyHeart\{#MyOverlayExeName}"
-  #error Missing packaged overlay executable. Run scripts/ci/build-release-artifacts.ps1 first.
-#endif
+#define MyPackagedAppDir "dist\PuriPulyHeart"
+#define MyStagedOverlayDir "build\overlay"
 
 [Setup]
 ; NOTE: AppId uniquely identifies this application.
@@ -57,7 +51,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; OnlyBelowVersion: 6.1; Check: not IsAdminInstallMode
 
 [Files]
-Source: "dist\PuriPulyHeart\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyPackagedAppDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyStagedOverlayDir}\{#MyOverlayExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyPackagedAppDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
 [Icons]

@@ -29,6 +29,24 @@ function Invoke-External {
     }
 }
 
+function Invoke-ExternalProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter()]
+        [string[]]$ArgumentList = @(),
+
+        [Parameter()]
+        [string]$WorkingDirectory = $PWD
+    )
+
+    $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "Command failed with exit code $($process.ExitCode): $FilePath $($ArgumentList -join ' ')"
+    }
+}
+
 function Get-InnoSetupVersion {
     foreach ($registryPath in @(
         "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1",
@@ -198,14 +216,30 @@ if ($currentInnoVersion -ne $InnoSetupVersion) {
     throw "Inno Setup version mismatch: expected $InnoSetupVersion, found $currentInnoVersion"
 }
 
-Write-Host "Building installer..."
-Invoke-External -FilePath $isccPath -ArgumentList @("installer.iss")
-
 $installerPath = Join-Path $PWD "installer_output/PuriPulyHeart-Setup-$AppVersion.exe"
+$installerHashPath = "$installerPath.sha256"
+if (Test-Path $installerPath) {
+    Remove-Item -Path $installerPath -Force
+}
+if (Test-Path $installerHashPath) {
+    Remove-Item -Path $installerHashPath -Force
+}
+
+Write-Host "Building installer..."
+Invoke-ExternalProcess -FilePath $isccPath -ArgumentList @("installer.iss") -WorkingDirectory $PWD
+
 if (-not (Test-Path $installerPath)) {
     throw "Installer not found: $installerPath"
 }
 
+if (-not (Test-Path $packagedOverlayPath)) {
+    Copy-Item -Path $overlayStagedPath -Destination $packagedOverlayPath -Force
+}
+
+if (-not (Test-Path $packagedOverlayPath)) {
+    throw "Packaged overlay executable not found after installer build: $packagedOverlayPath"
+}
+
 Write-Host "Generating SHA256..."
 $hash = (Get-FileHash -Path $installerPath -Algorithm SHA256).Hash
-"$hash  PuriPulyHeart-Setup-$AppVersion.exe" | Out-File -FilePath "$installerPath.sha256" -Encoding ascii
+"$hash  PuriPulyHeart-Setup-$AppVersion.exe" | Out-File -FilePath $installerHashPath -Encoding ascii
