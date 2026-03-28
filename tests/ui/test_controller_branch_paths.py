@@ -98,10 +98,19 @@ class DummyLogsView:
 
 
 class DummyHub:
-    def __init__(self, *, llm: object | None = object(), stt: object | None = object()) -> None:
+    def __init__(
+        self,
+        *,
+        llm: object | None = object(),
+        stt: object | None = object(),
+        peer_stt: object | None = None,
+    ) -> None:
         self.llm = llm
         self.stt = stt
+        self.peer_stt = peer_stt
         self.translation_enabled = True
+        self.peer_translation_enabled = False
+        self.integrated_context_enabled = False
         self.source_language = "ko"
         self.target_language = "en"
         self.system_prompt = ""
@@ -112,6 +121,7 @@ class DummyHub:
         self.clear_context_calls = 0
         self.promo_calls = 0
         self.replace_stt_calls: list[object | None] = []
+        self.replace_peer_stt_calls: list[object | None] = []
         self.start_calls: list[bool] = []
         self.stop_calls = 0
         self.submit_calls: list[tuple[str, str]] = []
@@ -138,6 +148,13 @@ class DummyHub:
         if old_stt is not None and hasattr(old_stt, "close"):
             await old_stt.close()
         self.stt = stt
+
+    async def replace_peer_stt_provider(self, stt: object | None) -> None:
+        old_stt = self.peer_stt
+        self.replace_peer_stt_calls.append(stt)
+        if old_stt is not None and hasattr(old_stt, "close"):
+            await old_stt.close()
+        self.peer_stt = stt
 
 
 class DummyGate:
@@ -167,6 +184,9 @@ def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[s
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
     monkeypatch.setattr(controller_module, "create_llm_provider", lambda *_a, **_k: "llm")
     monkeypatch.setattr(controller_module, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(
+        controller_module, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend"
+    )
     monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "stt")
 
     class FakeSender:
@@ -184,7 +204,13 @@ def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[s
         return osc
 
     def fake_hub(*_args, **kwargs):
-        hub = SimpleNamespace(llm=kwargs.get("llm"), stt=kwargs.get("stt"))
+        hub = SimpleNamespace(
+            llm=kwargs.get("llm"),
+            stt=kwargs.get("stt"),
+            peer_stt=kwargs.get("peer_stt"),
+            peer_translation_enabled=kwargs.get("peer_translation_enabled", False),
+            integrated_context_enabled=kwargs.get("integrated_context_enabled", False),
+        )
         created["hub"] = hub
         return hub
 
@@ -507,6 +533,47 @@ def test_stt_runtime_signature_ignores_custom_vocabulary_for_qwen_asr() -> None:
     assert disabled_signature == enabled_signature
     assert enabled_signature[-2] is False
     assert enabled_signature[-1] == ()
+
+
+def test_stt_runtime_signature_includes_peer_desktop_settings() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+
+    baseline = controller._build_stt_runtime_signature(settings)
+
+    settings.ui.peer_translation_enabled = True
+    settings.desktop_audio.output_device = "Headphones (Loopback)"
+    settings.desktop_audio.vad_speech_threshold = 0.72
+    settings.desktop_audio.vad_hangover_ms = 950
+    settings.desktop_audio.vad_pre_roll_ms = 420
+    changed = controller._build_stt_runtime_signature(settings)
+
+    assert baseline != changed
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_updates_peer_translation_flags_on_hub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    controller._last_stt_runtime_signature = controller._build_stt_runtime_signature(
+        controller.settings
+    )
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
+    )
+
+    updated = AppSettings()
+    updated.ui.peer_translation_enabled = True
+    updated.ui.integrated_context_enabled = True
+
+    await controller.apply_settings(updated)
+
+    assert controller.hub.peer_translation_enabled is True
+    assert controller.hub.integrated_context_enabled is True
 
 
 @pytest.mark.asyncio

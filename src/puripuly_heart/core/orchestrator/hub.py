@@ -65,6 +65,7 @@ class ClientHub:
     stt: STTProvider | None
     llm: LLMProvider | None
     osc: SmartOscQueue
+    peer_stt: STTProvider | None = None
     clock: Clock = SystemClock()
 
     source_language: str = "ko"
@@ -98,6 +99,7 @@ class ClientHub:
     _translation_history: list[ContextEntry] = field(default_factory=list)  # Context memory
     _speech_ended_ids: set[UUID] = field(default_factory=set)  # Track SpeechEnd arrivals
     _stt_task: asyncio.Task[None] | None = None
+    _peer_stt_task: asyncio.Task[None] | None = None
     _osc_flush_task: asyncio.Task[None] | None = None
     _running: bool = False
     _last_promo_time: float | None = None
@@ -122,7 +124,7 @@ class ClientHub:
             merge_buffer=self._merge_buffer,
             alias_target=self,
         )
-        self.peer_runtime = ChannelRuntime(channel="peer")
+        self.peer_runtime = ChannelRuntime(channel="peer", stt=self.peer_stt)
         self.context_resolver = ContextResolver(
             clock=self.clock,
             local_time_window_s=self.context_time_window_s,
@@ -180,7 +182,9 @@ class ClientHub:
             return
         self._running = True
         if self.stt is not None:
-            self._stt_task = asyncio.create_task(self._run_stt_event_loop())
+            self._stt_task = asyncio.create_task(self._run_stt_event_loop(self.stt))
+        if self.peer_stt is not None:
+            self._peer_stt_task = asyncio.create_task(self._run_stt_event_loop(self.peer_stt))
         if auto_flush_osc:
             self._osc_flush_task = asyncio.create_task(self._run_osc_flush_loop())
 
@@ -199,21 +203,38 @@ class ClientHub:
 
         if self.stt is not None:
             await self.stt.close()
+        if self.peer_stt is not None:
+            await self.peer_stt.close()
 
         if self.llm is not None:
             await self.llm.close()
 
     async def replace_stt_provider(self, stt: STTProvider | None) -> None:
         old_stt = self.stt
-        await self._stop_stt_event_loop()
-        await self._reset_stt_runtime_state()
+        await self._stop_stt_task("_stt_task")
+        await self.self_runtime.reset_runtime_state()
+        self._sync_self_runtime_aliases()
 
         if old_stt is not None:
             await old_stt.close()
 
         self.stt = stt
+        self.self_runtime.stt = stt
         if self._running and self.stt is not None:
-            self._stt_task = asyncio.create_task(self._run_stt_event_loop())
+            self._stt_task = asyncio.create_task(self._run_stt_event_loop(self.stt))
+
+    async def replace_peer_stt_provider(self, stt: STTProvider | None) -> None:
+        old_stt = self.peer_stt
+        await self._stop_stt_task("_peer_stt_task")
+        await self.peer_runtime.reset_runtime_state()
+
+        if old_stt is not None:
+            await old_stt.close()
+
+        self.peer_stt = stt
+        self.peer_runtime.stt = stt
+        if self._running and self.peer_stt is not None:
+            self._peer_stt_task = asyncio.create_task(self._run_stt_event_loop(self.peer_stt))
 
     def mark_promo_eligible(self) -> None:
         """Mark that user clicked STT button. Next STREAMING state will send promo."""
@@ -279,6 +300,10 @@ class ClientHub:
         if self.stt is not None:
             await self.stt.handle_vad_event(event)
 
+    async def handle_peer_vad_event(self, event: VadEvent) -> None:
+        if self.peer_stt is not None:
+            await self.peer_stt.handle_vad_event(event)
+
     async def submit_text(self, text: str, *, source: str = "You") -> UUID:
         text = text.strip()
         if not text:
@@ -321,9 +346,9 @@ class ClientHub:
             utterance_id, default_channel=channel
         ).get_or_create_bundle(utterance_id)
 
-    async def _run_stt_event_loop(self) -> None:
+    async def _run_stt_event_loop(self, provider: STTProvider) -> None:
         try:
-            async for ev in self.stt.events():
+            async for ev in provider.events():
                 await self._handle_stt_event(ev)
         except asyncio.CancelledError:
             raise
@@ -332,10 +357,14 @@ class ClientHub:
             raise
 
     async def _stop_stt_event_loop(self) -> None:
-        if self._stt_task is None:
+        await self._stop_stt_task("_stt_task")
+        await self._stop_stt_task("_peer_stt_task")
+
+    async def _stop_stt_task(self, attr_name: str) -> None:
+        task = getattr(self, attr_name)
+        if task is None:
             return
-        task = self._stt_task
-        self._stt_task = None
+        setattr(self, attr_name, None)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
@@ -347,19 +376,30 @@ class ClientHub:
     async def _handle_stt_event(self, event: object) -> None:
         if isinstance(event, STTSessionStateEvent):
             await self.ui_events.put(
-                UIEvent(type=UIEventType.SESSION_STATE_CHANGED, payload=event.state)
+                UIEvent(
+                    type=UIEventType.SESSION_STATE_CHANGED,
+                    payload=event.state,
+                    channel=event.channel,
+                )
             )
-            if event.state == STTSessionState.STREAMING:
+            if event.state == STTSessionState.STREAMING and event.channel == "self":
                 self._send_stt_connected_notification()
             return
 
         if isinstance(event, STTErrorEvent):
             await self.ui_events.put(
-                UIEvent(type=UIEventType.ERROR, payload=event.message, source="Mic")
+                UIEvent(
+                    type=UIEventType.ERROR,
+                    payload=event.message,
+                    source="Peer" if event.channel == "peer" else "Mic",
+                    channel=event.channel,
+                )
             )
             return
 
         if isinstance(event, STTPartialEvent):
+            if event.channel == "peer":
+                return
             self._send_stt_connected_notification()
             if self.low_latency_mode:
                 return
@@ -370,20 +410,28 @@ class ClientHub:
             return
 
         if isinstance(event, STTFinalEvent):
-            self._send_stt_connected_notification()
-            if self.low_latency_mode:
+            runtime = self._runtime_for_channel(event.channel)
+            source = "Peer" if runtime.channel == "peer" else "Mic"
+            if runtime.channel == "self":
+                self._send_stt_connected_notification()
+            if self.low_latency_mode and runtime.channel == "self":
                 await self._handle_low_latency_final(event.transcript)
                 return
-            await self._handle_transcript(event.transcript, is_final=True, source="Mic")
-            if self.llm is None or not self.translation_enabled:
+            await self._handle_transcript(event.transcript, is_final=True, source=source)
+            if self.llm is None or not self._translation_enabled_for_runtime(runtime):
                 logger.info(
-                    f"[Hub] Skipping translation (llm={self.llm is not None}, enabled={self.translation_enabled})"
+                    "[Hub] Skipping translation (llm=%s, self_enabled=%s, peer_enabled=%s, channel=%s)",
+                    self.llm is not None,
+                    self.translation_enabled,
+                    self.peer_translation_enabled,
+                    runtime.channel,
                 )
-                await self._enqueue_osc(
-                    event.transcript.utterance_id,
-                    transcript_text=event.transcript.text,
-                    translation_text=None,
-                )
+                if self._should_publish_to_chatbox(runtime):
+                    await self._enqueue_osc(
+                        event.transcript.utterance_id,
+                        transcript_text=event.transcript.text,
+                        translation_text=None,
+                    )
             else:
                 await self._ensure_translation(event.transcript)
             return
@@ -1127,6 +1175,18 @@ class ClientHub:
     def _should_publish_to_chatbox(self, runtime: ChannelRuntime) -> bool:
         return runtime.channel == self.active_chatbox_channel
 
+    def _translation_enabled_for_runtime(self, runtime: ChannelRuntime) -> bool:
+        if runtime.channel == "peer":
+            return self.peer_translation_enabled
+        return self.translation_enabled
+
+    def advance_peer_session_epoch(self) -> int:
+        self.peer_runtime.peer_epoch += 1
+        return self.peer_runtime.peer_epoch
+
+    def reset_peer_session_for_test(self) -> int:
+        return self.advance_peer_session_epoch()
+
     def _expected_peer_epoch(
         self,
         runtime: ChannelRuntime,
@@ -1225,6 +1285,8 @@ class ClientHub:
         if self.llm is None:
             return
         runtime = self._runtime_for_channel(transcript.channel)
+        if not self._translation_enabled_for_runtime(runtime):
+            return
         utterance_id = transcript.utterance_id
         if utterance_id in runtime.translation_tasks:
             return
@@ -1314,6 +1376,32 @@ class ClientHub:
             await self._enqueue_osc(
                 utterance_id, transcript_text=text, translation_text=translation.text
             )
+
+    async def handle_peer_transcript_final_for_test(
+        self,
+        *,
+        text: str,
+        speaker_label: str | None = None,
+        peer_epoch: int | None = None,
+        source: str = "Peer",
+    ) -> UUID:
+        utterance_id = uuid4()
+        transcript = Transcript(
+            utterance_id=utterance_id,
+            text=text,
+            is_final=True,
+            created_at=self.clock.now(),
+            channel="peer",
+            speaker_label=speaker_label,
+            peer_epoch=self._expected_peer_epoch(
+                self.peer_runtime,
+                explicit_peer_epoch=peer_epoch,
+            ),
+        )
+        await self._handle_transcript(transcript, is_final=True, source=source)
+        if self.llm is not None and self.peer_translation_enabled:
+            await self._ensure_translation(transcript)
+        return utterance_id
 
     async def _enqueue_osc(
         self, utterance_id: UUID, *, transcript_text: str, translation_text: str | None

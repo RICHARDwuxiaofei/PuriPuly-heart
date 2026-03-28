@@ -10,6 +10,7 @@ import flet as ft
 
 from puripuly_heart.app.wiring import (
     create_llm_provider,
+    create_peer_stt_backend,
     create_secret_store,
     create_stt_backend,
 )
@@ -21,6 +22,8 @@ from puripuly_heart.config.settings import (
     load_settings,
     save_settings,
 )
+from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
+from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.audio.source import (
     SoundDeviceAudioSource,
@@ -57,6 +60,18 @@ STT_RESET_DEADLINE_S = 300.0
 
 
 @dataclass(slots=True)
+class _HubVadSink:
+    hub: ClientHub
+    channel: str = "self"
+
+    async def handle_vad_event(self, event) -> None:  # noqa: ANN001
+        if self.channel == "peer":
+            await self.hub.handle_peer_vad_event(event)
+            return
+        await self.hub.handle_vad_event(event)
+
+
+@dataclass(slots=True)
 class GuiController:
     page: ft.Page
     app: object
@@ -74,8 +89,11 @@ class GuiController:
 
     _bridge_task: asyncio.Task[None] | None = None
     _mic_task: asyncio.Task[None] | None = None
+    _peer_mic_task: asyncio.Task[None] | None = None
     _audio_source: SoundDeviceAudioSource | None = None
+    _peer_audio_source: DesktopPeerPipeline | None = None
     _vad: VadGating | None = None
+    _peer_vad: VadGating | None = None
     _stt_desired: bool = False
     _stt_switch_lock: asyncio.Lock | None = None
     _stt_switch_task: asyncio.Task[None] | None = None
@@ -161,6 +179,7 @@ class GuiController:
             settings.languages.source_language,
             settings.audio.input_host_api,
             settings.audio.input_device,
+            settings.ui.peer_translation_enabled,
             settings.stt.vad_speech_threshold,
             settings.stt.low_latency_mode,
             settings.stt.low_latency_merge_gap_ms,
@@ -170,6 +189,10 @@ class GuiController:
             settings.audio.ring_buffer_ms,
             settings.audio.internal_sample_rate_hz,
             settings.audio.internal_channels,
+            settings.desktop_audio.output_device,
+            settings.desktop_audio.vad_speech_threshold,
+            settings.desktop_audio.vad_hangover_ms,
+            settings.desktop_audio.vad_pre_roll_ms,
             custom_vocab_enabled,
             custom_terms,
         )
@@ -249,7 +272,7 @@ class GuiController:
         await self._stt_switch_task
 
     async def _replace_runtime_stt_provider(self) -> None:
-        if self._mic_task is not None:
+        if self._mic_task is not None or self._peer_mic_task is not None:
             await self._stop_mic_loop()
         self._stt_restart_requested = False
         await self._rebuild_stt_provider()
@@ -270,6 +293,9 @@ class GuiController:
                     if self.hub is not None:
                         with contextlib.suppress(Exception):
                             await self.hub.stt.close()
+                        if self.hub.peer_stt is not None:
+                            with contextlib.suppress(Exception):
+                                await self.hub.peer_stt.close()
                 else:
                     if self.hub is None:
                         logger.warning("[STT] Enable requested before hub is ready")
@@ -278,11 +304,17 @@ class GuiController:
                         await self._stop_mic_loop()
                         with contextlib.suppress(Exception):
                             await self.hub.stt.close()
+                        if self.hub.peer_stt is not None:
+                            with contextlib.suppress(Exception):
+                                await self.hub.peer_stt.close()
                     await self._start_mic_loop()
                     # Pre-warm STT session for faster first response
                     if self.hub is not None and self.hub.stt is not None:
                         with contextlib.suppress(Exception):
                             await self.hub.stt.warmup()
+                    if self.hub is not None and self.hub.peer_stt is not None:
+                        with contextlib.suppress(Exception):
+                            await self.hub.peer_stt.warmup()
 
                 if desired == self._stt_desired and not self._stt_restart_requested:
                     break
@@ -324,6 +356,10 @@ class GuiController:
             self.hub.source_language = settings.languages.source_language
             self.hub.target_language = settings.languages.target_language
             self.hub.system_prompt = settings.system_prompt
+            self.hub.peer_translation_enabled = (
+                settings.ui.peer_translation_enabled and self.hub.peer_stt is not None
+            )
+            self.hub.integrated_context_enabled = settings.ui.integrated_context_enabled
             self.hub.low_latency_mode = settings.stt.low_latency_mode
             self.hub.low_latency_merge_gap_ms = settings.stt.low_latency_merge_gap_ms
             self.hub.low_latency_spec_retry_max = settings.stt.low_latency_spec_retry_max
@@ -452,6 +488,7 @@ class GuiController:
 
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
         stt = None
+        peer_stt = None
         try:
             backend = create_stt_backend(self.settings, secrets=secrets)
             stt = ManagedSTTProvider(
@@ -464,8 +501,28 @@ class GuiController:
             )
         except Exception as exc:
             self._log_error(f"STT backend not available: {exc}")
+        if self.settings.ui.peer_translation_enabled:
+            try:
+                peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
+                peer_stt = ManagedSTTProvider(
+                    backend=peer_backend,
+                    sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                    channel="peer",
+                    peer_epoch_resolver=self.hub.advance_peer_session_epoch,
+                    clock=self.clock,
+                    reset_deadline_s=STT_RESET_DEADLINE_S,
+                    drain_timeout_s=self.settings.stt.drain_timeout_s,
+                    bridging_ms=max(1, self.settings.desktop_audio.vad_pre_roll_ms),
+                )
+            except Exception as exc:
+                self._log_error(f"Peer STT backend not available: {exc}")
 
         await self.hub.replace_stt_provider(stt)
+        await self.hub.replace_peer_stt_provider(peer_stt)
+        self.hub.peer_translation_enabled = (
+            self.settings.ui.peer_translation_enabled and peer_stt is not None
+        )
+        self.hub.integrated_context_enabled = self.settings.ui.integrated_context_enabled
 
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
@@ -524,6 +581,7 @@ class GuiController:
             llm = create_llm_provider(self.settings, secrets=secrets)
 
         stt = None
+        peer_stt = None
         try:
             backend = create_stt_backend(self.settings, secrets=secrets)
             stt = ManagedSTTProvider(
@@ -536,6 +594,21 @@ class GuiController:
             )
         except Exception as exc:
             self._log_error(f"STT backend not available: {exc}")
+        if self.settings.ui.peer_translation_enabled:
+            try:
+                peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
+                peer_stt = ManagedSTTProvider(
+                    backend=peer_backend,
+                    sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                    channel="peer",
+                    peer_epoch_resolver=lambda: hub.advance_peer_session_epoch(),
+                    clock=self.clock,
+                    reset_deadline_s=STT_RESET_DEADLINE_S,
+                    drain_timeout_s=self.settings.stt.drain_timeout_s,
+                    bridging_ms=max(1, self.settings.desktop_audio.vad_pre_roll_ms),
+                )
+            except Exception as exc:
+                self._log_error(f"Peer STT backend not available: {exc}")
 
         sender = VrchatOscUdpSender(
             host=self.settings.osc.host,
@@ -556,12 +629,16 @@ class GuiController:
             stt=stt,
             llm=llm,
             osc=osc,
+            peer_stt=peer_stt,
             clock=self.clock,
             source_language=self.settings.languages.source_language,
             target_language=self.settings.languages.target_language,
             system_prompt=self.settings.system_prompt,
             fallback_transcript_only=True,
             translation_enabled=True,
+            peer_translation_enabled=self.settings.ui.peer_translation_enabled
+            and peer_stt is not None,
+            integrated_context_enabled=self.settings.ui.integrated_context_enabled,
             low_latency_mode=self.settings.stt.low_latency_mode,
             low_latency_merge_gap_ms=self.settings.stt.low_latency_merge_gap_ms,
             low_latency_spec_retry_max=self.settings.stt.low_latency_spec_retry_max,
@@ -591,10 +668,15 @@ class GuiController:
         await self._configure_vrc_mic_receiver(enabled=self.settings.osc.vrc_mic_intercept)
 
     async def _start_mic_loop(self) -> None:
-        if self._mic_task is not None:
-            return
         assert self.settings is not None
         assert self.hub is not None
+
+        if self._mic_task is not None and (
+            not self.settings.ui.peer_translation_enabled
+            or self._peer_mic_task is not None
+            or self.hub.peer_stt is None
+        ):
+            return
 
         try:
             model_path = ensure_silero_vad_onnx()
@@ -602,86 +684,109 @@ class GuiController:
             self._log_error(f"Failed to prepare Silero VAD model ({SILERO_VAD_VERSION}): {exc}")
             return
 
-        vad = VadGating(
-            engine=SileroVadOnnx(model_path=model_path),
-            sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-            ring_buffer_ms=self.settings.audio.ring_buffer_ms,
-            speech_threshold=self.settings.stt.vad_speech_threshold,
-            hangover_ms=(
-                self.settings.stt.low_latency_vad_hangover_ms
-                if self.settings.stt.low_latency_mode
-                else 1100
-            ),
-        )
-
-        def _resolve_device(host_api: str, device: str) -> int | None:
-            try:
-                return resolve_sounddevice_input_device(host_api=host_api, device=device)
-            except Exception as exc:
-                logger.warning(
-                    "Device resolution failed (host_api=%r, device=%r): %s", host_api, device, exc
-                )
-                return None
-
-        def _open_source(dev_idx: int | None) -> SoundDeviceAudioSource:
-            return SoundDeviceAudioSource(
-                sample_rate_hz=None,
-                channels=self.settings.audio.internal_channels,
-                device=dev_idx,
+        if self._mic_task is None:
+            vad = VadGating(
+                engine=SileroVadOnnx(model_path=model_path),
+                sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                ring_buffer_ms=self.settings.audio.ring_buffer_ms,
+                speech_threshold=self.settings.stt.vad_speech_threshold,
+                hangover_ms=(
+                    self.settings.stt.low_latency_vad_hangover_ms
+                    if self.settings.stt.low_latency_mode
+                    else 1100
+                ),
             )
 
-        host_api = self.settings.audio.input_host_api
-        device_name = self.settings.audio.input_device
-
-        # 1차 시도: 설정된 Host API + 마이크
-        device_idx = _resolve_device(host_api, device_name)
-        source: SoundDeviceAudioSource | None = None
-
-        try:
-            source = _open_source(device_idx)
-            logger.info("Microphone opened (device_idx=%s)", device_idx)
-        except Exception as exc:
-            logger.error(
-                "Failed to open microphone (host_api=%r, device=%r): %s", host_api, device_name, exc
-            )
-
-        # 2차 시도: Host API 무시, 마이크 이름만
-        if source is None and device_name:
-            fallback_idx = _resolve_device("", device_name)
-            if fallback_idx != device_idx:
+            def _resolve_device(host_api: str, device: str) -> int | None:
                 try:
-                    source = _open_source(fallback_idx)
-                    logger.info("Microphone opened with fallback (device_idx=%s)", fallback_idx)
+                    return resolve_sounddevice_input_device(host_api=host_api, device=device)
                 except Exception as exc:
-                    logger.error("Fallback microphone failed: %s", exc)
+                    logger.warning(
+                        "Device resolution failed (host_api=%r, device=%r): %s",
+                        host_api,
+                        device,
+                        exc,
+                    )
+                    return None
 
-        # 3차 시도: 시스템 기본 장치
-        if source is None:
+            def _open_source(dev_idx: int | None) -> SoundDeviceAudioSource:
+                return SoundDeviceAudioSource(
+                    sample_rate_hz=None,
+                    channels=self.settings.audio.internal_channels,
+                    device=dev_idx,
+                )
+
+            host_api = self.settings.audio.input_host_api
+            device_name = self.settings.audio.input_device
+
+            # 1차 시도: 설정된 Host API + 마이크
+            device_idx = _resolve_device(host_api, device_name)
+            source: SoundDeviceAudioSource | None = None
+
             try:
-                source = _open_source(None)
-                logger.info("Microphone opened with system default")
+                source = _open_source(device_idx)
+                logger.info("Microphone opened (device_idx=%s)", device_idx)
             except Exception as exc:
-                logger.error("System default microphone failed: %s", exc)
+                logger.error(
+                    "Failed to open microphone (host_api=%r, device=%r): %s",
+                    host_api,
+                    device_name,
+                    exc,
+                )
 
-        if source is None:
-            self._log_error("All microphone attempts failed")
-            return
+            # 2차 시도: Host API 무시, 마이크 이름만
+            if source is None and device_name:
+                fallback_idx = _resolve_device("", device_name)
+                if fallback_idx != device_idx:
+                    try:
+                        source = _open_source(fallback_idx)
+                        logger.info("Microphone opened with fallback (device_idx=%s)", fallback_idx)
+                    except Exception as exc:
+                        logger.error("Fallback microphone failed: %s", exc)
 
-        self._vad = vad
-        self._audio_source = source
-        self._mic_task = asyncio.create_task(self._run_mic_loop())
+            # 3차 시도: 시스템 기본 장치
+            if source is None:
+                try:
+                    source = _open_source(None)
+                    logger.info("Microphone opened with system default")
+                except Exception as exc:
+                    logger.error("System default microphone failed: %s", exc)
+
+            if source is None:
+                self._log_error("All microphone attempts failed")
+                return
+
+            self._vad = vad
+            self._audio_source = source
+            self._mic_task = asyncio.create_task(self._run_mic_loop())
+
+        if (
+            self.settings.ui.peer_translation_enabled
+            and self.hub.peer_stt is not None
+            and self._peer_mic_task is None
+        ):
+            await self._start_peer_loop(model_path)
 
     async def _stop_mic_loop(self) -> None:
         if self._mic_task is not None:
             self._mic_task.cancel()
             await asyncio.gather(self._mic_task, return_exceptions=True)
             self._mic_task = None
+        if self._peer_mic_task is not None:
+            self._peer_mic_task.cancel()
+            await asyncio.gather(self._peer_mic_task, return_exceptions=True)
+            self._peer_mic_task = None
 
         if self._audio_source is not None:
             with contextlib.suppress(Exception):
                 await self._audio_source.close()
             self._audio_source = None
+        if self._peer_audio_source is not None:
+            with contextlib.suppress(Exception):
+                await self._peer_audio_source.close()
+            self._peer_audio_source = None
         self._vad = None
+        self._peer_vad = None
         if self.vrc_mic_audio_gate is not None:
             self.vrc_mic_audio_gate.reset()
 
@@ -696,7 +801,7 @@ class GuiController:
             await run_audio_vad_loop(
                 source=self._audio_source,
                 vad=self._vad,
-                sink=self.hub,
+                sink=_HubVadSink(hub=self.hub),
                 target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,  # type: ignore[union-attr]
                 audio_gate=self.vrc_mic_audio_gate,
             )
@@ -704,6 +809,49 @@ class GuiController:
             raise
         except Exception as exc:
             self._log_error(f"Mic loop error: {exc}")
+
+    async def _start_peer_loop(self, model_path) -> None:  # noqa: ANN001
+        assert self.settings is not None
+
+        try:
+            source = DesktopPeerPipeline(
+                source=DesktopLoopbackAudioSource(
+                    device_name=self.settings.desktop_audio.output_device
+                ),
+                target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+            )
+        except Exception as exc:
+            self._log_error(f"Desktop loopback open failed: {exc}")
+            return
+
+        self._peer_vad = VadGating(
+            engine=SileroVadOnnx(model_path=model_path),
+            sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+            ring_buffer_ms=max(1, self.settings.desktop_audio.vad_pre_roll_ms),
+            speech_threshold=self.settings.desktop_audio.vad_speech_threshold,
+            hangover_ms=self.settings.desktop_audio.vad_hangover_ms,
+        )
+        self._peer_audio_source = source
+        self._peer_mic_task = asyncio.create_task(self._run_peer_mic_loop())
+
+    async def _run_peer_mic_loop(self) -> None:
+        assert self.hub is not None
+        assert self._peer_audio_source is not None
+        assert self._peer_vad is not None
+
+        from puripuly_heart.app.headless_mic import run_audio_vad_loop
+
+        try:
+            await run_audio_vad_loop(
+                source=self._peer_audio_source,
+                vad=self._peer_vad,
+                sink=_HubVadSink(hub=self.hub, channel="peer"),
+                target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,  # type: ignore[union-attr]
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._log_error(f"Peer desktop loop error: {exc}")
 
     async def _configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
         if self._vrc_receiver_lock is None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass
@@ -9,11 +10,14 @@ import numpy as np
 
 from puripuly_heart.app.wiring import (
     create_llm_provider,
+    create_peer_stt_backend,
     create_secret_store,
     create_stt_backend,
 )
 from puripuly_heart.config.paths import default_vad_model_path
 from puripuly_heart.config.settings import AppSettings
+from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
+from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
 from puripuly_heart.core.audio.format import normalize_audio_f32
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.audio.source import (
@@ -39,6 +43,18 @@ STT_RESET_DEADLINE_S = 180.0
 
 
 @dataclass(slots=True)
+class _HubVadSink:
+    hub: ClientHub
+    channel: str = "self"
+
+    async def handle_vad_event(self, event) -> None:  # noqa: ANN001
+        if self.channel == "peer":
+            await self.hub.handle_peer_vad_event(event)
+            return
+        await self.hub.handle_vad_event(event)
+
+
+@dataclass(slots=True)
 class HeadlessMicRunner:
     settings: AppSettings
     config_path: Path
@@ -59,6 +75,22 @@ class HeadlessMicRunner:
             drain_timeout_s=self.settings.stt.drain_timeout_s,
             bridging_ms=self.settings.audio.ring_buffer_ms,
         )
+        peer_stt = None
+        if self.settings.ui.peer_translation_enabled:
+            try:
+                peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
+                peer_stt = ManagedSTTProvider(
+                    backend=peer_backend,
+                    sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                    channel="peer",
+                    peer_epoch_resolver=lambda: hub.advance_peer_session_epoch(),
+                    clock=self.clock,
+                    reset_deadline_s=STT_RESET_DEADLINE_S,
+                    drain_timeout_s=self.settings.stt.drain_timeout_s,
+                    bridging_ms=max(1, self.settings.desktop_audio.vad_pre_roll_ms),
+                )
+            except Exception as exc:
+                logger.warning("Peer STT backend unavailable: %s", exc)
 
         sender = VrchatOscUdpSender(
             host=self.settings.osc.host,
@@ -79,11 +111,15 @@ class HeadlessMicRunner:
             stt=stt,
             llm=llm,
             osc=osc,
+            peer_stt=peer_stt,
             clock=self.clock,
             source_language=self.settings.languages.source_language,
             target_language=self.settings.languages.target_language,
             system_prompt=self.settings.system_prompt,
             fallback_transcript_only=not self.use_llm,
+            peer_translation_enabled=self.settings.ui.peer_translation_enabled
+            and peer_stt is not None,
+            integrated_context_enabled=self.settings.ui.integrated_context_enabled,
             low_latency_mode=self.settings.stt.low_latency_mode,
             low_latency_merge_gap_ms=self.settings.stt.low_latency_merge_gap_ms,
             low_latency_spec_retry_max=self.settings.stt.low_latency_spec_retry_max,
@@ -170,6 +206,28 @@ class HeadlessMicRunner:
             logger.error("All microphone attempts failed")
             return 2
 
+        peer_vad = None
+        peer_source = None
+        if self.settings.ui.peer_translation_enabled and hub.peer_stt is not None:
+            try:
+                peer_vad = VadGating(
+                    engine=SileroVadOnnx(model_path=self.vad_model_path),
+                    sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                    ring_buffer_ms=max(1, self.settings.desktop_audio.vad_pre_roll_ms),
+                    speech_threshold=self.settings.desktop_audio.vad_speech_threshold,
+                    hangover_ms=self.settings.desktop_audio.vad_hangover_ms,
+                )
+                peer_source = DesktopPeerPipeline(
+                    source=DesktopLoopbackAudioSource(
+                        device_name=self.settings.desktop_audio.output_device
+                    ),
+                    target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                )
+            except Exception as exc:
+                logger.warning("Desktop peer loop unavailable: %s", exc)
+                peer_vad = None
+                peer_source = None
+
         vrc_mic_state = VrcMicState()
         vrc_mic_audio_gate = VrcMicAudioGate(
             state=vrc_mic_state,
@@ -188,18 +246,33 @@ class HeadlessMicRunner:
 
         await hub.start(auto_flush_osc=True)
         try:
-            await run_audio_vad_loop(
-                source=source,
-                vad=vad,
-                sink=hub,
-                target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-                audio_gate=vrc_mic_audio_gate,
-            )
+            loops = [
+                run_audio_vad_loop(
+                    source=source,
+                    vad=vad,
+                    sink=_HubVadSink(hub=hub),
+                    target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                    audio_gate=vrc_mic_audio_gate,
+                )
+            ]
+            if peer_source is not None and peer_vad is not None:
+                loops.append(
+                    run_audio_vad_loop(
+                        source=peer_source,
+                        vad=peer_vad,
+                        sink=_HubVadSink(hub=hub, channel="peer"),
+                        target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                    )
+                )
+            await asyncio.gather(*loops)
         except KeyboardInterrupt:
             return 0
         finally:
             with contextlib.suppress(Exception):
                 await source.close()
+            if peer_source is not None:
+                with contextlib.suppress(Exception):
+                    await peer_source.close()
             await hub.stop()
             if receiver is not None:
                 receiver.stop()
