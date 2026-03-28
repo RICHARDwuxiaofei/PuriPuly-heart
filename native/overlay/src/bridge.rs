@@ -1,5 +1,6 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use std::io::ErrorKind;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
@@ -147,8 +148,24 @@ impl BridgeClient {
     }
 }
 
-fn bridge_error_from_read_error(_error: tokio_tungstenite::tungstenite::Error) -> BridgeError {
-    BridgeError::Disconnected
+fn bridge_error_from_read_error(error: tokio_tungstenite::tungstenite::Error) -> BridgeError {
+    match error {
+        tokio_tungstenite::tungstenite::Error::ConnectionClosed
+        | tokio_tungstenite::tungstenite::Error::AlreadyClosed => BridgeError::Disconnected,
+        tokio_tungstenite::tungstenite::Error::Io(io_error)
+            if matches!(
+                io_error.kind(),
+                ErrorKind::BrokenPipe
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::NotConnected
+                    | ErrorKind::UnexpectedEof
+            ) =>
+        {
+            BridgeError::Disconnected
+        }
+        other => BridgeError::Protocol(other.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -161,6 +178,17 @@ mod tests {
         assert!(matches!(
             bridge_error_from_read_error(error),
             BridgeError::Disconnected
+        ));
+    }
+
+    #[test]
+    fn read_side_protocol_errors_remain_protocol_failures() {
+        let error = tokio_tungstenite::tungstenite::Error::Protocol(
+            tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
+        );
+        assert!(matches!(
+            bridge_error_from_read_error(error),
+            BridgeError::Protocol(_)
         ));
     }
 }

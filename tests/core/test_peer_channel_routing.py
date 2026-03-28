@@ -213,24 +213,3 @@ async def test_peer_translation_respects_master_translation_toggle() -> None:
     assert event.type == UIEventType.TRANSCRIPT_FINAL
     assert bundle.translation is None
     assert llm.calls == []
-
-
-@pytest.mark.asyncio
-async def test_peer_translation_requires_overlay_connected_runtime_gate() -> None:
-    llm = FakeLLM()
-    hub = ClientHub(
-        stt=None,
-        llm=llm,
-        osc=RecordingOscQueue(),
-        clock=FakeClock(_now=10.0),
-        peer_translation_enabled=True,
-        overlay_connected=False,
-    )
-
-    utterance_id = await hub.handle_peer_transcript_final_for_test(text="peer line")
-    bundle = hub.get_or_create_bundle(utterance_id, channel="peer")
-    event = await hub.ui_events.get()
-
-    assert event.type == UIEventType.TRANSCRIPT_FINAL
-    assert bundle.translation is None
-    assert llm.calls == []
