@@ -1177,7 +1177,7 @@ class ClientHub:
 
     def _translation_enabled_for_runtime(self, runtime: ChannelRuntime) -> bool:
         if runtime.channel == "peer":
-            return self.peer_translation_enabled
+            return self.translation_enabled and self.peer_translation_enabled
         return self.translation_enabled
 
     def advance_peer_session_epoch(self) -> int:

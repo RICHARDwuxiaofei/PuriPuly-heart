@@ -54,6 +54,15 @@ class _HubVadSink:
         await self.hub.handle_vad_event(event)
 
 
+async def _run_peer_loop_with_isolation(coro, *, logger_label: str) -> None:  # noqa: ANN001
+    try:
+        await coro
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.error("%s failed: %s", logger_label, exc)
+
+
 @dataclass(slots=True)
 class HeadlessMicRunner:
     settings: AppSettings
@@ -257,11 +266,14 @@ class HeadlessMicRunner:
             ]
             if peer_source is not None and peer_vad is not None:
                 loops.append(
-                    run_audio_vad_loop(
-                        source=peer_source,
-                        vad=peer_vad,
-                        sink=_HubVadSink(hub=hub, channel="peer"),
-                        target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                    _run_peer_loop_with_isolation(
+                        run_audio_vad_loop(
+                            source=peer_source,
+                            vad=peer_vad,
+                            sink=_HubVadSink(hub=hub, channel="peer"),
+                            target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                        ),
+                        logger_label="Peer desktop loop",
                     )
                 )
             await asyncio.gather(*loops)

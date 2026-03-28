@@ -12,6 +12,7 @@ from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.gating import SpeechEnd, SpeechStart
 from puripuly_heart.domain.events import UIEventType
+from puripuly_heart.domain.models import Translation
 from tests.helpers.fakes import RecordingOscQueue, samples
 
 
@@ -54,6 +55,28 @@ class FakePeerBackend:
         session = FakePeerSession()
         self.sessions.append(session)
         return session
+
+
+@dataclass(slots=True)
+class FakeLLM:
+    calls: list[str] = field(default_factory=list)
+
+    async def translate(
+        self,
+        *,
+        utterance_id,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ) -> Translation:
+        _ = (utterance_id, system_prompt, source_language, target_language, context)
+        self.calls.append(text)
+        return Translation(utterance_id=utterance_id, text="translated")
+
+    async def close(self) -> None:
+        return None
 
 
 @pytest.mark.asyncio
@@ -169,3 +192,24 @@ async def test_peer_epoch_only_changes_when_a_new_provider_session_opens() -> No
     assert len(backend.sessions) == 2
 
     await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_peer_translation_respects_master_translation_toggle() -> None:
+    llm = FakeLLM()
+    hub = ClientHub(
+        stt=None,
+        llm=llm,
+        osc=RecordingOscQueue(),
+        clock=FakeClock(_now=10.0),
+        translation_enabled=False,
+        peer_translation_enabled=True,
+    )
+
+    utterance_id = await hub.handle_peer_transcript_final_for_test(text="peer line")
+    bundle = hub.get_or_create_bundle(utterance_id, channel="peer")
+    event = await hub.ui_events.get()
+
+    assert event.type == UIEventType.TRANSCRIPT_FINAL
+    assert bundle.translation is None
+    assert llm.calls == []
