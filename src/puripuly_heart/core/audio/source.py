@@ -78,7 +78,11 @@ class SoundDeviceAudioSource(AudioSource):
             item = await self._queue.async_q.get()
             if item is None:
                 return
-            yield AudioFrameF32(samples=item, sample_rate_hz=self._actual_sample_rate_hz)
+            yield AudioFrameF32(
+                samples=item,
+                sample_rate_hz=self._actual_sample_rate_hz,
+                channels=self.channels,
+            )
 
     async def close(self) -> None:
         if self._closed:

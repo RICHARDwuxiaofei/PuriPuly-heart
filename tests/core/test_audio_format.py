@@ -3,11 +3,14 @@ from __future__ import annotations
 import numpy as np
 
 from puripuly_heart.core.audio.format import (
+    AudioFrameF32,
     float32_to_pcm16le_bytes,
     mixdown_to_mono_f32,
     normalize_audio_f32,
+    normalize_audio_frame_f32,
     pcm16le_bytes_to_float32,
     resample_f32_linear,
+    reshape_audio_samples_f32,
 )
 from puripuly_heart.core.audio.ring_buffer import RingBufferF32
 
@@ -43,6 +46,24 @@ def test_normalize_audio_resamples_only_when_needed():
     assert first.sample_rate_hz == 16000
     assert second.sample_rate_hz == 16000
     assert second.samples.shape == first.samples.shape
+
+
+def test_reshape_audio_samples_reconstructs_interleaved_frames():
+    interleaved = np.array([0.0, 1.0, 1.0, 0.0], dtype=np.float32)
+    reshaped = reshape_audio_samples_f32(interleaved, channels=2)
+    assert reshaped.shape == (2, 2)
+    assert np.allclose(reshaped, np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32))
+
+
+def test_normalize_audio_frame_uses_channel_metadata_for_mixdown():
+    frame = AudioFrameF32(
+        samples=np.array([0.0, 1.0, 1.0, 0.0], dtype=np.float32),
+        sample_rate_hz=16000,
+        channels=2,
+    )
+    normalized = normalize_audio_frame_f32(frame, target_sample_rate_hz=16000)
+    assert normalized.channels == 1
+    assert np.allclose(normalized.samples, np.array([0.5, 0.5], dtype=np.float32))
 
 
 def test_ring_buffer_returns_last_samples():

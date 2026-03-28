@@ -10,6 +10,23 @@ import numpy as np
 class AudioFrameF32:
     samples: np.ndarray
     sample_rate_hz: int
+    channels: int = 1
+
+
+def reshape_audio_samples_f32(samples: np.ndarray, *, channels: int = 1) -> np.ndarray:
+    if channels <= 0:
+        raise ValueError("channels must be > 0")
+
+    samples = np.asarray(samples, dtype=np.float32)
+    if samples.ndim == 2:
+        return samples
+    if samples.ndim != 1:
+        raise ValueError("samples must be 1D or 2D")
+    if channels == 1:
+        return samples
+    if samples.size % channels != 0:
+        raise ValueError("interleaved samples must divide evenly by channels")
+    return samples.reshape((-1, channels))
 
 
 def mixdown_to_mono_f32(samples: np.ndarray) -> np.ndarray:
@@ -48,13 +65,27 @@ def normalize_audio_f32(
     *,
     input_sample_rate_hz: int,
     target_sample_rate_hz: int,
+    channels: int = 1,
 ) -> AudioFrameF32:
-    mono = mixdown_to_mono_f32(raw_samples)
+    mono = mixdown_to_mono_f32(reshape_audio_samples_f32(raw_samples, channels=channels))
     if input_sample_rate_hz != target_sample_rate_hz:
         mono = resample_f32_linear(
             mono, from_rate_hz=input_sample_rate_hz, to_rate_hz=target_sample_rate_hz
         )
     return AudioFrameF32(samples=mono, sample_rate_hz=target_sample_rate_hz)
+
+
+def normalize_audio_frame_f32(
+    frame: AudioFrameF32,
+    *,
+    target_sample_rate_hz: int,
+) -> AudioFrameF32:
+    return normalize_audio_f32(
+        frame.samples,
+        input_sample_rate_hz=frame.sample_rate_hz,
+        target_sample_rate_hz=target_sample_rate_hz,
+        channels=frame.channels,
+    )
 
 
 def float32_to_pcm16le_bytes(samples: np.ndarray) -> bytes:

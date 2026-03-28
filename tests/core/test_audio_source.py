@@ -142,6 +142,7 @@ async def test_sounddevice_audio_source_frames_and_close(monkeypatch):
 
     frame = await source.frames().__anext__()
     assert frame.sample_rate_hz == 48000
+    assert frame.channels == 1
     np.testing.assert_allclose(frame.samples, np.ones((4,), dtype=np.float32))
 
     stopped_frames = source.frames()
