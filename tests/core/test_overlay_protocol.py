@@ -11,6 +11,7 @@ from puripuly_heart.core.overlay.protocol import (
     SelfTranscriptFinal,
     TranslationFinal,
     TranslationStreamUpdate,
+    UtteranceClosed,
 )
 
 
@@ -130,3 +131,19 @@ def test_final_events_reject_invalid_channel_or_is_final_values() -> None:
 def test_overlay_state_snapshot_from_dict_rejects_non_dict_event_items() -> None:
     with pytest.raises(ValueError, match="dict items"):
         OverlayStateSnapshot.from_dict({"events": ["not-a-dict"]})
+
+
+def test_utterance_closed_round_trips_incomplete_state() -> None:
+    event = UtteranceClosed(
+        event_id="evt-7",
+        seq=13,
+        utterance_id=uuid4(),
+        channel="peer",
+        created_at=103.0,
+        is_final=False,
+    )
+
+    restored = OverlayStateSnapshot.from_dict({"events": [event.to_dict()]}).events[0]
+
+    assert isinstance(restored, UtteranceClosed)
+    assert restored.is_final is False

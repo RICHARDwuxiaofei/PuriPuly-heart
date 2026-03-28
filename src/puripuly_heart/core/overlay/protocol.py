@@ -124,7 +124,12 @@ class TranslationFinal(TranslationStreamUpdate):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class UtteranceClosed(OverlayEvent):
+    is_final: bool = True
+
     EVENT_TYPE: ClassVar[str] = "utterance_closed"
+
+    def _extra_dict(self) -> dict[str, object]:
+        return {"is_final": self.is_final}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -210,6 +215,12 @@ def overlay_event_from_dict(data: dict[str, object]) -> OverlayEventUnion:
                 str(data["speaker_label"]) if data.get("speaker_label") is not None else None
             ),
             peer_epoch=int(data["peer_epoch"]) if data.get("peer_epoch") is not None else None,
+        )
+
+    if cls is UtteranceClosed:
+        return cls(
+            **common,
+            is_final=bool(data.get("is_final", True)),
         )
 
     return cls(**common)

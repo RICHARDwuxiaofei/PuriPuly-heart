@@ -18,6 +18,11 @@ from puripuly_heart.core.orchestrator.channel_runtime import (
 )
 from puripuly_heart.core.orchestrator.context import ContextMode, ContextResolver
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
+from puripuly_heart.core.overlay.sink import (
+    OverlayEventAdapter,
+    OverlaySink,
+    OverlayStreamCoalescer,
+)
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadEvent
 from puripuly_heart.domain.events import (
     STTErrorEvent,
@@ -66,6 +71,7 @@ class ClientHub:
     llm: LLMProvider | None
     osc: SmartOscQueue
     peer_stt: STTProvider | None = None
+    overlay_sink: OverlaySink | None = None
     clock: Clock = SystemClock()
 
     source_language: str = "ko"
@@ -109,8 +115,12 @@ class ClientHub:
     peer_runtime: ChannelRuntime = field(init=False)
     context_resolver: ContextResolver = field(init=False)
     active_chatbox_channel: ChannelId = field(init=False, default="self")
+    overlay_event_adapter: OverlayEventAdapter = field(init=False)
+    overlay_stream_coalesce_ms: int = 300
+    last_error_source: str | None = None
 
     def __post_init__(self) -> None:
+        self.overlay_event_adapter = OverlayEventAdapter(clock=self.clock)
         self.self_runtime = ChannelRuntime(
             channel="self",
             stt=self.stt,
@@ -147,6 +157,10 @@ class ClientHub:
                 resolver = object.__getattribute__(self, "context_resolver")
             except AttributeError:
                 resolver = None
+            try:
+                overlay_event_adapter = object.__getattribute__(self, "overlay_event_adapter")
+            except AttributeError:
+                overlay_event_adapter = None
             if resolver is not None:
                 if name == "clock":
                     resolver.clock = value  # type: ignore[assignment]
@@ -158,6 +172,8 @@ class ClientHub:
                     resolver.integrated_time_window_s = value  # type: ignore[assignment]
                 elif name == "integrated_context_max_entries":
                     resolver.integrated_max_entries = value  # type: ignore[assignment]
+            if name == "clock" and overlay_event_adapter is not None:
+                overlay_event_adapter.clock = value  # type: ignore[assignment]
         runtime_field = _SELF_RUNTIME_FIELDS.get(name)
         if runtime_field is None:
             return
@@ -463,6 +479,28 @@ class ClientHub:
                 source=source,
             )
         )
+        if is_final:
+            await self._emit_final_transcript_to_overlay(transcript)
+
+    async def _emit_final_transcript_to_overlay(self, transcript: Transcript) -> None:
+        if self.overlay_sink is None:
+            return
+        await self._emit_overlay_event(
+            self.overlay_event_adapter.transcript_final(
+                transcript,
+                source_language=self.source_language,
+                target_language=self.target_language,
+            )
+        )
+
+    async def _emit_overlay_event(self, event: object) -> None:
+        if self.overlay_sink is None:
+            return
+        try:
+            await self.overlay_sink.emit(event)  # type: ignore[arg-type]
+        except Exception:
+            self.last_error_source = "overlay_sink"
+            logger.exception("[Hub] Overlay sink emit failed")
 
     def _merge_text(self, parts: list[str]) -> str:
         merged = ""
@@ -1206,6 +1244,20 @@ class ClientHub:
         runtime: ChannelRuntime | None = None,
         expected_peer_epoch: int | None = None,
     ) -> tuple[str, str, float]:
+        formatted_prompt, context_str, now, _ = self._prepare_llm_request_with_mode(
+            text,
+            runtime=runtime,
+            expected_peer_epoch=expected_peer_epoch,
+        )
+        return formatted_prompt, context_str, now
+
+    def _prepare_llm_request_with_mode(
+        self,
+        text: str,
+        *,
+        runtime: ChannelRuntime | None = None,
+        expected_peer_epoch: int | None = None,
+    ) -> tuple[str, str, float, ContextMode]:
         _ = text
         runtime = runtime or self.self_runtime
         requested_mode: ContextMode = "integrated" if self.integrated_context_enabled else "local"
@@ -1224,7 +1276,7 @@ class ClientHub:
         )
         logger.info("[Hub] Context mode: %s", applied_mode)
         formatted_prompt = self._format_system_prompt()
-        return formatted_prompt, context_str, now
+        return formatted_prompt, context_str, now, applied_mode
 
     def _normalize_translation(
         self,
@@ -1315,7 +1367,7 @@ class ClientHub:
             return
         runtime = runtime or self.self_runtime
         try:
-            formatted_prompt, context_str, now = self._prepare_llm_request(
+            formatted_prompt, context_str, now, applied_mode = self._prepare_llm_request_with_mode(
                 text,
                 runtime=runtime,
                 expected_peer_epoch=peer_epoch,
@@ -1330,21 +1382,33 @@ class ClientHub:
                 peer_epoch=peer_epoch,
             )
 
-            raw_translation = await self.llm.translate(
-                utterance_id=utterance_id,
-                text=text,
-                system_prompt=formatted_prompt,
-                source_language=self.source_language,
-                target_language=self.target_language,
-                context=context_str,
-            )
-            translation = self._normalize_translation(
-                raw_translation,
-                runtime=runtime,
-                text=text,
-                speaker_label=speaker_label,
-                peer_epoch=peer_epoch,
-            )
+            if runtime.channel == "peer" and self.overlay_sink is not None:
+                translation = await self._stream_peer_translation_to_overlay(
+                    utterance_id=utterance_id,
+                    text=text,
+                    system_prompt=formatted_prompt,
+                    context=context_str,
+                    runtime=runtime,
+                    speaker_label=speaker_label,
+                    peer_epoch=peer_epoch,
+                    applied_mode=applied_mode,
+                )
+            else:
+                raw_translation = await self.llm.translate(
+                    utterance_id=utterance_id,
+                    text=text,
+                    system_prompt=formatted_prompt,
+                    source_language=self.source_language,
+                    target_language=self.target_language,
+                    context=context_str,
+                )
+                translation = self._normalize_translation(
+                    raw_translation,
+                    runtime=runtime,
+                    text=text,
+                    speaker_label=speaker_label,
+                    peer_epoch=peer_epoch,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1377,6 +1441,100 @@ class ClientHub:
                 utterance_id, transcript_text=text, translation_text=translation.text
             )
 
+    async def _stream_peer_translation_to_overlay(
+        self,
+        *,
+        utterance_id: UUID,
+        text: str,
+        system_prompt: str,
+        context: str,
+        runtime: ChannelRuntime,
+        speaker_label: str | None,
+        peer_epoch: int | None,
+        applied_mode: ContextMode,
+    ) -> Translation:
+        if self.llm is None:
+            raise RuntimeError("LLM is not configured")
+
+        latest_snapshot = ""
+        coalescer = OverlayStreamCoalescer(interval_ms=self.overlay_stream_coalesce_ms)
+        try:
+            async for snapshot in self.llm.stream_translate(
+                utterance_id=utterance_id,
+                text=text,
+                system_prompt=system_prompt,
+                source_language=self.source_language,
+                target_language=self.target_language,
+                context=context,
+            ):
+                latest_snapshot = snapshot
+                await coalescer.push(
+                    self.overlay_event_adapter.translation_stream_update(
+                        utterance_id=utterance_id,
+                        channel=runtime.channel,
+                        text=snapshot,
+                        source_language=self.source_language,
+                        target_language=self.target_language,
+                        applied_context_mode=applied_mode,
+                        speaker_label=speaker_label,
+                        peer_epoch=peer_epoch,
+                    ),
+                    self._emit_overlay_event,
+                )
+
+            await coalescer.flush(self._emit_overlay_event)
+            translation = self._normalize_translation(
+                Translation(
+                    utterance_id=utterance_id,
+                    translated_text=latest_snapshot,
+                    source_text=text,
+                    source_language=self.source_language,
+                    target_language=self.target_language,
+                    channel=runtime.channel,
+                    speaker_label=speaker_label,
+                    peer_epoch=peer_epoch,
+                    created_at=self.clock.now(),
+                ),
+                runtime=runtime,
+                text=text,
+                speaker_label=speaker_label,
+                peer_epoch=peer_epoch,
+            )
+            await self._emit_overlay_event(
+                self.overlay_event_adapter.translation_final(
+                    utterance_id=utterance_id,
+                    channel=runtime.channel,
+                    text=translation.text,
+                    source_language=self.source_language,
+                    target_language=self.target_language,
+                    applied_context_mode=applied_mode,
+                    speaker_label=speaker_label,
+                    peer_epoch=peer_epoch,
+                )
+            )
+            await self._emit_overlay_event(
+                self.overlay_event_adapter.utterance_closed(
+                    utterance_id=utterance_id,
+                    channel=runtime.channel,
+                    is_final=True,
+                )
+            )
+            return translation
+        except asyncio.CancelledError:
+            await coalescer.cancel()
+            raise
+        except Exception:
+            await coalescer.flush(self._emit_overlay_event)
+            if latest_snapshot:
+                await self._emit_overlay_event(
+                    self.overlay_event_adapter.utterance_closed(
+                        utterance_id=utterance_id,
+                        channel=runtime.channel,
+                        is_final=False,
+                    )
+                )
+            raise
+
     async def handle_peer_transcript_final_for_test(
         self,
         *,
@@ -1401,6 +1559,24 @@ class ClientHub:
         await self._handle_transcript(transcript, is_final=True, source=source)
         if self.llm is not None and self.peer_translation_enabled:
             await self._ensure_translation(transcript)
+        return utterance_id
+
+    async def translate_peer_text_for_test(
+        self,
+        text: str,
+        *,
+        speaker_label: str | None = None,
+        peer_epoch: int | None = None,
+    ) -> UUID:
+        utterance_id = await self.handle_peer_transcript_final_for_test(
+            text=text,
+            speaker_label=speaker_label,
+            peer_epoch=peer_epoch,
+        )
+        if self.peer_runtime.translation_tasks:
+            await asyncio.gather(
+                *self.peer_runtime.translation_tasks.values(), return_exceptions=True
+            )
         return utterance_id
 
     async def _enqueue_osc(
