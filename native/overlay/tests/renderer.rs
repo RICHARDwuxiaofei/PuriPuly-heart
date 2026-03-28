@@ -1,4 +1,8 @@
-use puripuly_heart_overlay::{CaptionBlock, CaptionLayoutPolicy};
+use puripuly_heart_overlay::{CaptionBlock, CaptionLayoutPolicy, CaptionRenderer};
+
+fn test_block(text: &str) -> CaptionBlock {
+    CaptionBlock::new("block-1", text)
+}
 
 fn long_block(id: &str) -> CaptionBlock {
     let text = "streaming translation captions should keep the newest utterance readable while \
@@ -74,4 +78,28 @@ fn renderer_overflow_drops_oldest_block_before_truncating_newest_content() {
             .find(|block| block.id == "new")
             .is_some_and(|block| !block.lines.is_empty())
     );
+}
+
+#[test]
+fn renderer_first_usable_frame_is_fully_transparent_before_real_caption_content() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let frame = renderer.render_empty_frame().unwrap();
+
+    assert!(frame.is_fully_transparent());
+}
+
+#[test]
+fn renderer_returns_a_renderable_d3d11_texture_result() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let frame = renderer.render_blocks(vec![test_block("hello")]).unwrap();
+
+    assert!(frame.texture_ptr().is_some());
+    assert_eq!(frame.width(), 3840);
+    assert_eq!(frame.height(), 1024);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn renderer_runtime_backend_is_rejected_outside_windows() {
+    assert!(CaptionRenderer::new().is_err());
 }
