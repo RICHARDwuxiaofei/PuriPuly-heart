@@ -103,16 +103,23 @@ impl CaptionLayoutPolicy {
         surface_width_px: u32,
         surface_height_px: u32,
     ) -> CaptionLayoutResult {
+        let total_blocks = blocks.len();
+        let visible_window_start = total_blocks.saturating_sub(self.visible_window_target_blocks);
         let available_height_px = surface_height_px
             .saturating_sub(self.vertical_padding_px.saturating_mul(2))
             .max(self.line_height_px);
         let max_chars_per_line = self.max_chars_per_line(surface_width_px);
 
         let mut visible_newest_first = Vec::new();
-        let mut dropped_block_ids = Vec::new();
+        let mut dropped_block_ids = Vec::with_capacity(visible_window_start);
         let mut used_height_px = 0;
 
-        for block in blocks.into_iter().rev() {
+        for (index, block) in blocks.into_iter().enumerate().rev() {
+            if index < visible_window_start {
+                dropped_block_ids.push(block.id);
+                continue;
+            }
+
             let wrapped_lines = wrap_text(&block.text, max_chars_per_line);
             let block_height_px = self.block_height_px(wrapped_lines.len());
             let spacing_px = if visible_newest_first.is_empty() {

@@ -37,6 +37,30 @@ fn renderer_uses_fixed_surface_defaults_for_mvp_caption_layout() {
 }
 
 #[test]
+fn renderer_limits_default_visible_window_to_the_two_newest_blocks() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.layout_blocks(
+        vec![
+            CaptionBlock::new("old", "short one"),
+            CaptionBlock::new("mid", "short two"),
+            CaptionBlock::new("new", "short three"),
+        ],
+        3840,
+        4096,
+    );
+
+    assert_eq!(
+        result
+            .visible_blocks
+            .iter()
+            .map(|block| block.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["mid", "new"]
+    );
+    assert!(result.dropped_block_ids.contains(&"old".to_string()));
+}
+
+#[test]
 fn renderer_overflow_drops_oldest_block_before_truncating_newest_content() {
     let policy = CaptionLayoutPolicy::default();
     let result = policy.layout_blocks(vec![long_block("old"), long_block("new")], 3840, 1024);
