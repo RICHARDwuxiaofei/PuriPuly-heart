@@ -10,12 +10,21 @@ from puripuly_heart.ui.views.logs import (
     CLEANUP_BATCH,
     MAX_LOG_ENTRIES,
     FletLogHandler,
+    LiveLogViewModel,
     LogsView,
     _get_log_dir,
 )
 
 
 class TestLogsView:
+    def test_overlay_child_lines_are_visible_in_merged_live_log_view(self):
+        model = LiveLogViewModel()
+
+        model.append_app_log("app line")
+        model.append_overlay_log("[overlay] child line")
+
+        assert model.visible_lines[-2:] == ["app line", "[overlay] child line"]
+
     def test_append_log_adds_entry(self):
         """로그 항목이 정상적으로 추가되는지 확인"""
         view = LogsView()

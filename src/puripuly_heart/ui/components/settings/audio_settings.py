@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class AudioSettings(ft.Column):
-    """Audio settings: Host API and Microphone (modal-based)."""
+    """Audio settings for microphone and desktop loopback capture."""
 
     def __init__(
         self,
@@ -27,6 +27,16 @@ class AudioSettings(ft.Column):
         # Current selections
         self._current_host_api = ""
         self._current_microphone = ""
+        self._current_desktop_output_device = ""
+        self._current_desktop_vad_threshold = 0.65
+        self._current_desktop_hangover_ms = 900
+        self._current_desktop_pre_roll_ms = 500
+
+        self._host_api_label = self._build_section_label(t("settings.audio_host_api"))
+        self._microphone_label = self._build_section_label(t("settings.microphone"))
+        self._desktop_output_label = self._build_section_label(
+            t("settings.desktop_audio.output_device")
+        )
 
         # Clickable text for Host API
         self._host_api_text = self._build_clickable_text(
@@ -40,17 +50,55 @@ class AudioSettings(ft.Column):
             self._on_mic_click,
         )
 
+        self._desktop_output_text = self._build_clickable_text(
+            self._default_option_label,
+            self._on_desktop_output_click,
+        )
+
+        self._desktop_vad_field = self._build_numeric_field(
+            label=t("settings.desktop_audio.vad_speech_threshold"),
+            value=f"{self._current_desktop_vad_threshold:.2f}",
+            on_change_end=self._on_desktop_vad_threshold_change,
+        )
+        self._desktop_hangover_field = self._build_numeric_field(
+            label=t("settings.desktop_audio.vad_hangover_ms"),
+            value=str(self._current_desktop_hangover_ms),
+            on_change_end=self._on_desktop_hangover_change,
+        )
+        self._desktop_pre_roll_field = self._build_numeric_field(
+            label=t("settings.desktop_audio.vad_pre_roll_ms"),
+            value=str(self._current_desktop_pre_roll_ms),
+            on_change_end=self._on_desktop_pre_roll_change,
+        )
+
         super().__init__(
             controls=[
+                self._host_api_label,
                 self._host_api_text,
                 ft.Container(height=8),
+                self._microphone_label,
                 self._mic_text,
+                ft.Container(height=12),
+                self._desktop_output_label,
+                self._desktop_output_text,
+                ft.Container(height=12),
+                ft.Row(
+                    controls=[
+                        self._desktop_vad_field,
+                        self._desktop_hangover_field,
+                        self._desktop_pre_roll_field,
+                    ],
+                    spacing=8,
+                ),
             ],
             spacing=8,
             expand=True,
-            alignment=ft.MainAxisAlignment.CENTER,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            alignment=ft.MainAxisAlignment.START,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
+
+    def _build_section_label(self, text: str) -> ft.Text:
+        return ft.Text(text, size=15, color=COLOR_PRIMARY)
 
     def _build_clickable_text(self, text: str, on_click) -> ft.Container:
         """Build a clickable centered text with hover effect."""
@@ -68,6 +116,17 @@ class AudioSettings(ft.Column):
             expand=True,
             on_click=on_click,
             on_hover=self._on_text_hover,
+        )
+
+    def _build_numeric_field(self, *, label: str, value: str, on_change_end) -> ft.TextField:
+        return ft.TextField(
+            label=label,
+            value=value,
+            dense=True,
+            expand=True,
+            text_align=ft.TextAlign.CENTER,
+            on_blur=on_change_end,
+            on_submit=on_change_end,
         )
 
     def _on_text_hover(self, e: ft.ControlEvent) -> None:
@@ -105,6 +164,51 @@ class AudioSettings(ft.Column):
         self._mic_text.content.value = display
         if self._mic_text.page:
             self._mic_text.update()
+
+    @property
+    def desktop_output_device(self) -> str:
+        return self._current_desktop_output_device
+
+    @desktop_output_device.setter
+    def desktop_output_device(self, val: str) -> None:
+        self._current_desktop_output_device = val
+        display = val or self._default_option_label
+        self._desktop_output_text.content.value = display
+        if self._desktop_output_text.page:
+            self._desktop_output_text.update()
+
+    @property
+    def desktop_vad_threshold(self) -> float:
+        return self._current_desktop_vad_threshold
+
+    @desktop_vad_threshold.setter
+    def desktop_vad_threshold(self, val: float) -> None:
+        self._current_desktop_vad_threshold = float(val)
+        self._desktop_vad_field.value = f"{self._current_desktop_vad_threshold:.2f}"
+        if self._desktop_vad_field.page:
+            self._desktop_vad_field.update()
+
+    @property
+    def desktop_hangover_ms(self) -> int:
+        return self._current_desktop_hangover_ms
+
+    @desktop_hangover_ms.setter
+    def desktop_hangover_ms(self, val: int) -> None:
+        self._current_desktop_hangover_ms = int(val)
+        self._desktop_hangover_field.value = str(self._current_desktop_hangover_ms)
+        if self._desktop_hangover_field.page:
+            self._desktop_hangover_field.update()
+
+    @property
+    def desktop_pre_roll_ms(self) -> int:
+        return self._current_desktop_pre_roll_ms
+
+    @desktop_pre_roll_ms.setter
+    def desktop_pre_roll_ms(self, val: int) -> None:
+        self._current_desktop_pre_roll_ms = int(val)
+        self._desktop_pre_roll_field.value = str(self._current_desktop_pre_roll_ms)
+        if self._desktop_pre_roll_field.page:
+            self._desktop_pre_roll_field.update()
 
     def _get_host_api_options(self) -> list[OptionItem]:
         """Get available host API options."""
@@ -151,6 +255,32 @@ class AudioSettings(ft.Column):
 
         return options
 
+    def _get_desktop_output_options(self) -> list[OptionItem]:
+        options = [OptionItem(value="", label=self._default_option_label)]
+
+        manager = None
+        try:
+            import pyaudiowpatch as pyaudio  # type: ignore
+
+            manager = pyaudio.PyAudio()
+            seen: set[str] = set()
+            for info in manager.get_loopback_device_info_generator():
+                name = str(info.get("name", "") or "").strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                options.append(OptionItem(value=name, label=name))
+        except Exception as e:
+            logger.warning(f"Failed to enumerate desktop loopback outputs: {e}")
+        finally:
+            if manager is not None:
+                try:
+                    manager.terminate()
+                except Exception:
+                    pass
+
+        return options
+
     def _on_host_api_click(self, e) -> None:
         """Open Host API selection modal."""
         if not self.page:
@@ -191,6 +321,80 @@ class AudioSettings(ft.Column):
         self.microphone = value
         self._emit_change()
 
+    def _on_desktop_output_click(self, e) -> None:
+        """Open desktop loopback output selection modal."""
+        if not self.page:
+            return
+        options = self._get_desktop_output_options()
+        modal = SettingsModal(
+            self.page,
+            t("settings.desktop_audio.output_device"),
+            options,
+            self._on_desktop_output_selected,
+            show_description=False,
+        )
+        modal.open(self._current_desktop_output_device)
+
+    def _on_desktop_output_selected(self, value: str) -> None:
+        self.desktop_output_device = value
+        self._emit_change()
+
+    def _on_desktop_vad_threshold_change(self, e) -> None:
+        self.desktop_vad_threshold = self._parse_float(
+            e.control.value,
+            fallback=self._current_desktop_vad_threshold,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self._emit_change()
+
+    def _on_desktop_hangover_change(self, e) -> None:
+        self.desktop_hangover_ms = self._parse_int(
+            e.control.value,
+            fallback=self._current_desktop_hangover_ms,
+            minimum=0,
+        )
+        self._emit_change()
+
+    def _on_desktop_pre_roll_change(self, e) -> None:
+        self.desktop_pre_roll_ms = self._parse_int(
+            e.control.value,
+            fallback=self._current_desktop_pre_roll_ms,
+            minimum=0,
+        )
+        self._emit_change()
+
+    def _parse_float(
+        self,
+        raw_value: str,
+        *,
+        fallback: float,
+        minimum: float,
+        maximum: float | None = None,
+    ) -> float:
+        try:
+            parsed = float(raw_value)
+        except (TypeError, ValueError):
+            parsed = fallback
+        if parsed < minimum:
+            parsed = minimum
+        if maximum is not None and parsed > maximum:
+            parsed = maximum
+        return parsed
+
+    def _parse_int(
+        self,
+        raw_value: str,
+        *,
+        fallback: int,
+        minimum: int,
+    ) -> int:
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError):
+            parsed = fallback
+        return max(minimum, parsed)
+
     def _emit_change(self) -> None:
         if self._on_change:
             self._on_change()
@@ -199,12 +403,20 @@ class AudioSettings(ft.Column):
         """Update labels when locale changes."""
         old_default = self._default_option_label
         self._default_option_label = t("settings.default_option")
+        self._host_api_label.value = t("settings.audio_host_api")
+        self._microphone_label.value = t("settings.microphone")
+        self._desktop_output_label.value = t("settings.desktop_audio.output_device")
+        self._desktop_vad_field.label = t("settings.desktop_audio.vad_speech_threshold")
+        self._desktop_hangover_field.label = t("settings.desktop_audio.vad_hangover_ms")
+        self._desktop_pre_roll_field.label = t("settings.desktop_audio.vad_pre_roll_ms")
 
         # Update display if showing default
         if self._host_api_text.content.value == old_default:
             self._host_api_text.content.value = self._default_option_label
         if self._mic_text.content.value == old_default:
             self._mic_text.content.value = self._default_option_label
+        if self._desktop_output_text.content.value == old_default:
+            self._desktop_output_text.content.value = self._default_option_label
 
         if self.page:
             self.update()

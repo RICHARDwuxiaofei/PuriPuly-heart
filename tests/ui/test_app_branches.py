@@ -164,6 +164,22 @@ def test_apply_locale_updates_views_and_page() -> None:
     assert app.page.updated == 1
 
 
+def test_on_overlay_state_changed_updates_settings_view_runtime_state() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    seen: list[tuple[str, str | None]] = []
+    app.view_settings = SimpleNamespace(
+        set_overlay_runtime_state=lambda state, failure_reason=None: seen.append(
+            (state, failure_reason)
+        )
+    )
+
+    app.on_overlay_state_changed(state="failed", failure_reason="runtime_crashed")
+
+    assert app.overlay_state == "failed"
+    assert app.overlay_failure_reason == "runtime_crashed"
+    assert seen == [("failed", "runtime_crashed")]
+
+
 @pytest.mark.asyncio
 async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -> None:
     app = TranslatorApp.__new__(TranslatorApp)

@@ -137,6 +137,14 @@ class GuiController:
             return False
         return self._effective_peer_translation_enabled_for(self.settings)
 
+    @property
+    def effective_context_mode(self) -> str:
+        if self.settings is None:
+            return "local"
+        if self._effective_integrated_context_enabled_for(self.settings):
+            return "integrated"
+        return "local"
+
     def _effective_peer_translation_enabled_for(self, settings: AppSettings) -> bool:
         return bool(settings.ui.peer_translation_enabled and self.overlay_state == "connected")
 
@@ -298,6 +306,8 @@ class GuiController:
             return
 
         self.settings.ui.overlay_enabled = bool(enabled)
+        if not enabled:
+            self.settings.ui.peer_translation_enabled = False
         self._save_settings()
 
         if enabled:

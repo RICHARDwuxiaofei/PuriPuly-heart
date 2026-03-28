@@ -70,6 +70,7 @@ class TranslatorApp:
         self.view_settings = SettingsView()
         self.view_logs = LogsView()
         self.view_about = AboutView()
+        self.view_settings.set_overlay_runtime_state(self.overlay_state)
 
         # Custom title bar
         self.title_bar = TitleBar(self.page)
@@ -265,6 +266,7 @@ class TranslatorApp:
     ) -> None:
         self.overlay_state = state
         self.overlay_failure_reason = failure_reason
+        self.view_settings.set_overlay_runtime_state(state, failure_reason=failure_reason)
 
 
 async def main_gui(page: ft.Page, *, config_path):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import secrets
 import sys
@@ -15,6 +16,8 @@ from uuid import uuid4
 from puripuly_heart import __version__
 
 from .manifest import OVERLAY_CONTRACT_VERSION, OverlayLaunchManifest
+
+logger = logging.getLogger(__name__)
 
 OVERLAY_EXECUTABLE_NAME = "PuriPulyHeartOverlay.exe"
 _EXIT_CODE_TO_FAILURE_REASON = {
@@ -47,8 +50,8 @@ class _AsyncioOverlayProcess:
     _reader_tasks: list[asyncio.Task[None]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        self._start_reader(self.process.stdout)
-        self._start_reader(self.process.stderr)
+        self._start_reader(self.process.stdout, "stdout")
+        self._start_reader(self.process.stderr, "stderr")
 
     async def next_event(self) -> dict[str, object]:
         return await self._events.get()
@@ -64,20 +67,23 @@ class _AsyncioOverlayProcess:
                 self.process.terminate()
         await self.wait()
 
-    def _start_reader(self, stream: asyncio.StreamReader | None) -> None:
+    def _start_reader(self, stream: asyncio.StreamReader | None, stream_name: str) -> None:
         if stream is None:
             return
-        self._reader_tasks.append(asyncio.create_task(self._read_stream(stream)))
+        self._reader_tasks.append(asyncio.create_task(self._read_stream(stream, stream_name)))
 
-    async def _read_stream(self, stream: asyncio.StreamReader) -> None:
+    async def _read_stream(self, stream: asyncio.StreamReader, stream_name: str) -> None:
         try:
             while True:
                 raw_line = await stream.readline()
                 if not raw_line:
                     return
-                event = self._parse_event_line(raw_line.decode("utf-8", errors="replace").strip())
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                event = self._parse_event_line(line)
                 if event is not None:
                     await self._events.put(event)
+                    continue
+                self._log_passthrough_line(line, stream_name)
         except asyncio.CancelledError:
             raise
 
@@ -97,6 +103,17 @@ class _AsyncioOverlayProcess:
             if isinstance(payload, dict) and isinstance(payload.get("type"), str):
                 return payload
         return None
+
+    def _log_passthrough_line(self, line: str, stream_name: str) -> None:
+        if not line:
+            return
+        if stream_name == "stderr" or "[ERROR]" in line:
+            logger.error(line)
+            return
+        if "[WARN]" in line:
+            logger.warning(line)
+            return
+        logger.info(line)
 
     async def _finish_readers(self) -> None:
         tasks = self._reader_tasks

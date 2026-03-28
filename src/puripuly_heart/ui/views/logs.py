@@ -50,6 +50,35 @@ class FletLogHandler(logging.Handler):
             pass
 
 
+class LiveLogViewModel:
+    """Keeps the merged live-log buffer shared by app and overlay sources."""
+
+    def __init__(
+        self,
+        *,
+        max_entries: int = MAX_LOG_ENTRIES,
+        cleanup_batch: int = CLEANUP_BATCH,
+    ) -> None:
+        self._max_entries = max_entries
+        self._cleanup_batch = cleanup_batch
+        self._visible_lines: list[str] = []
+
+    @property
+    def visible_lines(self) -> list[str]:
+        return self._visible_lines
+
+    def append_app_log(self, record: str) -> None:
+        self._append(record)
+
+    def append_overlay_log(self, record: str) -> None:
+        self._append(record)
+
+    def _append(self, record: str) -> None:
+        self._visible_lines.append(record)
+        if len(self._visible_lines) > self._max_entries + self._cleanup_batch:
+            del self._visible_lines[: self._cleanup_batch]
+
+
 class _LogListProxy:
     """Compatibility proxy for tests expecting a list-style log view."""
 
@@ -58,7 +87,7 @@ class _LogListProxy:
 
     @property
     def controls(self) -> list[ft.Text]:
-        return [ft.Text(entry) for entry in self._view._log_buffer]
+        return [ft.Text(entry) for entry in self._view._model.visible_lines]
 
 
 class LogsView(ft.Column):
@@ -74,7 +103,8 @@ class LogsView(ft.Column):
         self._folder_button: ft.TextButton | None = None
 
         # Log buffer and throttling state
-        self._log_buffer: list[str] = []
+        self._model = LiveLogViewModel()
+        self._log_buffer = self._model.visible_lines
         self._last_update: float = 0.0
         self._pending_update: bool = False
         self.log_list = _LogListProxy(self)
@@ -203,11 +233,20 @@ class LogsView(ft.Column):
 
     def append_log(self, record: str):
         """Append a log entry with throttled updates."""
-        self._log_buffer.append(record)
+        self._model.append_app_log(record)
 
-        # Memory management: batch cleanup when threshold exceeded
-        if len(self._log_buffer) > MAX_LOG_ENTRIES + CLEANUP_BATCH:
-            del self._log_buffer[:CLEANUP_BATCH]
+        # Throttled update
+        now = time.time()
+        if now - self._last_update >= _UPDATE_INTERVAL:
+            self._flush_logs()
+        else:
+            self._pending_update = True
+
+    def append_app_log(self, record: str) -> None:
+        self.append_log(record)
+
+    def append_overlay_log(self, record: str) -> None:
+        self._model.append_overlay_log(record)
 
         # Throttled update
         now = time.time()

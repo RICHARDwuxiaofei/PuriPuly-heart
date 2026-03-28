@@ -16,6 +16,7 @@ from puripuly_heart.config.settings import (
     QwenRegion,
     STTProviderName,
 )
+from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.views import settings as settings_view
 
@@ -308,6 +309,91 @@ def test_audio_vad_and_low_latency_handlers_update_state(
     assert settings.stt.vad_speech_threshold == 0.72
     assert settings.stt.low_latency_mode is True
     assert view._low_latency_text.content.value == t("toggle.on")
+
+
+def test_overlay_controls_gate_peer_translation_until_overlay_is_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._peer_translation_button.disabled is True
+    assert view._peer_translation_hint.value == t(
+        "settings.peer_translation.disabled.overlay_required"
+    )
+
+    view.set_overlay_runtime_state("connected")
+
+    assert view._peer_translation_button.disabled is False
+    assert view._peer_translation_hint.value == ""
+
+
+def test_first_peer_translation_enable_bootstraps_integrated_context_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.ui.integrated_context_enabled = False
+    settings.ui.integrated_context_bootstrapped = False
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.set_overlay_runtime_state("connected")
+
+    view._on_peer_translation_selected("on")
+
+    assert settings.ui.peer_translation_enabled is True
+    assert settings.ui.integrated_context_enabled is True
+    assert settings.ui.integrated_context_bootstrapped is True
+
+
+def test_peer_translation_toggle_restores_saved_integrated_context_preference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.set_overlay_runtime_state("connected")
+
+    view._on_peer_translation_selected("on")
+    view._on_integrated_context_selected("off")
+    assert settings.ui.integrated_context_enabled is False
+
+    view._on_peer_translation_selected("off")
+    assert view._integrated_context_button.disabled is True
+
+    view._on_peer_translation_selected("on")
+
+    assert settings.ui.peer_translation_enabled is True
+    assert settings.ui.integrated_context_enabled is False
+
+
+def test_audio_change_updates_desktop_loopback_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = AppSettings()
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._audio_settings.desktop_output_device = "Speakers (Loopback)"
+    view._audio_settings.desktop_vad_threshold = 0.72
+    view._audio_settings.desktop_hangover_ms = 950
+    view._audio_settings.desktop_pre_roll_ms = 420
+    view._on_audio_change()
+
+    assert settings.desktop_audio.output_device == "Speakers (Loopback)"
+    assert settings.desktop_audio.vad_speech_threshold == 0.72
+    assert settings.desktop_audio.vad_hangover_ms == 950
+    assert settings.desktop_audio.vad_pre_roll_ms == 420
+    assert changed == [settings]
+
+
+def test_overlay_failure_reason_keys_are_localized() -> None:
+    bundle = i18n_module._load_bundle("en")
+
+    assert bundle["settings.overlay.failure.missing_executable"]
+    assert bundle["settings.overlay.failure.runtime_crashed"]
 
 
 @pytest.mark.asyncio

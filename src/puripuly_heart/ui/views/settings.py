@@ -82,6 +82,8 @@ class SettingsView(ft.Column):
         self.has_provider_changes: bool = False
         self.provider_change_requires_pipeline: bool = False
         self._custom_vocab_draft_terms: dict[str, str] = {}
+        self._overlay_state: str = "off"
+        self._overlay_failure_reason: str | None = None
 
         # Build UI components
         self._build_ui()
@@ -149,6 +151,20 @@ class SettingsView(ft.Column):
             ),
             overlay_color=ft.Colors.TRANSPARENT,
             animation_duration=0,
+        )
+
+    def _build_setting_action_row(self, label: ft.Text, action: ft.Control) -> ft.Row:
+        return ft.Row(
+            controls=[label, ft.Container(expand=True), action],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    def _build_action_button(self, text: str, on_click) -> ft.TextButton:
+        return ft.TextButton(
+            text=text,
+            style=self._get_button_style(font_for_language(get_locale())),
+            on_click=on_click,
         )
 
     def _build_ui(self) -> None:
@@ -309,7 +325,7 @@ class SettingsView(ft.Column):
 
         row3 = ft.Container(
             content=ft.Row([ui_card, audio_card], spacing=16, expand=True),
-            height=280,
+            height=420,
         )
 
         # === Row 4: Low Latency (1x1) + VAD (1x1) ===
@@ -364,7 +380,7 @@ class SettingsView(ft.Column):
             height=280,
         )
 
-        # === Row 5: VRChat Mic Sync (1x1) + Empty (1x1) ===
+        # === Row 5: VRChat Mic Sync (1x1) + Overlay (1x1) ===
         self._vrc_mic_text = self._build_clickable_text(
             t("settings.vrc_mic.on"),
             self._on_vrc_mic_click,
@@ -378,10 +394,76 @@ class SettingsView(ft.Column):
         vrc_mic_card = self._wrap_card(
             ft.Column([self._vrc_mic_title, self._vrc_mic_text], spacing=0, expand=True)
         )
-        empty_card = self._wrap_card(ft.Column([], expand=True))
+
+        self._overlay_title = ft.Text(
+            t("settings.section.overlay"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._overlay_enabled_label = ft.Text(
+            t("settings.overlay.enabled"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._peer_translation_label = ft.Text(
+            t("settings.peer_translation"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._integrated_context_label = ft.Text(
+            t("settings.integrated_context"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._overlay_enabled_button = self._build_action_button(
+            t("settings.option.off"),
+            self._on_overlay_click,
+        )
+        self._peer_translation_button = self._build_action_button(
+            t("settings.option.off"),
+            self._on_peer_translation_click,
+        )
+        self._integrated_context_button = self._build_action_button(
+            t("settings.context.local"),
+            self._on_integrated_context_click,
+        )
+        self._peer_translation_hint = ft.Text("", size=13, color=COLOR_NEUTRAL)
+        self._integrated_context_hint = ft.Text("", size=13, color=COLOR_NEUTRAL)
+        self._overlay_status_text = ft.Text(
+            "",
+            size=14,
+            color=COLOR_NEUTRAL,
+        )
+        overlay_card = self._wrap_card(
+            ft.Column(
+                [
+                    self._overlay_title,
+                    ft.Container(height=12),
+                    self._build_setting_action_row(
+                        self._overlay_enabled_label,
+                        self._overlay_enabled_button,
+                    ),
+                    self._build_setting_action_row(
+                        self._peer_translation_label,
+                        self._peer_translation_button,
+                    ),
+                    self._peer_translation_hint,
+                    self._build_setting_action_row(
+                        self._integrated_context_label,
+                        self._integrated_context_button,
+                    ),
+                    self._integrated_context_hint,
+                    ft.Container(height=12),
+                    self._overlay_status_text,
+                ],
+                spacing=6,
+                expand=True,
+            )
+        )
         row5 = ft.Container(
-            content=ft.Row([vrc_mic_card, empty_card], spacing=16, expand=True),
-            height=280,
+            content=ft.Row([vrc_mic_card, overlay_card], spacing=16, expand=True),
+            height=320,
         )
 
         # === Row 6: Persona (2x2) - Licenses style ===
@@ -589,6 +671,10 @@ class SettingsView(ft.Column):
         # Audio Settings
         self._audio_settings.host_api = settings.audio.input_host_api
         self._audio_settings.microphone = settings.audio.input_device
+        self._audio_settings.desktop_output_device = settings.desktop_audio.output_device
+        self._audio_settings.desktop_vad_threshold = settings.desktop_audio.vad_speech_threshold
+        self._audio_settings.desktop_hangover_ms = settings.desktop_audio.vad_hangover_ms
+        self._audio_settings.desktop_pre_roll_ms = settings.desktop_audio.vad_pre_roll_ms
 
         # VAD
         self._vad_slider.value = settings.stt.vad_speech_threshold
@@ -620,6 +706,7 @@ class SettingsView(ft.Column):
             preserve_existing=preserve_custom_vocab_draft
         )
         self._custom_vocab_terms.helper_text = ""
+        self._sync_overlay_controls()
 
         # Load secrets
         self._load_secrets(settings, config_path)
@@ -973,16 +1060,207 @@ class SettingsView(ft.Column):
 
         new_host = self._audio_settings.host_api
         new_device = self._audio_settings.microphone
+        new_desktop_output = self._audio_settings.desktop_output_device
+        new_desktop_vad = self._audio_settings.desktop_vad_threshold
+        new_desktop_hangover = self._audio_settings.desktop_hangover_ms
+        new_desktop_pre_roll = self._audio_settings.desktop_pre_roll_ms
         old_host = self._settings.audio.input_host_api
         old_device = self._settings.audio.input_device
+        old_desktop_output = self._settings.desktop_audio.output_device
+        old_desktop_vad = self._settings.desktop_audio.vad_speech_threshold
+        old_desktop_hangover = self._settings.desktop_audio.vad_hangover_ms
+        old_desktop_pre_roll = self._settings.desktop_audio.vad_pre_roll_ms
 
         if old_host != new_host:
             logger.info(f"[Settings] Audio Host changed: {old_host} -> {new_host}")
         if old_device != new_device:
             logger.info(f"[Settings] Microphone changed: {old_device} -> {new_device}")
+        if old_desktop_output != new_desktop_output:
+            logger.info(
+                "[Settings] Desktop loopback output changed: %s -> %s",
+                old_desktop_output,
+                new_desktop_output,
+            )
+        if abs(old_desktop_vad - new_desktop_vad) > 0.001:
+            logger.info(
+                "[Settings] Desktop loopback VAD threshold changed: %.2f -> %.2f",
+                old_desktop_vad,
+                new_desktop_vad,
+            )
+        if old_desktop_hangover != new_desktop_hangover:
+            logger.info(
+                "[Settings] Desktop loopback hangover changed: %s -> %s",
+                old_desktop_hangover,
+                new_desktop_hangover,
+            )
+        if old_desktop_pre_roll != new_desktop_pre_roll:
+            logger.info(
+                "[Settings] Desktop loopback pre-roll changed: %s -> %s",
+                old_desktop_pre_roll,
+                new_desktop_pre_roll,
+            )
 
         self._settings.audio.input_host_api = new_host
         self._settings.audio.input_device = new_device
+        self._settings.desktop_audio.output_device = new_desktop_output
+        self._settings.desktop_audio.vad_speech_threshold = new_desktop_vad
+        self._settings.desktop_audio.vad_hangover_ms = new_desktop_hangover
+        self._settings.desktop_audio.vad_pre_roll_ms = new_desktop_pre_roll
+        self._emit_settings_changed()
+
+    def _overlay_connected(self) -> bool:
+        return self._overlay_state == "connected"
+
+    def _compose_overlay_status_text(self) -> str:
+        state_label = t(
+            f"settings.overlay.status.{self._overlay_state}", default=self._overlay_state
+        )
+        if self._overlay_state == "failed" and self._overlay_failure_reason:
+            reason_label = t(
+                f"settings.overlay.failure.{self._overlay_failure_reason}",
+                default=self._overlay_failure_reason,
+            )
+            return t(
+                "settings.overlay.status.failed_with_reason",
+                status=state_label,
+                reason=reason_label,
+                default=f"{state_label}: {reason_label}",
+            )
+        return state_label
+
+    def _sync_overlay_controls(self) -> None:
+        overlay_enabled = bool(self._settings and self._settings.ui.overlay_enabled)
+        peer_translation_enabled = bool(
+            self._settings and self._settings.ui.peer_translation_enabled
+        )
+        integrated_context_enabled = bool(
+            self._settings and self._settings.ui.integrated_context_enabled
+        )
+
+        self._overlay_enabled_button.text = t(
+            "settings.option.on" if overlay_enabled else "settings.option.off"
+        )
+        self._peer_translation_button.text = t(
+            "settings.option.on" if peer_translation_enabled else "settings.option.off"
+        )
+        self._integrated_context_button.text = t(
+            "settings.context.integrated"
+            if integrated_context_enabled
+            else "settings.context.local"
+        )
+
+        peer_translation_available = self._overlay_connected()
+        integrated_context_available = peer_translation_available and peer_translation_enabled
+
+        self._overlay_enabled_button.disabled = self._settings is None
+        self._peer_translation_button.disabled = not peer_translation_available
+        self._integrated_context_button.disabled = not integrated_context_available
+
+        self._peer_translation_hint.value = (
+            ""
+            if peer_translation_available
+            else t("settings.peer_translation.disabled.overlay_required")
+        )
+        if integrated_context_available:
+            self._integrated_context_hint.value = ""
+        elif not peer_translation_available:
+            self._integrated_context_hint.value = t(
+                "settings.integrated_context.disabled.overlay_required"
+            )
+        else:
+            self._integrated_context_hint.value = t(
+                "settings.integrated_context.disabled.peer_translation_required"
+            )
+
+        self._overlay_status_text.value = self._compose_overlay_status_text()
+
+        if self.page:
+            self.update()
+
+    def set_overlay_runtime_state(
+        self,
+        state: str,
+        *,
+        failure_reason: str | None = None,
+    ) -> None:
+        self._overlay_state = state
+        self._overlay_failure_reason = failure_reason
+        self._sync_overlay_controls()
+
+    def _on_overlay_click(self, e) -> None:
+        if not self.page or not self._settings:
+            return
+        options = [
+            OptionItem(value="on", label=t("settings.option.on")),
+            OptionItem(value="off", label=t("settings.option.off")),
+        ]
+        modal = SettingsModal(
+            self.page,
+            t("settings.overlay.enabled"),
+            options,
+            self._on_overlay_selected,
+            show_description=False,
+        )
+        modal.open("on" if self._settings.ui.overlay_enabled else "off")
+
+    def _on_overlay_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+        enabled = value == "on"
+        self._settings.ui.overlay_enabled = enabled
+        if not enabled:
+            self._settings.ui.peer_translation_enabled = False
+        self._sync_overlay_controls()
+        self._emit_settings_changed()
+
+    def _on_peer_translation_click(self, e) -> None:
+        if not self.page or not self._settings or self._peer_translation_button.disabled:
+            return
+        options = [
+            OptionItem(value="on", label=t("settings.option.on")),
+            OptionItem(value="off", label=t("settings.option.off")),
+        ]
+        modal = SettingsModal(
+            self.page,
+            t("settings.peer_translation"),
+            options,
+            self._on_peer_translation_selected,
+            show_description=False,
+        )
+        modal.open("on" if self._settings.ui.peer_translation_enabled else "off")
+
+    def _on_peer_translation_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+        enabled = value == "on"
+        self._settings.ui.peer_translation_enabled = enabled
+        if enabled and not self._settings.ui.integrated_context_bootstrapped:
+            self._settings.ui.integrated_context_enabled = True
+            self._settings.ui.integrated_context_bootstrapped = True
+        self._sync_overlay_controls()
+        self._emit_settings_changed()
+
+    def _on_integrated_context_click(self, e) -> None:
+        if not self.page or not self._settings or self._integrated_context_button.disabled:
+            return
+        options = [
+            OptionItem(value="on", label=t("settings.context.integrated")),
+            OptionItem(value="off", label=t("settings.context.local")),
+        ]
+        modal = SettingsModal(
+            self.page,
+            t("settings.integrated_context"),
+            options,
+            self._on_integrated_context_selected,
+            show_description=False,
+        )
+        modal.open("on" if self._settings.ui.integrated_context_enabled else "off")
+
+    def _on_integrated_context_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+        self._settings.ui.integrated_context_enabled = value == "on"
+        self._sync_overlay_controls()
         self._emit_settings_changed()
 
     def _handle_vad_visual_change(self, e) -> None:
@@ -1189,6 +1467,10 @@ class SettingsView(ft.Column):
         self._custom_vocab_title.value = t("settings.section.custom_vocabulary")
         self._custom_vocab_info_icon.tooltip = t("settings.custom_vocabulary_tooltip")
         self._vrc_mic_title.value = t("settings.vrc_mic_intercept")
+        self._overlay_title.value = t("settings.section.overlay")
+        self._overlay_enabled_label.value = t("settings.overlay.enabled")
+        self._peer_translation_label.value = t("settings.peer_translation")
+        self._integrated_context_label.value = t("settings.integrated_context")
         self._reset_prompt_btn.text = t("settings.reset_prompt")
         self._custom_vocab_terms.label = None
         self._custom_vocab_terms.helper_text = ""
@@ -1201,6 +1483,12 @@ class SettingsView(ft.Column):
 
         if self._qwen_region_btn:
             self._qwen_region_btn.style = self._get_button_style(ui_font)
+        if self._overlay_enabled_button:
+            self._overlay_enabled_button.style = self._get_button_style(ui_font)
+        if self._peer_translation_button:
+            self._peer_translation_button.style = self._get_button_style(ui_font)
+        if self._integrated_context_button:
+            self._integrated_context_button.style = self._get_button_style(ui_font)
 
         # Update text controls with current selection labels
 
@@ -1217,6 +1505,7 @@ class SettingsView(ft.Column):
                 if self._settings.osc.vrc_mic_intercept
                 else "settings.vrc_mic.off"
             )
+            self._sync_overlay_controls()
 
         # Qwen Region label
         if self._settings:

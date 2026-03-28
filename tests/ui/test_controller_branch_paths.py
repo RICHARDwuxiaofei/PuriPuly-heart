@@ -722,6 +722,40 @@ async def test_overlay_toggle_starts_and_stops_overlay_runtime(
 
 
 @pytest.mark.asyncio
+async def test_explicit_overlay_off_clears_saved_peer_translation_toggle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.overlay_enabled = True
+    controller.settings.ui.peer_translation_enabled = True
+
+    await controller.set_overlay_enabled(False)
+
+    assert controller.settings.ui.overlay_enabled is False
+    assert controller.settings.ui.peer_translation_enabled is False
+
+
+def test_effective_context_mode_falls_back_to_local_until_peer_translation_is_effective() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.integrated_context_enabled = True
+
+    assert controller.effective_context_mode == "local"
+
+    controller.overlay_state = "connected"
+    controller.settings.ui.peer_translation_enabled = True
+
+    assert controller.effective_context_mode == "integrated"
+
+    controller.settings.ui.peer_translation_enabled = False
+
+    assert controller.effective_context_mode == "local"
+
+
+@pytest.mark.asyncio
 async def test_overlay_start_failure_keeps_saved_preferences_but_effective_state_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
