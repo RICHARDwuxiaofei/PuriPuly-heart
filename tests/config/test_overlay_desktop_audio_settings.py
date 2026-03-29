@@ -45,3 +45,26 @@ def test_desktop_audio_output_device_null_defaults_to_empty_string() -> None:
     settings = from_dict({"desktop_audio": {"output_device": None}})
 
     assert settings.desktop_audio.output_device == ""
+
+
+def test_overlay_calibration_round_trips_with_defaults() -> None:
+    settings = from_dict(
+        {
+            "overlay_calibration": {
+                "anchor": "head_locked",
+                "offset_x": 0.15,
+                "offset_y": -0.2,
+                "distance": 1.2,
+                "text_scale": 1.1,
+                "background_alpha": 0.4,
+            }
+        }
+    )
+
+    assert settings.overlay_calibration.anchor == "head_locked"
+    assert settings.overlay_calibration.distance == 1.2
+
+    data = to_dict(settings)
+
+    assert data["overlay_calibration"]["offset_x"] == 0.15
+    assert data["overlay_calibration"]["background_alpha"] == 0.4

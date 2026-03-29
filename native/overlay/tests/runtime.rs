@@ -7,9 +7,10 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use puripuly_heart_overlay::{
     run_with_manifest, submit_texture, validate_manifest, BridgeClient, CaptionBlock,
-    CaptionRenderer, Event, FakeOpenVr, OpenVrError, OverlayBridgeEvent,
-    OverlayFrameSubmitter, OverlayManifest, OverlayRuntime, OverlayStateSnapshot, RenderedFrame,
-    RowEvent, RuntimeFailure, StartupError, EXPECTED_CONTRACT_VERSION,
+    CaptionChannel, CaptionRenderer, Event, FakeOpenVr, OpenVrError, OverlayBridgeEvent,
+    OverlayCalibrationUpdateEvent, OverlayFrameSubmitter, OverlayManifest, OverlayRuntime,
+    OverlayStateSnapshot, RenderedFrame, RowEvent, RuntimeFailure, StartupError,
+    EXPECTED_CONTRACT_VERSION,
 };
 use puripuly_heart_overlay::logging::OverlayLogger;
 
@@ -211,6 +212,31 @@ async fn runtime_reports_bridge_loss_as_runtime_disconnect_after_ready() {
 }
 
 #[tokio::test]
+async fn runtime_applies_overlay_calibration_updates_to_state() {
+    let mut runtime = OverlayRuntime::new(OverlayStateSnapshot::default());
+
+    runtime
+        .handle_event(OverlayBridgeEvent::Live(Event::OverlayCalibrationUpdate(
+            OverlayCalibrationUpdateEvent {
+                event_id: "evt-calibration".into(),
+                seq: 1,
+                created_at: 100.0,
+                anchor: "head_locked".into(),
+                offset_x: 0.15,
+                offset_y: -0.2,
+                distance: 1.2,
+                text_scale: 1.1,
+                background_alpha: 0.4,
+            },
+        )))
+        .await
+        .unwrap();
+
+    assert_eq!(runtime.state().calibration().distance, 1.2);
+    assert_eq!(runtime.state().calibration().background_alpha, 0.4);
+}
+
+#[tokio::test]
 async fn runtime_emits_overlay_ready_only_after_first_texture_submit() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
     let logger = test_logger("ready-gating-success").await;
@@ -231,6 +257,27 @@ async fn runtime_emits_overlay_ready_only_after_first_texture_submit() {
     assert_eq!(submitter.calls, 1);
     assert!(runtime.ready_sent());
     assert!(messages.iter().any(|message| message["type"] == "overlay_ready"));
+}
+
+#[tokio::test]
+async fn runtime_caption_blocks_keep_channel_metadata_for_color_only_rendering() {
+    let runtime = OverlayRuntime::new(OverlayStateSnapshot {
+        events: vec![
+            Event::SelfTranscriptFinal(test_row("self", "self-1", "hello")),
+            Event::TranslationFinal(test_row("self", "self-1", "안녕")),
+            Event::PeerTranscriptFinal(test_row("peer", "peer-1", "world")),
+            Event::TranslationFinal(test_row("peer", "peer-1", "세상")),
+        ],
+    });
+
+    let blocks = runtime.caption_blocks();
+    let channels = blocks
+        .iter()
+        .map(|block| (block.id.as_str(), block.channel))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    assert_eq!(channels.get("self:self-1"), Some(&Some(CaptionChannel::SelfChannel)));
+    assert_eq!(channels.get("peer:peer-1"), Some(&Some(CaptionChannel::PeerChannel)));
 }
 
 #[tokio::test]

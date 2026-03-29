@@ -6,13 +6,92 @@ use std::ffi::{CStr, CString};
 use thiserror::Error;
 
 use crate::renderer::RenderedFrame;
+use crate::state::OverlayCalibration;
 
 #[cfg(windows)]
 const OVERLAY_KEY_PREFIX: &str = "com.puripuly.heart.overlay.";
 #[cfg(windows)]
 const OVERLAY_NAME_PREFIX: &str = "PuriPuly Heart Overlay ";
-#[cfg(windows)]
 const DEFAULT_OVERLAY_WIDTH_METERS: f32 = 1.8;
+const DEFAULT_OVERLAY_DISTANCE_METERS: f32 = 1.0;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverlayPlacementPolicy {
+    anchor: &'static str,
+    width_meters: f32,
+    offset_x_meters: f32,
+    offset_y_meters: f32,
+    distance_meters: f32,
+}
+
+impl Default for OverlayPlacementPolicy {
+    fn default() -> Self {
+        Self {
+            anchor: "head_locked",
+            width_meters: DEFAULT_OVERLAY_WIDTH_METERS,
+            offset_x_meters: 0.0,
+            offset_y_meters: 0.0,
+            distance_meters: DEFAULT_OVERLAY_DISTANCE_METERS,
+        }
+    }
+}
+
+impl OverlayPlacementPolicy {
+    pub fn is_head_locked(&self) -> bool {
+        self.anchor == "head_locked"
+    }
+
+    pub fn from_calibration(calibration: &OverlayCalibration) -> Self {
+        Self {
+            anchor: "head_locked",
+            width_meters: DEFAULT_OVERLAY_WIDTH_METERS * calibration.text_scale.max(0.1),
+            offset_x_meters: calibration.offset_x,
+            offset_y_meters: calibration.offset_y,
+            distance_meters: calibration.distance.max(0.1),
+        }
+    }
+
+    #[cfg(windows)]
+    fn apply(
+        &self,
+        overlay_api: &openvr_sys::VR_IVROverlay_FnTable,
+        overlay_handle: openvr_sys::VROverlayHandle_t,
+    ) -> Result<(), OpenVrError> {
+        let set_overlay_width_in_meters = overlay_api
+            .SetOverlayWidthInMeters
+            .ok_or_else(missing_overlay_method("SetOverlayWidthInMeters"))?;
+        let error = unsafe { set_overlay_width_in_meters(overlay_handle, self.width_meters) };
+        map_overlay_init_error(overlay_api, "SetOverlayWidthInMeters", error)?;
+
+        let set_overlay_transform = overlay_api
+            .SetOverlayTransformTrackedDeviceRelative
+            .ok_or_else(missing_overlay_method("SetOverlayTransformTrackedDeviceRelative"))?;
+        let mut transform = self.hmd_relative_transform();
+        let error = unsafe {
+            set_overlay_transform(
+                overlay_handle,
+                openvr_sys::k_unTrackedDeviceIndex_Hmd,
+                &mut transform,
+            )
+        };
+        map_overlay_init_error(
+            overlay_api,
+            "SetOverlayTransformTrackedDeviceRelative",
+            error,
+        )
+    }
+
+    #[cfg(windows)]
+    fn hmd_relative_transform(&self) -> openvr_sys::HmdMatrix34_t {
+        openvr_sys::HmdMatrix34_t {
+            m: [
+                [1.0, 0.0, 0.0, self.offset_x_meters],
+                [0.0, 1.0, 0.0, self.offset_y_meters],
+                [0.0, 0.0, 1.0, -self.distance_meters],
+            ],
+        }
+    }
+}
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum OpenVrError {
@@ -28,6 +107,10 @@ pub trait OverlayTextureSubmitter {
 
 pub trait OverlayFrameSubmitter {
     fn submit_frame(&mut self, frame: &RenderedFrame) -> Result<(), OpenVrError>;
+
+    fn apply_calibration(&mut self, _calibration: &OverlayCalibration) -> Result<(), OpenVrError> {
+        Ok(())
+    }
 }
 
 pub fn submit_texture<T: OverlayTextureSubmitter>(
@@ -75,6 +158,10 @@ impl OverlayFrameSubmitter for OpenVrOverlay {
     fn submit_frame(&mut self, frame: &RenderedFrame) -> Result<(), OpenVrError> {
         self.backend.submit_frame(frame)
     }
+
+    fn apply_calibration(&mut self, calibration: &OverlayCalibration) -> Result<(), OpenVrError> {
+        self.backend.apply_calibration(calibration)
+    }
 }
 
 enum OpenVrBackend {
@@ -104,12 +191,24 @@ impl OpenVrBackend {
             Self::Test(openvr) => submit_texture(openvr, frame),
         }
     }
+
+    fn apply_calibration(&mut self, calibration: &OverlayCalibration) -> Result<(), OpenVrError> {
+        #[cfg(not(windows))]
+        let _ = calibration;
+
+        match self {
+            #[cfg(windows)]
+            Self::Windows(openvr) => openvr.apply_calibration(calibration),
+            Self::Test(_) => Ok(()),
+        }
+    }
 }
 
 #[cfg(windows)]
 struct WindowsOpenVrOverlay {
     overlay_api: *mut openvr_sys::VR_IVROverlay_FnTable,
     overlay_handle: openvr_sys::VROverlayHandle_t,
+    placement_policy: OverlayPlacementPolicy,
     visible: bool,
 }
 
@@ -122,6 +221,7 @@ impl WindowsOpenVrOverlay {
         let instance = Self {
             overlay_api,
             overlay_handle,
+            placement_policy: OverlayPlacementPolicy::default(),
             visible: false,
         };
         instance.configure_overlay()?;
@@ -146,15 +246,6 @@ impl WindowsOpenVrOverlay {
             unsafe { set_overlay_rendering_pid(self.overlay_handle, std::process::id()) };
         map_overlay_init_error(self.overlay_api(), "SetOverlayRenderingPid", error)?;
 
-        let set_overlay_width_in_meters = self
-            .overlay_api()
-            .SetOverlayWidthInMeters
-            .ok_or_else(missing_overlay_method("SetOverlayWidthInMeters"))?;
-        let error = unsafe {
-            set_overlay_width_in_meters(self.overlay_handle, DEFAULT_OVERLAY_WIDTH_METERS)
-        };
-        map_overlay_init_error(self.overlay_api(), "SetOverlayWidthInMeters", error)?;
-
         let set_overlay_flag = self
             .overlay_api()
             .SetOverlayFlag
@@ -167,6 +258,8 @@ impl WindowsOpenVrOverlay {
             )
         };
         map_overlay_init_error(self.overlay_api(), "SetOverlayFlag", error)?;
+        self.placement_policy
+            .apply(self.overlay_api(), self.overlay_handle)?;
         Ok(())
     }
 
@@ -181,6 +274,12 @@ impl WindowsOpenVrOverlay {
 
     fn overlay_api(&self) -> &openvr_sys::VR_IVROverlay_FnTable {
         unsafe { &*self.overlay_api }
+    }
+
+    fn apply_calibration(&mut self, calibration: &OverlayCalibration) -> Result<(), OpenVrError> {
+        self.placement_policy = OverlayPlacementPolicy::from_calibration(calibration);
+        self.placement_policy
+            .apply(self.overlay_api(), self.overlay_handle)
     }
 }
 

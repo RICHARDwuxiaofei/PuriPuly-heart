@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import logging
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import flet as ft
@@ -43,6 +43,7 @@ from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.overlay.bridge import OverlayBridge
 from puripuly_heart.core.overlay.process import OverlayProcessManager
+from puripuly_heart.core.overlay.sink import OverlayEventAdapter
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
@@ -55,12 +56,14 @@ from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
 from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 from puripuly_heart.ui.event_bridge import UIEventBridge
 from puripuly_heart.ui.i18n import get_locale, set_locale, t
+from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
 logger = logging.getLogger(__name__)
 
 # Hardcoded STT session reset deadline (not configurable via settings)
 STT_RESET_DEADLINE_S = 300.0
 OVERLAY_STARTUP_TIMEOUT_MS = 3000
+OVERLAY_SHUTDOWN_GRACE_S = 0.05
 _OVERLAY_FAILURE_REASONS = frozenset(
     {
         "missing_executable",
@@ -130,6 +133,8 @@ class GuiController:
     overlay_state: str = "off"
     failure_reason: str | None = None
     auto_restart_scheduled: bool = False
+    overlay_calibration: OverlayCalibration = field(default_factory=OverlayCalibration)
+    _overlay_calibration_draft: OverlayCalibration | None = None
 
     @property
     def effective_peer_translation_enabled(self) -> bool:
@@ -146,7 +151,14 @@ class GuiController:
         return "local"
 
     def _effective_peer_translation_enabled_for(self, settings: AppSettings) -> bool:
-        return bool(settings.ui.peer_translation_enabled and self.overlay_state == "connected")
+        return bool(
+            settings.ui.peer_translation_enabled
+            and self._effective_peer_overlay_enabled_for(settings)
+        )
+
+    def _effective_peer_overlay_enabled_for(self, settings: AppSettings) -> bool:
+        _ = settings
+        return self.overlay_state == "connected"
 
     def _effective_integrated_context_enabled_for(self, settings: AppSettings) -> bool:
         return bool(
@@ -182,6 +194,8 @@ class GuiController:
 
     async def start(self) -> None:
         self.settings = self._load_or_init_settings(self.config_path)
+        self.overlay_calibration = self.settings.overlay_calibration.copy()
+        self._overlay_calibration_draft = None
         set_locale(self.settings.ui.locale)
         self._sync_ui_from_settings()
         with contextlib.suppress(Exception):
@@ -261,7 +275,7 @@ class GuiController:
             settings.languages.source_language,
             settings.audio.input_host_api,
             settings.audio.input_device,
-            self._effective_peer_translation_enabled_for(settings),
+            self._effective_peer_overlay_enabled_for(settings),
             settings.stt.vad_speech_threshold,
             settings.stt.low_latency_mode,
             settings.stt.low_latency_merge_gap_ms,
@@ -352,7 +366,9 @@ class GuiController:
 
             bridge = OverlayBridge(
                 session_token=secrets.token_urlsafe(16),
-                initial_snapshot={"events": []},
+                initial_snapshot={
+                    "events": [self._overlay_calibration_update_event().to_dict()],
+                },
             )
             await bridge.start()
             self._overlay_bridge = bridge
@@ -441,6 +457,7 @@ class GuiController:
             self.auto_restart_scheduled = False
             self._notify_overlay_state()
 
+            await self._emit_overlay_shutdown()
             await self._teardown_overlay_runtime()
             self.overlay_state = "off"
             if not preserve_failure_reason:
@@ -448,6 +465,14 @@ class GuiController:
             self._sync_effective_hub_flags()
             await self._refresh_overlay_runtime_dependencies()
             self._notify_overlay_state()
+
+    async def _emit_overlay_shutdown(self) -> None:
+        bridge = self._overlay_bridge
+        if bridge is None:
+            return
+        with contextlib.suppress(Exception):
+            await bridge.emit(OverlayEventAdapter(clock=self.clock).shutdown())
+            await asyncio.sleep(OVERLAY_SHUTDOWN_GRACE_S)
 
     async def _teardown_overlay_runtime(self) -> None:
         current_task = asyncio.current_task()
@@ -501,6 +526,77 @@ class GuiController:
         bridge = self._ui_event_bridge
         if bridge is not None:
             bridge.report_overlay_state(self.overlay_state, failure_reason=self.failure_reason)
+
+    def begin_overlay_calibration(self) -> OverlayCalibration:
+        if self._overlay_calibration_draft is None:
+            self._overlay_calibration_draft = self.overlay_calibration.copy()
+        return self._overlay_calibration_draft.copy()
+
+    def set_overlay_calibration_field(
+        self,
+        field_name: str,
+        value: object,
+    ) -> OverlayCalibration:
+        if self._overlay_calibration_draft is None:
+            self._overlay_calibration_draft = self.overlay_calibration.copy()
+
+        if field_name not in OverlayCalibration.__dataclass_fields__:
+            raise ValueError(f"unknown overlay calibration field: {field_name}")
+
+        if field_name == "anchor":
+            setattr(self._overlay_calibration_draft, field_name, str(value))
+        else:
+            setattr(self._overlay_calibration_draft, field_name, float(value))
+
+        self._overlay_calibration_draft.validate()
+        return self._overlay_calibration_draft.copy()
+
+    def apply_overlay_calibration(self) -> OverlayCalibration:
+        if self._overlay_calibration_draft is None:
+            return self.overlay_calibration.copy()
+
+        self._overlay_calibration_draft.validate()
+        self.overlay_calibration = self._overlay_calibration_draft.copy()
+        self._overlay_calibration_draft = None
+        if self.settings is not None:
+            self.settings.overlay_calibration = self.overlay_calibration.copy()
+            self._save_settings()
+        self._schedule_overlay_calibration_emit()
+        return self.overlay_calibration.copy()
+
+    def cancel_overlay_calibration(self) -> OverlayCalibration:
+        self._overlay_calibration_draft = None
+        return self.overlay_calibration.copy()
+
+    async def _emit_overlay_calibration_update(self) -> None:
+        bridge = self._overlay_bridge
+        if bridge is None:
+            return
+        with contextlib.suppress(Exception):
+            await bridge.emit(self._overlay_calibration_update_event())
+
+    def _schedule_overlay_calibration_emit(self) -> None:
+        if self._overlay_bridge is None:
+            return
+        with contextlib.suppress(RuntimeError):
+            asyncio.get_running_loop().create_task(self._emit_overlay_calibration_update())
+
+    def _overlay_calibration_update_event(self):
+        return OverlayEventAdapter(clock=self.clock).overlay_calibration_update(
+            self.overlay_calibration
+        )
+
+    def begin_overlay_calibration_for_test(self) -> None:
+        self.begin_overlay_calibration()
+
+    def set_overlay_calibration_field_for_test(self, field_name: str, value: object) -> None:
+        self.set_overlay_calibration_field(field_name, value)
+
+    def apply_overlay_calibration_for_test(self) -> None:
+        self.apply_overlay_calibration()
+
+    def cancel_overlay_calibration_for_test(self) -> None:
+        self.cancel_overlay_calibration()
 
     async def set_translation_enabled(self, enabled: bool) -> None:
         if self.hub is None:
@@ -789,7 +885,7 @@ class GuiController:
             )
         except Exception as exc:
             self._log_error(f"STT backend not available: {exc}")
-        if self._effective_peer_translation_enabled_for(self.settings):
+        if self._effective_peer_overlay_enabled_for(self.settings):
             try:
                 peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
                 peer_stt = ManagedSTTProvider(
@@ -879,7 +975,7 @@ class GuiController:
             )
         except Exception as exc:
             self._log_error(f"STT backend not available: {exc}")
-        if self._effective_peer_translation_enabled_for(self.settings):
+        if self._effective_peer_overlay_enabled_for(self.settings):
             try:
                 peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
                 peer_stt = ManagedSTTProvider(
@@ -959,7 +1055,7 @@ class GuiController:
         assert self.hub is not None
 
         if self._mic_task is not None and (
-            not self._effective_peer_translation_enabled_for(self.settings)
+            not self._effective_peer_overlay_enabled_for(self.settings)
             or self._peer_mic_task is not None
             or self.hub.peer_stt is None
         ):
@@ -1048,7 +1144,7 @@ class GuiController:
             self._mic_task = asyncio.create_task(self._run_mic_loop())
 
         if (
-            self._effective_peer_translation_enabled_for(self.settings)
+            self._effective_peer_overlay_enabled_for(self.settings)
             and self.hub.peer_stt is not None
             and self._peer_mic_task is None
         ):
@@ -1218,6 +1314,7 @@ class GuiController:
             view_settings = getattr(self.app, "view_settings", None)
             if view_settings is not None:
                 view_settings.load_from_settings(settings, config_path=self.config_path)
+                view_settings.set_overlay_calibration(self.overlay_calibration)
 
     def _on_recent_languages_change(self, source: list[str], target: list[str]) -> None:
         """Callback when recent languages change in dashboard."""

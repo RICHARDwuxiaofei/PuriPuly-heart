@@ -1,4 +1,6 @@
-use puripuly_heart_overlay::{CaptionBlock, CaptionLayoutPolicy, CaptionRenderer};
+use puripuly_heart_overlay::{
+    CaptionBlock, CaptionChannel, CaptionLayoutPolicy, CaptionRenderer, OverlayPlacementPolicy,
+};
 
 fn test_block(text: &str) -> CaptionBlock {
     CaptionBlock::new("block-1", text)
@@ -38,6 +40,41 @@ fn renderer_uses_fixed_surface_defaults_for_mvp_caption_layout() {
     let policy = CaptionLayoutPolicy::default();
     assert_eq!(policy.default_surface_size(), (3840, 1024));
     assert_eq!(policy.visible_window_target_blocks(), 2);
+}
+
+#[test]
+fn renderer_layout_preserves_channel_metadata_for_visible_blocks() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.layout_blocks(
+        vec![CaptionBlock::new("peer", "hello").with_channel(CaptionChannel::PeerChannel)],
+        3840,
+        1024,
+    );
+
+    assert_eq!(
+        result.visible_blocks[0].channel,
+        Some(CaptionChannel::PeerChannel)
+    );
+}
+
+#[test]
+fn renderer_default_caption_order_matches_self_and_peer_policy() {
+    let policy = CaptionLayoutPolicy::default();
+    assert_eq!(policy.compose_self_line("hello", "안녕"), "hello (안녕)");
+    assert_eq!(policy.compose_peer_line("hello", "안녕"), "안녕 (hello)");
+}
+
+#[test]
+fn renderer_channel_style_is_color_only_and_speaker_labels_are_hidden_by_default() {
+    let policy = CaptionLayoutPolicy::default();
+    assert!(policy.channel_uses_color_only());
+    assert!(!policy.show_speaker_labels_by_default());
+}
+
+#[test]
+fn openvr_overlay_policy_defaults_to_head_locked_mode() {
+    let policy = OverlayPlacementPolicy::default();
+    assert!(policy.is_head_locked());
 }
 
 #[test]

@@ -396,6 +396,55 @@ def test_overlay_failure_reason_keys_are_localized() -> None:
     assert bundle["settings.overlay.failure.runtime_crashed"]
 
 
+def test_overlay_calibration_controls_are_localized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(AppSettings(), config_path=Path("settings.json"))
+
+    assert view._overlay_calibration_title.value == t("settings.overlay.calibration")
+    assert view._overlay_anchor_label.value == t("settings.overlay.calibration.anchor")
+    assert view._overlay_calibration_apply_button.text == t("settings.overlay.calibration.apply")
+    assert view._overlay_calibration_cancel_button.text == t("settings.overlay.calibration.cancel")
+
+
+def test_overlay_calibration_controls_follow_local_apply_cancel_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(AppSettings(), config_path=Path("settings.json"))
+
+    view._overlay_distance_field.value = "1.20"
+    view._on_overlay_calibration_numeric_blur(
+        "distance",
+        SimpleNamespace(control=view._overlay_distance_field),
+    )
+    view._on_overlay_calibration_cancel(None)
+
+    assert view._overlay_distance_field.value == "1.00"
+
+    view._overlay_distance_field.value = "1.20"
+    view._on_overlay_calibration_numeric_blur(
+        "distance",
+        SimpleNamespace(control=view._overlay_distance_field),
+    )
+    view._on_overlay_calibration_apply(None)
+
+    assert view._overlay_distance_field.value == "1.20"
+
+
+def test_overlay_calibration_apply_commits_current_field_values_without_blur(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(AppSettings(), config_path=Path("settings.json"))
+
+    view._overlay_distance_field.value = "1.20"
+    view._on_overlay_calibration_apply(None)
+
+    assert view._overlay_distance_field.value == "1.20"
+
+
 @pytest.mark.asyncio
 async def test_prompt_verify_and_emit_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = AppSettings()

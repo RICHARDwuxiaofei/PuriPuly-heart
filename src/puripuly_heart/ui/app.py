@@ -50,6 +50,24 @@ class TranslatorApp:
         self.view_settings.on_secret_cleared = self._on_secret_cleared
         self.view_settings.show_snackbar = self._show_snackbar
 
+        calibration_begin = getattr(self.controller, "begin_overlay_calibration", None)
+        calibration_change = getattr(self.controller, "set_overlay_calibration_field", None)
+        calibration_apply = getattr(self.controller, "apply_overlay_calibration", None)
+        calibration_cancel = getattr(self.controller, "cancel_overlay_calibration", None)
+        if callable(calibration_begin):
+            self.view_settings.on_overlay_calibration_begin = calibration_begin
+        if callable(calibration_change):
+            self.view_settings.on_overlay_calibration_change = calibration_change
+        if callable(calibration_apply):
+            self.view_settings.on_overlay_calibration_apply = calibration_apply
+        if callable(calibration_cancel):
+            self.view_settings.on_overlay_calibration_cancel = calibration_cancel
+
+        set_overlay_calibration = getattr(self.view_settings, "set_overlay_calibration", None)
+        overlay_calibration = getattr(self.controller, "overlay_calibration", None)
+        if callable(set_overlay_calibration) and overlay_calibration is not None:
+            set_overlay_calibration(overlay_calibration)
+
     def _setup_page(self):
         self.page.title = t("app.title")
         self.page.theme_mode = ft.ThemeMode.LIGHT

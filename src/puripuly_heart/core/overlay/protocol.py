@@ -6,11 +6,14 @@ from uuid import UUID
 
 ChannelId = Literal["self", "peer"]
 AppliedContextMode = Literal["local", "integrated"]
-OVERLAY_ROW_IDENTITY_RULE = "channel+utterance_id"
+OverlayContentKind = Literal["original", "translation"]
+OVERLAY_ROW_IDENTITY_RULE = "channel+utterance_id+content_kind"
 
 
-def overlay_row_key(channel: ChannelId, utterance_id: UUID) -> str:
-    return f"{channel}:{utterance_id}"
+def overlay_row_key(
+    channel: ChannelId, utterance_id: UUID, content_kind: OverlayContentKind
+) -> str:
+    return f"{channel}:{utterance_id}:{content_kind}"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -28,10 +31,14 @@ class OverlayEvent:
         return self.EVENT_TYPE
 
     @property
+    def content_kind(self) -> OverlayContentKind | None:
+        return None
+
+    @property
     def row_key(self) -> str | None:
-        if self.channel is None or self.utterance_id is None:
+        if self.channel is None or self.utterance_id is None or self.content_kind is None:
             return None
-        return overlay_row_key(self.channel, self.utterance_id)
+        return overlay_row_key(self.channel, self.utterance_id, self.content_kind)
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -67,6 +74,10 @@ class _TranscriptEvent(OverlayEvent):
             "speaker_label": self.speaker_label,
             "peer_epoch": self.peer_epoch,
         }
+
+    @property
+    def content_kind(self) -> OverlayContentKind:
+        return "original"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -110,6 +121,10 @@ class TranslationStreamUpdate(OverlayEvent):
             "peer_epoch": self.peer_epoch,
         }
 
+    @property
+    def content_kind(self) -> OverlayContentKind:
+        return "translation"
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TranslationFinal(TranslationStreamUpdate):
@@ -140,6 +155,30 @@ class Shutdown(OverlayEvent):
     EVENT_TYPE: ClassVar[str] = "shutdown"
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OverlayCalibrationUpdate(OverlayEvent):
+    utterance_id: UUID | None = None
+    channel: ChannelId | None = None
+    anchor: str
+    offset_x: float
+    offset_y: float
+    distance: float
+    text_scale: float
+    background_alpha: float
+
+    EVENT_TYPE: ClassVar[str] = "overlay_calibration_update"
+
+    def _extra_dict(self) -> dict[str, object]:
+        return {
+            "anchor": self.anchor,
+            "offset_x": self.offset_x,
+            "offset_y": self.offset_y,
+            "distance": self.distance,
+            "text_scale": self.text_scale,
+            "background_alpha": self.background_alpha,
+        }
+
+
 OverlayEventUnion = (
     SelfTranscriptFinal
     | PeerTranscriptFinal
@@ -147,6 +186,7 @@ OverlayEventUnion = (
     | TranslationFinal
     | UtteranceClosed
     | Shutdown
+    | OverlayCalibrationUpdate
 )
 
 _EVENT_TYPES: dict[str, type[OverlayEvent]] = {
@@ -156,6 +196,7 @@ _EVENT_TYPES: dict[str, type[OverlayEvent]] = {
     TranslationFinal.EVENT_TYPE: TranslationFinal,
     UtteranceClosed.EVENT_TYPE: UtteranceClosed,
     Shutdown.EVENT_TYPE: Shutdown,
+    OverlayCalibrationUpdate.EVENT_TYPE: OverlayCalibrationUpdate,
 }
 
 
@@ -221,6 +262,17 @@ def overlay_event_from_dict(data: dict[str, object]) -> OverlayEventUnion:
         return cls(
             **common,
             is_final=bool(data.get("is_final", True)),
+        )
+
+    if cls is OverlayCalibrationUpdate:
+        return cls(
+            **common,
+            anchor=str(data["anchor"]),
+            offset_x=float(data["offset_x"]),
+            offset_y=float(data["offset_y"]),
+            distance=float(data["distance"]),
+            text_scale=float(data["text_scale"]),
+            background_alpha=float(data["background_alpha"]),
         )
 
     return cls(**common)

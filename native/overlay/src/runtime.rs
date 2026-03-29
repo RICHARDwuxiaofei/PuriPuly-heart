@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::json;
@@ -8,8 +9,10 @@ use crate::bridge::{BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEven
 use crate::logging::OverlayLogger;
 use crate::manifest::{load_manifest, validate_manifest, OverlayManifest, EXPECTED_CONTRACT_VERSION};
 use crate::openvr::{OpenVrOverlay, OverlayFrameSubmitter};
-use crate::renderer::{CaptionBlock, CaptionRenderer};
-use crate::state::{OverlayState, OverlayStateSnapshot};
+use crate::renderer::{
+    CaptionBlock, CaptionChannel, CaptionLayoutPolicy, CaptionPresentation, CaptionRenderer,
+};
+use crate::state::{OverlayContentKind, OverlayState, OverlayStateSnapshot};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StartupError {
@@ -81,6 +84,48 @@ pub struct OverlayRuntime {
     stopped: bool,
     state: OverlayState,
     redraw_requested: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CaptionBlockEntry {
+    channel: String,
+    utterance_id: String,
+    original_text: String,
+    translation_text: String,
+}
+
+impl CaptionBlockEntry {
+    fn new(channel: &str, utterance_id: &str) -> Self {
+        Self {
+            channel: channel.to_string(),
+            utterance_id: utterance_id.to_string(),
+            original_text: String::new(),
+            translation_text: String::new(),
+        }
+    }
+
+    fn apply_row(&mut self, content_kind: &OverlayContentKind, text: &str) {
+        match content_kind {
+            OverlayContentKind::Original => self.original_text = text.to_string(),
+            OverlayContentKind::Translation => self.translation_text = text.to_string(),
+        }
+    }
+
+    fn into_caption_block(self, policy: &CaptionLayoutPolicy) -> CaptionBlock {
+        let (text, channel) = match self.channel.as_str() {
+            "peer" => (
+                policy.compose_peer_line(&self.original_text, &self.translation_text),
+                CaptionChannel::PeerChannel,
+            ),
+            _ => (
+                policy.compose_self_line(&self.original_text, &self.translation_text),
+                CaptionChannel::SelfChannel,
+            ),
+        };
+
+        CaptionBlock::new(format!("{}:{}", self.channel, self.utterance_id), text)
+            .with_channel(channel)
+    }
 }
 
 impl OverlayRuntime {
@@ -188,6 +233,12 @@ impl OverlayRuntime {
             return Ok(());
         }
 
+        renderer.set_presentation(CaptionPresentation {
+            background_alpha: self.state.calibration().background_alpha,
+        });
+        openvr
+            .apply_calibration(self.state.calibration())
+            .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
         let blocks = self.caption_blocks();
         let frame = if blocks.is_empty() {
             renderer
@@ -422,7 +473,8 @@ fn create_runtime_renderer() -> Result<CaptionRenderer, crate::renderer::Caption
 }
 
 impl OverlayRuntime {
-    fn caption_blocks(&self) -> Vec<CaptionBlock> {
+    pub fn caption_blocks(&self) -> Vec<CaptionBlock> {
+        let policy = CaptionLayoutPolicy::default();
         let mut rows = self.state.rows_for("self");
         rows.extend(self.state.rows_for("peer"));
         rows.sort_by(|left, right| {
@@ -432,14 +484,94 @@ impl OverlayRuntime {
                 .then_with(|| left.channel.cmp(&right.channel))
                 .then_with(|| left.utterance_id.cmp(&right.utterance_id))
         });
-        rows.into_iter()
-            .map(|row| {
-                CaptionBlock::new(
-                    format!("{}:{}", row.channel, row.utterance_id),
-                    row.text.clone(),
-                )
-            })
+
+        let mut block_indexes: BTreeMap<(String, String), usize> = BTreeMap::new();
+        let mut blocks = Vec::new();
+
+        for row in rows {
+            let key = (row.channel.clone(), row.utterance_id.clone());
+            let index = *block_indexes.entry(key).or_insert_with(|| {
+                blocks.push(CaptionBlockEntry::new(&row.channel, &row.utterance_id));
+                blocks.len() - 1
+            });
+            blocks[index].apply_row(&row.content_kind, &row.text);
+        }
+
+        blocks
+            .into_iter()
+            .map(|block| block.into_caption_block(&policy))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OverlayRuntime;
+    use crate::state::{Event, OverlayStateSnapshot, RowEvent};
+
+    fn row_event(seq: u64, channel: &str, utterance_id: &str, text: &str) -> RowEvent {
+        RowEvent {
+            event_id: format!("evt-{channel}-{utterance_id}-{seq}"),
+            seq,
+            utterance_id: utterance_id.to_string(),
+            channel: channel.to_string(),
+            text: text.to_string(),
+            source_language: "en".to_string(),
+            target_language: "ko".to_string(),
+            created_at: seq as f64,
+            is_final: true,
+            speaker_label: None,
+            peer_epoch: None,
+            applied_context_mode: None,
+        }
+    }
+
+    #[test]
+    fn caption_blocks_keep_late_self_translation_attached_to_original_utterance() {
+        let runtime = OverlayRuntime::new(OverlayStateSnapshot {
+            events: vec![
+                Event::SelfTranscriptFinal(row_event(1, "self", "self-1", "self one")),
+                Event::SelfTranscriptFinal(row_event(3, "self", "self-2", "self two")),
+                Event::TranslationFinal(row_event(4, "self", "self-1", "자기 하나")),
+            ],
+        });
+
+        let blocks = runtime.caption_blocks();
+
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| (block.id.as_str(), block.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("self:self-1", "self one (자기 하나)"),
+                ("self:self-2", "self two"),
+            ]
+        );
+    }
+
+    #[test]
+    fn caption_blocks_compose_peer_translation_with_original_in_same_block() {
+        let runtime = OverlayRuntime::new(OverlayStateSnapshot {
+            events: vec![
+                Event::PeerTranscriptFinal(row_event(1, "peer", "peer-1", "hello")),
+                Event::PeerTranscriptFinal(row_event(2, "peer", "peer-2", "world")),
+                Event::TranslationStreamUpdate(row_event(4, "peer", "peer-1", "안녕")),
+            ],
+        });
+
+        let blocks = runtime.caption_blocks();
+
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| (block.id.as_str(), block.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("peer:peer-1", "안녕 (hello)"),
+                ("peer:peer-2", "world"),
+            ]
+        );
     }
 }
 

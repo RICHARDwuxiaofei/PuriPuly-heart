@@ -7,9 +7,11 @@ from uuid import UUID
 
 from puripuly_heart.core.clock import Clock, SystemClock
 from puripuly_heart.domain.models import ChannelId, Transcript
+from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
 from .protocol import (
     AppliedContextMode,
+    OverlayCalibrationUpdate,
     OverlayEventUnion,
     OverlayStateSnapshot,
     PeerTranscriptFinal,
@@ -201,6 +203,26 @@ class OverlayEventAdapter:
                 channel=None,
                 created_at=created_at,
             )
+        )
+
+    def overlay_calibration_update(
+        self,
+        calibration: OverlayCalibration,
+        *,
+        created_at: float | None = None,
+    ) -> OverlayCalibrationUpdate:
+        return OverlayCalibrationUpdate(
+            **self._common_event_fields(
+                utterance_id=None,
+                channel=None,
+                created_at=created_at,
+            ),
+            anchor=calibration.anchor,
+            offset_x=calibration.offset_x,
+            offset_y=calibration.offset_y,
+            distance=calibration.distance,
+            text_scale=calibration.text_scale,
+            background_alpha=calibration.background_alpha,
         )
 
     def _common_event_fields(

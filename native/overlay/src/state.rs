@@ -3,16 +3,24 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OverlayContentKind {
+    Original,
+    Translation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct OverlayRowKey {
     channel: String,
     utterance_id: String,
+    content_kind: OverlayContentKind,
 }
 
 impl OverlayRowKey {
-    fn new(channel: &str, utterance_id: &str) -> Self {
+    fn new(channel: &str, utterance_id: &str, content_kind: OverlayContentKind) -> Self {
         Self {
             channel: channel.to_string(),
             utterance_id: utterance_id.to_string(),
+            content_kind,
         }
     }
 }
@@ -66,6 +74,67 @@ pub struct ShutdownEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OverlayCalibration {
+    #[serde(default = "default_anchor")]
+    pub anchor: String,
+    #[serde(default)]
+    pub offset_x: f32,
+    #[serde(default)]
+    pub offset_y: f32,
+    #[serde(default = "default_distance")]
+    pub distance: f32,
+    #[serde(default = "default_text_scale")]
+    pub text_scale: f32,
+    #[serde(default = "default_background_alpha")]
+    pub background_alpha: f32,
+}
+
+impl Default for OverlayCalibration {
+    fn default() -> Self {
+        Self {
+            anchor: default_anchor(),
+            offset_x: 0.0,
+            offset_y: 0.0,
+            distance: default_distance(),
+            text_scale: default_text_scale(),
+            background_alpha: default_background_alpha(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OverlayCalibrationUpdateEvent {
+    pub event_id: String,
+    pub seq: u64,
+    pub created_at: f64,
+    #[serde(default = "default_anchor")]
+    pub anchor: String,
+    #[serde(default)]
+    pub offset_x: f32,
+    #[serde(default)]
+    pub offset_y: f32,
+    #[serde(default = "default_distance")]
+    pub distance: f32,
+    #[serde(default = "default_text_scale")]
+    pub text_scale: f32,
+    #[serde(default = "default_background_alpha")]
+    pub background_alpha: f32,
+}
+
+impl OverlayCalibrationUpdateEvent {
+    fn calibration(&self) -> OverlayCalibration {
+        OverlayCalibration {
+            anchor: self.anchor.clone(),
+            offset_x: self.offset_x,
+            offset_y: self.offset_y,
+            distance: self.distance,
+            text_scale: self.text_scale,
+            background_alpha: self.background_alpha,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Event {
     #[serde(rename = "self_transcript_final")]
@@ -80,6 +149,8 @@ pub enum Event {
     UtteranceClosed(UtteranceClosedEvent),
     #[serde(rename = "shutdown")]
     Shutdown(ShutdownEvent),
+    #[serde(rename = "overlay_calibration_update")]
+    OverlayCalibrationUpdate(OverlayCalibrationUpdateEvent),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -93,6 +164,7 @@ pub struct OverlayRow {
     pub seq: u64,
     pub utterance_id: String,
     pub channel: String,
+    pub content_kind: OverlayContentKind,
     pub text: String,
     pub source_language: String,
     pub target_language: String,
@@ -104,13 +176,14 @@ pub struct OverlayRow {
     pub closed: bool,
 }
 
-impl From<&RowEvent> for OverlayRow {
-    fn from(event: &RowEvent) -> Self {
+impl OverlayRow {
+    fn from_row_event(event: &RowEvent, content_kind: OverlayContentKind) -> Self {
         Self {
             event_id: event.event_id.clone(),
             seq: event.seq,
             utterance_id: event.utterance_id.clone(),
             channel: event.channel.clone(),
+            content_kind,
             text: event.text.clone(),
             source_language: event.source_language.clone(),
             target_language: event.target_language.clone(),
@@ -127,23 +200,24 @@ impl From<&RowEvent> for OverlayRow {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct OverlayState {
     rows: BTreeMap<OverlayRowKey, OverlayRow>,
+    calibration: OverlayCalibration,
 }
 
 impl OverlayState {
     pub fn apply_snapshot(&mut self, snapshot: &OverlayStateSnapshot) -> bool {
-        let mut next_rows = BTreeMap::new();
+        let mut next_state = OverlayState::default();
         for event in &snapshot.events {
-            apply_event_to_rows(&mut next_rows, event.clone());
+            apply_event_to_state(&mut next_state, event.clone());
         }
-        if self.rows == next_rows {
+        if self == &next_state {
             return false;
         }
-        self.rows = next_rows;
+        *self = next_state;
         true
     }
 
     pub fn apply(&mut self, event: Event) -> bool {
-        apply_event_to_rows(&mut self.rows, event)
+        apply_event_to_state(self, event)
     }
 
     pub fn rows_for(&self, channel: &str) -> Vec<&OverlayRow> {
@@ -155,25 +229,61 @@ impl OverlayState {
         rows.sort_by(|left, right| left.seq.cmp(&right.seq));
         rows
     }
+
+    pub fn calibration(&self) -> &OverlayCalibration {
+        &self.calibration
+    }
 }
 
 fn default_true() -> bool {
     true
 }
 
-fn apply_event_to_rows(rows: &mut BTreeMap<OverlayRowKey, OverlayRow>, event: Event) -> bool {
+fn default_anchor() -> String {
+    "head_locked".to_string()
+}
+
+fn default_distance() -> f32 {
+    1.0
+}
+
+fn default_text_scale() -> f32 {
+    1.0
+}
+
+fn default_background_alpha() -> f32 {
+    0.24
+}
+
+fn apply_event_to_state(state: &mut OverlayState, event: Event) -> bool {
     match event {
-        Event::SelfTranscriptFinal(row_event)
-        | Event::PeerTranscriptFinal(row_event)
-        | Event::TranslationStreamUpdate(row_event)
-        | Event::TranslationFinal(row_event) => upsert_row(rows, OverlayRow::from(&row_event)),
-        Event::UtteranceClosed(event) => close_row(rows, event),
+        Event::SelfTranscriptFinal(row_event) | Event::PeerTranscriptFinal(row_event) => {
+            upsert_row(
+                &mut state.rows,
+                OverlayRow::from_row_event(&row_event, OverlayContentKind::Original),
+            )
+        }
+        Event::TranslationStreamUpdate(row_event) | Event::TranslationFinal(row_event) => {
+            upsert_row(
+                &mut state.rows,
+                OverlayRow::from_row_event(&row_event, OverlayContentKind::Translation),
+            )
+        }
+        Event::UtteranceClosed(event) => close_row(&mut state.rows, event),
         Event::Shutdown(_) => false,
+        Event::OverlayCalibrationUpdate(event) => {
+            let next_calibration = event.calibration();
+            if state.calibration == next_calibration {
+                return false;
+            }
+            state.calibration = next_calibration;
+            true
+        }
     }
 }
 
 fn upsert_row(rows: &mut BTreeMap<OverlayRowKey, OverlayRow>, row: OverlayRow) -> bool {
-    let key = OverlayRowKey::new(&row.channel, &row.utterance_id);
+    let key = OverlayRowKey::new(&row.channel, &row.utterance_id, row.content_kind.clone());
     match rows.get(&key) {
         Some(existing) if existing == &row => false,
         _ => {
@@ -184,14 +294,30 @@ fn upsert_row(rows: &mut BTreeMap<OverlayRowKey, OverlayRow>, row: OverlayRow) -
 }
 
 fn close_row(rows: &mut BTreeMap<OverlayRowKey, OverlayRow>, event: UtteranceClosedEvent) -> bool {
-    let key = OverlayRowKey::new(&event.channel, &event.utterance_id);
-    let Some(row) = rows.get_mut(&key) else {
-        return false;
-    };
+    let keys = [
+        OverlayRowKey::new(
+            &event.channel,
+            &event.utterance_id,
+            OverlayContentKind::Original,
+        ),
+        OverlayRowKey::new(
+            &event.channel,
+            &event.utterance_id,
+            OverlayContentKind::Translation,
+        ),
+    ];
 
-    let was_closed = row.closed;
-    let prior_final = row.is_final;
-    row.closed = true;
-    row.is_final = event.is_final;
-    !was_closed || prior_final != event.is_final
+    let mut changed = false;
+    for key in keys {
+        let Some(row) = rows.get_mut(&key) else {
+            continue;
+        };
+        let was_closed = row.closed;
+        let prior_final = row.is_final;
+        row.closed = true;
+        row.is_final = event.is_final;
+        changed |= !was_closed || prior_final != event.is_final;
+    }
+
+    changed
 }

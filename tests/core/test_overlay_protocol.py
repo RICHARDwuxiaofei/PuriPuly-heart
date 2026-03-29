@@ -6,6 +6,7 @@ import pytest
 
 from puripuly_heart.core.overlay.protocol import (
     OVERLAY_ROW_IDENTITY_RULE,
+    OverlayCalibrationUpdate,
     OverlayStateSnapshot,
     PeerTranscriptFinal,
     SelfTranscriptFinal,
@@ -70,9 +71,31 @@ def test_overlay_state_snapshot_round_trips_channel_identity_and_ordering() -> N
     assert restored_event.utterance_id == event.utterance_id
 
 
+def test_overlay_calibration_update_round_trips_runtime_fields() -> None:
+    event = OverlayCalibrationUpdate(
+        event_id="evt-calibration",
+        seq=14,
+        created_at=500.0,
+        anchor="head_locked",
+        offset_x=0.15,
+        offset_y=-0.2,
+        distance=1.1,
+        text_scale=1.25,
+        background_alpha=0.4,
+    )
+
+    snapshot = OverlayStateSnapshot(events=[event])
+    restored = OverlayStateSnapshot.from_dict(snapshot.to_dict()).events[0]
+
+    assert isinstance(restored, OverlayCalibrationUpdate)
+    assert restored.anchor == "head_locked"
+    assert restored.distance == 1.1
+    assert restored.background_alpha == 0.4
+
+
 def test_overlay_row_key_uses_channel_plus_utterance_id_identity_rule() -> None:
     utterance_id = uuid4()
-    event = PeerTranscriptFinal(
+    transcript_event = PeerTranscriptFinal(
         event_id="evt-3",
         seq=9,
         utterance_id=utterance_id,
@@ -82,9 +105,20 @@ def test_overlay_row_key_uses_channel_plus_utterance_id_identity_rule() -> None:
         target_language="ko",
         created_at=789.0,
     )
+    translation_event = TranslationFinal(
+        event_id="evt-3b",
+        seq=10,
+        utterance_id=utterance_id,
+        channel="peer",
+        text="translated",
+        source_language="en",
+        target_language="ko",
+        created_at=790.0,
+    )
 
-    assert OVERLAY_ROW_IDENTITY_RULE == "channel+utterance_id"
-    assert event.row_key == f"peer:{utterance_id}"
+    assert OVERLAY_ROW_IDENTITY_RULE == "channel+utterance_id+content_kind"
+    assert transcript_event.row_key == f"peer:{utterance_id}:original"
+    assert translation_event.row_key == f"peer:{utterance_id}:translation"
 
 
 def test_final_events_reject_invalid_channel_or_is_final_values() -> None:

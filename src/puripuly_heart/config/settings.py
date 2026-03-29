@@ -7,6 +7,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from puripuly_heart.ui.overlay_calibration import OverlayCalibration
+
 SETTINGS_SCHEMA_VERSION = 2
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
@@ -309,6 +311,7 @@ class AppSettings:
     languages: LanguageSettings = field(default_factory=LanguageSettings)
     audio: AudioSettings = field(default_factory=AudioSettings)
     desktop_audio: DesktopAudioSettings = field(default_factory=DesktopAudioSettings)
+    overlay_calibration: OverlayCalibration = field(default_factory=OverlayCalibration)
     stt: STTSettings = field(default_factory=STTSettings)
     deepgram_stt: DeepgramSTTSettings = field(default_factory=DeepgramSTTSettings)
     qwen_asr_stt: QwenASRSTTSettings = field(default_factory=QwenASRSTTSettings)
@@ -330,6 +333,7 @@ class AppSettings:
         self.languages.validate()
         self.audio.validate()
         self.desktop_audio.validate()
+        self.overlay_calibration.validate()
         self.stt.validate()
         self.deepgram_stt.validate()
         self.qwen_asr_stt.validate()
@@ -381,6 +385,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "vad_hangover_ms": settings.desktop_audio.vad_hangover_ms,
             "vad_pre_roll_ms": settings.desktop_audio.vad_pre_roll_ms,
         },
+        "overlay_calibration": settings.overlay_calibration.to_dict(),
         "stt": {
             "drain_timeout_s": settings.stt.drain_timeout_s,
             "vad_speech_threshold": settings.stt.vad_speech_threshold,
@@ -617,6 +622,7 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 def from_dict(data: dict[str, Any]) -> AppSettings:
     audio_data = data.get("audio") or {}
     desktop_audio_data = data.get("desktop_audio") or {}
+    overlay_calibration_data = data.get("overlay_calibration") or {}
     stt_data = data.get("stt") or {}
 
     input_host_api_raw = audio_data.get("input_host_api")
@@ -670,6 +676,44 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             vad_speech_threshold=float(desktop_audio_data.get("vad_speech_threshold", 0.65)),
             vad_hangover_ms=int(desktop_audio_data.get("vad_hangover_ms", 900)),
             vad_pre_roll_ms=int(desktop_audio_data.get("vad_pre_roll_ms", 500)),
+        ),
+        overlay_calibration=OverlayCalibration(
+            anchor=str(
+                overlay_calibration_data.get(
+                    "anchor",
+                    OverlayCalibration().anchor,
+                )
+            ),
+            offset_x=float(
+                overlay_calibration_data.get(
+                    "offset_x",
+                    OverlayCalibration().offset_x,
+                )
+            ),
+            offset_y=float(
+                overlay_calibration_data.get(
+                    "offset_y",
+                    OverlayCalibration().offset_y,
+                )
+            ),
+            distance=float(
+                overlay_calibration_data.get(
+                    "distance",
+                    OverlayCalibration().distance,
+                )
+            ),
+            text_scale=float(
+                overlay_calibration_data.get(
+                    "text_scale",
+                    OverlayCalibration().text_scale,
+                )
+            ),
+            background_alpha=float(
+                overlay_calibration_data.get(
+                    "background_alpha",
+                    OverlayCalibration().background_alpha,
+                )
+            ),
         ),
         stt=STTSettings(
             drain_timeout_s=float(stt_data.get("drain_timeout_s", 2.0)),

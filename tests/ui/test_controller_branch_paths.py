@@ -686,6 +686,27 @@ async def test_apply_settings_updates_peer_translation_flags_on_hub(
 
 
 @pytest.mark.asyncio
+async def test_init_pipeline_keeps_peer_original_runtime_available_without_peer_translation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = _patch_init_pipeline_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        GuiController, "_configure_vrc_mic_receiver", lambda self, enabled: asyncio.sleep(0)
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.overlay_enabled = True
+    controller.overlay_state = "connected"
+
+    await controller._init_pipeline()
+
+    hub = created["hub"]
+    assert hub.peer_stt == "stt"
+    assert hub.peer_translation_enabled is False
+
+
+@pytest.mark.asyncio
 async def test_overlay_toggle_starts_and_stops_overlay_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -718,6 +739,32 @@ async def test_overlay_toggle_starts_and_stops_overlay_runtime(
     assert controller.overlay_state == "off"
     assert controller.hub.overlay_sink is None
     assert bridge.stopped is True
+    assert manager.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_overlay_toggle_off_sends_shutdown_event_before_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.overlay_enabled = True
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    manager = FakeOverlayProcessManager.instances[0]
+    bridge = FakeOverlayBridge.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    await controller.set_overlay_enabled(False)
+
+    assert [event.type for event in bridge.events[-1:]] == ["shutdown"]
     assert manager.stop_calls == 1
 
 
@@ -2080,3 +2127,44 @@ async def test_verify_qwen_llm_api_key_uses_sync_provider_when_low_latency_disab
 
     assert result is True
     assert calls == [("secret", "https://dashscope.aliyuncs.com/api/v1", "qwen3.5-flash")]
+
+
+def test_overlay_calibration_controls_follow_apply_cancel_contract() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+
+    controller.begin_overlay_calibration_for_test()
+    controller.set_overlay_calibration_field_for_test("distance", 1.2)
+    controller.cancel_overlay_calibration_for_test()
+
+    assert controller.overlay_calibration.distance != 1.2
+
+    controller.begin_overlay_calibration_for_test()
+    controller.set_overlay_calibration_field_for_test("distance", 1.2)
+    controller.apply_overlay_calibration_for_test()
+
+    assert controller.overlay_calibration.distance == 1.2
+
+
+@pytest.mark.asyncio
+async def test_apply_overlay_calibration_persists_settings_and_emits_overlay_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved: list[tuple[Path, AppSettings]] = []
+
+    def fake_save(path: Path, settings: AppSettings) -> None:
+        saved.append((path, settings))
+
+    monkeypatch.setattr(controller_module, "save_settings", fake_save)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller._overlay_bridge = FakeOverlayBridge(session_token="token")
+
+    controller.begin_overlay_calibration_for_test()
+    controller.set_overlay_calibration_field_for_test("distance", 1.2)
+    controller.apply_overlay_calibration_for_test()
+    await asyncio.sleep(0)
+
+    assert controller.settings.overlay_calibration.distance == 1.2
+    assert saved == [(Path("settings.json"), controller.settings)]
+    assert controller._overlay_bridge.events[-1].type == "overlay_calibration_update"

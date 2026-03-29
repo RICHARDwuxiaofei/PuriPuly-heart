@@ -66,6 +66,13 @@ pub enum CaptionRenderError {
 pub struct CaptionBlock {
     pub id: String,
     pub text: String,
+    pub channel: Option<CaptionChannel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptionChannel {
+    SelfChannel,
+    PeerChannel,
 }
 
 impl CaptionBlock {
@@ -73,13 +80,20 @@ impl CaptionBlock {
         Self {
             id: id.into(),
             text: text.into(),
+            channel: None,
         }
+    }
+
+    pub fn with_channel(mut self, channel: CaptionChannel) -> Self {
+        self.channel = Some(channel);
+        self
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisibleCaptionBlock {
     pub id: String,
+    pub channel: Option<CaptionChannel>,
     pub lines: Vec<String>,
     pub truncated: bool,
 }
@@ -92,11 +106,26 @@ pub struct CaptionLayoutResult {
     pub surface_height_px: u32,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptionPresentation {
+    pub background_alpha: f32,
+}
+
+impl Default for CaptionPresentation {
+    fn default() -> Self {
+        Self {
+            background_alpha: 0.24,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptionLayoutPolicy {
     preferred_weights: [&'static str; 3],
     latin_face_chain: [&'static str; 3],
     cjk_face_chain: [&'static str; 10],
+    channel_uses_color_only: bool,
+    show_speaker_labels_by_default: bool,
     visible_window_target_blocks: usize,
     horizontal_padding_px: u32,
     vertical_padding_px: u32,
@@ -122,6 +151,8 @@ impl Default for CaptionLayoutPolicy {
                 "Segoe UI",
                 "DirectWrite system fallback",
             ],
+            channel_uses_color_only: true,
+            show_speaker_labels_by_default: false,
             visible_window_target_blocks: 2,
             horizontal_padding_px: DEFAULT_HORIZONTAL_PADDING_PX,
             vertical_padding_px: DEFAULT_VERTICAL_PADDING_PX,
@@ -147,6 +178,22 @@ impl CaptionLayoutPolicy {
 
     pub fn visible_window_target_blocks(&self) -> usize {
         self.visible_window_target_blocks
+    }
+
+    pub fn compose_self_line(&self, original: &str, translation: &str) -> String {
+        compose_caption_pair(original, translation)
+    }
+
+    pub fn compose_peer_line(&self, original: &str, translation: &str) -> String {
+        compose_caption_pair(translation, original)
+    }
+
+    pub fn channel_uses_color_only(&self) -> bool {
+        self.channel_uses_color_only
+    }
+
+    pub fn show_speaker_labels_by_default(&self) -> bool {
+        self.show_speaker_labels_by_default
     }
 
     pub fn default_surface_size(&self) -> (u32, u32) {
@@ -188,6 +235,7 @@ impl CaptionLayoutPolicy {
                 used_height_px += spacing_px + block_height_px;
                 visible_newest_first.push(VisibleCaptionBlock {
                     id: block.id,
+                    channel: block.channel,
                     lines: wrapped_lines,
                     truncated: false,
                 });
@@ -203,6 +251,7 @@ impl CaptionLayoutPolicy {
             let truncated = wrapped_lines.len() > max_lines;
             visible_newest_first.push(VisibleCaptionBlock {
                 id: block.id,
+                channel: block.channel,
                 lines: wrapped_lines.into_iter().take(max_lines).collect(),
                 truncated,
             });
@@ -231,8 +280,19 @@ impl CaptionLayoutPolicy {
     }
 }
 
+fn compose_caption_pair(primary: &str, secondary: &str) -> String {
+    if primary.is_empty() {
+        return secondary.to_string();
+    }
+    if secondary.is_empty() {
+        return primary.to_string();
+    }
+    format!("{primary} ({secondary})")
+}
+
 pub struct CaptionRenderer {
     policy: CaptionLayoutPolicy,
+    presentation: RefCell<CaptionPresentation>,
     backend: RefCell<RenderBackend>,
 }
 
@@ -252,7 +312,10 @@ impl CaptionRenderer {
     pub fn render_blocks(&self, blocks: Vec<CaptionBlock>) -> Result<RenderedFrame, CaptionRenderError> {
         let (width, height) = self.policy.default_surface_size();
         let layout = self.policy.layout_blocks(blocks, width, height);
-        self.backend.borrow_mut().render(&self.policy, layout)
+        let presentation = self.presentation.borrow().clone();
+        self.backend
+            .borrow_mut()
+            .render(&self.policy, &presentation, layout)
     }
 
     fn with_policy(
@@ -261,11 +324,16 @@ impl CaptionRenderer {
     ) -> Result<Self, CaptionRenderError> {
         Ok(Self {
             policy,
+            presentation: RefCell::new(CaptionPresentation::default()),
             backend: RefCell::new(match backend_mode {
                 BackendMode::Runtime => RenderBackend::new_runtime()?,
                 BackendMode::Test => RenderBackend::new_test()?,
             }),
         })
+    }
+
+    pub fn set_presentation(&self, presentation: CaptionPresentation) {
+        self.presentation.replace(presentation);
     }
 }
 
@@ -392,14 +460,15 @@ impl RenderBackend {
     fn render(
         &mut self,
         policy: &CaptionLayoutPolicy,
+        presentation: &CaptionPresentation,
         layout: CaptionLayoutResult,
     ) -> Result<RenderedFrame, CaptionRenderError> {
         match self {
             #[cfg(windows)]
-            Self::Windows(renderer) => renderer.render(policy, layout),
+            Self::Windows(renderer) => renderer.render(policy, presentation, layout),
             #[cfg(not(windows))]
             Self::Test(renderer) => {
-                let _ = policy;
+                let _ = (policy, presentation);
                 renderer.render(layout)
             }
         }
@@ -430,7 +499,9 @@ struct WindowsCaptionRenderer {
     dwrite_factory: IDWriteFactory,
     system_font_collection: IDWriteFontCollection,
     d2d_context: ID2D1DeviceContext,
-    text_brush: ID2D1SolidColorBrush,
+    self_text_brush: ID2D1SolidColorBrush,
+    peer_text_brush: ID2D1SolidColorBrush,
+    background_brush: ID2D1SolidColorBrush,
     target_bitmap: ID2D1Bitmap1,
     texture: ID3D11Texture2D,
     _d3d_device: ID3D11Device,
@@ -467,13 +538,39 @@ impl WindowsCaptionRenderer {
             d2d_context.SetTarget(&target_bitmap);
             d2d_context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
         }
-        let text_brush = unsafe {
+        let self_text_brush = unsafe {
             d2d_context
                 .CreateSolidColorBrush(
                     &D2D1_COLOR_F {
                         r: 1.0,
-                        g: 1.0,
+                        g: 0.95,
+                        b: 0.88,
+                        a: 0.95,
+                    },
+                    None,
+                )
+                .map_err(|error| CaptionRenderError::Init(error.to_string()))?
+        };
+        let peer_text_brush = unsafe {
+            d2d_context
+                .CreateSolidColorBrush(
+                    &D2D1_COLOR_F {
+                        r: 0.79,
+                        g: 0.91,
                         b: 1.0,
+                        a: 0.95,
+                    },
+                    None,
+                )
+                .map_err(|error| CaptionRenderError::Init(error.to_string()))?
+        };
+        let background_brush = unsafe {
+            d2d_context
+                .CreateSolidColorBrush(
+                    &D2D1_COLOR_F {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
                         a: 0.95,
                     },
                     None,
@@ -485,7 +582,9 @@ impl WindowsCaptionRenderer {
             dwrite_factory,
             system_font_collection,
             d2d_context,
-            text_brush,
+            self_text_brush,
+            peer_text_brush,
+            background_brush,
             target_bitmap,
             texture,
             _d3d_device: device,
@@ -496,6 +595,7 @@ impl WindowsCaptionRenderer {
     fn render(
         &mut self,
         policy: &CaptionLayoutPolicy,
+        presentation: &CaptionPresentation,
         layout: CaptionLayoutResult,
     ) -> Result<RenderedFrame, CaptionRenderError> {
         unsafe {
@@ -507,6 +607,24 @@ impl WindowsCaptionRenderer {
                 b: 0.0,
                 a: 0.0,
             }));
+        }
+
+        if layout_has_drawable_text(&layout) && presentation.background_alpha > 0.0 {
+            let rect = D2D_RECT_F {
+                left: 0.0,
+                top: 0.0,
+                right: layout.surface_width_px as f32,
+                bottom: layout.surface_height_px as f32,
+            };
+            unsafe {
+                self.background_brush.SetColor(&D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: presentation.background_alpha,
+                });
+                self.d2d_context.FillRectangle(&rect, &self.background_brush);
+            }
         }
 
         let mut baseline_y = policy.vertical_padding_px as f32;
@@ -532,12 +650,16 @@ impl WindowsCaptionRenderer {
                     right,
                     bottom: baseline_y + line_height,
                 };
+                let brush = match block.channel.unwrap_or(CaptionChannel::SelfChannel) {
+                    CaptionChannel::SelfChannel => &self.self_text_brush,
+                    CaptionChannel::PeerChannel => &self.peer_text_brush,
+                };
                 unsafe {
                     self.d2d_context.DrawText(
                         &utf16,
                         &text_format,
                         &rect,
-                        &self.text_brush,
+                        brush,
                         D2D1_DRAW_TEXT_OPTIONS_NONE,
                         DWRITE_MEASURING_MODE_NATURAL,
                     );
