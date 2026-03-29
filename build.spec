@@ -54,8 +54,9 @@ hiddenimports = [
     "httpx",
     "keyring.backends.Windows",
     "onnxruntime",
+    # NumPy's C-extension is required before the packaged CLI can even boot.
+    "numpy._core._multiarray_umath",
     "sounddevice",
-    "numpy",
 ]
 
 a = Analysis(

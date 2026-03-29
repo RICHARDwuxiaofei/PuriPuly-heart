@@ -120,8 +120,8 @@ $cmakeCommand = Resolve-CommandPath -Name "cmake" -Fallbacks @(
     (Join-Path $projectEnvironmentScripts "cmake.exe"),
     "C:\Program Files\CMake\bin\cmake.exe"
 )
-$uvCommand = Resolve-CommandPath -Name "uv" -Fallbacks @(
-    (Join-Path $env:USERPROFILE ".local\bin\uv.exe")
+$pythonCommand = Resolve-CommandPath -Name "python" -Fallbacks @(
+    (Join-Path $projectEnvironmentScripts "python.exe")
 )
 $cmakeCommandDirectory = Split-Path -Parent $cmakeCommand
 if (-not [string]::IsNullOrWhiteSpace($cmakeCommandDirectory)) {
@@ -133,6 +133,8 @@ $overlayManifestPath = Join-Path $PWD "native/overlay/Cargo.toml"
 $overlayBuildDir = Join-Path $PWD "build/overlay"
 $overlayReleasePath = Join-Path $PWD "native/overlay/target/release/PuriPulyHeartOverlay.exe"
 $overlayStagedPath = Join-Path $overlayBuildDir "PuriPulyHeartOverlay.exe"
+$pyInstallerBuildDir = Join-Path $PWD "build/build"
+$distDir = Join-Path $PWD "dist/PuriPulyHeart"
 
 Write-Host "Building Rust overlay executable..."
 Invoke-External -FilePath $cargoCommand -ArgumentList @(
@@ -161,12 +163,27 @@ if (-not (Test-Path $overlayStagedPath)) {
 Write-Host "Smoke-testing staged overlay executable..."
 Invoke-External -FilePath $overlayStagedPath -ArgumentList @("--check-startup-contract")
 
+Write-Host "Cleaning previous PyInstaller outputs..."
+Remove-Item -Recurse -Force $pyInstallerBuildDir -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force $distDir -ErrorAction SilentlyContinue
+
 Write-Host "Building Windows executable..."
-Invoke-External -FilePath $uvCommand -ArgumentList @("run", "python", "-m", "PyInstaller", "--noconfirm", "build.spec")
+Invoke-ExternalProcess -FilePath $pythonCommand -ArgumentList @(
+    "-m",
+    "PyInstaller",
+    "--clean",
+    "--noconfirm",
+    "build.spec"
+)
 
 $exePath = Join-Path $PWD "dist/PuriPulyHeart/PuriPulyHeart.exe"
 if (-not (Test-Path $exePath)) {
     throw "Packaged executable not found: $exePath"
+}
+
+$numpyCoreExtensions = @(Get-ChildItem -Path (Join-Path $distDir "_internal") -Filter "_multiarray_umath*.pyd" -Recurse -File -ErrorAction SilentlyContinue)
+if ($numpyCoreExtensions.Count -eq 0) {
+    throw "Packaged executable is missing numpy._core._multiarray_umath in $distDir"
 }
 
 $packagedOverlayPath = Join-Path $PWD "dist/PuriPulyHeart/PuriPulyHeartOverlay.exe"
@@ -177,6 +194,11 @@ if (-not (Test-Path $packagedOverlayPath)) {
 }
 
 Write-Host "Smoke-testing packaged executable..."
+$versionSmokeTest = Start-Process -FilePath $exePath -ArgumentList @("--version") -Wait -PassThru
+if ($versionSmokeTest.ExitCode -ne 0) {
+    throw "Packaged executable version smoke test failed with exit code $($versionSmokeTest.ExitCode)"
+}
+
 $smokeTest = Start-Process -FilePath $exePath -ArgumentList @("osc-send", "ci-smoke") -Wait -PassThru
 if ($smokeTest.ExitCode -ne 0) {
     throw "Packaged executable smoke test failed with exit code $($smokeTest.ExitCode)"

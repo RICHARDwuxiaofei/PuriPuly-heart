@@ -62,11 +62,24 @@ def test_shared_windows_build_script_runs_packaged_smoke_test() -> None:
     script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
 
     assert "Start-Process" in script
+    assert '"--clean"' in script
+    assert '"--version"' in script
+    assert "_multiarray_umath" in script
     assert "osc-send" in script
+    assert "Remove-Item -Recurse -Force $pyInstallerBuildDir" in script
+    assert "Remove-Item -Recurse -Force $distDir" in script
     assert '"innosetup"' in script
     assert '"--version=$InnoSetupVersion"' in script
     assert "DisplayVersion" in script
     assert "Get-Command choco" in script
+
+
+def test_build_spec_hiddenimports_only_numpy_core_runtime_extension_for_packaged_cli() -> None:
+    spec = (ROOT / "build.spec").read_text(encoding="utf-8")
+
+    assert '"numpy._core._multiarray_umath"' in spec
+    assert 'collect_dynamic_libs("numpy")' not in spec
+    assert 'collect_submodules("numpy")' not in spec
 
 
 def test_shared_setup_action_installs_pinned_uv_and_uses_frozen_sync() -> None:
