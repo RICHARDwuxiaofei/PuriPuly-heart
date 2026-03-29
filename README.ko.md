@@ -284,6 +284,7 @@ Gemini/Deepgram/Soniox가 차단된 지역이라면
 ### 설치
 
 ```bash
+# Windows 기본 프로젝트 환경
 python -m venv .venv
 .venv\Scripts\activate  # Windows
 ```
@@ -292,8 +293,14 @@ python -m venv .venv
 # pip
 pip install -e '.[dev]'
 
-# 또는 uv
+# 또는 Windows에서 uv
 uv sync --dev
+```
+
+```bash
+# WSL / Codex (별도 Linux 가상환경 유지)
+UV_PROJECT_ENVIRONMENT=.venv-wsl uv sync --dev
+source .venv-wsl/bin/activate
 ```
 
 ```bash
@@ -303,11 +310,12 @@ pre-commit install
 ### 실행
 
 ```bash
-# 가상환경 활성화 후
-python -m puripuly_heart.main run-gui
-
-# 또는 uv를 통해 실행
+# Windows
 uv run python -m puripuly_heart.main run-gui
+
+# WSL / Codex
+source .venv-wsl/bin/activate
+python -m puripuly_heart.main run-gui
 ```
 
 ### 개발

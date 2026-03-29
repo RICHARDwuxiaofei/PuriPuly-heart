@@ -14,6 +14,11 @@
 - All new user-facing UI text must go through i18n keys, and all locale bundles must be updated.
 - For documentation lookup and code generation, prefer MCP resources/templates first and use Context7 when available.
 - For browser or website automation tasks, use the `agent-browser` skill first.
+- Project environment naming is mandatory:
+  - `.venv` is the canonical Windows project environment. Windows `uv run` and L3 Windows release verification should target this environment.
+  - `.venv-wsl` is the canonical WSL/Codex environment. When running from WSL, never create, mutate, or rely on `.venv`.
+  - `.venv-win` is legacy local-only state. Do not create new workflows or docs that depend on it.
+  - In WSL/Codex shells, prefer explicit `.venv-wsl/bin/python` or `UV_PROJECT_ENVIRONMENT=.venv-wsl` before `uv sync` / `uv run`.
 
 ## Codex Configuration
 

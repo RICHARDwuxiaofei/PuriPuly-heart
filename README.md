@@ -284,6 +284,7 @@ If Gemini/Deepgram/Soniox are blocked in your region:
 ### Installation
 
 ```bash
+# Windows (canonical project environment)
 python -m venv .venv
 .venv\Scripts\activate  # Windows
 ```
@@ -292,8 +293,14 @@ python -m venv .venv
 # pip
 pip install -e '.[dev]'
 
-# or uv
+# or uv on Windows
 uv sync --dev
+```
+
+```bash
+# WSL / Codex (keep a separate Linux environment)
+UV_PROJECT_ENVIRONMENT=.venv-wsl uv sync --dev
+source .venv-wsl/bin/activate
 ```
 
 ```bash
@@ -303,11 +310,12 @@ pre-commit install
 ### Running
 
 ```bash
-# After activating venv
-python -m puripuly_heart.main run-gui
-
-# or using uv run directly
+# Windows
 uv run python -m puripuly_heart.main run-gui
+
+# WSL / Codex
+source .venv-wsl/bin/activate
+python -m puripuly_heart.main run-gui
 ```
 
 ### Testing & Linting
