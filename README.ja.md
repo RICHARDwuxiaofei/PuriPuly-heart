@@ -283,7 +283,6 @@ Gemini / Deepgram / Sonioxへのアクセスがブロックされている地域
 ### インストール
 
 ```bash
-# Windows の標準プロジェクト環境
 python -m venv .venv
 .venv\Scripts\activate  # Windows
 ```
@@ -292,14 +291,8 @@ python -m venv .venv
 # pip
 pip install -e '.[dev]'
 
-# または Windows で uv
+# または uv
 uv sync --dev
-```
-
-```bash
-# WSL / Codex（Linux 用の別環境を維持）
-UV_PROJECT_ENVIRONMENT=.venv-wsl uv sync --dev
-source .venv-wsl/bin/activate
 ```
 
 ```bash
@@ -309,12 +302,11 @@ pre-commit install
 ### 実行
 
 ```bash
-# Windows
-uv run python -m puripuly_heart.main run-gui
-
-# WSL / Codex
-source .venv-wsl/bin/activate
+# 仮想環境を有効にした後
 python -m puripuly_heart.main run-gui
+
+# または uv run で直接実行
+uv run python -m puripuly_heart.main run-gui
 ```
 
 ### 開発用コマンド
