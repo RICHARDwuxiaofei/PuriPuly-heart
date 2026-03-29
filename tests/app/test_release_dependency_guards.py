@@ -91,3 +91,20 @@ def test_shared_setup_action_installs_pinned_uv_and_uses_frozen_sync() -> None:
     assert "cache-dependency-path: uv.lock" in action
     assert '"uv==${{ inputs.uv-version }}"' in action
     assert "uv sync ${{ inputs.sync-args }} --frozen" in action
+
+
+def test_installer_script_guards_against_repo_checkout_installs() -> None:
+    script = (ROOT / "installer.iss").read_text(encoding="utf-8")
+
+    assert "#ifndef MyAppId" in script
+    assert "AppId={#MyAppId}" in script
+    assert r"DefaultDirName={autopf}\{#MyAppDirName}" in script
+    assert "function DirectoryLooksLikeRepositoryCheckout(Path: String): Boolean;" in script
+    assert "DirExists(AddBackslash(ProbePath) + '.git')" in script
+    assert "FileExists(AddBackslash(ProbePath) + 'pyproject.toml')" in script
+    assert "FileExists(AddBackslash(ProbePath) + 'AGENTS.md')" in script
+    assert "procedure ResetSuspiciousInstallDir();" in script
+    assert "WizardForm.DirEdit.Text := DefaultDir;" in script
+    assert r"DefaultDir := ExpandConstant('{autopf}\{#MyAppDirName}');" in script
+    assert "procedure InitializeWizard();" in script
+    assert "function PrepareToInstall(var NeedsRestart: Boolean): String;" in script

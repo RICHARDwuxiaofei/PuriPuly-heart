@@ -12,9 +12,13 @@
 #define MyPackagedAppDir "dist\PuriPulyHeart"
 #define MyStagedOverlayDir "build\overlay"
 
+#ifndef MyAppId
+  #define MyAppId "{{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
+#endif
+
 [Setup]
 ; NOTE: AppId uniquely identifies this application.
-AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
+AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
@@ -68,3 +72,68 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 [UninstallDelete]
 ; Clean up user config on uninstall (optional)
 Type: filesandordirs; Name: "{localappdata}\puripuly-heart"
+
+[Code]
+function DirectoryLooksLikeRepositoryCheckout(Path: String): Boolean;
+var
+  ProbePath: String;
+  ParentPath: String;
+  Depth: Integer;
+begin
+  ProbePath := RemoveBackslashUnlessRoot(Path);
+  Result := False;
+
+  if ProbePath = '' then begin
+    exit;
+  end;
+
+  for Depth := 0 to 8 do begin
+    if DirExists(AddBackslash(ProbePath) + '.git') or
+       FileExists(AddBackslash(ProbePath) + 'pyproject.toml') or
+       FileExists(AddBackslash(ProbePath) + 'AGENTS.md') then begin
+      Result := True;
+      exit;
+    end;
+
+    ParentPath := ExtractFileDir(ProbePath);
+    if (ParentPath = '') or (ParentPath = ProbePath) then begin
+      exit;
+    end;
+
+    ProbePath := ParentPath;
+  end;
+end;
+
+procedure ResetSuspiciousInstallDir();
+var
+  CandidateDir: String;
+  DefaultDir: String;
+begin
+  CandidateDir := RemoveBackslashUnlessRoot(WizardForm.DirEdit.Text);
+  if CandidateDir = '' then begin
+    exit;
+  end;
+
+  if not DirectoryLooksLikeRepositoryCheckout(CandidateDir) then begin
+    exit;
+  end;
+
+  DefaultDir := ExpandConstant('{autopf}\{#MyAppDirName}');
+  if RemoveBackslashUnlessRoot(DefaultDir) = CandidateDir then begin
+    exit;
+  end;
+
+  Log('Resetting suspicious install dir inside a repository checkout: ' + CandidateDir);
+  WizardForm.DirEdit.Text := DefaultDir;
+end;
+
+procedure InitializeWizard();
+begin
+  ResetSuspiciousInstallDir();
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  ResetSuspiciousInstallDir();
+  Result := '';
+end;

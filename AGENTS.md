@@ -14,6 +14,7 @@
 - All new user-facing UI text must go through i18n keys, and all locale bundles must be updated.
 - For documentation lookup and code generation, prefer MCP resources/templates first and use Context7 when available.
 - For browser or website automation tasks, use the `agent-browser` skill first.
+- Local installer smoke tests must use an alternate `AppId` and an isolated install directory; never reuse the production `AppId` for test installs.
 - Prefer a project virtual environment for tests, verification, and development commands whenever one exists.
 - If `.venv` exists, Windows shells should use `.venv`.
 - If `.venv-wsl` exists, Linux / WSL shells should use `.venv-wsl`.
