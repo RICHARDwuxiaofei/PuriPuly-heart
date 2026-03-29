@@ -13,7 +13,7 @@
 ; understand the '[LangOptions] section' topic in the help file.
 LanguageName=<7e41><9ad4><4e2d><6587>
 LanguageID=$0404
-LanguageCodepage=950
+LanguageCodePage=950
 ; If the language you are translating to requires special font faces or
 ; sizes, uncomment any of the following entries and change them accordingly.
 ;DialogFontName=
@@ -210,15 +210,25 @@ ReadyMemoComponents=選擇的元件:
 ReadyMemoGroup=「開始」功能表資料夾:
 ReadyMemoTasks=附加工作:
 
+; *** TExtractionWizardPage wizard page and ExtractArchive
+ExtractingLabel=正在解壓縮檔案...
+ButtonStopExtraction=停止解壓縮 (&S)
+StopExtraction=您確定要停止解壓縮嗎？
+ErrorExtractionAborted=解壓縮已中止
+ErrorExtractionFailed=解壓縮失敗: %1
+
+; *** Archive extraction failures details
+ArchiveIncorrectPassword=壓縮檔密碼不正確
+ArchiveIsCorrupted=壓縮檔已損毀
+ArchiveUnsupportedFormat=不支援的壓縮檔格式
+
 ; *** TDownloadWizardPage wizard page and DownloadTemporaryFile
-DownloadingLabel=正在下載額外檔案...
+DownloadingLabel2=正在下載檔案...
 ButtonStopDownload=停止下載 (&S)
 StopDownload=您確定要停止下載嗎？
 ErrorDownloadAborted=已停止下載
 ErrorDownloadFailed=下載失敗: %1 %2
 ErrorDownloadSizeFailed=取得檔案大小失敗: %1 %2
-ErrorFileHash1=檔案雜湊失敗: %1
-ErrorFileHash2=檔案雜湊無效: 必須為 %1，收到 %2
 ErrorProgress=進度無效: %1 之 %2
 ErrorFileSize=檔案大小無效: 必須為 %1，收到 %2
 
@@ -266,11 +276,15 @@ AbortRetryIgnoreSelectAction=選取動作
 AbortRetryIgnoreRetry=請再試一次 (&T)
 AbortRetryIgnoreIgnore=略過錯誤並繼續 (&I)
 AbortRetryIgnoreCancel=取消安裝
+RetryCancelSelectAction=選擇操作
+RetryCancelRetry=重試 (&T)
+RetryCancelCancel=取消 (&C)
 
 ; *** Installation status messages
 StatusClosingApplications=正在關閉應用程式...
 StatusCreateDirs=正在建立資料夾...
 StatusExtractFiles=正在解壓縮檔案...
+StatusDownloadFiles=正在下載檔案...
 StatusCreateIcons=正在建立程式集圖示...
 StatusCreateIniEntries=寫入 INI 檔案的項目...
 StatusCreateRegistryEntries=正在更新系統登錄...
@@ -300,6 +314,14 @@ FileAbortRetryIgnoreSkipNotRecommended=略過這個檔案 (不建議) (&S)
 FileAbortRetryIgnoreIgnoreNotRecommended=略過錯誤並繼續 (不建議) (&I)
 SourceDoesntExist=來源檔案“%1”不存在。
 SourceIsCorrupted=來源檔案已經損毀。
+SourceVerificationFailed=來源檔案驗證失敗: %1
+VerificationSignatureDoesntExist=簽章檔案“%1”不存在
+VerificationSignatureInvalid=簽章檔案“%1”無效
+VerificationKeyNotFound=簽章檔案“%1”使用了未知金鑰
+VerificationFileNameIncorrect=檔案名稱不正確
+VerificationFileTagIncorrect=檔案標記不正確
+VerificationFileSizeIncorrect=檔案大小不正確
+VerificationFileHashIncorrect=檔案雜湊值不正確
 ExistingFileReadOnly2=無法取代現有檔案，因為檔案已標示為唯讀。
 ExistingFileReadOnlyRetry=移除唯讀屬性並重試 (&R)
 ExistingFileReadOnlyKeepExisting=保留現有檔案 (&K)
@@ -318,6 +340,8 @@ ErrorChangingAttr=在變更檔案屬性時發生錯誤:
 ErrorCreatingTemp=在目的資料夾中建立檔案時發生錯誤:
 ErrorReadingSource=讀取原始檔案時發生錯誤:
 ErrorCopying=複製檔案時發生錯誤:
+ErrorDownloading=下載檔案時發生錯誤:
+ErrorExtracting=解壓縮壓縮檔時發生錯誤:
 ErrorReplacingExistingFile=取代檔案時發生錯誤:
 ErrorRestartReplace=重新啟動電腦後取代檔案失敗:
 ErrorRenamingTemp=在目的資料夾變更檔案名稱時發生錯誤:

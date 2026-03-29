@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -108,3 +109,20 @@ def test_installer_script_guards_against_repo_checkout_installs() -> None:
     assert r"DefaultDir := ExpandConstant('{autopf}\{#MyAppDirName}');" in script
     assert "procedure InitializeWizard();" in script
     assert "function PrepareToInstall(var NeedsRestart: Boolean): String;" in script
+
+
+def test_chinese_installer_language_files_use_matching_message_keys() -> None:
+    pattern = re.compile(r"^([A-Za-z][A-Za-z0-9]*)=")
+
+    def extract_keys(path: Path) -> set[str]:
+        keys: set[str] = set()
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            match = pattern.match(line)
+            if match:
+                keys.add(match.group(1))
+        return keys
+
+    simplified = extract_keys(ROOT / "installer" / "Languages" / "ChineseSimplified.isl")
+    traditional = extract_keys(ROOT / "installer" / "Languages" / "ChineseTraditional.isl")
+
+    assert traditional == simplified
