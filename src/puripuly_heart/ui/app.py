@@ -45,6 +45,7 @@ class TranslatorApp:
         self.view_dashboard.on_language_change = self._on_language_change
 
         self.view_settings.on_settings_changed = self._on_settings_changed
+        self.view_settings.on_overlay_toggle = self._on_overlay_toggle
         self.view_settings.on_providers_changed = self._on_providers_changed
         self.view_settings.on_verify_api_key = self._on_verify_api_key
         self.view_settings.on_secret_cleared = self._on_secret_cleared

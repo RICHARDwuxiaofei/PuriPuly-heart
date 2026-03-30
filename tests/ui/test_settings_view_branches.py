@@ -177,6 +177,25 @@ def test_on_stt_selected_updates_provider_and_pipeline_flags(
     assert changed == [settings]
 
 
+def test_on_overlay_selected_uses_dedicated_overlay_toggle_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    overlay_calls: list[bool] = []
+    settings_calls: list[AppSettings] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_overlay_toggle = lambda enabled: overlay_calls.append(enabled)
+    view.on_settings_changed = lambda incoming: settings_calls.append(incoming)
+
+    view._on_overlay_selected("on")
+
+    assert overlay_calls == [True]
+    assert settings_calls == []
+    assert settings.ui.overlay_enabled is True
+
+
 def test_on_llm_selected_updates_model_and_prompt_state(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.GEMINI

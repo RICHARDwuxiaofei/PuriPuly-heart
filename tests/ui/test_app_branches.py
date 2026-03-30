@@ -83,6 +83,7 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert page.added
     assert app.view_dashboard.on_send_message == app._on_manual_submit
     assert app.view_settings.on_verify_api_key == app._on_verify_api_key
+    assert app.view_settings.on_overlay_toggle == app._on_overlay_toggle
 
 
 @pytest.mark.asyncio

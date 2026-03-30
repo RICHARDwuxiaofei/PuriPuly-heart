@@ -75,6 +75,7 @@ class SettingsView(ft.Column):
 
         # Callbacks (assigned by App)
         self.on_settings_changed: Callable[[AppSettings], None] | None = None
+        self.on_overlay_toggle: Callable[[bool], None] | None = None
         self.on_providers_changed: Callable[[], None] | None = None
         self.on_verify_api_key: Callable[[str, str], object] | None = None
         self.on_secret_cleared: Callable[[str], None] | None = None  # key name
@@ -1552,6 +1553,9 @@ class SettingsView(ft.Column):
         if not enabled:
             self._settings.ui.peer_translation_enabled = False
         self._sync_overlay_controls()
+        if self.on_overlay_toggle is not None:
+            self.on_overlay_toggle(enabled)
+            return
         self._emit_settings_changed()
 
     def _on_peer_translation_click(self, e) -> None:
