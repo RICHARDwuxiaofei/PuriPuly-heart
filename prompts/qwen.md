@@ -12,6 +12,9 @@ Interpret ${sourceName} input into the ${targetName} naturally, preserving the s
   * **Fragments**: Input is grammatically incomplete alone
   * **Clarify**: Input has ambiguous expression, meaning depends on context
 * **Independence**: If the current input is unrelated to the context, translate it independently.
+* Context lines may include non-literal helper metadata such as speaker labels and relative-age markers like `[Speaker 1, 8s ago]`.
+* That metadata is only a hint for disambiguation. You must not copy speaker labels, brackets, or relative-age markers into the output unless the speaker literally said them.
+* Do not invent facts that appear only in context metadata.
 
 ## Core Guidelines
 * **Tone Mirroring**: Precisely mirror the input's formality (Casual/Polite) and emotion.
