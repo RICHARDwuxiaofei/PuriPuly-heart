@@ -133,8 +133,6 @@
   "provider.gemini3_flash.description": "'GOD'... but the server is sometimes unstable",
   "provider.gemini31_flash_lite": "Gemini 3.1 Flash-Lite",
   "provider.gemini31_flash_lite.description": "Fast and (kinda) smart",
-  "provider.gemini31_flash_live": "Gemini 3.1 Flash Live",
-  "provider.gemini31_flash_live.description": "Experimental STT+translation live mode for text-only OSC output",
   "provider.qwen": "Qwen 3.5",
   "provider.qwen35_flash": "Qwen 3.5 Flash",
   "provider.qwen35_flash.description": "Use this when the Plus model feels too slow",

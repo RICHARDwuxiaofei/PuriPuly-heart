@@ -233,24 +233,6 @@ def test_on_llm_selected_updates_gemini_model(monkeypatch: pytest.MonkeyPatch) -
     assert view.has_provider_changes is True
 
 
-def test_on_llm_selected_updates_gemini_live_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = AppSettings()
-    settings.provider.llm = LLMProviderName.GEMINI
-    settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
-    settings.system_prompts = {"gemini": "G", "qwen": "Q"}
-    settings.system_prompt = "G"
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    view._on_llm_selected(GeminiLLMModel.GEMINI_31_FLASH_LIVE.value)
-
-    assert settings.provider.llm == LLMProviderName.GEMINI
-    assert settings.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LIVE
-    assert view._prompt_editor.value == "G"
-    assert settings.system_prompt == "G"
-    assert view._llm_text.content.value == t("provider.gemini31_flash_live")
-
-
 def test_on_llm_selected_logs_only_changed_fields_for_provider_switch(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

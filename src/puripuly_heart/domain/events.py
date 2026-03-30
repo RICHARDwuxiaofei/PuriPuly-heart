@@ -22,7 +22,6 @@ class STTSessionState(str, Enum):
 class STTEventType(str, Enum):
     PARTIAL = "STT_PARTIAL"
     FINAL = "STT_FINAL"
-    INTEGRATED_FINAL = "STT_INTEGRATED_FINAL"
     ERROR = "STT_ERROR"
     SESSION_STATE = "STT_SESSION_STATE"
 
@@ -58,21 +57,6 @@ class STTFinalEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class STTIntegratedFinalEvent:
-    utterance_id: UUID
-    transcript_text: str
-    translation_text: str
-    channel: ChannelId = "self"
-    created_at: float | None = None
-    type: STTEventType = STTEventType.INTEGRATED_FINAL
-
-    def __post_init__(self) -> None:
-        _validate_channel(self.channel)
-        if not self.transcript_text.strip() and not self.translation_text.strip():
-            raise ValueError("STTIntegratedFinalEvent requires transcript_text or translation_text")
-
-
-@dataclass(frozen=True, slots=True)
 class STTErrorEvent:
     message: str
     utterance_id: UUID | None = None
@@ -94,9 +78,7 @@ class STTSessionStateEvent:
         _validate_channel(self.channel)
 
 
-STTEvent = (
-    STTPartialEvent | STTFinalEvent | STTIntegratedFinalEvent | STTErrorEvent | STTSessionStateEvent
-)
+STTEvent = STTPartialEvent | STTFinalEvent | STTErrorEvent | STTSessionStateEvent
 
 
 class UIEventType(str, Enum):

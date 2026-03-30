@@ -11,7 +11,6 @@ pytest.importorskip("flet")
 
 from puripuly_heart.config.settings import (
     AppSettings,
-    GeminiLLMModel,
     LLMProviderName,
     QwenLLMModel,
     QwenRegion,
@@ -377,38 +376,6 @@ async def test_verify_and_update_status_handles_mixed_provider_failures(
 
 
 @pytest.mark.asyncio
-async def test_verify_and_update_status_accepts_gemini_live_without_llm(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    settings.provider.llm = LLMProviderName.GEMINI
-    settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LIVE
-    settings.provider.stt = STTProviderName.DEEPGRAM
-
-    dash = DummyDashboard()
-    app = SimpleNamespace(view_dashboard=dash)
-    controller = _make_controller(app=app)
-    controller.settings = settings
-    controller.hub = DummyHub(llm=None, stt=object())
-
-    monkeypatch.setattr(
-        controller_module,
-        "create_secret_store",
-        lambda *_args, **_kwargs: DummySecrets({"google_api_key": "g", "deepgram_api_key": "d"}),
-    )
-
-    async def always_true(*_args, **_kwargs) -> bool:
-        return True
-
-    monkeypatch.setattr(GeminiLLMProvider, "verify_api_key", staticmethod(always_true))
-    monkeypatch.setattr(DeepgramRealtimeSTTBackend, "verify_api_key", staticmethod(always_true))
-
-    await controller._verify_and_update_status()
-
-    assert dash.translation_needs_key is False
-
-
-@pytest.mark.asyncio
 async def test_verify_and_update_status_marks_needs_key_when_secret_store_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -578,20 +545,6 @@ async def test_set_translation_enabled_disables_when_llm_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_translation_enabled_allows_gemini_live_without_llm() -> None:
-    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
-    controller.settings = AppSettings()
-    controller.settings.provider.llm = LLMProviderName.GEMINI
-    controller.settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LIVE
-    controller.hub = DummyHub(llm=None, stt=object())
-
-    await controller.set_translation_enabled(True)
-
-    assert controller.hub.translation_enabled is True
-    assert controller.hub.clear_context_calls == 1
-
-
-@pytest.mark.asyncio
 async def test_set_translation_enabled_warms_supported_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -637,19 +590,6 @@ def test_verified_key_and_runtime_signature_depend_on_region_and_settings() -> N
 
     assert key_beijing == "alibaba_beijing"
     assert key_singapore == "alibaba_singapore"
-    assert baseline != changed
-
-
-def test_stt_runtime_signature_changes_for_gemini_live_mode() -> None:
-    controller = _make_controller(app=SimpleNamespace())
-    settings = AppSettings()
-    settings.provider.llm = LLMProviderName.GEMINI
-    settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
-
-    baseline = controller._build_stt_runtime_signature(settings)
-    settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LIVE
-    changed = controller._build_stt_runtime_signature(settings)
-
     assert baseline != changed
 
 
@@ -746,37 +686,6 @@ async def test_apply_settings_updates_peer_translation_flags_on_hub(
 
 
 @pytest.mark.asyncio
-async def test_apply_settings_live_mode_forces_effective_runtime_flags(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    controller = _make_controller(app=SimpleNamespace())
-    controller.settings = AppSettings()
-    controller.hub = DummyHub(llm=None, stt=object(), peer_stt=object())
-    controller.overlay_state = "connected"
-    controller._last_stt_runtime_signature = controller._build_stt_runtime_signature(
-        controller.settings
-    )
-    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
-    monkeypatch.setattr(
-        GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
-    )
-
-    updated = AppSettings()
-    updated.provider.llm = LLMProviderName.GEMINI
-    updated.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LIVE
-    updated.ui.peer_translation_enabled = True
-    updated.ui.integrated_context_enabled = True
-    updated.stt.low_latency_mode = True
-
-    await controller.apply_settings(updated)
-
-    assert controller.hub.peer_translation_enabled is False
-    assert controller.hub.integrated_context_enabled is False
-    assert controller.hub.low_latency_mode is False
-    assert controller.hub.hangover_s == 1.1
-
-
-@pytest.mark.asyncio
 async def test_init_pipeline_keeps_peer_original_runtime_available_without_peer_translation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -795,63 +704,6 @@ async def test_init_pipeline_keeps_peer_original_runtime_available_without_peer_
     hub = created["hub"]
     assert hub.peer_stt == "stt"
     assert hub.peer_translation_enabled is False
-
-
-@pytest.mark.asyncio
-async def test_init_pipeline_uses_integrated_gemini_live_self_stt(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    created: dict[str, object] = {}
-
-    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
-    monkeypatch.setattr(controller_module, "create_llm_provider", lambda *_a, **_k: None)
-    monkeypatch.setattr(controller_module, "create_stt_backend", lambda *_a, **_k: "live-stt")
-    monkeypatch.setattr(
-        controller_module, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend"
-    )
-    monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "peer-stt")
-
-    class FakeSender:
-        def close(self) -> None:
-            return None
-
-    monkeypatch.setattr(controller_module, "VrchatOscUdpSender", lambda *_a, **_k: FakeSender())
-    monkeypatch.setattr(controller_module, "SmartOscQueue", lambda *_a, **_k: object())
-
-    def fake_hub(*_args, **kwargs):
-        hub = SimpleNamespace(
-            llm=kwargs.get("llm"),
-            stt=kwargs.get("stt"),
-            peer_stt=kwargs.get("peer_stt"),
-            peer_translation_enabled=kwargs.get("peer_translation_enabled", False),
-            integrated_context_enabled=kwargs.get("integrated_context_enabled", False),
-            low_latency_mode=kwargs.get("low_latency_mode"),
-        )
-        created["hub"] = hub
-        return hub
-
-    monkeypatch.setattr(controller_module, "ClientHub", fake_hub)
-    monkeypatch.setattr(
-        GuiController, "_configure_vrc_mic_receiver", lambda self, enabled: asyncio.sleep(0)
-    )
-
-    controller = _make_controller(app=SimpleNamespace())
-    controller.settings = AppSettings()
-    controller.settings.provider.llm = LLMProviderName.GEMINI
-    controller.settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LIVE
-    controller.settings.stt.low_latency_mode = True
-    controller.settings.ui.overlay_enabled = True
-    controller.overlay_state = "connected"
-
-    await controller._init_pipeline()
-
-    hub = created["hub"]
-    assert hub.llm is None
-    assert hub.stt == "live-stt"
-    assert hub.peer_stt == "peer-stt"
-    assert hub.peer_translation_enabled is False
-    assert hub.integrated_context_enabled is False
-    assert hub.low_latency_mode is False
 
 
 @pytest.mark.asyncio

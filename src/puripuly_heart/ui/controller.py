@@ -10,14 +10,10 @@ from pathlib import Path
 import flet as ft
 
 from puripuly_heart.app.wiring import (
-    create_effective_llm_provider,
+    create_llm_provider,
     create_peer_stt_backend,
     create_secret_store,
-    create_self_stt_provider,
-    is_gemini_live_mode,
-)
-from puripuly_heart.app.wiring import (
-    create_stt_backend as create_base_stt_backend,
+    create_stt_backend,
 )
 from puripuly_heart.config.settings import (
     AppSettings,
@@ -34,7 +30,7 @@ from puripuly_heart.core.audio.source import (
     SoundDeviceAudioSource,
     resolve_sounddevice_input_device,
 )
-from puripuly_heart.core.clock import Clock, SystemClock
+from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.osc.receiver import (
@@ -53,7 +49,6 @@ from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
 from puripuly_heart.core.vad.gating import VadGating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
-from puripuly_heart.providers.live.gemini_live import GeminiLiveIntegratedProvider
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -84,27 +79,6 @@ _OVERLAY_FAILURE_REASONS = frozenset(
         "unknown",
     }
 )
-
-
-def create_llm_provider(settings: AppSettings, *, secrets):
-    return create_effective_llm_provider(settings, secrets=secrets)
-
-
-def create_stt_backend(
-    settings: AppSettings,
-    *,
-    secrets,
-    clock: Clock,
-    reset_deadline_s: float,
-):
-    if is_gemini_live_mode(settings):
-        return create_self_stt_provider(
-            settings,
-            secrets=secrets,
-            clock=clock,
-            reset_deadline_s=reset_deadline_s,
-        )
-    return create_base_stt_backend(settings, secrets=secrets)
 
 
 @dataclass(slots=True)
@@ -177,8 +151,6 @@ class GuiController:
         return "local"
 
     def _effective_peer_translation_enabled_for(self, settings: AppSettings) -> bool:
-        if is_gemini_live_mode(settings):
-            return False
         return bool(
             settings.ui.peer_translation_enabled
             and self._effective_peer_overlay_enabled_for(settings)
@@ -189,33 +161,10 @@ class GuiController:
         return self.overlay_state == "connected"
 
     def _effective_integrated_context_enabled_for(self, settings: AppSettings) -> bool:
-        if is_gemini_live_mode(settings):
-            return False
         return bool(
             settings.ui.integrated_context_enabled
             and self._effective_peer_translation_enabled_for(settings)
         )
-
-    def _effective_low_latency_mode_for(self, settings: AppSettings) -> bool:
-        return bool(settings.stt.low_latency_mode and not is_gemini_live_mode(settings))
-
-    def _effective_hangover_s_for(self, settings: AppSettings) -> float:
-        if not self._effective_low_latency_mode_for(settings):
-            return 1.1
-        return settings.stt.low_latency_vad_hangover_ms / 1000.0
-
-    def _translation_runtime_available(
-        self,
-        settings: AppSettings | None,
-        *,
-        llm: object | None,
-        stt: object | None,
-    ) -> bool:
-        if settings is None:
-            return llm is not None
-        if is_gemini_live_mode(settings):
-            return stt is not None
-        return llm is not None
 
     def _sync_effective_hub_flags(self, settings: AppSettings | None = None) -> None:
         resolved_settings = settings or self.settings
@@ -280,13 +229,7 @@ class GuiController:
             llm_key_map = {"gemini": "google", "qwen": self._get_alibaba_verified_key()}
             llm_verified_key = llm_key_map.get(llm_provider, llm_provider)
             llm_verified = getattr(self.settings.api_key_verified, llm_verified_key, False)
-            dash.translation_needs_key = (
-                not self._translation_runtime_available(
-                    self.settings,
-                    llm=self.hub.llm,
-                    stt=self.hub.stt,
-                )
-            ) or (not llm_verified)
+            dash.translation_needs_key = (self.hub.llm is None) or (not llm_verified)
 
             # Set initial enabled states (all start as off/gray)
             dash.set_translation_enabled(False)
@@ -330,14 +273,11 @@ class GuiController:
         custom_vocab_enabled, custom_terms = self._stt_runtime_custom_vocabulary_signature(settings)
         return (
             settings.languages.source_language,
-            settings.languages.target_language,
-            settings.provider.llm.value,
-            settings.gemini.llm_model.value,
             settings.audio.input_host_api,
             settings.audio.input_device,
             self._effective_peer_overlay_enabled_for(settings),
             settings.stt.vad_speech_threshold,
-            self._effective_low_latency_mode_for(settings),
+            settings.stt.low_latency_mode,
             settings.stt.low_latency_merge_gap_ms,
             settings.stt.low_latency_spec_retry_max,
             settings.stt.low_latency_vad_hangover_ms,
@@ -661,19 +601,12 @@ class GuiController:
     async def set_translation_enabled(self, enabled: bool) -> None:
         if self.hub is None:
             return
-        if enabled and (
-            self.settings is None
-            or not self._translation_runtime_available(
-                self.settings,
-                llm=self.hub.llm,
-                stt=self.hub.stt,
-            )
-        ):
+        if enabled and self.hub.llm is None:
             self.hub.translation_enabled = False
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 dash.set_translation_enabled(False)
-            self._log_error("Translation is ON but translation provider is not configured.")
+            self._log_error("Translation is ON but LLM provider is not configured.")
             return
 
         # Log provider info when enabling
@@ -783,7 +716,6 @@ class GuiController:
         # hub.source_language를 기준으로 비교 (settings 객체는 이미 수정되어 전달될 수 있음)
         prev_source_lang = self.hub.source_language if self.hub else None
         prev_low_latency = self.hub.low_latency_mode if self.hub else None
-        prev_live_mode = is_gemini_live_mode(self.settings) if self.settings is not None else False
         source_language_changed = (
             prev_source_lang is not None and prev_source_lang != settings.languages.source_language
         )
@@ -803,23 +735,20 @@ class GuiController:
                 settings.stt.low_latency_mode,
             )
             await self._rebuild_llm_provider()
-        elif prev_live_mode != is_gemini_live_mode(settings):
-            await self._rebuild_llm_provider()
 
         if self.hub is not None:
             self.hub.source_language = settings.languages.source_language
             self.hub.target_language = settings.languages.target_language
             self.hub.system_prompt = settings.system_prompt
-            self.hub.low_latency_mode = self._effective_low_latency_mode_for(settings)
+            self.hub.low_latency_mode = settings.stt.low_latency_mode
             self.hub.low_latency_merge_gap_ms = settings.stt.low_latency_merge_gap_ms
             self.hub.low_latency_spec_retry_max = settings.stt.low_latency_spec_retry_max
-            self.hub.hangover_s = self._effective_hangover_s_for(settings)
+            self.hub.hangover_s = (
+                settings.stt.low_latency_vad_hangover_ms / 1000.0
+                if settings.stt.low_latency_mode
+                else 1.1
+            )
             self._sync_effective_hub_flags(settings)
-            live_stt = getattr(self.hub, "stt", None)
-            if isinstance(live_stt, GeminiLiveIntegratedProvider):
-                live_stt.source_language = settings.languages.source_language
-                live_stt.target_language = settings.languages.target_language
-                live_stt.system_prompt = settings.system_prompt
 
         if prev_overlay_enabled != settings.ui.overlay_enabled:
             await self.set_overlay_enabled(settings.ui.overlay_enabled)
@@ -932,13 +861,7 @@ class GuiController:
         # Update dashboard status
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
-            dash.set_translation_needs_key(
-                not self._translation_runtime_available(
-                    self.settings,
-                    llm=llm,
-                    stt=self.hub.stt,
-                )
-            )
+            dash.set_translation_needs_key(llm is None)
 
         logger.info("[Settings] LLM provider rebuilt successfully")
 
@@ -951,23 +874,15 @@ class GuiController:
         stt = None
         peer_stt = None
         try:
-            stt_backend = create_stt_backend(
-                self.settings,
-                secrets=secrets,
+            backend = create_stt_backend(self.settings, secrets=secrets)
+            stt = ManagedSTTProvider(
+                backend=backend,
+                sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
                 clock=self.clock,
                 reset_deadline_s=STT_RESET_DEADLINE_S,
+                drain_timeout_s=self.settings.stt.drain_timeout_s,
+                bridging_ms=self.settings.audio.ring_buffer_ms,
             )
-            if is_gemini_live_mode(self.settings):
-                stt = stt_backend
-            else:
-                stt = ManagedSTTProvider(
-                    backend=stt_backend,
-                    sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-                    clock=self.clock,
-                    reset_deadline_s=STT_RESET_DEADLINE_S,
-                    drain_timeout_s=self.settings.stt.drain_timeout_s,
-                    bridging_ms=self.settings.audio.ring_buffer_ms,
-                )
         except Exception as exc:
             self._log_error(f"STT backend not available: {exc}")
         if self._effective_peer_overlay_enabled_for(self.settings):
@@ -993,13 +908,6 @@ class GuiController:
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             dash.set_stt_needs_key(stt is None)
-            dash.set_translation_needs_key(
-                not self._translation_runtime_available(
-                    self.settings,
-                    llm=self.hub.llm,
-                    stt=stt,
-                )
-            )
             if stt is None:
                 dash.set_stt_enabled(False)
 
@@ -1028,21 +936,11 @@ class GuiController:
 
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
-            dash.set_translation_needs_key(
-                not self._translation_runtime_available(
-                    self.settings,
-                    llm=self.hub.llm,
-                    stt=self.hub.stt,
-                )
-            )
+            dash.set_translation_needs_key(self.hub.llm is None)
             dash.set_stt_needs_key(self.hub.stt is None)
 
-            self.hub.translation_enabled = bool(
-                getattr(dash, "is_translation_on", True)
-            ) and self._translation_runtime_available(
-                self.settings,
-                llm=self.hub.llm,
-                stt=self.hub.stt,
+            self.hub.translation_enabled = (
+                bool(getattr(dash, "is_translation_on", True)) and self.hub.llm is not None
             )
             dash.set_translation_enabled(self.hub.translation_enabled)
 
@@ -1066,23 +964,15 @@ class GuiController:
         stt = None
         peer_stt = None
         try:
-            stt_backend = create_stt_backend(
-                self.settings,
-                secrets=secrets,
+            backend = create_stt_backend(self.settings, secrets=secrets)
+            stt = ManagedSTTProvider(
+                backend=backend,
+                sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
                 clock=self.clock,
                 reset_deadline_s=STT_RESET_DEADLINE_S,
+                drain_timeout_s=self.settings.stt.drain_timeout_s,
+                bridging_ms=self.settings.audio.ring_buffer_ms,
             )
-            if is_gemini_live_mode(self.settings):
-                stt = stt_backend
-            else:
-                stt = ManagedSTTProvider(
-                    backend=stt_backend,
-                    sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-                    clock=self.clock,
-                    reset_deadline_s=STT_RESET_DEADLINE_S,
-                    drain_timeout_s=self.settings.stt.drain_timeout_s,
-                    bridging_ms=self.settings.audio.ring_buffer_ms,
-                )
         except Exception as exc:
             self._log_error(f"STT backend not available: {exc}")
         if self._effective_peer_overlay_enabled_for(self.settings):
@@ -1132,10 +1022,14 @@ class GuiController:
             integrated_context_enabled=self._effective_integrated_context_enabled_for(
                 self.settings
             ),
-            low_latency_mode=self._effective_low_latency_mode_for(self.settings),
+            low_latency_mode=self.settings.stt.low_latency_mode,
             low_latency_merge_gap_ms=self.settings.stt.low_latency_merge_gap_ms,
             low_latency_spec_retry_max=self.settings.stt.low_latency_spec_retry_max,
-            hangover_s=self._effective_hangover_s_for(self.settings),
+            hangover_s=(
+                self.settings.stt.low_latency_vad_hangover_ms / 1000.0
+                if self.settings.stt.low_latency_mode
+                else 1.1
+            ),
         )
 
         if self.vrc_mic_state is None:
@@ -1567,15 +1461,7 @@ class GuiController:
 
         # 1. Verify LLM
         llm_valid = False
-        translation_runtime_available = (
-            self.hub is not None
-            and self._translation_runtime_available(
-                self.settings,
-                llm=self.hub.llm,
-                stt=self.hub.stt,
-            )
-        )
-        if translation_runtime_available:
+        if self.hub and self.hub.llm:
             # It was created, but is the key valid?
             try:
                 provider_name = self.settings.provider.llm

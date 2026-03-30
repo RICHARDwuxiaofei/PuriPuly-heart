@@ -761,8 +761,6 @@ class SettingsView(ft.Column):
 
     def _get_llm_display_label(self, settings: AppSettings) -> str:
         if settings.provider.llm == LLMProviderName.GEMINI:
-            if settings.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LIVE:
-                return t("provider.gemini31_flash_live")
             if settings.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE:
                 return t("provider.gemini31_flash_lite")
             return t("provider.gemini3_flash")
@@ -1047,11 +1045,6 @@ class SettingsView(ft.Column):
                 description=t("provider.gemini31_flash_lite.description", default=""),
             ),
             OptionItem(
-                value=GeminiLLMModel.GEMINI_31_FLASH_LIVE.value,
-                label=t("provider.gemini31_flash_live"),
-                description=t("provider.gemini31_flash_live.description", default=""),
-            ),
-            OptionItem(
                 value=QwenLLMModel.QWEN_35_PLUS.value,
                 label=t("provider.qwen35_plus"),
                 description=t("provider.qwen35_plus.description", default=""),
@@ -1095,10 +1088,6 @@ class SettingsView(ft.Column):
         elif value == GeminiLLMModel.GEMINI_31_FLASH_LITE.value:
             provider = LLMProviderName.GEMINI
             gemini_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
-            qwen_model = old_qwen_model
-        elif value == GeminiLLMModel.GEMINI_31_FLASH_LIVE.value:
-            provider = LLMProviderName.GEMINI
-            gemini_model = GeminiLLMModel.GEMINI_31_FLASH_LIVE
             qwen_model = old_qwen_model
         elif value == QwenLLMModel.QWEN_35_PLUS.value:
             provider = LLMProviderName.QWEN

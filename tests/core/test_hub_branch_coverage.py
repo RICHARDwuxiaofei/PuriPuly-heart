@@ -13,7 +13,6 @@ from puripuly_heart.core.vad.gating import SpeechEnd
 from puripuly_heart.domain.events import (
     STTErrorEvent,
     STTFinalEvent,
-    STTIntegratedFinalEvent,
     STTPartialEvent,
     STTSessionState,
     STTSessionStateEvent,
@@ -296,55 +295,6 @@ async def test_handle_stt_event_ignores_partial_in_low_latency_mode() -> None:
     await hub._handle_stt_event(STTPartialEvent(utterance_id=utterance_id, transcript=partial))
 
     assert hub.ui_events.empty()
-
-
-@pytest.mark.asyncio
-async def test_handle_stt_event_routes_integrated_final_event() -> None:
-    hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), clock=FakeClock())
-    utterance_id = uuid4()
-
-    await hub._handle_stt_event(
-        STTIntegratedFinalEvent(
-            utterance_id=utterance_id,
-            transcript_text="안녕",
-            translation_text="hello",
-            created_at=2.0,
-        )
-    )
-
-    events = [await hub.ui_events.get() for _ in range(3)]
-    assert [event.type for event in events] == [
-        UIEventType.TRANSCRIPT_FINAL,
-        UIEventType.TRANSLATION_DONE,
-        UIEventType.OSC_SENT,
-    ]
-    translation = events[1].payload
-    assert isinstance(translation, Translation)
-    assert translation.text == "hello"
-    assert translation.source_text == "안녕"
-    assert hub.osc.messages[0].text == "안녕 (hello)"
-
-
-@pytest.mark.asyncio
-async def test_handle_stt_event_integrated_final_event_supports_translation_only() -> None:
-    hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), clock=FakeClock())
-    utterance_id = uuid4()
-
-    await hub._handle_stt_event(
-        STTIntegratedFinalEvent(
-            utterance_id=utterance_id,
-            transcript_text="",
-            translation_text="hello",
-            created_at=2.0,
-        )
-    )
-
-    events = [await hub.ui_events.get() for _ in range(2)]
-    assert [event.type for event in events] == [
-        UIEventType.TRANSLATION_DONE,
-        UIEventType.OSC_SENT,
-    ]
-    assert hub.osc.messages[0].text == "hello"
 
 
 @pytest.mark.asyncio

@@ -133,8 +133,6 @@
   "provider.gemini3_flash.description": "'신'...인데 가끔씩 서버가 불안정해요",
   "provider.gemini31_flash_lite": "Gemini 3.1 Flash Lite",
   "provider.gemini31_flash_lite.description": "빠르고 (적당히) 똑똑해요",
-  "provider.gemini31_flash_live": "Gemini 3.1 Flash Live",
-  "provider.gemini31_flash_live.description": "오디오 출력은 버리고 STT와 번역 텍스트만 쓰는 실험 모드예요",
   "provider.qwen": "Qwen 3.5",
   "provider.qwen35_flash": "Qwen 3.5 Flash",
   "provider.qwen35_flash.description": "Plus 모델의 속도가 답답할 때 사용하세요",

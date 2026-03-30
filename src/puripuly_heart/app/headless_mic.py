@@ -9,14 +9,10 @@ from pathlib import Path
 import numpy as np
 
 from puripuly_heart.app.wiring import (
-    create_effective_llm_provider,
+    create_llm_provider,
     create_peer_stt_backend,
     create_secret_store,
-    create_self_stt_provider,
-    is_gemini_live_mode,
-)
-from puripuly_heart.app.wiring import (
-    create_stt_backend as create_base_stt_backend,
+    create_stt_backend,
 )
 from puripuly_heart.config.paths import default_vad_model_path
 from puripuly_heart.config.settings import AppSettings
@@ -44,27 +40,6 @@ logger = logging.getLogger(__name__)
 
 # Hardcoded STT session reset deadline (not configurable via settings)
 STT_RESET_DEADLINE_S = 180.0
-
-
-def create_llm_provider(settings: AppSettings, *, secrets):
-    return create_effective_llm_provider(settings, secrets=secrets)
-
-
-def create_stt_backend(
-    settings: AppSettings,
-    *,
-    secrets,
-    clock: SystemClock,
-    reset_deadline_s: float,
-):
-    if is_gemini_live_mode(settings):
-        return create_self_stt_provider(
-            settings,
-            secrets=secrets,
-            clock=clock,
-            reset_deadline_s=reset_deadline_s,
-        )
-    return create_base_stt_backend(settings, secrets=secrets)
 
 
 @dataclass(slots=True)
@@ -100,23 +75,15 @@ class HeadlessMicRunner:
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
         llm = create_llm_provider(self.settings, secrets=secrets) if self.use_llm else None
 
-        stt_backend = create_stt_backend(
-            self.settings,
-            secrets=secrets,
+        backend = create_stt_backend(self.settings, secrets=secrets)
+        stt = ManagedSTTProvider(
+            backend=backend,
+            sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
             clock=self.clock,
             reset_deadline_s=STT_RESET_DEADLINE_S,
+            drain_timeout_s=self.settings.stt.drain_timeout_s,
+            bridging_ms=self.settings.audio.ring_buffer_ms,
         )
-        if is_gemini_live_mode(self.settings):
-            stt = stt_backend
-        else:
-            stt = ManagedSTTProvider(
-                backend=stt_backend,
-                sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-                clock=self.clock,
-                reset_deadline_s=STT_RESET_DEADLINE_S,
-                drain_timeout_s=self.settings.stt.drain_timeout_s,
-                bridging_ms=self.settings.audio.ring_buffer_ms,
-            )
         peer_stt = None
         if self.settings.ui.peer_translation_enabled:
             try:
@@ -160,17 +127,14 @@ class HeadlessMicRunner:
             system_prompt=self.settings.system_prompt,
             fallback_transcript_only=not self.use_llm,
             peer_translation_enabled=self.settings.ui.peer_translation_enabled
-            and (not is_gemini_live_mode(self.settings))
             and peer_stt is not None,
-            integrated_context_enabled=self.settings.ui.integrated_context_enabled
-            and (not is_gemini_live_mode(self.settings)),
-            low_latency_mode=self.settings.stt.low_latency_mode
-            and (not is_gemini_live_mode(self.settings)),
+            integrated_context_enabled=self.settings.ui.integrated_context_enabled,
+            low_latency_mode=self.settings.stt.low_latency_mode,
             low_latency_merge_gap_ms=self.settings.stt.low_latency_merge_gap_ms,
             low_latency_spec_retry_max=self.settings.stt.low_latency_spec_retry_max,
             hangover_s=(
                 self.settings.stt.low_latency_vad_hangover_ms / 1000.0
-                if self.settings.stt.low_latency_mode and (not is_gemini_live_mode(self.settings))
+                if self.settings.stt.low_latency_mode
                 else 1.1
             ),
         )
