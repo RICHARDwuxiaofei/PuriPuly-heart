@@ -18,6 +18,7 @@
 - Prefer a project virtual environment for tests, verification, and development commands whenever one exists.
 - If `.venv` exists, Windows shells should use `.venv`.
 - If `.venv-wsl` exists, Linux / WSL shells should use `.venv-wsl`.
+- In WSL shells, use `direnv exec <repo> ...` or explicit `UV_PROJECT_ENVIRONMENT=.venv-wsl`; do not rely on `bash -i -c`.
 
 ## Verification Contract & Evidence
 
