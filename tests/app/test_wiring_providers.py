@@ -3,9 +3,12 @@ from __future__ import annotations
 import pytest
 
 from puripuly_heart.app.wiring import (
+    create_effective_llm_provider,
     create_llm_provider,
     create_peer_stt_backend,
+    create_self_stt_provider,
     create_stt_backend,
+    is_gemini_live_mode,
 )
 from puripuly_heart.config.settings import (
     AppSettings,
@@ -23,9 +26,11 @@ from puripuly_heart.config.settings import (
     STTProviderName,
     STTSettings,
 )
+from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.language import get_deepgram_language, get_qwen_asr_language
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
+from puripuly_heart.providers.live.gemini_live import GeminiLiveIntegratedProvider
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -62,6 +67,45 @@ def test_create_llm_provider_gemini_uses_selected_model() -> None:
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, GeminiLLMProvider)
     assert provider.inner.model == "gemini-3.1-flash-lite-preview"
+
+
+def test_create_effective_llm_provider_returns_none_for_gemini_live() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.GEMINI),
+        gemini=GeminiSettings(llm_model=GeminiLLMModel.GEMINI_31_FLASH_LIVE),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("google_api_key", "k")
+
+    provider = create_effective_llm_provider(settings, secrets=secrets)
+
+    assert provider is None
+    assert is_gemini_live_mode(settings) is True
+
+
+def test_create_self_stt_provider_uses_gemini_live_provider() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.GEMINI),
+        gemini=GeminiSettings(llm_model=GeminiLLMModel.GEMINI_31_FLASH_LIVE),
+    )
+    settings.languages.source_language = "ko"
+    settings.languages.target_language = "en"
+    settings.system_prompt = "Translate ${sourceName} to ${targetName}."
+    secrets = InMemorySecretStore()
+    secrets.set("google_api_key", "live-k")
+
+    stt = create_self_stt_provider(
+        settings,
+        secrets=secrets,
+        clock=SystemClock(),
+        reset_deadline_s=300.0,
+    )
+
+    assert isinstance(stt, GeminiLiveIntegratedProvider)
+    assert stt.api_key == "live-k"
+    assert stt.model == "gemini-3.1-flash-live-preview"
+    assert stt.source_language == "ko"
+    assert stt.target_language == "en"
 
 
 def test_create_llm_provider_qwen_uses_secret() -> None:

@@ -7,11 +7,13 @@ from pathlib import Path
 
 from puripuly_heart.config.settings import (
     AppSettings,
+    GeminiLLMModel,
     LLMProviderName,
     SecretsBackend,
     SecretsSettings,
     STTProviderName,
 )
+from puripuly_heart.core.clock import Clock
 from puripuly_heart.core.llm.provider import LLMProvider, SemaphoreLLMProvider
 from puripuly_heart.core.storage.secrets import (
     EncryptedFileSecretStore,
@@ -19,7 +21,9 @@ from puripuly_heart.core.storage.secrets import (
     SecretStore,
 )
 from puripuly_heart.core.stt.backend import STTBackend
+from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
+from puripuly_heart.providers.live.gemini_live import GeminiLiveIntegratedProvider
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -118,6 +122,10 @@ def require_secret(
 
 
 def create_llm_provider(settings: AppSettings, *, secrets: SecretStore) -> LLMProvider:
+    if is_gemini_live_mode(settings):
+        raise ValueError(
+            "Gemini Live model is only supported through the integrated live STT provider"
+        )
     if settings.provider.llm == LLMProviderName.GEMINI:
         api_key = require_secret(secrets, key="google_api_key", env_var="GOOGLE_API_KEY")
         base: LLMProvider = GeminiLLMProvider(
@@ -164,6 +172,53 @@ def create_llm_provider(settings: AppSettings, *, secrets: SecretStore) -> LLMPr
     return SemaphoreLLMProvider(
         inner=base,
         semaphore=asyncio.Semaphore(settings.llm.concurrency_limit),
+    )
+
+
+def is_gemini_live_mode(settings: AppSettings | None) -> bool:
+    if settings is None:
+        return False
+    return (
+        settings.provider.llm == LLMProviderName.GEMINI
+        and settings.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LIVE
+    )
+
+
+def create_effective_llm_provider(
+    settings: AppSettings, *, secrets: SecretStore
+) -> LLMProvider | None:
+    if is_gemini_live_mode(settings):
+        return None
+    return create_llm_provider(settings, secrets=secrets)
+
+
+def create_self_stt_provider(
+    settings: AppSettings,
+    *,
+    secrets: SecretStore,
+    clock: Clock,
+    reset_deadline_s: float,
+) -> object:
+    if is_gemini_live_mode(settings):
+        api_key = require_secret(secrets, key="google_api_key", env_var="GOOGLE_API_KEY")
+        return GeminiLiveIntegratedProvider(
+            api_key=api_key,
+            model=settings.gemini.llm_model.value,
+            sample_rate_hz=settings.audio.internal_sample_rate_hz,
+            source_language=settings.languages.source_language,
+            target_language=settings.languages.target_language,
+            system_prompt=settings.system_prompt,
+            clock=clock,
+        )
+
+    backend = create_stt_backend(settings, secrets=secrets)
+    return ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=settings.audio.internal_sample_rate_hz,
+        clock=clock,
+        reset_deadline_s=reset_deadline_s,
+        drain_timeout_s=settings.stt.drain_timeout_s,
+        bridging_ms=settings.audio.ring_buffer_ms,
     )
 
 

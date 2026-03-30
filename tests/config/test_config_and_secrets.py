@@ -104,6 +104,19 @@ def test_gemini_llm_model_roundtrip(tmp_path):
     assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite-preview"
 
 
+def test_gemini_live_llm_model_roundtrip(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = AppSettings()
+    settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LIVE
+    save_settings(path, settings)
+
+    loaded = load_settings(path)
+    assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LIVE
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-live-preview"
+
+
 def test_load_settings_migrates_legacy_qwen_mt_flash_model(tmp_path):
     path = tmp_path / "settings.json"
     legacy = to_dict(AppSettings())

@@ -27,6 +27,7 @@ from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, 
 from puripuly_heart.domain.events import (
     STTErrorEvent,
     STTFinalEvent,
+    STTIntegratedFinalEvent,
     STTPartialEvent,
     STTSessionState,
     STTSessionStateEvent,
@@ -450,6 +451,55 @@ class ClientHub:
                     )
             else:
                 await self._ensure_translation(event.transcript)
+            return
+
+        if isinstance(event, STTIntegratedFinalEvent):
+            runtime = self._runtime_for_channel(event.channel)
+            if runtime.channel == "self":
+                self._send_stt_connected_notification()
+
+            transcript_text = event.transcript_text.strip()
+            translation_text = event.translation_text.strip()
+            if transcript_text:
+                transcript = Transcript(
+                    utterance_id=event.utterance_id,
+                    text=transcript_text,
+                    is_final=True,
+                    created_at=event.created_at,
+                    channel=event.channel,
+                )
+                await self._handle_transcript(transcript, is_final=True, source="Mic")
+
+            if self._translation_enabled_for_runtime(runtime) and translation_text:
+                translation = Translation(
+                    utterance_id=event.utterance_id,
+                    text=translation_text,
+                    source_text=transcript_text,
+                    source_language=self.source_language,
+                    target_language=self.target_language,
+                    channel=event.channel,
+                    created_at=event.created_at,
+                )
+                await self._complete_translation_result(
+                    translation,
+                    runtime=runtime,
+                    transcript_text=transcript_text,
+                    applied_context_mode=None,
+                )
+                return
+
+            if transcript_text and self._should_publish_to_chatbox(runtime):
+                await self._enqueue_osc(
+                    event.utterance_id,
+                    transcript_text=transcript_text,
+                    translation_text=None,
+                )
+            elif translation_text and self._should_publish_to_chatbox(runtime):
+                await self._enqueue_osc(
+                    event.utterance_id,
+                    transcript_text="",
+                    translation_text=translation_text,
+                )
             return
 
     def _send_stt_connected_notification(self) -> None:
@@ -1453,25 +1503,41 @@ class ClientHub:
                 )
             return
 
-        bundle = self.get_or_create_bundle(utterance_id, channel=runtime.channel)
+        await self._complete_translation_result(
+            translation,
+            runtime=runtime,
+            transcript_text=text,
+            applied_context_mode=applied_mode,
+        )
+
+    async def _complete_translation_result(
+        self,
+        translation: Translation,
+        *,
+        runtime: ChannelRuntime | None = None,
+        transcript_text: str,
+        applied_context_mode: ContextMode | None,
+    ) -> None:
+        runtime = runtime or self._runtime_for_channel(translation.channel)
+        bundle = self.get_or_create_bundle(translation.utterance_id, channel=runtime.channel)
         bundle.with_translation(translation)
         await self.ui_events.put(
             UIEvent(
                 type=UIEventType.TRANSLATION_DONE,
-                utterance_id=utterance_id,
+                utterance_id=translation.utterance_id,
                 payload=translation,
-                source=self._get_source(utterance_id, channel=runtime.channel),
+                source=self._get_source(translation.utterance_id, channel=runtime.channel),
             )
         )
         if runtime.channel == "self":
             await self._emit_translation_to_overlay(
                 translation=translation,
-                applied_context_mode=applied_mode,
+                applied_context_mode=applied_context_mode,
             )
         if self._should_publish_to_chatbox(runtime):
             await self._enqueue_osc(
-                utterance_id,
-                transcript_text=text,
+                translation.utterance_id,
+                transcript_text=transcript_text,
                 translation_text=translation.text,
             )
 
@@ -1622,6 +1688,8 @@ class ClientHub:
     ) -> None:
         if translation_text is None:
             merged = transcript_text
+        elif not transcript_text:
+            merged = translation_text
         else:
             merged = f"{transcript_text} ({translation_text})"
 
