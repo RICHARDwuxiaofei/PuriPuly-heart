@@ -147,6 +147,35 @@ async def test_overlay_sink_failures_do_not_break_chatbox_or_translation_complet
 
 
 @pytest.mark.asyncio
+async def test_hub_emits_self_translation_to_overlay_after_translation_completion() -> None:
+    sink = RecordingOverlaySink()
+    osc = RecordingOscQueue()
+    hub = ClientHub(
+        stt=None,
+        llm=StubStreamingLLMProvider(chunks=["hello"]),
+        osc=osc,
+        overlay_sink=sink,
+    )
+
+    await hub.submit_text("self text", source="You")
+    await asyncio.gather(*hub.self_runtime.translation_tasks.values(), return_exceptions=True)
+
+    translation_events = [
+        event
+        for event in sink.events
+        if event.type == "translation_final" and event.channel == "self"
+    ]
+
+    assert osc.messages[0].text == "self text (hello)"
+    assert [event.type for event in sink.events[:2]] == [
+        "self_transcript_final",
+        "translation_final",
+    ]
+    assert translation_events[-1].text == "hello"
+    assert translation_events[-1].text != osc.messages[0].text
+
+
+@pytest.mark.asyncio
 async def test_peer_stream_failure_keeps_latest_snapshot_and_closes_line_as_incomplete() -> None:
     sink = RecordingOverlaySink()
     hub = ClientHub(

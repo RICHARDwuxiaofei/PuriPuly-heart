@@ -493,6 +493,29 @@ class ClientHub:
             )
         )
 
+    async def _emit_translation_to_overlay(
+        self,
+        *,
+        translation: Translation,
+        applied_context_mode: ContextMode | None,
+    ) -> None:
+        if self.overlay_sink is None:
+            return
+
+        await self._emit_overlay_event(
+            self.overlay_event_adapter.translation_final(
+                utterance_id=translation.utterance_id,
+                channel=translation.channel,
+                text=translation.text,
+                source_language=self.source_language,
+                target_language=self.target_language,
+                applied_context_mode=applied_context_mode,
+                speaker_label=translation.speaker_label,
+                peer_epoch=translation.peer_epoch,
+                created_at=translation.created_at,
+            )
+        )
+
     async def _emit_overlay_event(self, event: object) -> None:
         if self.overlay_sink is None:
             return
@@ -1366,6 +1389,7 @@ class ClientHub:
         if self.llm is None:
             return
         runtime = runtime or self.self_runtime
+        applied_mode: ContextMode | None = None
         try:
             formatted_prompt, context_str, now, applied_mode = self._prepare_llm_request_with_mode(
                 text,
@@ -1422,11 +1446,14 @@ class ClientHub:
                 )
             )
             if self.fallback_transcript_only and self._should_publish_to_chatbox(runtime):
-                await self._enqueue_osc(utterance_id, transcript_text=text, translation_text=None)
+                await self._enqueue_osc(
+                    utterance_id,
+                    transcript_text=text,
+                    translation_text=None,
+                )
             return
 
         bundle = self.get_or_create_bundle(utterance_id, channel=runtime.channel)
-        bundle.with_translation(translation)
         bundle.with_translation(translation)
         await self.ui_events.put(
             UIEvent(
@@ -1436,9 +1463,16 @@ class ClientHub:
                 source=self._get_source(utterance_id, channel=runtime.channel),
             )
         )
+        if runtime.channel == "self":
+            await self._emit_translation_to_overlay(
+                translation=translation,
+                applied_context_mode=applied_mode,
+            )
         if self._should_publish_to_chatbox(runtime):
             await self._enqueue_osc(
-                utterance_id, transcript_text=text, translation_text=translation.text
+                utterance_id,
+                transcript_text=text,
+                translation_text=translation.text,
             )
 
     async def _stream_peer_translation_to_overlay(
@@ -1580,7 +1614,11 @@ class ClientHub:
         return utterance_id
 
     async def _enqueue_osc(
-        self, utterance_id: UUID, *, transcript_text: str, translation_text: str | None
+        self,
+        utterance_id: UUID,
+        *,
+        transcript_text: str,
+        translation_text: str | None,
     ) -> None:
         if translation_text is None:
             merged = transcript_text
