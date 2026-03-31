@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
+from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.llm.provider import LLMProvider
+from puripuly_heart.core.orchestrator import hub as hub_module
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.overlay.protocol import OverlayStateSnapshot
+from puripuly_heart.core.vad.gating import SpeechEnd
+from puripuly_heart.domain.events import STTFinalEvent, STTPartialEvent
+from puripuly_heart.domain.models import Transcript
 from tests.helpers.fakes import RecordingOscQueue
 
 
@@ -193,3 +198,158 @@ async def test_peer_stream_failure_keeps_latest_snapshot_and_closes_line_as_inco
 
     assert stream_events[-1].text == "he"
     assert closed.is_final is False
+
+
+@pytest.mark.asyncio
+async def test_low_latency_self_partial_emits_delayed_preview_update_to_overlay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(hub_module, "_SELF_PREVIEW_COALESCE_MS", 10)
+    sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        clock=FakeClock(_now=10.0),
+        low_latency_mode=True,
+    )
+    utterance_id = uuid4()
+    partial = Transcript(
+        utterance_id=utterance_id, text="hello live", is_final=False, created_at=11.0
+    )
+
+    await hub._handle_stt_event(STTPartialEvent(utterance_id=utterance_id, transcript=partial))
+
+    assert sink.events == []
+    await asyncio.sleep(0.02)
+
+    assert [event.type for event in sink.events] == ["self_preview_update"]
+    assert sink.events[0].text == "hello live"
+    assert hub.ui_events.empty()
+
+
+@pytest.mark.asyncio
+async def test_low_latency_self_preview_coalesces_multiple_partials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(hub_module, "_SELF_PREVIEW_COALESCE_MS", 10)
+    sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        clock=FakeClock(_now=10.0),
+        low_latency_mode=True,
+    )
+    utterance_id = uuid4()
+
+    await hub._handle_stt_event(
+        STTPartialEvent(
+            utterance_id=utterance_id,
+            transcript=Transcript(
+                utterance_id=utterance_id,
+                text="hello",
+                is_final=False,
+                created_at=11.0,
+            ),
+        )
+    )
+    await hub._handle_stt_event(
+        STTPartialEvent(
+            utterance_id=utterance_id,
+            transcript=Transcript(
+                utterance_id=utterance_id,
+                text="hello world",
+                is_final=False,
+                created_at=12.0,
+            ),
+        )
+    )
+    await asyncio.sleep(0.02)
+
+    assert [event.type for event in sink.events] == ["self_preview_update"]
+    assert sink.events[0].text == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_low_latency_merge_commit_clears_preview_before_emitting_self_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(hub_module, "_SELF_PREVIEW_COALESCE_MS", 10)
+    sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        clock=FakeClock(_now=10.0),
+        low_latency_mode=True,
+        low_latency_finalize_wait_ms=0,
+    )
+    utterance_id = uuid4()
+
+    await hub._handle_stt_event(
+        STTPartialEvent(
+            utterance_id=utterance_id,
+            transcript=Transcript(
+                utterance_id=utterance_id,
+                text="hello live",
+                is_final=False,
+                created_at=11.0,
+            ),
+        )
+    )
+    await asyncio.sleep(0.02)
+    await hub.handle_vad_event(SpeechEnd(utterance_id))
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=utterance_id,
+            transcript=Transcript(
+                utterance_id=utterance_id,
+                text="hello live final",
+                is_final=True,
+                created_at=12.0,
+            ),
+        )
+    )
+
+    assert [event.type for event in sink.events] == [
+        "self_preview_update",
+        "self_preview_clear",
+        "self_transcript_final",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_low_latency_self_preview_failures_do_not_break_hub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(hub_module, "_SELF_PREVIEW_COALESCE_MS", 10)
+    sink = FailingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        clock=FakeClock(_now=10.0),
+        low_latency_mode=True,
+    )
+    utterance_id = uuid4()
+
+    await hub._handle_stt_event(
+        STTPartialEvent(
+            utterance_id=utterance_id,
+            transcript=Transcript(
+                utterance_id=utterance_id,
+                text="hello live",
+                is_final=False,
+                created_at=11.0,
+            ),
+        )
+    )
+    await asyncio.sleep(0.02)
+
+    assert hub.last_error_source == "overlay_sink"
+    assert hub.ui_events.empty()

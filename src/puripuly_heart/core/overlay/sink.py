@@ -15,6 +15,8 @@ from .protocol import (
     OverlayEventUnion,
     OverlayStateSnapshot,
     PeerTranscriptFinal,
+    SelfPreviewClear,
+    SelfPreviewUpdate,
     SelfTranscriptFinal,
     Shutdown,
     TranslationFinal,
@@ -41,13 +43,13 @@ class NullOverlaySink:
 @dataclass(slots=True)
 class OverlayStreamCoalescer:
     interval_ms: int = 300
-    _pending_event: TranslationStreamUpdate | None = None
+    _pending_event: OverlayEventUnion | None = None
     _flush_task: asyncio.Task[None] | None = None
 
     async def push(
         self,
-        event: TranslationStreamUpdate,
-        emit: Callable[[TranslationStreamUpdate], Awaitable[None]],
+        event: OverlayEventUnion,
+        emit: Callable[[OverlayEventUnion], Awaitable[None]],
     ) -> None:
         self._pending_event = event
         if self._flush_task is None or self._flush_task.done():
@@ -55,7 +57,7 @@ class OverlayStreamCoalescer:
 
     async def flush(
         self,
-        emit: Callable[[TranslationStreamUpdate], Awaitable[None]],
+        emit: Callable[[OverlayEventUnion], Awaitable[None]],
     ) -> None:
         flush_task = self._flush_task
         self._flush_task = None
@@ -77,7 +79,7 @@ class OverlayStreamCoalescer:
 
     async def _delayed_flush(
         self,
-        emit: Callable[[TranslationStreamUpdate], Awaitable[None]],
+        emit: Callable[[OverlayEventUnion], Awaitable[None]],
     ) -> None:
         try:
             await asyncio.sleep(self.interval_ms / 1000.0)
@@ -89,7 +91,7 @@ class OverlayStreamCoalescer:
         finally:
             self._flush_task = None
 
-    def _take_pending_event(self) -> TranslationStreamUpdate | None:
+    def _take_pending_event(self) -> OverlayEventUnion | None:
         pending = self._pending_event
         self._pending_event = None
         return pending
@@ -149,6 +151,30 @@ class OverlayEventAdapter:
             applied_context_mode=applied_context_mode,
             speaker_label=speaker_label,
             peer_epoch=peer_epoch,
+        )
+
+    def self_preview_update(
+        self,
+        *,
+        text: str,
+        created_at: float | None = None,
+    ) -> SelfPreviewUpdate:
+        return SelfPreviewUpdate(
+            **self._common_event_fields(
+                utterance_id=None,
+                channel="self",
+                created_at=created_at,
+            ),
+            text=text,
+        )
+
+    def self_preview_clear(self, *, created_at: float | None = None) -> SelfPreviewClear:
+        return SelfPreviewClear(
+            **self._common_event_fields(
+                utterance_id=None,
+                channel="self",
+                created_at=created_at,
+            )
         )
 
     def translation_final(

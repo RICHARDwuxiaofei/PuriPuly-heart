@@ -125,6 +125,7 @@ class DummyHub:
         self.start_calls: list[bool] = []
         self.stop_calls = 0
         self.submit_calls: list[tuple[str, str]] = []
+        self.reset_overlay_preview_calls = 0
         self.ui_events: asyncio.Queue[object] = asyncio.Queue()
 
     def clear_context(self) -> None:
@@ -141,6 +142,9 @@ class DummyHub:
 
     async def submit_text(self, text: str, *, source: str) -> None:
         self.submit_calls.append((text, source))
+
+    async def reset_overlay_preview(self) -> None:
+        self.reset_overlay_preview_calls += 1
 
     async def replace_stt_provider(self, stt: object | None) -> None:
         old_stt = self.stt
@@ -738,6 +742,7 @@ async def test_overlay_toggle_starts_and_stops_overlay_runtime(
     assert controller.settings.ui.overlay_enabled is False
     assert controller.overlay_state == "off"
     assert controller.hub.overlay_sink is None
+    assert controller.hub.reset_overlay_preview_calls == 1
     assert bridge.stopped is True
     assert manager.stop_calls == 1
 

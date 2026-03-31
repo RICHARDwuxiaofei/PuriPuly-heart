@@ -99,6 +99,29 @@ class PeerTranscriptFinal(_TranscriptEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class SelfPreviewUpdate(OverlayEvent):
+    text: str
+
+    EVENT_TYPE: ClassVar[str] = "self_preview_update"
+
+    def __post_init__(self) -> None:
+        if self.channel != "self":
+            raise ValueError("SelfPreviewUpdate requires channel='self'")
+
+    def _extra_dict(self) -> dict[str, object]:
+        return {"text": self.text}
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SelfPreviewClear(OverlayEvent):
+    EVENT_TYPE: ClassVar[str] = "self_preview_clear"
+
+    def __post_init__(self) -> None:
+        if self.channel != "self":
+            raise ValueError("SelfPreviewClear requires channel='self'")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class TranslationStreamUpdate(OverlayEvent):
     text: str
     source_language: str
@@ -182,6 +205,8 @@ class OverlayCalibrationUpdate(OverlayEvent):
 OverlayEventUnion = (
     SelfTranscriptFinal
     | PeerTranscriptFinal
+    | SelfPreviewUpdate
+    | SelfPreviewClear
     | TranslationStreamUpdate
     | TranslationFinal
     | UtteranceClosed
@@ -192,6 +217,8 @@ OverlayEventUnion = (
 _EVENT_TYPES: dict[str, type[OverlayEvent]] = {
     SelfTranscriptFinal.EVENT_TYPE: SelfTranscriptFinal,
     PeerTranscriptFinal.EVENT_TYPE: PeerTranscriptFinal,
+    SelfPreviewUpdate.EVENT_TYPE: SelfPreviewUpdate,
+    SelfPreviewClear.EVENT_TYPE: SelfPreviewClear,
     TranslationStreamUpdate.EVENT_TYPE: TranslationStreamUpdate,
     TranslationFinal.EVENT_TYPE: TranslationFinal,
     UtteranceClosed.EVENT_TYPE: UtteranceClosed,
@@ -243,6 +270,15 @@ def overlay_event_from_dict(data: dict[str, object]) -> OverlayEventUnion:
             ),
             peer_epoch=int(data["peer_epoch"]) if data.get("peer_epoch") is not None else None,
         )
+
+    if cls is SelfPreviewUpdate:
+        return cls(
+            **common,
+            text=str(data["text"]),
+        )
+
+    if cls is SelfPreviewClear:
+        return cls(**common)
 
     if cls in (TranslationStreamUpdate, TranslationFinal):
         return cls(

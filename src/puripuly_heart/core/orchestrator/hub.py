@@ -52,6 +52,7 @@ _PROMO_INTERVAL_SEC: float = 300.0  # 5 minutes
 _RELAXED_OVERLAP_MIN_CHARS: int = 3
 _BOUNDARY_PUNCT = {".", ",", ";", ":", "!", "?"}
 _SOFT_REUSE_PUNCT = {".", ",", "…", "。", "，", "、"}
+_SELF_PREVIEW_COALESCE_MS: int = 300
 _SELF_RUNTIME_FIELDS = {
     "stt": "stt",
     "_stt_task": "stt_task",
@@ -116,11 +117,14 @@ class ClientHub:
     context_resolver: ContextResolver = field(init=False)
     active_chatbox_channel: ChannelId = field(init=False, default="self")
     overlay_event_adapter: OverlayEventAdapter = field(init=False)
+    _self_preview_coalescer: OverlayStreamCoalescer = field(init=False)
+    _self_preview_visible: bool = field(init=False, default=False)
     overlay_stream_coalesce_ms: int = 300
     last_error_source: str | None = None
 
     def __post_init__(self) -> None:
         self.overlay_event_adapter = OverlayEventAdapter(clock=self.clock)
+        self._self_preview_coalescer = OverlayStreamCoalescer(interval_ms=_SELF_PREVIEW_COALESCE_MS)
         self.self_runtime = ChannelRuntime(
             channel="self",
             stt=self.stt,
@@ -215,6 +219,7 @@ class ClientHub:
             self._osc_flush_task = None
 
         await self._stop_stt_event_loop()
+        await self.reset_overlay_preview()
         await self._reset_stt_runtime_state()
 
         if self.stt is not None:
@@ -228,6 +233,7 @@ class ClientHub:
     async def replace_stt_provider(self, stt: STTProvider | None) -> None:
         old_stt = self.stt
         await self._stop_stt_task("_stt_task")
+        await self.reset_overlay_preview()
         await self.self_runtime.reset_runtime_state()
         self._sync_self_runtime_aliases()
 
@@ -418,6 +424,7 @@ class ClientHub:
                 return
             self._send_stt_connected_notification()
             if self.low_latency_mode:
+                await self._queue_self_preview_update(event.transcript)
                 return
             logger.debug(
                 f"[Hub] STT Partial: '{event.transcript.text[:50]}...' id={str(event.transcript.utterance_id)[:8]}"
@@ -524,6 +531,38 @@ class ClientHub:
         except Exception:
             self.last_error_source = "overlay_sink"
             logger.exception("[Hub] Overlay sink emit failed")
+
+    async def _queue_self_preview_update(self, transcript: Transcript) -> None:
+        if self.overlay_sink is None or transcript.channel != "self":
+            return
+
+        text = transcript.text.strip()
+        if not text:
+            return
+
+        await self._self_preview_coalescer.push(
+            self.overlay_event_adapter.self_preview_update(
+                text=text,
+                created_at=transcript.created_at,
+            ),
+            self._emit_self_preview_overlay_event,
+        )
+
+    async def _emit_self_preview_overlay_event(self, event: object) -> None:
+        await self._emit_overlay_event(event)
+        if getattr(event, "type", None) == "self_preview_update":
+            self._self_preview_visible = True
+        elif getattr(event, "type", None) == "self_preview_clear":
+            self._self_preview_visible = False
+
+    async def reset_overlay_preview(self) -> None:
+        await self._self_preview_coalescer.cancel()
+        if not self._self_preview_visible:
+            return
+        if self.overlay_sink is None:
+            self._self_preview_visible = False
+            return
+        await self._emit_self_preview_overlay_event(self.overlay_event_adapter.self_preview_clear())
 
     def _merge_text(self, parts: list[str]) -> str:
         merged = ""
@@ -991,6 +1030,8 @@ class ClientHub:
             self._speech_ended_ids.discard(utterance_id)
         if self._merge_buffer is buffer:
             self._merge_buffer = None
+
+        await self.reset_overlay_preview()
 
         final_text = self._merge_text(buffer.parts)
         if not final_text:

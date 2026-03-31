@@ -498,7 +498,13 @@ class GuiController:
         if monitor_task is not None and monitor_task.done():
             self._overlay_monitor_task = None
 
-        if self.hub is not None and getattr(self.hub, "overlay_sink", None) is self._overlay_bridge:
+        if (
+            self._overlay_bridge is not None
+            and self.hub is not None
+            and getattr(self.hub, "overlay_sink", None) is self._overlay_bridge
+        ):
+            with contextlib.suppress(Exception):
+                await self.hub.reset_overlay_preview()
             self.hub.overlay_sink = None
 
         manager = self._overlay_manager

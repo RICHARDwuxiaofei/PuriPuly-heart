@@ -544,10 +544,21 @@ impl OverlayRuntime {
             blocks[index].apply_row(&row.content_kind, &row.text);
         }
 
-        blocks
+        let mut caption_blocks: Vec<CaptionBlock> = blocks
             .into_iter()
             .map(|block| block.into_caption_block(&policy))
-            .collect()
+            .collect();
+
+        if let Some(preview_text) = self.state.self_preview_text() {
+            if !preview_text.trim().is_empty() {
+                caption_blocks.push(
+                    CaptionBlock::new("self:preview", preview_text)
+                        .with_channel(CaptionChannel::SelfChannel),
+                );
+            }
+        }
+
+        caption_blocks
     }
 }
 
@@ -555,7 +566,7 @@ impl OverlayRuntime {
 mod tests {
     use super::{prepare_openvr_runtime, OverlayRuntime, StartupError};
     use crate::openvr::{OpenVrError, OpenVrStartupPreflightError};
-    use crate::state::{Event, OverlayStateSnapshot, RowEvent};
+    use crate::state::{Event, OverlayStateSnapshot, RowEvent, SelfPreviewClearEvent, SelfPreviewUpdateEvent};
     use std::cell::Cell;
 
     fn row_event(seq: u64, channel: &str, utterance_id: &str, text: &str) -> RowEvent {
@@ -572,6 +583,27 @@ mod tests {
             speaker_label: None,
             peer_epoch: None,
             applied_context_mode: None,
+        }
+    }
+
+    fn self_preview_update_event(seq: u64, text: &str) -> SelfPreviewUpdateEvent {
+        SelfPreviewUpdateEvent {
+            event_id: format!("evt-self-preview-{seq}"),
+            seq,
+            utterance_id: None,
+            channel: Some("self".to_string()),
+            text: text.to_string(),
+            created_at: seq as f64,
+        }
+    }
+
+    fn self_preview_clear_event(seq: u64) -> SelfPreviewClearEvent {
+        SelfPreviewClearEvent {
+            event_id: format!("evt-self-preview-clear-{seq}"),
+            seq,
+            utterance_id: None,
+            channel: Some("self".to_string()),
+            created_at: seq as f64,
         }
     }
 
@@ -620,6 +652,50 @@ mod tests {
                 ("peer:peer-1", "안녕 (hello)"),
                 ("peer:peer-2", "world"),
             ]
+        );
+    }
+
+    #[test]
+    fn caption_blocks_append_active_self_preview_as_newest_self_block() {
+        let runtime = OverlayRuntime::new(OverlayStateSnapshot {
+            events: vec![
+                Event::SelfTranscriptFinal(row_event(1, "self", "self-1", "self one")),
+                Event::SelfPreviewUpdate(self_preview_update_event(2, "speaking now")),
+            ],
+        });
+
+        let blocks = runtime.caption_blocks();
+
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| (block.id.as_str(), block.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("self:self-1", "self one"),
+                ("self:preview", "speaking now"),
+            ]
+        );
+    }
+
+    #[test]
+    fn caption_blocks_drop_self_preview_after_clear_event() {
+        let runtime = OverlayRuntime::new(OverlayStateSnapshot {
+            events: vec![
+                Event::SelfTranscriptFinal(row_event(1, "self", "self-1", "self one")),
+                Event::SelfPreviewUpdate(self_preview_update_event(2, "speaking now")),
+                Event::SelfPreviewClear(self_preview_clear_event(3)),
+            ],
+        });
+
+        let blocks = runtime.caption_blocks();
+
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| (block.id.as_str(), block.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("self:self-1", "self one")]
         );
     }
 

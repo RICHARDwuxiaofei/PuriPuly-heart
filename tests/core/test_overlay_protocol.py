@@ -9,6 +9,8 @@ from puripuly_heart.core.overlay.protocol import (
     OverlayCalibrationUpdate,
     OverlayStateSnapshot,
     PeerTranscriptFinal,
+    SelfPreviewClear,
+    SelfPreviewUpdate,
     SelfTranscriptFinal,
     TranslationFinal,
     TranslationStreamUpdate,
@@ -181,3 +183,31 @@ def test_utterance_closed_round_trips_incomplete_state() -> None:
 
     assert isinstance(restored, UtteranceClosed)
     assert restored.is_final is False
+
+
+def test_self_preview_events_round_trip_without_row_identity() -> None:
+    update = SelfPreviewUpdate(
+        event_id="evt-preview-1",
+        seq=15,
+        utterance_id=None,
+        channel="self",
+        text="speaking now",
+        created_at=104.0,
+    )
+    clear = SelfPreviewClear(
+        event_id="evt-preview-2",
+        seq=16,
+        utterance_id=None,
+        channel="self",
+        created_at=105.0,
+    )
+
+    restored = OverlayStateSnapshot.from_dict(
+        {"events": [update.to_dict(), clear.to_dict()]}
+    ).events
+
+    assert update.row_key is None
+    assert clear.row_key is None
+    assert isinstance(restored[0], SelfPreviewUpdate)
+    assert restored[0].text == "speaking now"
+    assert isinstance(restored[1], SelfPreviewClear)
