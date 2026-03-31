@@ -581,8 +581,24 @@ class GuiController:
     def _schedule_overlay_calibration_emit(self) -> None:
         if self._overlay_bridge is None:
             return
-        with contextlib.suppress(RuntimeError):
+        run_task = getattr(self.page, "run_task", None)
+        if callable(run_task):
+            try:
+                run_task(self._emit_overlay_calibration_update)
+                return
+            except Exception:
+                logger.warning(
+                    "[Overlay] Failed to schedule calibration update via page.run_task",
+                    exc_info=True,
+                )
+                return
+
+        try:
             asyncio.get_running_loop().create_task(self._emit_overlay_calibration_update())
+        except RuntimeError:
+            logger.warning(
+                "[Overlay] Skipping calibration update; no running loop and page.run_task unavailable"
+            )
 
     def _overlay_calibration_update_event(self):
         return OverlayEventAdapter(clock=self.clock).overlay_calibration_update(

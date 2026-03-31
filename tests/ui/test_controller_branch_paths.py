@@ -2176,6 +2176,42 @@ def test_overlay_calibration_controls_follow_apply_cancel_contract() -> None:
     assert controller.overlay_calibration.distance == 1.2
 
 
+def test_apply_overlay_calibration_uses_page_run_task_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved: list[tuple[Path, AppSettings]] = []
+
+    def fake_save(path: Path, settings: AppSettings) -> None:
+        saved.append((path, settings))
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.tasks: list[object] = []
+
+        def run_task(self, coro_fn) -> None:
+            self.tasks.append(coro_fn)
+
+    monkeypatch.setattr(controller_module, "save_settings", fake_save)
+
+    page = FakePage()
+    controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
+    controller.settings = AppSettings()
+    controller._overlay_bridge = FakeOverlayBridge(session_token="token")
+
+    controller.begin_overlay_calibration_for_test()
+    controller.set_overlay_calibration_field_for_test("offset_x", 0.25)
+    controller.apply_overlay_calibration_for_test()
+
+    assert controller.settings.overlay_calibration.offset_x == 0.25
+    assert saved == [(Path("settings.json"), controller.settings)]
+    assert len(page.tasks) == 1
+
+    asyncio.run(page.tasks[0]())
+
+    assert controller._overlay_bridge.events[-1].type == "overlay_calibration_update"
+    assert controller._overlay_bridge.events[-1].offset_x == 0.25
+
+
 @pytest.mark.asyncio
 async def test_apply_overlay_calibration_persists_settings_and_emits_overlay_event(
     monkeypatch: pytest.MonkeyPatch,
