@@ -185,8 +185,24 @@ fn runtime_accepts_app_version_mismatch_when_contract_version_matches() {
 fn runtime_returns_standardized_startup_failure_codes_before_ready() {
     assert_eq!(StartupError::ContractMismatch("bad".into()).exit_code(), 10);
     assert_eq!(StartupError::BridgeAuth("bad token".into()).exit_code(), 12);
+    assert_eq!(StartupError::SteamVrNotInstalled.exit_code(), 20);
+    assert_eq!(StartupError::SteamVrNotRunning.exit_code(), 20);
+    assert_eq!(StartupError::HmdNotFound.exit_code(), 20);
     assert_eq!(StartupError::OpenVrInit("steamvr missing".into()).exit_code(), 20);
     assert_eq!(StartupError::RendererInit("d3d init failed".into()).exit_code(), 21);
+}
+
+#[test]
+fn runtime_exposes_specific_preflight_failure_reasons() {
+    assert_eq!(
+        StartupError::SteamVrNotInstalled.failure_reason(),
+        "steamvr_not_installed"
+    );
+    assert_eq!(
+        StartupError::SteamVrNotRunning.failure_reason(),
+        "steamvr_not_running"
+    );
+    assert_eq!(StartupError::HmdNotFound.failure_reason(), "hmd_not_found");
 }
 
 #[tokio::test]
@@ -257,6 +273,51 @@ async fn runtime_emits_overlay_ready_only_after_first_texture_submit() {
     assert_eq!(submitter.calls, 1);
     assert!(runtime.ready_sent());
     assert!(messages.iter().any(|message| message["type"] == "overlay_ready"));
+}
+
+#[tokio::test]
+async fn bridge_client_close_sends_close_frame() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+
+        let auth = ws.next().await.unwrap().unwrap();
+        let Message::Text(auth_text) = auth else {
+            panic!("expected auth text frame");
+        };
+        let auth_payload: serde_json::Value = serde_json::from_str(&auth_text).unwrap();
+        assert_eq!(auth_payload["type"], "auth");
+
+        ws.send(Message::Text(
+            json!({"type": "snapshot", "payload": {"events": []}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+        while let Some(message) = ws.next().await {
+            match message.unwrap() {
+                Message::Close(_) => return true,
+                Message::Text(_) | Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => {}
+                Message::Frame(_) => {}
+            }
+        }
+
+        false
+    });
+
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{}", address);
+
+    let (mut client, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    assert!(snapshot.events.is_empty());
+
+    client.close().await.unwrap();
+
+    assert!(server.await.unwrap());
 }
 
 #[tokio::test]

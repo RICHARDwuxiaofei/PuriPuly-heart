@@ -6,11 +6,12 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Mapping, Protocol
 from uuid import uuid4
 
 from puripuly_heart import __version__
@@ -20,6 +21,10 @@ from .manifest import OVERLAY_CONTRACT_VERSION, OverlayLaunchManifest
 logger = logging.getLogger(__name__)
 
 OVERLAY_EXECUTABLE_NAME = "PuriPulyHeartOverlay.exe"
+OPENVR_RUNTIME_DLL_NAME = "openvr_api.dll"
+_STEAMVR_OPENVR_RUNTIME_DLL_RELATIVE_PATH = (
+    Path("Steam") / "steamapps" / "common" / "SteamVR" / "bin" / "win64" / OPENVR_RUNTIME_DLL_NAME
+)
 _EXIT_CODE_TO_FAILURE_REASON = {
     10: "contract_mismatch",
     12: "bridge_auth_failed",
@@ -134,6 +139,16 @@ class DefaultOverlayProcessRunner:
             path = self._resolve_default_executable()
         if not path.exists():
             raise FileNotFoundError(path)
+        if path.name == OVERLAY_EXECUTABLE_NAME:
+            try:
+                bundled_runtime_path = self.ensure_bundled_openvr_runtime_dll(path)
+            except FileNotFoundError:
+                logger.warning(
+                    "[overlay] bundled OpenVR runtime DLL source not found; continuing without %s",
+                    OPENVR_RUNTIME_DLL_NAME,
+                )
+            else:
+                logger.info("[overlay] OpenVR runtime DLL ready at %s", bundled_runtime_path)
         return path
 
     async def spawn(
@@ -182,6 +197,56 @@ class DefaultOverlayProcessRunner:
 
     def _resolve_default_executable(self) -> Path:
         return self.resolve_default_executable()
+
+    @classmethod
+    def bundled_openvr_runtime_dll_path(cls, executable_path: Path) -> Path:
+        return executable_path.with_name(OPENVR_RUNTIME_DLL_NAME)
+
+    @classmethod
+    def default_openvr_runtime_dll_candidates(
+        cls,
+        *,
+        environ: Mapping[str, str] | None = None,
+    ) -> tuple[Path, ...]:
+        env = environ or os.environ
+        candidate_roots: list[Path] = []
+        for key in (
+            "ProgramFiles(x86)",
+            "PROGRAMFILES(X86)",
+            "ProgramW6432",
+            "ProgramFiles",
+            "PROGRAMFILES",
+        ):
+            raw_value = env.get(key)
+            if not raw_value:
+                continue
+            root = Path(raw_value)
+            if root not in candidate_roots:
+                candidate_roots.append(root)
+        return tuple(root / _STEAMVR_OPENVR_RUNTIME_DLL_RELATIVE_PATH for root in candidate_roots)
+
+    @classmethod
+    def ensure_bundled_openvr_runtime_dll(
+        cls,
+        executable_path: Path,
+        *,
+        environ: Mapping[str, str] | None = None,
+    ) -> Path:
+        bundled_path = cls.bundled_openvr_runtime_dll_path(executable_path)
+        if bundled_path.exists():
+            return bundled_path
+
+        for candidate in cls.default_openvr_runtime_dll_candidates(environ=environ):
+            if not candidate.exists():
+                continue
+            bundled_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(candidate, bundled_path)
+            return bundled_path
+
+        raise FileNotFoundError(
+            "OpenVR runtime DLL not found in default SteamVR locations: "
+            f"{_STEAMVR_OPENVR_RUNTIME_DLL_RELATIVE_PATH}"
+        )
 
 
 @dataclass(slots=True)

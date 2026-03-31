@@ -8,7 +8,11 @@ use tokio::io::{self, AsyncWriteExt};
 use crate::bridge::{BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEvent};
 use crate::logging::OverlayLogger;
 use crate::manifest::{load_manifest, validate_manifest, OverlayManifest, EXPECTED_CONTRACT_VERSION};
-use crate::openvr::{OpenVrOverlay, OverlayFrameSubmitter};
+use crate::openvr::{
+    perform_startup_preflight, OpenVrOverlay, OpenVrStartupPreflightError, OverlayFrameSubmitter,
+};
+#[cfg(test)]
+use crate::openvr::OpenVrError;
 use crate::renderer::{
     CaptionBlock, CaptionChannel, CaptionLayoutPolicy, CaptionPresentation, CaptionRenderer,
 };
@@ -22,6 +26,12 @@ pub enum StartupError {
     ContractMismatch(String),
     #[error("bridge auth failed: {0}")]
     BridgeAuth(String),
+    #[error("SteamVR/OpenVR runtime is not installed")]
+    SteamVrNotInstalled,
+    #[error("SteamVR is not running")]
+    SteamVrNotRunning,
+    #[error("VR headset not found")]
+    HmdNotFound,
     #[error("openvr init failed: {0}")]
     OpenVrInit(String),
     #[error("renderer init failed: {0}")]
@@ -35,6 +45,7 @@ impl StartupError {
         match self {
             Self::ContractMismatch(_) => 10,
             Self::BridgeAuth(_) => 12,
+            Self::SteamVrNotInstalled | Self::SteamVrNotRunning | Self::HmdNotFound => 20,
             Self::OpenVrInit(_) => 20,
             Self::RendererInit(_) => 21,
             Self::Manifest(_) | Self::Other(_) => 1,
@@ -46,6 +57,9 @@ impl StartupError {
             Self::Manifest(_) => "manifest_invalid",
             Self::ContractMismatch(_) => "contract_mismatch",
             Self::BridgeAuth(_) => "bridge_auth_failed",
+            Self::SteamVrNotInstalled => "steamvr_not_installed",
+            Self::SteamVrNotRunning => "steamvr_not_running",
+            Self::HmdNotFound => "hmd_not_found",
             Self::OpenVrInit(_) => "openvr_init_failed",
             Self::RendererInit(_) => "renderer_init_failed",
             Self::Other(_) => "unknown",
@@ -322,6 +336,15 @@ pub fn startup_error_from_bridge_error(error: BridgeError) -> StartupError {
     }
 }
 
+fn startup_error_from_preflight(error: OpenVrStartupPreflightError) -> StartupError {
+    match error {
+        OpenVrStartupPreflightError::SteamVrNotInstalled => StartupError::SteamVrNotInstalled,
+        OpenVrStartupPreflightError::SteamVrNotRunning => StartupError::SteamVrNotRunning,
+        OpenVrStartupPreflightError::HmdNotFound => StartupError::HmdNotFound,
+        OpenVrStartupPreflightError::Init(message) => StartupError::OpenVrInit(message),
+    }
+}
+
 pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
     let logger = match OverlayLogger::open(&manifest.log_dir).await {
         Ok(logger) => logger,
@@ -345,6 +368,12 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
         )).await;
     }
 
+    if let Err(error) = perform_startup_preflight() {
+        let startup_error = startup_error_from_preflight(error);
+        emit_startup_failure(&logger, &startup_error).await;
+        return startup_error.exit_code();
+    }
+
     let (mut bridge, snapshot) = match BridgeClient::connect(&manifest).await {
         Ok(result) => result,
         Err(error) => {
@@ -359,6 +388,7 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
     let (renderer, mut openvr) = match initialize_runtime_resources(&manifest, &logger).await {
         Ok(resources) => resources,
         Err(error) => {
+            let _ = bridge.close().await;
             emit_startup_failure(&logger, &error).await;
             return error.exit_code();
         }
@@ -370,14 +400,17 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
         .await
     {
         let startup_error = startup_error_from_runtime_failure(error);
+        let _ = bridge.close().await;
         emit_startup_failure(&logger, &startup_error).await;
         return startup_error.exit_code();
     }
 
-    match runtime
+    let runtime_result = runtime
         .run_event_loop(&mut bridge, &renderer, &mut openvr, &logger)
-        .await
-    {
+        .await;
+    let _ = bridge.close().await;
+
+    match runtime_result {
         Ok(()) => 0,
         Err(RuntimeFailure::RuntimeDisconnected) => 1,
         Err(error) => {
@@ -439,6 +472,20 @@ fn startup_error_from_runtime_failure(error: RuntimeFailure) -> StartupError {
         }
         RuntimeFailure::Stopped => StartupError::Other("runtime stopped before ready".into()),
     }
+}
+
+#[cfg(test)]
+fn prepare_openvr_runtime<T, P, F>(
+    overlay_instance_id: &str,
+    preflight: P,
+    overlay_factory: F,
+) -> Result<T, StartupError>
+where
+    P: FnOnce() -> Result<(), OpenVrStartupPreflightError>,
+    F: FnOnce(&str) -> Result<T, OpenVrError>,
+{
+    preflight().map_err(startup_error_from_preflight)?;
+    overlay_factory(overlay_instance_id).map_err(|error| StartupError::OpenVrInit(error.to_string()))
 }
 
 async fn initialize_runtime_resources(
@@ -506,8 +553,10 @@ impl OverlayRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::OverlayRuntime;
+    use super::{prepare_openvr_runtime, OverlayRuntime, StartupError};
+    use crate::openvr::{OpenVrError, OpenVrStartupPreflightError};
     use crate::state::{Event, OverlayStateSnapshot, RowEvent};
+    use std::cell::Cell;
 
     fn row_event(seq: u64, channel: &str, utterance_id: &str, text: &str) -> RowEvent {
         RowEvent {
@@ -572,6 +621,36 @@ mod tests {
                 ("peer:peer-2", "world"),
             ]
         );
+    }
+
+    #[test]
+    fn prepare_openvr_runtime_stops_before_overlay_factory_when_preflight_fails() {
+        let overlay_factory_calls = Cell::new(0);
+
+        let result = prepare_openvr_runtime(
+            "overlay-test",
+            || Err(OpenVrStartupPreflightError::SteamVrNotRunning),
+            |_| {
+                overlay_factory_calls.set(overlay_factory_calls.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert_eq!(result, Err(StartupError::SteamVrNotRunning));
+        assert_eq!(overlay_factory_calls.get(), 0);
+    }
+
+    #[test]
+    fn prepare_openvr_runtime_initializes_overlay_after_successful_preflight() {
+        let overlay_factory_calls = Cell::new(0);
+
+        let result = prepare_openvr_runtime("overlay-test", || Ok(()), |_| {
+            overlay_factory_calls.set(overlay_factory_calls.get() + 1);
+            Ok::<_, OpenVrError>("overlay-ready")
+        });
+
+        assert_eq!(result, Ok("overlay-ready"));
+        assert_eq!(overlay_factory_calls.get(), 1);
     }
 }
 

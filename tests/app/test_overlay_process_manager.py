@@ -187,6 +187,28 @@ async def test_overlay_process_manager_prefers_explicit_startup_error_event_over
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_reason",
+    [
+        "steamvr_not_installed",
+        "steamvr_not_running",
+        "hmd_not_found",
+    ],
+)
+async def test_overlay_process_manager_preserves_specific_preflight_failure_reasons(
+    failure_reason: str,
+) -> None:
+    manager = OverlayProcessManager(
+        process_runner=FakeProcessRunner(startup_error=failure_reason, exit_code=20)
+    )
+
+    await manager.start()
+
+    assert manager.state == "failed"
+    assert manager.failure_reason == failure_reason
+
+
+@pytest.mark.asyncio
 async def test_overlay_process_manager_maps_pre_ready_exit_code_to_standard_failure_reason() -> (
     None
 ):
@@ -304,6 +326,36 @@ def test_default_overlay_process_runner_uses_staged_overlay_for_local_dev_when_s
     )
 
     assert resolved == staged
+
+
+def test_default_overlay_process_runner_bundles_openvr_runtime_dll_next_to_overlay_executable(
+    tmp_path: Path,
+) -> None:
+    program_files_x86 = tmp_path / "Program Files (x86)"
+    source_dll = (
+        program_files_x86
+        / "Steam"
+        / "steamapps"
+        / "common"
+        / "SteamVR"
+        / "bin"
+        / "win64"
+        / "openvr_api.dll"
+    )
+    source_dll.parent.mkdir(parents=True)
+    source_dll.write_text("steamvr-runtime", encoding="utf-8")
+
+    overlay_executable = tmp_path / "build" / "overlay" / "PuriPulyHeartOverlay.exe"
+    overlay_executable.parent.mkdir(parents=True)
+    overlay_executable.write_text("overlay", encoding="utf-8")
+
+    bundled_path = DefaultOverlayProcessRunner.ensure_bundled_openvr_runtime_dll(
+        overlay_executable,
+        environ={"ProgramFiles(x86)": str(program_files_x86)},
+    )
+
+    assert bundled_path == overlay_executable.with_name("openvr_api.dll")
+    assert bundled_path.read_text(encoding="utf-8") == "steamvr-runtime"
 
 
 @pytest.mark.asyncio

@@ -280,6 +280,7 @@ class QwenSettings:
 @dataclass(slots=True)
 class UiSettings:
     locale: str = "en"
+    # Session-only toggle; intentionally not persisted to settings.json.
     overlay_enabled: bool = False
     peer_translation_enabled: bool = False
     integrated_context_enabled: bool = False
@@ -434,7 +435,6 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         },
         "ui": {
             "locale": settings.ui.locale,
-            "overlay_enabled": settings.ui.overlay_enabled,
             "peer_translation_enabled": settings.ui.peer_translation_enabled,
             "integrated_context_enabled": settings.ui.integrated_context_enabled,
             "integrated_context_bootstrapped": settings.ui.integrated_context_bootstrapped,
@@ -612,6 +612,11 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         qwen_data["llm_model"] = normalized_qwen_model
         changed = True
 
+    ui_data = data.get("ui")
+    if isinstance(ui_data, dict) and "overlay_enabled" in ui_data:
+        del ui_data["overlay_enabled"]
+        changed = True
+
     if data.get("settings_version") != version:
         data["settings_version"] = version
         changed = True
@@ -779,7 +784,6 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         ),
         ui=UiSettings(
             locale=str(data.get("ui", {}).get("locale", "en")),
-            overlay_enabled=bool(data.get("ui", {}).get("overlay_enabled", False)),
             peer_translation_enabled=bool(
                 data.get("ui", {}).get("peer_translation_enabled", False)
             ),

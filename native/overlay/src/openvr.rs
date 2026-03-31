@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use std::ffi::{CStr, CString};
 
 use thiserror::Error;
@@ -12,6 +12,8 @@ use crate::state::OverlayCalibration;
 const OVERLAY_KEY_PREFIX: &str = "com.puripuly.heart.overlay.";
 #[cfg(windows)]
 const OVERLAY_NAME_PREFIX: &str = "PuriPuly Heart Overlay ";
+#[cfg(any(windows, test))]
+const FN_TABLE_INTERFACE_PREFIX: &str = "FnTable:";
 const DEFAULT_OVERLAY_WIDTH_METERS: f32 = 1.8;
 const DEFAULT_OVERLAY_DISTANCE_METERS: f32 = 1.0;
 
@@ -101,6 +103,72 @@ pub enum OpenVrError {
     Submit(String),
 }
 
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+enum OpenVrBackgroundInitError {
+    #[error("SteamVR runtime is not running")]
+    NoServerForBackgroundApp,
+    #[error("openvr init failed: {0}")]
+    Init(String),
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub(crate) enum OpenVrStartupPreflightError {
+    #[error("SteamVR/OpenVR runtime is not installed")]
+    SteamVrNotInstalled,
+    #[error("SteamVR is not running")]
+    SteamVrNotRunning,
+    #[error("VR headset not found")]
+    HmdNotFound,
+    #[error("openvr init failed: {0}")]
+    Init(String),
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+trait OpenVrPreflightApi {
+    fn is_runtime_installed(&self) -> bool;
+    fn initialize_background_app(&self) -> Result<(), OpenVrBackgroundInitError>;
+    fn shutdown_runtime(&self);
+    fn is_hmd_present(&self) -> bool;
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn run_startup_preflight(api: &impl OpenVrPreflightApi) -> Result<(), OpenVrStartupPreflightError> {
+    if !api.is_runtime_installed() {
+        return Err(OpenVrStartupPreflightError::SteamVrNotInstalled);
+    }
+
+    match api.initialize_background_app() {
+        Ok(()) => api.shutdown_runtime(),
+        Err(OpenVrBackgroundInitError::NoServerForBackgroundApp) => {
+            return Err(OpenVrStartupPreflightError::SteamVrNotRunning);
+        }
+        Err(OpenVrBackgroundInitError::Init(message)) => {
+            return Err(OpenVrStartupPreflightError::Init(message));
+        }
+    }
+
+    if !api.is_hmd_present() {
+        return Err(OpenVrStartupPreflightError::HmdNotFound);
+    }
+
+    Ok(())
+}
+
+pub(crate) fn perform_startup_preflight() -> Result<(), OpenVrStartupPreflightError> {
+    #[cfg(windows)]
+    {
+        let api = WindowsOpenVrPreflightApi;
+        return run_startup_preflight(&api);
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(())
+    }
+}
+
 pub trait OverlayTextureSubmitter {
     fn set_overlay_texture(&self, texture_handle: *mut c_void) -> Result<(), OpenVrError>;
 }
@@ -168,6 +236,48 @@ enum OpenVrBackend {
     #[cfg(windows)]
     Windows(WindowsOpenVrOverlay),
     Test(FakeOpenVr),
+}
+
+#[cfg(windows)]
+struct WindowsOpenVrPreflightApi;
+
+#[cfg(windows)]
+impl OpenVrPreflightApi for WindowsOpenVrPreflightApi {
+    fn is_runtime_installed(&self) -> bool {
+        unsafe { openvr_sys::VR_IsRuntimeInstalled() }
+    }
+
+    fn initialize_background_app(&self) -> Result<(), OpenVrBackgroundInitError> {
+        let mut init_error = openvr_sys::EVRInitError_VRInitError_None;
+        unsafe {
+            openvr_sys::VR_InitInternal(
+                &mut init_error,
+                openvr_sys::EVRApplicationType_VRApplication_Background,
+            );
+        }
+        if init_error == openvr_sys::EVRInitError_VRInitError_None {
+            return Ok(());
+        }
+        if init_error
+            == openvr_sys::EVRInitError_VRInitError_Init_NoServerForBackgroundApp
+        {
+            return Err(OpenVrBackgroundInitError::NoServerForBackgroundApp);
+        }
+        Err(OpenVrBackgroundInitError::Init(format!(
+            "VR_InitInternal failed: {}",
+            vr_init_error_name(init_error)
+        )))
+    }
+
+    fn shutdown_runtime(&self) {
+        unsafe {
+            openvr_sys::VR_ShutdownInternal();
+        }
+    }
+
+    fn is_hmd_present(&self) -> bool {
+        unsafe { openvr_sys::VR_IsHmdPresent() }
+    }
 }
 
 impl OpenVrBackend {
@@ -333,10 +443,11 @@ fn initialize_overlay_api() -> Result<*mut openvr_sys::VR_IVROverlay_FnTable, Op
         )));
     }
 
+    let overlay_interface_version = fn_table_interface_version(openvr_sys::IVROverlay_Version)?;
     let mut interface_error = openvr_sys::EVRInitError_VRInitError_None;
     let overlay_api = unsafe {
         openvr_sys::VR_GetGenericInterface(
-            openvr_sys::IVROverlay_Version.as_ptr().cast(),
+            overlay_interface_version.as_ptr(),
             &mut interface_error,
         )
     };
@@ -351,6 +462,19 @@ fn initialize_overlay_api() -> Result<*mut openvr_sys::VR_IVROverlay_FnTable, Op
     }
 
     Ok(overlay_api as *mut openvr_sys::VR_IVROverlay_FnTable)
+}
+
+#[cfg(any(windows, test))]
+fn fn_table_interface_version(interface_version: &[u8]) -> Result<CString, OpenVrError> {
+    let version = CStr::from_bytes_with_nul(interface_version)
+        .map_err(|error| OpenVrError::Init(format!("invalid OpenVR interface version: {error}")))?;
+    let mut prefixed = Vec::with_capacity(
+        FN_TABLE_INTERFACE_PREFIX.len() + version.to_bytes_with_nul().len(),
+    );
+    prefixed.extend_from_slice(FN_TABLE_INTERFACE_PREFIX.as_bytes());
+    prefixed.extend_from_slice(version.to_bytes());
+    CString::new(prefixed)
+        .map_err(|error| OpenVrError::Init(format!("invalid OpenVR interface version: {error}")))
 }
 
 #[cfg(windows)]
@@ -445,4 +569,144 @@ fn vr_init_error_name(error: openvr_sys::EVRInitError) -> String {
     unsafe { CStr::from_ptr(name) }
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::{
+        fn_table_interface_version, run_startup_preflight, OpenVrBackgroundInitError,
+        OpenVrPreflightApi, OpenVrStartupPreflightError,
+    };
+
+    enum FakeBackgroundInitResult {
+        Ok,
+        NoServer,
+        OtherError(&'static str),
+    }
+
+    struct FakePreflightApi {
+        runtime_installed: bool,
+        background_init: FakeBackgroundInitResult,
+        hmd_present: bool,
+        shutdown_calls: Cell<usize>,
+    }
+
+    impl FakePreflightApi {
+        fn shutdown_calls(&self) -> usize {
+            self.shutdown_calls.get()
+        }
+    }
+
+    impl OpenVrPreflightApi for FakePreflightApi {
+        fn is_runtime_installed(&self) -> bool {
+            self.runtime_installed
+        }
+
+        fn initialize_background_app(&self) -> Result<(), OpenVrBackgroundInitError> {
+            match self.background_init {
+                FakeBackgroundInitResult::Ok => Ok(()),
+                FakeBackgroundInitResult::NoServer => {
+                    Err(OpenVrBackgroundInitError::NoServerForBackgroundApp)
+                }
+                FakeBackgroundInitResult::OtherError(message) => {
+                    Err(OpenVrBackgroundInitError::Init(message.to_string()))
+                }
+            }
+        }
+
+        fn shutdown_runtime(&self) {
+            self.shutdown_calls.set(self.shutdown_calls.get() + 1);
+        }
+
+        fn is_hmd_present(&self) -> bool {
+            self.hmd_present
+        }
+    }
+
+    #[test]
+    fn startup_preflight_maps_missing_runtime_to_specific_failure_reason() {
+        let api = FakePreflightApi {
+            runtime_installed: false,
+            background_init: FakeBackgroundInitResult::Ok,
+            hmd_present: true,
+            shutdown_calls: Cell::new(0),
+        };
+
+        let result = run_startup_preflight(&api);
+
+        assert_eq!(result, Err(OpenVrStartupPreflightError::SteamVrNotInstalled));
+        assert_eq!(api.shutdown_calls(), 0);
+    }
+
+    #[test]
+    fn startup_preflight_maps_background_no_server_to_runtime_not_running() {
+        let api = FakePreflightApi {
+            runtime_installed: true,
+            background_init: FakeBackgroundInitResult::NoServer,
+            hmd_present: true,
+            shutdown_calls: Cell::new(0),
+        };
+
+        let result = run_startup_preflight(&api);
+
+        assert_eq!(result, Err(OpenVrStartupPreflightError::SteamVrNotRunning));
+        assert_eq!(api.shutdown_calls(), 0);
+    }
+
+    #[test]
+    fn startup_preflight_maps_missing_hmd_after_successful_background_probe() {
+        let api = FakePreflightApi {
+            runtime_installed: true,
+            background_init: FakeBackgroundInitResult::Ok,
+            hmd_present: false,
+            shutdown_calls: Cell::new(0),
+        };
+
+        let result = run_startup_preflight(&api);
+
+        assert_eq!(result, Err(OpenVrStartupPreflightError::HmdNotFound));
+        assert_eq!(api.shutdown_calls(), 1);
+    }
+
+    #[test]
+    fn startup_preflight_preserves_unexpected_background_init_failures() {
+        let api = FakePreflightApi {
+            runtime_installed: true,
+            background_init: FakeBackgroundInitResult::OtherError("unexpected"),
+            hmd_present: true,
+            shutdown_calls: Cell::new(0),
+        };
+
+        let result = run_startup_preflight(&api);
+
+        assert_eq!(
+            result,
+            Err(OpenVrStartupPreflightError::Init("unexpected".to_string()))
+        );
+        assert_eq!(api.shutdown_calls(), 0);
+    }
+
+    #[test]
+    fn startup_preflight_succeeds_after_all_guards_pass() {
+        let api = FakePreflightApi {
+            runtime_installed: true,
+            background_init: FakeBackgroundInitResult::Ok,
+            hmd_present: true,
+            shutdown_calls: Cell::new(0),
+        };
+
+        let result = run_startup_preflight(&api);
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(api.shutdown_calls(), 1);
+    }
+
+    #[test]
+    fn fn_table_interface_version_prefixes_overlay_version_for_flat_api_requests() {
+        let request = fn_table_interface_version(b"IVROverlay_028\0").expect("request");
+
+        assert_eq!(request.to_bytes_with_nul(), b"FnTable:IVROverlay_028\0");
+    }
 }

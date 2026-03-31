@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from dataclasses import dataclass, field
 from typing import Any
 
 import websockets
 from websockets.asyncio.server import Server, ServerConnection
+from websockets.exceptions import ConnectionClosed
 
 from .protocol import OverlayEventUnion, OverlayStateSnapshot
 
@@ -108,10 +110,13 @@ class OverlayBridge:
             async for raw_message in connection:
                 message = self._load_message(raw_message)
                 await self.messages.put(message)
+        except ConnectionClosed:
+            return
         finally:
             if authenticated:
                 self._authenticated_connections.discard(connection)
-            await connection.close()
+            with contextlib.suppress(ConnectionClosed):
+                await connection.close()
 
     def _is_valid_auth_payload(self, payload: dict[str, Any]) -> bool:
         return (

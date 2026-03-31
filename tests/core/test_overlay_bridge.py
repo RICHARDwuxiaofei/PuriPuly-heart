@@ -5,8 +5,30 @@ import json
 
 import pytest
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosedError
 
 from puripuly_heart.core.overlay.bridge import OverlayBridge
+
+
+class _AbruptAuthenticatedConnection:
+    def __init__(self) -> None:
+        self.sent_payloads: list[dict[str, object]] = []
+        self.closed = False
+
+    async def recv(self) -> str:
+        return json.dumps({"type": "auth", "session_token": "expected-token"})
+
+    async def send(self, payload: str) -> None:
+        self.sent_payloads.append(json.loads(payload))
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        raise ConnectionClosedError(None, None)
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 @pytest.mark.asyncio
@@ -87,3 +109,15 @@ async def test_overlay_bridge_resets_one_time_token_after_stop_and_restart() -> 
 
     assert first_message["type"] == "snapshot"
     assert second_message["type"] == "snapshot"
+
+
+@pytest.mark.asyncio
+async def test_overlay_bridge_swallows_authenticated_disconnect_without_close_frame() -> None:
+    bridge = OverlayBridge(session_token="expected-token", initial_snapshot={"events": []})
+    connection = _AbruptAuthenticatedConnection()
+
+    await bridge._handle_connection(connection)
+
+    assert connection.closed is True
+    assert connection.sent_payloads == [{"type": "snapshot", "payload": {"events": []}}]
+    assert bridge._authenticated_connections == set()

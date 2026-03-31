@@ -90,6 +90,15 @@ impl BridgeClient {
             .map_err(|error| BridgeError::Connect(error.to_string()))
     }
 
+    pub async fn close(&mut self) -> Result<(), BridgeError> {
+        match self.stream.close(None).await {
+            Ok(()) => Ok(()),
+            Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed)
+            | Err(tokio_tungstenite::tungstenite::Error::AlreadyClosed) => Ok(()),
+            Err(error) => Err(BridgeError::Connect(error.to_string())),
+        }
+    }
+
     pub async fn next_message(&mut self) -> Result<BridgeIncoming, BridgeError> {
         let payload = Self::read_json_message(&mut self.stream).await?;
         let Value::Object(map) = payload else {

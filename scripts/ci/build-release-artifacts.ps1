@@ -133,8 +133,31 @@ $overlayManifestPath = Join-Path $PWD "native/overlay/Cargo.toml"
 $overlayBuildDir = Join-Path $PWD "build/overlay"
 $overlayReleasePath = Join-Path $PWD "native/overlay/target/release/PuriPulyHeartOverlay.exe"
 $overlayStagedPath = Join-Path $overlayBuildDir "PuriPulyHeartOverlay.exe"
+$overlayBundledDllPath = Join-Path $overlayBuildDir "openvr_api.dll"
 $pyInstallerBuildDir = Join-Path $PWD "build/build"
 $distDir = Join-Path $PWD "dist/PuriPulyHeart"
+$packagedOverlayDllPath = Join-Path $distDir "openvr_api.dll"
+
+$openVrRuntimeDllPath = $null
+foreach ($programFilesRoot in @(
+    ${env:ProgramFiles(x86)},
+    $env:ProgramW6432,
+    $env:ProgramFiles
+)) {
+    if ([string]::IsNullOrWhiteSpace($programFilesRoot)) {
+        continue
+    }
+
+    $candidate = Join-Path $programFilesRoot "Steam\steamapps\common\SteamVR\bin\win64\openvr_api.dll"
+    if (Test-Path $candidate) {
+        $openVrRuntimeDllPath = $candidate
+        break
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($openVrRuntimeDllPath) -or -not (Test-Path $openVrRuntimeDllPath)) {
+    throw "SteamVR OpenVR runtime DLL not found at expected SteamVR bin\win64 path."
+}
 
 Write-Host "Building Rust overlay executable..."
 Invoke-External -FilePath $cargoCommand -ArgumentList @(
@@ -155,9 +178,13 @@ if (-not (Test-Path $overlayReleasePath)) {
 
 New-Item -ItemType Directory -Force -Path $overlayBuildDir | Out-Null
 Copy-Item -Path $overlayReleasePath -Destination $overlayStagedPath -Force
+Copy-Item -Path $openVrRuntimeDllPath -Destination $overlayBundledDllPath -Force
 
 if (-not (Test-Path $overlayStagedPath)) {
     throw "Staged overlay executable not found: $overlayStagedPath"
+}
+if (-not (Test-Path $overlayBundledDllPath)) {
+    throw "Staged OpenVR runtime DLL not found: $overlayBundledDllPath"
 }
 
 Write-Host "Smoke-testing staged overlay executable..."
@@ -188,9 +215,13 @@ if ($numpyCoreExtensions.Count -eq 0) {
 
 $packagedOverlayPath = Join-Path $PWD "dist/PuriPulyHeart/PuriPulyHeartOverlay.exe"
 Copy-Item -Path $overlayStagedPath -Destination $packagedOverlayPath -Force
+Copy-Item -Path $openVrRuntimeDllPath -Destination $packagedOverlayDllPath -Force
 
 if (-not (Test-Path $packagedOverlayPath)) {
     throw "Packaged overlay executable not found: $packagedOverlayPath"
+}
+if (-not (Test-Path $packagedOverlayDllPath)) {
+    throw "Packaged OpenVR runtime DLL not found: $packagedOverlayDllPath"
 }
 
 Write-Host "Smoke-testing packaged executable..."

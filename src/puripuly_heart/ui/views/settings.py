@@ -580,8 +580,22 @@ class SettingsView(ft.Column):
                     self._integrated_context_hint,
                     ft.Container(height=12),
                     self._overlay_status_text,
-                    ft.Container(height=8),
+                ],
+                spacing=6,
+                expand=True,
+            )
+        )
+        row5 = ft.Container(
+            content=ft.Row([vrc_mic_card, overlay_card], spacing=16, expand=True),
+            height=320,
+        )
+
+        # === Row 6: Overlay Calibration (2x1) ===
+        overlay_calibration_card = self._wrap_card(
+            ft.Column(
+                [
                     self._overlay_calibration_title,
+                    ft.Container(height=12),
                     ft.Row(
                         controls=[
                             self._build_overlay_calibration_column(
@@ -630,15 +644,11 @@ class SettingsView(ft.Column):
                     ),
                 ],
                 spacing=6,
-                expand=True,
-            )
-        )
-        row5 = ft.Container(
-            content=ft.Row([vrc_mic_card, overlay_card], spacing=16, expand=True),
-            height=540,
+            ),
+            expand=False,
         )
 
-        # === Row 6: Persona (2x2) - Licenses style ===
+        # === Row 7: Persona (2x2) - Licenses style ===
         self._prompt_editor = PromptEditor(on_change=self._on_prompt_change)
         self._persona_title = ft.Text(
             t("settings.section.persona"), size=24, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL
@@ -690,9 +700,8 @@ class SettingsView(ft.Column):
                 spacing=0,
             ),
         )
-        row6 = persona_card
 
-        # === Row 7: Custom Vocabulary (2x1) ===
+        # === Row 8: Custom Vocabulary (2x1) ===
         self._custom_vocab_title = ft.Text(
             t("settings.section.custom_vocabulary"),
             size=24,
@@ -738,7 +747,7 @@ class SettingsView(ft.Column):
             expand=False,
         )
 
-        self.controls = [row1, row2, row3, row4, row5, row6, row7]
+        self.controls = [row1, row2, row3, row4, row5, overlay_calibration_card, persona_card, row7]
 
     def _populate_host_apis(self) -> None:
         """Legacy hook for tests; host APIs are handled by AudioSettings."""

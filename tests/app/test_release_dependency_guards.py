@@ -75,6 +75,22 @@ def test_shared_windows_build_script_runs_packaged_smoke_test() -> None:
     assert "Get-Command choco" in script
 
 
+def test_shared_windows_build_script_bundles_openvr_runtime_dll_for_overlay() -> None:
+    script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
+
+    assert "openvr_api.dll" in script
+    assert "SteamVR\\bin\\win64\\openvr_api.dll" in script
+    assert '$overlayBundledDllPath = Join-Path $overlayBuildDir "openvr_api.dll"' in script
+    assert '$packagedOverlayDllPath = Join-Path $distDir "openvr_api.dll"' in script
+    assert (
+        "Copy-Item -Path $openVrRuntimeDllPath -Destination $overlayBundledDllPath -Force" in script
+    )
+    assert (
+        "Copy-Item -Path $openVrRuntimeDllPath -Destination $packagedOverlayDllPath -Force"
+        in script
+    )
+
+
 def test_build_spec_hiddenimports_only_numpy_core_runtime_extension_for_packaged_cli() -> None:
     spec = (ROOT / "build.spec").read_text(encoding="utf-8")
 

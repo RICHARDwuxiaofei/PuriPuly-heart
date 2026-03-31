@@ -408,11 +408,15 @@ def test_audio_change_updates_desktop_loopback_controls(monkeypatch: pytest.Monk
     assert changed == [settings]
 
 
-def test_overlay_failure_reason_keys_are_localized() -> None:
-    bundle = i18n_module._load_bundle("en")
+@pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
+def test_overlay_failure_reason_keys_are_localized(locale: str) -> None:
+    bundle = i18n_module._load_bundle(locale)
 
     assert bundle["settings.overlay.failure.missing_executable"]
     assert bundle["settings.overlay.failure.runtime_crashed"]
+    assert bundle["settings.overlay.failure.steamvr_not_installed"]
+    assert bundle["settings.overlay.failure.steamvr_not_running"]
+    assert bundle["settings.overlay.failure.hmd_not_found"]
 
 
 def test_overlay_calibration_controls_are_localized(
@@ -462,6 +466,24 @@ def test_overlay_calibration_apply_commits_current_field_values_without_blur(
     view._on_overlay_calibration_apply(None)
 
     assert view._overlay_distance_field.value == "1.20"
+
+
+def test_overlay_calibration_section_uses_dedicated_row_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    assert len(view.controls) == 8
+
+    row5 = view.controls[4]
+    overlay_column = row5.content.controls[1].content.controls[1].content.content
+    assert view._overlay_calibration_title not in overlay_column.controls
+
+    row6 = view.controls[5]
+    calibration_column = row6.content.controls[1].content.content
+    assert calibration_column.controls[0] is view._overlay_calibration_title
+    assert view._overlay_calibration_apply_button in calibration_column.controls[-1].controls
+    assert view._overlay_calibration_cancel_button in calibration_column.controls[-1].controls
 
 
 @pytest.mark.asyncio

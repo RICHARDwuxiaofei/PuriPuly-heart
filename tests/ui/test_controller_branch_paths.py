@@ -830,6 +830,37 @@ async def test_overlay_start_failure_keeps_saved_preferences_but_effective_state
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_reason",
+    [
+        "steamvr_not_installed",
+        "steamvr_not_running",
+        "hmd_not_found",
+    ],
+)
+async def test_overlay_start_failure_preserves_specific_preflight_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_reason: str,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup(failure_reason=failure_reason)
+    await _wait_until(lambda: controller.overlay_state == "failed")
+
+    assert controller.settings.ui.overlay_enabled is True
+    assert controller.failure_reason == failure_reason
+
+
+@pytest.mark.asyncio
 async def test_overlay_runtime_disconnect_keeps_saved_preferences_without_auto_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
