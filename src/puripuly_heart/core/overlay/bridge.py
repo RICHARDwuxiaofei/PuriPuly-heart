@@ -10,13 +10,13 @@ import websockets
 from websockets.asyncio.server import Server, ServerConnection
 from websockets.exceptions import ConnectionClosed
 
-from .protocol import OverlayEventUnion, OverlayStateSnapshot
+from .protocol import OverlayPresentationSnapshot
 
 
 @dataclass(slots=True)
 class OverlayBridge:
     session_token: str
-    initial_snapshot: dict[str, object] | OverlayStateSnapshot | None = None
+    initial_snapshot: dict[str, object] | OverlayPresentationSnapshot | None = None
     heartbeat_interval_ms: int = 1000
     host: str = "127.0.0.1"
     port: int = 0
@@ -32,17 +32,18 @@ class OverlayBridge:
         init=False,
         default_factory=set,
     )
-    _snapshot: OverlayStateSnapshot = field(init=False)
+    _snapshot: OverlayPresentationSnapshot = field(init=False)
+    _snapshot_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock)
     _token_consumed: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         if self.initial_snapshot is None:
-            self._snapshot = OverlayStateSnapshot(events=[])
+            self._snapshot = OverlayPresentationSnapshot()
             return
-        if isinstance(self.initial_snapshot, OverlayStateSnapshot):
+        if isinstance(self.initial_snapshot, OverlayPresentationSnapshot):
             self._snapshot = self.initial_snapshot
             return
-        self._snapshot = OverlayStateSnapshot.from_dict(self.initial_snapshot)
+        self._snapshot = OverlayPresentationSnapshot.from_dict(self.initial_snapshot)
 
     async def start(self) -> None:
         if self._server is not None:
@@ -80,12 +81,18 @@ class OverlayBridge:
         self._token_consumed = False
         self.url = ""
 
-    async def emit(self, event: OverlayEventUnion) -> None:
-        self._snapshot.events.append(event)
-        await self._broadcast_json(event.to_dict())
+    async def replace_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None:
+        async with self._snapshot_lock:
+            if snapshot.revision <= self._snapshot.revision:
+                return
+            self._snapshot = snapshot
+            await self._broadcast_json({"type": "snapshot", "payload": snapshot.to_dict()})
 
-    def snapshot(self) -> OverlayStateSnapshot:
-        return OverlayStateSnapshot(events=list(self._snapshot.events))
+    async def broadcast_shutdown(self) -> None:
+        await self._broadcast_json({"type": "shutdown"})
+
+    def snapshot(self) -> OverlayPresentationSnapshot:
+        return self._snapshot
 
     async def _handle_connection(self, connection: ServerConnection) -> None:
         authenticated = False
@@ -95,17 +102,21 @@ class OverlayBridge:
                 await connection.send(json.dumps({"type": "auth_error"}))
                 return
 
-            authenticated = True
-            self._token_consumed = True
-            self._authenticated_connections.add(connection)
-            await connection.send(
-                json.dumps(
-                    {
-                        "type": "snapshot",
-                        "payload": self.snapshot().to_dict(),
-                    }
+            async with self._snapshot_lock:
+                if not self._is_valid_auth_payload(auth_payload):
+                    await connection.send(json.dumps({"type": "auth_error"}))
+                    return
+                self._token_consumed = True
+                await connection.send(
+                    json.dumps(
+                        {
+                            "type": "snapshot",
+                            "payload": self._snapshot.to_dict(),
+                        }
+                    )
                 )
-            )
+                self._authenticated_connections.add(connection)
+                authenticated = True
 
             async for raw_message in connection:
                 message = self._load_message(raw_message)

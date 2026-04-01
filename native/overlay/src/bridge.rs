@@ -6,17 +6,16 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::manifest::OverlayManifest;
-use crate::state::{Event, OverlayStateSnapshot};
+use crate::state::OverlayPresentationSnapshot;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OverlayBridgeEvent {
     Shutdown,
-    Live(Event),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BridgeIncoming {
-    Snapshot(OverlayStateSnapshot),
+    Snapshot(OverlayPresentationSnapshot),
     Heartbeat,
     Event(OverlayBridgeEvent),
 }
@@ -40,7 +39,7 @@ pub struct BridgeClient {
 impl BridgeClient {
     pub async fn connect(
         manifest: &OverlayManifest,
-    ) -> Result<(Self, OverlayStateSnapshot), BridgeError> {
+    ) -> Result<(Self, OverlayPresentationSnapshot), BridgeError> {
         let (mut stream, _response) = connect_async(&manifest.bridge_url)
             .await
             .map_err(|error| BridgeError::Connect(error.to_string()))?;
@@ -125,11 +124,9 @@ impl BridgeClient {
             "heartbeat" => Ok(BridgeIncoming::Heartbeat),
             "auth_error" => Err(BridgeError::Auth("bridge rejected session token".into())),
             "shutdown" => Ok(BridgeIncoming::Event(OverlayBridgeEvent::Shutdown)),
-            _ => {
-                let event = serde_json::from_value(Value::Object(map))
-                    .map_err(|error| BridgeError::Protocol(error.to_string()))?;
-                Ok(BridgeIncoming::Event(OverlayBridgeEvent::Live(event)))
-            }
+            _ => Err(BridgeError::Protocol(format!(
+                "unsupported bridge payload type: {event_type}"
+            ))),
         }
     }
 

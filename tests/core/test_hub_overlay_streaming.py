@@ -11,7 +11,6 @@ from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.orchestrator import hub as hub_module
 from puripuly_heart.core.orchestrator.hub import ClientHub
-from puripuly_heart.core.overlay.protocol import OverlayStateSnapshot
 from puripuly_heart.core.vad.gating import SpeechEnd
 from puripuly_heart.domain.events import STTFinalEvent, STTPartialEvent
 from puripuly_heart.domain.models import Transcript
@@ -25,18 +24,12 @@ class RecordingOverlaySink:
     async def emit(self, event: object) -> None:
         self.events.append(event)
 
-    def snapshot(self) -> OverlayStateSnapshot:
-        return OverlayStateSnapshot(events=list(self.events))
-
 
 @dataclass(slots=True)
 class FailingOverlaySink:
     async def emit(self, event: object) -> None:
         _ = event
         raise RuntimeError("overlay boom")
-
-    def snapshot(self) -> OverlayStateSnapshot:
-        return OverlayStateSnapshot(events=[])
 
 
 @dataclass(slots=True)

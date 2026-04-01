@@ -1,23 +1,11 @@
 from .protocol import (
-    OVERLAY_ROW_IDENTITY_RULE,
-    OverlayEvent,
-    OverlayStateSnapshot,
-    PeerTranscriptFinal,
-    SelfTranscriptFinal,
-    Shutdown,
-    TranslationFinal,
-    TranslationStreamUpdate,
-    UtteranceClosed,
+    OverlayPresentationBlock,
+    OverlayPresentationCalibration,
+    OverlayPresentationSnapshot,
 )
 
 __all__ = [
-    "OVERLAY_ROW_IDENTITY_RULE",
-    "OverlayEvent",
-    "OverlayStateSnapshot",
-    "PeerTranscriptFinal",
-    "SelfTranscriptFinal",
-    "Shutdown",
-    "TranslationFinal",
-    "TranslationStreamUpdate",
-    "UtteranceClosed",
+    "OverlayPresentationBlock",
+    "OverlayPresentationCalibration",
+    "OverlayPresentationSnapshot",
 ]

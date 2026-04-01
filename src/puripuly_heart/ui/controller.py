@@ -42,8 +42,8 @@ from puripuly_heart.core.osc.receiver import (
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.overlay.bridge import OverlayBridge
+from puripuly_heart.core.overlay.presenter import OverlayPresenter
 from puripuly_heart.core.overlay.process import OverlayProcessManager
-from puripuly_heart.core.overlay.sink import OverlayEventAdapter
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
@@ -129,6 +129,7 @@ class GuiController:
     _vrc_receiver_lock: asyncio.Lock | None = None
     _ui_event_bridge: UIEventBridge | None = None
     _overlay_bridge: OverlayBridge | None = None
+    _overlay_presenter: OverlayPresenter | None = None
     _overlay_manager: OverlayProcessManager | None = None
     _overlay_start_task: asyncio.Task[None] | None = None
     _overlay_monitor_task: asyncio.Task[None] | None = None
@@ -355,7 +356,7 @@ class GuiController:
             if self.overlay_state in {"starting", "connected"}:
                 return
 
-            await self._teardown_overlay_runtime()
+            await self._teardown_overlay_runtime(preserve_presenter_state=True)
             self.overlay_state = "starting"
             self.auto_restart_scheduled = False
             self._notify_overlay_state()
@@ -368,15 +369,21 @@ class GuiController:
                 self.on_overlay_start_failed("unknown")
                 return
 
+            presenter = self._overlay_presenter
+            if presenter is None:
+                presenter = OverlayPresenter(
+                    calibration=self.overlay_calibration.copy(),
+                    clock=self.clock,
+                )
+                self._overlay_presenter = presenter
             bridge = OverlayBridge(
                 session_token=secrets.token_urlsafe(16),
-                initial_snapshot={
-                    "events": [self._overlay_calibration_update_event().to_dict()],
-                },
+                initial_snapshot=presenter.snapshot(),
             )
             await bridge.start()
+            presenter.attach_bridge(bridge)
             self._overlay_bridge = bridge
-            self.hub.overlay_sink = bridge
+            self.hub.overlay_sink = presenter
 
             manager = OverlayProcessManager(
                 bridge_url=bridge.url,
@@ -431,7 +438,7 @@ class GuiController:
                 self.on_overlay_runtime_crashed()
             else:
                 self.on_overlay_start_failed(reason)
-            await self._teardown_overlay_runtime()
+            await self._teardown_overlay_runtime(preserve_presenter_state=True)
             await self._refresh_overlay_runtime_dependencies()
         except asyncio.CancelledError:
             raise
@@ -441,7 +448,7 @@ class GuiController:
 
     async def _handle_overlay_start_failure(self, failure_reason: str | None) -> None:
         self.on_overlay_start_failed(failure_reason)
-        await self._teardown_overlay_runtime()
+        await self._teardown_overlay_runtime(preserve_presenter_state=True)
         await self._refresh_overlay_runtime_dependencies()
 
     async def _shutdown_overlay_runtime(self, *, preserve_failure_reason: bool) -> None:
@@ -462,7 +469,7 @@ class GuiController:
             self._notify_overlay_state()
 
             await self._emit_overlay_shutdown()
-            await self._teardown_overlay_runtime()
+            await self._teardown_overlay_runtime(preserve_presenter_state=False)
             self.overlay_state = "off"
             if not preserve_failure_reason:
                 self.failure_reason = None
@@ -471,14 +478,14 @@ class GuiController:
             self._notify_overlay_state()
 
     async def _emit_overlay_shutdown(self) -> None:
-        bridge = self._overlay_bridge
-        if bridge is None:
+        presenter = self._overlay_presenter
+        if presenter is None:
             return
         with contextlib.suppress(Exception):
-            await bridge.emit(OverlayEventAdapter(clock=self.clock).shutdown())
+            await presenter.broadcast_shutdown()
             await asyncio.sleep(OVERLAY_SHUTDOWN_GRACE_S)
 
-    async def _teardown_overlay_runtime(self) -> None:
+    async def _teardown_overlay_runtime(self, *, preserve_presenter_state: bool) -> None:
         current_task = asyncio.current_task()
 
         start_task = self._overlay_start_task
@@ -499,14 +506,23 @@ class GuiController:
         if monitor_task is not None and monitor_task.done():
             self._overlay_monitor_task = None
 
+        presenter = self._overlay_presenter
+        if presenter is not None:
+            presenter.detach_bridge()
         if (
-            self._overlay_bridge is not None
+            presenter is not None
             and self.hub is not None
-            and getattr(self.hub, "overlay_sink", None) is self._overlay_bridge
+            and getattr(self.hub, "overlay_sink", None) is presenter
         ):
-            with contextlib.suppress(Exception):
-                await self.hub.reset_overlay_preview()
-            self.hub.overlay_sink = None
+            if preserve_presenter_state:
+                self.hub.overlay_sink = presenter
+            else:
+                with contextlib.suppress(Exception):
+                    await self.hub.reset_overlay_preview()
+                self.hub.overlay_sink = None
+        if not preserve_presenter_state and presenter is not None:
+            presenter.reset_scene()
+            self._overlay_presenter = None
 
         manager = self._overlay_manager
         self._overlay_manager = None
@@ -579,14 +595,14 @@ class GuiController:
         return self.overlay_calibration.copy()
 
     async def _emit_overlay_calibration_update(self) -> None:
-        bridge = self._overlay_bridge
-        if bridge is None:
+        presenter = self._overlay_presenter
+        if presenter is None:
             return
         with contextlib.suppress(Exception):
-            await bridge.emit(self._overlay_calibration_update_event())
+            await presenter.update_calibration(self.overlay_calibration.copy())
 
     def _schedule_overlay_calibration_emit(self) -> None:
-        if self._overlay_bridge is None:
+        if self._overlay_presenter is None:
             return
         run_task = getattr(self.page, "run_task", None)
         if callable(run_task):
@@ -606,11 +622,6 @@ class GuiController:
             logger.warning(
                 "[Overlay] Skipping calibration update; no running loop and page.run_task unavailable"
             )
-
-    def _overlay_calibration_update_event(self):
-        return OverlayEventAdapter(clock=self.clock).overlay_calibration_update(
-            self.overlay_calibration
-        )
 
     def begin_overlay_calibration_for_test(self) -> None:
         self.begin_overlay_calibration()

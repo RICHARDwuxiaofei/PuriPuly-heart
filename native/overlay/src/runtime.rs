@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::json;
@@ -14,9 +13,9 @@ use crate::openvr::{
 #[cfg(test)]
 use crate::openvr::OpenVrError;
 use crate::renderer::{
-    CaptionBlock, CaptionChannel, CaptionLayoutPolicy, CaptionPresentation, CaptionRenderer,
+    CaptionBlock, CaptionChannel, CaptionPresentation, CaptionRenderer,
 };
-use crate::state::{OverlayContentKind, OverlayState, OverlayStateSnapshot};
+use crate::state::{OverlayPresentationSnapshot, OverlayState};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StartupError {
@@ -100,50 +99,8 @@ pub struct OverlayRuntime {
     redraw_requested: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CaptionBlockEntry {
-    channel: String,
-    utterance_id: String,
-    original_text: String,
-    translation_text: String,
-}
-
-impl CaptionBlockEntry {
-    fn new(channel: &str, utterance_id: &str) -> Self {
-        Self {
-            channel: channel.to_string(),
-            utterance_id: utterance_id.to_string(),
-            original_text: String::new(),
-            translation_text: String::new(),
-        }
-    }
-
-    fn apply_row(&mut self, content_kind: &OverlayContentKind, text: &str) {
-        match content_kind {
-            OverlayContentKind::Original => self.original_text = text.to_string(),
-            OverlayContentKind::Translation => self.translation_text = text.to_string(),
-        }
-    }
-
-    fn into_caption_block(self, policy: &CaptionLayoutPolicy) -> CaptionBlock {
-        let (text, channel) = match self.channel.as_str() {
-            "peer" => (
-                policy.compose_peer_line(&self.original_text, &self.translation_text),
-                CaptionChannel::PeerChannel,
-            ),
-            _ => (
-                policy.compose_self_line(&self.original_text, &self.translation_text),
-                CaptionChannel::SelfChannel,
-            ),
-        };
-
-        CaptionBlock::new(format!("{}:{}", self.channel, self.utterance_id), text)
-            .with_channel(channel)
-    }
-}
-
 impl OverlayRuntime {
-    pub fn new(snapshot: OverlayStateSnapshot) -> Self {
+    pub fn new(snapshot: OverlayPresentationSnapshot) -> Self {
         let mut runtime = Self {
             ready: false,
             first_texture_submitted: false,
@@ -177,7 +134,7 @@ impl OverlayRuntime {
         Ok(())
     }
 
-    pub fn apply_snapshot(&mut self, snapshot: OverlayStateSnapshot) {
+    pub fn apply_snapshot(&mut self, snapshot: OverlayPresentationSnapshot) {
         if self.state.apply_snapshot(&snapshot) {
             self.redraw_requested = true;
         }
@@ -195,12 +152,6 @@ impl OverlayRuntime {
         match event {
             OverlayBridgeEvent::Shutdown => {
                 self.stopped = true;
-                Ok(())
-            }
-            OverlayBridgeEvent::Live(event) => {
-                if self.state.apply(event) {
-                    self.redraw_requested = true;
-                }
                 Ok(())
             }
         }
@@ -521,44 +472,18 @@ fn create_runtime_renderer() -> Result<CaptionRenderer, crate::renderer::Caption
 
 impl OverlayRuntime {
     pub fn caption_blocks(&self) -> Vec<CaptionBlock> {
-        let policy = CaptionLayoutPolicy::default();
-        let mut rows = self.state.rows_for("self");
-        rows.extend(self.state.rows_for("peer"));
-        rows.sort_by(|left, right| {
-            left.seq
-                .cmp(&right.seq)
-                .then_with(|| left.created_at.total_cmp(&right.created_at))
-                .then_with(|| left.channel.cmp(&right.channel))
-                .then_with(|| left.utterance_id.cmp(&right.utterance_id))
-        });
-
-        let mut block_indexes: BTreeMap<(String, String), usize> = BTreeMap::new();
-        let mut blocks = Vec::new();
-
-        for row in rows {
-            let key = (row.channel.clone(), row.utterance_id.clone());
-            let index = *block_indexes.entry(key).or_insert_with(|| {
-                blocks.push(CaptionBlockEntry::new(&row.channel, &row.utterance_id));
-                blocks.len() - 1
-            });
-            blocks[index].apply_row(&row.content_kind, &row.text);
-        }
-
-        let mut caption_blocks: Vec<CaptionBlock> = blocks
-            .into_iter()
-            .map(|block| block.into_caption_block(&policy))
-            .collect();
-
-        if let Some(active_self_text) = self.state.active_self_text() {
-            if !active_self_text.trim().is_empty() {
-                caption_blocks.push(
-                    CaptionBlock::new("self:active", active_self_text)
-                        .with_channel(CaptionChannel::SelfChannel),
-                );
-            }
-        }
-
-        caption_blocks
+        self.state
+            .blocks()
+            .iter()
+            .map(|block| {
+                let channel = if block.channel == "peer" {
+                    CaptionChannel::PeerChannel
+                } else {
+                    CaptionChannel::SelfChannel
+                };
+                CaptionBlock::new(block.id.clone(), block.text.clone()).with_channel(channel)
+            })
+            .collect()
     }
 }
 
@@ -567,55 +492,26 @@ mod tests {
     use super::{prepare_openvr_runtime, OverlayRuntime, StartupError};
     use crate::openvr::{OpenVrError, OpenVrStartupPreflightError};
     use crate::state::{
-        Event, OverlayStateSnapshot, RowEvent, SelfActiveClearEvent, SelfActiveUpdateEvent,
+        OverlayPresentationBlock, OverlayPresentationCalibration, OverlayPresentationSnapshot,
     };
     use std::cell::Cell;
 
-    fn row_event(seq: u64, channel: &str, utterance_id: &str, text: &str) -> RowEvent {
-        RowEvent {
-            event_id: format!("evt-{channel}-{utterance_id}-{seq}"),
-            seq,
-            utterance_id: utterance_id.to_string(),
+    fn block(id: &str, channel: &str, text: &str) -> OverlayPresentationBlock {
+        OverlayPresentationBlock {
+            id: id.to_string(),
             channel: channel.to_string(),
             text: text.to_string(),
-            source_language: "en".to_string(),
-            target_language: "ko".to_string(),
-            created_at: seq as f64,
-            is_final: true,
-            speaker_label: None,
-            peer_epoch: None,
-            applied_context_mode: None,
-        }
-    }
-
-    fn self_active_update_event(seq: u64, text: &str) -> SelfActiveUpdateEvent {
-        SelfActiveUpdateEvent {
-            event_id: format!("evt-self-active-{seq}"),
-            seq,
-            utterance_id: None,
-            channel: Some("self".to_string()),
-            text: text.to_string(),
-            created_at: seq as f64,
-        }
-    }
-
-    fn self_active_clear_event(seq: u64) -> SelfActiveClearEvent {
-        SelfActiveClearEvent {
-            event_id: format!("evt-self-active-clear-{seq}"),
-            seq,
-            utterance_id: None,
-            channel: Some("self".to_string()),
-            created_at: seq as f64,
         }
     }
 
     #[test]
-    fn caption_blocks_keep_late_self_translation_attached_to_original_utterance() {
-        let runtime = OverlayRuntime::new(OverlayStateSnapshot {
-            events: vec![
-                Event::SelfTranscriptFinal(row_event(1, "self", "self-1", "self one")),
-                Event::SelfTranscriptFinal(row_event(3, "self", "self-2", "self two")),
-                Event::TranslationFinal(row_event(4, "self", "self-1", "자기 하나")),
+    fn caption_blocks_follow_snapshot_order_exactly() {
+        let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            revision: 3,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![
+                block("peer:1", "peer", "peer one"),
+                block("self:2", "self", "self two (translated)"),
             ],
         });
 
@@ -627,19 +523,50 @@ mod tests {
                 .map(|block| (block.id.as_str(), block.text.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                ("self:self-1", "self one (자기 하나)"),
-                ("self:self-2", "self two"),
+                ("peer:1", "peer one"),
+                ("self:2", "self two (translated)"),
             ]
         );
     }
 
     #[test]
-    fn caption_blocks_compose_peer_translation_with_original_in_same_block() {
-        let runtime = OverlayRuntime::new(OverlayStateSnapshot {
-            events: vec![
-                Event::PeerTranscriptFinal(row_event(1, "peer", "peer-1", "hello")),
-                Event::PeerTranscriptFinal(row_event(2, "peer", "peer-2", "world")),
-                Event::TranslationStreamUpdate(row_event(4, "peer", "peer-1", "안녕")),
+    fn apply_snapshot_replaces_existing_blocks_and_calibration() {
+        let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            revision: 1,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![block("self:1", "self", "self one")],
+        });
+
+        runtime.apply_snapshot(OverlayPresentationSnapshot {
+            revision: 2,
+            calibration: OverlayPresentationCalibration {
+                distance: 1.5,
+                ..OverlayPresentationCalibration::default()
+            },
+            blocks: vec![block("peer:2", "peer", "peer two")],
+        });
+
+        let blocks = runtime.caption_blocks();
+
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| (block.id.as_str(), block.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("peer:2", "peer two")]
+        );
+        assert_eq!(runtime.state().snapshot().revision, 2);
+        assert_eq!(runtime.state().snapshot().calibration.distance, 1.5);
+    }
+
+    #[test]
+    fn runtime_uses_snapshot_blocks_without_internal_reordering() {
+        let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            revision: 4,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![
+                block("self:older", "self", "older"),
+                block("peer:newer", "peer", "newer"),
             ],
         });
 
@@ -651,74 +578,25 @@ mod tests {
                 .map(|block| (block.id.as_str(), block.text.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                ("peer:peer-1", "안녕 (hello)"),
-                ("peer:peer-2", "world"),
+                ("self:older", "older"),
+                ("peer:newer", "newer"),
             ]
         );
     }
 
     #[test]
-    fn caption_blocks_append_active_self_row_as_newest_self_block() {
-        let runtime = OverlayRuntime::new(OverlayStateSnapshot {
-            events: vec![
-                Event::SelfTranscriptFinal(row_event(1, "self", "self-1", "self one")),
-                Event::SelfActiveUpdate(self_active_update_event(2, "speaking now")),
-            ],
+    fn runtime_starts_empty_when_snapshot_has_no_blocks() {
+        let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            revision: 0,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![],
         });
 
-        let blocks = runtime.caption_blocks();
-
+        assert!(runtime.caption_blocks().is_empty());
+        assert_eq!(runtime.state().snapshot().revision, 0);
         assert_eq!(
-            blocks
-                .iter()
-                .map(|block| (block.id.as_str(), block.text.as_str()))
-                .collect::<Vec<_>>(),
-            vec![
-                ("self:self-1", "self one"),
-                ("self:active", "speaking now"),
-            ]
-        );
-    }
-
-    #[test]
-    fn caption_blocks_drop_active_self_after_clear_event() {
-        let runtime = OverlayRuntime::new(OverlayStateSnapshot {
-            events: vec![
-                Event::SelfTranscriptFinal(row_event(1, "self", "self-1", "self one")),
-                Event::SelfActiveUpdate(self_active_update_event(2, "speaking now")),
-                Event::SelfActiveClear(self_active_clear_event(3)),
-            ],
-        });
-
-        let blocks = runtime.caption_blocks();
-
-        assert_eq!(
-            blocks
-                .iter()
-                .map(|block| (block.id.as_str(), block.text.as_str()))
-                .collect::<Vec<_>>(),
-            vec![("self:self-1", "self one")]
-        );
-    }
-
-    #[test]
-    fn caption_blocks_clear_active_self_before_committed_history_replacement() {
-        let runtime = OverlayRuntime::new(OverlayStateSnapshot {
-            events: vec![
-                Event::SelfActiveUpdate(self_active_update_event(1, "speaking now")),
-                Event::SelfActiveClear(self_active_clear_event(2)),
-                Event::SelfTranscriptFinal(row_event(3, "self", "self-1", "speaking now")),
-            ],
-        });
-
-        let blocks = runtime.caption_blocks();
-
-        assert_eq!(
-            blocks
-                .iter()
-                .map(|block| (block.id.as_str(), block.text.as_str()))
-                .collect::<Vec<_>>(),
-            vec![("self:self-1", "speaking now")]
+            runtime.state().snapshot().calibration,
+            OverlayPresentationCalibration::default()
         );
     }
 

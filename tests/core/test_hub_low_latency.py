@@ -10,7 +10,6 @@ import numpy as np
 import pytest
 
 from puripuly_heart.core.orchestrator.hub import ClientHub, _MergeBuffer
-from puripuly_heart.core.overlay.protocol import OverlayStateSnapshot
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
 from puripuly_heart.domain.models import Transcript, Translation
 
@@ -87,9 +86,6 @@ class RecordingOverlaySink:
 
     async def emit(self, event: object) -> None:
         self.events.append(event)
-
-    def snapshot(self) -> OverlayStateSnapshot:
-        return OverlayStateSnapshot(events=list(self.events))
 
 
 def samples(value: float, n: int = 512) -> np.ndarray:

@@ -19,7 +19,6 @@ pub use renderer::{
 };
 pub use runtime::{run_cli, run_with_manifest, OverlayRuntime, RuntimeFailure, StartupError};
 pub use state::{
-    Event, OverlayCalibration, OverlayCalibrationUpdateEvent, OverlayRow, OverlayState,
-    OverlayStateSnapshot, RowEvent, SelfActiveClearEvent, SelfActiveUpdateEvent,
-    ShutdownEvent, UtteranceClosedEvent,
+    OverlayCalibration, OverlayPresentationBlock, OverlayPresentationCalibration,
+    OverlayPresentationSnapshot, OverlayState, OverlayStateSnapshot,
 };

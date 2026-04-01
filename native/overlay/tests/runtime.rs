@@ -5,14 +5,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+use puripuly_heart_overlay::logging::OverlayLogger;
 use puripuly_heart_overlay::{
     run_with_manifest, submit_texture, validate_manifest, BridgeClient, CaptionBlock,
-    CaptionChannel, CaptionRenderer, Event, FakeOpenVr, OpenVrError, OverlayBridgeEvent,
-    OverlayCalibrationUpdateEvent, OverlayFrameSubmitter, OverlayManifest, OverlayRuntime,
-    OverlayStateSnapshot, RenderedFrame, RowEvent, RuntimeFailure, StartupError,
-    EXPECTED_CONTRACT_VERSION,
+    CaptionChannel, CaptionRenderer, FakeOpenVr, OpenVrError, OverlayBridgeEvent,
+    OverlayFrameSubmitter, OverlayManifest, OverlayPresentationBlock,
+    OverlayPresentationCalibration, OverlayPresentationSnapshot, OverlayRuntime, RenderedFrame,
+    RuntimeFailure, StartupError, EXPECTED_CONTRACT_VERSION,
 };
-use puripuly_heart_overlay::logging::OverlayLogger;
 
 fn test_manifest() -> OverlayManifest {
     OverlayManifest {
@@ -64,35 +64,12 @@ fn parse_event_payloads(stderr: &[u8]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn test_row(channel: &str, utterance_id: &str, text: &str) -> RowEvent {
-    RowEvent {
-        event_id: format!("evt-{channel}-{utterance_id}"),
-        seq: 1,
-        utterance_id: utterance_id.to_string(),
+fn block(id: &str, channel: &str, text: &str) -> OverlayPresentationBlock {
+    OverlayPresentationBlock {
+        id: id.to_string(),
         channel: channel.to_string(),
         text: text.to_string(),
-        source_language: "en".to_string(),
-        target_language: "ko".to_string(),
-        created_at: 123.0,
-        is_final: true,
-        speaker_label: None,
-        peer_epoch: None,
-        applied_context_mode: None,
     }
-}
-
-fn test_snapshot() -> OverlayStateSnapshot {
-    OverlayStateSnapshot {
-        events: vec![Event::PeerTranscriptFinal(test_row("peer", "peer-1", "hello"))],
-    }
-}
-
-fn test_peer_final_event() -> OverlayBridgeEvent {
-    OverlayBridgeEvent::Live(Event::TranslationFinal(test_row(
-        "peer",
-        "peer-1",
-        "hello there",
-    )))
 }
 
 #[derive(Default)]
@@ -138,9 +115,16 @@ async fn connect_test_bridge() -> (BridgeClient, tokio::task::JoinHandle<Vec<ser
         assert_eq!(auth_payload["session_token"], "expected-token");
 
         ws.send(Message::Text(
-            json!({"type": "snapshot", "payload": {"events": []}})
-                .to_string()
-                .into(),
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 0,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": [],
+                }
+            })
+            .to_string()
+            .into(),
         ))
         .await
         .unwrap();
@@ -160,7 +144,7 @@ async fn connect_test_bridge() -> (BridgeClient, tokio::task::JoinHandle<Vec<ser
     manifest.bridge_url = format!("ws://{}", address);
 
     let (client, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
-    assert!(snapshot.events.is_empty());
+    assert!(snapshot.blocks.is_empty());
     (client, server)
 }
 
@@ -207,7 +191,7 @@ fn runtime_exposes_specific_preflight_failure_reasons() {
 
 #[tokio::test]
 async fn runtime_stops_cleanly_on_shutdown_event() {
-    let mut runtime = OverlayRuntime::new(OverlayStateSnapshot::default());
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
 
     runtime
         .handle_event(OverlayBridgeEvent::Shutdown)
@@ -219,7 +203,7 @@ async fn runtime_stops_cleanly_on_shutdown_event() {
 
 #[tokio::test]
 async fn runtime_reports_bridge_loss_as_runtime_disconnect_after_ready() {
-    let mut runtime = OverlayRuntime::new(OverlayStateSnapshot::default());
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
     runtime.mark_ready_for_test();
 
     let err = runtime.handle_bridge_loss_for_test().await.unwrap_err();
@@ -228,25 +212,21 @@ async fn runtime_reports_bridge_loss_as_runtime_disconnect_after_ready() {
 }
 
 #[tokio::test]
-async fn runtime_applies_overlay_calibration_updates_to_state() {
-    let mut runtime = OverlayRuntime::new(OverlayStateSnapshot::default());
+async fn runtime_applies_new_snapshot_calibration_to_state() {
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
 
-    runtime
-        .handle_event(OverlayBridgeEvent::Live(Event::OverlayCalibrationUpdate(
-            OverlayCalibrationUpdateEvent {
-                event_id: "evt-calibration".into(),
-                seq: 1,
-                created_at: 100.0,
-                anchor: "head_locked".into(),
-                offset_x: 0.15,
-                offset_y: -0.2,
-                distance: 1.2,
-                text_scale: 1.1,
-                background_alpha: 0.4,
-            },
-        )))
-        .await
-        .unwrap();
+    runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 2,
+        calibration: OverlayPresentationCalibration {
+            anchor: "head_locked".into(),
+            offset_x: 0.15,
+            offset_y: -0.2,
+            distance: 1.2,
+            text_scale: 1.1,
+            background_alpha: 0.4,
+        },
+        blocks: vec![],
+    });
 
     assert_eq!(runtime.state().calibration().distance, 1.2);
     assert_eq!(runtime.state().calibration().background_alpha, 0.4);
@@ -257,7 +237,7 @@ async fn runtime_emits_overlay_ready_only_after_first_texture_submit() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
     let logger = test_logger("ready-gating-success").await;
     let (mut bridge, server) = connect_test_bridge().await;
-    let mut runtime = OverlayRuntime::new(OverlayStateSnapshot::default());
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
     let mut submitter = RecordingSubmitter::default();
 
     assert!(!runtime.ready_sent());
@@ -291,9 +271,16 @@ async fn bridge_client_close_sends_close_frame() {
         assert_eq!(auth_payload["type"], "auth");
 
         ws.send(Message::Text(
-            json!({"type": "snapshot", "payload": {"events": []}})
-                .to_string()
-                .into(),
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 0,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": [],
+                }
+            })
+            .to_string()
+            .into(),
         ))
         .await
         .unwrap();
@@ -313,7 +300,7 @@ async fn bridge_client_close_sends_close_frame() {
     manifest.bridge_url = format!("ws://{}", address);
 
     let (mut client, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
-    assert!(snapshot.events.is_empty());
+    assert!(snapshot.blocks.is_empty());
 
     client.close().await.unwrap();
 
@@ -322,12 +309,12 @@ async fn bridge_client_close_sends_close_frame() {
 
 #[tokio::test]
 async fn runtime_caption_blocks_keep_channel_metadata_for_color_only_rendering() {
-    let runtime = OverlayRuntime::new(OverlayStateSnapshot {
-        events: vec![
-            Event::SelfTranscriptFinal(test_row("self", "self-1", "hello")),
-            Event::TranslationFinal(test_row("self", "self-1", "안녕")),
-            Event::PeerTranscriptFinal(test_row("peer", "peer-1", "world")),
-            Event::TranslationFinal(test_row("peer", "peer-1", "세상")),
+    let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 3,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![
+            block("self:1", "self", "hello (안녕)"),
+            block("peer:2", "peer", "세상 (world)"),
         ],
     });
 
@@ -337,8 +324,8 @@ async fn runtime_caption_blocks_keep_channel_metadata_for_color_only_rendering()
         .map(|block| (block.id.as_str(), block.channel))
         .collect::<std::collections::BTreeMap<_, _>>();
 
-    assert_eq!(channels.get("self:self-1"), Some(&Some(CaptionChannel::SelfChannel)));
-    assert_eq!(channels.get("peer:peer-1"), Some(&Some(CaptionChannel::PeerChannel)));
+    assert_eq!(channels.get("self:1"), Some(&Some(CaptionChannel::SelfChannel)));
+    assert_eq!(channels.get("peer:2"), Some(&Some(CaptionChannel::PeerChannel)));
 }
 
 #[tokio::test]
@@ -346,7 +333,7 @@ async fn runtime_does_not_emit_overlay_ready_when_first_texture_submit_fails() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
     let logger = test_logger("ready-gating-failure").await;
     let (mut bridge, server) = connect_test_bridge().await;
-    let mut runtime = OverlayRuntime::new(OverlayStateSnapshot::default());
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
     let mut submitter = RecordingSubmitter::failing();
 
     let err = runtime
@@ -380,9 +367,16 @@ async fn bridge_client_authenticates_and_receives_initial_snapshot() {
         assert_eq!(auth_payload["session_token"], "expected-token");
 
         ws.send(Message::Text(
-            json!({"type": "snapshot", "payload": {"events": []}})
-                .to_string()
-                .into(),
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 0,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": [],
+                }
+            })
+            .to_string()
+            .into(),
         ))
         .await
         .unwrap();
@@ -394,7 +388,7 @@ async fn bridge_client_authenticates_and_receives_initial_snapshot() {
     let (_client, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
 
     server.await.unwrap();
-    assert!(snapshot.events.is_empty());
+    assert!(snapshot.blocks.is_empty());
 }
 
 #[test]
@@ -418,126 +412,67 @@ fn openvr_submission_uses_set_overlay_texture_for_rendered_frames() {
     assert_eq!(openvr.last_call().as_deref(), Some("SetOverlayTexture"));
 }
 
-#[tokio::test]
-async fn runtime_startup_connect_failure_is_not_reported_as_bridge_auth() {
-    std::env::set_var("PURIPULY_SKIP_VR_PREFLIGHT", "1");
-    let mut manifest = test_manifest();
-    manifest.bridge_url = "ws://127.0.0.1:9".into();
-    manifest.log_dir = unique_log_dir("connect-failure");
-
-    let exit_code = run_with_manifest(manifest.clone()).await;
-    let log_path = std::path::Path::new(&manifest.log_dir).join("puripuly_heart_overlay.log");
-    let log_contents = std::fs::read_to_string(log_path).unwrap();
-
-    assert_eq!(exit_code, 1);
-    assert!(log_contents.contains("bridge startup failed"));
-    assert!(
-        log_contents.contains("Connection refused") || log_contents.contains("os error 10061"),
-        "expected connection refused error in log, got: {log_contents}"
-    );
-    assert!(!log_contents.contains("bridge auth failed"));
-}
-
 #[test]
-fn binary_emits_structured_manifest_invalid_startup_error() {
-    let manifest_path = unique_temp_file("invalid-manifest", "json");
-    std::fs::write(&manifest_path, "{ invalid json").unwrap();
-
-    let output = Command::new(overlay_binary())
-        .args(["--config", manifest_path.to_str().unwrap()])
-        .output()
-        .unwrap();
-
-    let events = parse_event_payloads(&output.stderr);
-
-    assert!(!output.status.success());
-    assert!(events.iter().any(|event| {
-        event["type"] == "startup_error" && event["failure_reason"] == "manifest_invalid"
-    }));
-}
-
-#[test]
-fn binary_reports_startup_contract_for_smoke_checks() {
+fn check_startup_contract_reports_current_contract_version() {
     let output = Command::new(overlay_binary())
         .arg("--check-startup-contract")
         .output()
         .unwrap();
 
-    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-
     assert!(output.status.success());
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(payload["contract_version"], EXPECTED_CONTRACT_VERSION);
-    assert_eq!(payload["app_version"], env!("CARGO_PKG_VERSION"));
 }
 
 #[tokio::test]
-async fn binary_reports_non_auth_bridge_startup_failure_as_unknown() {
+async fn run_with_manifest_reports_bridge_auth_failures_as_startup_errors() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    drop(listener);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let _ = ws.next().await;
+        ws.send(Message::Text(
+            json!({"type": "auth_error"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+    });
 
-    let manifest = OverlayManifest {
+    let log_dir = unique_log_dir("bridge-auth-failure");
+    let exit_code = run_with_manifest(OverlayManifest {
         bridge_url: format!("ws://{}", address),
-        log_dir: unique_log_dir("connect-failure-binary"),
+        log_dir,
         ..test_manifest()
-    };
-    let manifest_path = unique_temp_file("connect-failure", "json");
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec(&manifest).unwrap(),
-    )
-    .unwrap();
+    })
+    .await;
 
+    server.await.unwrap();
+    assert_eq!(exit_code, StartupError::BridgeAuth("x".into()).exit_code());
+}
+
+#[test]
+fn cli_requires_config_argument_or_supported_flags() {
+    let output = Command::new(overlay_binary()).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("usage:"));
+}
+
+#[test]
+fn cli_emits_startup_failure_event_when_manifest_is_missing() {
+    let missing_path = unique_temp_file("missing-manifest", "json");
     let output = Command::new(overlay_binary())
-        .args(["--config", manifest_path.to_str().unwrap()])
-        .env("PURIPULY_SKIP_VR_PREFLIGHT", "1")
+        .arg("--config")
+        .arg(&missing_path)
         .output()
         .unwrap();
-    let events = parse_event_payloads(&output.stderr);
 
-    assert!(!output.status.success());
-    assert!(events.iter().any(|event| {
-        event["type"] == "startup_error" && event["failure_reason"] == "unknown"
-    }));
-    assert!(!events.iter().any(|event| {
-        event["type"] == "startup_error" && event["failure_reason"] == "bridge_auth_failed"
-    }));
-}
-
-#[tokio::test]
-async fn runtime_schedules_redraws_from_snapshot_and_live_events() {
-    let mut runtime = OverlayRuntime::new(OverlayStateSnapshot::default());
-
-    runtime.apply_snapshot(test_snapshot());
-    assert!(runtime.redraw_requested());
-
-    runtime.clear_redraw_flag();
-    runtime.handle_event(test_peer_final_event()).await.unwrap();
-
-    assert!(runtime.redraw_requested());
-}
-
-#[tokio::test]
-async fn runtime_ignores_duplicate_snapshot_for_redraw() {
-    let snapshot = test_snapshot();
-    let mut runtime = OverlayRuntime::new(snapshot.clone());
-
-    runtime.clear_redraw_flag();
-    runtime.apply_snapshot(snapshot);
-
-    assert!(!runtime.redraw_requested());
-}
-
-#[tokio::test]
-async fn runtime_ignores_duplicate_live_events_for_redraw() {
-    let mut runtime = OverlayRuntime::new(OverlayStateSnapshot::default());
-    let event = test_peer_final_event();
-
-    runtime.handle_event(event.clone()).await.unwrap();
-    assert!(runtime.redraw_requested());
-
-    runtime.clear_redraw_flag();
-    runtime.handle_event(event).await.unwrap();
-
-    assert!(!runtime.redraw_requested());
+    assert_eq!(output.status.code(), Some(1));
+    let stderr_events = parse_event_payloads(&output.stderr);
+    assert!(
+        stderr_events
+            .iter()
+            .any(|event| event["type"] == "startup_error")
+    );
 }

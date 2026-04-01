@@ -4,6 +4,7 @@ import asyncio
 import logging
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -19,6 +20,8 @@ from puripuly_heart.config.settings import (
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.osc.receiver import VrcMicState
+from puripuly_heart.core.overlay.presenter import OverlayPresenter
+from puripuly_heart.core.overlay.sink import SelfTranscriptFinal
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -184,11 +187,13 @@ class FakeOverlayBridge:
     def __init__(self, *, session_token: str, initial_snapshot=None, **_kwargs) -> None:
         self.session_token = session_token
         self.initial_snapshot = initial_snapshot
+        self.current_snapshot = initial_snapshot
         self.messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
         self.url = "ws://127.0.0.1:8765"
         self.started = False
         self.stopped = False
-        self.events: list[object] = []
+        self.snapshots: list[object] = []
+        self.shutdown_calls = 0
         self.__class__.instances.append(self)
 
     async def start(self) -> None:
@@ -197,11 +202,15 @@ class FakeOverlayBridge:
     async def stop(self) -> None:
         self.stopped = True
 
-    async def emit(self, event: object) -> None:
-        self.events.append(event)
+    async def replace_snapshot(self, snapshot: object) -> None:
+        self.current_snapshot = snapshot
+        self.snapshots.append(snapshot)
+
+    async def broadcast_shutdown(self) -> None:
+        self.shutdown_calls += 1
 
     def snapshot(self):
-        return {"events": list(self.events)}
+        return self.current_snapshot
 
 
 class FakeOverlayProcessManager:
@@ -789,7 +798,7 @@ async def test_overlay_toggle_starts_and_stops_overlay_runtime(
 
     assert controller.settings.ui.overlay_enabled is True
     assert controller.overlay_state == "starting"
-    assert controller.hub.overlay_sink is bridge
+    assert controller.hub.overlay_sink is controller._overlay_presenter
     assert bridge.started is True
 
     manager.complete_startup()
@@ -829,8 +838,98 @@ async def test_overlay_toggle_off_sends_shutdown_event_before_teardown(
 
     await controller.set_overlay_enabled(False)
 
-    assert [event.type for event in bridge.events[-1:]] == ["shutdown"]
+    assert bridge.shutdown_calls == 1
     assert manager.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_overlay_restart_reuses_presenter_scene_for_new_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    presenter = controller._overlay_presenter
+    assert presenter is not None
+
+    utterance_id = uuid4()
+    await presenter.emit(
+        SelfTranscriptFinal(
+            event_id="self-final",
+            seq=1,
+            utterance_id=utterance_id,
+            channel="self",
+            created_at=10.0,
+            text="persist me",
+            source_language="ko",
+            target_language="en",
+            is_final=True,
+        )
+    )
+    saved_snapshot = presenter.snapshot()
+
+    await controller._teardown_overlay_runtime(preserve_presenter_state=True)
+
+    assert controller._overlay_presenter is presenter
+    assert controller.hub.overlay_sink is presenter
+
+    controller.overlay_state = "failed"
+    await controller._begin_overlay_start()
+    await _wait_until(lambda: len(FakeOverlayBridge.instances) == 2)
+
+    assert FakeOverlayBridge.instances[1].initial_snapshot == saved_snapshot
+    assert controller._overlay_presenter is presenter
+
+
+@pytest.mark.asyncio
+async def test_explicit_overlay_disable_resets_presenter_scene_for_next_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    presenter = controller._overlay_presenter
+    assert presenter is not None
+    await presenter.emit(
+        SelfTranscriptFinal(
+            event_id="self-final",
+            seq=1,
+            utterance_id=uuid4(),
+            channel="self",
+            created_at=10.0,
+            text="discard me",
+            source_language="ko",
+            target_language="en",
+            is_final=True,
+        )
+    )
+
+    await controller.set_overlay_enabled(False)
+
+    assert controller._overlay_presenter is None
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayBridge.instances) == 2)
+
+    assert FakeOverlayBridge.instances[1].initial_snapshot.blocks == []
 
 
 @pytest.mark.asyncio
@@ -2263,6 +2362,11 @@ def test_apply_overlay_calibration_uses_page_run_task_when_available(
     controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
     controller.settings = AppSettings()
     controller._overlay_bridge = FakeOverlayBridge(session_token="token")
+    controller._overlay_presenter = OverlayPresenter(
+        bridge=controller._overlay_bridge,
+        calibration=controller.overlay_calibration.copy(),
+        clock=controller.clock,
+    )
 
     controller.begin_overlay_calibration_for_test()
     controller.set_overlay_calibration_field_for_test("offset_x", 0.25)
@@ -2274,8 +2378,7 @@ def test_apply_overlay_calibration_uses_page_run_task_when_available(
 
     asyncio.run(page.tasks[0]())
 
-    assert controller._overlay_bridge.events[-1].type == "overlay_calibration_update"
-    assert controller._overlay_bridge.events[-1].offset_x == 0.25
+    assert controller._overlay_bridge.snapshots[-1].calibration.offset_x == 0.25
 
 
 @pytest.mark.asyncio
@@ -2292,6 +2395,11 @@ async def test_apply_overlay_calibration_persists_settings_and_emits_overlay_eve
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller._overlay_bridge = FakeOverlayBridge(session_token="token")
+    controller._overlay_presenter = OverlayPresenter(
+        bridge=controller._overlay_bridge,
+        calibration=controller.overlay_calibration.copy(),
+        clock=controller.clock,
+    )
 
     controller.begin_overlay_calibration_for_test()
     controller.set_overlay_calibration_field_for_test("distance", 1.2)
@@ -2300,4 +2408,4 @@ async def test_apply_overlay_calibration_persists_settings_and_emits_overlay_eve
 
     assert controller.settings.overlay_calibration.distance == 1.2
     assert saved == [(Path("settings.json"), controller.settings)]
-    assert controller._overlay_bridge.events[-1].type == "overlay_calibration_update"
+    assert controller._overlay_bridge.snapshots[-1].calibration.distance == 1.2
