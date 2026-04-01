@@ -420,6 +420,7 @@ fn openvr_submission_uses_set_overlay_texture_for_rendered_frames() {
 
 #[tokio::test]
 async fn runtime_startup_connect_failure_is_not_reported_as_bridge_auth() {
+    std::env::set_var("PURIPULY_SKIP_VR_PREFLIGHT", "1");
     let mut manifest = test_manifest();
     manifest.bridge_url = "ws://127.0.0.1:9".into();
     manifest.log_dir = unique_log_dir("connect-failure");
@@ -430,7 +431,10 @@ async fn runtime_startup_connect_failure_is_not_reported_as_bridge_auth() {
 
     assert_eq!(exit_code, 1);
     assert!(log_contents.contains("bridge startup failed"));
-    assert!(log_contents.contains("Connection refused"));
+    assert!(
+        log_contents.contains("Connection refused") || log_contents.contains("os error 10061"),
+        "expected connection refused error in log, got: {log_contents}"
+    );
     assert!(!log_contents.contains("bridge auth failed"));
 }
 
@@ -486,6 +490,7 @@ async fn binary_reports_non_auth_bridge_startup_failure_as_unknown() {
 
     let output = Command::new(overlay_binary())
         .args(["--config", manifest_path.to_str().unwrap()])
+        .env("PURIPULY_SKIP_VR_PREFLIGHT", "1")
         .output()
         .unwrap();
     let events = parse_event_payloads(&output.stderr);

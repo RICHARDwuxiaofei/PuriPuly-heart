@@ -157,6 +157,10 @@ fn run_startup_preflight(api: &impl OpenVrPreflightApi) -> Result<(), OpenVrStar
 }
 
 pub(crate) fn perform_startup_preflight() -> Result<(), OpenVrStartupPreflightError> {
+    if std::env::var("PURIPULY_SKIP_VR_PREFLIGHT").is_ok() {
+        return Ok(());
+    }
+
     #[cfg(windows)]
     {
         let api = WindowsOpenVrPreflightApi;
