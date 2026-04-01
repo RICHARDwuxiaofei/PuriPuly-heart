@@ -66,6 +66,7 @@
   "settings.overlay.status.stopping": "오버레이를 중지하는 중이에요",
   "settings.overlay.status.failed_with_reason": "{status}: {reason}",
   "settings.overlay.failure.missing_executable": "오버레이 실행 파일을 찾을 수 없어요",
+  "settings.overlay.failure.stale_overlay_build": "오버레이 실행 파일이 네이티브 오버레이 소스보다 오래됐어요. 오버레이 바이너리를 다시 빌드해주세요.",
   "settings.overlay.failure.spawn_failed": "오버레이 프로세스를 시작하지 못했어요",
   "settings.overlay.failure.manifest_invalid": "오버레이 실행 매니페스트가 올바르지 않아요",
   "settings.overlay.failure.contract_mismatch": "오버레이 계약 버전이 맞지 않아요",

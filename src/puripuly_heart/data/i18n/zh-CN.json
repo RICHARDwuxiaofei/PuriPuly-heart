@@ -66,6 +66,7 @@
     "settings.overlay.status.stopping": "叠加层正在停止",
     "settings.overlay.status.failed_with_reason": "{status}：{reason}",
     "settings.overlay.failure.missing_executable": "未找到叠加层可执行文件",
+    "settings.overlay.failure.stale_overlay_build": "叠加层可执行文件早于原生叠加层源码。请重新构建叠加层二进制文件。",
     "settings.overlay.failure.spawn_failed": "叠加层进程启动失败",
     "settings.overlay.failure.manifest_invalid": "叠加层启动清单无效",
     "settings.overlay.failure.contract_mismatch": "叠加层契约版本不匹配",

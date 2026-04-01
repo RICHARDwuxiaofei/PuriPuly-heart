@@ -33,6 +33,12 @@ _EXIT_CODE_TO_FAILURE_REASON = {
 }
 
 
+class OverlayPreparationError(Exception):
+    def __init__(self, failure_reason: str, message: str | None = None) -> None:
+        super().__init__(message or failure_reason)
+        self.failure_reason = failure_reason
+
+
 class OverlayManagedProcess(Protocol):
     async def next_event(self) -> dict[str, object]: ...
     async def wait(self) -> int | None: ...
@@ -139,6 +145,12 @@ class DefaultOverlayProcessRunner:
             path = self._resolve_default_executable()
         if not path.exists():
             raise FileNotFoundError(path)
+        stale_source = self._newer_local_dev_overlay_source(path)
+        if stale_source is not None:
+            raise OverlayPreparationError(
+                "stale_overlay_build",
+                f"staged overlay executable is older than overlay source: {stale_source}",
+            )
         if path.name == OVERLAY_EXECUTABLE_NAME:
             try:
                 bundled_runtime_path = self.ensure_bundled_openvr_runtime_dll(path)
@@ -197,6 +209,50 @@ class DefaultOverlayProcessRunner:
 
     def _resolve_default_executable(self) -> Path:
         return self.resolve_default_executable()
+
+    @classmethod
+    def _newer_local_dev_overlay_source(cls, executable_path: Path) -> Path | None:
+        repo_root = cls._local_dev_repo_root_for_staged_executable(executable_path)
+        if repo_root is None:
+            return None
+
+        executable_mtime = executable_path.stat().st_mtime
+        for source_path in cls._local_dev_overlay_source_paths(repo_root):
+            if source_path.stat().st_mtime > executable_mtime:
+                return source_path
+        return None
+
+    @classmethod
+    def _local_dev_repo_root_for_staged_executable(cls, executable_path: Path) -> Path | None:
+        if executable_path.name != OVERLAY_EXECUTABLE_NAME:
+            return None
+        if executable_path.parent.name != "overlay":
+            return None
+        build_dir = executable_path.parent.parent
+        if build_dir.name != "build":
+            return None
+
+        repo_root = build_dir.parent
+        source_root = repo_root / "native" / "overlay" / "src"
+        if not source_root.exists():
+            return None
+        return repo_root
+
+    @classmethod
+    def _local_dev_overlay_source_paths(cls, repo_root: Path) -> tuple[Path, ...]:
+        overlay_root = repo_root / "native" / "overlay"
+        source_paths: list[Path] = []
+        for relative_path in ("Cargo.toml", "Cargo.lock", "build.rs"):
+            candidate = overlay_root / relative_path
+            if candidate.exists():
+                source_paths.append(candidate)
+
+        source_root = overlay_root / "src"
+        if source_root.exists():
+            source_paths.extend(
+                sorted(path for path in source_root.rglob("*.rs") if path.is_file())
+            )
+        return tuple(source_paths)
 
     @classmethod
     def bundled_openvr_runtime_dll_path(cls, executable_path: Path) -> Path:
@@ -282,6 +338,8 @@ class OverlayProcessManager:
             self._manifest_path = self._write_manifest(manifest)
             self._process = await self.process_runner.spawn(executable_path, self._manifest_path)
             await self._wait_for_startup()
+        except OverlayPreparationError as error:
+            await self._fail(error.failure_reason)
         except FileNotFoundError:
             await self._fail("missing_executable")
         except ValueError:

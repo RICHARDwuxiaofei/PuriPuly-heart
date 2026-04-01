@@ -72,6 +72,7 @@ _OVERLAY_FAILURE_REASONS = frozenset(
         "contract_mismatch",
         "bridge_auth_failed",
         "startup_timeout",
+        "stale_overlay_build",
         "steamvr_not_installed",
         "steamvr_not_running",
         "hmd_not_found",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -326,6 +327,34 @@ def test_default_overlay_process_runner_uses_staged_overlay_for_local_dev_when_s
     )
 
     assert resolved == staged
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_rejects_stale_staged_overlay_build(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    staged = repo_root / "build" / "overlay" / "PuriPulyHeartOverlay.exe"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("staged", encoding="utf-8")
+
+    overlay_source = repo_root / "native" / "overlay" / "src" / "state.rs"
+    overlay_source.parent.mkdir(parents=True)
+    overlay_source.write_text("// changed overlay source", encoding="utf-8")
+
+    staged_mtime = 1_700_000_000
+    source_mtime = staged_mtime + 60
+    os.utime(staged, (staged_mtime, staged_mtime))
+    os.utime(overlay_source, (source_mtime, source_mtime))
+
+    manager = OverlayProcessManager(
+        process_runner=DefaultOverlayProcessRunner(executable_path=staged),
+    )
+
+    await manager.start()
+
+    assert manager.state == "failed"
+    assert manager.failure_reason == "stale_overlay_build"
 
 
 def test_default_overlay_process_runner_bundles_openvr_runtime_dll_next_to_overlay_executable(

@@ -66,6 +66,7 @@
   "settings.overlay.status.stopping": "Overlay is stopping",
   "settings.overlay.status.failed_with_reason": "{status}: {reason}",
   "settings.overlay.failure.missing_executable": "Overlay executable not found",
+  "settings.overlay.failure.stale_overlay_build": "Overlay executable is older than the native overlay source. Rebuild the overlay binary.",
   "settings.overlay.failure.spawn_failed": "Overlay process failed to start",
   "settings.overlay.failure.manifest_invalid": "Overlay launch manifest is invalid",
   "settings.overlay.failure.contract_mismatch": "Overlay contract version mismatch",

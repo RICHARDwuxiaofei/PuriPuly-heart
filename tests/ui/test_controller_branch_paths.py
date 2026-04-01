@@ -898,6 +898,7 @@ async def test_overlay_start_failure_keeps_saved_preferences_but_effective_state
 @pytest.mark.parametrize(
     "failure_reason",
     [
+        "stale_overlay_build",
         "steamvr_not_installed",
         "steamvr_not_running",
         "hmd_not_found",

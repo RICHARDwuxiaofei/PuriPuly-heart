@@ -414,6 +414,7 @@ def test_overlay_failure_reason_keys_are_localized(locale: str) -> None:
 
     assert bundle["settings.overlay.failure.missing_executable"]
     assert bundle["settings.overlay.failure.runtime_crashed"]
+    assert bundle["settings.overlay.failure.stale_overlay_build"]
     assert bundle["settings.overlay.failure.steamvr_not_installed"]
     assert bundle["settings.overlay.failure.steamvr_not_running"]
     assert bundle["settings.overlay.failure.hmd_not_found"]
