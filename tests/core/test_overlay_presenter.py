@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -532,3 +533,169 @@ async def test_presenter_reset_scene_clears_closed_entry_tombstones() -> None:
     assert presenter.snapshot().blocks == [presenter.snapshot().blocks[0]]
     assert presenter.snapshot().blocks[0].id == f"self:{reused_utterance_id}"
     assert presenter.snapshot().blocks[0].text == "second scene"
+
+
+@pytest.mark.asyncio
+async def test_presenter_expires_visible_finalized_entry_after_five_seconds() -> None:
+    bridge = RecordingPresentationBridge()
+    clock = FakeClock(_now=10.0)
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+        clock.advance(delay)
+        await asyncio.sleep(0)
+
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=clock,
+        sleep=fake_sleep,
+    )
+    adapter = OverlayEventAdapter(clock=clock)
+    transcript = Transcript(
+        utterance_id=uuid4(),
+        channel="self",
+        text="hello now",
+        is_final=True,
+        created_at=10.0,
+    )
+
+    await presenter.emit(
+        adapter.transcript_final(
+            transcript,
+            source_language="ko",
+            target_language="en",
+        )
+    )
+    await presenter.emit(
+        adapter.utterance_closed(
+            utterance_id=transcript.utterance_id,
+            channel="self",
+            is_final=True,
+            created_at=10.1,
+        )
+    )
+
+    assert [block.id for block in presenter.snapshot().blocks] == [
+        f"self:{transcript.utterance_id}"
+    ]
+    assert len(bridge.snapshots) == 1
+
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert sleep_calls == [5.0]
+    assert presenter.snapshot().blocks == []
+    assert len(bridge.snapshots) == 2
+    assert bridge.snapshots[-1].blocks == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_keeps_active_self_visible_when_finalized_entry_expires() -> None:
+    bridge = RecordingPresentationBridge()
+    clock = FakeClock(_now=20.0)
+
+    async def fake_sleep(delay: float) -> None:
+        clock.advance(delay)
+        await asyncio.sleep(0)
+
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=clock,
+        sleep=fake_sleep,
+    )
+    adapter = OverlayEventAdapter(clock=clock)
+    transcript = Transcript(
+        utterance_id=uuid4(),
+        channel="self",
+        text="final line",
+        is_final=True,
+        created_at=20.0,
+    )
+
+    await presenter.emit(
+        adapter.transcript_final(
+            transcript,
+            source_language="ko",
+            target_language="en",
+        )
+    )
+    await presenter.emit(
+        adapter.utterance_closed(
+            utterance_id=transcript.utterance_id,
+            channel="self",
+            is_final=True,
+            created_at=20.1,
+        )
+    )
+    await presenter.emit(
+        SelfActiveUpdate(
+            event_id="self-active",
+            seq=999,
+            utterance_id=None,
+            channel="self",
+            created_at=20.2,
+            text="live self",
+        )
+    )
+
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert [block.id for block in presenter.snapshot().blocks] == ["self:active"]
+    assert presenter.snapshot().blocks[0].text == "live self"
+
+
+@pytest.mark.asyncio
+async def test_presenter_keeps_active_self_in_addition_to_two_finalized_turns() -> None:
+    bridge = RecordingPresentationBridge()
+    clock = FakeClock(_now=30.0)
+    adapter = OverlayEventAdapter(clock=clock)
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=clock,
+    )
+    utterance_ids = [uuid4(), uuid4()]
+
+    for index, utterance_id in enumerate(utterance_ids, start=1):
+        await presenter.emit(
+            adapter.transcript_final(
+                Transcript(
+                    utterance_id=utterance_id,
+                    channel="self",
+                    text=f"final {index}",
+                    is_final=True,
+                    created_at=30.0 + index,
+                ),
+                source_language="ko",
+                target_language="en",
+            )
+        )
+        await presenter.emit(
+            adapter.utterance_closed(
+                utterance_id=utterance_id,
+                channel="self",
+                is_final=True,
+                created_at=30.1 + index,
+            )
+        )
+
+    await presenter.emit(
+        SelfActiveUpdate(
+            event_id="active-now",
+            seq=999,
+            utterance_id=None,
+            channel="self",
+            created_at=35.0,
+            text="live self",
+        )
+    )
+
+    assert [block.id for block in presenter.snapshot().blocks] == [
+        f"self:{utterance_ids[0]}",
+        f"self:{utterance_ids[1]}",
+        "self:active",
+    ]

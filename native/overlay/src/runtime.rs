@@ -17,9 +17,14 @@ use crate::openvr::OpenVrError;
 use crate::renderer::{
     CaptionBlock, CaptionChannel, CaptionPresentation, CaptionRenderer,
 };
-use crate::state::{OverlayPresentationSnapshot, OverlayState};
+use crate::state::{OverlayPresentationSnapshot, OverlayState, OverlayStrip, OverlayStripLifecycle};
 
 const EMPTY_OVERLAY_HIDE_DELAY: Duration = Duration::from_millis(500);
+const FALLBACK_REFRESH_RATE_HZ: f32 = 90.0;
+const ANIMATION_SAMPLE_RATE_72_HZ: u32 = 36;
+const ANIMATION_SAMPLE_RATE_DEFAULT_HZ: u32 = 45;
+const ENTER_SLIDE_OFFSET_PX: f32 = 24.0;
+const REFLOW_STEP_PX: f32 = 120.0;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StartupError {
@@ -103,6 +108,9 @@ pub struct OverlayRuntime {
     state: OverlayState,
     redraw_requested: bool,
     hide_deadline: Option<Instant>,
+    animation_deadline: Option<Instant>,
+    last_animation_tick: Option<Instant>,
+    refresh_rate_hz: Option<f32>,
 }
 
 impl OverlayRuntime {
@@ -115,6 +123,9 @@ impl OverlayRuntime {
             state: OverlayState::default(),
             redraw_requested: false,
             hide_deadline: None,
+            animation_deadline: None,
+            last_animation_tick: None,
+            refresh_rate_hz: None,
         };
         runtime.apply_snapshot(snapshot);
         runtime
@@ -146,6 +157,7 @@ impl OverlayRuntime {
         if self.state.apply_snapshot(&snapshot) {
             self.redraw_requested = true;
         }
+        self.sync_animation_schedule(Instant::now());
     }
 
     pub fn redraw_requested(&self) -> bool {
@@ -154,6 +166,22 @@ impl OverlayRuntime {
 
     pub fn clear_redraw_flag(&mut self) {
         self.redraw_requested = false;
+    }
+
+    pub fn set_refresh_rate_for_test(&mut self, refresh_rate_hz: Option<f32>) {
+        self.refresh_rate_hz = refresh_rate_hz;
+    }
+
+    pub fn animation_interval_for_test(&self) -> Duration {
+        self.animation_interval()
+    }
+
+    pub fn advance_animation_for_test(&mut self, delta: Duration) {
+        let changed = self
+            .state
+            .sample_animations(delta.as_secs_f32(), self.animation_sample_rate_hz());
+        self.redraw_requested = changed;
+        self.sync_animation_schedule(Instant::now());
     }
 
     pub async fn handle_event(&mut self, event: OverlayBridgeEvent) -> Result<(), RuntimeFailure> {
@@ -209,6 +237,9 @@ impl OverlayRuntime {
         renderer.set_presentation(CaptionPresentation {
             background_alpha: self.state.calibration().background_alpha,
         });
+        if self.refresh_rate_hz.is_none() {
+            self.refresh_rate_hz = openvr.display_refresh_rate_hz();
+        }
         openvr
             .apply_calibration(self.state.calibration())
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
@@ -239,6 +270,7 @@ impl OverlayRuntime {
             self.overlay_visible = true;
         }
         self.redraw_requested = false;
+        self.sync_animation_schedule(Instant::now());
 
         if !self.first_texture_submitted {
             logger
@@ -260,25 +292,24 @@ impl OverlayRuntime {
         logger: &OverlayLogger,
     ) -> Result<(), RuntimeFailure> {
         loop {
-            if let Some(deadline) = self.hide_deadline {
-                tokio::select! {
-                    _ = sleep_until(deadline) => {
-                        self.handle_hide_deadline(openvr).await?;
-                    }
-                    message = bridge.next_message() => {
-                        if !self
-                            .handle_bridge_message(message, renderer, openvr, bridge, logger)
-                            .await?
-                        {
-                            return Ok(());
-                        }
+            let hide_deadline = self.hide_deadline;
+            let animation_deadline = self.animation_deadline;
+
+            tokio::select! {
+                _ = sleep_until(hide_deadline.unwrap_or_else(Instant::now)), if hide_deadline.is_some() => {
+                    self.handle_hide_deadline(openvr).await?;
+                }
+                _ = sleep_until(animation_deadline.unwrap_or_else(Instant::now)), if animation_deadline.is_some() => {
+                    self.handle_animation_deadline(renderer, openvr, bridge, logger).await?;
+                }
+                message = bridge.next_message() => {
+                    if !self
+                        .handle_bridge_message(message, renderer, openvr, bridge, logger)
+                        .await?
+                    {
+                        return Ok(());
                     }
                 }
-            } else if !self
-                .handle_bridge_message(bridge.next_message().await, renderer, openvr, bridge, logger)
-                .await?
-            {
-                return Ok(());
             }
         }
     }
@@ -342,11 +373,50 @@ impl OverlayRuntime {
         Ok(())
     }
 
+    async fn handle_animation_deadline<S: OverlayFrameSubmitter>(
+        &mut self,
+        renderer: &CaptionRenderer,
+        openvr: &mut S,
+        bridge: &mut BridgeClient,
+        logger: &OverlayLogger,
+    ) -> Result<(), RuntimeFailure> {
+        let now = Instant::now();
+        let delta = now
+            .saturating_duration_since(self.last_animation_tick.unwrap_or(now))
+            .as_secs_f32();
+        self.last_animation_tick = Some(now);
+        let changed = self
+            .state
+            .sample_animations(delta, self.animation_sample_rate_hz());
+        self.redraw_requested = changed;
+        self.sync_animation_schedule(now);
+        self.submit_frame_if_needed(renderer, openvr, bridge, logger).await
+    }
+
     fn has_drawable_text(&self) -> bool {
-        self.state
-            .blocks()
-            .iter()
-            .any(|block| !block.text.trim().is_empty())
+        self.caption_blocks().iter().any(|block| !block.text.trim().is_empty())
+    }
+
+    fn animation_sample_rate_hz(&self) -> u32 {
+        match self.refresh_rate_hz.unwrap_or(FALLBACK_REFRESH_RATE_HZ) {
+            hz if (hz - 72.0).abs() < 1.0 => ANIMATION_SAMPLE_RATE_72_HZ,
+            _ => ANIMATION_SAMPLE_RATE_DEFAULT_HZ,
+        }
+    }
+
+    fn animation_interval(&self) -> Duration {
+        Duration::from_secs_f32(1.0 / self.animation_sample_rate_hz() as f32)
+    }
+
+    fn sync_animation_schedule(&mut self, now: Instant) {
+        if self.state.has_active_animation() {
+            self.last_animation_tick.get_or_insert(now);
+            self.animation_deadline = Some(now + self.animation_interval());
+            return;
+        }
+
+        self.animation_deadline = None;
+        self.last_animation_tick = None;
     }
 }
 
@@ -548,17 +618,41 @@ fn create_runtime_renderer() -> Result<CaptionRenderer, crate::renderer::Caption
 impl OverlayRuntime {
     pub fn caption_blocks(&self) -> Vec<CaptionBlock> {
         self.state
-            .blocks()
+            .scene()
+            .strips()
             .iter()
-            .map(|block| {
-                let channel = if block.channel == "peer" {
+            .map(|strip| {
+                let channel = if strip.channel == "peer" {
                     CaptionChannel::PeerChannel
                 } else {
                     CaptionChannel::SelfChannel
                 };
-                CaptionBlock::new(block.id.clone(), block.text.clone()).with_channel(channel)
+                let (opacity, offset_y_px, height_scale) = strip_visual_state(strip);
+                CaptionBlock::new(strip.id.clone(), strip.text.clone())
+                    .with_channel(channel)
+                    .with_visual_state(opacity, offset_y_px, height_scale)
             })
             .collect()
+    }
+}
+
+fn strip_visual_state(strip: &OverlayStrip) -> (f32, f32, f32) {
+    let reflow_progress = strip.reflow_progress.clamp(0.0, 1.0);
+    let reflow_offset =
+        (strip.previous_order as f32 - strip.order as f32) * REFLOW_STEP_PX * (1.0 - reflow_progress);
+
+    match strip.lifecycle {
+        OverlayStripLifecycle::Entering => (
+            strip.enter_progress.clamp(0.0, 1.0),
+            ENTER_SLIDE_OFFSET_PX * (1.0 - strip.enter_progress.clamp(0.0, 1.0)) + reflow_offset,
+            1.0,
+        ),
+        OverlayStripLifecycle::Stable => (1.0, reflow_offset, 1.0),
+        OverlayStripLifecycle::Exiting => (
+            (1.0 - strip.exit_progress).clamp(0.0, 1.0),
+            reflow_offset,
+            (1.0 - strip.exit_progress * 0.45).clamp(0.45, 1.0),
+        ),
     }
 }
 

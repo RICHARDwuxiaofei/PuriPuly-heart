@@ -347,6 +347,77 @@ async fn runtime_caption_blocks_keep_channel_metadata_for_color_only_rendering()
     assert_eq!(channels.get("peer:2"), Some(&Some(CaptionChannel::PeerChannel)));
 }
 
+#[test]
+fn runtime_uses_half_refresh_animation_sampling() {
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
+
+    runtime.set_refresh_rate_for_test(Some(72.0));
+    assert_eq!(
+        runtime.animation_interval_for_test(),
+        Duration::from_secs_f32(1.0 / 36.0)
+    );
+
+    runtime.set_refresh_rate_for_test(Some(90.0));
+    assert_eq!(
+        runtime.animation_interval_for_test(),
+        Duration::from_secs_f32(1.0 / 45.0)
+    );
+
+    runtime.set_refresh_rate_for_test(None);
+    assert_eq!(
+        runtime.animation_interval_for_test(),
+        Duration::from_secs_f32(1.0 / 45.0)
+    );
+}
+
+#[test]
+fn runtime_keeps_missing_snapshot_blocks_visible_until_exit_animation_finishes() {
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![block("self:1", "self", "hello")],
+    });
+
+    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
+    runtime.clear_redraw_flag();
+    runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 2,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![],
+    });
+
+    assert_eq!(runtime.caption_blocks().len(), 1);
+    assert_eq!(runtime.caption_blocks()[0].id, "self:1");
+
+    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
+
+    assert!(runtime.caption_blocks().is_empty());
+}
+
+#[test]
+fn runtime_requests_redraws_while_animation_is_active_and_stops_when_scene_is_idle() {
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![block("self:1", "self", "hello")],
+    });
+
+    assert!(runtime.redraw_requested());
+    runtime.clear_redraw_flag();
+    assert!(!runtime.redraw_requested());
+
+    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0 / 45.0));
+    assert!(runtime.redraw_requested());
+
+    runtime.clear_redraw_flag();
+    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
+    assert!(runtime.redraw_requested());
+
+    runtime.clear_redraw_flag();
+    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
+    assert!(!runtime.redraw_requested());
+}
+
 #[tokio::test]
 async fn runtime_does_not_emit_overlay_ready_when_first_texture_submit_fails() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
@@ -707,7 +778,7 @@ async fn runtime_submits_text_frame_before_revealing_overlay_after_idle_hide() {
         .rposition(|operation| *operation == "hide")
         .expect("expected idle hide before reveal");
     assert_eq!(
-        &submitter.operations[hide_index + 1..],
+        &submitter.operations[hide_index + 1..hide_index + 3],
         &["submit:text", "show"]
     );
 }

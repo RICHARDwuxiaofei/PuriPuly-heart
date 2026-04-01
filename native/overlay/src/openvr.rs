@@ -180,6 +180,10 @@ pub trait OverlayTextureSubmitter {
 pub trait OverlayFrameSubmitter {
     fn submit_frame(&mut self, frame: &RenderedFrame) -> Result<(), OpenVrError>;
 
+    fn display_refresh_rate_hz(&self) -> Option<f32> {
+        None
+    }
+
     fn apply_calibration(&mut self, _calibration: &OverlayCalibration) -> Result<(), OpenVrError> {
         Ok(())
     }
@@ -233,6 +237,10 @@ impl OpenVrOverlay {
 impl OverlayFrameSubmitter for OpenVrOverlay {
     fn submit_frame(&mut self, frame: &RenderedFrame) -> Result<(), OpenVrError> {
         self.backend.submit_frame(frame)
+    }
+
+    fn display_refresh_rate_hz(&self) -> Option<f32> {
+        self.backend.display_refresh_rate_hz()
     }
 
     fn apply_calibration(&mut self, calibration: &OverlayCalibration) -> Result<(), OpenVrError> {
@@ -332,11 +340,20 @@ impl OpenVrBackend {
             Self::Test(openvr) => openvr.set_overlay_visible(visible),
         }
     }
+
+    fn display_refresh_rate_hz(&self) -> Option<f32> {
+        match self {
+            #[cfg(windows)]
+            Self::Windows(openvr) => openvr.display_refresh_rate_hz(),
+            Self::Test(_) => None,
+        }
+    }
 }
 
 #[cfg(windows)]
 struct WindowsOpenVrOverlay {
     overlay_api: *mut openvr_sys::VR_IVROverlay_FnTable,
+    system_api: *mut openvr_sys::VR_IVRSystem_FnTable,
     overlay_handle: openvr_sys::VROverlayHandle_t,
     placement_policy: OverlayPlacementPolicy,
     visible: bool,
@@ -346,10 +363,12 @@ struct WindowsOpenVrOverlay {
 impl WindowsOpenVrOverlay {
     fn new(overlay_instance_id: &str) -> Result<Self, OpenVrError> {
         let overlay_api = initialize_overlay_api()?;
+        let system_api = initialize_system_api()?;
         let overlay_handle = create_overlay_handle(overlay_api, overlay_instance_id)?;
 
         let instance = Self {
             overlay_api,
+            system_api,
             overlay_handle,
             placement_policy: OverlayPlacementPolicy::default(),
             visible: false,
@@ -410,6 +429,10 @@ impl WindowsOpenVrOverlay {
         unsafe { &*self.overlay_api }
     }
 
+    fn system_api(&self) -> &openvr_sys::VR_IVRSystem_FnTable {
+        unsafe { &*self.system_api }
+    }
+
     fn apply_calibration(&mut self, calibration: &OverlayCalibration) -> Result<(), OpenVrError> {
         self.placement_policy = OverlayPlacementPolicy::from_calibration(calibration);
         self.placement_policy
@@ -427,6 +450,25 @@ impl WindowsOpenVrOverlay {
         }
         self.visible = visible;
         Ok(())
+    }
+
+    fn display_refresh_rate_hz(&self) -> Option<f32> {
+        const PROP_DISPLAY_FREQUENCY_FLOAT: openvr_sys::ETrackedDeviceProperty = 2002;
+
+        let get_float = self.system_api().GetFloatTrackedDeviceProperty?;
+        let mut error = 0;
+        let refresh_rate_hz = unsafe {
+            get_float(
+                openvr_sys::k_unTrackedDeviceIndex_Hmd,
+                PROP_DISPLAY_FREQUENCY_FLOAT,
+                &mut error,
+            )
+        };
+        if error == 0 && refresh_rate_hz.is_finite() && refresh_rate_hz > 0.0 {
+            Some(refresh_rate_hz)
+        } else {
+            None
+        }
     }
 }
 
@@ -516,6 +558,26 @@ fn initialize_overlay_api() -> Result<*mut openvr_sys::VR_IVROverlay_FnTable, Op
     }
 
     Ok(overlay_api as *mut openvr_sys::VR_IVROverlay_FnTable)
+}
+
+#[cfg(windows)]
+fn initialize_system_api() -> Result<*mut openvr_sys::VR_IVRSystem_FnTable, OpenVrError> {
+    let system_interface_version = fn_table_interface_version(openvr_sys::IVRSystem_Version)?;
+    let mut interface_error = openvr_sys::EVRInitError_VRInitError_None;
+    let system_api = unsafe {
+        openvr_sys::VR_GetGenericInterface(system_interface_version.as_ptr(), &mut interface_error)
+    };
+    if interface_error != openvr_sys::EVRInitError_VRInitError_None || system_api == 0 {
+        unsafe {
+            openvr_sys::VR_ShutdownInternal();
+        }
+        return Err(OpenVrError::Init(format!(
+            "VR_GetGenericInterface failed: {}",
+            vr_init_error_name(interface_error)
+        )));
+    }
+
+    Ok(system_api as *mut openvr_sys::VR_IVRSystem_FnTable)
 }
 
 #[cfg(any(windows, test))]

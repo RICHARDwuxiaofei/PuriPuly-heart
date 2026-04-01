@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 from uuid import UUID
@@ -28,6 +30,8 @@ from .sink import (
 VISIBLE_WINDOW_TARGET_BLOCKS = 2
 _ACTIVE_SELF_BLOCK_ID = "self:active"
 _CLOSED_TOMBSTONE_LIMIT = 64
+FINALIZED_TTL_SECONDS = 5.0
+SleepFn = Callable[[float], Awaitable[None]]
 
 
 class OverlayPresentationTransport(Protocol):
@@ -44,6 +48,7 @@ class _LogicalCaptionEntry:
     translation_text: str = ""
     last_updated_seq: int = 0
     closed_seq: int | None = None
+    closed_at: float | None = None
 
     @property
     def block_id(self) -> str:
@@ -69,6 +74,7 @@ class OverlayPresenter(OverlaySink):
     calibration: OverlayCalibration
     bridge: OverlayPresentationTransport | None = None
     clock: Clock = field(default_factory=SystemClock)
+    sleep: SleepFn = asyncio.sleep
     visible_window_target_blocks: int = VISIBLE_WINDOW_TARGET_BLOCKS
 
     _entries: dict[tuple[str, UUID], _LogicalCaptionEntry] = field(
@@ -80,6 +86,10 @@ class OverlayPresenter(OverlaySink):
         default_factory=OrderedDict,
     )
     _active_self: _ActiveSelfEntry | None = field(init=False, default=None)
+    _expiration_tasks: dict[tuple[str, UUID], asyncio.Task[None]] = field(
+        init=False,
+        default_factory=dict,
+    )
     _revision: int = field(init=False, default=0)
     _snapshot: OverlayPresentationSnapshot = field(init=False)
 
@@ -100,6 +110,7 @@ class OverlayPresenter(OverlaySink):
         return self._snapshot
 
     def reset_scene(self) -> None:
+        self._cancel_all_expiration_tasks()
         self._entries.clear()
         self._closed_tombstones.clear()
         self._active_self = None
@@ -148,6 +159,7 @@ class OverlayPresenter(OverlaySink):
         if isinstance(event, (SelfTranscriptFinal, PeerTranscriptFinal)):
             if self._is_tombstoned(event.channel, event.utterance_id):
                 return False
+            key = self._entry_key(event.channel, event.utterance_id)
             entry = self._entry_for(event.channel, event.utterance_id)
             if event.seq < entry.last_updated_seq:
                 return False
@@ -155,12 +167,13 @@ class OverlayPresenter(OverlaySink):
                 return False
             entry.original_text = event.text
             entry.last_updated_seq = event.seq
-            entry.closed_seq = None
+            self._reopen_entry(key, entry)
             return True
 
         if isinstance(event, (TranslationStreamUpdate, TranslationFinal)):
             if self._is_tombstoned(event.channel, event.utterance_id):
                 return False
+            key = self._entry_key(event.channel, event.utterance_id)
             entry = self._entry_for(event.channel, event.utterance_id)
             if event.seq < entry.last_updated_seq:
                 return False
@@ -168,7 +181,7 @@ class OverlayPresenter(OverlaySink):
                 return False
             entry.translation_text = event.text
             entry.last_updated_seq = event.seq
-            entry.closed_seq = None
+            self._reopen_entry(key, entry)
             return True
 
         if isinstance(event, UtteranceClosed):
@@ -183,7 +196,9 @@ class OverlayPresenter(OverlaySink):
             if entry.closed_seq == event.seq:
                 return False
             entry.closed_seq = event.seq
+            entry.closed_at = self.clock.now()
             entry.last_updated_seq = event.seq
+            self._schedule_expiration(key, entry)
             return True
 
         return False
@@ -207,6 +222,7 @@ class OverlayPresenter(OverlaySink):
         return self._entry_key(channel, utterance_id) in self._closed_tombstones
 
     async def _publish_if_changed(self) -> None:
+        self._expire_closed_entries(now=self.clock.now())
         next_blocks = self._visible_blocks()
         next_calibration = _calibration_from_overlay(self.calibration)
         if next_blocks == self._snapshot.blocks and next_calibration == self._snapshot.calibration:
@@ -222,7 +238,8 @@ class OverlayPresenter(OverlaySink):
             await self.bridge.replace_snapshot(self._snapshot)
 
     def _visible_blocks(self) -> list[OverlayPresentationBlock]:
-        candidates: list[tuple[int, str, tuple[str, UUID] | None, OverlayPresentationBlock]] = []
+        self._expire_closed_entries(now=self.clock.now())
+        candidates: list[tuple[int, str, tuple[str, UUID], OverlayPresentationBlock]] = []
 
         for key, entry in self._entries.items():
             text = entry.composed_text()
@@ -241,25 +258,20 @@ class OverlayPresenter(OverlaySink):
                 )
             )
 
-        if self._active_self is not None and self._active_self.text:
-            candidates.append(
-                (
-                    self._active_self.last_updated_seq,
-                    _ACTIVE_SELF_BLOCK_ID,
-                    None,
-                    OverlayPresentationBlock(
-                        id=_ACTIVE_SELF_BLOCK_ID,
-                        channel="self",
-                        text=self._active_self.composed_text(),
-                    ),
-                )
-            )
-
         candidates.sort(key=lambda item: (item[0], item[1]))
         selected = candidates[-self.visible_window_target_blocks :]
-        visible_entry_keys = {key for _, _, key, _ in selected if key is not None}
+        visible_entry_keys = {key for _, _, key, _ in selected}
         self._prune_closed_invisible_entries(visible_entry_keys)
-        return [block for _, _, _, block in selected]
+        blocks = [block for _, _, _, block in selected]
+        if self._active_self is not None and self._active_self.text:
+            blocks.append(
+                OverlayPresentationBlock(
+                    id=_ACTIVE_SELF_BLOCK_ID,
+                    channel="self",
+                    text=self._active_self.composed_text(),
+                )
+            )
+        return blocks
 
     def _prune_closed_invisible_entries(self, visible_entry_keys: set[tuple[str, UUID]]) -> None:
         stale_keys = [
@@ -268,16 +280,91 @@ class OverlayPresenter(OverlaySink):
             if entry.closed_seq is not None and key not in visible_entry_keys
         ]
         for key in stale_keys:
-            closed_seq = self._entries[key].closed_seq
-            del self._entries[key]
-            if closed_seq is not None:
-                self._remember_tombstone(key, closed_seq)
+            self._remove_entry(key)
 
     def _remember_tombstone(self, key: tuple[str, UUID], closed_seq: int) -> None:
         self._closed_tombstones.pop(key, None)
         self._closed_tombstones[key] = closed_seq
         while len(self._closed_tombstones) > _CLOSED_TOMBSTONE_LIMIT:
             self._closed_tombstones.popitem(last=False)
+
+    def _reopen_entry(self, key: tuple[str, UUID], entry: _LogicalCaptionEntry) -> None:
+        entry.closed_seq = None
+        entry.closed_at = None
+        self._cancel_expiration_task(key)
+
+    def _schedule_expiration(
+        self,
+        key: tuple[str, UUID],
+        entry: _LogicalCaptionEntry,
+    ) -> None:
+        self._cancel_expiration_task(key)
+        if entry.closed_seq is None:
+            return
+        self._expiration_tasks[key] = asyncio.create_task(
+            self._expire_entry_after_ttl(key, entry.closed_seq)
+        )
+
+    async def _expire_entry_after_ttl(self, key: tuple[str, UUID], closed_seq: int) -> None:
+        try:
+            while True:
+                entry = self._entries.get(key)
+                if entry is None or entry.closed_seq != closed_seq or entry.closed_at is None:
+                    return
+
+                remaining = FINALIZED_TTL_SECONDS - (self.clock.now() - entry.closed_at)
+                if remaining > 0:
+                    await self.sleep(remaining)
+                    continue
+
+                self._remove_entry(key, current_task=self._current_task())
+                await self._publish_if_changed()
+                return
+        except asyncio.CancelledError:
+            raise
+        finally:
+            current_task = self._current_task()
+            if current_task is not None and self._expiration_tasks.get(key) is current_task:
+                self._expiration_tasks.pop(key, None)
+
+    def _expire_closed_entries(self, *, now: float) -> None:
+        expired_keys = [
+            key
+            for key, entry in self._entries.items()
+            if entry.closed_at is not None and now - entry.closed_at >= FINALIZED_TTL_SECONDS
+        ]
+        current_task = self._current_task()
+        for key in expired_keys:
+            self._remove_entry(key, current_task=current_task)
+
+    def _remove_entry(
+        self,
+        key: tuple[str, UUID],
+        *,
+        current_task: asyncio.Task[None] | None = None,
+    ) -> None:
+        if self._expiration_tasks.get(key) is not current_task:
+            self._cancel_expiration_task(key)
+        entry = self._entries.pop(key, None)
+        if entry is not None and entry.closed_seq is not None:
+            self._remember_tombstone(key, entry.closed_seq)
+
+    def _cancel_expiration_task(self, key: tuple[str, UUID]) -> None:
+        task = self._expiration_tasks.pop(key, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _cancel_all_expiration_tasks(self) -> None:
+        for task in self._expiration_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._expiration_tasks.clear()
+
+    def _current_task(self) -> asyncio.Task[None] | None:
+        try:
+            return asyncio.current_task()
+        except RuntimeError:
+            return None
 
 
 def _calibration_from_overlay(

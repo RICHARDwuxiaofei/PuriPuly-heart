@@ -1,5 +1,6 @@
 use puripuly_heart_overlay::{
-    CaptionBlock, CaptionChannel, CaptionLayoutPolicy, CaptionRenderer, OverlayPlacementPolicy,
+    BlockBounds, CaptionBlock, CaptionChannel, CaptionLayoutPolicy, CaptionRenderer, DamageBand,
+    OverlayPlacementPolicy,
 };
 
 fn test_block(text: &str) -> CaptionBlock {
@@ -115,6 +116,52 @@ fn renderer_overflow_drops_oldest_block_before_truncating_newest_content() {
             .find(|block| block.id == "new")
             .is_some_and(|block| !block.lines.is_empty())
     );
+}
+
+#[test]
+fn renderer_wraps_by_measured_width_and_keeps_lines_inside_strip_width() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.layout_blocks(
+        vec![CaptionBlock::new(
+            "new",
+            "measured width wrapping should stay inside the strip bounds for every rendered line",
+        )],
+        1600,
+        900,
+    );
+
+    let block = &result.visible_blocks[0];
+    assert!(block.lines.len() > 1);
+    assert!(
+        block
+            .line_metrics
+            .iter()
+            .all(|line| line.width_px <= block.content_width_px + f32::EPSILON)
+    );
+}
+
+#[test]
+fn renderer_centers_each_line_within_strip_bounds() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.layout_blocks(vec![CaptionBlock::new("new", "center me")], 1600, 900);
+
+    let block = &result.visible_blocks[0];
+    let line = &block.line_metrics[0];
+    let line_center_x = line.origin_x + line.width_px * 0.5;
+
+    assert!((line_center_x - block.bounds.center_x()).abs() < 1.0);
+}
+
+#[test]
+fn renderer_damage_band_covers_old_and_new_strip_bounds() {
+    let damage = DamageBand::from_bounds([
+        BlockBounds::new(0.0, 100.0, 1000.0, 260.0),
+        BlockBounds::new(0.0, 180.0, 1000.0, 340.0),
+    ])
+    .unwrap();
+
+    assert_eq!(damage.top_px, 100.0);
+    assert_eq!(damage.bottom_px, 340.0);
 }
 
 #[test]
