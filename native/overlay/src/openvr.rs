@@ -183,6 +183,10 @@ pub trait OverlayFrameSubmitter {
     fn apply_calibration(&mut self, _calibration: &OverlayCalibration) -> Result<(), OpenVrError> {
         Ok(())
     }
+
+    fn set_overlay_visible(&mut self, _visible: bool) -> Result<(), OpenVrError> {
+        Ok(())
+    }
 }
 
 pub fn submit_texture<T: OverlayTextureSubmitter>(
@@ -233,6 +237,10 @@ impl OverlayFrameSubmitter for OpenVrOverlay {
 
     fn apply_calibration(&mut self, calibration: &OverlayCalibration) -> Result<(), OpenVrError> {
         self.backend.apply_calibration(calibration)
+    }
+
+    fn set_overlay_visible(&mut self, visible: bool) -> Result<(), OpenVrError> {
+        self.backend.set_overlay_visible(visible)
     }
 }
 
@@ -316,6 +324,14 @@ impl OpenVrBackend {
             Self::Test(_) => Ok(()),
         }
     }
+
+    fn set_overlay_visible(&mut self, visible: bool) -> Result<(), OpenVrError> {
+        match self {
+            #[cfg(windows)]
+            Self::Windows(openvr) => openvr.set_overlay_visible(visible),
+            Self::Test(openvr) => openvr.set_overlay_visible(visible),
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -343,12 +359,7 @@ impl WindowsOpenVrOverlay {
     }
 
     fn submit_frame(&mut self, frame: &RenderedFrame) -> Result<(), OpenVrError> {
-        submit_texture(self, frame)?;
-        if !self.visible {
-            self.show_overlay()?;
-            self.visible = true;
-        }
-        Ok(())
+        submit_texture(self, frame)
     }
 
     fn configure_overlay(&self) -> Result<(), OpenVrError> {
@@ -386,6 +397,15 @@ impl WindowsOpenVrOverlay {
         map_overlay_init_error(self.overlay_api(), "ShowOverlay", error)
     }
 
+    fn hide_overlay(&self) -> Result<(), OpenVrError> {
+        let hide_overlay = self
+            .overlay_api()
+            .HideOverlay
+            .ok_or_else(missing_overlay_method("HideOverlay"))?;
+        let error = unsafe { hide_overlay(self.overlay_handle) };
+        map_overlay_init_error(self.overlay_api(), "HideOverlay", error)
+    }
+
     fn overlay_api(&self) -> &openvr_sys::VR_IVROverlay_FnTable {
         unsafe { &*self.overlay_api }
     }
@@ -394,6 +414,19 @@ impl WindowsOpenVrOverlay {
         self.placement_policy = OverlayPlacementPolicy::from_calibration(calibration);
         self.placement_policy
             .apply(self.overlay_api(), self.overlay_handle)
+    }
+
+    fn set_overlay_visible(&mut self, visible: bool) -> Result<(), OpenVrError> {
+        if self.visible == visible {
+            return Ok(());
+        }
+        if visible {
+            self.show_overlay()?;
+        } else {
+            self.hide_overlay()?;
+        }
+        self.visible = visible;
+        Ok(())
     }
 }
 
@@ -411,6 +444,23 @@ impl OverlayTextureSubmitter for WindowsOpenVrOverlay {
         };
         let error = unsafe { method(self.overlay_handle, &mut descriptor) };
         map_overlay_submit_error(self.overlay_api(), "SetOverlayTexture", error)
+    }
+}
+
+impl OverlayFrameSubmitter for FakeOpenVr {
+    fn submit_frame(&mut self, frame: &RenderedFrame) -> Result<(), OpenVrError> {
+        submit_texture(self, frame)
+    }
+
+    fn set_overlay_visible(&mut self, visible: bool) -> Result<(), OpenVrError> {
+        self.last_call.replace(Some(
+            if visible {
+                "ShowOverlay".to_string()
+            } else {
+                "HideOverlay".to_string()
+            },
+        ));
+        Ok(())
     }
 }
 

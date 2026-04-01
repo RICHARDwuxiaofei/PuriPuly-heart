@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
 #[cfg(windows)]
+use std::collections::HashMap;
+#[cfg(windows)]
 use std::mem::ManuallyDrop;
 
 use thiserror::Error;
@@ -501,11 +503,18 @@ struct WindowsCaptionRenderer {
     d2d_context: ID2D1DeviceContext,
     self_text_brush: ID2D1SolidColorBrush,
     peer_text_brush: ID2D1SolidColorBrush,
-    background_brush: ID2D1SolidColorBrush,
     target_bitmap: ID2D1Bitmap1,
     texture: ID3D11Texture2D,
+    text_format_cache: HashMap<TextScriptBucket, IDWriteTextFormat>,
     _d3d_device: ID3D11Device,
     d3d_context: ID3D11DeviceContext,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TextScriptBucket {
+    Latin,
+    Cjk,
 }
 
 #[cfg(windows)]
@@ -564,29 +573,15 @@ impl WindowsCaptionRenderer {
                 )
                 .map_err(|error| CaptionRenderError::Init(error.to_string()))?
         };
-        let background_brush = unsafe {
-            d2d_context
-                .CreateSolidColorBrush(
-                    &D2D1_COLOR_F {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 0.95,
-                    },
-                    None,
-                )
-                .map_err(|error| CaptionRenderError::Init(error.to_string()))?
-        };
-
         Ok(Self {
             dwrite_factory,
             system_font_collection,
             d2d_context,
             self_text_brush,
             peer_text_brush,
-            background_brush,
             target_bitmap,
             texture,
+            text_format_cache: HashMap::new(),
             _d3d_device: device,
             d3d_context: context,
         })
@@ -598,6 +593,11 @@ impl WindowsCaptionRenderer {
         presentation: &CaptionPresentation,
         layout: CaptionLayoutResult,
     ) -> Result<RenderedFrame, CaptionRenderError> {
+        let clear_alpha = if layout_has_drawable_text(&layout) {
+            presentation.background_alpha
+        } else {
+            0.0
+        };
         unsafe {
             self.d2d_context.SetTarget(&self.target_bitmap);
             self.d2d_context.BeginDraw();
@@ -605,26 +605,8 @@ impl WindowsCaptionRenderer {
                 r: 0.0,
                 g: 0.0,
                 b: 0.0,
-                a: 0.0,
+                a: clear_alpha,
             }));
-        }
-
-        if layout_has_drawable_text(&layout) && presentation.background_alpha > 0.0 {
-            let rect = D2D_RECT_F {
-                left: 0.0,
-                top: 0.0,
-                right: layout.surface_width_px as f32,
-                bottom: layout.surface_height_px as f32,
-            };
-            unsafe {
-                self.background_brush.SetColor(&D2D1_COLOR_F {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: presentation.background_alpha,
-                });
-                self.d2d_context.FillRectangle(&rect, &self.background_brush);
-            }
         }
 
         let mut baseline_y = policy.vertical_padding_px as f32;
@@ -686,11 +668,16 @@ impl WindowsCaptionRenderer {
     }
 
     fn create_text_format(
-        &self,
+        &mut self,
         policy: &CaptionLayoutPolicy,
         text: &str,
     ) -> Result<IDWriteTextFormat, CaptionRenderError> {
-        let resolved_style = self.resolve_text_style(policy, text)?;
+        let bucket = text_script_bucket(text);
+        if let Some(text_format) = self.text_format_cache.get(&bucket) {
+            return Ok(text_format.clone());
+        }
+
+        let resolved_style = self.resolve_text_style(policy, bucket)?;
         let locale = utf16_null("en-us");
         let face_name = utf16_null(&resolved_style.family_name);
         let text_format = unsafe {
@@ -711,15 +698,16 @@ impl WindowsCaptionRenderer {
                 .SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)
                 .map_err(|error| CaptionRenderError::Draw(error.to_string()))?;
         }
+        self.text_format_cache.insert(bucket, text_format.clone());
         Ok(text_format)
     }
 
     fn resolve_text_style(
         &self,
         policy: &CaptionLayoutPolicy,
-        text: &str,
+        bucket: TextScriptBucket,
     ) -> Result<ResolvedTextStyle, CaptionRenderError> {
-        for family_name in select_face_chain(policy, text)
+        for family_name in select_face_chain(policy, bucket)
             .iter()
             .copied()
             .filter(|candidate| *candidate != "DirectWrite system fallback")
@@ -886,8 +874,11 @@ fn layout_has_drawable_text(layout: &CaptionLayoutResult) -> bool {
 }
 
 #[cfg(windows)]
-fn select_face_chain<'a>(policy: &'a CaptionLayoutPolicy, text: &str) -> &'a [&'static str] {
-    if contains_cjk(text) {
+fn select_face_chain<'a>(
+    policy: &'a CaptionLayoutPolicy,
+    bucket: TextScriptBucket,
+) -> &'a [&'static str] {
+    if matches!(bucket, TextScriptBucket::Cjk) {
         policy.cjk_face_chain()
     } else {
         policy.latin_face_chain()
@@ -936,7 +927,7 @@ fn utf16_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn contains_cjk(text: &str) -> bool {
     text.chars().any(|ch| {
         matches!(
@@ -948,6 +939,15 @@ fn contains_cjk(text: &str) -> bool {
                 | 0xf900..=0xfaff
         )
     })
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn text_script_bucket(text: &str) -> TextScriptBucket {
+    if contains_cjk(text) {
+        TextScriptBucket::Cjk
+    } else {
+        TextScriptBucket::Latin
+    }
 }
 
 fn wrap_text(text: &str, max_chars_per_line: usize) -> Vec<String> {
@@ -1015,11 +1015,21 @@ fn push_word_chunks(
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_text;
+    use super::{text_script_bucket, wrap_text, TextScriptBucket};
 
     #[test]
     fn wrap_text_splits_long_words_into_fixed_width_chunks() {
         let lines = wrap_text("abcdefgh", 3);
         assert_eq!(lines, vec!["abc", "def", "gh"]);
+    }
+
+    #[test]
+    fn text_script_bucket_prefers_latin_for_non_cjk_text() {
+        assert_eq!(text_script_bucket("hello world"), TextScriptBucket::Latin);
+    }
+
+    #[test]
+    fn text_script_bucket_uses_cjk_bucket_for_korean_text() {
+        assert_eq!(text_script_bucket("안녕하세요"), TextScriptBucket::Cjk);
     }
 }

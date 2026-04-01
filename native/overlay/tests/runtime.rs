@@ -76,6 +76,9 @@ fn block(id: &str, channel: &str, text: &str) -> OverlayPresentationBlock {
 struct RecordingSubmitter {
     calls: usize,
     fail: bool,
+    operations: Vec<&'static str>,
+    visibility_changes: Vec<bool>,
+    last_visible: Option<bool>,
 }
 
 impl RecordingSubmitter {
@@ -83,6 +86,9 @@ impl RecordingSubmitter {
         Self {
             calls: 0,
             fail: true,
+            operations: Vec::new(),
+            visibility_changes: Vec::new(),
+            last_visible: None,
         }
     }
 }
@@ -90,11 +96,24 @@ impl RecordingSubmitter {
 impl OverlayFrameSubmitter for RecordingSubmitter {
     fn submit_frame(&mut self, frame: &RenderedFrame) -> Result<(), OpenVrError> {
         self.calls += 1;
+        let operation = if frame.layout().visible_blocks.is_empty() {
+            "submit:empty"
+        } else {
+            "submit:text"
+        };
+        self.operations.push(operation);
         if self.fail {
             return Err(OpenVrError::Submit("submit failed".into()));
         }
         assert_eq!(frame.width(), 3840);
         assert_eq!(frame.height(), 1024);
+        Ok(())
+    }
+
+    fn set_overlay_visible(&mut self, visible: bool) -> Result<(), OpenVrError> {
+        self.operations.push(if visible { "show" } else { "hide" });
+        self.last_visible = Some(visible);
+        self.visibility_changes.push(visible);
         Ok(())
     }
 }
@@ -348,6 +367,349 @@ async fn runtime_does_not_emit_overlay_ready_when_first_texture_submit_fails() {
     assert!(matches!(err, RuntimeFailure::OpenVr(_)));
     assert!(!runtime.ready_sent());
     assert!(!messages.iter().any(|message| message["type"] == "overlay_ready"));
+}
+
+#[tokio::test]
+async fn runtime_hides_overlay_after_empty_state_stays_idle_past_delay() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+
+        let _ = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 1,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": [block("self:1", "self", "hello")]
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        let _ = ws.next().await;
+
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 2,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": []
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(650)).await;
+
+        ws.send(Message::Text(json!({"type": "shutdown"}).to_string().into()))
+            .await
+            .unwrap();
+    });
+
+    let logger = test_logger("idle-hide").await;
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{}", address);
+
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let mut runtime = OverlayRuntime::new(snapshot);
+    let mut submitter = RecordingSubmitter::default();
+
+    runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+    runtime
+        .run_event_loop(&mut bridge, &renderer, &mut submitter, &logger)
+        .await
+        .unwrap();
+
+    server.await.unwrap();
+
+    assert!(submitter.visibility_changes.contains(&false));
+}
+
+#[tokio::test]
+async fn runtime_cancels_pending_idle_hide_when_new_text_arrives() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+
+        let _ = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 1,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": [block("self:1", "self", "hello")]
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        let _ = ws.next().await;
+
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 2,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": []
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 3,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": [block("self:2", "self", "back again")]
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(650)).await;
+
+        ws.send(Message::Text(json!({"type": "shutdown"}).to_string().into()))
+            .await
+            .unwrap();
+    });
+
+    let logger = test_logger("idle-hide-cancel").await;
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{}", address);
+
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let mut runtime = OverlayRuntime::new(snapshot);
+    let mut submitter = RecordingSubmitter::default();
+
+    runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+    runtime
+        .run_event_loop(&mut bridge, &renderer, &mut submitter, &logger)
+        .await
+        .unwrap();
+
+    server.await.unwrap();
+
+    assert!(!submitter.visibility_changes.contains(&false));
+}
+
+#[tokio::test]
+async fn runtime_shows_overlay_again_when_text_returns_after_idle_hide() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+
+        let _ = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 1,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": [block("self:1", "self", "hello")]
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        let _ = ws.next().await;
+
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 2,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": []
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(650)).await;
+
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 3,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": [block("self:2", "self", "visible again")]
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        ws.send(Message::Text(json!({"type": "shutdown"}).to_string().into()))
+            .await
+            .unwrap();
+    });
+
+    let logger = test_logger("idle-hide-restore").await;
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{}", address);
+
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let mut runtime = OverlayRuntime::new(snapshot);
+    let mut submitter = RecordingSubmitter::default();
+
+    runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+    runtime
+        .run_event_loop(&mut bridge, &renderer, &mut submitter, &logger)
+        .await
+        .unwrap();
+
+    server.await.unwrap();
+
+    assert!(submitter.visibility_changes.windows(2).any(|pair| pair == [false, true]));
+}
+
+#[tokio::test]
+async fn runtime_submits_text_frame_before_revealing_overlay_after_idle_hide() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+
+        let _ = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 1,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": [block("self:1", "self", "hello")]
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        let _ = ws.next().await;
+
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 2,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": []
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(650)).await;
+
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 3,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": [block("self:2", "self", "visible again")]
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        ws.send(Message::Text(json!({"type": "shutdown"}).to_string().into()))
+            .await
+            .unwrap();
+    });
+
+    let logger = test_logger("reveal-order-after-hide").await;
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{}", address);
+
+    let (mut bridge, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let mut runtime = OverlayRuntime::new(snapshot);
+    let mut submitter = RecordingSubmitter::default();
+
+    runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+    runtime
+        .run_event_loop(&mut bridge, &renderer, &mut submitter, &logger)
+        .await
+        .unwrap();
+
+    server.await.unwrap();
+
+    let hide_index = submitter
+        .operations
+        .iter()
+        .rposition(|operation| *operation == "hide")
+        .expect("expected idle hide before reveal");
+    assert_eq!(
+        &submitter.operations[hide_index + 1..],
+        &["submit:text", "show"]
+    );
 }
 
 #[tokio::test]

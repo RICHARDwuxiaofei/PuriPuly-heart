@@ -1,8 +1,10 @@
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::json;
 use thiserror::Error;
 use tokio::io::{self, AsyncWriteExt};
+use tokio::time::{sleep_until, Instant};
 
 use crate::bridge::{BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEvent};
 use crate::logging::OverlayLogger;
@@ -16,6 +18,8 @@ use crate::renderer::{
     CaptionBlock, CaptionChannel, CaptionPresentation, CaptionRenderer,
 };
 use crate::state::{OverlayPresentationSnapshot, OverlayState};
+
+const EMPTY_OVERLAY_HIDE_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StartupError {
@@ -94,9 +98,11 @@ impl RuntimeFailure {
 pub struct OverlayRuntime {
     ready: bool,
     first_texture_submitted: bool,
+    overlay_visible: bool,
     stopped: bool,
     state: OverlayState,
     redraw_requested: bool,
+    hide_deadline: Option<Instant>,
 }
 
 impl OverlayRuntime {
@@ -104,9 +110,11 @@ impl OverlayRuntime {
         let mut runtime = Self {
             ready: false,
             first_texture_submitted: false,
+            overlay_visible: false,
             stopped: false,
             state: OverlayState::default(),
             redraw_requested: false,
+            hide_deadline: None,
         };
         runtime.apply_snapshot(snapshot);
         runtime
@@ -205,6 +213,13 @@ impl OverlayRuntime {
             .apply_calibration(self.state.calibration())
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
         let blocks = self.caption_blocks();
+        let has_drawable_text = blocks.iter().any(|block| !block.text.trim().is_empty());
+        let should_show_after_submit = has_drawable_text && !self.overlay_visible;
+        if has_drawable_text {
+            self.hide_deadline = None;
+        } else if self.first_texture_submitted && self.overlay_visible && self.hide_deadline.is_none() {
+            self.hide_deadline = Some(Instant::now() + EMPTY_OVERLAY_HIDE_DELAY);
+        }
         let frame = if blocks.is_empty() {
             renderer
                 .render_empty_frame()
@@ -217,6 +232,12 @@ impl OverlayRuntime {
         openvr
             .submit_frame(&frame)
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
+        if should_show_after_submit {
+            openvr
+                .set_overlay_visible(true)
+                .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
+            self.overlay_visible = true;
+        }
         self.redraw_requested = false;
 
         if !self.first_texture_submitted {
@@ -239,39 +260,93 @@ impl OverlayRuntime {
         logger: &OverlayLogger,
     ) -> Result<(), RuntimeFailure> {
         loop {
-            match bridge.next_message().await {
-                Ok(BridgeIncoming::Heartbeat) => continue,
-                Ok(BridgeIncoming::Snapshot(snapshot)) => {
-                    self.apply_snapshot(snapshot);
-                    self.submit_frame_if_needed(renderer, openvr, bridge, logger)
-                        .await?;
-                }
-                Ok(BridgeIncoming::Event(event)) => {
-                    self.handle_event(event).await?;
-                    if self.stopped {
-                        return Ok(());
+            if let Some(deadline) = self.hide_deadline {
+                tokio::select! {
+                    _ = sleep_until(deadline) => {
+                        self.handle_hide_deadline(openvr).await?;
                     }
-                    self.submit_frame_if_needed(renderer, openvr, bridge, logger)
-                        .await?;
+                    message = bridge.next_message() => {
+                        if !self
+                            .handle_bridge_message(message, renderer, openvr, bridge, logger)
+                            .await?
+                        {
+                            return Ok(());
+                        }
+                    }
                 }
-                Err(BridgeError::Disconnected) => {
-                    logger
-                        .error("runtime_disconnected")
-                        .await
-                        .map_err(|error| RuntimeFailure::Bridge(error.to_string()))?;
-                    self.handle_bridge_loss_for_test().await?;
-                    logger
-                        .emit_stdout_event(&json!({
-                            "type": "runtime_error",
-                            "failure_reason": "runtime_disconnected"
-                        }))
-                        .await
-                        .map_err(|error| RuntimeFailure::Bridge(error.to_string()))?;
-                    return Err(RuntimeFailure::RuntimeDisconnected);
-                }
-                Err(error) => return Err(RuntimeFailure::Bridge(error.to_string())),
+            } else if !self
+                .handle_bridge_message(bridge.next_message().await, renderer, openvr, bridge, logger)
+                .await?
+            {
+                return Ok(());
             }
         }
+    }
+
+    async fn handle_bridge_message<S: OverlayFrameSubmitter>(
+        &mut self,
+        message: Result<BridgeIncoming, BridgeError>,
+        renderer: &CaptionRenderer,
+        openvr: &mut S,
+        bridge: &mut BridgeClient,
+        logger: &OverlayLogger,
+    ) -> Result<bool, RuntimeFailure> {
+        match message {
+            Ok(BridgeIncoming::Heartbeat) => Ok(true),
+            Ok(BridgeIncoming::Snapshot(snapshot)) => {
+                self.apply_snapshot(snapshot);
+                self.submit_frame_if_needed(renderer, openvr, bridge, logger)
+                    .await?;
+                Ok(true)
+            }
+            Ok(BridgeIncoming::Event(event)) => {
+                self.handle_event(event).await?;
+                if self.stopped {
+                    return Ok(false);
+                }
+                self.submit_frame_if_needed(renderer, openvr, bridge, logger)
+                    .await?;
+                Ok(true)
+            }
+            Err(BridgeError::Disconnected) => {
+                logger
+                    .error("runtime_disconnected")
+                    .await
+                    .map_err(|error| RuntimeFailure::Bridge(error.to_string()))?;
+                self.handle_bridge_loss_for_test().await?;
+                logger
+                    .emit_stdout_event(&json!({
+                        "type": "runtime_error",
+                        "failure_reason": "runtime_disconnected"
+                    }))
+                    .await
+                    .map_err(|error| RuntimeFailure::Bridge(error.to_string()))?;
+                Err(RuntimeFailure::RuntimeDisconnected)
+            }
+            Err(error) => Err(RuntimeFailure::Bridge(error.to_string())),
+        }
+    }
+
+    async fn handle_hide_deadline<S: OverlayFrameSubmitter>(
+        &mut self,
+        openvr: &mut S,
+    ) -> Result<(), RuntimeFailure> {
+        self.hide_deadline = None;
+        if !self.first_texture_submitted || !self.overlay_visible || self.has_drawable_text() {
+            return Ok(());
+        }
+        openvr
+            .set_overlay_visible(false)
+            .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
+        self.overlay_visible = false;
+        Ok(())
+    }
+
+    fn has_drawable_text(&self) -> bool {
+        self.state
+            .blocks()
+            .iter()
+            .any(|block| !block.text.trim().is_empty())
     }
 }
 

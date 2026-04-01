@@ -274,3 +274,261 @@ async def test_presenter_ignores_stale_history_updates() -> None:
 
     assert presenter.snapshot().revision == revision_before_stale
     assert presenter.snapshot().blocks[-1].text == "latest original (latest translation)"
+
+
+@pytest.mark.asyncio
+async def test_presenter_prunes_closed_entries_once_newer_turns_displace_them() -> None:
+    bridge = RecordingPresentationBridge()
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=FakeClock(_now=10.0),
+    )
+
+    utterance_ids = [uuid4(), uuid4(), uuid4()]
+
+    for offset, utterance_id in enumerate(utterance_ids, start=1):
+        await presenter.emit(
+            SelfTranscriptFinal(
+                event_id=f"self-{offset}",
+                seq=offset * 10,
+                utterance_id=utterance_id,
+                channel="self",
+                created_at=float(offset),
+                text=f"original {offset}",
+                source_language="ko",
+                target_language="en",
+                is_final=True,
+            )
+        )
+        await presenter.emit(
+            TranslationFinal(
+                event_id=f"translation-{offset}",
+                seq=offset * 10 + 1,
+                utterance_id=utterance_id,
+                channel="self",
+                created_at=float(offset) + 0.1,
+                text=f"translation {offset}",
+                source_language="ko",
+                target_language="en",
+                is_final=True,
+                applied_context_mode=None,
+            )
+        )
+        await presenter.emit(
+            adapter.utterance_closed(
+                utterance_id=utterance_id,
+                channel="self",
+                is_final=True,
+                created_at=float(offset) + 0.2,
+            )
+        )
+
+    latest = presenter.snapshot()
+
+    assert [block.id for block in latest.blocks] == [
+        f"self:{utterance_ids[1]}",
+        f"self:{utterance_ids[2]}",
+    ]
+    assert latest.blocks[0].text == "original 2 (translation 2)"
+    assert latest.blocks[1].text == "original 3 (translation 3)"
+
+
+@pytest.mark.asyncio
+async def test_presenter_ignores_late_updates_for_pruned_closed_entries() -> None:
+    bridge = RecordingPresentationBridge()
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=FakeClock(_now=10.0),
+    )
+
+    displaced_utterance_id = uuid4()
+    newer_ids = [uuid4(), uuid4()]
+
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=displaced_utterance_id,
+                channel="self",
+                text="original 1",
+                is_final=True,
+                created_at=1.0,
+            ),
+            source_language="ko",
+            target_language="en",
+        )
+    )
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=displaced_utterance_id,
+            channel="self",
+            text="translation 1",
+            source_language="ko",
+            target_language="en",
+            applied_context_mode=None,
+            created_at=1.1,
+        )
+    )
+    await presenter.emit(
+        adapter.utterance_closed(
+            utterance_id=displaced_utterance_id,
+            channel="self",
+            is_final=True,
+            created_at=1.2,
+        )
+    )
+
+    for index, utterance_id in enumerate(newer_ids, start=2):
+        await presenter.emit(
+            adapter.transcript_final(
+                Transcript(
+                    utterance_id=utterance_id,
+                    channel="self",
+                    text=f"original {index}",
+                    is_final=True,
+                    created_at=float(index),
+                ),
+                source_language="ko",
+                target_language="en",
+            )
+        )
+        await presenter.emit(
+            adapter.translation_final(
+                utterance_id=utterance_id,
+                channel="self",
+                text=f"translation {index}",
+                source_language="ko",
+                target_language="en",
+                applied_context_mode=None,
+                created_at=float(index) + 0.1,
+            )
+        )
+        await presenter.emit(
+            adapter.utterance_closed(
+                utterance_id=utterance_id,
+                channel="self",
+                is_final=True,
+                created_at=float(index) + 0.2,
+            )
+        )
+
+    revision_before_late_update = presenter.snapshot().revision
+    blocks_before_late_update = presenter.snapshot().blocks
+
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=displaced_utterance_id,
+            channel="self",
+            text="late duplicate translation",
+            source_language="ko",
+            target_language="en",
+            applied_context_mode=None,
+            created_at=9.9,
+        )
+    )
+
+    assert presenter.snapshot().revision == revision_before_late_update
+    assert presenter.snapshot().blocks == blocks_before_late_update
+
+
+@pytest.mark.asyncio
+async def test_presenter_reset_scene_clears_closed_entry_tombstones() -> None:
+    bridge = RecordingPresentationBridge()
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=FakeClock(_now=10.0),
+    )
+    reused_utterance_id = uuid4()
+
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=reused_utterance_id,
+                channel="self",
+                text="first scene",
+                is_final=True,
+                created_at=1.0,
+            ),
+            source_language="ko",
+            target_language="en",
+        )
+    )
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=reused_utterance_id,
+            channel="self",
+            text="first translation",
+            source_language="ko",
+            target_language="en",
+            applied_context_mode=None,
+            created_at=1.1,
+        )
+    )
+    await presenter.emit(
+        adapter.utterance_closed(
+            utterance_id=reused_utterance_id,
+            channel="self",
+            is_final=True,
+            created_at=1.2,
+        )
+    )
+
+    for index in range(2):
+        utterance_id = uuid4()
+        await presenter.emit(
+            adapter.transcript_final(
+                Transcript(
+                    utterance_id=utterance_id,
+                    channel="self",
+                    text=f"scene filler {index}",
+                    is_final=True,
+                    created_at=2.0 + index,
+                ),
+                source_language="ko",
+                target_language="en",
+            )
+        )
+        await presenter.emit(
+            adapter.translation_final(
+                utterance_id=utterance_id,
+                channel="self",
+                text=f"translation filler {index}",
+                source_language="ko",
+                target_language="en",
+                applied_context_mode=None,
+                created_at=2.1 + index,
+            )
+        )
+        await presenter.emit(
+            adapter.utterance_closed(
+                utterance_id=utterance_id,
+                channel="self",
+                is_final=True,
+                created_at=2.2 + index,
+            )
+        )
+
+    presenter.reset_scene()
+
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=reused_utterance_id,
+                channel="self",
+                text="second scene",
+                is_final=True,
+                created_at=10.0,
+            ),
+            source_language="ko",
+            target_language="en",
+        )
+    )
+
+    assert presenter.snapshot().blocks == [presenter.snapshot().blocks[0]]
+    assert presenter.snapshot().blocks[0].id == f"self:{reused_utterance_id}"
+    assert presenter.snapshot().blocks[0].text == "second scene"

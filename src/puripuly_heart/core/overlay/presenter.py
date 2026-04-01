@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Protocol
 from uuid import UUID
@@ -26,6 +27,7 @@ from .sink import (
 
 VISIBLE_WINDOW_TARGET_BLOCKS = 2
 _ACTIVE_SELF_BLOCK_ID = "self:active"
+_CLOSED_TOMBSTONE_LIMIT = 64
 
 
 class OverlayPresentationTransport(Protocol):
@@ -41,6 +43,7 @@ class _LogicalCaptionEntry:
     original_text: str = ""
     translation_text: str = ""
     last_updated_seq: int = 0
+    closed_seq: int | None = None
 
     @property
     def block_id(self) -> str:
@@ -72,6 +75,10 @@ class OverlayPresenter(OverlaySink):
         init=False,
         default_factory=dict,
     )
+    _closed_tombstones: OrderedDict[tuple[str, UUID], int] = field(
+        init=False,
+        default_factory=OrderedDict,
+    )
     _active_self: _ActiveSelfEntry | None = field(init=False, default=None)
     _revision: int = field(init=False, default=0)
     _snapshot: OverlayPresentationSnapshot = field(init=False)
@@ -94,6 +101,7 @@ class OverlayPresenter(OverlaySink):
 
     def reset_scene(self) -> None:
         self._entries.clear()
+        self._closed_tombstones.clear()
         self._active_self = None
         self._revision = 0
         self._snapshot = OverlayPresentationSnapshot(
@@ -138,6 +146,8 @@ class OverlayPresenter(OverlaySink):
             return True
 
         if isinstance(event, (SelfTranscriptFinal, PeerTranscriptFinal)):
+            if self._is_tombstoned(event.channel, event.utterance_id):
+                return False
             entry = self._entry_for(event.channel, event.utterance_id)
             if event.seq < entry.last_updated_seq:
                 return False
@@ -145,9 +155,12 @@ class OverlayPresenter(OverlaySink):
                 return False
             entry.original_text = event.text
             entry.last_updated_seq = event.seq
+            entry.closed_seq = None
             return True
 
         if isinstance(event, (TranslationStreamUpdate, TranslationFinal)):
+            if self._is_tombstoned(event.channel, event.utterance_id):
+                return False
             entry = self._entry_for(event.channel, event.utterance_id)
             if event.seq < entry.last_updated_seq:
                 return False
@@ -155,25 +168,43 @@ class OverlayPresenter(OverlaySink):
                 return False
             entry.translation_text = event.text
             entry.last_updated_seq = event.seq
+            entry.closed_seq = None
             return True
 
         if isinstance(event, UtteranceClosed):
-            return False
+            key = self._entry_key(event.channel, event.utterance_id)
+            if key in self._closed_tombstones:
+                return False
+            entry = self._entries.get(key)
+            if entry is None:
+                return False
+            if event.seq < entry.last_updated_seq:
+                return False
+            if entry.closed_seq == event.seq:
+                return False
+            entry.closed_seq = event.seq
+            entry.last_updated_seq = event.seq
+            return True
 
         return False
 
     def _entry_for(self, channel: str | None, utterance_id: UUID | None) -> _LogicalCaptionEntry:
+        key = self._entry_key(channel, utterance_id)
+        entry = self._entries.get(key)
+        if entry is None:
+            entry = _LogicalCaptionEntry(channel=key[0], utterance_id=key[1])
+            self._entries[key] = entry
+        return entry
+
+    def _entry_key(self, channel: str | None, utterance_id: UUID | None) -> tuple[str, UUID]:
         if channel not in ("self", "peer"):
             raise ValueError(f"invalid overlay channel: {channel!r}")
         if utterance_id is None:
             raise ValueError("overlay presenter requires utterance_id for finalized entries")
+        return (channel, utterance_id)
 
-        key = (channel, utterance_id)
-        entry = self._entries.get(key)
-        if entry is None:
-            entry = _LogicalCaptionEntry(channel=channel, utterance_id=utterance_id)
-            self._entries[key] = entry
-        return entry
+    def _is_tombstoned(self, channel: str | None, utterance_id: UUID | None) -> bool:
+        return self._entry_key(channel, utterance_id) in self._closed_tombstones
 
     async def _publish_if_changed(self) -> None:
         next_blocks = self._visible_blocks()
@@ -191,9 +222,9 @@ class OverlayPresenter(OverlaySink):
             await self.bridge.replace_snapshot(self._snapshot)
 
     def _visible_blocks(self) -> list[OverlayPresentationBlock]:
-        candidates: list[tuple[int, str, OverlayPresentationBlock]] = []
+        candidates: list[tuple[int, str, tuple[str, UUID] | None, OverlayPresentationBlock]] = []
 
-        for entry in self._entries.values():
+        for key, entry in self._entries.items():
             text = entry.composed_text()
             if not text:
                 continue
@@ -201,6 +232,7 @@ class OverlayPresenter(OverlaySink):
                 (
                     entry.last_updated_seq,
                     entry.block_id,
+                    key,
                     OverlayPresentationBlock(
                         id=entry.block_id,
                         channel=entry.channel,  # type: ignore[arg-type]
@@ -214,6 +246,7 @@ class OverlayPresenter(OverlaySink):
                 (
                     self._active_self.last_updated_seq,
                     _ACTIVE_SELF_BLOCK_ID,
+                    None,
                     OverlayPresentationBlock(
                         id=_ACTIVE_SELF_BLOCK_ID,
                         channel="self",
@@ -224,7 +257,27 @@ class OverlayPresenter(OverlaySink):
 
         candidates.sort(key=lambda item: (item[0], item[1]))
         selected = candidates[-self.visible_window_target_blocks :]
-        return [block for _, _, block in selected]
+        visible_entry_keys = {key for _, _, key, _ in selected if key is not None}
+        self._prune_closed_invisible_entries(visible_entry_keys)
+        return [block for _, _, _, block in selected]
+
+    def _prune_closed_invisible_entries(self, visible_entry_keys: set[tuple[str, UUID]]) -> None:
+        stale_keys = [
+            key
+            for key, entry in self._entries.items()
+            if entry.closed_seq is not None and key not in visible_entry_keys
+        ]
+        for key in stale_keys:
+            closed_seq = self._entries[key].closed_seq
+            del self._entries[key]
+            if closed_seq is not None:
+                self._remember_tombstone(key, closed_seq)
+
+    def _remember_tombstone(self, key: tuple[str, UUID], closed_seq: int) -> None:
+        self._closed_tombstones.pop(key, None)
+        self._closed_tombstones[key] = closed_seq
+        while len(self._closed_tombstones) > _CLOSED_TOMBSTONE_LIMIT:
+            self._closed_tombstones.popitem(last=False)
 
 
 def _calibration_from_overlay(
