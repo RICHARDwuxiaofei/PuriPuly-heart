@@ -119,6 +119,10 @@ class ClientHub:
     context_resolver: ContextResolver = field(init=False)
     active_chatbox_channel: ChannelId = field(init=False, default="self")
     overlay_event_adapter: OverlayEventAdapter = field(init=False)
+    _last_logged_context_modes: dict[ChannelId, ContextMode | None] = field(
+        init=False,
+        default_factory=lambda: {"self": None, "peer": None},
+    )
     _overlay_active_self_text: str | None = field(init=False, default=None)
     overlay_stream_coalesce_ms: int = 300
     last_error_source: str | None = None
@@ -299,6 +303,36 @@ class ClientHub:
             speaker_label=speaker_label,
             peer_epoch=peer_epoch,
         )
+
+    def _log_context_mode_change(
+        self,
+        *,
+        runtime: ChannelRuntime,
+        applied_mode: ContextMode,
+    ) -> None:
+        last_mode = self._last_logged_context_modes.get(runtime.channel)
+        if last_mode == applied_mode:
+            return
+        self._last_logged_context_modes[runtime.channel] = applied_mode
+        logger.info("[Hub] Context mode: channel=%s mode=%s", runtime.channel, applied_mode)
+
+    def _log_context_application(
+        self,
+        *,
+        text: str,
+        runtime: ChannelRuntime,
+        context: str,
+    ) -> None:
+        context_lines = context.splitlines() if context else []
+        logger.info(
+            "[Hub] Context apply: channel=%s text=%r entries=%s",
+            runtime.channel,
+            text,
+            len(context_lines),
+        )
+        for index, line in enumerate(context_lines):
+            display_line = line[2:] if line.startswith("- ") else line
+            logger.info("[Hub] Context[%s]: %s", index, display_line)
 
     async def handle_vad_event(self, event: VadEvent) -> None:
         if isinstance(event, SpeechStart):
@@ -1355,7 +1389,8 @@ class ClientHub:
                 explicit_peer_epoch=expected_peer_epoch,
             ),
         )
-        logger.info("[Hub] Context mode: %s", applied_mode)
+        self._log_context_mode_change(runtime=runtime, applied_mode=applied_mode)
+        self._log_context_application(text=text, runtime=runtime, context=context_str)
         formatted_prompt = self._format_system_prompt(runtime)
         return formatted_prompt, context_str, now, applied_mode
 

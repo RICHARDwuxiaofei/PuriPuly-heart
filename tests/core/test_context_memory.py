@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -502,6 +503,79 @@ class TestContextInternalPaths:
         assert "${targetName}" not in prompt
         assert context == '- [1s ago] "안녕"'
         assert now == 20.0
+
+
+class TestContextLogging:
+    def test_prepare_llm_request_logs_zero_entries_for_utterance(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=20.0),
+        )
+
+        with caplog.at_level(logging.INFO, logger="puripuly_heart.core.orchestrator.hub"):
+            hub._prepare_llm_request("입력")
+
+        assert "[Hub] Context apply: channel=self text='입력' entries=0" in caplog.messages
+
+    def test_prepare_llm_request_logs_context_entries_for_utterance(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        clock = FakeClock(initial_time=20.0)
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=FakeOscQueue(),
+            clock=clock,
+        )
+        hub.self_runtime.remember_context(
+            "안녕",
+            timestamp=19.0,
+            source_language="ko",
+            target_language="en",
+        )
+
+        with caplog.at_level(logging.INFO, logger="puripuly_heart.core.orchestrator.hub"):
+            hub._prepare_llm_request("입력")
+
+        assert "[Hub] Context apply: channel=self text='입력' entries=1" in caplog.messages
+        assert '[Hub] Context[0]: [1s ago] "안녕"' in caplog.messages
+
+    def test_prepare_llm_request_logs_context_mode_only_when_changed(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        clock = FakeClock(initial_time=20.0)
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=FakeOscQueue(),
+            clock=clock,
+        )
+        hub.self_runtime.remember_context(
+            "안녕",
+            timestamp=19.0,
+            source_language="ko",
+            target_language="en",
+        )
+
+        with caplog.at_level(logging.INFO, logger="puripuly_heart.core.orchestrator.hub"):
+            hub._prepare_llm_request("first")
+            hub._prepare_llm_request("second")
+            hub.integrated_context_enabled = True
+            hub.peer_translation_enabled = True
+            hub._prepare_llm_request("third")
+            hub._prepare_llm_request("fourth")
+
+        mode_logs = [
+            message for message in caplog.messages if message.startswith("[Hub] Context mode:")
+        ]
+        assert mode_logs == [
+            "[Hub] Context mode: channel=self mode=local",
+            "[Hub] Context mode: channel=self mode=integrated",
+        ]
 
     @pytest.mark.asyncio
     async def test_submit_text_without_llm_enqueues_transcript_only(self):
