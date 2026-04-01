@@ -472,6 +472,16 @@ def test_overlay_calibration_apply_commits_current_field_values_without_blur(
     assert view._overlay_distance_field.value == "1.20"
 
 
+def test_overlay_calibration_hides_background_alpha_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(AppSettings(), config_path=Path("settings.json"))
+
+    assert not hasattr(view, "_overlay_background_alpha_field")
+    assert not hasattr(view, "_overlay_background_alpha_label")
+
+
 def test_overlay_calibration_reset_restores_defaults_until_apply(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -578,11 +578,6 @@ class SettingsView(ft.Column):
             size=14,
             color=COLOR_NEUTRAL,
         )
-        self._overlay_background_alpha_label = ft.Text(
-            t("settings.overlay.calibration.background_alpha"),
-            size=14,
-            color=COLOR_NEUTRAL,
-        )
         self._overlay_anchor_dropdown = ft.Dropdown(
             value=self._overlay_calibration.anchor,
             options=[
@@ -613,10 +608,6 @@ class SettingsView(ft.Column):
         self._overlay_text_scale_field = self._build_overlay_calibration_field(
             value=self._overlay_calibration.text_scale,
             on_blur=lambda e: self._on_overlay_calibration_numeric_blur("text_scale", e),
-        )
-        self._overlay_background_alpha_field = self._build_overlay_calibration_field(
-            value=self._overlay_calibration.background_alpha,
-            on_blur=lambda e: self._on_overlay_calibration_numeric_blur("background_alpha", e),
         )
         self._overlay_calibration_apply_button = self._build_action_button(
             t("settings.overlay.calibration.apply"),
@@ -698,10 +689,6 @@ class SettingsView(ft.Column):
                             self._build_overlay_calibration_column(
                                 label=self._overlay_text_scale_label,
                                 control=self._overlay_text_scale_field,
-                            ),
-                            self._build_overlay_calibration_column(
-                                label=self._overlay_background_alpha_label,
-                                control=self._overlay_background_alpha_field,
                             ),
                         ],
                         spacing=12,
@@ -1408,9 +1395,6 @@ class SettingsView(ft.Column):
         self._overlay_text_scale_field.value = self._format_overlay_calibration_number(
             current.text_scale
         )
-        self._overlay_background_alpha_field.value = self._format_overlay_calibration_number(
-            current.background_alpha
-        )
 
     def _begin_overlay_calibration_session(self) -> OverlayCalibration:
         if self._overlay_calibration_session_active:
@@ -1490,17 +1474,12 @@ class SettingsView(ft.Column):
         offset_y_raw = (self._overlay_offset_y_field.value or "").strip()
         distance_raw = (self._overlay_distance_field.value or "").strip()
         text_scale_raw = (self._overlay_text_scale_field.value or "").strip()
-        background_alpha_raw = (self._overlay_background_alpha_field.value or "").strip()
         try:
             self._update_overlay_calibration_draft("anchor", anchor_value)
             self._update_overlay_calibration_draft("offset_x", float(offset_x_raw))
             self._update_overlay_calibration_draft("offset_y", float(offset_y_raw))
             self._update_overlay_calibration_draft("distance", float(distance_raw))
             self._update_overlay_calibration_draft("text_scale", float(text_scale_raw))
-            self._update_overlay_calibration_draft(
-                "background_alpha",
-                float(background_alpha_raw),
-            )
         except (TypeError, ValueError):
             self._sync_overlay_calibration_controls(current)
             return False
@@ -2021,9 +2000,6 @@ class SettingsView(ft.Column):
         self._overlay_offset_y_label.value = t("settings.overlay.calibration.offset_y")
         self._overlay_distance_label.value = t("settings.overlay.calibration.distance")
         self._overlay_text_scale_label.value = t("settings.overlay.calibration.text_scale")
-        self._overlay_background_alpha_label.value = t(
-            "settings.overlay.calibration.background_alpha"
-        )
         self._reset_prompt_btn.text = t("settings.reset_prompt")
         self._custom_vocab_terms.label = None
         self._custom_vocab_terms.helper_text = ""

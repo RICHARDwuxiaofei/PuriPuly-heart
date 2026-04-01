@@ -664,6 +664,7 @@ mod tests {
         OverlayPresentationBlock, OverlayPresentationCalibration, OverlayPresentationSnapshot,
     };
     use std::cell::Cell;
+    use std::time::Duration;
 
     fn block(id: &str, channel: &str, text: &str) -> OverlayPresentationBlock {
         OverlayPresentationBlock {
@@ -699,12 +700,13 @@ mod tests {
     }
 
     #[test]
-    fn apply_snapshot_replaces_existing_blocks_and_calibration() {
+    fn apply_snapshot_replaces_snapshot_blocks_and_calibration_but_keeps_exiting_scene_blocks() {
         let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
             revision: 1,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![block("self:1", "self", "self one")],
         });
+        runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
 
         runtime.apply_snapshot(OverlayPresentationSnapshot {
             revision: 2,
@@ -718,11 +720,21 @@ mod tests {
         let blocks = runtime.caption_blocks();
 
         assert_eq!(
-            blocks
+            runtime
+                .state()
+                .snapshot()
+                .blocks
                 .iter()
                 .map(|block| (block.id.as_str(), block.text.as_str()))
                 .collect::<Vec<_>>(),
             vec![("peer:2", "peer two")]
+        );
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| (block.id.as_str(), block.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("peer:2", "peer two"), ("self:1", "self one")]
         );
         assert_eq!(runtime.state().snapshot().revision, 2);
         assert_eq!(runtime.state().snapshot().calibration.distance, 1.5);

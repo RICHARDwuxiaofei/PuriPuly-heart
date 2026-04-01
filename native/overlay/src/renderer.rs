@@ -13,10 +13,7 @@ use windows::{
     Win32::Foundation::HMODULE,
     Win32::Graphics::{
         Direct2D::{
-            Common::{
-                D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
-                D2D1_ROUNDED_RECT,
-            },
+            Common::{D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT},
             D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
             D2D1_BITMAP_PROPERTIES1, D2D1_DRAW_TEXT_OPTIONS_NONE,
             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
@@ -60,6 +57,19 @@ const DEFAULT_STRIP_VERTICAL_PADDING_PX: u32 = 44;
 const DEFAULT_AVERAGE_GLYPH_ADVANCE_PX: u32 = 80;
 #[cfg(windows)]
 const DEFAULT_FONT_SIZE_PX: f32 = 140.0;
+#[cfg_attr(not(windows), allow(dead_code))]
+const SELF_TEXT_FILL_COLOR: (f32, f32, f32, f32) = (1.0, 1.0, 1.0, 1.0);
+#[cfg_attr(not(windows), allow(dead_code))]
+const PEER_TEXT_FILL_COLOR: (f32, f32, f32, f32) = (1.0, 215.0 / 255.0, 0.0, 1.0);
+#[cfg(windows)]
+const TEXT_OUTLINE_COLOR: (f32, f32, f32, f32) = (0.0, 0.0, 0.0, 1.0);
+#[cfg_attr(not(windows), allow(dead_code))]
+const TEXT_OUTLINE_OFFSETS_PX: [(f32, f32); 4] = [
+    (-5.0, 0.0),
+    (5.0, 0.0),
+    (0.0, -5.0),
+    (0.0, 5.0),
+];
 
 #[derive(Debug, Error)]
 pub enum CaptionRenderError {
@@ -202,6 +212,47 @@ impl Default for CaptionPresentation {
         Self {
             background_alpha: 0.24,
         }
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn fill_color_for_channel(channel: CaptionChannel) -> (f32, f32, f32, f32) {
+    match channel {
+        CaptionChannel::SelfChannel => SELF_TEXT_FILL_COLOR,
+        CaptionChannel::PeerChannel => PEER_TEXT_FILL_COLOR,
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn outline_offsets_px() -> [(f32, f32); 4] {
+    TEXT_OUTLINE_OFFSETS_PX
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn effective_background_alpha(
+    _has_drawable_text: bool,
+    _presentation: &CaptionPresentation,
+) -> f32 {
+    0.0
+}
+
+#[cfg(windows)]
+fn d2d_color(color: (f32, f32, f32, f32)) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: color.0,
+        g: color.1,
+        b: color.2,
+        a: color.3,
+    }
+}
+
+#[cfg(windows)]
+fn offset_text_rect(rect: D2D_RECT_F, offset_x: f32, offset_y: f32) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: rect.left + offset_x,
+        top: rect.top + offset_y,
+        right: rect.right + offset_x,
+        bottom: rect.bottom + offset_y,
     }
 }
 
@@ -649,8 +700,7 @@ struct WindowsCaptionRenderer {
     dwrite_factory: IDWriteFactory,
     system_font_collection: IDWriteFontCollection,
     d2d_context: ID2D1DeviceContext,
-    self_strip_brush: ID2D1SolidColorBrush,
-    peer_strip_brush: ID2D1SolidColorBrush,
+    outline_brush: ID2D1SolidColorBrush,
     self_text_brush: ID2D1SolidColorBrush,
     peer_text_brush: ID2D1SolidColorBrush,
     target_bitmap: ID2D1Bitmap1,
@@ -698,64 +748,26 @@ impl WindowsCaptionRenderer {
             d2d_context.SetTarget(&target_bitmap);
             d2d_context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
         }
-        let self_strip_brush = unsafe {
+        let outline_brush = unsafe {
             d2d_context
-                .CreateSolidColorBrush(
-                    &D2D1_COLOR_F {
-                        r: 0.16,
-                        g: 0.16,
-                        b: 0.18,
-                        a: 0.82,
-                    },
-                    None,
-                )
-                .map_err(|error| CaptionRenderError::Init(error.to_string()))?
-        };
-        let peer_strip_brush = unsafe {
-            d2d_context
-                .CreateSolidColorBrush(
-                    &D2D1_COLOR_F {
-                        r: 0.12,
-                        g: 0.18,
-                        b: 0.21,
-                        a: 0.82,
-                    },
-                    None,
-                )
+                .CreateSolidColorBrush(&d2d_color(TEXT_OUTLINE_COLOR), None)
                 .map_err(|error| CaptionRenderError::Init(error.to_string()))?
         };
         let self_text_brush = unsafe {
             d2d_context
-                .CreateSolidColorBrush(
-                    &D2D1_COLOR_F {
-                        r: 1.0,
-                        g: 0.95,
-                        b: 0.88,
-                        a: 0.95,
-                    },
-                    None,
-                )
+                .CreateSolidColorBrush(&d2d_color(fill_color_for_channel(CaptionChannel::SelfChannel)), None)
                 .map_err(|error| CaptionRenderError::Init(error.to_string()))?
         };
         let peer_text_brush = unsafe {
             d2d_context
-                .CreateSolidColorBrush(
-                    &D2D1_COLOR_F {
-                        r: 0.79,
-                        g: 0.91,
-                        b: 1.0,
-                        a: 0.95,
-                    },
-                    None,
-                )
+                .CreateSolidColorBrush(&d2d_color(fill_color_for_channel(CaptionChannel::PeerChannel)), None)
                 .map_err(|error| CaptionRenderError::Init(error.to_string()))?
         };
         Ok(Self {
             dwrite_factory,
             system_font_collection,
             d2d_context,
-            self_strip_brush,
-            peer_strip_brush,
+            outline_brush,
             self_text_brush,
             peer_text_brush,
             target_bitmap,
@@ -774,11 +786,7 @@ impl WindowsCaptionRenderer {
         layout: CaptionLayoutResult,
     ) -> Result<RenderedFrame, CaptionRenderError> {
         let layout = prepare_layout_for_render(&mut self.previous_layout, layout);
-        let clear_alpha = if layout_has_drawable_text(&layout) {
-            presentation.background_alpha
-        } else {
-            0.0
-        };
+        let clear_alpha = effective_background_alpha(layout_has_drawable_text(&layout), presentation);
         let damage_band = layout.damage_band.unwrap_or(DamageBand {
             top_px: 0.0,
             bottom_px: layout.surface_height_px as f32,
@@ -812,30 +820,14 @@ impl WindowsCaptionRenderer {
             }
             let block_text = block.lines.join(" ");
             let text_format = self.create_text_format(policy, &block_text)?;
-            let background_brush = match block.channel.unwrap_or(CaptionChannel::SelfChannel) {
-                CaptionChannel::SelfChannel => &self.self_strip_brush,
-                CaptionChannel::PeerChannel => &self.peer_strip_brush,
-            };
             let text_brush = match block.channel.unwrap_or(CaptionChannel::SelfChannel) {
                 CaptionChannel::SelfChannel => &self.self_text_brush,
                 CaptionChannel::PeerChannel => &self.peer_text_brush,
             };
-            let rounded_rect = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: block.bounds.left_px,
-                    top: block.bounds.top_px,
-                    right: block.bounds.right_px,
-                    bottom: block.bounds.bottom_px,
-                },
-                radiusX: 28.0,
-                radiusY: 28.0,
-            };
 
             unsafe {
-                background_brush.SetOpacity((block.opacity * 0.92).clamp(0.0, 1.0));
+                self.outline_brush.SetOpacity(block.opacity.clamp(0.0, 1.0));
                 text_brush.SetOpacity(block.opacity.clamp(0.0, 1.0));
-                self.d2d_context
-                    .FillRoundedRectangle(&rounded_rect, background_brush);
             }
 
             for line in &block.line_metrics {
@@ -851,6 +843,17 @@ impl WindowsCaptionRenderer {
                     bottom: line.origin_y + line_height,
                 };
                 unsafe {
+                    for (offset_x, offset_y) in outline_offsets_px() {
+                        let outline_rect = offset_text_rect(rect, offset_x, offset_y);
+                        self.d2d_context.DrawText(
+                            &utf16,
+                            &text_format,
+                            &outline_rect,
+                            &self.outline_brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                            DWRITE_MEASURING_MODE_NATURAL,
+                        );
+                    }
                     self.d2d_context.DrawText(
                         &utf16,
                         &text_format,
@@ -1335,7 +1338,11 @@ fn measure_text_width(text: &str, average_glyph_advance_px: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{measure_text_width, text_script_bucket, wrap_text, TextScriptBucket};
+    use super::{
+        effective_background_alpha, fill_color_for_channel, measure_text_width,
+        outline_offsets_px, text_script_bucket, wrap_text, CaptionChannel, CaptionPresentation,
+        TextScriptBucket,
+    };
 
     #[test]
     fn wrap_text_splits_long_words_into_measured_chunks() {
@@ -1356,5 +1363,40 @@ mod tests {
     #[test]
     fn text_script_bucket_uses_cjk_bucket_for_korean_text() {
         assert_eq!(text_script_bucket("안녕하세요"), TextScriptBucket::Cjk);
+    }
+
+    #[test]
+    fn fill_color_for_channel_uses_fixed_text_only_palette() {
+        assert_eq!(
+            fill_color_for_channel(CaptionChannel::SelfChannel),
+            (1.0, 1.0, 1.0, 1.0)
+        );
+        assert_eq!(
+            fill_color_for_channel(CaptionChannel::PeerChannel),
+            (1.0, 215.0 / 255.0, 0.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn outline_offsets_px_match_the_vr_outline_profile() {
+        assert_eq!(
+            outline_offsets_px().to_vec(),
+            vec![
+                (-5.0, 0.0),
+                (5.0, 0.0),
+                (0.0, -5.0),
+                (0.0, 5.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn effective_background_alpha_is_zero_for_text_only_overlay() {
+        let presentation = CaptionPresentation {
+            background_alpha: 0.82,
+        };
+
+        assert_eq!(effective_background_alpha(true, &presentation), 0.0);
+        assert_eq!(effective_background_alpha(false, &presentation), 0.0);
     }
 }
