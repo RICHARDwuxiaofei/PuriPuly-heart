@@ -99,26 +99,26 @@ class PeerTranscriptFinal(_TranscriptEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class SelfPreviewUpdate(OverlayEvent):
+class SelfActiveUpdate(OverlayEvent):
     text: str
 
-    EVENT_TYPE: ClassVar[str] = "self_preview_update"
+    EVENT_TYPE: ClassVar[str] = "self_active_update"
 
     def __post_init__(self) -> None:
         if self.channel != "self":
-            raise ValueError("SelfPreviewUpdate requires channel='self'")
+            raise ValueError("SelfActiveUpdate requires channel='self'")
 
     def _extra_dict(self) -> dict[str, object]:
         return {"text": self.text}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class SelfPreviewClear(OverlayEvent):
-    EVENT_TYPE: ClassVar[str] = "self_preview_clear"
+class SelfActiveClear(OverlayEvent):
+    EVENT_TYPE: ClassVar[str] = "self_active_clear"
 
     def __post_init__(self) -> None:
         if self.channel != "self":
-            raise ValueError("SelfPreviewClear requires channel='self'")
+            raise ValueError("SelfActiveClear requires channel='self'")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -205,8 +205,8 @@ class OverlayCalibrationUpdate(OverlayEvent):
 OverlayEventUnion = (
     SelfTranscriptFinal
     | PeerTranscriptFinal
-    | SelfPreviewUpdate
-    | SelfPreviewClear
+    | SelfActiveUpdate
+    | SelfActiveClear
     | TranslationStreamUpdate
     | TranslationFinal
     | UtteranceClosed
@@ -217,8 +217,8 @@ OverlayEventUnion = (
 _EVENT_TYPES: dict[str, type[OverlayEvent]] = {
     SelfTranscriptFinal.EVENT_TYPE: SelfTranscriptFinal,
     PeerTranscriptFinal.EVENT_TYPE: PeerTranscriptFinal,
-    SelfPreviewUpdate.EVENT_TYPE: SelfPreviewUpdate,
-    SelfPreviewClear.EVENT_TYPE: SelfPreviewClear,
+    SelfActiveUpdate.EVENT_TYPE: SelfActiveUpdate,
+    SelfActiveClear.EVENT_TYPE: SelfActiveClear,
     TranslationStreamUpdate.EVENT_TYPE: TranslationStreamUpdate,
     TranslationFinal.EVENT_TYPE: TranslationFinal,
     UtteranceClosed.EVENT_TYPE: UtteranceClosed,
@@ -271,13 +271,13 @@ def overlay_event_from_dict(data: dict[str, object]) -> OverlayEventUnion:
             peer_epoch=int(data["peer_epoch"]) if data.get("peer_epoch") is not None else None,
         )
 
-    if cls is SelfPreviewUpdate:
+    if cls is SelfActiveUpdate:
         return cls(
             **common,
             text=str(data["text"]),
         )
 
-    if cls is SelfPreviewClear:
+    if cls is SelfActiveClear:
         return cls(**common)
 
     if cls in (TranslationStreamUpdate, TranslationFinal):

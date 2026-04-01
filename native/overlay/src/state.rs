@@ -74,7 +74,7 @@ pub struct ShutdownEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SelfPreviewUpdateEvent {
+pub struct SelfActiveUpdateEvent {
     pub event_id: String,
     pub seq: u64,
     #[serde(default)]
@@ -87,7 +87,7 @@ pub struct SelfPreviewUpdateEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SelfPreviewClearEvent {
+pub struct SelfActiveClearEvent {
     pub event_id: String,
     pub seq: u64,
     #[serde(default)]
@@ -165,10 +165,10 @@ pub enum Event {
     SelfTranscriptFinal(RowEvent),
     #[serde(rename = "peer_transcript_final")]
     PeerTranscriptFinal(RowEvent),
-    #[serde(rename = "self_preview_update")]
-    SelfPreviewUpdate(SelfPreviewUpdateEvent),
-    #[serde(rename = "self_preview_clear")]
-    SelfPreviewClear(SelfPreviewClearEvent),
+    #[serde(rename = "self_active_update")]
+    SelfActiveUpdate(SelfActiveUpdateEvent),
+    #[serde(rename = "self_active_clear")]
+    SelfActiveClear(SelfActiveClearEvent),
     #[serde(rename = "translation_stream_update")]
     TranslationStreamUpdate(RowEvent),
     #[serde(rename = "translation_final")]
@@ -226,17 +226,15 @@ impl OverlayRow {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct OverlaySelfPreview {
-    event_id: String,
+struct OverlayActiveSelf {
     seq: u64,
     text: String,
     created_at: f64,
 }
 
-impl OverlaySelfPreview {
-    fn from_event(event: &SelfPreviewUpdateEvent) -> Self {
+impl OverlayActiveSelf {
+    fn from_event(event: &SelfActiveUpdateEvent) -> Self {
         Self {
-            event_id: event.event_id.clone(),
             seq: event.seq,
             text: event.text.clone(),
             created_at: event.created_at,
@@ -248,7 +246,7 @@ impl OverlaySelfPreview {
 pub struct OverlayState {
     rows: BTreeMap<OverlayRowKey, OverlayRow>,
     calibration: OverlayCalibration,
-    self_preview: Option<OverlaySelfPreview>,
+    active_self: Option<OverlayActiveSelf>,
 }
 
 impl OverlayState {
@@ -282,12 +280,12 @@ impl OverlayState {
         &self.calibration
     }
 
-    pub fn self_preview_text(&self) -> Option<&str> {
-        self.self_preview.as_ref().map(|preview| preview.text.as_str())
+    pub fn active_self_text(&self) -> Option<&str> {
+        self.active_self.as_ref().map(|active| active.text.as_str())
     }
 
-    pub fn self_preview_seq(&self) -> Option<u64> {
-        self.self_preview.as_ref().map(|preview| preview.seq)
+    pub fn active_self_seq(&self) -> Option<u64> {
+        self.active_self.as_ref().map(|active| active.seq)
     }
 }
 
@@ -319,8 +317,8 @@ fn apply_event_to_state(state: &mut OverlayState, event: Event) -> bool {
                 OverlayRow::from_row_event(&row_event, OverlayContentKind::Original),
             )
         }
-        Event::SelfPreviewUpdate(event) => upsert_self_preview(&mut state.self_preview, event),
-        Event::SelfPreviewClear(_) => clear_self_preview(&mut state.self_preview),
+        Event::SelfActiveUpdate(event) => upsert_active_self(&mut state.active_self, event),
+        Event::SelfActiveClear(_) => clear_active_self(&mut state.active_self),
         Event::TranslationStreamUpdate(row_event) | Event::TranslationFinal(row_event) => {
             upsert_row(
                 &mut state.rows,
@@ -380,51 +378,51 @@ fn close_row(rows: &mut BTreeMap<OverlayRowKey, OverlayRow>, event: UtteranceClo
     changed
 }
 
-fn upsert_self_preview(
-    self_preview: &mut Option<OverlaySelfPreview>,
-    event: SelfPreviewUpdateEvent,
+fn upsert_active_self(
+    active_self: &mut Option<OverlayActiveSelf>,
+    event: SelfActiveUpdateEvent,
 ) -> bool {
-    let next_preview = OverlaySelfPreview::from_event(&event);
-    match self_preview {
-        Some(existing) if existing == &next_preview => false,
+    let next_active = OverlayActiveSelf::from_event(&event);
+    match active_self {
+        Some(existing) if existing == &next_active => false,
         _ => {
-            *self_preview = Some(next_preview);
+            *active_self = Some(next_active);
             true
         }
     }
 }
 
-fn clear_self_preview(self_preview: &mut Option<OverlaySelfPreview>) -> bool {
-    self_preview.take().is_some()
+fn clear_active_self(active_self: &mut Option<OverlayActiveSelf>) -> bool {
+    active_self.take().is_some()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Event, OverlayState, SelfPreviewClearEvent, SelfPreviewUpdateEvent,
+        Event, OverlayState, SelfActiveClearEvent, SelfActiveUpdateEvent,
     };
 
     #[test]
-    fn self_preview_update_and_clear_change_overlay_state() {
+    fn self_active_update_and_clear_change_overlay_state() {
         let mut state = OverlayState::default();
 
-        assert!(state.apply(Event::SelfPreviewUpdate(SelfPreviewUpdateEvent {
-            event_id: "evt-preview-1".to_string(),
+        assert!(state.apply(Event::SelfActiveUpdate(SelfActiveUpdateEvent {
+            event_id: "evt-active-1".to_string(),
             seq: 1,
             utterance_id: None,
             channel: Some("self".to_string()),
             text: "speaking now".to_string(),
             created_at: 1.0,
         })));
-        assert_eq!(state.self_preview_text(), Some("speaking now"));
+        assert_eq!(state.active_self_text(), Some("speaking now"));
 
-        assert!(state.apply(Event::SelfPreviewClear(SelfPreviewClearEvent {
-            event_id: "evt-preview-2".to_string(),
+        assert!(state.apply(Event::SelfActiveClear(SelfActiveClearEvent {
+            event_id: "evt-active-2".to_string(),
             seq: 2,
             utterance_id: None,
             channel: Some("self".to_string()),
             created_at: 2.0,
         })));
-        assert_eq!(state.self_preview_text(), None);
+        assert_eq!(state.active_self_text(), None);
     }
 }

@@ -15,8 +15,8 @@ from .protocol import (
     OverlayEventUnion,
     OverlayStateSnapshot,
     PeerTranscriptFinal,
-    SelfPreviewClear,
-    SelfPreviewUpdate,
+    SelfActiveClear,
+    SelfActiveUpdate,
     SelfTranscriptFinal,
     Shutdown,
     TranslationFinal,
@@ -153,13 +153,13 @@ class OverlayEventAdapter:
             peer_epoch=peer_epoch,
         )
 
-    def self_preview_update(
+    def self_active_update(
         self,
         *,
         text: str,
         created_at: float | None = None,
-    ) -> SelfPreviewUpdate:
-        return SelfPreviewUpdate(
+    ) -> SelfActiveUpdate:
+        return SelfActiveUpdate(
             **self._common_event_fields(
                 utterance_id=None,
                 channel="self",
@@ -168,8 +168,8 @@ class OverlayEventAdapter:
             text=text,
         )
 
-    def self_preview_clear(self, *, created_at: float | None = None) -> SelfPreviewClear:
-        return SelfPreviewClear(
+    def self_active_clear(self, *, created_at: float | None = None) -> SelfActiveClear:
+        return SelfActiveClear(
             **self._common_event_fields(
                 utterance_id=None,
                 channel="self",

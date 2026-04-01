@@ -549,10 +549,10 @@ impl OverlayRuntime {
             .map(|block| block.into_caption_block(&policy))
             .collect();
 
-        if let Some(preview_text) = self.state.self_preview_text() {
-            if !preview_text.trim().is_empty() {
+        if let Some(active_self_text) = self.state.active_self_text() {
+            if !active_self_text.trim().is_empty() {
                 caption_blocks.push(
-                    CaptionBlock::new("self:preview", preview_text)
+                    CaptionBlock::new("self:active", active_self_text)
                         .with_channel(CaptionChannel::SelfChannel),
                 );
             }
@@ -566,7 +566,9 @@ impl OverlayRuntime {
 mod tests {
     use super::{prepare_openvr_runtime, OverlayRuntime, StartupError};
     use crate::openvr::{OpenVrError, OpenVrStartupPreflightError};
-    use crate::state::{Event, OverlayStateSnapshot, RowEvent, SelfPreviewClearEvent, SelfPreviewUpdateEvent};
+    use crate::state::{
+        Event, OverlayStateSnapshot, RowEvent, SelfActiveClearEvent, SelfActiveUpdateEvent,
+    };
     use std::cell::Cell;
 
     fn row_event(seq: u64, channel: &str, utterance_id: &str, text: &str) -> RowEvent {
@@ -586,9 +588,9 @@ mod tests {
         }
     }
 
-    fn self_preview_update_event(seq: u64, text: &str) -> SelfPreviewUpdateEvent {
-        SelfPreviewUpdateEvent {
-            event_id: format!("evt-self-preview-{seq}"),
+    fn self_active_update_event(seq: u64, text: &str) -> SelfActiveUpdateEvent {
+        SelfActiveUpdateEvent {
+            event_id: format!("evt-self-active-{seq}"),
             seq,
             utterance_id: None,
             channel: Some("self".to_string()),
@@ -597,9 +599,9 @@ mod tests {
         }
     }
 
-    fn self_preview_clear_event(seq: u64) -> SelfPreviewClearEvent {
-        SelfPreviewClearEvent {
-            event_id: format!("evt-self-preview-clear-{seq}"),
+    fn self_active_clear_event(seq: u64) -> SelfActiveClearEvent {
+        SelfActiveClearEvent {
+            event_id: format!("evt-self-active-clear-{seq}"),
             seq,
             utterance_id: None,
             channel: Some("self".to_string()),
@@ -656,11 +658,11 @@ mod tests {
     }
 
     #[test]
-    fn caption_blocks_append_active_self_preview_as_newest_self_block() {
+    fn caption_blocks_append_active_self_row_as_newest_self_block() {
         let runtime = OverlayRuntime::new(OverlayStateSnapshot {
             events: vec![
                 Event::SelfTranscriptFinal(row_event(1, "self", "self-1", "self one")),
-                Event::SelfPreviewUpdate(self_preview_update_event(2, "speaking now")),
+                Event::SelfActiveUpdate(self_active_update_event(2, "speaking now")),
             ],
         });
 
@@ -673,18 +675,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ("self:self-1", "self one"),
-                ("self:preview", "speaking now"),
+                ("self:active", "speaking now"),
             ]
         );
     }
 
     #[test]
-    fn caption_blocks_drop_self_preview_after_clear_event() {
+    fn caption_blocks_drop_active_self_after_clear_event() {
         let runtime = OverlayRuntime::new(OverlayStateSnapshot {
             events: vec![
                 Event::SelfTranscriptFinal(row_event(1, "self", "self-1", "self one")),
-                Event::SelfPreviewUpdate(self_preview_update_event(2, "speaking now")),
-                Event::SelfPreviewClear(self_preview_clear_event(3)),
+                Event::SelfActiveUpdate(self_active_update_event(2, "speaking now")),
+                Event::SelfActiveClear(self_active_clear_event(3)),
             ],
         });
 
@@ -696,6 +698,27 @@ mod tests {
                 .map(|block| (block.id.as_str(), block.text.as_str()))
                 .collect::<Vec<_>>(),
             vec![("self:self-1", "self one")]
+        );
+    }
+
+    #[test]
+    fn caption_blocks_clear_active_self_before_committed_history_replacement() {
+        let runtime = OverlayRuntime::new(OverlayStateSnapshot {
+            events: vec![
+                Event::SelfActiveUpdate(self_active_update_event(1, "speaking now")),
+                Event::SelfActiveClear(self_active_clear_event(2)),
+                Event::SelfTranscriptFinal(row_event(3, "self", "self-1", "speaking now")),
+            ],
+        });
+
+        let blocks = runtime.caption_blocks();
+
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| (block.id.as_str(), block.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("self:self-1", "speaking now")]
         );
     }
 

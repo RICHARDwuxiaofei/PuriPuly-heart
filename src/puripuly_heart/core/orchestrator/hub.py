@@ -52,7 +52,6 @@ _PROMO_INTERVAL_SEC: float = 300.0  # 5 minutes
 _RELAXED_OVERLAP_MIN_CHARS: int = 3
 _BOUNDARY_PUNCT = {".", ",", ";", ":", "!", "?"}
 _SOFT_REUSE_PUNCT = {".", ",", "…", "。", "，", "、"}
-_SELF_PREVIEW_COALESCE_MS: int = 300
 _SELF_RUNTIME_FIELDS = {
     "stt": "stt",
     "_stt_task": "stt_task",
@@ -117,14 +116,12 @@ class ClientHub:
     context_resolver: ContextResolver = field(init=False)
     active_chatbox_channel: ChannelId = field(init=False, default="self")
     overlay_event_adapter: OverlayEventAdapter = field(init=False)
-    _self_preview_coalescer: OverlayStreamCoalescer = field(init=False)
-    _self_preview_visible: bool = field(init=False, default=False)
+    _overlay_active_self_text: str | None = field(init=False, default=None)
     overlay_stream_coalesce_ms: int = 300
     last_error_source: str | None = None
 
     def __post_init__(self) -> None:
         self.overlay_event_adapter = OverlayEventAdapter(clock=self.clock)
-        self._self_preview_coalescer = OverlayStreamCoalescer(interval_ms=_SELF_PREVIEW_COALESCE_MS)
         self.self_runtime = ChannelRuntime(
             channel="self",
             stt=self.stt,
@@ -424,7 +421,6 @@ class ClientHub:
                 return
             self._send_stt_connected_notification()
             if self.low_latency_mode:
-                await self._queue_self_preview_update(event.transcript)
                 return
             logger.debug(
                 f"[Hub] STT Partial: '{event.transcript.text[:50]}...' id={str(event.transcript.utterance_id)[:8]}"
@@ -532,37 +528,39 @@ class ClientHub:
             self.last_error_source = "overlay_sink"
             logger.exception("[Hub] Overlay sink emit failed")
 
-    async def _queue_self_preview_update(self, transcript: Transcript) -> None:
-        if self.overlay_sink is None or transcript.channel != "self":
+    async def _emit_overlay_active_self_event(self, event: object) -> None:
+        await self._emit_overlay_event(event)
+        if getattr(event, "type", None) == "self_active_update":
+            self._overlay_active_self_text = getattr(event, "text", None)
+        elif getattr(event, "type", None) == "self_active_clear":
+            self._overlay_active_self_text = None
+
+    async def _sync_overlay_active_self(
+        self, buffer: _MergeBuffer | None, *, created_at: float | None = None
+    ) -> None:
+        if self.overlay_sink is None or buffer is None:
             return
 
-        text = transcript.text.strip()
-        if not text:
+        active_text = self._merge_text(buffer.parts)
+        if not active_text:
+            return
+        if active_text == self._overlay_active_self_text:
             return
 
-        await self._self_preview_coalescer.push(
-            self.overlay_event_adapter.self_preview_update(
-                text=text,
-                created_at=transcript.created_at,
-            ),
-            self._emit_self_preview_overlay_event,
+        await self._emit_overlay_active_self_event(
+            self.overlay_event_adapter.self_active_update(
+                text=active_text,
+                created_at=created_at,
+            )
         )
 
-    async def _emit_self_preview_overlay_event(self, event: object) -> None:
-        await self._emit_overlay_event(event)
-        if getattr(event, "type", None) == "self_preview_update":
-            self._self_preview_visible = True
-        elif getattr(event, "type", None) == "self_preview_clear":
-            self._self_preview_visible = False
-
     async def reset_overlay_preview(self) -> None:
-        await self._self_preview_coalescer.cancel()
-        if not self._self_preview_visible:
+        if self._overlay_active_self_text is None:
             return
         if self.overlay_sink is None:
-            self._self_preview_visible = False
+            self._overlay_active_self_text = None
             return
-        await self._emit_self_preview_overlay_event(self.overlay_event_adapter.self_preview_clear())
+        await self._emit_overlay_active_self_event(self.overlay_event_adapter.self_active_clear())
 
     def _merge_text(self, parts: list[str]) -> str:
         merged = ""
@@ -953,6 +951,7 @@ class ClientHub:
             self._clear_resume_state(buffer)
         self._upsert_merge_part(buffer, transcript.utterance_id, text)
         buffer.last_final_at = now
+        await self._sync_overlay_active_self(buffer, created_at=transcript.created_at)
 
         end_time = self._utterance_start_times.get(transcript.utterance_id)
         speech_already_ended = transcript.utterance_id in self._speech_ended_ids
@@ -1100,6 +1099,10 @@ class ClientHub:
                         payload=translation,
                         source=self._get_source(buffer.merge_id),
                     )
+                )
+                await self._emit_translation_to_overlay(
+                    translation=translation,
+                    applied_context_mode=None,
                 )
                 await self._enqueue_osc(
                     buffer.merge_id,

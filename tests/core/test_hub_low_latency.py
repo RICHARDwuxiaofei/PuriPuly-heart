@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from puripuly_heart.core.orchestrator.hub import ClientHub, _MergeBuffer
+from puripuly_heart.core.overlay.protocol import OverlayStateSnapshot
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
 from puripuly_heart.domain.models import Transcript, Translation
 
@@ -78,6 +79,17 @@ class FakeOscQueue:
 
     def process_due(self) -> None:
         pass
+
+
+@dataclass
+class RecordingOverlaySink:
+    events: list[object] = field(default_factory=list)
+
+    async def emit(self, event: object) -> None:
+        self.events.append(event)
+
+    def snapshot(self) -> OverlayStateSnapshot:
+        return OverlayStateSnapshot(events=list(self.events))
 
 
 def samples(value: float, n: int = 512) -> np.ndarray:
@@ -621,10 +633,12 @@ class TestSpecCommitPaths:
     async def test_commit_merge_reuses_spec_translation_when_text_matches(self):
         clock = FakeClock(initial_time=10.0)
         osc = FakeOscQueue()
+        overlay_sink = RecordingOverlaySink()
         hub = ClientHub(
             stt=None,
             llm=FakeLLMProvider(),
             osc=osc,
+            overlay_sink=overlay_sink,
             clock=clock,
             low_latency_mode=True,
         )
@@ -648,6 +662,11 @@ class TestSpecCommitPaths:
         assert len(osc.messages) == 1
         assert osc.messages[0].text == "hello (hola)"
         assert len(hub._translation_history) == 1
+        assert [event.type for event in overlay_sink.events] == [
+            "self_transcript_final",
+            "translation_final",
+        ]
+        assert overlay_sink.events[-1].text == "hola"
 
     @pytest.mark.asyncio
     async def test_commit_merge_reuses_spec_translation_for_soft_boundary_difference(self):
