@@ -90,6 +90,7 @@
     "settings.overlay.calibration.background_alpha": "背景透明度",
     "settings.overlay.calibration.apply": "应用",
     "settings.overlay.calibration.cancel": "取消",
+    "settings.overlay.calibration.reset": "重置",
     "settings.desktop_audio.output_device": "桌面输出设备",
     "settings.desktop_audio.vad_speech_threshold": "桌面 VAD",
     "settings.desktop_audio.vad_hangover_ms": "拖尾 (ms)",

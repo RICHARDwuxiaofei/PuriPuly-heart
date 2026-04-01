@@ -90,6 +90,7 @@
   "settings.overlay.calibration.background_alpha": "Background Alpha",
   "settings.overlay.calibration.apply": "Apply",
   "settings.overlay.calibration.cancel": "Cancel",
+  "settings.overlay.calibration.reset": "Reset",
   "settings.desktop_audio.output_device": "Desktop Output",
   "settings.desktop_audio.vad_speech_threshold": "Desktop VAD",
   "settings.desktop_audio.vad_hangover_ms": "Hangover (ms)",

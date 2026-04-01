@@ -18,6 +18,7 @@ from puripuly_heart.config.settings import (
 )
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.i18n import t
+from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 from puripuly_heart.ui.views import settings as settings_view
 
 
@@ -430,6 +431,7 @@ def test_overlay_calibration_controls_are_localized(
     assert view._overlay_anchor_label.value == t("settings.overlay.calibration.anchor")
     assert view._overlay_calibration_apply_button.text == t("settings.overlay.calibration.apply")
     assert view._overlay_calibration_cancel_button.text == t("settings.overlay.calibration.cancel")
+    assert view._overlay_calibration_reset_button.text == t("settings.overlay.calibration.reset")
 
 
 def test_overlay_calibration_controls_follow_local_apply_cancel_contract(
@@ -437,6 +439,7 @@ def test_overlay_calibration_controls_follow_local_apply_cancel_contract(
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(AppSettings(), config_path=Path("settings.json"))
+    default_distance = view._format_overlay_calibration_number(OverlayCalibration().distance)
 
     view._overlay_distance_field.value = "1.20"
     view._on_overlay_calibration_numeric_blur(
@@ -445,7 +448,7 @@ def test_overlay_calibration_controls_follow_local_apply_cancel_contract(
     )
     view._on_overlay_calibration_cancel(None)
 
-    assert view._overlay_distance_field.value == "1.00"
+    assert view._overlay_distance_field.value == default_distance
 
     view._overlay_distance_field.value = "1.20"
     view._on_overlay_calibration_numeric_blur(
@@ -467,6 +470,43 @@ def test_overlay_calibration_apply_commits_current_field_values_without_blur(
     view._on_overlay_calibration_apply(None)
 
     assert view._overlay_distance_field.value == "1.20"
+
+
+def test_overlay_calibration_reset_restores_defaults_until_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay_calibration.distance = 1.2
+    settings.overlay_calibration.offset_y = 0.5
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.set_overlay_calibration(settings.overlay_calibration)
+
+    defaults = OverlayCalibration()
+
+    view._on_overlay_calibration_reset(None)
+
+    assert view._overlay_distance_field.value == view._format_overlay_calibration_number(
+        defaults.distance
+    )
+    assert view._overlay_offset_y_field.value == view._format_overlay_calibration_number(
+        defaults.offset_y
+    )
+
+    view._on_overlay_calibration_cancel(None)
+
+    assert view._overlay_distance_field.value == "1.20"
+    assert view._overlay_offset_y_field.value == "0.50"
+
+    view._on_overlay_calibration_reset(None)
+    view._on_overlay_calibration_apply(None)
+
+    assert view._overlay_distance_field.value == view._format_overlay_calibration_number(
+        defaults.distance
+    )
+    assert view._overlay_offset_y_field.value == view._format_overlay_calibration_number(
+        defaults.offset_y
+    )
 
 
 def test_overlay_calibration_section_uses_dedicated_row_card(

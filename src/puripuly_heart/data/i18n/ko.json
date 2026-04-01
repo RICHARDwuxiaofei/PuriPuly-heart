@@ -90,6 +90,7 @@
   "settings.overlay.calibration.background_alpha": "배경 투명도",
   "settings.overlay.calibration.apply": "적용",
   "settings.overlay.calibration.cancel": "취소",
+  "settings.overlay.calibration.reset": "초기화",
   "settings.desktop_audio.output_device": "데스크톱 출력 장치",
   "settings.desktop_audio.vad_speech_threshold": "데스크톱 VAD",
   "settings.desktop_audio.vad_hangover_ms": "행오버 (ms)",

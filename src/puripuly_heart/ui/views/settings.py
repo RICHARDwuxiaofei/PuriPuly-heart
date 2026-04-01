@@ -559,6 +559,10 @@ class SettingsView(ft.Column):
             t("settings.overlay.calibration.cancel"),
             self._on_overlay_calibration_cancel,
         )
+        self._overlay_calibration_reset_button = self._build_action_button(
+            t("settings.overlay.calibration.reset"),
+            self._on_overlay_calibration_reset,
+        )
         overlay_card = self._wrap_card(
             ft.Column(
                 [
@@ -639,6 +643,7 @@ class SettingsView(ft.Column):
                         controls=[
                             self._overlay_calibration_apply_button,
                             self._overlay_calibration_cancel_button,
+                            self._overlay_calibration_reset_button,
                         ],
                         spacing=12,
                     ),
@@ -1527,6 +1532,15 @@ class SettingsView(ft.Column):
         self._overlay_failure_reason = failure_reason
         self._sync_overlay_controls()
 
+    def _on_overlay_calibration_reset(self, e) -> None:
+        _ = e
+        self._begin_overlay_calibration_session()
+        self._overlay_calibration_draft = OverlayCalibration()
+        self._sync_overlay_calibration_controls(self._overlay_calibration_draft)
+
+        if self.page:
+            self.update()
+
     def _on_overlay_click(self, e) -> None:
         if not self.page or not self._settings:
             return
@@ -1845,9 +1859,12 @@ class SettingsView(ft.Column):
             self._overlay_calibration_apply_button.style = self._get_button_style(ui_font)
         if self._overlay_calibration_cancel_button:
             self._overlay_calibration_cancel_button.style = self._get_button_style(ui_font)
+        if self._overlay_calibration_reset_button:
+            self._overlay_calibration_reset_button.style = self._get_button_style(ui_font)
 
         self._overlay_calibration_apply_button.text = t("settings.overlay.calibration.apply")
         self._overlay_calibration_cancel_button.text = t("settings.overlay.calibration.cancel")
+        self._overlay_calibration_reset_button.text = t("settings.overlay.calibration.reset")
         self._overlay_anchor_dropdown.options = [
             ft.dropdown.Option(
                 key=anchor,
