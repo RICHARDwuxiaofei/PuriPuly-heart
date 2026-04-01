@@ -514,17 +514,18 @@ def test_overlay_calibration_section_uses_dedicated_row_card(
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
 
-    assert len(view.controls) == 8
+    assert len(view.controls) == 9
 
     row5 = view.controls[4]
     overlay_column = row5.content.controls[1].content.controls[1].content.content
     assert view._overlay_calibration_title not in overlay_column.controls
 
-    row6 = view.controls[5]
+    row6 = view.controls[6]
     calibration_column = row6.content.controls[1].content.content
     assert calibration_column.controls[0] is view._overlay_calibration_title
     assert view._overlay_calibration_apply_button in calibration_column.controls[-1].controls
     assert view._overlay_calibration_cancel_button in calibration_column.controls[-1].controls
+    assert view._overlay_calibration_reset_button in calibration_column.controls[-1].controls
 
 
 @pytest.mark.asyncio

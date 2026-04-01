@@ -66,7 +66,10 @@ class HeadlessStdinRunner:
                     source_language=self.settings.languages.source_language,
                     target_language=self.settings.languages.target_language,
                 )
-                merged = f"{text} ({translation.text})"
+                if self.settings.osc.chatbox_include_source:
+                    merged = f"{text} ({translation.text})"
+                else:
+                    merged = translation.text
             else:
                 merged = text
 

@@ -197,5 +197,12 @@
   "settings.vrc_mic_intercept": "VRChat 마이크 동기화",
   "settings.vrc_mic.on": "ON",
   "settings.vrc_mic.on.description": "VRChat에서 마이크를 끄면 음성 인식도 같이 멈춰요",
-  "settings.vrc_mic.off": "OFF"
+  "settings.vrc_mic.off": "OFF",
+  "settings.chatbox_include_source": "원문 포함",
+  "settings.chatbox_source.on": "원문 + 번역",
+  "settings.chatbox_source.off": "번역만",
+  "settings.peer_language": "상대 번역 언어",
+  "settings.peer_language.source": "원문",
+  "settings.peer_language.target": "번역",
+  "settings.peer_language.follow": "셀프와 동일"
 }

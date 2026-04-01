@@ -765,6 +765,8 @@ class GuiController:
         if self.hub is not None:
             self.hub.source_language = settings.languages.source_language
             self.hub.target_language = settings.languages.target_language
+            self.hub.peer_source_language = settings.languages.peer_source_language
+            self.hub.peer_target_language = settings.languages.peer_target_language
             self.hub.system_prompt = settings.system_prompt
             self.hub.low_latency_mode = settings.stt.low_latency_mode
             self.hub.low_latency_merge_gap_ms = settings.stt.low_latency_merge_gap_ms
@@ -774,6 +776,7 @@ class GuiController:
                 if settings.stt.low_latency_mode
                 else 1.1
             )
+            self.hub.chatbox_include_source = settings.osc.chatbox_include_source
             self._sync_effective_hub_flags(settings)
 
         if prev_overlay_enabled != settings.ui.overlay_enabled:

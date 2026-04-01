@@ -197,5 +197,12 @@
     "settings.vrc_mic_intercept": "VRChat 闭麦同步",
     "settings.vrc_mic.on": "开启",
     "settings.vrc_mic.on.description": "在VRChat中关闭麦克风时，语音识别也会一起暂停",
-    "settings.vrc_mic.off": "关闭"
+    "settings.vrc_mic.off": "关闭",
+    "settings.chatbox_include_source": "包含原文",
+    "settings.chatbox_source.on": "原文 + 翻译",
+    "settings.chatbox_source.off": "仅翻译",
+    "settings.peer_language": "对方翻译语言",
+    "settings.peer_language.source": "原文",
+    "settings.peer_language.target": "翻译",
+    "settings.peer_language.follow": "与自身相同"
 }

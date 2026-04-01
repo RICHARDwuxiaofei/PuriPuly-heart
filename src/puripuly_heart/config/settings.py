@@ -62,6 +62,8 @@ class QwenLLMModel(str, Enum):
 class LanguageSettings:
     source_language: str = "ko"
     target_language: str = "en"
+    peer_source_language: str = ""
+    peer_target_language: str = ""
     recent_source_languages: list[str] = field(default_factory=lambda: ["en", "zh-CN", "ja"])
     recent_target_languages: list[str] = field(default_factory=lambda: ["en", "zh-CN", "ja"])
 
@@ -70,6 +72,14 @@ class LanguageSettings:
             raise ValueError("source_language must be non-empty")
         if not self.target_language:
             raise ValueError("target_language must be non-empty")
+
+    @property
+    def effective_peer_source(self) -> str:
+        return self.peer_source_language or self.source_language
+
+    @property
+    def effective_peer_target(self) -> str:
+        return self.peer_target_language or self.target_language
 
 
 @dataclass(slots=True)
@@ -206,6 +216,7 @@ class OSCSettings:
     cooldown_s: float = 1.5
     ttl_s: float = 7.0
     vrc_mic_intercept: bool = False
+    chatbox_include_source: bool = True
 
     def validate(self) -> None:
         if not self.host:
@@ -370,6 +381,8 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         "languages": {
             "source_language": settings.languages.source_language,
             "target_language": settings.languages.target_language,
+            "peer_source_language": settings.languages.peer_source_language,
+            "peer_target_language": settings.languages.peer_target_language,
             "recent_source_languages": settings.languages.recent_source_languages,
             "recent_target_languages": settings.languages.recent_target_languages,
         },
@@ -428,6 +441,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "cooldown_s": settings.osc.cooldown_s,
             "ttl_s": settings.osc.ttl_s,
             "vrc_mic_intercept": settings.osc.vrc_mic_intercept,
+            "chatbox_include_source": settings.osc.chatbox_include_source,
         },
         "secrets": {
             "backend": settings.secrets.backend.value,
@@ -652,6 +666,8 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         languages=LanguageSettings(
             source_language=data.get("languages", {}).get("source_language", "ko"),
             target_language=data.get("languages", {}).get("target_language", "en"),
+            peer_source_language=str(data.get("languages", {}).get("peer_source_language", "")),
+            peer_target_language=str(data.get("languages", {}).get("peer_target_language", "")),
             recent_source_languages=list(
                 dict.fromkeys(
                     list(data.get("languages", {}).get("recent_source_languages") or [])
@@ -775,6 +791,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             cooldown_s=float(data.get("osc", {}).get("cooldown_s", 1.5)),
             ttl_s=float(data.get("osc", {}).get("ttl_s", 7.0)),
             vrc_mic_intercept=bool(data.get("osc", {}).get("vrc_mic_intercept", False)),
+            chatbox_include_source=bool(data.get("osc", {}).get("chatbox_include_source", True)),
         ),
         secrets=SecretsSettings(
             backend=SecretsBackend(

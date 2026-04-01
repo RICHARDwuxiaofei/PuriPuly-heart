@@ -76,7 +76,10 @@ class ClientHub:
 
     source_language: str = "ko"
     target_language: str = "en"
+    peer_source_language: str = ""
+    peer_target_language: str = ""
     system_prompt: str = ""
+    chatbox_include_source: bool = True
     fallback_transcript_only: bool = False
     translation_enabled: bool = True
     peer_translation_enabled: bool = False
@@ -269,8 +272,8 @@ class ClientHub:
         """Get context entries within time window and max entries limit."""
         return self.context_resolver.get_local_entries(
             runtime=self.self_runtime,
-            source_language=self.source_language,
-            target_language=self.target_language,
+            source_language=self._source_language_for(self.self_runtime),
+            target_language=self._target_language_for(self.self_runtime),
         )
 
     def _format_context_for_llm(self, context: list[ContextEntry]) -> str:
@@ -290,8 +293,8 @@ class ClientHub:
         runtime.remember_context(
             text,
             timestamp=timestamp,
-            source_language=self.source_language,
-            target_language=self.target_language,
+            source_language=self._source_language_for(runtime),
+            target_language=self._target_language_for(runtime),
             max_entries=max(self.context_max_entries, self.integrated_context_max_entries),
             speaker_label=speaker_label,
             peer_epoch=peer_epoch,
@@ -1264,13 +1267,24 @@ class ClientHub:
         other_runtime = self.peer_runtime if runtime is self.self_runtime else self.self_runtime
         return other_runtime.get_source(utterance_id)
 
-    def _format_system_prompt(self) -> str:
+    def _source_language_for(self, runtime: ChannelRuntime) -> str:
+        if runtime.channel == "peer" and self.peer_source_language:
+            return self.peer_source_language
+        return self.source_language
+
+    def _target_language_for(self, runtime: ChannelRuntime) -> str:
+        if runtime.channel == "peer" and self.peer_target_language:
+            return self.peer_target_language
+        return self.target_language
+
+    def _format_system_prompt(self, runtime: ChannelRuntime | None = None) -> str:
+        runtime = runtime or self.self_runtime
         formatted_prompt = self.system_prompt
         formatted_prompt = formatted_prompt.replace(
-            "${sourceName}", get_llm_language_name(self.source_language)
+            "${sourceName}", get_llm_language_name(self._source_language_for(runtime))
         )
         formatted_prompt = formatted_prompt.replace(
-            "${targetName}", get_llm_language_name(self.target_language)
+            "${targetName}", get_llm_language_name(self._target_language_for(runtime))
         )
         return formatted_prompt
 
@@ -1334,15 +1348,15 @@ class ClientHub:
             other_runtime=self._other_runtime(runtime),
             requested_mode=requested_mode,
             peer_translation_enabled=self.peer_translation_enabled,
-            source_language=self.source_language,
-            target_language=self.target_language,
+            source_language=self._source_language_for(runtime),
+            target_language=self._target_language_for(runtime),
             expected_peer_epoch=self._expected_peer_epoch(
                 runtime,
                 explicit_peer_epoch=expected_peer_epoch,
             ),
         )
         logger.info("[Hub] Context mode: %s", applied_mode)
-        formatted_prompt = self._format_system_prompt()
+        formatted_prompt = self._format_system_prompt(runtime)
         return formatted_prompt, context_str, now, applied_mode
 
     def _normalize_translation(
@@ -1358,8 +1372,8 @@ class ClientHub:
             utterance_id=translation.utterance_id,
             translated_text=translation.text,
             source_text=text,
-            source_language=self.source_language,
-            target_language=self.target_language,
+            source_language=self._source_language_for(runtime),
+            target_language=self._target_language_for(runtime),
             channel=runtime.channel,
             speaker_label=speaker_label,
             peer_epoch=peer_epoch,
@@ -1388,8 +1402,8 @@ class ClientHub:
             utterance_id=utterance_id,
             text=text,
             system_prompt=formatted_prompt,
-            source_language=self.source_language,
-            target_language=self.target_language,
+            source_language=self._source_language_for(runtime),
+            target_language=self._target_language_for(runtime),
             context=context_str,
         )
         return self._normalize_translation(
@@ -1466,8 +1480,8 @@ class ClientHub:
                     utterance_id=utterance_id,
                     text=text,
                     system_prompt=formatted_prompt,
-                    source_language=self.source_language,
-                    target_language=self.target_language,
+                    source_language=self._source_language_for(runtime),
+                    target_language=self._target_language_for(runtime),
                     context=context_str,
                 )
                 translation = self._normalize_translation(
@@ -1537,12 +1551,14 @@ class ClientHub:
         latest_snapshot = ""
         coalescer = OverlayStreamCoalescer(interval_ms=self.overlay_stream_coalesce_ms)
         try:
+            src = self._source_language_for(runtime)
+            tgt = self._target_language_for(runtime)
             async for snapshot in self.llm.stream_translate(
                 utterance_id=utterance_id,
                 text=text,
                 system_prompt=system_prompt,
-                source_language=self.source_language,
-                target_language=self.target_language,
+                source_language=src,
+                target_language=tgt,
                 context=context,
             ):
                 latest_snapshot = snapshot
@@ -1551,8 +1567,8 @@ class ClientHub:
                         utterance_id=utterance_id,
                         channel=runtime.channel,
                         text=snapshot,
-                        source_language=self.source_language,
-                        target_language=self.target_language,
+                        source_language=src,
+                        target_language=tgt,
                         applied_context_mode=applied_mode,
                         speaker_label=speaker_label,
                         peer_epoch=peer_epoch,
@@ -1566,8 +1582,8 @@ class ClientHub:
                     utterance_id=utterance_id,
                     translated_text=latest_snapshot,
                     source_text=text,
-                    source_language=self.source_language,
-                    target_language=self.target_language,
+                    source_language=src,
+                    target_language=tgt,
                     channel=runtime.channel,
                     speaker_label=speaker_label,
                     peer_epoch=peer_epoch,
@@ -1583,8 +1599,8 @@ class ClientHub:
                     utterance_id=utterance_id,
                     channel=runtime.channel,
                     text=translation.text,
-                    source_language=self.source_language,
-                    target_language=self.target_language,
+                    source_language=src,
+                    target_language=tgt,
                     applied_context_mode=applied_mode,
                     speaker_label=speaker_label,
                     peer_epoch=peer_epoch,
@@ -1666,8 +1682,10 @@ class ClientHub:
     ) -> None:
         if translation_text is None:
             merged = transcript_text
-        else:
+        elif self.chatbox_include_source:
             merged = f"{transcript_text} ({translation_text})"
+        else:
+            merged = translation_text
 
         msg = OSCMessage(utterance_id=utterance_id, text=merged, created_at=self.clock.now())
 

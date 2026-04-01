@@ -19,8 +19,9 @@ from puripuly_heart.config.settings import (
     QwenRegion,
     STTProviderName,
 )
-from puripuly_heart.core.language import get_stt_compatibility_warning
+from puripuly_heart.core.language import get_all_language_options, get_stt_compatibility_warning
 from puripuly_heart.ui.components.glow import GLOW_CARD, create_glow_stack
+from puripuly_heart.ui.components.language_modal import LanguageModal
 from puripuly_heart.ui.components.settings import (
     ApiKeyField,
     AudioSettings,
@@ -440,6 +441,72 @@ class SettingsView(ft.Column):
             ft.Column([self._vrc_mic_title, self._vrc_mic_text], spacing=0, expand=True)
         )
 
+        # === Chatbox source toggle card ===
+        self._chatbox_source_text = self._build_clickable_text(
+            t("settings.chatbox_source.on"),
+            self._on_chatbox_source_click,
+        )
+        self._chatbox_source_title = ft.Text(
+            t("settings.chatbox_include_source"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        chatbox_source_card = self._wrap_card(
+            ft.Column(
+                [self._chatbox_source_title, self._chatbox_source_text],
+                spacing=0,
+                expand=True,
+            )
+        )
+        # === Peer language card ===
+        self._peer_lang_title = ft.Text(
+            t("settings.peer_language"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._peer_source_text = self._build_clickable_text(
+            t("settings.peer_language.follow"),
+            self._on_peer_source_click,
+        )
+        self._peer_target_text = self._build_clickable_text(
+            t("settings.peer_language.follow"),
+            self._on_peer_target_click,
+        )
+        self._peer_source_label = ft.Text(
+            t("settings.peer_language.source"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._peer_target_label = ft.Text(
+            t("settings.peer_language.target"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
+        peer_lang_card = self._wrap_card(
+            ft.Column(
+                [
+                    self._peer_lang_title,
+                    ft.Container(height=12),
+                    self._build_setting_action_row(
+                        self._peer_source_label,
+                        self._peer_source_text,
+                    ),
+                    self._build_setting_action_row(
+                        self._peer_target_label,
+                        self._peer_target_text,
+                    ),
+                ],
+                spacing=6,
+                expand=True,
+            )
+        )
+        row_chatbox_source = ft.Container(
+            content=ft.Row([chatbox_source_card, peer_lang_card], spacing=16, expand=True),
+            height=280,
+        )
+
         self._overlay_title = ft.Text(
             t("settings.section.overlay"),
             size=24,
@@ -752,7 +819,17 @@ class SettingsView(ft.Column):
             expand=False,
         )
 
-        self.controls = [row1, row2, row3, row4, row5, overlay_calibration_card, persona_card, row7]
+        self.controls = [
+            row1,
+            row2,
+            row3,
+            row4,
+            row5,
+            row_chatbox_source,
+            overlay_calibration_card,
+            persona_card,
+            row7,
+        ]
 
     def _populate_host_apis(self) -> None:
         """Legacy hook for tests; host APIs are handled by AudioSettings."""
@@ -871,6 +948,17 @@ class SettingsView(ft.Column):
         # --- 新增：读取 VRChat 同步开关状态 ---
         self._vrc_mic_text.content.value = t(
             "settings.vrc_mic.on" if settings.osc.vrc_mic_intercept else "settings.vrc_mic.off"
+        )
+        self._chatbox_source_text.content.value = t(
+            "settings.chatbox_source.on"
+            if settings.osc.chatbox_include_source
+            else "settings.chatbox_source.off"
+        )
+        self._peer_source_text.content.value = self._peer_lang_display(
+            settings.languages.peer_source_language
+        )
+        self._peer_target_text.content.value = self._peer_lang_display(
+            settings.languages.peer_target_language
         )
 
         # Prompt
@@ -1680,6 +1768,101 @@ class SettingsView(ft.Column):
             self._vrc_mic_text.update()
         self._emit_settings_changed()
 
+    def _on_chatbox_source_click(self, e) -> None:
+        """Open chatbox source inclusion selection modal."""
+        if not self.page:
+            return
+        options = [
+            OptionItem(value="on", label=t("settings.chatbox_source.on")),
+            OptionItem(value="off", label=t("settings.chatbox_source.off")),
+        ]
+        current = "on" if self._settings.osc.chatbox_include_source else "off"
+        modal = SettingsModal(
+            self.page,
+            t("settings.chatbox_include_source"),
+            options,
+            self._on_chatbox_source_selected,
+            show_description=False,
+        )
+        modal.open(current)
+
+    def _on_chatbox_source_selected(self, value: str) -> None:
+        """Handle chatbox source inclusion selection result."""
+        if not self._settings:
+            return
+        new_value = value == "on"
+        logger.info(f"[Settings] Chatbox include source toggled: {new_value}")
+        self._settings.osc.chatbox_include_source = new_value
+
+        self._chatbox_source_text.content.value = t(
+            "settings.chatbox_source.on" if new_value else "settings.chatbox_source.off"
+        )
+        if self.page:
+            self._chatbox_source_text.update()
+        self._emit_settings_changed()
+
+    def _peer_lang_display(self, code: str) -> str:
+        """Return display text for peer language, showing 'follow' if empty."""
+        if not code:
+            return t("settings.peer_language.follow")
+        return language_name(code)
+
+    def _on_peer_source_click(self, e) -> None:
+        if not self.page or not self._settings:
+            return
+        modal = LanguageModal(
+            page=self.page,
+            languages=get_all_language_options(),
+            on_select=self._on_peer_source_selected,
+        )
+        current = (
+            self._settings.languages.peer_source_language
+            or self._settings.languages.source_language
+        )
+        modal.open(current=current, recent=self._settings.languages.recent_source_languages)
+
+    def _on_peer_source_selected(self, lang_code: str) -> None:
+        if not self._settings:
+            return
+        if lang_code == self._settings.languages.source_language:
+            self._settings.languages.peer_source_language = ""
+        else:
+            self._settings.languages.peer_source_language = lang_code
+        self._peer_source_text.content.value = self._peer_lang_display(
+            self._settings.languages.peer_source_language
+        )
+        if self.page:
+            self._peer_source_text.update()
+        self._emit_settings_changed()
+
+    def _on_peer_target_click(self, e) -> None:
+        if not self.page or not self._settings:
+            return
+        modal = LanguageModal(
+            page=self.page,
+            languages=get_all_language_options(),
+            on_select=self._on_peer_target_selected,
+        )
+        current = (
+            self._settings.languages.peer_target_language
+            or self._settings.languages.target_language
+        )
+        modal.open(current=current, recent=self._settings.languages.recent_target_languages)
+
+    def _on_peer_target_selected(self, lang_code: str) -> None:
+        if not self._settings:
+            return
+        if lang_code == self._settings.languages.target_language:
+            self._settings.languages.peer_target_language = ""
+        else:
+            self._settings.languages.peer_target_language = lang_code
+        self._peer_target_text.content.value = self._peer_lang_display(
+            self._settings.languages.peer_target_language
+        )
+        if self.page:
+            self._peer_target_text.update()
+        self._emit_settings_changed()
+
     def _on_low_latency_click(self, e) -> None:
         """Open low latency mode selection modal."""
         if not self.page:
@@ -1824,6 +2007,10 @@ class SettingsView(ft.Column):
         self._custom_vocab_title.value = t("settings.section.custom_vocabulary")
         self._custom_vocab_info_icon.tooltip = t("settings.custom_vocabulary_tooltip")
         self._vrc_mic_title.value = t("settings.vrc_mic_intercept")
+        self._chatbox_source_title.value = t("settings.chatbox_include_source")
+        self._peer_lang_title.value = t("settings.peer_language")
+        self._peer_source_label.value = t("settings.peer_language.source")
+        self._peer_target_label.value = t("settings.peer_language.target")
         self._overlay_title.value = t("settings.section.overlay")
         self._overlay_enabled_label.value = t("settings.overlay.enabled")
         self._peer_translation_label.value = t("settings.peer_translation")
@@ -1887,6 +2074,17 @@ class SettingsView(ft.Column):
                 "settings.vrc_mic.on"
                 if self._settings.osc.vrc_mic_intercept
                 else "settings.vrc_mic.off"
+            )
+            self._chatbox_source_text.content.value = t(
+                "settings.chatbox_source.on"
+                if self._settings.osc.chatbox_include_source
+                else "settings.chatbox_source.off"
+            )
+            self._peer_source_text.content.value = self._peer_lang_display(
+                self._settings.languages.peer_source_language
+            )
+            self._peer_target_text.content.value = self._peer_lang_display(
+                self._settings.languages.peer_target_language
             )
             self._sync_overlay_controls()
             self._sync_overlay_calibration_controls()
