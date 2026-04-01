@@ -393,3 +393,104 @@ async def test_headless_mic_runner_isolates_peer_loop_runtime_failures(
 
     assert result == 0
     assert any("Peer desktop loop failed" in message for message in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    settings = AppSettings()
+    settings.ui.peer_translation_enabled = True
+    settings.desktop_audio.output_device = "Headphones (Loopback)"
+    settings.desktop_audio.vad_hangover_ms = 950
+    settings.desktop_audio.vad_pre_roll_ms = 420
+    config_path = tmp_path / "settings.json"
+    vad_path = tmp_path / "vad.onnx"
+    vad_path.write_text("dummy", encoding="utf-8")
+
+    helper_calls: list[dict[str, object]] = []
+    engine = object()
+
+    class FakeSender:
+        def close(self):
+            return None
+
+    class FakeHub:
+        def __init__(self, *args, **kwargs):
+            self.peer_stt = kwargs.get("peer_stt")
+
+        async def start(self, *args, **kwargs):
+            return None
+
+        async def stop(self):
+            return None
+
+        def advance_peer_session_epoch(self) -> int:
+            return 1
+
+    class FakeSource:
+        async def close(self):
+            return None
+
+    class FakeDesktopSource(FakeSource):
+        pass
+
+    async def fake_run_audio_vad_loop(*_args, **_kwargs):
+        return None
+
+    def fake_create_peer_vad_gating(*, engine, sample_rate_hz, ring_buffer_ms, hangover_ms):
+        helper_calls.append(
+            {
+                "engine": engine,
+                "sample_rate_hz": sample_rate_hz,
+                "ring_buffer_ms": ring_buffer_ms,
+                "hangover_ms": hangover_ms,
+            }
+        )
+        return object()
+
+    monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
+    monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
+    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
+    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
+    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(headless_mic, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend")
+    monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
+    monkeypatch.setattr(headless_mic, "SmartOscQueue", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "ClientHub", FakeHub)
+    monkeypatch.setattr(headless_mic, "SileroVadOnnx", lambda *a, **k: engine)
+    monkeypatch.setattr(headless_mic, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "create_peer_vad_gating", fake_create_peer_vad_gating)
+    monkeypatch.setattr(headless_mic, "SoundDeviceAudioSource", lambda *a, **k: FakeSource())
+    monkeypatch.setattr(
+        headless_mic,
+        "DesktopLoopbackAudioSource",
+        lambda *a, **k: FakeDesktopSource(),
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "DesktopPeerPipeline",
+        lambda *a, **k: FakeDesktopSource(),
+    )
+    monkeypatch.setattr(headless_mic, "run_audio_vad_loop", fake_run_audio_vad_loop)
+    monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", lambda *a, **k: None)
+
+    runner = headless_mic.HeadlessMicRunner(
+        settings=settings,
+        config_path=config_path,
+        vad_model_path=vad_path,
+        use_llm=True,
+    )
+    result = await runner.run()
+
+    assert result == 0
+    assert helper_calls == [
+        {
+            "engine": engine,
+            "sample_rate_hz": 16000,
+            "ring_buffer_ms": 420,
+            "hangover_ms": 950,
+        }
+    ]

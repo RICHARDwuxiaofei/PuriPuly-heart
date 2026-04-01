@@ -32,7 +32,7 @@ from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
-from puripuly_heart.core.vad.gating import VadGating
+from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
 from puripuly_heart.core.vad.sink import VadEventSink
 
@@ -219,11 +219,10 @@ class HeadlessMicRunner:
         peer_source = None
         if self.settings.ui.peer_translation_enabled and hub.peer_stt is not None:
             try:
-                peer_vad = VadGating(
+                peer_vad = create_peer_vad_gating(
                     engine=SileroVadOnnx(model_path=self.vad_model_path),
                     sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-                    ring_buffer_ms=max(1, self.settings.desktop_audio.vad_pre_roll_ms),
-                    speech_threshold=self.settings.desktop_audio.vad_speech_threshold,
+                    ring_buffer_ms=self.settings.desktop_audio.vad_pre_roll_ms,
                     hangover_ms=self.settings.desktop_audio.vad_hangover_ms,
                 )
                 peer_source = DesktopPeerPipeline(

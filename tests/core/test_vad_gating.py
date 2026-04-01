@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from puripuly_heart.core.vad.gating import SpeechEnd, SpeechStart, VadGating
+from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadGating
 from tests.helpers.vad import SequenceVadEngine, chunk_samples
 
 
@@ -38,3 +39,87 @@ def test_vad_gating_pre_roll_contains_previous_audio():
     assert start.pre_roll.shape[0] == 1024
     assert np.allclose(start.pre_roll[:512], 0.0)
     assert np.allclose(start.pre_roll[512:], 1.0)
+
+
+def test_vad_gating_starts_on_first_positive_chunk_by_default():
+    engine = SequenceVadEngine(probs=[0.0, 0.9])
+    gating = VadGating(engine, sample_rate_hz=16000, ring_buffer_ms=64, hangover_ms=0)
+
+    assert gating.process_chunk(chunk_samples(0.0, n=gating.chunk_samples)) == []
+
+    events = gating.process_chunk(chunk_samples(1.0, n=gating.chunk_samples))
+
+    assert len(events) == 1
+    assert isinstance(events[0], SpeechStart)
+    assert np.allclose(events[0].chunk, 1.0)
+
+
+def test_vad_gating_buffers_candidate_until_commit_threshold():
+    probs = [0.0, 0.0, 0.9, 0.9, 0.9, 0.9, 0.9]
+    gating = VadGating(
+        SequenceVadEngine(probs=probs),
+        sample_rate_hz=16000,
+        ring_buffer_ms=64,
+        speech_threshold=0.7,
+        hangover_ms=64,
+        start_debounce_chunks=3,
+        start_commit_chunks=5,
+    )
+
+    per_chunk_events = [
+        gating.process_chunk(chunk_samples(float(i), n=gating.chunk_samples))
+        for i in range(len(probs))
+    ]
+
+    assert all(not events for events in per_chunk_events[:6])
+
+    events = per_chunk_events[6]
+    start = events[0]
+    chunks = [start.chunk] + [event.chunk for event in events[1:] if isinstance(event, SpeechChunk)]
+
+    assert isinstance(start, SpeechStart)
+    assert start.pre_roll.shape[0] == 1024
+    assert np.allclose(start.pre_roll[:512], 0.0)
+    assert np.allclose(start.pre_roll[512:], 1.0)
+    assert len(events) == 5
+    assert [type(event) for event in events] == [
+        SpeechStart,
+        SpeechChunk,
+        SpeechChunk,
+        SpeechChunk,
+        SpeechChunk,
+    ]
+    assert [float(chunk[0]) for chunk in chunks] == [2.0, 3.0, 4.0, 5.0, 6.0]
+
+
+def test_vad_gating_drops_short_candidate_before_commit():
+    probs = [0.0, 0.9, 0.9, 0.9, 0.9, 0.0]
+    gating = VadGating(
+        SequenceVadEngine(probs=probs),
+        sample_rate_hz=16000,
+        ring_buffer_ms=64,
+        speech_threshold=0.7,
+        hangover_ms=64,
+        start_debounce_chunks=3,
+        start_commit_chunks=5,
+    )
+
+    events: list[object] = []
+    for i in range(len(probs)):
+        events.extend(gating.process_chunk(chunk_samples(float(i), n=gating.chunk_samples)))
+
+    assert events == []
+    assert gating.in_speech is False
+    assert gating.utterance_id is None
+
+
+def test_vad_gating_rejects_commit_threshold_lower_than_debounce_threshold():
+    engine = SequenceVadEngine(probs=[0.0])
+
+    with pytest.raises(ValueError, match="start_commit_chunks"):
+        VadGating(
+            engine,
+            sample_rate_hz=16000,
+            start_debounce_chunks=3,
+            start_commit_chunks=2,
+        )

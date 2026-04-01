@@ -11,8 +11,9 @@ from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.gating import VadGating
+from puripuly_heart.domain.events import STTSessionState
 from tests.helpers.audio import FakeAudioSource, make_frames
-from tests.helpers.fakes import FakeSender, SpeechAwareFakeBackend
+from tests.helpers.fakes import FakeSender, SpeechAwareFakeBackend, SpeechAwareFakeSession
 from tests.helpers.vad import SequenceVadEngine
 
 
@@ -97,3 +98,115 @@ async def test_run_audio_vad_loop_applies_audio_gate_before_forwarding_to_sink()
     assert np.array_equal(gate_inputs[0], original)
     assert np.array_equal(vad_inputs[0], gated)
     assert np.array_equal(sink_events[0], gated)
+
+
+class _PeerOnlySink:
+    def __init__(self, hub: ClientHub) -> None:
+        self._hub = hub
+
+    async def handle_vad_event(self, event) -> None:  # noqa: ANN001
+        await self._hub.handle_peer_vad_event(event)
+
+
+class _RecordingSpeechBackend:
+    def __init__(self) -> None:
+        self.open_calls = 0
+        self.sessions: list[SpeechAwareFakeSession] = []
+
+    async def open_session(self) -> SpeechAwareFakeSession:
+        self.open_calls += 1
+        session = SpeechAwareFakeSession()
+        self.sessions.append(session)
+        return session
+
+
+async def test_peer_pipeline_drops_short_candidate_before_opening_stt_session():
+    clock = FakeClock()
+    sender = FakeSender()
+    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    backend = _RecordingSpeechBackend()
+    peer_stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        channel="peer",
+        clock=clock,
+    )
+    hub = ClientHub(stt=None, peer_stt=peer_stt, llm=None, osc=osc, clock=clock)
+    await hub.start(auto_flush_osc=False)
+
+    probs = [0.0, 0.9, 0.9, 0.9, 0.9, 0.0]
+    vad = VadGating(
+        SequenceVadEngine(probs=probs),
+        sample_rate_hz=16000,
+        ring_buffer_ms=64,
+        speech_threshold=0.7,
+        hangover_ms=64,
+        start_debounce_chunks=3,
+        start_commit_chunks=5,
+    )
+
+    audio = np.concatenate(
+        [np.full((512,), float(i), dtype=np.float32) for i in range(len(probs))], axis=0
+    )
+    frames = make_frames(audio, sample_rate_hz=16000, splits=[1000, 1000, audio.size - 2000])
+    source = FakeAudioSource(frames)
+    await run_audio_vad_loop(
+        source=source,
+        vad=vad,
+        sink=_PeerOnlySink(hub),
+        target_sample_rate_hz=16000,
+    )
+
+    assert backend.open_calls == 0
+    assert peer_stt.state == STTSessionState.DISCONNECTED
+    assert hub.peer_runtime.utterances == {}
+
+    await hub.stop()
+
+
+async def test_peer_pipeline_commits_after_candidate_reaches_minimum_length():
+    clock = FakeClock()
+    sender = FakeSender()
+    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    backend = _RecordingSpeechBackend()
+    peer_stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        channel="peer",
+        clock=clock,
+    )
+    hub = ClientHub(stt=None, peer_stt=peer_stt, llm=None, osc=osc, clock=clock)
+    await hub.start(auto_flush_osc=False)
+
+    probs = [0.0, 0.0, 0.9, 0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0]
+    vad = VadGating(
+        SequenceVadEngine(probs=probs),
+        sample_rate_hz=16000,
+        ring_buffer_ms=64,
+        speech_threshold=0.7,
+        hangover_ms=64,
+        start_debounce_chunks=3,
+        start_commit_chunks=5,
+    )
+
+    audio = np.concatenate(
+        [np.full((512,), float(i), dtype=np.float32) for i in range(len(probs))], axis=0
+    )
+    frames = make_frames(audio, sample_rate_hz=16000, splits=[1000, 1000, 1000, audio.size - 3000])
+    source = FakeAudioSource(frames)
+    await run_audio_vad_loop(
+        source=source,
+        vad=vad,
+        sink=_PeerOnlySink(hub),
+        target_sample_rate_hz=16000,
+    )
+
+    for _ in range(50):
+        if hub.peer_runtime.utterances:
+            break
+        await asyncio.sleep(0.01)
+
+    assert backend.open_calls == 1
+    assert hub.peer_runtime.utterances
+
+    await hub.stop()

@@ -711,6 +711,66 @@ async def test_init_pipeline_keeps_peer_original_runtime_available_without_peer_
 
 
 @pytest.mark.asyncio
+async def test_start_peer_loop_uses_shared_peer_vad_policy_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.desktop_audio.output_device = "Headphones (Loopback)"
+    controller.settings.desktop_audio.vad_hangover_ms = 950
+    controller.settings.desktop_audio.vad_pre_roll_ms = 420
+
+    helper_calls: list[dict[str, object]] = []
+    engine = object()
+
+    class FakePeerSource:
+        async def close(self) -> None:
+            return None
+
+    async def fake_run_peer_mic_loop(self: GuiController) -> None:
+        return None
+
+    def fake_create_peer_vad_gating(*, engine, sample_rate_hz, ring_buffer_ms, hangover_ms):
+        helper_calls.append(
+            {
+                "engine": engine,
+                "sample_rate_hz": sample_rate_hz,
+                "ring_buffer_ms": ring_buffer_ms,
+                "hangover_ms": hangover_ms,
+            }
+        )
+        return "peer-vad"
+
+    monkeypatch.setattr(
+        controller_module,
+        "DesktopLoopbackAudioSource",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "DesktopPeerPipeline",
+        lambda *args, **kwargs: FakePeerSource(),
+    )
+    monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *args, **kwargs: engine)
+    monkeypatch.setattr(controller_module, "create_peer_vad_gating", fake_create_peer_vad_gating)
+    monkeypatch.setattr(GuiController, "_run_peer_mic_loop", fake_run_peer_mic_loop)
+
+    await controller._start_peer_loop(Path("vad.onnx"))
+    assert controller._peer_audio_source is not None
+    assert controller._peer_vad == "peer-vad"
+    assert helper_calls == [
+        {
+            "engine": engine,
+            "sample_rate_hz": 16000,
+            "ring_buffer_ms": 420,
+            "hangover_ms": 950,
+        }
+    ]
+    assert controller._peer_mic_task is not None
+    await controller._peer_mic_task
+
+
+@pytest.mark.asyncio
 async def test_overlay_toggle_starts_and_stops_overlay_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
