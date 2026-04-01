@@ -14,8 +14,8 @@ const OVERLAY_KEY_PREFIX: &str = "com.puripuly.heart.overlay.";
 const OVERLAY_NAME_PREFIX: &str = "PuriPuly Heart Overlay ";
 #[cfg(any(windows, test))]
 const FN_TABLE_INTERFACE_PREFIX: &str = "FnTable:";
-const DEFAULT_OVERLAY_WIDTH_METERS: f32 = 1.8;
-const DEFAULT_OVERLAY_DISTANCE_METERS: f32 = 1.0;
+const DEFAULT_OVERLAY_WIDTH_METERS: f32 = 1.0;
+const DEFAULT_OVERLAY_DISTANCE_METERS: f32 = 1.1;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OverlayPlacementPolicy {

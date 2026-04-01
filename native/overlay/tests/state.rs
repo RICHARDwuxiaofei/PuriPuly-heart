@@ -108,7 +108,7 @@ fn overlay_state_snapshot_replaces_stale_rows() {
 fn overlay_state_tracks_latest_overlay_calibration_update() {
     let mut state = OverlayState::default();
 
-    assert_eq!(state.calibration().distance, 1.0);
+    assert_eq!(state.calibration().distance, 1.1);
 
     state.apply(Event::OverlayCalibrationUpdate(OverlayCalibrationUpdateEvent {
         event_id: "evt-calibration".to_string(),

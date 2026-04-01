@@ -300,7 +300,7 @@ fn default_anchor() -> String {
 }
 
 fn default_distance() -> f32 {
-    1.0
+    1.1
 }
 
 fn default_text_scale() -> f32 {
