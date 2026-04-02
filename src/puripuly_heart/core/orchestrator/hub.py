@@ -1563,6 +1563,12 @@ class ClientHub:
                     peer_epoch=peer_epoch,
                 )
         except asyncio.CancelledError:
+            if runtime.channel == "self":
+                await self._emit_overlay_utterance_closed(
+                    utterance_id=utterance_id,
+                    channel=runtime.channel,
+                    is_final=False,
+                )
             raise
         except Exception as exc:
             logger.error(f"[Hub] Translation failed: {exc}")
@@ -1698,17 +1704,23 @@ class ClientHub:
             return translation
         except asyncio.CancelledError:
             await coalescer.cancel()
+            await self._emit_overlay_event(
+                self.overlay_event_adapter.utterance_closed(
+                    utterance_id=utterance_id,
+                    channel=runtime.channel,
+                    is_final=False,
+                )
+            )
             raise
         except Exception:
             await coalescer.flush(self._emit_overlay_event)
-            if latest_snapshot:
-                await self._emit_overlay_event(
-                    self.overlay_event_adapter.utterance_closed(
-                        utterance_id=utterance_id,
-                        channel=runtime.channel,
-                        is_final=False,
-                    )
+            await self._emit_overlay_event(
+                self.overlay_event_adapter.utterance_closed(
+                    utterance_id=utterance_id,
+                    channel=runtime.channel,
+                    is_final=False,
                 )
+            )
             raise
 
     async def handle_peer_transcript_final_for_test(

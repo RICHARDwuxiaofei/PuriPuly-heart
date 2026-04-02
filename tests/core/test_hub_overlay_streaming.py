@@ -78,6 +78,55 @@ class FailingAfterStreamingLLMProvider(LLMProvider):
         return
 
 
+@dataclass(slots=True)
+class ImmediateFailingStreamingLLMProvider(LLMProvider):
+    error: Exception
+
+    async def stream_translate(
+        self,
+        *,
+        utterance_id: UUID,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ) -> AsyncIterator[str]:
+        _ = (utterance_id, text, system_prompt, source_language, target_language, context)
+        raise self.error
+        if False:
+            yield ""
+
+    async def close(self) -> None:
+        return
+
+
+@dataclass(slots=True)
+class BlockingTranslateLLMProvider(LLMProvider):
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Future[None] | None = None
+
+    async def translate(
+        self,
+        *,
+        utterance_id: UUID,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ):
+        _ = (utterance_id, text, system_prompt, source_language, target_language, context)
+        self.started.set()
+        if self.release is None:
+            self.release = asyncio.get_running_loop().create_future()
+        await self.release
+        raise AssertionError("blocking provider should be cancelled before release")
+
+    async def close(self) -> None:
+        return
+
+
 @pytest.mark.asyncio
 async def test_hub_emits_self_and_peer_finals_to_overlay_sink() -> None:
     sink = RecordingOverlaySink()
@@ -123,9 +172,15 @@ async def test_peer_stream_updates_are_coalesced_before_overlay_emit() -> None:
     await hub.translate_peer_text_for_test("안녕")
 
     stream_events = [event for event in sink.events if event.type == "translation_stream_update"]
+    final_events = [event for event in sink.events if event.type == "translation_final"]
+    closed_events = [event for event in sink.events if event.type == "utterance_closed"]
 
     assert len(stream_events) == 1
     assert stream_events[0].text == "hello"
+    assert final_events[-1].channel == "peer"
+    assert final_events[-1].text == "hello"
+    assert closed_events[-1].channel == "peer"
+    assert closed_events[-1].is_final is True
 
 
 @pytest.mark.asyncio
@@ -198,6 +253,28 @@ async def test_hub_closes_self_overlay_line_after_translation_completion() -> No
 
 
 @pytest.mark.asyncio
+async def test_self_translation_failure_closes_overlay_line_as_incomplete() -> None:
+    sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=ImmediateFailingStreamingLLMProvider(error=RuntimeError("boom")),
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+    )
+
+    utterance_id = await hub.submit_text("self text", source="You")
+    await asyncio.gather(*hub.self_runtime.translation_tasks.values(), return_exceptions=True)
+
+    assert [event.type for event in sink.events] == [
+        "self_transcript_final",
+        "utterance_closed",
+    ]
+    assert sink.events[-1].channel == "self"
+    assert sink.events[-1].utterance_id == utterance_id
+    assert sink.events[-1].is_final is False
+
+
+@pytest.mark.asyncio
 async def test_peer_stream_failure_keeps_latest_snapshot_and_closes_line_as_incomplete() -> None:
     sink = RecordingOverlaySink()
     hub = ClientHub(
@@ -215,6 +292,52 @@ async def test_peer_stream_failure_keeps_latest_snapshot_and_closes_line_as_inco
 
     assert stream_events[-1].text == "he"
     assert closed.is_final is False
+
+
+@pytest.mark.asyncio
+async def test_peer_stream_failure_before_first_chunk_still_closes_line() -> None:
+    sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=ImmediateFailingStreamingLLMProvider(error=RuntimeError("boom")),
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        peer_translation_enabled=True,
+    )
+
+    utterance_id = await hub.translate_peer_text_for_test("안녕")
+
+    assert [event.type for event in sink.events] == [
+        "peer_transcript_final",
+        "utterance_closed",
+    ]
+    assert sink.events[-1].channel == "peer"
+    assert sink.events[-1].utterance_id == utterance_id
+    assert sink.events[-1].is_final is False
+
+
+@pytest.mark.asyncio
+async def test_self_translation_cancellation_closes_overlay_line_as_incomplete() -> None:
+    sink = RecordingOverlaySink()
+    llm = BlockingTranslateLLMProvider()
+    hub = ClientHub(
+        stt=None,
+        llm=llm,
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+    )
+
+    utterance_id = await hub.submit_text("self text", source="You")
+    await llm.started.wait()
+    await hub.self_runtime.reset_runtime_state()
+
+    assert [event.type for event in sink.events] == [
+        "self_transcript_final",
+        "utterance_closed",
+    ]
+    assert sink.events[-1].channel == "self"
+    assert sink.events[-1].utterance_id == utterance_id
+    assert sink.events[-1].is_final is False
 
 
 @pytest.mark.asyncio
