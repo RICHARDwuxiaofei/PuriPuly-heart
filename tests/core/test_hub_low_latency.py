@@ -661,8 +661,11 @@ class TestSpecCommitPaths:
         assert [event.type for event in overlay_sink.events] == [
             "self_transcript_final",
             "translation_final",
+            "utterance_closed",
         ]
-        assert overlay_sink.events[-1].text == "hola"
+        assert overlay_sink.events[1].text == "hola"
+        assert overlay_sink.events[-1].channel == "self"
+        assert overlay_sink.events[-1].is_final is True
 
     @pytest.mark.asyncio
     async def test_commit_merge_reuses_spec_translation_for_soft_boundary_difference(self):

@@ -508,6 +508,7 @@ class ClientHub:
     async def _handle_transcript(
         self, transcript: Transcript, *, is_final: bool, source: str | None
     ) -> None:
+        runtime = self._runtime_for_channel(transcript.channel)
         bundle = self.get_or_create_bundle(transcript.utterance_id, channel=transcript.channel)
         bundle.with_transcript(transcript)
         self._remember_source(transcript.utterance_id, source, channel=transcript.channel)
@@ -521,6 +522,12 @@ class ClientHub:
         )
         if is_final:
             await self._emit_final_transcript_to_overlay(transcript)
+            if not self._overlay_translation_will_follow(runtime):
+                await self._emit_overlay_utterance_closed(
+                    utterance_id=transcript.utterance_id,
+                    channel=transcript.channel,
+                    is_final=True,
+                )
 
     async def _emit_final_transcript_to_overlay(self, transcript: Transcript) -> None:
         if self.overlay_sink is None:
@@ -531,6 +538,30 @@ class ClientHub:
                 source_language=self.source_language,
                 target_language=self.target_language,
             )
+        )
+
+    async def _emit_overlay_utterance_closed(
+        self,
+        *,
+        utterance_id: UUID,
+        channel: ChannelId,
+        is_final: bool,
+    ) -> None:
+        if self.overlay_sink is None:
+            return
+        await self._emit_overlay_event(
+            self.overlay_event_adapter.utterance_closed(
+                utterance_id=utterance_id,
+                channel=channel,
+                is_final=is_final,
+            )
+        )
+
+    def _overlay_translation_will_follow(self, runtime: ChannelRuntime) -> bool:
+        return (
+            self.overlay_sink is not None
+            and self.llm is not None
+            and self._translation_enabled_for_runtime(runtime)
         )
 
     async def _emit_translation_to_overlay(
@@ -1141,6 +1172,11 @@ class ClientHub:
                     translation=translation,
                     applied_context_mode=None,
                 )
+                await self._emit_overlay_utterance_closed(
+                    utterance_id=buffer.merge_id,
+                    channel="self",
+                    is_final=True,
+                )
                 await self._enqueue_osc(
                     buffer.merge_id,
                     transcript_text=final_text,
@@ -1538,6 +1574,12 @@ class ClientHub:
                     source=self._get_source(utterance_id, channel=runtime.channel),
                 )
             )
+            if runtime.channel == "self":
+                await self._emit_overlay_utterance_closed(
+                    utterance_id=utterance_id,
+                    channel=runtime.channel,
+                    is_final=False,
+                )
             if self.fallback_transcript_only and self._should_publish_to_chatbox(runtime):
                 await self._enqueue_osc(
                     utterance_id,
@@ -1560,6 +1602,11 @@ class ClientHub:
             await self._emit_translation_to_overlay(
                 translation=translation,
                 applied_context_mode=applied_mode,
+            )
+            await self._emit_overlay_utterance_closed(
+                utterance_id=utterance_id,
+                channel=runtime.channel,
+                is_final=True,
             )
         if self._should_publish_to_chatbox(runtime):
             await self._enqueue_osc(

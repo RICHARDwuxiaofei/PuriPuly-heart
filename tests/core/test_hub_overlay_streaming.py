@@ -88,9 +88,11 @@ async def test_hub_emits_self_and_peer_finals_to_overlay_sink() -> None:
 
     assert [event.type for event in sink.events] == [
         "self_transcript_final",
+        "utterance_closed",
         "peer_transcript_final",
+        "utterance_closed",
     ]
-    assert [event.channel for event in sink.events] == ["self", "peer"]
+    assert [event.channel for event in sink.events] == ["self", "self", "peer", "peer"]
 
 
 @pytest.mark.asyncio
@@ -171,6 +173,28 @@ async def test_hub_emits_self_translation_to_overlay_after_translation_completio
     ]
     assert translation_events[-1].text == "hello"
     assert translation_events[-1].text != osc.messages[0].text
+
+
+@pytest.mark.asyncio
+async def test_hub_closes_self_overlay_line_after_translation_completion() -> None:
+    sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=StubStreamingLLMProvider(chunks=["hello"]),
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+    )
+
+    await hub.submit_text("self text", source="You")
+    await asyncio.gather(*hub.self_runtime.translation_tasks.values(), return_exceptions=True)
+
+    assert [event.type for event in sink.events] == [
+        "self_transcript_final",
+        "translation_final",
+        "utterance_closed",
+    ]
+    assert sink.events[-1].channel == "self"
+    assert sink.events[-1].is_final is True
 
 
 @pytest.mark.asyncio
@@ -345,6 +369,7 @@ async def test_low_latency_merge_commit_clears_active_self_before_emitting_self_
         "self_active_update",
         "self_active_clear",
         "self_transcript_final",
+        "utterance_closed",
     ]
 
 
