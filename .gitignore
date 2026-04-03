@@ -225,3 +225,6 @@ Installer_output/
 .codex/
 .agent/
 docs/plans/
+docs/superpowers
+.worktrees/
+.superpowers/
