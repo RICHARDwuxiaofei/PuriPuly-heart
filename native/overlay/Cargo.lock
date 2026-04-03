@@ -357,6 +357,8 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "windows",
+ "windows-core",
+ "windows-numerics",
 ]
 
 [[package]]

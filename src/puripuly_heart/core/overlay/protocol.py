@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 ChannelId = Literal["self", "peer"]
+BlockVariant = Literal["active_self", "finalized"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,24 +42,42 @@ class OverlayPresentationCalibration:
 class OverlayPresentationBlock:
     id: str
     channel: ChannelId
-    text: str
+    block_variant: BlockVariant
+    primary_text: str
+    secondary_text: str
+    secondary_enabled: bool
 
     def to_dict(self) -> dict[str, object]:
         return {
             "id": self.id,
             "channel": self.channel,
-            "text": self.text,
+            "block_variant": self.block_variant,
+            "primary_text": self.primary_text,
+            "secondary_text": self.secondary_text,
+            "secondary_enabled": self.secondary_enabled,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "OverlayPresentationBlock":
+        if not isinstance(data, dict):
+            raise ValueError("overlay presentation block must be an object")
         channel = data.get("channel")
         if channel not in ("self", "peer"):
             raise ValueError(f"invalid overlay presentation channel: {channel!r}")
+        block_variant = data.get("block_variant")
+        if block_variant not in ("active_self", "finalized"):
+            raise ValueError(
+                f"invalid overlay presentation block variant: {block_variant!r}"
+            )
+        if block_variant == "active_self" and channel != "self":
+            raise ValueError("active_self blocks require channel='self'")
         return cls(
-            id=str(data["id"]),
+            id=_require_string_field(data, "id"),
             channel=channel,
-            text=str(data["text"]),
+            block_variant=block_variant,
+            primary_text=_require_string_field(data, "primary_text"),
+            secondary_text=_require_string_field(data, "secondary_text"),
+            secondary_enabled=_require_bool_field(data, "secondary_enabled"),
         )
 
 
@@ -100,3 +119,17 @@ class OverlayPresentationSnapshot:
             calibration=OverlayPresentationCalibration.from_dict(calibration),
             blocks=blocks,
         )
+
+
+def _require_string_field(data: dict[str, object], key: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string")
+    return value
+
+
+def _require_bool_field(data: dict[str, object], key: str) -> bool:
+    value = data.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be a bool")
+    return value

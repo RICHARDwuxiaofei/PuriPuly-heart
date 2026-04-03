@@ -30,7 +30,8 @@ from .sink import (
 VISIBLE_WINDOW_TARGET_BLOCKS = 2
 _ACTIVE_SELF_BLOCK_ID = "self:active"
 _CLOSED_TOMBSTONE_LIMIT = 64
-FINALIZED_TTL_SECONDS = 5.0
+LATE_ARRIVAL_WINDOW_SECONDS = 5.0
+VISIBLE_TTL_SECONDS = 5.0
 SleepFn = Callable[[float], Awaitable[None]]
 
 
@@ -46,6 +47,8 @@ class _LogicalCaptionEntry:
     utterance_id: UUID
     original_text: str = ""
     translation_text: str = ""
+    ever_publishable: bool = False
+    visible_since: float | None = None
     last_updated_seq: int = 0
     closed_seq: int | None = None
     closed_at: float | None = None
@@ -54,19 +57,11 @@ class _LogicalCaptionEntry:
     def block_id(self) -> str:
         return f"{self.channel}:{self.utterance_id}"
 
-    def composed_text(self) -> str:
-        if self.channel == "peer":
-            return _compose_caption_pair(self.translation_text, self.original_text)
-        return _compose_caption_pair(self.original_text, self.translation_text)
-
 
 @dataclass(slots=True)
 class _ActiveSelfEntry:
     text: str
     last_updated_seq: int
-
-    def composed_text(self) -> str:
-        return self.text
 
 
 @dataclass(slots=True)
@@ -76,6 +71,8 @@ class OverlayPresenter(OverlaySink):
     clock: Clock = field(default_factory=SystemClock)
     sleep: SleepFn = asyncio.sleep
     visible_window_target_blocks: int = VISIBLE_WINDOW_TARGET_BLOCKS
+    show_translation: bool = True
+    show_peer_original: bool = True
 
     _entries: dict[tuple[str, UUID], _LogicalCaptionEntry] = field(
         init=False,
@@ -133,12 +130,32 @@ class OverlayPresenter(OverlaySink):
         self.calibration = calibration.copy()
         await self._publish_if_changed()
 
+    async def update_display_preferences(
+        self,
+        *,
+        show_translation: bool,
+        show_peer_original: bool,
+    ) -> None:
+        next_show_translation = bool(show_translation)
+        next_show_peer_original = bool(show_peer_original)
+        if (
+            next_show_translation == self.show_translation
+            and next_show_peer_original == self.show_peer_original
+        ):
+            return
+        self.show_translation = next_show_translation
+        self.show_peer_original = next_show_peer_original
+        await self._publish_if_changed()
+
     async def broadcast_shutdown(self) -> None:
         if self.bridge is None:
             return
         await self.bridge.broadcast_shutdown()
 
     def _apply_event(self, event: OverlayEventUnion) -> bool:
+        now = self.clock.now()
+        self._expire_closed_entries(now=now)
+
         if isinstance(event, SelfActiveUpdate):
             if self._active_self is not None and event.seq < self._active_self.last_updated_seq:
                 return False
@@ -167,7 +184,7 @@ class OverlayPresenter(OverlaySink):
                 return False
             entry.original_text = event.text
             entry.last_updated_seq = event.seq
-            self._reopen_entry(key, entry)
+            self._refresh_entry_visibility_and_expiration(key, entry, now=now)
             return True
 
         if isinstance(event, (TranslationStreamUpdate, TranslationFinal)):
@@ -181,7 +198,7 @@ class OverlayPresenter(OverlaySink):
                 return False
             entry.translation_text = event.text
             entry.last_updated_seq = event.seq
-            self._reopen_entry(key, entry)
+            self._refresh_entry_visibility_and_expiration(key, entry, now=now)
             return True
 
         if isinstance(event, UtteranceClosed):
@@ -196,7 +213,7 @@ class OverlayPresenter(OverlaySink):
             if entry.closed_seq == event.seq:
                 return False
             entry.closed_seq = event.seq
-            entry.closed_at = self.clock.now()
+            entry.closed_at = now
             entry.last_updated_seq = event.seq
             self._schedule_expiration(key, entry)
             return True
@@ -242,19 +259,15 @@ class OverlayPresenter(OverlaySink):
         candidates: list[tuple[int, str, tuple[str, UUID], OverlayPresentationBlock]] = []
 
         for key, entry in self._entries.items():
-            text = entry.composed_text()
-            if not text:
+            block = self._build_presentation_block(entry)
+            if block is None:
                 continue
             candidates.append(
                 (
                     entry.last_updated_seq,
                     entry.block_id,
                     key,
-                    OverlayPresentationBlock(
-                        id=entry.block_id,
-                        channel=entry.channel,  # type: ignore[arg-type]
-                        text=text,
-                    ),
+                    block,
                 )
             )
 
@@ -268,30 +281,75 @@ class OverlayPresenter(OverlaySink):
                 OverlayPresentationBlock(
                     id=_ACTIVE_SELF_BLOCK_ID,
                     channel="self",
-                    text=self._active_self.composed_text(),
+                    block_variant="active_self",
+                    primary_text=self._active_self.text,
+                    secondary_text="",
+                    secondary_enabled=self.show_translation,
                 )
             )
         return blocks
+
+    def _build_presentation_block(
+        self,
+        entry: _LogicalCaptionEntry,
+    ) -> OverlayPresentationBlock | None:
+        if entry.channel == "peer":
+            primary_text = entry.translation_text.strip()
+            if not primary_text:
+                return None
+            secondary_text = entry.original_text.strip()
+            secondary_enabled = self.show_peer_original
+        else:
+            primary_text = entry.original_text.strip()
+            if not primary_text:
+                return None
+            secondary_text = entry.translation_text.strip()
+            secondary_enabled = self.show_translation
+
+        return OverlayPresentationBlock(
+            id=entry.block_id,
+            channel=entry.channel,  # type: ignore[arg-type]
+            block_variant="finalized",
+            primary_text=primary_text,
+            secondary_text=secondary_text,
+            secondary_enabled=secondary_enabled,
+        )
 
     def _prune_closed_invisible_entries(self, visible_entry_keys: set[tuple[str, UUID]]) -> None:
         stale_keys = [
             key
             for key, entry in self._entries.items()
-            if entry.closed_seq is not None and key not in visible_entry_keys
+            if entry.closed_seq is not None
+            and entry.ever_publishable
+            and key not in visible_entry_keys
         ]
         for key in stale_keys:
             self._remove_entry(key)
+
+    def _entry_is_publishable(self, entry: _LogicalCaptionEntry) -> bool:
+        if entry.channel == "peer":
+            return bool(entry.translation_text.strip())
+        return bool(entry.original_text.strip())
+
+    def _refresh_entry_visibility_and_expiration(
+        self,
+        key: tuple[str, UUID],
+        entry: _LogicalCaptionEntry,
+        *,
+        now: float,
+    ) -> None:
+        if self._entry_is_publishable(entry):
+            entry.ever_publishable = True
+            if entry.visible_since is None:
+                entry.visible_since = now
+        if entry.closed_seq is not None:
+            self._schedule_expiration(key, entry)
 
     def _remember_tombstone(self, key: tuple[str, UUID], closed_seq: int) -> None:
         self._closed_tombstones.pop(key, None)
         self._closed_tombstones[key] = closed_seq
         while len(self._closed_tombstones) > _CLOSED_TOMBSTONE_LIMIT:
             self._closed_tombstones.popitem(last=False)
-
-    def _reopen_entry(self, key: tuple[str, UUID], entry: _LogicalCaptionEntry) -> None:
-        entry.closed_seq = None
-        entry.closed_at = None
-        self._cancel_expiration_task(key)
 
     def _schedule_expiration(
         self,
@@ -309,10 +367,13 @@ class OverlayPresenter(OverlaySink):
         try:
             while True:
                 entry = self._entries.get(key)
-                if entry is None or entry.closed_seq != closed_seq or entry.closed_at is None:
+                if entry is None or entry.closed_seq != closed_seq:
                     return
 
-                remaining = FINALIZED_TTL_SECONDS - (self.clock.now() - entry.closed_at)
+                deadline = self._entry_expiration_deadline(entry)
+                if deadline is None:
+                    return
+                remaining = deadline - self.clock.now()
                 if remaining > 0:
                     await self.sleep(remaining)
                     continue
@@ -331,11 +392,18 @@ class OverlayPresenter(OverlaySink):
         expired_keys = [
             key
             for key, entry in self._entries.items()
-            if entry.closed_at is not None and now - entry.closed_at >= FINALIZED_TTL_SECONDS
+            if (deadline := self._entry_expiration_deadline(entry)) is not None and now >= deadline
         ]
         current_task = self._current_task()
         for key in expired_keys:
             self._remove_entry(key, current_task=current_task)
+
+    def _entry_expiration_deadline(self, entry: _LogicalCaptionEntry) -> float | None:
+        if entry.closed_at is None:
+            return None
+        if entry.visible_since is None:
+            return entry.closed_at + LATE_ARRIVAL_WINDOW_SECONDS
+        return max(entry.closed_at, entry.visible_since + VISIBLE_TTL_SECONDS)
 
     def _remove_entry(
         self,
@@ -378,11 +446,3 @@ def _calibration_from_overlay(
         text_scale=calibration.text_scale,
         background_alpha=calibration.background_alpha,
     )
-
-
-def _compose_caption_pair(primary: str, secondary: str) -> str:
-    if not primary:
-        return secondary
-    if not secondary:
-        return primary
-    return f"{primary} ({secondary})"

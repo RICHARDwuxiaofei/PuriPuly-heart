@@ -67,7 +67,9 @@ impl OverlayPlacementPolicy {
 
         let set_overlay_transform = overlay_api
             .SetOverlayTransformTrackedDeviceRelative
-            .ok_or_else(missing_overlay_method("SetOverlayTransformTrackedDeviceRelative"))?;
+            .ok_or_else(missing_overlay_method(
+                "SetOverlayTransformTrackedDeviceRelative",
+            ))?;
         let mut transform = self.hmd_relative_transform();
         let error = unsafe {
             set_overlay_transform(
@@ -278,9 +280,7 @@ impl OpenVrPreflightApi for WindowsOpenVrPreflightApi {
         if init_error == openvr_sys::EVRInitError_VRInitError_None {
             return Ok(());
         }
-        if init_error
-            == openvr_sys::EVRInitError_VRInitError_Init_NoServerForBackgroundApp
-        {
+        if init_error == openvr_sys::EVRInitError_VRInitError_Init_NoServerForBackgroundApp {
             return Err(OpenVrBackgroundInitError::NoServerForBackgroundApp);
         }
         Err(OpenVrBackgroundInitError::Init(format!(
@@ -386,8 +386,7 @@ impl WindowsOpenVrOverlay {
             .overlay_api()
             .SetOverlayRenderingPid
             .ok_or_else(missing_overlay_method("SetOverlayRenderingPid"))?;
-        let error =
-            unsafe { set_overlay_rendering_pid(self.overlay_handle, std::process::id()) };
+        let error = unsafe { set_overlay_rendering_pid(self.overlay_handle, std::process::id()) };
         map_overlay_init_error(self.overlay_api(), "SetOverlayRenderingPid", error)?;
 
         let set_overlay_flag = self
@@ -495,13 +494,11 @@ impl OverlayFrameSubmitter for FakeOpenVr {
     }
 
     fn set_overlay_visible(&mut self, visible: bool) -> Result<(), OpenVrError> {
-        self.last_call.replace(Some(
-            if visible {
-                "ShowOverlay".to_string()
-            } else {
-                "HideOverlay".to_string()
-            },
-        ));
+        self.last_call.replace(Some(if visible {
+            "ShowOverlay".to_string()
+        } else {
+            "HideOverlay".to_string()
+        }));
         Ok(())
     }
 }
@@ -542,10 +539,7 @@ fn initialize_overlay_api() -> Result<*mut openvr_sys::VR_IVROverlay_FnTable, Op
     let overlay_interface_version = fn_table_interface_version(openvr_sys::IVROverlay_Version)?;
     let mut interface_error = openvr_sys::EVRInitError_VRInitError_None;
     let overlay_api = unsafe {
-        openvr_sys::VR_GetGenericInterface(
-            overlay_interface_version.as_ptr(),
-            &mut interface_error,
-        )
+        openvr_sys::VR_GetGenericInterface(overlay_interface_version.as_ptr(), &mut interface_error)
     };
     if interface_error != openvr_sys::EVRInitError_VRInitError_None || overlay_api == 0 {
         unsafe {
@@ -584,9 +578,8 @@ fn initialize_system_api() -> Result<*mut openvr_sys::VR_IVRSystem_FnTable, Open
 fn fn_table_interface_version(interface_version: &[u8]) -> Result<CString, OpenVrError> {
     let version = CStr::from_bytes_with_nul(interface_version)
         .map_err(|error| OpenVrError::Init(format!("invalid OpenVR interface version: {error}")))?;
-    let mut prefixed = Vec::with_capacity(
-        FN_TABLE_INTERFACE_PREFIX.len() + version.to_bytes_with_nul().len(),
-    );
+    let mut prefixed =
+        Vec::with_capacity(FN_TABLE_INTERFACE_PREFIX.len() + version.to_bytes_with_nul().len());
     prefixed.extend_from_slice(FN_TABLE_INTERFACE_PREFIX.as_bytes());
     prefixed.extend_from_slice(version.to_bytes());
     CString::new(prefixed)
@@ -752,7 +745,10 @@ mod tests {
 
         let result = run_startup_preflight(&api);
 
-        assert_eq!(result, Err(OpenVrStartupPreflightError::SteamVrNotInstalled));
+        assert_eq!(
+            result,
+            Err(OpenVrStartupPreflightError::SteamVrNotInstalled)
+        );
         assert_eq!(api.shutdown_calls(), 0);
     }
 

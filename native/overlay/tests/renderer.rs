@@ -1,10 +1,25 @@
 use puripuly_heart_overlay::{
-    BlockBounds, CaptionBlock, CaptionChannel, CaptionLayoutPolicy, CaptionRenderer, DamageBand,
-    OverlayPlacementPolicy,
+    BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
+    CaptionPresentation, CaptionRenderer, DamageBand, OverlayPlacementPolicy,
 };
+fn assert_close(actual: f32, expected: f32) {
+    assert!(
+        (actual - expected).abs() < 0.01,
+        "expected {expected}, got {actual}"
+    );
+}
 
 fn test_block(text: &str) -> CaptionBlock {
     CaptionBlock::new("block-1", text)
+}
+
+fn bilingual_block(
+    id: &str,
+    primary_text: &str,
+    secondary_text: &str,
+    secondary_enabled: bool,
+) -> CaptionBlock {
+    CaptionBlock::new(id, primary_text).with_secondary_text(secondary_text, secondary_enabled)
 }
 
 fn long_block(id: &str) -> CaptionBlock {
@@ -59,10 +74,22 @@ fn renderer_layout_preserves_channel_metadata_for_visible_blocks() {
 }
 
 #[test]
-fn renderer_default_caption_order_matches_self_and_peer_policy() {
+fn renderer_keeps_active_self_and_finalized_variants_distinct() {
     let policy = CaptionLayoutPolicy::default();
-    assert_eq!(policy.compose_self_line("hello", "안녕"), "hello (안녕)");
-    assert_eq!(policy.compose_peer_line("hello", "안녕"), "안녕 (hello)");
+    let active = CaptionBlock::new("self:active", "hello")
+        .with_variant(CaptionBlockVariant::ActiveSelf)
+        .with_secondary_text("", true);
+    let finalized = bilingual_block("self:1", "hello", "안녕", true);
+    let result = policy.layout_blocks(vec![finalized, active], 1600, 1600);
+
+    let variants = result
+        .visible_blocks
+        .iter()
+        .map(|block| block.block_variant)
+        .collect::<Vec<_>>();
+
+    assert!(variants.contains(&CaptionBlockVariant::Finalized));
+    assert!(variants.contains(&CaptionBlockVariant::ActiveSelf));
 }
 
 #[test]
@@ -79,7 +106,7 @@ fn openvr_overlay_policy_defaults_to_head_locked_mode() {
 }
 
 #[test]
-fn renderer_limits_default_visible_window_to_the_two_newest_blocks() {
+fn renderer_preserves_all_supplied_blocks_without_a_renderer_side_visibility_cap() {
     let policy = CaptionLayoutPolicy::default();
     let result = policy.layout_blocks(
         vec![
@@ -97,25 +124,24 @@ fn renderer_limits_default_visible_window_to_the_two_newest_blocks() {
             .iter()
             .map(|block| block.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["mid", "new"]
+        vec!["old", "mid", "new"]
     );
-    assert!(result.dropped_block_ids.contains(&"old".to_string()));
+    assert!(result.dropped_block_ids.is_empty());
 }
 
 #[test]
-fn renderer_overflow_drops_oldest_block_before_truncating_newest_content() {
+fn renderer_overflow_keeps_supplied_blocks_and_truncates_per_block_content_only() {
     let policy = CaptionLayoutPolicy::default();
     let result = policy.layout_blocks(vec![long_block("old"), long_block("new")], 3840, 1024);
 
+    assert!(result.visible_blocks.iter().any(|block| block.id == "old"));
     assert!(result.visible_blocks.iter().any(|block| block.id == "new"));
-    assert!(result.dropped_block_ids.contains(&"old".into()));
-    assert!(
-        result
-            .visible_blocks
-            .iter()
-            .find(|block| block.id == "new")
-            .is_some_and(|block| !block.lines.is_empty())
-    );
+    assert!(result.dropped_block_ids.is_empty());
+    assert!(result
+        .visible_blocks
+        .iter()
+        .find(|block| block.id == "new")
+        .is_some_and(|block| !block.primary_lines.is_empty()));
 }
 
 #[test]
@@ -131,13 +157,11 @@ fn renderer_wraps_by_measured_width_and_keeps_lines_inside_strip_width() {
     );
 
     let block = &result.visible_blocks[0];
-    assert!(block.lines.len() > 1);
-    assert!(
-        block
-            .line_metrics
-            .iter()
-            .all(|line| line.width_px <= block.content_width_px + f32::EPSILON)
-    );
+    assert!(block.primary_lines.len() > 1);
+    assert!(block
+        .primary_lines
+        .iter()
+        .all(|line| line.width_px <= block.content_width_px + f32::EPSILON));
 }
 
 #[test]
@@ -146,7 +170,7 @@ fn renderer_centers_each_line_within_strip_bounds() {
     let result = policy.layout_blocks(vec![CaptionBlock::new("new", "center me")], 1600, 900);
 
     let block = &result.visible_blocks[0];
-    let line = &block.line_metrics[0];
+    let line = &block.primary_lines[0];
     let line_center_x = line.origin_x + line.width_px * 0.5;
 
     assert!((line_center_x - block.bounds.center_x()).abs() < 1.0);
@@ -165,11 +189,236 @@ fn renderer_damage_band_covers_old_and_new_strip_bounds() {
 }
 
 #[test]
+fn renderer_render_path_expands_damage_band_to_rendered_bounds_overhang() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let first = renderer
+        .render_blocks(vec![CaptionBlock::new("self", "hello")])
+        .unwrap();
+    let previous_bounds = first.layout().visible_blocks[0].bounds;
+
+    let second = renderer.render_empty_frame().unwrap();
+    let damage = second
+        .layout()
+        .damage_band
+        .expect("damage band should be present");
+
+    assert_eq!(damage.top_px, previous_bounds.top_px - 5.0);
+    assert_eq!(damage.bottom_px, previous_bounds.bottom_px + 5.0);
+}
+
+#[test]
+fn renderer_secondary_line_is_single_line_with_ellipsis() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.layout_blocks(
+        vec![bilingual_block(
+            "peer",
+            "primary",
+            "this secondary line should truncate before it wraps into another row",
+            true,
+        )],
+        1100,
+        900,
+    );
+
+    let block = &result.visible_blocks[0];
+    let secondary = block.secondary_line.as_ref().unwrap();
+
+    assert!(secondary.text.ends_with("..."));
+    assert!(secondary.width_px <= block.content_width_px + f32::EPSILON);
+}
+
+#[test]
+fn renderer_reserves_secondary_row_height_even_before_secondary_text_arrives() {
+    let policy = CaptionLayoutPolicy::default();
+    let empty_secondary = policy.layout_blocks(
+        vec![bilingual_block("self", "hello there", "", true)],
+        1600,
+        900,
+    );
+    let filled_secondary = policy.layout_blocks(
+        vec![bilingual_block(
+            "self",
+            "hello there",
+            "secondary line",
+            true,
+        )],
+        1600,
+        900,
+    );
+
+    let empty_block = &empty_secondary.visible_blocks[0];
+    let filled_block = &filled_secondary.visible_blocks[0];
+
+    assert!(empty_block.secondary_reserved);
+    assert!(filled_block.secondary_reserved);
+    assert_eq!(
+        empty_block.bounds.bottom_px - empty_block.bounds.top_px,
+        filled_block.bounds.bottom_px - filled_block.bounds.top_px
+    );
+}
+
+#[test]
+fn renderer_turning_secondary_off_expands_primary_line_budget() {
+    let policy = CaptionLayoutPolicy::default();
+    let text = "primary text should gain an extra line when the secondary slot is disabled and the width budget stays the same";
+    let with_secondary = policy.layout_blocks(
+        vec![bilingual_block("self", text, "secondary", true)],
+        1100,
+        900,
+    );
+    let without_secondary =
+        policy.layout_blocks(vec![bilingual_block("self", text, "", false)], 1100, 900);
+
+    assert_eq!(with_secondary.visible_blocks[0].primary_lines.len(), 2);
+    assert_eq!(without_secondary.visible_blocks[0].primary_lines.len(), 3);
+}
+
+#[test]
+fn renderer_height_scale_changes_rendered_block_bounds_height() {
+    let policy = CaptionLayoutPolicy::default();
+    let full = policy.layout_blocks(vec![CaptionBlock::new("self", "hello")], 1600, 900);
+    let exiting = policy.layout_blocks(
+        vec![CaptionBlock::new("self", "hello").with_visual_state(1.0, 0.0, 0.5)],
+        1600,
+        900,
+    );
+
+    let full_height =
+        full.visible_blocks[0].bounds.bottom_px - full.visible_blocks[0].bounds.top_px;
+    let exiting_height =
+        exiting.visible_blocks[0].bounds.bottom_px - exiting.visible_blocks[0].bounds.top_px;
+
+    assert!(exiting_height < full_height);
+}
+
+#[test]
+fn renderer_layout_cache_key_ignores_animation_only_visual_state() {
+    let policy = CaptionLayoutPolicy::default();
+    let presentation = CaptionPresentation::default();
+    let stable = bilingual_block("self:1", "hello there", "secondary line", true)
+        .with_channel(CaptionChannel::SelfChannel)
+        .with_variant(CaptionBlockVariant::Finalized);
+    let animated = stable.clone().with_visual_state(0.42, 64.0, 0.5);
+
+    let stable_layout =
+        policy.resolve_blocks_for_presentation(vec![stable], 1600, 900, &presentation);
+    let animated_layout =
+        policy.resolve_blocks_for_presentation(vec![animated], 1600, 900, &presentation);
+
+    assert_eq!(
+        stable_layout.visible_blocks[0].layout_cache_key,
+        animated_layout.visible_blocks[0].layout_cache_key
+    );
+}
+
+#[test]
+fn renderer_block_cache_key_ignores_animation_only_visual_state() {
+    let policy = CaptionLayoutPolicy::default();
+    let presentation = CaptionPresentation::default();
+    let stable = bilingual_block("self:1", "hello there", "secondary line", true)
+        .with_channel(CaptionChannel::SelfChannel)
+        .with_variant(CaptionBlockVariant::Finalized);
+    let animated = stable.clone().with_visual_state(0.35, -48.0, 1.35);
+
+    let stable_layout =
+        policy.resolve_blocks_for_presentation(vec![stable], 1600, 900, &presentation);
+    let animated_layout =
+        policy.resolve_blocks_for_presentation(vec![animated], 1600, 900, &presentation);
+
+    assert_eq!(
+        stable_layout.visible_blocks[0].block_cache_key(),
+        animated_layout.visible_blocks[0].block_cache_key()
+    );
+}
+
+#[test]
+fn renderer_applies_offset_and_height_scale_to_transformed_bounds() {
+    let policy = CaptionLayoutPolicy::default();
+    let presentation = CaptionPresentation::default();
+    let stable = policy.resolve_blocks_for_presentation(
+        vec![CaptionBlock::new("self", "hello there").with_secondary_text("secondary", true)],
+        1600,
+        900,
+        &presentation,
+    );
+    let animated = policy.resolve_blocks_for_presentation(
+        vec![CaptionBlock::new("self", "hello there")
+            .with_secondary_text("secondary", true)
+            .with_visual_state(0.4, 48.0, 0.5)],
+        1600,
+        900,
+        &presentation,
+    );
+
+    let stable_block = &stable.visible_blocks[0];
+    let animated_block = &animated.visible_blocks[0];
+    let stable_height = stable_block.bounds.bottom_px - stable_block.bounds.top_px;
+    let animated_height = animated_block.bounds.bottom_px - animated_block.bounds.top_px;
+    let stable_line = &stable_block.primary_lines[0];
+    let animated_line = &animated_block.primary_lines[0];
+
+    assert_eq!(animated_block.render_offset_y_px, 48.0);
+    assert_eq!(animated_block.render_height_scale, 0.5);
+    assert_close(
+        animated_block.bounds.top_px,
+        stable_block.bounds.top_px + animated_block.render_offset_y_px,
+    );
+    assert_close(
+        animated_height,
+        stable_height * animated_block.render_height_scale,
+    );
+    assert_close(
+        animated_line.origin_y,
+        animated_block.bounds.top_px
+            + (stable_line.origin_y - stable_block.bounds.top_px)
+                * animated_block.render_height_scale,
+    );
+    assert_close(
+        animated_block.visual_bounds.top_px,
+        animated_block.bounds.top_px
+            + (stable_block.visual_bounds.top_px - stable_block.bounds.top_px)
+                * animated_block.render_height_scale,
+    );
+    assert_close(
+        animated_block.visual_bounds.bottom_px,
+        animated_block.bounds.top_px
+            + (stable_block.visual_bounds.bottom_px - stable_block.bounds.top_px)
+                * animated_block.render_height_scale,
+    );
+}
+
+#[test]
+fn renderer_uses_near_full_safe_width_for_content() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.layout_blocks(vec![CaptionBlock::new("self", "hello")], 1600, 900);
+
+    assert!(result.visible_blocks[0].content_width_px > 1600.0 * 0.88);
+}
+
+#[test]
 fn renderer_first_usable_frame_is_fully_transparent_before_real_caption_content() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
     let frame = renderer.render_empty_frame().unwrap();
 
     assert!(frame.is_fully_transparent());
+}
+
+#[test]
+fn renderer_presentation_text_scale_changes_block_bounds_height() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let default_frame = renderer.render_blocks(vec![test_block("hello")]).unwrap();
+    let default_height = default_frame.layout().visible_blocks[0].bounds.bottom_px
+        - default_frame.layout().visible_blocks[0].bounds.top_px;
+
+    renderer.set_presentation(CaptionPresentation {
+        text_scale: 1.25,
+        ..CaptionPresentation::default()
+    });
+    let scaled_frame = renderer.render_blocks(vec![test_block("hello")]).unwrap();
+    let scaled_height = scaled_frame.layout().visible_blocks[0].bounds.bottom_px
+        - scaled_frame.layout().visible_blocks[0].bounds.top_px;
+
+    assert!(scaled_height > default_height);
 }
 
 #[cfg(windows)]
@@ -182,6 +431,100 @@ fn renderer_returns_a_renderable_d3d11_texture_result() {
     assert!(frame.d3d11_texture().is_some());
     assert_eq!(frame.width(), 3840);
     assert_eq!(frame.height(), 1024);
+}
+
+#[cfg(windows)]
+#[test]
+fn renderer_windows_layout_handles_mixed_script_text_with_directwrite_fallback() {
+    let policy = CaptionLayoutPolicy::default();
+    let text = "fallback hello 안녕하세요 你好 mixed text";
+    let result = policy.layout_blocks(vec![CaptionBlock::new("mix", text)], 1200, 900);
+    let block = &result.visible_blocks[0];
+    let combined = block
+        .primary_lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    assert!(!block.primary_lines.is_empty());
+    assert!(combined.contains("hello"));
+    assert!(combined.contains("안녕하세요") || combined.contains("你好"));
+    assert!(block
+        .primary_lines
+        .iter()
+        .all(|line| line.width_px <= block.content_width_px + 1.0));
+}
+
+#[cfg(windows)]
+#[test]
+fn renderer_windows_pipeline_renders_mixed_script_frame() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let frame = renderer
+        .render_blocks(vec![CaptionBlock::new(
+            "mix",
+            "fallback hello 안녕하세요 你好 mixed text",
+        )])
+        .unwrap();
+
+    assert!(!frame.is_fully_transparent());
+    assert!(frame.texture_ptr().is_some());
+    assert!(frame.d3d11_texture().is_some());
+    assert!(!frame.layout().visible_blocks[0].primary_lines.is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn renderer_windows_second_render_hits_layout_and_block_caches() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let block = bilingual_block("self:1", "hello there", "secondary line", true)
+        .with_channel(CaptionChannel::SelfChannel);
+
+    let first = renderer.render_blocks(vec![block.clone()]).unwrap();
+    let second = renderer.render_blocks(vec![block]).unwrap();
+
+    assert!(first.diagnostics().layout_cache_misses >= 1);
+    assert!(first.diagnostics().block_cache_misses >= 1);
+    assert!(second.diagnostics().layout_cache_hits >= 1);
+    assert!(second.diagnostics().block_cache_hits >= 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn renderer_windows_reuses_finalized_block_cache_across_animation_states() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let stable = bilingual_block("self:1", "hello there", "secondary line", true)
+        .with_channel(CaptionChannel::SelfChannel);
+
+    renderer.render_blocks(vec![stable.clone()]).unwrap();
+    let entering = renderer
+        .render_blocks(vec![stable.clone().with_visual_state(0.4, 64.0, 0.7)])
+        .unwrap();
+    let reflow = renderer
+        .render_blocks(vec![stable.with_visual_state(1.0, -42.0, 1.2)])
+        .unwrap();
+
+    assert!(entering.diagnostics().block_cache_hits >= 1);
+    assert!(reflow.diagnostics().block_cache_hits >= 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn renderer_windows_secondary_translation_update_reuses_primary_line_cache_only() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let primary_text =
+        "this primary text should wrap into multiple lines so cached line visuals can be reused";
+    let first = bilingual_block("self:1", primary_text, "secondary one", true)
+        .with_channel(CaptionChannel::SelfChannel);
+    let second = bilingual_block("self:1", primary_text, "secondary two", true)
+        .with_channel(CaptionChannel::SelfChannel);
+
+    renderer.render_blocks(vec![first]).unwrap();
+    let frame = renderer.render_blocks(vec![second]).unwrap();
+
+    assert!(frame.diagnostics().layout_cache_misses >= 1);
+    assert!(frame.diagnostics().line_cache_hits >= 1);
+    assert!(frame.diagnostics().block_cache_misses >= 1);
 }
 
 #[cfg(not(windows))]
@@ -202,9 +545,7 @@ fn renderer_runtime_backend_is_rejected_outside_windows() {
     assert!(result.is_err());
     let error = result.err().unwrap();
 
-    assert!(
-        error
-            .to_string()
-            .contains("Direct3D11 caption renderer is only available on Windows")
-    );
+    assert!(error
+        .to_string()
+        .contains("Direct3D11 caption renderer is only available on Windows"));
 }

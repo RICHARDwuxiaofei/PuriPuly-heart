@@ -42,11 +42,13 @@ impl OverlayLogger {
     }
 
     pub async fn emit_stdout_event(&self, payload: &Value) -> io::Result<()> {
-        self.write_stream_line(true, &format!("EVENT {}", payload)).await
+        self.write_stream_line(true, &format!("EVENT {}", payload))
+            .await
     }
 
     pub async fn emit_stderr_event(&self, payload: &Value) -> io::Result<()> {
-        self.write_stream_line(false, &format!("EVENT {}", payload)).await
+        self.write_stream_line(false, &format!("EVENT {}", payload))
+            .await
     }
 
     async fn log_line(&self, level: &str, message: &str) -> io::Result<()> {
@@ -56,7 +58,8 @@ impl OverlayLogger {
             file.write_all(line.as_bytes()).await?;
             file.flush().await?;
         }
-        self.write_stream_line(level != "ERROR", line.trim_end()).await
+        self.write_stream_line(level != "ERROR", line.trim_end())
+            .await
     }
 
     async fn write_stream_line(&self, stdout: bool, line: &str) -> io::Result<()> {

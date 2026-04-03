@@ -21,8 +21,22 @@ def test_overlay_presentation_snapshot_round_trips_blocks_and_calibration() -> N
             background_alpha=0.4,
         ),
         blocks=[
-            OverlayPresentationBlock(id="self:1", channel="self", text="hello"),
-            OverlayPresentationBlock(id="peer:2", channel="peer", text="hola (hello)"),
+            OverlayPresentationBlock(
+                id="self:1",
+                channel="self",
+                block_variant="finalized",
+                primary_text="hello",
+                secondary_text="안녕",
+                secondary_enabled=True,
+            ),
+            OverlayPresentationBlock(
+                id="self:active",
+                channel="self",
+                block_variant="active_self",
+                primary_text="hola",
+                secondary_text="",
+                secondary_enabled=False,
+            ),
         ],
     )
 
@@ -32,8 +46,22 @@ def test_overlay_presentation_snapshot_round_trips_blocks_and_calibration() -> N
     assert restored.calibration.anchor == "head_locked"
     assert restored.calibration.distance == 1.1
     assert restored.blocks == [
-        OverlayPresentationBlock(id="self:1", channel="self", text="hello"),
-        OverlayPresentationBlock(id="peer:2", channel="peer", text="hola (hello)"),
+        OverlayPresentationBlock(
+            id="self:1",
+            channel="self",
+            block_variant="finalized",
+            primary_text="hello",
+            secondary_text="안녕",
+            secondary_enabled=True,
+        ),
+        OverlayPresentationBlock(
+            id="self:active",
+            channel="self",
+            block_variant="active_self",
+            primary_text="hola",
+            secondary_text="",
+            secondary_enabled=False,
+        ),
     ]
 
 
@@ -57,3 +85,71 @@ def test_overlay_presentation_snapshot_rejects_non_dict_block_items() -> None:
                 "blocks": ["not-a-dict"],
             }
         )
+
+
+def test_overlay_presentation_snapshot_rejects_invalid_block_variant() -> None:
+    with pytest.raises(ValueError, match="invalid overlay presentation block variant"):
+        OverlayPresentationSnapshot.from_dict(
+            {
+                "revision": 1,
+                "calibration": OverlayPresentationCalibration().to_dict(),
+                "blocks": [
+                    {
+                        "id": "self:1",
+                        "channel": "self",
+                        "block_variant": "streaming",
+                        "primary_text": "hello",
+                        "secondary_text": "",
+                        "secondary_enabled": True,
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("id", 123, "id must be a string"),
+        ("primary_text", 123, "primary_text must be a string"),
+        ("secondary_text", 123, "secondary_text must be a string"),
+        ("secondary_enabled", "true", "secondary_enabled must be a bool"),
+    ],
+)
+def test_overlay_presentation_block_rejects_invalid_field_types(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    payload = {
+        "id": "self:1",
+        "channel": "self",
+        "block_variant": "finalized",
+        "primary_text": "hello",
+        "secondary_text": "",
+        "secondary_enabled": True,
+    }
+    payload[field] = value
+
+    with pytest.raises(ValueError, match=message):
+        OverlayPresentationBlock.from_dict(payload)
+
+
+def test_overlay_presentation_block_rejects_peer_active_self_combination() -> None:
+    with pytest.raises(ValueError, match="active_self blocks require channel='self'"):
+        OverlayPresentationBlock.from_dict(
+            {
+                "id": "peer:active",
+                "channel": "peer",
+                "block_variant": "active_self",
+                "primary_text": "hello",
+                "secondary_text": "",
+                "secondary_enabled": False,
+            }
+        )
+
+
+@pytest.mark.parametrize("payload", [None, [], "not-a-dict"])
+def test_overlay_presentation_block_rejects_non_dict_payload(payload: object) -> None:
+    with pytest.raises(ValueError, match="overlay presentation block must be an object"):
+        OverlayPresentationBlock.from_dict(payload)  # type: ignore[arg-type]

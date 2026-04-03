@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime::StartupError;
 
-pub const EXPECTED_CONTRACT_VERSION: u32 = 2;
+pub const EXPECTED_CONTRACT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,7 +23,8 @@ pub struct OverlayManifest {
 }
 
 pub fn load_manifest(path: impl AsRef<Path>) -> Result<OverlayManifest, StartupError> {
-    let content = std::fs::read_to_string(path).map_err(|error| StartupError::Manifest(error.to_string()))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|error| StartupError::Manifest(error.to_string()))?;
     serde_json::from_str(&content).map_err(|error| StartupError::Manifest(error.to_string()))
 }
 

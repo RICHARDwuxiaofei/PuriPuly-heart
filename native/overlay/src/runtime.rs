@@ -8,23 +8,26 @@ use tokio::time::{sleep_until, Instant};
 
 use crate::bridge::{BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEvent};
 use crate::logging::OverlayLogger;
-use crate::manifest::{load_manifest, validate_manifest, OverlayManifest, EXPECTED_CONTRACT_VERSION};
-use crate::openvr::{
-    perform_startup_preflight, OpenVrOverlay, OpenVrStartupPreflightError, OverlayFrameSubmitter,
+use crate::manifest::{
+    load_manifest, validate_manifest, OverlayManifest, EXPECTED_CONTRACT_VERSION,
 };
 #[cfg(test)]
 use crate::openvr::OpenVrError;
-use crate::renderer::{
-    CaptionBlock, CaptionChannel, CaptionPresentation, CaptionRenderer,
+use crate::openvr::{
+    perform_startup_preflight, OpenVrOverlay, OpenVrStartupPreflightError, OverlayFrameSubmitter,
 };
-use crate::state::{OverlayPresentationSnapshot, OverlayState, OverlayStrip, OverlayStripLifecycle};
+use crate::renderer::{
+    CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionPresentation, CaptionRenderer,
+};
+use crate::state::{
+    OverlayPresentationSnapshot, OverlayState, OverlayStrip, OverlayStripLifecycle,
+};
 
 const EMPTY_OVERLAY_HIDE_DELAY: Duration = Duration::from_millis(500);
 const FALLBACK_REFRESH_RATE_HZ: f32 = 90.0;
 const ANIMATION_SAMPLE_RATE_72_HZ: u32 = 36;
 const ANIMATION_SAMPLE_RATE_DEFAULT_HZ: u32 = 45;
 const ENTER_SLIDE_OFFSET_PX: f32 = 24.0;
-const REFLOW_STEP_PX: f32 = 120.0;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StartupError {
@@ -236,6 +239,7 @@ impl OverlayRuntime {
 
         renderer.set_presentation(CaptionPresentation {
             background_alpha: self.state.calibration().background_alpha,
+            text_scale: self.state.calibration().text_scale,
         });
         if self.refresh_rate_hz.is_none() {
             self.refresh_rate_hz = openvr.display_refresh_rate_hz();
@@ -244,11 +248,14 @@ impl OverlayRuntime {
             .apply_calibration(self.state.calibration())
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
         let blocks = self.caption_blocks();
-        let has_drawable_text = blocks.iter().any(|block| !block.text.trim().is_empty());
+        let has_drawable_text = blocks.iter().any(CaptionBlock::has_drawable_text);
         let should_show_after_submit = has_drawable_text && !self.overlay_visible;
         if has_drawable_text {
             self.hide_deadline = None;
-        } else if self.first_texture_submitted && self.overlay_visible && self.hide_deadline.is_none() {
+        } else if self.first_texture_submitted
+            && self.overlay_visible
+            && self.hide_deadline.is_none()
+        {
             self.hide_deadline = Some(Instant::now() + EMPTY_OVERLAY_HIDE_DELAY);
         }
         let frame = if blocks.is_empty() {
@@ -390,11 +397,14 @@ impl OverlayRuntime {
             .sample_animations(delta, self.animation_sample_rate_hz());
         self.redraw_requested = changed;
         self.sync_animation_schedule(now);
-        self.submit_frame_if_needed(renderer, openvr, bridge, logger).await
+        self.submit_frame_if_needed(renderer, openvr, bridge, logger)
+            .await
     }
 
     fn has_drawable_text(&self) -> bool {
-        self.caption_blocks().iter().any(|block| !block.text.trim().is_empty())
+        self.caption_blocks()
+            .iter()
+            .any(CaptionBlock::has_drawable_text)
     }
 
     fn animation_sample_rate_hz(&self) -> u32 {
@@ -457,11 +467,13 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
     }
 
     if manifest.app_version != env!("CARGO_PKG_VERSION") {
-        let _ = logger.warn(&format!(
-            "app_version mismatch accepted: manifest={} runtime={}",
-            manifest.app_version,
-            env!("CARGO_PKG_VERSION")
-        )).await;
+        let _ = logger
+            .warn(&format!(
+                "app_version mismatch accepted: manifest={} runtime={}",
+                manifest.app_version,
+                env!("CARGO_PKG_VERSION")
+            ))
+            .await;
     }
 
     if let Err(error) = perform_startup_preflight() {
@@ -581,7 +593,8 @@ where
     F: FnOnce(&str) -> Result<T, OpenVrError>,
 {
     preflight().map_err(startup_error_from_preflight)?;
-    overlay_factory(overlay_instance_id).map_err(|error| StartupError::OpenVrInit(error.to_string()))
+    overlay_factory(overlay_instance_id)
+        .map_err(|error| StartupError::OpenVrInit(error.to_string()))
 }
 
 async fn initialize_runtime_resources(
@@ -594,8 +607,8 @@ async fn initialize_runtime_resources(
         .info("openvr_ready")
         .await
         .map_err(|error| StartupError::Other(error.to_string()))?;
-    let renderer = create_runtime_renderer()
-        .map_err(|error| StartupError::RendererInit(error.to_string()))?;
+    let renderer =
+        create_runtime_renderer().map_err(|error| StartupError::RendererInit(error.to_string()))?;
     logger
         .info("renderer_resources_ready")
         .await
@@ -627,9 +640,19 @@ impl OverlayRuntime {
                 } else {
                     CaptionChannel::SelfChannel
                 };
+                let variant = match strip.block_variant {
+                    crate::state::OverlayPresentationBlockVariant::ActiveSelf => {
+                        CaptionBlockVariant::ActiveSelf
+                    }
+                    crate::state::OverlayPresentationBlockVariant::Finalized => {
+                        CaptionBlockVariant::Finalized
+                    }
+                };
                 let (opacity, offset_y_px, height_scale) = strip_visual_state(strip);
-                CaptionBlock::new(strip.id.clone(), strip.text.clone())
+                CaptionBlock::new(strip.id.clone(), strip.primary_text.clone())
                     .with_channel(channel)
+                    .with_variant(variant)
+                    .with_secondary_text(strip.secondary_text.clone(), strip.secondary_enabled)
                     .with_visual_state(opacity, offset_y_px, height_scale)
             })
             .collect()
@@ -638,22 +661,39 @@ impl OverlayRuntime {
 
 fn strip_visual_state(strip: &OverlayStrip) -> (f32, f32, f32) {
     let reflow_progress = strip.reflow_progress.clamp(0.0, 1.0);
-    let reflow_offset =
-        (strip.previous_order as f32 - strip.order as f32) * REFLOW_STEP_PX * (1.0 - reflow_progress);
+    let interpolated_top_px = match strip.lifecycle {
+        OverlayStripLifecycle::Exiting => strip.previous_top_px,
+        _ => lerp(strip.previous_top_px, strip.current_top_px, reflow_progress),
+    };
+    let reflow_offset = interpolated_top_px - strip.current_top_px;
+    let reflow_height_scale = if strip.current_height_px > f32::EPSILON {
+        let interpolated_height_px = lerp(
+            strip.previous_height_px,
+            strip.current_height_px,
+            reflow_progress,
+        );
+        (interpolated_height_px / strip.current_height_px).clamp(0.35, 4.0)
+    } else {
+        1.0
+    };
 
     match strip.lifecycle {
         OverlayStripLifecycle::Entering => (
             strip.enter_progress.clamp(0.0, 1.0),
             ENTER_SLIDE_OFFSET_PX * (1.0 - strip.enter_progress.clamp(0.0, 1.0)) + reflow_offset,
-            1.0,
+            reflow_height_scale,
         ),
-        OverlayStripLifecycle::Stable => (1.0, reflow_offset, 1.0),
+        OverlayStripLifecycle::Stable => (1.0, reflow_offset, reflow_height_scale),
         OverlayStripLifecycle::Exiting => (
             (1.0 - strip.exit_progress).clamp(0.0, 1.0),
             reflow_offset,
-            (1.0 - strip.exit_progress * 0.45).clamp(0.45, 1.0),
+            (reflow_height_scale * (1.0 - strip.exit_progress * 0.45)).clamp(0.35, 4.0),
         ),
     }
+}
+
+fn lerp(start: f32, end: f32, progress: f32) -> f32 {
+    start + (end - start) * progress.clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -661,16 +701,26 @@ mod tests {
     use super::{prepare_openvr_runtime, OverlayRuntime, StartupError};
     use crate::openvr::{OpenVrError, OpenVrStartupPreflightError};
     use crate::state::{
-        OverlayPresentationBlock, OverlayPresentationCalibration, OverlayPresentationSnapshot,
+        OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
+        OverlayPresentationSnapshot,
     };
     use std::cell::Cell;
     use std::time::Duration;
 
-    fn block(id: &str, channel: &str, text: &str) -> OverlayPresentationBlock {
+    fn block(
+        id: &str,
+        channel: &str,
+        primary_text: &str,
+        secondary_text: &str,
+        secondary_enabled: bool,
+    ) -> OverlayPresentationBlock {
         OverlayPresentationBlock {
             id: id.to_string(),
             channel: channel.to_string(),
-            text: text.to_string(),
+            block_variant: OverlayPresentationBlockVariant::Finalized,
+            primary_text: primary_text.to_string(),
+            secondary_text: secondary_text.to_string(),
+            secondary_enabled,
         }
     }
 
@@ -680,8 +730,8 @@ mod tests {
             revision: 3,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![
-                block("peer:1", "peer", "peer one"),
-                block("self:2", "self", "self two (translated)"),
+                block("peer:1", "peer", "peer one", "원문", true),
+                block("self:2", "self", "self two", "translated", true),
             ],
         });
 
@@ -690,12 +740,9 @@ mod tests {
         assert_eq!(
             blocks
                 .iter()
-                .map(|block| (block.id.as_str(), block.text.as_str()))
+                .map(|block| (block.id.as_str(), block.primary_text.as_str()))
                 .collect::<Vec<_>>(),
-            vec![
-                ("peer:1", "peer one"),
-                ("self:2", "self two (translated)"),
-            ]
+            vec![("peer:1", "peer one"), ("self:2", "self two"),]
         );
     }
 
@@ -704,7 +751,7 @@ mod tests {
         let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
             revision: 1,
             calibration: OverlayPresentationCalibration::default(),
-            blocks: vec![block("self:1", "self", "self one")],
+            blocks: vec![block("self:1", "self", "self one", "", true)],
         });
         runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
 
@@ -714,7 +761,7 @@ mod tests {
                 distance: 1.5,
                 ..OverlayPresentationCalibration::default()
             },
-            blocks: vec![block("peer:2", "peer", "peer two")],
+            blocks: vec![block("peer:2", "peer", "peer two", "", true)],
         });
 
         let blocks = runtime.caption_blocks();
@@ -725,14 +772,14 @@ mod tests {
                 .snapshot()
                 .blocks
                 .iter()
-                .map(|block| (block.id.as_str(), block.text.as_str()))
+                .map(|block| (block.id.as_str(), block.primary_text.as_str()))
                 .collect::<Vec<_>>(),
             vec![("peer:2", "peer two")]
         );
         assert_eq!(
             blocks
                 .iter()
-                .map(|block| (block.id.as_str(), block.text.as_str()))
+                .map(|block| (block.id.as_str(), block.primary_text.as_str()))
                 .collect::<Vec<_>>(),
             vec![("peer:2", "peer two"), ("self:1", "self one")]
         );
@@ -746,8 +793,8 @@ mod tests {
             revision: 4,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![
-                block("self:older", "self", "older"),
-                block("peer:newer", "peer", "newer"),
+                block("self:older", "self", "older", "", true),
+                block("peer:newer", "peer", "newer", "", true),
             ],
         });
 
@@ -756,12 +803,9 @@ mod tests {
         assert_eq!(
             blocks
                 .iter()
-                .map(|block| (block.id.as_str(), block.text.as_str()))
+                .map(|block| (block.id.as_str(), block.primary_text.as_str()))
                 .collect::<Vec<_>>(),
-            vec![
-                ("self:older", "older"),
-                ("peer:newer", "newer"),
-            ]
+            vec![("self:older", "older"), ("peer:newer", "newer"),]
         );
     }
 
@@ -802,10 +846,14 @@ mod tests {
     fn prepare_openvr_runtime_initializes_overlay_after_successful_preflight() {
         let overlay_factory_calls = Cell::new(0);
 
-        let result = prepare_openvr_runtime("overlay-test", || Ok(()), |_| {
-            overlay_factory_calls.set(overlay_factory_calls.get() + 1);
-            Ok::<_, OpenVrError>("overlay-ready")
-        });
+        let result = prepare_openvr_runtime(
+            "overlay-test",
+            || Ok(()),
+            |_| {
+                overlay_factory_calls.set(overlay_factory_calls.get() + 1);
+                Ok::<_, OpenVrError>("overlay-ready")
+            },
+        );
 
         assert_eq!(result, Ok("overlay-ready"));
         assert_eq!(overlay_factory_calls.get(), 1);

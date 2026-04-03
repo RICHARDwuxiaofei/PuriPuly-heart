@@ -8,10 +8,10 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use puripuly_heart_overlay::logging::OverlayLogger;
 use puripuly_heart_overlay::{
     run_with_manifest, submit_texture, validate_manifest, BridgeClient, CaptionBlock,
-    CaptionChannel, CaptionRenderer, FakeOpenVr, OpenVrError, OverlayBridgeEvent,
-    OverlayFrameSubmitter, OverlayManifest, OverlayPresentationBlock,
-    OverlayPresentationCalibration, OverlayPresentationSnapshot, OverlayRuntime, RenderedFrame,
-    RuntimeFailure, StartupError, EXPECTED_CONTRACT_VERSION,
+    CaptionChannel, CaptionLayoutPolicy, CaptionRenderer, FakeOpenVr, OpenVrError,
+    OverlayBridgeEvent, OverlayFrameSubmitter, OverlayManifest, OverlayPresentationBlock,
+    OverlayPresentationBlockVariant, OverlayPresentationCalibration, OverlayPresentationSnapshot,
+    OverlayRuntime, RenderedFrame, RuntimeFailure, StartupError, EXPECTED_CONTRACT_VERSION,
 };
 
 fn test_manifest() -> OverlayManifest {
@@ -64,11 +64,31 @@ fn parse_event_payloads(stderr: &[u8]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn block(id: &str, channel: &str, text: &str) -> OverlayPresentationBlock {
+fn block(
+    id: &str,
+    channel: &str,
+    primary_text: &str,
+    secondary_text: &str,
+    secondary_enabled: bool,
+) -> OverlayPresentationBlock {
     OverlayPresentationBlock {
         id: id.to_string(),
         channel: channel.to_string(),
-        text: text.to_string(),
+        block_variant: OverlayPresentationBlockVariant::Finalized,
+        primary_text: primary_text.to_string(),
+        secondary_text: secondary_text.to_string(),
+        secondary_enabled,
+    }
+}
+
+fn active_self_block(id: &str, primary_text: &str) -> OverlayPresentationBlock {
+    OverlayPresentationBlock {
+        id: id.to_string(),
+        channel: "self".to_string(),
+        block_variant: OverlayPresentationBlockVariant::ActiveSelf,
+        primary_text: primary_text.to_string(),
+        secondary_text: String::new(),
+        secondary_enabled: true,
     }
 }
 
@@ -118,7 +138,10 @@ impl OverlayFrameSubmitter for RecordingSubmitter {
     }
 }
 
-async fn connect_test_bridge() -> (BridgeClient, tokio::task::JoinHandle<Vec<serde_json::Value>>) {
+async fn connect_test_bridge() -> (
+    BridgeClient,
+    tokio::task::JoinHandle<Vec<serde_json::Value>>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -191,8 +214,14 @@ fn runtime_returns_standardized_startup_failure_codes_before_ready() {
     assert_eq!(StartupError::SteamVrNotInstalled.exit_code(), 20);
     assert_eq!(StartupError::SteamVrNotRunning.exit_code(), 20);
     assert_eq!(StartupError::HmdNotFound.exit_code(), 20);
-    assert_eq!(StartupError::OpenVrInit("steamvr missing".into()).exit_code(), 20);
-    assert_eq!(StartupError::RendererInit("d3d init failed".into()).exit_code(), 21);
+    assert_eq!(
+        StartupError::OpenVrInit("steamvr missing".into()).exit_code(),
+        20
+    );
+    assert_eq!(
+        StartupError::RendererInit("d3d init failed".into()).exit_code(),
+        21
+    );
 }
 
 #[test]
@@ -271,7 +300,9 @@ async fn runtime_emits_overlay_ready_only_after_first_texture_submit() {
 
     assert_eq!(submitter.calls, 1);
     assert!(runtime.ready_sent());
-    assert!(messages.iter().any(|message| message["type"] == "overlay_ready"));
+    assert!(messages
+        .iter()
+        .any(|message| message["type"] == "overlay_ready"));
 }
 
 #[tokio::test]
@@ -332,19 +363,34 @@ async fn runtime_caption_blocks_keep_channel_metadata_for_color_only_rendering()
         revision: 3,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
-            block("self:1", "self", "hello (안녕)"),
-            block("peer:2", "peer", "세상 (world)"),
+            block("self:1", "self", "hello", "안녕", true),
+            block("peer:2", "peer", "세상", "world", false),
         ],
     });
 
     let blocks = runtime.caption_blocks();
     let channels = blocks
         .iter()
-        .map(|block| (block.id.as_str(), block.channel))
+        .map(|block| {
+            (
+                block.id.as_str(),
+                (
+                    block.channel,
+                    block.primary_text.as_str(),
+                    block.secondary_enabled,
+                ),
+            )
+        })
         .collect::<std::collections::BTreeMap<_, _>>();
 
-    assert_eq!(channels.get("self:1"), Some(&Some(CaptionChannel::SelfChannel)));
-    assert_eq!(channels.get("peer:2"), Some(&Some(CaptionChannel::PeerChannel)));
+    assert_eq!(
+        channels.get("self:1"),
+        Some(&(Some(CaptionChannel::SelfChannel), "hello", true))
+    );
+    assert_eq!(
+        channels.get("peer:2"),
+        Some(&(Some(CaptionChannel::PeerChannel), "세상", false))
+    );
 }
 
 #[test]
@@ -375,7 +421,7 @@ fn runtime_keeps_missing_snapshot_blocks_visible_until_exit_animation_finishes()
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
-        blocks: vec![block("self:1", "self", "hello")],
+        blocks: vec![block("self:1", "self", "hello", "", true)],
     });
 
     runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
@@ -395,11 +441,220 @@ fn runtime_keeps_missing_snapshot_blocks_visible_until_exit_animation_finishes()
 }
 
 #[test]
+fn runtime_keeps_two_finalized_rows_visible_when_active_self_is_present() {
+    let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![
+            block("self:1", "self", "first", "", true),
+            block("peer:2", "peer", "second", "", true),
+            active_self_block("self:active", "speaking"),
+        ],
+    });
+
+    assert_eq!(
+        runtime
+            .caption_blocks()
+            .iter()
+            .map(|block| block.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["self:1", "peer:2", "self:active"]
+    );
+}
+
+#[test]
+fn runtime_reflow_tracks_actual_height_delta_when_secondary_slot_changes() {
+    let policy = CaptionLayoutPolicy::default();
+    let expected_before = policy.layout_blocks(
+        vec![
+            CaptionBlock::new("self:1", "hello").with_secondary_text("", false),
+            CaptionBlock::new("peer:2", "second").with_secondary_text("", false),
+        ],
+        3840,
+        4096,
+    );
+    let expected_after = policy.layout_blocks(
+        vec![
+            CaptionBlock::new("self:1", "hello").with_secondary_text("translated", true),
+            CaptionBlock::new("peer:2", "second").with_secondary_text("", false),
+        ],
+        3840,
+        4096,
+    );
+    let expected_shift = expected_after.visible_blocks[1].bounds.top_px
+        - expected_before.visible_blocks[1].bounds.top_px;
+
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![
+            block("self:1", "self", "hello", "", false),
+            block("peer:2", "peer", "second", "", false),
+        ],
+    });
+    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
+
+    runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 2,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![
+            block("self:1", "self", "hello", "translated", true),
+            block("peer:2", "peer", "second", "", false),
+        ],
+    });
+
+    let second = runtime
+        .caption_blocks()
+        .into_iter()
+        .find(|block| block.id == "peer:2")
+        .expect("peer block should remain visible");
+    let first = runtime
+        .caption_blocks()
+        .into_iter()
+        .find(|block| block.id == "self:1")
+        .expect("self block should remain visible");
+
+    assert_eq!(second.offset_y_px, -expected_shift);
+    assert!(first.height_scale > 1.0);
+}
+
+#[test]
+fn runtime_reflow_animation_still_renders_shifted_bounds_from_visual_state_only() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let initial_layout = CaptionLayoutPolicy::default().layout_blocks(
+        vec![
+            CaptionBlock::new("self:1", "hello")
+                .with_channel(CaptionChannel::SelfChannel)
+                .with_secondary_text("", false),
+            CaptionBlock::new("peer:2", "second")
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_secondary_text("", false),
+        ],
+        3840,
+        4096,
+    );
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![
+            block("self:1", "self", "hello", "", false),
+            block("peer:2", "peer", "second", "", false),
+        ],
+    });
+    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
+    runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 2,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![
+            block("self:1", "self", "hello", "translated", true),
+            block("peer:2", "peer", "second", "", false),
+        ],
+    });
+
+    let animated = renderer.render_blocks(runtime.caption_blocks()).unwrap();
+    let final_layout = CaptionLayoutPolicy::default().layout_blocks(
+        vec![
+            CaptionBlock::new("self:1", "hello")
+                .with_channel(CaptionChannel::SelfChannel)
+                .with_secondary_text("translated", true),
+            CaptionBlock::new("peer:2", "second")
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_secondary_text("", false),
+        ],
+        3840,
+        4096,
+    );
+
+    let animated_self = animated
+        .layout()
+        .visible_blocks
+        .iter()
+        .find(|block| block.id == "self:1")
+        .expect("animated self block should render");
+    let animated_peer = animated
+        .layout()
+        .visible_blocks
+        .iter()
+        .find(|block| block.id == "peer:2")
+        .expect("animated peer block should render");
+    let initial_peer = initial_layout
+        .visible_blocks
+        .iter()
+        .find(|block| block.id == "peer:2")
+        .expect("initial peer block should render");
+    let final_self = final_layout
+        .visible_blocks
+        .iter()
+        .find(|block| block.id == "self:1")
+        .expect("final self block should render");
+    let final_peer = final_layout
+        .visible_blocks
+        .iter()
+        .find(|block| block.id == "peer:2")
+        .expect("final peer block should render");
+
+    assert_eq!(animated_peer.bounds.top_px, initial_peer.bounds.top_px);
+    assert_ne!(animated_peer.bounds.top_px, final_peer.bounds.top_px);
+    assert!(
+        animated_self.bounds.bottom_px - animated_self.bounds.top_px
+            > final_self.bounds.bottom_px - final_self.bounds.top_px,
+        "height_scale should still stretch the updated row during reflow"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn runtime_active_self_frames_do_not_hit_finalized_block_cache() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![active_self_block("self:active", "speaking now")],
+    });
+
+    renderer.render_blocks(runtime.caption_blocks()).unwrap();
+    let second = renderer.render_blocks(runtime.caption_blocks()).unwrap();
+
+    assert_eq!(second.diagnostics().block_cache_hits, 0);
+    assert!(second.diagnostics().line_cache_hits >= 1);
+}
+
+#[test]
+fn runtime_does_not_render_duplicate_row_when_same_id_reappears_during_exit() {
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![block("self:1", "self", "hello", "", true)],
+    });
+    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
+
+    runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 2,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![],
+    });
+    runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 3,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![block("self:1", "self", "hello again", "", true)],
+    });
+
+    assert_eq!(
+        runtime
+            .caption_blocks()
+            .iter()
+            .map(|block| block.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["self:1"]
+    );
+}
+
+#[test]
 fn runtime_requests_redraws_while_animation_is_active_and_stops_when_scene_is_idle() {
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
-        blocks: vec![block("self:1", "self", "hello")],
+        blocks: vec![block("self:1", "self", "hello", "", true)],
     });
 
     assert!(runtime.redraw_requested());
@@ -437,7 +692,9 @@ async fn runtime_does_not_emit_overlay_ready_when_first_texture_submit_fails() {
     assert_eq!(submitter.calls, 1);
     assert!(matches!(err, RuntimeFailure::OpenVr(_)));
     assert!(!runtime.ready_sent());
-    assert!(!messages.iter().any(|message| message["type"] == "overlay_ready"));
+    assert!(!messages
+        .iter()
+        .any(|message| message["type"] == "overlay_ready"));
 }
 
 #[tokio::test]
@@ -455,7 +712,7 @@ async fn runtime_hides_overlay_after_empty_state_stays_idle_past_delay() {
                 "payload": {
                     "revision": 1,
                     "calibration": OverlayPresentationCalibration::default(),
-                    "blocks": [block("self:1", "self", "hello")]
+                    "blocks": [block("self:1", "self", "hello", "", true)]
                 }
             })
             .to_string()
@@ -483,9 +740,11 @@ async fn runtime_hides_overlay_after_empty_state_stays_idle_past_delay() {
 
         tokio::time::sleep(Duration::from_millis(650)).await;
 
-        ws.send(Message::Text(json!({"type": "shutdown"}).to_string().into()))
-            .await
-            .unwrap();
+        ws.send(Message::Text(
+            json!({"type": "shutdown"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
     });
 
     let logger = test_logger("idle-hide").await;
@@ -526,7 +785,7 @@ async fn runtime_cancels_pending_idle_hide_when_new_text_arrives() {
                 "payload": {
                     "revision": 1,
                     "calibration": OverlayPresentationCalibration::default(),
-                    "blocks": [block("self:1", "self", "hello")]
+                    "blocks": [block("self:1", "self", "hello", "", true)]
                 }
             })
             .to_string()
@@ -560,7 +819,7 @@ async fn runtime_cancels_pending_idle_hide_when_new_text_arrives() {
                 "payload": {
                     "revision": 3,
                     "calibration": OverlayPresentationCalibration::default(),
-                    "blocks": [block("self:2", "self", "back again")]
+                    "blocks": [block("self:2", "self", "back again", "", true)]
                 }
             })
             .to_string()
@@ -571,9 +830,11 @@ async fn runtime_cancels_pending_idle_hide_when_new_text_arrives() {
 
         tokio::time::sleep(Duration::from_millis(650)).await;
 
-        ws.send(Message::Text(json!({"type": "shutdown"}).to_string().into()))
-            .await
-            .unwrap();
+        ws.send(Message::Text(
+            json!({"type": "shutdown"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
     });
 
     let logger = test_logger("idle-hide-cancel").await;
@@ -614,7 +875,7 @@ async fn runtime_shows_overlay_again_when_text_returns_after_idle_hide() {
                 "payload": {
                     "revision": 1,
                     "calibration": OverlayPresentationCalibration::default(),
-                    "blocks": [block("self:1", "self", "hello")]
+                    "blocks": [block("self:1", "self", "hello", "", true)]
                 }
             })
             .to_string()
@@ -648,7 +909,7 @@ async fn runtime_shows_overlay_again_when_text_returns_after_idle_hide() {
                 "payload": {
                     "revision": 3,
                     "calibration": OverlayPresentationCalibration::default(),
-                    "blocks": [block("self:2", "self", "visible again")]
+                    "blocks": [block("self:2", "self", "visible again", "", true)]
                 }
             })
             .to_string()
@@ -659,9 +920,11 @@ async fn runtime_shows_overlay_again_when_text_returns_after_idle_hide() {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        ws.send(Message::Text(json!({"type": "shutdown"}).to_string().into()))
-            .await
-            .unwrap();
+        ws.send(Message::Text(
+            json!({"type": "shutdown"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
     });
 
     let logger = test_logger("idle-hide-restore").await;
@@ -684,7 +947,10 @@ async fn runtime_shows_overlay_again_when_text_returns_after_idle_hide() {
 
     server.await.unwrap();
 
-    assert!(submitter.visibility_changes.windows(2).any(|pair| pair == [false, true]));
+    assert!(submitter
+        .visibility_changes
+        .windows(2)
+        .any(|pair| pair == [false, true]));
 }
 
 #[tokio::test]
@@ -702,7 +968,7 @@ async fn runtime_submits_text_frame_before_revealing_overlay_after_idle_hide() {
                 "payload": {
                     "revision": 1,
                     "calibration": OverlayPresentationCalibration::default(),
-                    "blocks": [block("self:1", "self", "hello")]
+                    "blocks": [block("self:1", "self", "hello", "", true)]
                 }
             })
             .to_string()
@@ -736,7 +1002,7 @@ async fn runtime_submits_text_frame_before_revealing_overlay_after_idle_hide() {
                 "payload": {
                     "revision": 3,
                     "calibration": OverlayPresentationCalibration::default(),
-                    "blocks": [block("self:2", "self", "visible again")]
+                    "blocks": [block("self:2", "self", "visible again", "", true)]
                 }
             })
             .to_string()
@@ -747,9 +1013,11 @@ async fn runtime_submits_text_frame_before_revealing_overlay_after_idle_hide() {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        ws.send(Message::Text(json!({"type": "shutdown"}).to_string().into()))
-            .await
-            .unwrap();
+        ws.send(Message::Text(
+            json!({"type": "shutdown"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
     });
 
     let logger = test_logger("reveal-order-after-hide").await;
@@ -857,6 +1125,18 @@ fn check_startup_contract_reports_current_contract_version() {
     assert_eq!(payload["contract_version"], EXPECTED_CONTRACT_VERSION);
 }
 
+#[test]
+fn validate_manifest_rejects_contract_version_mismatch() {
+    let manifest = OverlayManifest {
+        contract_version: EXPECTED_CONTRACT_VERSION + 1,
+        ..test_manifest()
+    };
+
+    let error = validate_manifest(&manifest).unwrap_err();
+
+    assert!(matches!(error, StartupError::ContractMismatch(_)));
+}
+
 #[tokio::test]
 async fn run_with_manifest_reports_bridge_auth_failures_as_startup_errors() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -903,9 +1183,7 @@ fn cli_emits_startup_failure_event_when_manifest_is_missing() {
 
     assert_eq!(output.status.code(), Some(1));
     let stderr_events = parse_event_payloads(&output.stderr);
-    assert!(
-        stderr_events
-            .iter()
-            .any(|event| event["type"] == "startup_error")
-    );
+    assert!(stderr_events
+        .iter()
+        .any(|event| event["type"] == "startup_error"));
 }

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-OVERLAY_CONTRACT_VERSION = 2
+OVERLAY_CONTRACT_VERSION = 3
 _MANIFEST_FIELDS = {
     "contract_version",
     "app_version",

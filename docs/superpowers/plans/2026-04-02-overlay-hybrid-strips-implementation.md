@@ -22,15 +22,12 @@
 - Delete: `native/overlay/src/renderer.rs`
 - Create: `native/overlay/src/renderer/mod.rs`
 - Create: `native/overlay/src/renderer/types.rs`
-- Create: `native/overlay/src/renderer/scene.rs`
 - Create: `native/overlay/src/renderer/layout.rs`
-- Create: `native/overlay/src/renderer/animation.rs`
-- Create: `native/overlay/src/renderer/damage.rs`
 - Create: `native/overlay/src/renderer/backend.rs`
 - Modify: `native/overlay/tests/renderer.rs`
 - Modify: `native/overlay/tests/runtime.rs`
-- Create: `native/overlay/tests/scene.rs`
-- Create: `native/overlay/tests/damage.rs`
+
+> Superseded implementation note (2026-04-03): retained strip scene/lifecycle logic stays in `native/overlay/src/state.rs` and `native/overlay/src/runtime.rs`. It was not split into `renderer/scene.rs`, `renderer/animation.rs`, or `renderer/damage.rs`, and the corresponding standalone test files are not planned.
 
 ## Baseline Already Verified
 
@@ -277,14 +274,14 @@ Expected:
 
 ### Task 2: Replace Immediate Caption Blocks With A Retained Strip Scene
 
+> Superseded architecture note (2026-04-03): `OverlayScene` remains in `state.rs`; there is no separate `renderer/scene.rs`.
+
 **Files:**
 - Delete: `native/overlay/src/renderer.rs`
 - Create: `native/overlay/src/renderer/mod.rs`
 - Create: `native/overlay/src/renderer/types.rs`
-- Create: `native/overlay/src/renderer/scene.rs`
 - Create: `native/overlay/src/renderer/backend.rs`
 - Modify: `native/overlay/src/lib.rs`
-- Create: `native/overlay/tests/scene.rs`
 
 - [ ] **Step 1: Write failing strip-scene tests**
 
