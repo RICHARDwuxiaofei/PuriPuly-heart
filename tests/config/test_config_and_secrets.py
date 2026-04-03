@@ -13,6 +13,7 @@ from puripuly_heart.config.settings import (
     LLMProviderName,
     OSCSettings,
     QwenLLMModel,
+    STTProviderName,
     from_dict,
     load_settings,
     save_settings,
@@ -44,6 +45,86 @@ def test_settings_validation_rejects_invalid_osc():
     settings = AppSettings(osc=OSCSettings(ttl_s=-1))
     with pytest.raises(ValueError):
         settings.validate()
+
+
+def test_default_stt_provider_is_local_qwen() -> None:
+    settings = AppSettings()
+
+    assert settings.provider.stt == STTProviderName.LOCAL_QWEN
+    assert to_dict(settings)["provider"]["stt"] == STTProviderName.LOCAL_QWEN.value
+
+
+def test_from_dict_preserves_cloud_qwen_asr_provider_value() -> None:
+    data = to_dict(AppSettings())
+    data["provider"]["stt"] = STTProviderName.QWEN_ASR.value
+
+    loaded = from_dict(data)
+
+    assert loaded.provider.stt == STTProviderName.QWEN_ASR
+
+
+def test_from_dict_defaults_missing_stt_provider_to_local_qwen() -> None:
+    data = to_dict(AppSettings())
+    data["provider"].pop("stt", None)
+
+    loaded = from_dict(data)
+
+    assert loaded.provider.stt == STTProviderName.LOCAL_QWEN
+
+
+def test_from_dict_maps_legacy_alibaba_provider_to_qwen_asr() -> None:
+    data = to_dict(AppSettings())
+    data["provider"]["stt"] = "alibaba"
+
+    loaded = from_dict(data)
+
+    assert loaded.provider.stt == STTProviderName.QWEN_ASR
+
+
+def test_from_dict_falls_back_to_deepgram_for_invalid_persisted_stt_provider() -> None:
+    data = to_dict(AppSettings())
+    data["provider"]["stt"] = "broken-provider"
+
+    loaded = from_dict(data)
+
+    assert loaded.provider.stt == STTProviderName.DEEPGRAM
+
+
+def test_from_dict_recovers_non_dict_provider_payload_to_deepgram() -> None:
+    data = to_dict(AppSettings())
+    data["provider"] = "broken"
+
+    loaded = from_dict(data)
+
+    assert loaded.provider.stt == STTProviderName.DEEPGRAM
+    assert loaded.provider.llm == LLMProviderName.GEMINI
+
+
+def test_load_settings_persists_invalid_stt_provider_as_deepgram(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["provider"]["stt"] = "broken-provider"
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+
+    assert loaded.provider.stt == STTProviderName.DEEPGRAM
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["provider"]["stt"] == STTProviderName.DEEPGRAM.value
+
+
+def test_load_settings_persists_non_dict_provider_payload_as_deepgram(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["provider"] = []
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+
+    assert loaded.provider.stt == STTProviderName.DEEPGRAM
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["provider"]["stt"] == STTProviderName.DEEPGRAM.value
+    assert persisted["provider"]["llm"] == LLMProviderName.GEMINI.value
 
 
 def test_load_settings_migrates_legacy_concurrency_limit_and_persists(tmp_path):

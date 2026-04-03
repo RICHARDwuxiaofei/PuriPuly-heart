@@ -21,7 +21,11 @@ from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.osc.receiver import VrcMicState
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
-from puripuly_heart.core.overlay.sink import PeerTranscriptFinal, SelfTranscriptFinal, TranslationFinal
+from puripuly_heart.core.overlay.sink import (
+    PeerTranscriptFinal,
+    SelfTranscriptFinal,
+    TranslationFinal,
+)
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -656,18 +660,35 @@ def test_stt_runtime_signature_ignores_custom_vocabulary_for_qwen_asr() -> None:
     assert enabled_signature[-1] == ()
 
 
-def test_stt_runtime_signature_includes_peer_desktop_settings() -> None:
+def test_self_stt_runtime_signature_ignores_overlay_and_peer_desktop_settings() -> None:
     controller = _make_controller(app=SimpleNamespace())
     settings = AppSettings()
 
-    baseline = controller._build_stt_runtime_signature(settings)
+    baseline = controller._build_self_stt_runtime_signature(settings)
+
+    settings.ui.peer_translation_enabled = True
+    controller.overlay_state = "connected"
+    settings.desktop_audio.output_device = "Headphones (Loopback)"
+    settings.desktop_audio.vad_speech_threshold = 0.72
+    settings.desktop_audio.vad_hangover_ms = 950
+    settings.desktop_audio.vad_pre_roll_ms = 420
+    changed = controller._build_self_stt_runtime_signature(settings)
+
+    assert baseline == changed
+
+
+def test_peer_stt_runtime_signature_includes_peer_desktop_settings() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+
+    baseline = controller._build_peer_stt_runtime_signature(settings)
 
     settings.ui.peer_translation_enabled = True
     settings.desktop_audio.output_device = "Headphones (Loopback)"
     settings.desktop_audio.vad_speech_threshold = 0.72
     settings.desktop_audio.vad_hangover_ms = 950
     settings.desktop_audio.vad_pre_roll_ms = 420
-    changed = controller._build_stt_runtime_signature(settings)
+    changed = controller._build_peer_stt_runtime_signature(settings)
 
     assert baseline != changed
 
@@ -680,12 +701,18 @@ async def test_apply_settings_updates_peer_translation_flags_on_hub(
     controller.settings = AppSettings()
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
     controller.overlay_state = "connected"
-    controller._last_stt_runtime_signature = controller._build_stt_runtime_signature(
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
         controller.settings
     )
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
     monkeypatch.setattr(
         GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
+    )
+    monkeypatch.setattr(
+        GuiController, "_refresh_peer_stt_runtime", lambda self: asyncio.sleep(0)
     )
 
     updated = AppSettings()
@@ -715,8 +742,52 @@ async def test_init_pipeline_keeps_peer_original_runtime_available_without_peer_
     await controller._init_pipeline()
 
     hub = created["hub"]
-    assert hub.peer_stt == "stt"
+    assert hub.peer_stt is None
     assert hub.peer_translation_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_overlay_runtime_refresh_replaces_only_peer_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+    controller.overlay_state = "connected"
+
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend")
+    monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "peer-stt")
+    monkeypatch.setattr(GuiController, "_start_peer_loop", lambda self, model_path: asyncio.sleep(0))
+
+    await controller._refresh_overlay_runtime_dependencies()
+
+    assert controller.hub.replace_stt_calls == []
+    assert controller.hub.replace_peer_stt_calls == ["peer-stt"]
+
+
+@pytest.mark.asyncio
+async def test_overlay_runtime_failure_drops_only_peer_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    controller.overlay_state = "failed"
+
+    async def fake_stop_peer_loop(self: GuiController) -> None:
+        self._peer_mic_task = None
+        self._peer_audio_source = None
+        self._peer_vad = None
+
+    monkeypatch.setattr(GuiController, "_stop_peer_loop", fake_stop_peer_loop)
+
+    await controller._refresh_overlay_runtime_dependencies()
+
+    assert controller.hub.replace_stt_calls == []
+    assert controller.hub.replace_peer_stt_calls == [None]
 
 
 @pytest.mark.asyncio
@@ -958,6 +1029,7 @@ def test_effective_context_mode_falls_back_to_local_until_peer_translation_is_ef
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.ui.integrated_context_enabled = True
+    controller.hub = DummyHub(peer_stt=object())
 
     assert controller.effective_context_mode == "local"
 
@@ -1039,6 +1111,9 @@ async def test_overlay_runtime_disconnect_keeps_saved_preferences_without_auto_r
     monkeypatch.setattr(
         GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
     )
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "create_peer_stt_backend", lambda *_a, **_k: "peer")
+    monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "peer-stt")
 
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
@@ -1072,6 +1147,9 @@ async def test_overlay_runtime_crash_keeps_saved_preferences_without_auto_restar
     monkeypatch.setattr(
         GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
     )
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "create_peer_stt_backend", lambda *_a, **_k: "peer")
+    monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "peer-stt")
 
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
@@ -2028,6 +2106,7 @@ async def test_apply_settings_skips_vrc_sync_when_setting_is_unchanged(
         low_latency_merge_gap_ms=settings.stt.low_latency_merge_gap_ms,
         low_latency_spec_retry_max=settings.stt.low_latency_spec_retry_max,
         hangover_s=1.1,
+        peer_stt=None,
     )
     controller._last_stt_runtime_signature = controller._build_stt_runtime_signature(settings)
     controller._last_vrc_mic_sync_enabled = settings.osc.vrc_mic_intercept

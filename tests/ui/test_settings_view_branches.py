@@ -161,6 +161,25 @@ def test_update_api_visibility_tracks_provider_and_region(monkeypatch: pytest.Mo
     assert view._alibaba_key_singapore.visible is True
 
 
+def test_update_api_visibility_hides_secret_fields_for_local_qwen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    settings.provider.llm = LLMProviderName.GEMINI
+
+    view, _ = _make_settings_view(monkeypatch)
+    view._settings = settings
+    view._update_api_visibility()
+
+    assert view._deepgram_key.visible is False
+    assert view._soniox_key.visible is False
+    assert view._qwen_region_btn.visible is False
+    assert view._alibaba_key_beijing.visible is False
+    assert view._alibaba_key_singapore.visible is False
+    assert view._google_key.visible is True
+
+
 def test_on_stt_selected_updates_provider_and_pipeline_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

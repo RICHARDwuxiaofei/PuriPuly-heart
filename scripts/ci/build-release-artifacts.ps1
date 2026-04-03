@@ -271,11 +271,29 @@ if ($currentInnoVersion -ne $InnoSetupVersion) {
 
 $installerPath = Join-Path $PWD "installer_output/PuriPulyHeart-Setup-$AppVersion.exe"
 $installerHashPath = "$installerPath.sha256"
+$InstallerTestAppId = "{{A9E6D735-6E7A-4B1A-9D74-6D9F0A6E7A55}"
+$InstallerSmokeBuildDir = Join-Path $env:TEMP "PuriPulyHeart-Installer-Smoke"
+$InstallerSmokeDir = Join-Path $env:TEMP "PuriPulyHeart-LocalSTT-Test"
+$InstallerSmokeAppDataRoot = Join-Path $env:TEMP "PuriPulyHeart-LocalSTT-Test-AppData"
+$InstallerSmokeLogPath = Join-Path $env:TEMP "PuriPulyHeart-LocalSTT-Test.log"
+$smokeInstallerPath = Join-Path $InstallerSmokeBuildDir "PuriPulyHeart-Setup-$AppVersion.exe"
 if (Test-Path $installerPath) {
     Remove-Item -Path $installerPath -Force
 }
 if (Test-Path $installerHashPath) {
     Remove-Item -Path $installerHashPath -Force
+}
+if (Test-Path $InstallerSmokeBuildDir) {
+    Remove-Item -Recurse -Force $InstallerSmokeBuildDir -ErrorAction SilentlyContinue
+}
+if (Test-Path $InstallerSmokeDir) {
+    Remove-Item -Recurse -Force $InstallerSmokeDir -ErrorAction SilentlyContinue
+}
+if (Test-Path $InstallerSmokeAppDataRoot) {
+    Remove-Item -Recurse -Force $InstallerSmokeAppDataRoot -ErrorAction SilentlyContinue
+}
+if (Test-Path $InstallerSmokeLogPath) {
+    Remove-Item -Path $InstallerSmokeLogPath -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "Building installer..."
@@ -291,6 +309,49 @@ if (-not (Test-Path $packagedOverlayPath)) {
 
 if (-not (Test-Path $packagedOverlayPath)) {
     throw "Packaged overlay executable not found after installer build: $packagedOverlayPath"
+}
+
+Write-Host "Building smoke-test installer with alternate AppId..."
+Invoke-ExternalProcess -FilePath $isccPath -ArgumentList @(
+    "/DMyAppId=$InstallerTestAppId",
+    "/O$InstallerSmokeBuildDir",
+    "installer.iss"
+) -WorkingDirectory $PWD
+
+if (-not (Test-Path $smokeInstallerPath)) {
+    throw "Smoke installer not found: $smokeInstallerPath"
+}
+
+Write-Host "Smoke-testing installer with alternate AppId and isolated directory..."
+$previousLocalSttAppDataRoot = $env:PURIPULY_HEART_LOCAL_STT_APPDATA_ROOT
+$env:PURIPULY_HEART_LOCAL_STT_APPDATA_ROOT = $InstallerSmokeAppDataRoot
+try {
+    $installerSmoke = Start-Process -FilePath $smokeInstallerPath -ArgumentList @(
+        "/CURRENTUSER",
+        "/VERYSILENT",
+        "/SUPPRESSMSGBOXES",
+        "/DIR=$InstallerSmokeDir",
+        "/LOG=$InstallerSmokeLogPath"
+    ) -Wait -PassThru
+} finally {
+    if ($null -eq $previousLocalSttAppDataRoot) {
+        Remove-Item Env:PURIPULY_HEART_LOCAL_STT_APPDATA_ROOT -ErrorAction SilentlyContinue
+    } else {
+        $env:PURIPULY_HEART_LOCAL_STT_APPDATA_ROOT = $previousLocalSttAppDataRoot
+    }
+}
+if ($installerSmoke.ExitCode -ne 0) {
+    throw "Installer smoke test failed with exit code $($installerSmoke.ExitCode)"
+}
+if (-not (Test-Path $InstallerSmokeLogPath)) {
+    throw "Installer smoke log not found: $InstallerSmokeLogPath"
+}
+$installerSmokeLog = Get-Content -Path $InstallerSmokeLogPath -Raw
+if ($installerSmokeLog -match "Local STT provisioning failed" -or $installerSmokeLog -match "Failed to launch local STT provisioning script") {
+    throw "Installer smoke test did not complete local STT provisioning successfully"
+}
+if ($installerSmokeLog -notmatch [regex]::Escape("Local STT provisioning completed successfully.")) {
+    throw "Installer smoke log is missing local STT provisioning success marker"
 }
 
 Write-Host "Generating SHA256..."

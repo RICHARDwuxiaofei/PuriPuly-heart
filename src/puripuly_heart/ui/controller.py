@@ -32,6 +32,10 @@ from puripuly_heart.core.audio.source import (
 )
 from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
+from puripuly_heart.core.local_stt_assets import (
+    LocalSTTManifestInvalidError,
+    LocalSTTModelMissingError,
+)
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.osc.receiver import (
     VRC_OSC_RECEIVER_HOST,
@@ -53,6 +57,7 @@ from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
+from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaLoadError
 from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 from puripuly_heart.ui.event_bridge import UIEventBridge
 from puripuly_heart.ui.i18n import get_locale, set_locale, t
@@ -125,6 +130,8 @@ class GuiController:
     _stt_switch_task: asyncio.Task[None] | None = None
     _stt_restart_requested: bool = False
     _last_stt_runtime_signature: tuple[object, ...] | None = None
+    _last_self_stt_runtime_signature: tuple[object, ...] | None = None
+    _last_peer_stt_runtime_signature: tuple[object, ...] | None = None
     _last_vrc_mic_sync_enabled: bool | None = None
     _vrc_receiver_lock: asyncio.Lock | None = None
     _ui_event_bridge: UIEventBridge | None = None
@@ -159,6 +166,8 @@ class GuiController:
         return bool(
             settings.ui.peer_translation_enabled
             and self._effective_peer_overlay_enabled_for(settings)
+            and self.hub is not None
+            and getattr(self.hub, "peer_stt", None) is not None
         )
 
     def _effective_peer_overlay_enabled_for(self, settings: AppSettings) -> bool:
@@ -175,27 +184,19 @@ class GuiController:
         resolved_settings = settings or self.settings
         if resolved_settings is None or self.hub is None:
             return
-        self.hub.peer_translation_enabled = (
-            self._effective_peer_translation_enabled_for(resolved_settings)
-            and self.hub.peer_stt is not None
+        self.hub.peer_translation_enabled = self._effective_peer_translation_enabled_for(
+            resolved_settings
         )
         self.hub.integrated_context_enabled = self._effective_integrated_context_enabled_for(
             resolved_settings
         )
 
     async def _refresh_overlay_runtime_dependencies(self) -> None:
-        if self.settings is None:
+        if self.settings is None or self.hub is None:
             return
 
+        await self._refresh_peer_stt_runtime()
         self._sync_effective_hub_flags(self.settings)
-        current_signature = self._build_stt_runtime_signature(self.settings)
-        should_restart_stt = (
-            self._last_stt_runtime_signature is not None
-            and current_signature != self._last_stt_runtime_signature
-        )
-        self._last_stt_runtime_signature = current_signature
-        if should_restart_stt:
-            await self._replace_runtime_stt_provider()
 
     async def start(self) -> None:
         self.settings = self._load_or_init_settings(self.config_path)
@@ -222,11 +223,14 @@ class GuiController:
             # Set needs_key flags based on saved verification status & key existence
             # STT: check current provider's verification status
             stt_provider = self.settings.provider.stt.value
-            # Map stt provider to api_key_verified field name (qwen_asr uses alibaba keys)
-            stt_key_map = {"qwen_asr": self._get_alibaba_verified_key()}
-            stt_verified_key = stt_key_map.get(stt_provider, stt_provider)
-            stt_verified = getattr(self.settings.api_key_verified, stt_verified_key, False)
-            dash.stt_needs_key = (self.hub.stt is None) or (not stt_verified)
+            if self._stt_provider_requires_secret(self.settings.provider.stt):
+                # Map stt provider to api_key_verified field name (qwen_asr uses alibaba keys)
+                stt_key_map = {"qwen_asr": self._get_alibaba_verified_key()}
+                stt_verified_key = stt_key_map.get(stt_provider, stt_provider)
+                stt_verified = getattr(self.settings.api_key_verified, stt_verified_key, False)
+                dash.stt_needs_key = (self.hub.stt is None) or (not stt_verified)
+            else:
+                dash.stt_needs_key = False
 
             # LLM: check current provider's verification status
             llm_provider = self.settings.provider.llm.value
@@ -264,6 +268,24 @@ class GuiController:
             STTProviderName.SONIOX,
         )
 
+    def _stt_provider_requires_secret(self, provider: STTProviderName) -> bool:
+        return provider in (
+            STTProviderName.DEEPGRAM,
+            STTProviderName.QWEN_ASR,
+            STTProviderName.SONIOX,
+        )
+
+    def _selected_stt_provider(self) -> STTProviderName | None:
+        if self.settings is None:
+            return None
+        return self.settings.provider.stt
+
+    def _dashboard_stt_needs_key(self, *, stt_available: bool) -> bool:
+        provider = self._selected_stt_provider()
+        if provider is None:
+            return not stt_available
+        return self._stt_provider_requires_secret(provider) and not stt_available
+
     def _stt_runtime_custom_vocabulary_signature(
         self, settings: AppSettings
     ) -> tuple[bool, tuple[str, ...]]:
@@ -274,13 +296,21 @@ class GuiController:
             tuple(get_effective_custom_terms(settings, settings.languages.source_language)),
         )
 
-    def _build_stt_runtime_signature(self, settings: AppSettings) -> tuple[object, ...]:
+    def _peer_stt_runtime_custom_vocabulary_signature(
+        self, settings: AppSettings
+    ) -> tuple[bool, tuple[str, ...]]:
+        return (
+            settings.stt.custom_vocabulary_enabled,
+            tuple(get_effective_custom_terms(settings, settings.languages.source_language)),
+        )
+
+    def _build_self_stt_runtime_signature(self, settings: AppSettings) -> tuple[object, ...]:
         custom_vocab_enabled, custom_terms = self._stt_runtime_custom_vocabulary_signature(settings)
         return (
             settings.languages.source_language,
             settings.audio.input_host_api,
             settings.audio.input_device,
-            self._effective_peer_overlay_enabled_for(settings),
+            settings.provider.stt,
             settings.stt.vad_speech_threshold,
             settings.stt.low_latency_mode,
             settings.stt.low_latency_merge_gap_ms,
@@ -290,6 +320,21 @@ class GuiController:
             settings.audio.ring_buffer_ms,
             settings.audio.internal_sample_rate_hz,
             settings.audio.internal_channels,
+            custom_vocab_enabled,
+            custom_terms,
+        )
+
+    def _build_stt_runtime_signature(self, settings: AppSettings) -> tuple[object, ...]:
+        return self._build_self_stt_runtime_signature(settings)
+
+    def _build_peer_stt_runtime_signature(self, settings: AppSettings) -> tuple[object, ...]:
+        custom_vocab_enabled, custom_terms = self._peer_stt_runtime_custom_vocabulary_signature(
+            settings
+        )
+        return (
+            settings.languages.source_language,
+            settings.audio.internal_sample_rate_hz,
+            settings.deepgram_stt.model,
             settings.desktop_audio.output_device,
             settings.desktop_audio.vad_speech_threshold,
             settings.desktop_audio.vad_hangover_ms,
@@ -686,6 +731,51 @@ class GuiController:
 
         await self._ensure_stt_switch()
 
+    def _show_short_stt_message(self, message_key: str) -> None:
+        message = t(message_key)
+        opener = getattr(self.page, "open", None)
+        if callable(opener):
+            with contextlib.suppress(Exception):
+                opener(
+                    ft.SnackBar(
+                        ft.Text(message, color=ft.Colors.WHITE),
+                        bgcolor=ft.Colors.ORANGE_700,
+                        duration=4000,
+                        behavior=ft.SnackBarBehavior.FLOATING,
+                        margin=ft.margin.only(bottom=90),
+                        padding=20,
+                    )
+                )
+                return
+        self._log_error(message)
+
+    async def _ensure_local_stt_ready(self) -> bool:
+        if self.settings is None or self.settings.provider.stt != STTProviderName.LOCAL_QWEN:
+            return True
+        if self.hub is None or self.hub.stt is None:
+            self._stt_desired = False
+            dash = getattr(self.app, "view_dashboard", None)
+            if dash is not None:
+                dash.set_stt_enabled(False)
+                dash.set_stt_needs_key(False)
+            self._show_short_stt_message("error.local_stt_model_invalid")
+            return False
+        try:
+            await self.hub.stt.warmup()
+            return True
+        except LocalSTTModelMissingError:
+            message_key = "error.local_stt_model_missing"
+        except (LocalSTTManifestInvalidError, LocalQwenSherpaLoadError):
+            message_key = "error.local_stt_model_invalid"
+
+        self._stt_desired = False
+        dash = getattr(self.app, "view_dashboard", None)
+        if dash is not None:
+            dash.set_stt_enabled(False)
+            dash.set_stt_needs_key(False)
+        self._show_short_stt_message(message_key)
+        return False
+
     async def _ensure_stt_switch(self) -> None:
         if self._stt_switch_task is None or self._stt_switch_task.done():
             self._stt_switch_task = asyncio.create_task(self._run_stt_switch())
@@ -727,9 +817,15 @@ class GuiController:
                         if self.hub.peer_stt is not None:
                             with contextlib.suppress(Exception):
                                 await self.hub.peer_stt.close()
+                    if not await self._ensure_local_stt_ready():
+                        break
                     await self._start_mic_loop()
                     # Pre-warm STT session for faster first response
-                    if self.hub is not None and self.hub.stt is not None:
+                    if (
+                        self.hub is not None
+                        and self.hub.stt is not None
+                        and self._selected_stt_provider() != STTProviderName.LOCAL_QWEN
+                    ):
                         with contextlib.suppress(Exception):
                             await self.hub.stt.warmup()
                     if self.hub is not None and self.hub.peer_stt is not None:
@@ -752,6 +848,10 @@ class GuiController:
         prev_overlay_enabled = (
             self.settings.ui.overlay_enabled if self.settings is not None else False
         )
+        prev_self_signature = (
+            self._last_self_stt_runtime_signature or self._last_stt_runtime_signature
+        )
+        prev_peer_signature = self._last_peer_stt_runtime_signature
         # hub.source_language를 기준으로 비교 (settings 객체는 이미 수정되어 전달될 수 있음)
         prev_source_lang = self.hub.source_language if self.hub else None
         prev_low_latency = self.hub.low_latency_mode if self.hub else None
@@ -808,13 +908,24 @@ class GuiController:
             logger.info("[Settings] VRC mic sync enabled: %s", settings.osc.vrc_mic_intercept)
             await self._configure_vrc_mic_receiver(enabled=settings.osc.vrc_mic_intercept)
 
-        # Restart STT only when runtime STT-relevant settings changed.
-        current_signature = self._build_stt_runtime_signature(settings)
+        current_self_signature = self._build_self_stt_runtime_signature(settings)
+        current_peer_signature = self._build_peer_stt_runtime_signature(settings)
         should_restart_stt = (
-            self._last_stt_runtime_signature is not None
-            and current_signature != self._last_stt_runtime_signature
+            prev_self_signature is not None and current_self_signature != prev_self_signature
         )
-        self._last_stt_runtime_signature = current_signature
+        should_refresh_peer = (
+            prev_peer_signature is None
+            or current_peer_signature != prev_peer_signature
+        )
+
+        self._last_stt_runtime_signature = current_self_signature
+        self._last_self_stt_runtime_signature = current_self_signature
+        self._last_peer_stt_runtime_signature = current_peer_signature
+
+        if should_refresh_peer and self.hub is not None:
+            await self._refresh_peer_stt_runtime()
+            self._sync_effective_hub_flags(settings)
+
         if should_restart_stt:
             await self._replace_runtime_stt_provider()
 
@@ -921,7 +1032,6 @@ class GuiController:
 
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
         stt = None
-        peer_stt = None
         try:
             backend = create_stt_backend(self.settings, secrets=secrets)
             stt = ManagedSTTProvider(
@@ -934,32 +1044,86 @@ class GuiController:
             )
         except Exception as exc:
             self._log_error(f"STT backend not available: {exc}")
-        if self._effective_peer_overlay_enabled_for(self.settings):
-            try:
-                peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
-                peer_stt = ManagedSTTProvider(
-                    backend=peer_backend,
-                    sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-                    channel="peer",
-                    clock=self.clock,
-                    reset_deadline_s=STT_RESET_DEADLINE_S,
-                    drain_timeout_s=self.settings.stt.drain_timeout_s,
-                    bridging_ms=max(1, self.settings.desktop_audio.vad_pre_roll_ms),
-                )
-            except Exception as exc:
-                self._log_error(f"Peer STT backend not available: {exc}")
 
         await self.hub.replace_stt_provider(stt)
-        await self.hub.replace_peer_stt_provider(peer_stt)
         self._sync_effective_hub_flags(self.settings)
 
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
-            dash.set_stt_needs_key(stt is None)
+            dash.set_stt_needs_key(self._dashboard_stt_needs_key(stt_available=stt is not None))
             if stt is None:
                 dash.set_stt_enabled(False)
 
         logger.info("[Settings] STT provider replacement completed successfully")
+
+    def _create_peer_stt_provider(self) -> ManagedSTTProvider:
+        assert self.settings is not None
+        secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+        peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
+        return ManagedSTTProvider(
+            backend=peer_backend,
+            sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+            channel="peer",
+            clock=self.clock,
+            reset_deadline_s=STT_RESET_DEADLINE_S,
+            drain_timeout_s=self.settings.stt.drain_timeout_s,
+            bridging_ms=max(1, self.settings.desktop_audio.vad_pre_roll_ms),
+        )
+
+    async def _refresh_peer_stt_runtime(self) -> None:
+        if self.settings is None or self.hub is None:
+            return
+
+        previous_signature = self._last_peer_stt_runtime_signature
+        current_signature = self._build_peer_stt_runtime_signature(self.settings)
+
+        if not self._effective_peer_overlay_enabled_for(self.settings):
+            self._last_peer_stt_runtime_signature = current_signature
+            await self._stop_peer_loop()
+            peer_stt = getattr(self.hub, "peer_stt", None)
+            replace_peer = getattr(self.hub, "replace_peer_stt_provider", None)
+            if peer_stt is not None and callable(replace_peer):
+                await replace_peer(None)
+            self._sync_effective_hub_flags(self.settings)
+            return
+
+        should_rebuild = (
+            getattr(self.hub, "peer_stt", None) is None
+            or previous_signature is None
+            or current_signature != previous_signature
+        )
+
+        if should_rebuild:
+            await self._stop_peer_loop()
+            peer_stt = None
+            try:
+                peer_stt = self._create_peer_stt_provider()
+            except Exception as exc:
+                self._log_error(f"Peer STT backend not available: {exc}")
+            replace_peer = getattr(self.hub, "replace_peer_stt_provider", None)
+            if callable(replace_peer):
+                await replace_peer(peer_stt)
+            else:
+                self.hub.peer_stt = peer_stt  # type: ignore[attr-defined]
+        self._last_peer_stt_runtime_signature = current_signature
+
+        if (
+            self._stt_desired
+            and self._mic_task is not None
+            and getattr(self.hub, "peer_stt", None) is not None
+            and self._peer_mic_task is None
+        ):
+            try:
+                model_path = ensure_silero_vad_onnx()
+            except Exception as exc:
+                self._log_error(
+                    f"Failed to prepare Silero VAD model ({SILERO_VAD_VERSION}): {exc}"
+                )
+                return
+            await self._start_peer_loop(model_path)
+            with contextlib.suppress(Exception):
+                await self.hub.peer_stt.warmup()
+        self._sync_effective_hub_flags(self.settings)
 
     async def _rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
         _ = rebuild_stt
@@ -985,7 +1149,7 @@ class GuiController:
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             dash.set_translation_needs_key(self.hub.llm is None)
-            dash.set_stt_needs_key(self.hub.stt is None)
+            dash.set_stt_needs_key(self._dashboard_stt_needs_key(stt_available=self.hub.stt is not None))
 
             self.hub.translation_enabled = (
                 bool(getattr(dash, "is_translation_on", True)) and self.hub.llm is not None
@@ -1003,6 +1167,12 @@ class GuiController:
     async def _init_pipeline(self) -> None:
         assert self.settings is not None
         self._last_stt_runtime_signature = self._build_stt_runtime_signature(self.settings)
+        self._last_self_stt_runtime_signature = self._build_self_stt_runtime_signature(
+            self.settings
+        )
+        self._last_peer_stt_runtime_signature = self._build_peer_stt_runtime_signature(
+            self.settings
+        )
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
 
         llm = None
@@ -1010,7 +1180,6 @@ class GuiController:
             llm = create_llm_provider(self.settings, secrets=secrets)
 
         stt = None
-        peer_stt = None
         try:
             backend = create_stt_backend(self.settings, secrets=secrets)
             stt = ManagedSTTProvider(
@@ -1023,20 +1192,6 @@ class GuiController:
             )
         except Exception as exc:
             self._log_error(f"STT backend not available: {exc}")
-        if self._effective_peer_overlay_enabled_for(self.settings):
-            try:
-                peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
-                peer_stt = ManagedSTTProvider(
-                    backend=peer_backend,
-                    sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-                    channel="peer",
-                    clock=self.clock,
-                    reset_deadline_s=STT_RESET_DEADLINE_S,
-                    drain_timeout_s=self.settings.stt.drain_timeout_s,
-                    bridging_ms=max(1, self.settings.desktop_audio.vad_pre_roll_ms),
-                )
-            except Exception as exc:
-                self._log_error(f"Peer STT backend not available: {exc}")
 
         sender = VrchatOscUdpSender(
             host=self.settings.osc.host,
@@ -1057,18 +1212,15 @@ class GuiController:
             stt=stt,
             llm=llm,
             osc=osc,
-            peer_stt=peer_stt,
+            peer_stt=None,
             clock=self.clock,
             source_language=self.settings.languages.source_language,
             target_language=self.settings.languages.target_language,
             system_prompt=self.settings.system_prompt,
             fallback_transcript_only=True,
             translation_enabled=True,
-            peer_translation_enabled=self._effective_peer_translation_enabled_for(self.settings)
-            and peer_stt is not None,
-            integrated_context_enabled=self._effective_integrated_context_enabled_for(
-                self.settings
-            ),
+            peer_translation_enabled=False,
+            integrated_context_enabled=False,
             low_latency_mode=self.settings.stt.low_latency_mode,
             low_latency_merge_gap_ms=self.settings.stt.low_latency_merge_gap_ms,
             low_latency_spec_retry_max=self.settings.stt.low_latency_spec_retry_max,
@@ -1202,23 +1354,27 @@ class GuiController:
             self._mic_task.cancel()
             await asyncio.gather(self._mic_task, return_exceptions=True)
             self._mic_task = None
-        if self._peer_mic_task is not None:
-            self._peer_mic_task.cancel()
-            await asyncio.gather(self._peer_mic_task, return_exceptions=True)
-            self._peer_mic_task = None
 
         if self._audio_source is not None:
             with contextlib.suppress(Exception):
                 await self._audio_source.close()
             self._audio_source = None
+        self._vad = None
+        await self._stop_peer_loop()
+        if self.vrc_mic_audio_gate is not None:
+            self.vrc_mic_audio_gate.reset()
+
+    async def _stop_peer_loop(self) -> None:
+        if self._peer_mic_task is not None:
+            self._peer_mic_task.cancel()
+            await asyncio.gather(self._peer_mic_task, return_exceptions=True)
+            self._peer_mic_task = None
+
         if self._peer_audio_source is not None:
             with contextlib.suppress(Exception):
                 await self._peer_audio_source.close()
             self._peer_audio_source = None
-        self._vad = None
         self._peer_vad = None
-        if self.vrc_mic_audio_gate is not None:
-            self.vrc_mic_audio_gate.reset()
 
     async def _run_mic_loop(self) -> None:
         assert self.hub is not None
@@ -1538,8 +1694,9 @@ class GuiController:
             dash.set_translation_needs_key(False)
 
         # 2. Verify STT
-        stt_valid = False
-        if self.hub and self.hub.stt:
+        stt_requires_secret = self._stt_provider_requires_secret(self.settings.provider.stt)
+        stt_valid = not stt_requires_secret
+        if self.hub and self.hub.stt and stt_requires_secret:
             try:
                 provider_name = self.settings.provider.stt
 
@@ -1557,7 +1714,7 @@ class GuiController:
                 stt_valid = False
 
         if not stt_valid:
-            dash.set_stt_needs_key(True)
+            dash.set_stt_needs_key(stt_requires_secret)
             if self.hub:
                 # Close STT backend?
                 pass

@@ -170,6 +170,15 @@ def create_llm_provider(settings: AppSettings, *, secrets: SecretStore) -> LLMPr
 def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBackend:
     effective_terms = get_effective_custom_terms(settings, settings.languages.source_language)
 
+    if settings.provider.stt == STTProviderName.LOCAL_QWEN:
+        from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
+        from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaSTTBackend
+
+        return LocalQwenSherpaSTTBackend(
+            model_dir=default_local_stt_model_dir(),
+            sample_rate_hz=settings.audio.internal_sample_rate_hz,
+        )
+
     if settings.provider.stt == STTProviderName.DEEPGRAM:
         api_key = require_secret(secrets, key="deepgram_api_key", env_var="DEEPGRAM_API_KEY")
         return _create_deepgram_stt_backend(

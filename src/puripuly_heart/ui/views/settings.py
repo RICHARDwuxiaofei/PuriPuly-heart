@@ -217,7 +217,7 @@ class SettingsView(ft.Column):
         """Build the settings UI with Bento grid layout."""
         # === Row 1: STT (1x1) + Translation (1x1) ===
         self._stt_text = self._build_clickable_text(
-            provider_label(STTProviderName.DEEPGRAM.value),
+            provider_label(STTProviderName.LOCAL_QWEN.value),
             self._on_stt_click,
         )
         self._stt_title = ft.Text(
@@ -1094,7 +1094,9 @@ class SettingsView(ft.Column):
             for p in STTProviderName
         ]
         current = (
-            self._settings.provider.stt.value if self._settings else STTProviderName.DEEPGRAM.value
+            self._settings.provider.stt.value
+            if self._settings
+            else STTProviderName.LOCAL_QWEN.value
         )
         modal = SettingsModal(
             self.page,

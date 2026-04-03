@@ -17,6 +17,12 @@ def test_pyproject_caps_deepgram_sdk_below_v6() -> None:
     assert "deepgram-sdk>=5.0.0,<6.0.0" in pyproject["project"]["dependencies"]
 
 
+def test_pyproject_includes_sherpa_onnx_dependency() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert "sherpa-onnx>=1.12.35" in pyproject["project"]["dependencies"]
+
+
 def test_release_workflow_uses_frozen_lockfile_sync() -> None:
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
@@ -75,6 +81,42 @@ def test_shared_windows_build_script_runs_packaged_smoke_test() -> None:
     assert "Get-Command choco" in script
 
 
+def test_shared_windows_build_script_uses_alternate_app_id_and_isolated_installer_smoke_dir() -> None:
+    script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
+
+    assert "$InstallerTestAppId" in script
+    assert "$InstallerSmokeDir" in script
+    assert '"/CURRENTUSER"' in script
+    assert '"/VERYSILENT"' in script
+    assert '"/SUPPRESSMSGBOXES"' in script
+    assert '"/DIR=$InstallerSmokeDir"' in script
+
+
+def test_shared_windows_build_script_builds_release_installer_without_alternate_app_id() -> None:
+    script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
+
+    assert 'Invoke-ExternalProcess -FilePath $isccPath -ArgumentList @("installer.iss")' in script
+
+
+def test_shared_windows_build_script_uses_separate_smoke_installer_build_with_alternate_app_id() -> None:
+    script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
+
+    assert "$InstallerSmokeBuildDir" in script
+    assert "$InstallerSmokeAppDataRoot" in script
+    assert '"/DMyAppId=$InstallerTestAppId"' in script
+    assert '"/O$InstallerSmokeBuildDir"' in script
+    assert "$smokeInstallerPath" in script
+
+
+def test_shared_windows_build_script_overrides_local_stt_appdata_for_smoke_and_checks_log() -> None:
+    script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
+
+    assert "PURIPULY_HEART_LOCAL_STT_APPDATA_ROOT" in script
+    assert "$InstallerSmokeLogPath" in script
+    assert '"/LOG=$InstallerSmokeLogPath"' in script
+    assert "Local STT provisioning completed successfully." in script
+
+
 def test_shared_windows_build_script_bundles_openvr_runtime_dll_for_overlay() -> None:
     script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
 
@@ -125,6 +167,60 @@ def test_installer_script_guards_against_repo_checkout_installs() -> None:
     assert r"DefaultDir := ExpandConstant('{autopf}\{#MyAppDirName}');" in script
     assert "procedure InitializeWizard();" in script
     assert "function PrepareToInstall(var NeedsRestart: Boolean): String;" in script
+
+
+def test_installer_script_adds_local_stt_source_controls_and_provisioning_hook() -> None:
+    script = (ROOT / "installer.iss").read_text(encoding="utf-8")
+
+    assert 'Source: "scripts\\installer\\install-local-stt-model.ps1"' in script
+    assert "LocalSttSourcePage" in script
+    assert "LocalSttSourceComboBox" in script
+    assert "LocalSttReinstallCheckBox" in script
+    assert "GetDefaultLocalSttSource" in script
+    assert "ActiveLanguage() = 'chinesesimplified'" in script
+    assert "RunLocalSttModelInstall" in script
+    assert "install-local-stt-model.ps1" in script
+
+
+def test_installer_script_supports_local_stt_appdata_override_for_smoke_runs() -> None:
+    script = (ROOT / "installer.iss").read_text(encoding="utf-8")
+
+    assert "PURIPULY_HEART_LOCAL_STT_APPDATA_ROOT" in script
+    assert "GetEnv('PURIPULY_HEART_LOCAL_STT_APPDATA_ROOT')" in script
+
+
+def test_local_stt_installer_script_uses_manifest_validation_and_atomic_promotion() -> None:
+    script = (ROOT / "scripts" / "installer" / "install-local-stt-model.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Get-FileHash" in script
+    assert "Invoke-WebRequest" in script
+    assert "installed-manifest.json" in script
+    assert "huggingface" in script.lower()
+    assert "modelscope" in script.lower()
+    assert "Move-Item" in script
+    assert "selectedSource" in script or "SelectedSource" in script
+
+
+def test_local_stt_installer_script_writes_bomless_manifest_and_treats_invalid_install_as_recoverable() -> None:
+    script = (ROOT / "scripts" / "installer" / "install-local-stt-model.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "UTF8Encoding($false)" in script
+    assert "WriteAllText" in script
+    assert "catch {" in script
+    assert "return $false" in script
+
+
+def test_local_stt_installer_script_attempts_backup_restore_on_promotion_failure() -> None:
+    script = (ROOT / "scripts" / "installer" / "install-local-stt-model.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert '$backupDir = "$InstallDir.backup"' in script
+    assert "Move-Item -Path $backupDir -Destination $InstallDir -Force" in script
 
 
 def test_chinese_installer_language_files_use_matching_message_keys() -> None:

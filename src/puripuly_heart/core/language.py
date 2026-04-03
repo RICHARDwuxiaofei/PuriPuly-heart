@@ -227,7 +227,7 @@ def get_stt_compatibility_warning(code: str, stt_provider: str) -> SttCompatibil
             return SttCompatibilityWarning("warning.deepgram_suggest_qwen", lang_code)
         return SttCompatibilityWarning("warning.deepgram_not_supported", lang_code)
 
-    if stt_provider == "qwen_asr" and not is_qwen_asr_supported(code):
+    if stt_provider in {"qwen_asr", "local_qwen"} and not is_qwen_asr_supported(code):
         if is_deepgram_supported(code):
             return SttCompatibilityWarning("warning.qwen_suggest_deepgram", lang_code)
         return SttCompatibilityWarning("warning.qwen_not_supported", lang_code)

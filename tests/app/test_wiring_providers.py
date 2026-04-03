@@ -25,11 +25,13 @@ from puripuly_heart.config.settings import (
 )
 from puripuly_heart.core.language import get_deepgram_language, get_qwen_asr_language
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
+from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
+from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaSTTBackend
 from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
 from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 
@@ -182,6 +184,19 @@ def test_create_stt_backend_deepgram_passes_effective_custom_terms() -> None:
 
     assert isinstance(backend, DeepgramRealtimeSTTBackend)
     assert list(backend.keyterms) == ["Puripuly", "VRChat"]
+
+
+def test_create_stt_backend_local_qwen_uses_shared_model_path_without_secret() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(stt=STTProviderName.LOCAL_QWEN),
+    )
+    secrets = InMemorySecretStore()
+
+    backend = create_stt_backend(settings, secrets=secrets)
+
+    assert isinstance(backend, LocalQwenSherpaSTTBackend)
+    assert backend.model_dir == default_local_stt_model_dir()
+    assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
 
 
 def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None:

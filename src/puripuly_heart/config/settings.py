@@ -28,6 +28,7 @@ def _default_custom_terms() -> dict[str, list[str]]:
 
 
 class STTProviderName(str, Enum):
+    LOCAL_QWEN = "local_qwen"
     DEEPGRAM = "deepgram"
     QWEN_ASR = "qwen_asr"
     SONIOX = "soniox"
@@ -235,7 +236,7 @@ class OSCSettings:
 
 @dataclass(slots=True)
 class ProviderSettings:
-    stt: STTProviderName = STTProviderName.DEEPGRAM
+    stt: STTProviderName = STTProviderName.LOCAL_QWEN
     llm: LLMProviderName = LLMProviderName.GEMINI
 
     def validate(self) -> None:
@@ -608,6 +609,27 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         )
         changed = True
 
+    raw_provider_data = data.get("provider")
+    provider_data: dict[str, Any] | None
+    if raw_provider_data is None:
+        provider_data = None
+    elif not isinstance(raw_provider_data, dict):
+        provider_data = {
+            "stt": STTProviderName.DEEPGRAM.value,
+            "llm": LLMProviderName.GEMINI.value,
+        }
+        data["provider"] = provider_data
+        changed = True
+    else:
+        provider_data = raw_provider_data
+
+    if isinstance(provider_data, dict) and "stt" in provider_data:
+        raw_stt_provider = provider_data.get("stt")
+        normalized_stt_provider = _parse_stt_provider(str(raw_stt_provider)).value
+        if raw_stt_provider != normalized_stt_provider:
+            provider_data["stt"] = normalized_stt_provider
+            changed = True
+
     # Keep schema at v2 but backfill Soniox legacy default model upgrade.
     soniox_data = data.get("soniox_stt")
     if isinstance(soniox_data, dict):
@@ -672,6 +694,14 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     overlay_calibration_data = data.get("overlay_calibration") or {}
     stt_data = data.get("stt") or {}
     ui_data = data.get("ui") or {}
+    raw_provider_data = data.get("provider")
+    provider_data = raw_provider_data if isinstance(raw_provider_data, dict) else {}
+    if raw_provider_data is None:
+        stt_provider_value = STTProviderName.LOCAL_QWEN.value
+    elif isinstance(raw_provider_data, dict):
+        stt_provider_value = provider_data.get("stt", STTProviderName.LOCAL_QWEN.value)
+    else:
+        stt_provider_value = STTProviderName.DEEPGRAM.value
 
     input_host_api_raw = audio_data.get("input_host_api")
     input_device_raw = audio_data.get("input_device")
@@ -687,10 +717,8 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     settings = AppSettings(
         settings_version=_coerce_int(data.get("settings_version"), SETTINGS_SCHEMA_VERSION),
         provider=ProviderSettings(
-            stt=_parse_stt_provider(
-                data.get("provider", {}).get("stt", STTProviderName.DEEPGRAM.value)
-            ),
-            llm=LLMProviderName(data.get("provider", {}).get("llm", LLMProviderName.GEMINI.value)),
+            stt=_parse_stt_provider(str(stt_provider_value)),
+            llm=LLMProviderName(provider_data.get("llm", LLMProviderName.GEMINI.value)),
         ),
         languages=LanguageSettings(
             source_language=data.get("languages", {}).get("source_language", "ko"),

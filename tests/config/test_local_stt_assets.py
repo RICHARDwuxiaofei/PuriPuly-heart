@@ -1,0 +1,256 @@
+from __future__ import annotations
+
+import codecs
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+from puripuly_heart.core import local_stt_assets as local_stt_assets_module
+from puripuly_heart.core.local_stt_assets import (
+    InstalledLocalSTTManifest,
+    LocalSTTAssetFile,
+    LocalSTTAssetManifest,
+    LocalSTTAssetSource,
+    LocalSTTManifestInvalidError,
+    default_local_stt_installed_manifest_path,
+    default_local_stt_model_dir,
+    default_local_stt_model_root,
+    load_local_stt_asset_manifest,
+    validate_local_stt_install,
+)
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _test_manifest() -> LocalSTTAssetManifest:
+    return LocalSTTAssetManifest(
+        manifest_version=1,
+        installed_manifest_version=1,
+        model_id="qwen3-asr-0.6b-int8-sherpa",
+        engine="sherpa-onnx",
+        upstream_repo="zengshuishui/Qwen3-ASR-onnx",
+        install_dirname="qwen3-asr-0.6b-int8-sherpa",
+        sources={
+            "huggingface": LocalSTTAssetSource(
+                name="huggingface",
+                revision="hf-rev-1",
+            ),
+            "modelscope": LocalSTTAssetSource(
+                name="modelscope",
+                revision="ms-rev-1",
+            ),
+        },
+        files=(
+            LocalSTTAssetFile(
+                relative_path="model.int8.onnx",
+                sha256=_sha256_bytes(b"model-bytes"),
+            ),
+            LocalSTTAssetFile(
+                relative_path="tokens.txt",
+                sha256=_sha256_bytes(b"token-bytes"),
+            ),
+        ),
+    )
+
+
+def _write_valid_install(root: Path, manifest: LocalSTTAssetManifest) -> None:
+    (root / "model.int8.onnx").write_bytes(b"model-bytes")
+    (root / "tokens.txt").write_bytes(b"token-bytes")
+    installed = InstalledLocalSTTManifest(
+        manifest_version=manifest.installed_manifest_version,
+        model_id=manifest.model_id,
+        engine=manifest.engine,
+        install_dirname=manifest.install_dirname,
+        selected_source="huggingface",
+        selected_revision=manifest.sources["huggingface"].revision,
+    )
+    default_local_stt_installed_manifest_path(root).write_text(
+        json.dumps(installed.to_dict(), indent=2),
+        encoding="utf-8",
+    )
+
+
+def test_default_local_stt_paths_use_user_config_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    from puripuly_heart.config import paths
+
+    def _fake_user_config_dir(*, app_dir_name: str = paths.APP_DIR_NAME) -> Path:
+        return Path("/tmp") / app_dir_name
+
+    monkeypatch.setattr(paths, "user_config_dir", _fake_user_config_dir)
+
+    assert default_local_stt_model_root() == Path("/tmp") / paths.APP_DIR_NAME / "models"
+    assert (
+        default_local_stt_model_dir()
+        == Path("/tmp") / paths.APP_DIR_NAME / "models" / "qwen3-asr-0.6b-int8-sherpa"
+    )
+    assert (
+        default_local_stt_installed_manifest_path()
+        == Path("/tmp")
+        / paths.APP_DIR_NAME
+        / "models"
+        / "qwen3-asr-0.6b-int8-sherpa"
+        / "installed-manifest.json"
+    )
+
+
+def test_load_local_stt_asset_manifest_parses_packaged_manifest() -> None:
+    manifest = load_local_stt_asset_manifest()
+
+    assert manifest.model_id == "qwen3-asr-0.6b-int8-sherpa"
+    assert manifest.engine == "sherpa-onnx"
+    assert manifest.upstream_repo == "zengshuishui/Qwen3-ASR-onnx"
+    assert manifest.install_dirname == "qwen3-asr-0.6b-int8-sherpa"
+    assert set(manifest.sources) == {"huggingface", "modelscope"}
+    assert manifest.files
+
+
+def test_validate_local_stt_install_accepts_matching_manifest_and_checksums(
+    tmp_path: Path,
+) -> None:
+    manifest = _test_manifest()
+    install_dir = tmp_path / manifest.install_dirname
+    install_dir.mkdir()
+    _write_valid_install(install_dir, manifest)
+
+    installed = validate_local_stt_install(install_dir, manifest=manifest)
+
+    assert installed.selected_source == "huggingface"
+    assert installed.selected_revision == "hf-rev-1"
+
+
+def test_validate_local_stt_runtime_ready_accepts_matching_manifest_without_checksum(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _test_manifest()
+    install_dir = tmp_path / manifest.install_dirname
+    install_dir.mkdir()
+    _write_valid_install(install_dir, manifest)
+
+    def fail_if_hashed(_path: Path) -> str:
+        raise AssertionError("runtime validator must not hash files")
+
+    monkeypatch.setattr(local_stt_assets_module, "_sha256_file", fail_if_hashed)
+
+    installed = local_stt_assets_module.validate_local_stt_runtime_ready(
+        install_dir,
+        manifest=manifest,
+    )
+
+    assert installed.selected_source == "huggingface"
+    assert installed.selected_revision == "hf-rev-1"
+
+
+def test_validate_local_stt_install_rejects_missing_required_file(tmp_path: Path) -> None:
+    manifest = _test_manifest()
+    install_dir = tmp_path / manifest.install_dirname
+    install_dir.mkdir()
+    _write_valid_install(install_dir, manifest)
+    (install_dir / "tokens.txt").unlink()
+
+    with pytest.raises(LocalSTTManifestInvalidError, match="missing required model file"):
+        validate_local_stt_install(install_dir, manifest=manifest)
+
+
+def test_validate_local_stt_runtime_ready_rejects_missing_required_file(tmp_path: Path) -> None:
+    manifest = _test_manifest()
+    install_dir = tmp_path / manifest.install_dirname
+    install_dir.mkdir()
+    _write_valid_install(install_dir, manifest)
+    (install_dir / "tokens.txt").unlink()
+
+    with pytest.raises(LocalSTTManifestInvalidError, match="missing required model file"):
+        local_stt_assets_module.validate_local_stt_runtime_ready(
+            install_dir,
+            manifest=manifest,
+        )
+
+
+def test_validate_local_stt_install_rejects_stale_revision(tmp_path: Path) -> None:
+    manifest = _test_manifest()
+    install_dir = tmp_path / manifest.install_dirname
+    install_dir.mkdir()
+    _write_valid_install(install_dir, manifest)
+
+    stale_manifest = InstalledLocalSTTManifest(
+        manifest_version=manifest.installed_manifest_version,
+        model_id=manifest.model_id,
+        engine=manifest.engine,
+        install_dirname=manifest.install_dirname,
+        selected_source="huggingface",
+        selected_revision="old-revision",
+    )
+    default_local_stt_installed_manifest_path(install_dir).write_text(
+        json.dumps(stale_manifest.to_dict(), indent=2),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LocalSTTManifestInvalidError, match="stale installed manifest revision"):
+        validate_local_stt_install(install_dir, manifest=manifest)
+
+
+def test_validate_local_stt_install_rejects_checksum_mismatch(tmp_path: Path) -> None:
+    manifest = _test_manifest()
+    install_dir = tmp_path / manifest.install_dirname
+    install_dir.mkdir()
+    _write_valid_install(install_dir, manifest)
+    (install_dir / "model.int8.onnx").write_bytes(b"corrupted")
+
+    with pytest.raises(LocalSTTManifestInvalidError, match="checksum mismatch"):
+        validate_local_stt_install(install_dir, manifest=manifest)
+
+
+def test_validate_local_stt_install_accepts_bom_prefixed_installed_manifest(
+    tmp_path: Path,
+) -> None:
+    manifest = _test_manifest()
+    install_dir = tmp_path / manifest.install_dirname
+    install_dir.mkdir()
+    _write_valid_install(install_dir, manifest)
+
+    installed_manifest_path = default_local_stt_installed_manifest_path(install_dir)
+    payload = installed_manifest_path.read_text(encoding="utf-8")
+    installed_manifest_path.write_bytes(codecs.BOM_UTF8 + payload.encode("utf-8"))
+
+    installed = validate_local_stt_install(install_dir, manifest=manifest)
+
+    assert installed.selected_source == "huggingface"
+
+
+def test_validate_local_stt_install_wraps_invalid_json_manifest(tmp_path: Path) -> None:
+    manifest = _test_manifest()
+    install_dir = tmp_path / manifest.install_dirname
+    install_dir.mkdir()
+    (install_dir / "model.int8.onnx").write_bytes(b"model-bytes")
+    (install_dir / "tokens.txt").write_bytes(b"token-bytes")
+    default_local_stt_installed_manifest_path(install_dir).write_text("{invalid", encoding="utf-8")
+
+    with pytest.raises(LocalSTTManifestInvalidError, match="invalid local STT installed manifest"):
+        validate_local_stt_install(install_dir, manifest=manifest)
+
+
+def test_validate_local_stt_install_wraps_missing_manifest_fields(tmp_path: Path) -> None:
+    manifest = _test_manifest()
+    install_dir = tmp_path / manifest.install_dirname
+    install_dir.mkdir()
+    (install_dir / "model.int8.onnx").write_bytes(b"model-bytes")
+    (install_dir / "tokens.txt").write_bytes(b"token-bytes")
+    default_local_stt_installed_manifest_path(install_dir).write_text(
+        json.dumps(
+            {
+                "manifest_version": manifest.installed_manifest_version,
+                "model_id": manifest.model_id,
+                "engine": manifest.engine,
+                "install_dirname": manifest.install_dirname,
+                "selected_source": "huggingface",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LocalSTTManifestInvalidError, match="invalid local STT installed manifest"):
+        validate_local_stt_install(install_dir, manifest=manifest)

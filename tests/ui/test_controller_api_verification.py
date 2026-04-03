@@ -14,8 +14,10 @@ from puripuly_heart.config.settings import (
     QwenRegion,
     STTProviderName,
 )
+from puripuly_heart.core.local_stt_assets import LocalSTTModelMissingError
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
+from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaLoadError
 from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
 from puripuly_heart.ui import controller as controller_module
 from puripuly_heart.ui.controller import GuiController
@@ -234,3 +236,98 @@ async def test_verify_and_update_status_uses_selected_qwen_model_for_both_llm_an
     assert app.view_dashboard.translation_needs_key is False
     assert app.view_dashboard.stt_needs_key is False
     assert seen_models == ["qwen3.5-plus"]
+
+
+@pytest.mark.asyncio
+async def test_verify_and_update_status_treats_local_qwen_stt_as_keyless(
+    monkeypatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    settings.provider.llm = LLMProviderName.GEMINI
+    app = SimpleNamespace(view_dashboard=DummyDashboard())
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyHub()
+
+    def fail_secret_store(*_args, **_kwargs):
+        raise RuntimeError("secret store should not be needed for local STT")
+
+    monkeypatch.setattr(controller_module, "create_secret_store", fail_secret_store)
+
+    await controller._verify_and_update_status()
+
+    assert app.view_dashboard.stt_needs_key is False
+
+
+@pytest.mark.asyncio
+async def test_set_stt_enabled_refuses_local_qwen_when_model_is_missing() -> None:
+    opened: list[object] = []
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    app = SimpleNamespace(view_dashboard=DummyDashboard())
+
+    class FailingStt:
+        async def warmup(self) -> None:
+            raise LocalSTTModelMissingError("missing")
+
+    class DummyWarmupHub:
+        def __init__(self) -> None:
+            self.stt = FailingStt()
+            self.peer_stt = None
+            self.promo_calls = 0
+
+        def mark_promo_eligible(self) -> None:
+            self.promo_calls += 1
+
+    controller = GuiController(
+        page=SimpleNamespace(open=lambda control: opened.append(control)),
+        app=app,
+        config_path=Path("settings.json"),
+    )
+    controller.settings = settings
+    controller.hub = DummyWarmupHub()
+
+    await controller.set_stt_enabled(True)
+
+    assert controller._stt_desired is False
+    assert app.view_dashboard.stt_enabled is False
+    assert len(opened) == 1
+    assert opened[0].content.value == "Local speech model is not installed"
+
+
+@pytest.mark.asyncio
+async def test_set_stt_enabled_refuses_local_qwen_when_model_load_fails() -> None:
+    opened: list[object] = []
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    app = SimpleNamespace(view_dashboard=DummyDashboard())
+
+    class FailingStt:
+        async def warmup(self) -> None:
+            raise LocalQwenSherpaLoadError("load failed")
+
+    class DummyWarmupHub:
+        def __init__(self) -> None:
+            self.stt = FailingStt()
+            self.peer_stt = None
+            self.promo_calls = 0
+
+        def mark_promo_eligible(self) -> None:
+            self.promo_calls += 1
+
+    controller = GuiController(
+        page=SimpleNamespace(open=lambda control: opened.append(control)),
+        app=app,
+        config_path=Path("settings.json"),
+    )
+    controller.settings = settings
+    controller.hub = DummyWarmupHub()
+
+    await controller.set_stt_enabled(True)
+
+    assert controller._stt_desired is False
+    assert app.view_dashboard.stt_enabled is False
+    assert len(opened) == 1
+    assert opened[0].content.value == "Local speech model is invalid"

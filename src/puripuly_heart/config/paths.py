@@ -7,6 +7,7 @@ from pathlib import Path
 APP_DIR_NAME = "puripuly-heart"
 SETTINGS_FILENAME = "settings.json"
 VAD_MODEL_FILENAME = "silero_vad.onnx"
+MODELS_DIRNAME = "models"
 
 
 def user_config_dir(*, app_dir_name: str = APP_DIR_NAME) -> Path:
@@ -31,3 +32,7 @@ def default_settings_path() -> Path:
 
 def default_vad_model_path() -> Path:
     return user_config_dir() / VAD_MODEL_FILENAME
+
+
+def default_models_dir() -> Path:
+    return user_config_dir() / MODELS_DIRNAME
