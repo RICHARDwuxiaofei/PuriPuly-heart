@@ -198,6 +198,7 @@ pub(crate) fn render_text_layout_to_command_list(
     outline_brush: &ID2D1SolidColorBrush,
     outline_stroke_width_px: f32,
 ) -> Result<GlyphRunVisual, CaptionRenderError> {
+    let previous_target = unsafe { cache_context.GetTarget().ok() };
     let command_list = unsafe {
         cache_context
             .CreateCommandList()
@@ -218,16 +219,27 @@ pub(crate) fn render_text_layout_to_command_list(
         outline_stroke_width_px,
     };
     let text_renderer: IDWriteTextRenderer = renderer.into();
-    unsafe {
+    let draw_result = unsafe {
         text_layout
             .Draw(None, &text_renderer, 0.0, 0.0)
-            .map_err(|error| CaptionRenderError::Draw(error.to_string()))?;
+            .map_err(|error| CaptionRenderError::Draw(error.to_string()))
+    };
+    let end_draw_result = unsafe {
         cache_context
             .EndDraw(None, None)
-            .map_err(|error| CaptionRenderError::Draw(error.to_string()))?;
-        command_list
-            .Close()
-            .map_err(|error| CaptionRenderError::Draw(error.to_string()))?;
+            .map_err(|error| CaptionRenderError::Draw(error.to_string()))
+    };
+    unsafe {
+        cache_context.SetTarget(previous_target.as_ref());
+    }
+    match (draw_result, end_draw_result) {
+        (Err(error), _) => return Err(error),
+        (Ok(()), Err(error)) => return Err(error),
+        (Ok(()), Ok(())) => unsafe {
+            command_list
+                .Close()
+                .map_err(|error| CaptionRenderError::Draw(error.to_string()))?;
+        },
     }
 
     let visual_bounds = visual_bounds

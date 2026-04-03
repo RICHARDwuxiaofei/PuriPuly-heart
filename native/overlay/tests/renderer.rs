@@ -475,6 +475,46 @@ fn renderer_windows_pipeline_renders_mixed_script_frame() {
 
 #[cfg(windows)]
 #[test]
+fn renderer_windows_first_active_self_frame_after_empty_frame_is_renderable() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let empty = renderer.render_empty_frame().unwrap();
+    let active = CaptionBlock::new("self:active", "live self preview")
+        .with_variant(CaptionBlockVariant::ActiveSelf)
+        .with_secondary_text("", true)
+        .with_channel(CaptionChannel::SelfChannel);
+    let frame = renderer.render_blocks(vec![active]).unwrap();
+
+    assert!(empty.is_fully_transparent());
+    assert!(!frame.is_fully_transparent());
+    assert_eq!(
+        frame.layout().visible_blocks[0].block_variant,
+        CaptionBlockVariant::ActiveSelf
+    );
+    assert!(frame.texture_ptr().is_some());
+    assert!(frame.d3d11_texture().is_some());
+}
+
+#[cfg(windows)]
+#[test]
+fn renderer_windows_first_finalized_bilingual_frame_after_empty_frame_is_renderable() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let empty = renderer.render_empty_frame().unwrap();
+    let finalized = bilingual_block("self:1", "hello there", "secondary line", true)
+        .with_channel(CaptionChannel::SelfChannel);
+    let frame = renderer.render_blocks(vec![finalized]).unwrap();
+
+    assert!(empty.is_fully_transparent());
+    assert!(!frame.is_fully_transparent());
+    assert_eq!(
+        frame.layout().visible_blocks[0].block_variant,
+        CaptionBlockVariant::Finalized
+    );
+    assert!(frame.texture_ptr().is_some());
+    assert!(frame.d3d11_texture().is_some());
+}
+
+#[cfg(windows)]
+#[test]
 fn renderer_windows_second_render_hits_layout_and_block_caches() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
     let block = bilingual_block("self:1", "hello there", "secondary line", true)

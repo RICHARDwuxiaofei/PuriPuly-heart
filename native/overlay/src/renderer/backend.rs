@@ -291,7 +291,6 @@ struct WindowsCaptionRenderer {
     system_font_collection: IDWriteFontCollection,
     system_font_fallback: IDWriteFontFallback,
     d2d_context: ID2D1DeviceContext,
-    cache_context: ID2D1DeviceContext,
     cache_outline_brush: ID2D1SolidColorBrush,
     cache_self_text_brush: ID2D1SolidColorBrush,
     cache_peer_text_brush: ID2D1SolidColorBrush,
@@ -319,7 +318,6 @@ impl WindowsCaptionRenderer {
         };
         let texture = create_target_texture(&device)?;
         let d2d_context = create_d2d_context(&device, &d2d_factory)?;
-        let cache_context = create_d2d_context(&device, &d2d_factory)?;
         let dxgi_surface: IDXGISurface = texture
             .cast()
             .map_err(|error| CaptionRenderError::Init(error.to_string()))?;
@@ -341,15 +339,14 @@ impl WindowsCaptionRenderer {
         unsafe {
             d2d_context.SetTarget(&target_bitmap);
             d2d_context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-            cache_context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
         }
         let cache_outline_brush = unsafe {
-            cache_context
+            d2d_context
                 .CreateSolidColorBrush(&d2d_color(TEXT_OUTLINE_COLOR), None)
                 .map_err(|error| CaptionRenderError::Init(error.to_string()))?
         };
         let cache_self_text_brush = unsafe {
-            cache_context
+            d2d_context
                 .CreateSolidColorBrush(
                     &d2d_color(fill_color_for_channel(CaptionChannel::SelfChannel)),
                     None,
@@ -357,7 +354,7 @@ impl WindowsCaptionRenderer {
                 .map_err(|error| CaptionRenderError::Init(error.to_string()))?
         };
         let cache_peer_text_brush = unsafe {
-            cache_context
+            d2d_context
                 .CreateSolidColorBrush(
                     &d2d_color(fill_color_for_channel(CaptionChannel::PeerChannel)),
                     None,
@@ -370,7 +367,6 @@ impl WindowsCaptionRenderer {
             system_font_collection,
             system_font_fallback,
             d2d_context,
-            cache_context,
             cache_outline_brush,
             cache_self_text_brush,
             cache_peer_text_brush,
@@ -408,11 +404,6 @@ impl WindowsCaptionRenderer {
 
     fn block_cache_key(&self, block: &ResolvedBlockLayout) -> BlockCacheKey {
         block.block_cache_key()
-    }
-
-    fn cacheable_line(&self, block: &ResolvedBlockLayout) -> bool {
-        let _ = block;
-        true
     }
 
     fn cacheable_block(&self, block: &ResolvedBlockLayout) -> bool {
@@ -523,7 +514,7 @@ impl WindowsCaptionRenderer {
             line.font_size_px * 1.15,
         )?;
         let glyph_visual = render_text_layout_to_command_list(
-            &self.cache_context,
+            &self.d2d_context,
             &self.d2d_factory,
             &text_layout,
             fill_brush,
@@ -560,42 +551,48 @@ impl WindowsCaptionRenderer {
         Ok(cached)
     }
 
+    fn prepared_line_visual(
+        &self,
+        block: &ResolvedBlockLayout,
+        line: &ResolvedLineLayout,
+        role: LineRole,
+    ) -> Result<CachedLineVisual, CaptionRenderError> {
+        let key = self.line_cache_key(block, line, role);
+        self.caches.line_cache.get(&key).cloned().ok_or_else(|| {
+            CaptionRenderError::Draw(format!(
+                "missing prepared line cache for block={} role={role:?}",
+                block.id
+            ))
+        })
+    }
+
     fn build_cached_block_visual(
         &mut self,
         policy: &CaptionLayoutPolicy,
         block: &ResolvedBlockLayout,
-        diagnostics: &mut RenderDiagnostics,
+        _diagnostics: &mut RenderDiagnostics,
     ) -> Result<CachedBlockVisual, CaptionRenderError> {
+        let previous_target = unsafe { self.d2d_context.GetTarget().ok() };
         let command_list = unsafe {
-            self.cache_context
+            self.d2d_context
                 .CreateCommandList()
                 .map_err(|error| CaptionRenderError::Draw(error.to_string()))?
         };
         unsafe {
-            self.cache_context.SetTarget(&command_list);
-            self.cache_context.BeginDraw();
+            self.d2d_context.SetTarget(&command_list);
+            self.d2d_context.BeginDraw();
         }
 
         let mut visual_bounds: Option<super::types::VisualBounds> = None;
         let build_result = (|| {
-            for (role, line) in block
-                .primary_lines
-                .iter()
-                .map(|line| (LineRole::Primary, line))
-                .chain(
-                    block
-                        .secondary_line
-                        .iter()
-                        .map(|line| (LineRole::Secondary, line)),
-                )
-            {
-                let cached = self.cached_line_visual(policy, block, line, role, diagnostics)?;
+            for (role, line) in block_lines(block) {
+                let cached = self.prepared_line_visual(block, line, role)?;
                 let offset = Vector2 {
                     X: policy.strip_horizontal_padding_px() as f32,
                     Y: stable_line_origin_y(block, line),
                 };
                 unsafe {
-                    self.cache_context.DrawImage(
+                    self.d2d_context.DrawImage(
                         &cached.command_list,
                         Some(&offset),
                         None,
@@ -622,10 +619,13 @@ impl WindowsCaptionRenderer {
             Ok(())
         })();
         let end_draw_result = unsafe {
-            self.cache_context
+            self.d2d_context
                 .EndDraw(None, None)
                 .map_err(|error| CaptionRenderError::Draw(error.to_string()))
         };
+        unsafe {
+            self.d2d_context.SetTarget(previous_target.as_ref());
+        }
 
         match (build_result, end_draw_result) {
             (Err(error), _) => Err(error),
@@ -662,6 +662,42 @@ impl WindowsCaptionRenderer {
         Ok(cached)
     }
 
+    fn prepare_line_visuals(
+        &mut self,
+        policy: &CaptionLayoutPolicy,
+        layout: &ResolvedFrameLayout,
+        diagnostics: &mut RenderDiagnostics,
+    ) -> Result<(), CaptionRenderError> {
+        for block in &layout.visible_blocks {
+            for (role, line) in block_lines(block) {
+                if line.text.trim().is_empty() {
+                    continue;
+                }
+                let _ = self
+                    .cached_line_visual(policy, block, line, role, diagnostics)
+                    .map_err(|error| prefix_render_error("line_cache_build", error))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_block_visuals(
+        &mut self,
+        policy: &CaptionLayoutPolicy,
+        layout: &ResolvedFrameLayout,
+        diagnostics: &mut RenderDiagnostics,
+    ) -> Result<(), CaptionRenderError> {
+        for block in &layout.visible_blocks {
+            if !self.cacheable_block(block) {
+                continue;
+            }
+            let _ = self
+                .cached_block_visual(policy, block, diagnostics)
+                .map_err(|error| prefix_render_error("block_cache_build", error))?;
+        }
+        Ok(())
+    }
+
     fn render(
         &mut self,
         policy: &CaptionLayoutPolicy,
@@ -690,6 +726,8 @@ impl WindowsCaptionRenderer {
             Err(_) => policy.resolve_blocks_for_presentation(blocks, width, height, presentation),
         };
         let layout = prepare_layout_for_render(&mut self.previous_layout, layout);
+        self.prepare_line_visuals(policy, &layout, &mut diagnostics)?;
+        self.prepare_block_visuals(policy, &layout, &mut diagnostics)?;
         let clear_alpha =
             effective_background_alpha(resolved_layout_has_drawable_text(&layout), presentation);
         let damage_band = layout.damage_band.unwrap_or(DamageBand {
@@ -725,7 +763,17 @@ impl WindowsCaptionRenderer {
                 }
 
                 if self.cacheable_block(block) {
-                    let cached_block = self.cached_block_visual(policy, block, &mut diagnostics)?;
+                    let cached_block = self
+                        .caches
+                        .block_cache
+                        .get(&self.block_cache_key(block))
+                        .cloned()
+                        .ok_or_else(|| {
+                            CaptionRenderError::Draw(format!(
+                                "missing prepared block cache for block={}",
+                                block.id
+                            ))
+                        })?;
                     self.draw_cached_command_list_with_state(
                         &cached_block.command_list,
                         block.bounds.left_px,
@@ -736,26 +784,12 @@ impl WindowsCaptionRenderer {
                     continue;
                 }
 
-                for (role, line) in block
-                    .primary_lines
-                    .iter()
-                    .map(|line| (LineRole::Primary, line))
-                    .chain(
-                        block
-                            .secondary_line
-                            .iter()
-                            .map(|line| (LineRole::Secondary, line)),
-                    )
-                {
+                for (role, line) in block_lines(block) {
                     let trimmed = line.text.trim();
                     if trimmed.is_empty() {
                         continue;
                     }
-                    let line_visual = if self.cacheable_line(block) {
-                        self.cached_line_visual(policy, block, line, role, &mut diagnostics)?
-                    } else {
-                        self.build_cached_line_visual(policy, block, line, role)?
-                    };
+                    let line_visual = self.prepared_line_visual(block, line, role)?;
                     self.draw_cached_command_list_with_state(
                         &line_visual.command_list,
                         block.bounds.left_px + policy.strip_horizontal_padding_px() as f32,
@@ -774,11 +808,12 @@ impl WindowsCaptionRenderer {
                 diagnostics,
                 texture: TextureHandle::D3D11(self.texture.clone()),
             })
-        })();
+        })()
+        .map_err(|error| prefix_render_error("frame_compose", error));
         let end_draw_result = unsafe {
             self.d2d_context
                 .EndDraw(None, None)
-                .map_err(|error| CaptionRenderError::Draw(error.to_string()))
+                .map_err(|error| CaptionRenderError::Draw(format!("frame_compose: {}", error)))
         };
 
         match (render_result, end_draw_result) {
@@ -1060,6 +1095,34 @@ fn identity_matrix() -> Matrix3x2 {
 #[cfg(windows)]
 fn stable_line_origin_y(block: &ResolvedBlockLayout, line: &ResolvedLineLayout) -> f32 {
     (line.origin_y - block.bounds.top_px) / block.render_height_scale.max(f32::EPSILON)
+}
+
+#[cfg(windows)]
+fn prefix_render_error(stage: &str, error: CaptionRenderError) -> CaptionRenderError {
+    match error {
+        CaptionRenderError::Init(message) => {
+            CaptionRenderError::Init(format!("{stage}: {message}"))
+        }
+        CaptionRenderError::Draw(message) => {
+            CaptionRenderError::Draw(format!("{stage}: {message}"))
+        }
+    }
+}
+
+#[cfg(windows)]
+fn block_lines(
+    block: &ResolvedBlockLayout,
+) -> impl Iterator<Item = (LineRole, &ResolvedLineLayout)> + '_ {
+    block
+        .primary_lines
+        .iter()
+        .map(|line| (LineRole::Primary, line))
+        .chain(
+            block
+                .secondary_line
+                .iter()
+                .map(|line| (LineRole::Secondary, line)),
+        )
 }
 
 fn prepare_layout_for_render(
