@@ -19,6 +19,7 @@ class DummyDashboard:
         self.statuses: list[str] = []
         self.display_calls: list[tuple[str, str | None, bool]] = []
         self.translation_calls: list[tuple[str, str | None]] = []
+        self.notice_calls: list[str | None] = []
 
     def set_status(self, status: str) -> None:
         self.statuses.append(status)
@@ -39,6 +40,9 @@ class DummyDashboard:
         language_code: str | None = None,
     ) -> None:
         self.translation_calls.append((text, language_code))
+
+    def set_local_stt_notice(self, status: str | None) -> None:
+        self.notice_calls.append(status)
 
 
 class DummyLogs:
@@ -122,6 +126,7 @@ async def test_event_bridge_maps_session_and_transcript_events() -> None:
         ("partial", "ko", False),
         ("final", "ko", False),
     ]
+    assert app.view_dashboard.notice_calls == []
     assert app.history == [("Mic", "final", False, "ko")]
 
 

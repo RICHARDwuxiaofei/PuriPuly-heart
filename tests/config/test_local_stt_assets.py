@@ -13,10 +13,13 @@ from puripuly_heart.core.local_stt_assets import (
     LocalSTTAssetFile,
     LocalSTTAssetManifest,
     LocalSTTAssetSource,
+    LocalSTTInstallState,
     LocalSTTManifestInvalidError,
     default_local_stt_installed_manifest_path,
     default_local_stt_model_dir,
     default_local_stt_model_root,
+    default_local_stt_source_for_locale,
+    inspect_local_stt_install_state,
     load_local_stt_asset_manifest,
     validate_local_stt_install,
 )
@@ -254,3 +257,50 @@ def test_validate_local_stt_install_wraps_missing_manifest_fields(tmp_path: Path
 
     with pytest.raises(LocalSTTManifestInvalidError, match="invalid local STT installed manifest"):
         validate_local_stt_install(install_dir, manifest=manifest)
+
+
+def test_inspect_local_stt_install_state_returns_missing_for_absent_install(tmp_path: Path) -> None:
+    manifest = _test_manifest()
+
+    state = inspect_local_stt_install_state(
+        tmp_path / manifest.install_dirname,
+        manifest=manifest,
+    )
+
+    assert state == LocalSTTInstallState(status="missing", installed_manifest=None)
+
+
+def test_inspect_local_stt_install_state_returns_invalid_for_broken_manifest(tmp_path: Path) -> None:
+    manifest = _test_manifest()
+    install_dir = tmp_path / manifest.install_dirname
+    install_dir.mkdir()
+    (install_dir / "model.int8.onnx").write_bytes(b"model-bytes")
+    (install_dir / "tokens.txt").write_bytes(b"token-bytes")
+    default_local_stt_installed_manifest_path(install_dir).write_text("{invalid", encoding="utf-8")
+
+    state = inspect_local_stt_install_state(install_dir, manifest=manifest)
+
+    assert state.status == "invalid"
+    assert state.installed_manifest is None
+    assert state.error_message == "invalid local STT installed manifest"
+
+
+def test_inspect_local_stt_install_state_returns_ready_for_valid_install(tmp_path: Path) -> None:
+    manifest = _test_manifest()
+    install_dir = tmp_path / manifest.install_dirname
+    install_dir.mkdir()
+    _write_valid_install(install_dir, manifest)
+
+    state = inspect_local_stt_install_state(install_dir, manifest=manifest)
+
+    assert state.status == "ready"
+    assert state.installed_manifest is not None
+    assert state.installed_manifest.selected_source == "huggingface"
+
+
+def test_default_local_stt_source_for_locale_uses_modelscope_only_for_simplified_chinese() -> None:
+    assert default_local_stt_source_for_locale("zh-CN") == "modelscope"
+    assert default_local_stt_source_for_locale("zh-cn") == "modelscope"
+    assert default_local_stt_source_for_locale("ko") == "huggingface"
+    assert default_local_stt_source_for_locale("en") == "huggingface"
+    assert default_local_stt_source_for_locale(None) == "huggingface"

@@ -27,6 +27,7 @@ class FakeDisplayCard:
         self.statuses: list[tuple[str, str | None]] = []
         self.display_calls: list[tuple[str, bool, str | None]] = []
         self.translation_calls: list[tuple[str | None, str | None]] = []
+        self.notice_calls: list[tuple[str | None, str | None]] = []
         self.input_fonts: list[str | None] = []
         self.locale_calls: list[tuple[str | None, str | None]] = []
 
@@ -40,6 +41,9 @@ class FakeDisplayCard:
 
     def set_display_translation(self, text: str | None, font_family: str | None = None) -> None:
         self.translation_calls.append((text, font_family))
+
+    def set_notice(self, text: str | None, tone: str | None = None) -> None:
+        self.notice_calls.append((text, tone))
 
     def set_input_font(self, font_family: str | None) -> None:
         self.input_fonts.append(font_family)
@@ -168,6 +172,7 @@ def test_dashboard_public_setters_update_components(monkeypatch: pytest.MonkeyPa
     view.set_stt_enabled(False)
     view.set_translation_needs_key(True, update_ui=True)
     view.set_stt_needs_key(True, update_ui=True)
+    view.set_local_stt_notice("missing")
     view.set_display_text("src", language_code="ko")
     view.set_display_translation_text("dst", language_code="en")
     view.set_recent_languages(["a", "b", "c", "d", "e", "f", "g"], ["x", "y", "z"])
@@ -176,6 +181,10 @@ def test_dashboard_public_setters_update_components(monkeypatch: pytest.MonkeyPa
     assert view.display_card.statuses[-1] == ("connected", "font-en")
     assert view.display_card.display_calls[-1] == ("src", False, "font-ko")
     assert view.display_card.translation_calls[-1] == ("dst", "font-en")
+    assert view.display_card.notice_calls[-1] == (
+        dashboard_module.t("dashboard.local_stt_notice_missing"),
+        "warning",
+    )
     assert view.trans_button.states[-1] == (False, True)
     assert view.stt_button.states[-1] == (False, True)
     assert view._recent_source_langs == ["a", "b", "c", "d", "e", "f"]
@@ -199,3 +208,21 @@ def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.Monkey
     warning_texts = [text for text, _is_error, _font in view.display_card.display_calls]
     assert dashboard_module.t("dashboard.warn_stt_key") in warning_texts
     assert dashboard_module.t("dashboard.warn_llm_key") in warning_texts
+
+
+def test_dashboard_local_stt_notice_can_change_and_clear_without_touching_display(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+
+    view.set_local_stt_notice("missing")
+    view.set_display_text("hello", language_code="ko")
+    view.set_local_stt_notice("downloading")
+    view.set_local_stt_notice(None)
+
+    assert view.display_card.display_calls == [("hello", False, "font-ko")]
+    assert view.display_card.notice_calls == [
+        (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
+        (dashboard_module.t("dashboard.local_stt_notice_downloading"), "info"),
+        (None, None),
+    ]

@@ -32,6 +32,7 @@ class DashboardView(ft.Column):
         # Warning state for UI feedback
         self._translation_showing_warning = False
         self._stt_showing_warning = False
+        self._local_stt_notice_status: str | None = None
 
         # Current language settings
         self._source_lang_code = "ko"
@@ -275,6 +276,30 @@ class DashboardView(ft.Column):
         font_family = font_for_language(language_code) if language_code else self._ui_font()
         self.display_card.set_display_translation(text, font_family=font_family)
 
+    def set_local_stt_notice(self, status: str | None) -> None:
+        self._local_stt_notice_status = status
+        if status is None:
+            self.display_card.set_notice(None, None)
+            return
+
+        notice_key_by_status = {
+            "missing": "dashboard.local_stt_notice_missing",
+            "invalid": "dashboard.local_stt_notice_invalid",
+            "downloading": "dashboard.local_stt_notice_downloading",
+            "download_failed": "dashboard.local_stt_notice_download_failed",
+        }
+        tone_by_status = {
+            "missing": "warning",
+            "invalid": "warning",
+            "downloading": "info",
+            "download_failed": "error",
+        }
+        notice_key = notice_key_by_status.get(status)
+        if notice_key is None:
+            self.display_card.set_notice(None, None)
+            return
+        self.display_card.set_notice(t(notice_key), tone_by_status.get(status))
+
     def apply_locale(self) -> None:
         self.stt_button.set_label(t("dashboard.stt_label"))
         self.trans_button.set_label(t("dashboard.trans_label"))
@@ -290,6 +315,7 @@ class DashboardView(ft.Column):
             self.set_display_text(t("dashboard.warn_stt_key"))
         elif self._translation_showing_warning:
             self.set_display_text(t("dashboard.warn_llm_key"))
+        self.set_local_stt_notice(self._local_stt_notice_status)
 
     def set_recent_languages(self, source: list[str], target: list[str]) -> None:
         """Set recent languages from settings (for persistence)."""

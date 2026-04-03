@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+from typing import Literal
 
 from puripuly_heart.config import paths
 
@@ -110,6 +111,16 @@ class InstalledLocalSTTManifest:
         )
 
 
+LocalSTTInstallStatus = Literal["ready", "missing", "invalid"]
+
+
+@dataclass(frozen=True, slots=True)
+class LocalSTTInstallState:
+    status: LocalSTTInstallStatus
+    installed_manifest: InstalledLocalSTTManifest | None = None
+    error_message: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class LocalSTTAssetManifest:
     manifest_version: int
@@ -183,6 +194,13 @@ def default_local_stt_model_dir() -> Path:
 def default_local_stt_installed_manifest_path(model_dir: Path | None = None) -> Path:
     resolved_model_dir = model_dir or default_local_stt_model_dir()
     return resolved_model_dir / LOCAL_STT_INSTALLED_MANIFEST_FILENAME
+
+
+def default_local_stt_source_for_locale(locale: str | None) -> str:
+    normalized = (locale or "").strip().lower()
+    if normalized == "zh-cn":
+        return "modelscope"
+    return "huggingface"
 
 
 def load_local_stt_asset_manifest() -> LocalSTTAssetManifest:
@@ -304,3 +322,22 @@ def validate_local_stt_install(
         verify_checksums=True,
     )
     return installed
+
+
+def inspect_local_stt_install_state(
+    model_dir: Path | None = None,
+    *,
+    manifest: LocalSTTAssetManifest | None = None,
+) -> LocalSTTInstallState:
+    resolved_model_dir = model_dir or default_local_stt_model_dir()
+    resolved_manifest = manifest or load_local_stt_asset_manifest()
+    try:
+        installed = validate_local_stt_runtime_ready(
+            resolved_model_dir,
+            manifest=resolved_manifest,
+        )
+    except LocalSTTModelMissingError:
+        return LocalSTTInstallState(status="missing")
+    except LocalSTTManifestInvalidError as exc:
+        return LocalSTTInstallState(status="invalid", error_message=str(exc))
+    return LocalSTTInstallState(status="ready", installed_manifest=installed)

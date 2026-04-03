@@ -54,6 +54,7 @@ class DummyDashboard:
         self.translation_enabled: bool | None = None
         self.stt_needs_key: bool | None = None
         self.stt_enabled: bool | None = None
+        self.local_stt_notice_status: str | None = None
         self.languages: tuple[str, str] | None = None
         self.recent_languages: tuple[list[str], list[str]] | None = None
         self.is_translation_on: bool = True
@@ -70,6 +71,9 @@ class DummyDashboard:
 
     def set_stt_enabled(self, value: bool) -> None:
         self.stt_enabled = value
+
+    def set_local_stt_notice(self, status: str | None) -> None:
+        self.local_stt_notice_status = status
 
     def set_languages_from_codes(self, source: str, target: str) -> None:
         self.languages = (source, target)

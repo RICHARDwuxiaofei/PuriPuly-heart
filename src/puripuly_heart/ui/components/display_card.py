@@ -5,10 +5,14 @@ import flet as ft
 from puripuly_heart.ui.components.glow import create_glow_stack
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import (
+    COLOR_ERROR,
     COLOR_NEUTRAL,
     COLOR_NEUTRAL_DARK,
+    COLOR_PRIMARY,
     COLOR_SECONDARY,
+    COLOR_SUCCESS,
     COLOR_SURFACE,
+    COLOR_WARNING,
     get_card_shadow,
 )
 
@@ -54,6 +58,7 @@ class DisplayCard(ft.Container):
         self._secondary_value: str | None = None
         self._primary_font_family: str | None = None
         self._secondary_font_family: str | None = None
+        self._notice_value: str | None = None
 
         self._display_primary = ft.Text(
             self._primary_value,
@@ -76,6 +81,20 @@ class DisplayCard(ft.Container):
             visible=False,
         )
 
+        self._notice_text = ft.Text(
+            "",
+            size=13,
+            weight=ft.FontWeight.W_600,
+            color=ft.Colors.WHITE,
+        )
+        self._notice_chip = ft.Container(
+            content=self._notice_text,
+            visible=False,
+            bgcolor=COLOR_WARNING,
+            border_radius=999,
+            padding=ft.padding.symmetric(horizontal=10, vertical=6),
+        )
+
         self._input_field = ft.TextField(
             hint_text=t("display.input_hint"),
             border=ft.InputBorder.NONE,
@@ -89,12 +108,22 @@ class DisplayCard(ft.Container):
         main_content = ft.Column(
             [
                 ft.Container(
-                    content=ft.Column(
+                    content=ft.Row(
                         [
-                            self._display_primary,
-                            self._display_secondary,
+                            ft.Container(
+                                content=ft.Column(
+                                    [
+                                        self._display_primary,
+                                        self._display_secondary,
+                                    ],
+                                    spacing=4,
+                                ),
+                                expand=True,
+                            ),
+                            self._notice_chip,
                         ],
-                        spacing=4,
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
                     ),
                     alignment=ft.alignment.top_left,
                     padding=ft.padding.only(left=8),
@@ -175,6 +204,24 @@ class DisplayCard(ft.Container):
         self._secondary_value = None
         self._secondary_font_family = None
         self._sync_display()
+
+    def set_notice(self, text: str | None, tone: str | None = None) -> None:
+        self._notice_value = text or None
+        if self._notice_value:
+            tone_colors = {
+                "info": COLOR_PRIMARY,
+                "success": COLOR_SUCCESS,
+                "error": COLOR_ERROR,
+                "warning": COLOR_WARNING,
+            }
+            self._notice_text.value = self._notice_value
+            self._notice_chip.bgcolor = tone_colors.get(tone or "warning", COLOR_WARNING)
+            self._notice_chip.visible = True
+        else:
+            self._notice_text.value = ""
+            self._notice_chip.visible = False
+        if self._notice_chip.page is not None:
+            self._notice_chip.update()
 
     def clear_input(self):
         """Clear the input field."""

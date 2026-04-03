@@ -19,6 +19,7 @@ from puripuly_heart.ui.theme import (
     COLOR_BACKGROUND,
     COLOR_PRIMARY,
     COLOR_SUCCESS,
+    COLOR_WARNING,
     get_app_theme,
 )
 from puripuly_heart.ui.views.about import AboutView
@@ -276,6 +277,62 @@ class TranslatorApp:
                 padding=20,
             )
         )
+
+    def show_action_snackbar(
+        self,
+        message: str,
+        *,
+        action_label: str,
+        on_action,
+        bgcolor=COLOR_WARNING,
+        duration: int = 30000,
+        icon: str = ft.Icons.DOWNLOAD,
+    ) -> None:
+        snackbar: ft.SnackBar | None = None
+
+        def _handle_action(e) -> None:
+            on_action(e)
+            if snackbar is not None:
+                snackbar.open = False
+                self.page.update()
+
+        snackbar = ft.SnackBar(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(name=icon, color=ft.Colors.WHITE, size=28),
+                    ft.Text(
+                        message,
+                        color=ft.Colors.WHITE,
+                        size=18,
+                        font_family=font_for_language(get_locale()),
+                        expand=True,
+                    ),
+                    ft.TextButton(
+                        text=action_label,
+                        on_click=_handle_action,
+                        style=ft.ButtonStyle(
+                            color=ft.Colors.WHITE,
+                            text_style=ft.TextStyle(
+                                size=18,
+                                font_family=font_for_language(get_locale()),
+                            ),
+                            overlay_color=COLOR_PRIMARY,
+                        ),
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.START,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=12,
+            ),
+            bgcolor=bgcolor,
+            behavior=ft.SnackBarBehavior.FLOATING,
+            margin=ft.margin.only(bottom=90),
+            padding=20,
+            duration=duration,
+            show_close_icon=True,
+            close_icon_color=ft.Colors.WHITE,
+        )
+        self.page.open(snackbar)
 
     def on_overlay_state_changed(
         self,

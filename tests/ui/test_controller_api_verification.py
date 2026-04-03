@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +15,7 @@ from puripuly_heart.config.settings import (
     QwenRegion,
     STTProviderName,
 )
-from puripuly_heart.core.local_stt_assets import LocalSTTModelMissingError
+from puripuly_heart.core.local_stt_assets import LocalSTTInstallState, LocalSTTModelMissingError
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaLoadError
@@ -37,6 +38,7 @@ class DummyDashboard:
         self.translation_enabled: bool | None = None
         self.stt_needs_key: bool | None = None
         self.stt_enabled: bool | None = None
+        self.local_stt_notice_status: str | None = None
 
     def set_translation_needs_key(self, value: bool) -> None:
         self.translation_needs_key = value
@@ -49,6 +51,9 @@ class DummyDashboard:
 
     def set_stt_enabled(self, value: bool) -> None:
         self.stt_enabled = value
+
+    def set_local_stt_notice(self, status: str | None) -> None:
+        self.local_stt_notice_status = status
 
 
 class DummyHub:
@@ -263,10 +268,20 @@ async def test_verify_and_update_status_treats_local_qwen_stt_as_keyless(
 
 @pytest.mark.asyncio
 async def test_set_stt_enabled_refuses_local_qwen_when_model_is_missing() -> None:
-    opened: list[object] = []
     settings = AppSettings()
     settings.provider.stt = STTProviderName.LOCAL_QWEN
-    app = SimpleNamespace(view_dashboard=DummyDashboard())
+    actions: list[dict[str, object]] = []
+    app = SimpleNamespace(
+        view_dashboard=DummyDashboard(),
+        show_action_snackbar=lambda message, *, action_label, on_action, **kwargs: actions.append(
+            {
+                "message": message,
+                "action_label": action_label,
+                "on_action": on_action,
+                "kwargs": kwargs,
+            }
+        ),
+    )
 
     class FailingStt:
         async def warmup(self) -> None:
@@ -282,27 +297,40 @@ async def test_set_stt_enabled_refuses_local_qwen_when_model_is_missing() -> Non
             self.promo_calls += 1
 
     controller = GuiController(
-        page=SimpleNamespace(open=lambda control: opened.append(control)),
+        page=SimpleNamespace(),
         app=app,
         config_path=Path("settings.json"),
     )
     controller.settings = settings
     controller.hub = DummyWarmupHub()
+    controller._local_stt_install_state = LocalSTTInstallState(status="missing")
 
     await controller.set_stt_enabled(True)
 
     assert controller._stt_desired is False
     assert app.view_dashboard.stt_enabled is False
-    assert len(opened) == 1
-    assert opened[0].content.value == "Local speech model is not installed"
+    assert app.view_dashboard.local_stt_notice_status == "missing"
+    assert len(actions) == 1
+    assert actions[0]["message"] == controller_module.t("local_stt.download_prompt_missing")
+    assert actions[0]["action_label"] == controller_module.t("local_stt.download_action")
 
 
 @pytest.mark.asyncio
 async def test_set_stt_enabled_refuses_local_qwen_when_model_load_fails() -> None:
-    opened: list[object] = []
     settings = AppSettings()
     settings.provider.stt = STTProviderName.LOCAL_QWEN
-    app = SimpleNamespace(view_dashboard=DummyDashboard())
+    actions: list[dict[str, object]] = []
+    app = SimpleNamespace(
+        view_dashboard=DummyDashboard(),
+        show_action_snackbar=lambda message, *, action_label, on_action, **kwargs: actions.append(
+            {
+                "message": message,
+                "action_label": action_label,
+                "on_action": on_action,
+                "kwargs": kwargs,
+            }
+        ),
+    )
 
     class FailingStt:
         async def warmup(self) -> None:
@@ -318,16 +346,262 @@ async def test_set_stt_enabled_refuses_local_qwen_when_model_load_fails() -> Non
             self.promo_calls += 1
 
     controller = GuiController(
-        page=SimpleNamespace(open=lambda control: opened.append(control)),
+        page=SimpleNamespace(),
         app=app,
         config_path=Path("settings.json"),
     )
     controller.settings = settings
     controller.hub = DummyWarmupHub()
+    controller._local_stt_install_state = LocalSTTInstallState(status="invalid")
 
     await controller.set_stt_enabled(True)
 
     assert controller._stt_desired is False
     assert app.view_dashboard.stt_enabled is False
-    assert len(opened) == 1
-    assert opened[0].content.value == "Local speech model is invalid"
+    assert app.view_dashboard.local_stt_notice_status == "invalid"
+    assert len(actions) == 1
+    assert actions[0]["message"] == controller_module.t("local_stt.download_prompt_invalid")
+    assert actions[0]["action_label"] == controller_module.t("local_stt.download_action")
+
+
+@pytest.mark.asyncio
+async def test_set_stt_enabled_preserves_download_failed_notice_and_prompt() -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    actions: list[dict[str, object]] = []
+    app = SimpleNamespace(
+        view_dashboard=DummyDashboard(),
+        show_action_snackbar=lambda message, *, action_label, on_action, **kwargs: actions.append(
+            {
+                "message": message,
+                "action_label": action_label,
+                "on_action": on_action,
+                "kwargs": kwargs,
+            }
+        ),
+    )
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=app,
+        config_path=Path("settings.json"),
+    )
+    controller.settings = settings
+    controller._local_stt_install_state = LocalSTTInstallState(status="invalid")
+    controller._local_stt_runtime_status = "download_failed"
+
+    await controller.set_stt_enabled(True)
+
+    assert controller._stt_desired is False
+    assert app.view_dashboard.stt_enabled is False
+    assert app.view_dashboard.local_stt_notice_status == "download_failed"
+    assert len(actions) == 1
+    assert actions[0]["message"] == controller_module.t("local_stt.download_prompt_failed")
+    assert actions[0]["action_label"] == controller_module.t("local_stt.download_action")
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_download_action_starts_single_runtime_install_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    dashboard = DummyDashboard()
+    actions: list[dict[str, object]] = []
+    status_messages: list[str] = []
+    install_calls: list[str] = []
+    release = SimpleNamespace(done=False)
+
+    app = SimpleNamespace(
+        view_dashboard=dashboard,
+        show_action_snackbar=lambda message, *, action_label, on_action, **kwargs: actions.append(
+            {"message": message, "action_label": action_label, "on_action": on_action}
+        ),
+        _show_snackbar=lambda message, *_args, **_kwargs: status_messages.append(message),
+    )
+
+    class DummyWarmupHub:
+        def __init__(self) -> None:
+            self.stt = object()
+            self.peer_stt = None
+            self.promo_calls = 0
+
+        def mark_promo_eligible(self) -> None:
+            self.promo_calls += 1
+
+    async def fake_install(**_kwargs):
+        install_calls.append("install")
+        while not release.done:
+            await asyncio.sleep(0)
+        return object()
+
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", lambda self: asyncio.sleep(0))
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyWarmupHub()
+    controller._local_stt_install_state = LocalSTTInstallState(status="missing")
+
+    await controller.set_stt_enabled(True)
+    assert len(actions) == 1
+
+    actions[0]["on_action"](None)
+    await asyncio.sleep(0)
+    actions[0]["on_action"](None)
+    await asyncio.sleep(0)
+
+    assert install_calls == ["install"]
+    assert dashboard.local_stt_notice_status == "downloading"
+
+    release.done = True
+    await controller._local_stt_download_task
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_active_local_stt_download_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(view_dashboard=DummyDashboard()),
+        config_path=Path("settings.json"),
+    )
+
+    async def fake_set_stt_enabled(self, enabled: bool) -> None:
+        _ = self, enabled
+
+    async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
+        _ = self, enabled
+
+    async def fake_shutdown_overlay_runtime(self, *, preserve_failure_reason: bool) -> None:
+        _ = self, preserve_failure_reason
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        fake_configure_vrc_mic_receiver,
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_shutdown_overlay_runtime",
+        fake_shutdown_overlay_runtime,
+    )
+
+    controller._local_stt_download_task = asyncio.create_task(asyncio.sleep(3600))
+
+    await controller.stop()
+
+    assert controller._local_stt_download_task is None
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_successful_runtime_install_retries_enable_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    dashboard = DummyDashboard()
+    actions: list[dict[str, object]] = []
+    rebuild_calls: list[str] = []
+    switch_calls: list[bool] = []
+
+    app = SimpleNamespace(
+        view_dashboard=dashboard,
+        show_action_snackbar=lambda message, *, action_label, on_action, **kwargs: actions.append(
+            {"message": message, "action_label": action_label, "on_action": on_action}
+        ),
+        _show_snackbar=lambda *_args, **_kwargs: None,
+    )
+
+    class DummyWarmupHub:
+        def __init__(self) -> None:
+            self.stt = object()
+            self.peer_stt = None
+            self.promo_calls = 0
+
+        def mark_promo_eligible(self) -> None:
+            self.promo_calls += 1
+
+    async def fake_install(**_kwargs):
+        return object()
+
+    async def fake_rebuild(self):
+        rebuild_calls.append("rebuild")
+
+    async def fake_switch(self):
+        switch_calls.append(self._stt_desired)
+
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild)
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_switch)
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyWarmupHub()
+    controller._local_stt_install_state = LocalSTTInstallState(status="missing")
+
+    await controller.set_stt_enabled(True)
+    actions[0]["on_action"](None)
+    await controller._local_stt_download_task
+
+    assert rebuild_calls == ["rebuild"]
+    assert switch_calls == [True]
+    assert dashboard.local_stt_notice_status is None
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_runtime_install_does_not_auto_enable_after_provider_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    dashboard = DummyDashboard()
+    actions: list[dict[str, object]] = []
+    switch_calls: list[bool] = []
+    release = SimpleNamespace(done=False)
+
+    app = SimpleNamespace(
+        view_dashboard=dashboard,
+        show_action_snackbar=lambda message, *, action_label, on_action, **kwargs: actions.append(
+            {"message": message, "action_label": action_label, "on_action": on_action}
+        ),
+        _show_snackbar=lambda *_args, **_kwargs: None,
+    )
+
+    class DummyWarmupHub:
+        def __init__(self) -> None:
+            self.stt = object()
+            self.peer_stt = None
+            self.promo_calls = 0
+
+        def mark_promo_eligible(self) -> None:
+            self.promo_calls += 1
+
+    async def fake_install(**_kwargs):
+        while not release.done:
+            await asyncio.sleep(0)
+        return object()
+
+    async def fake_switch(self):
+        switch_calls.append(self._stt_desired)
+
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_switch)
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyWarmupHub()
+    controller._local_stt_install_state = LocalSTTInstallState(status="missing")
+
+    await controller.set_stt_enabled(True)
+    actions[0]["on_action"](None)
+    await asyncio.sleep(0)
+
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
+    release.done = True
+    await controller._local_stt_download_task
+
+    assert switch_calls == []

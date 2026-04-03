@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import secrets
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,8 +34,15 @@ from puripuly_heart.core.audio.source import (
 from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.local_stt_assets import (
+    LocalSTTInstallState,
     LocalSTTManifestInvalidError,
     LocalSTTModelMissingError,
+    inspect_local_stt_install_state,
+)
+from puripuly_heart.core.local_stt_runtime_installer import (
+    LocalSTTRuntimeInstallCancelled,
+    LocalSTTRuntimeInstallError,
+    ensure_local_stt_installed,
 )
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.osc.receiver import (
@@ -135,6 +143,22 @@ class GuiController:
     _last_vrc_mic_sync_enabled: bool | None = None
     _vrc_receiver_lock: asyncio.Lock | None = None
     _ui_event_bridge: UIEventBridge | None = None
+    _local_stt_install_state: LocalSTTInstallState = field(
+        init=False,
+        default_factory=lambda: LocalSTTInstallState(status="ready"),
+    )
+    _local_stt_runtime_status: str = field(init=False, default="ready")
+    _local_stt_download_task: asyncio.Task[object] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _local_stt_download_cancel_event: threading.Event | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _local_stt_pending_enable_after_install: bool = field(init=False, default=False)
     _overlay_bridge: OverlayBridge | None = None
     _overlay_presenter: OverlayPresenter | None = None
     _overlay_manager: OverlayProcessManager | None = None
@@ -215,6 +239,7 @@ class GuiController:
             logs_view.attach_log_handler()
 
         await self._init_pipeline()
+        self._refresh_local_stt_runtime_state()
 
         assert self.hub is not None
 
@@ -344,6 +369,8 @@ class GuiController:
         )
 
     async def stop(self) -> None:
+        await self._cancel_local_stt_download()
+        self._local_stt_pending_enable_after_install = False
         await self.set_stt_enabled(False)
         await self._configure_vrc_mic_receiver(enabled=False)
         await self._shutdown_overlay_runtime(preserve_failure_reason=True)
@@ -725,6 +752,19 @@ class GuiController:
             else:
                 logger.info(f"[STT] Enabled with provider: {provider}")
 
+        if enabled and self.settings is not None and self.settings.provider.stt == STTProviderName.LOCAL_QWEN:
+            current_status = self._current_local_stt_runtime_status()
+            if current_status == "downloading":
+                self._stt_desired = False
+                dash = getattr(self.app, "view_dashboard", None)
+                if dash is not None:
+                    dash.set_stt_enabled(False)
+                self._show_short_stt_message("local_stt.download_in_progress")
+                return
+            if current_status in ("missing", "invalid", "download_failed"):
+                self._handle_local_stt_unavailable(current_status)
+                return
+
         # Mark promo eligible when user explicitly enables STT via button
         if enabled and self.hub is not None:
             self.hub.mark_promo_eligible()
@@ -733,6 +773,11 @@ class GuiController:
 
     def _show_short_stt_message(self, message_key: str) -> None:
         message = t(message_key)
+        show_snackbar = getattr(self.app, "_show_snackbar", None)
+        if callable(show_snackbar):
+            with contextlib.suppress(Exception):
+                show_snackbar(message, ft.Colors.ORANGE_700)
+                return
         opener = getattr(self.page, "open", None)
         if callable(opener):
             with contextlib.suppress(Exception):
@@ -749,9 +794,149 @@ class GuiController:
                 return
         self._log_error(message)
 
+    def _refresh_local_stt_runtime_state(self) -> None:
+        if self.settings is None:
+            return
+        if self.settings.provider.stt != STTProviderName.LOCAL_QWEN:
+            self._local_stt_install_state = LocalSTTInstallState(status="ready")
+            if self._local_stt_runtime_status != "downloading":
+                self._local_stt_runtime_status = "ready"
+            self._sync_local_stt_notice()
+            return
+        self._local_stt_install_state = inspect_local_stt_install_state()
+        if self._local_stt_runtime_status not in ("downloading", "download_failed"):
+            self._local_stt_runtime_status = self._local_stt_install_state.status
+        self._sync_local_stt_notice()
+
+    def _current_local_stt_runtime_status(self) -> str:
+        if self._local_stt_runtime_status in ("downloading", "download_failed"):
+            return self._local_stt_runtime_status
+        return self._local_stt_install_state.status
+
+    def _sync_local_stt_notice(self) -> None:
+        dash = getattr(self.app, "view_dashboard", None)
+        if dash is None or self.settings is None:
+            return
+        if self.settings.provider.stt != STTProviderName.LOCAL_QWEN:
+            with contextlib.suppress(Exception):
+                dash.set_local_stt_notice(None)
+            return
+        status = self._current_local_stt_runtime_status()
+        with contextlib.suppress(Exception):
+            dash.set_local_stt_notice(None if status == "ready" else status)
+
+    def _show_local_stt_download_prompt(self, status: str) -> None:
+        show_action = getattr(self.app, "show_action_snackbar", None)
+        if not callable(show_action):
+            fallback_key = (
+                "error.local_stt_model_missing"
+                if status == "missing"
+                else "local_stt.download_failed"
+                if status == "download_failed"
+                else "error.local_stt_model_invalid"
+            )
+            self._show_short_stt_message(fallback_key)
+            return
+
+        message_key = (
+            "local_stt.download_prompt_missing"
+            if status == "missing"
+            else "local_stt.download_prompt_failed"
+            if status == "download_failed"
+            else "local_stt.download_prompt_invalid"
+        )
+        show_action(
+            t(message_key),
+            action_label=t("local_stt.download_action"),
+            on_action=self._on_local_stt_download_action,
+        )
+
+    def _on_local_stt_download_action(self, _e) -> None:
+        if self._local_stt_download_task is not None and not self._local_stt_download_task.done():
+            self._show_short_stt_message("local_stt.download_in_progress")
+            return
+        self._local_stt_download_cancel_event = threading.Event()
+        self._local_stt_download_task = asyncio.create_task(self._run_local_stt_download())
+
+    async def _run_local_stt_download(self) -> None:
+        current_task = asyncio.current_task()
+        cancel_event = self._local_stt_download_cancel_event
+        if self.settings is None:
+            return
+        self._local_stt_runtime_status = "downloading"
+        self._sync_local_stt_notice()
+        try:
+            installed = await ensure_local_stt_installed(
+                locale=self.settings.ui.locale,
+                on_status=self._handle_local_stt_download_status,
+                cancel_event=cancel_event,
+            )
+        except (asyncio.CancelledError, LocalSTTRuntimeInstallCancelled):
+            return
+        except LocalSTTRuntimeInstallError as exc:
+            self._local_stt_runtime_status = "download_failed"
+            self._sync_local_stt_notice()
+            self._show_short_stt_message("local_stt.download_failed")
+            self._log_error(f"Local STT download failed: {exc}")
+            return
+        finally:
+            if self._local_stt_download_task is current_task:
+                self._local_stt_download_task = None
+            if self._local_stt_download_cancel_event is cancel_event:
+                self._local_stt_download_cancel_event = None
+
+        self._local_stt_install_state = LocalSTTInstallState(
+            status="ready",
+            installed_manifest=installed,
+        )
+        self._local_stt_runtime_status = "ready"
+        self._sync_local_stt_notice()
+        self._show_short_stt_message("local_stt.download_success")
+
+        if (
+            self.settings.provider.stt == STTProviderName.LOCAL_QWEN
+            and self._local_stt_pending_enable_after_install
+        ):
+            self._local_stt_pending_enable_after_install = False
+            await self._rebuild_stt_provider()
+            self._stt_desired = True
+            dash = getattr(self.app, "view_dashboard", None)
+            if dash is not None:
+                dash.set_stt_enabled(True)
+            await self._ensure_stt_switch()
+
+    async def _handle_local_stt_download_status(self, status: str) -> None:
+        self._local_stt_runtime_status = status
+        self._sync_local_stt_notice()
+
+    def _handle_local_stt_unavailable(self, status: str) -> bool:
+        if status in ("missing", "invalid"):
+            self._local_stt_install_state = LocalSTTInstallState(status=status)
+        if self._local_stt_runtime_status != "downloading":
+            self._local_stt_runtime_status = status
+        self._local_stt_pending_enable_after_install = True
+        self._stt_desired = False
+        dash = getattr(self.app, "view_dashboard", None)
+        if dash is not None:
+            dash.set_stt_enabled(False)
+            dash.set_stt_needs_key(False)
+        self._sync_local_stt_notice()
+        self._show_local_stt_download_prompt(status)
+        return False
+
     async def _ensure_local_stt_ready(self) -> bool:
         if self.settings is None or self.settings.provider.stt != STTProviderName.LOCAL_QWEN:
             return True
+        current_status = self._current_local_stt_runtime_status()
+        if current_status == "downloading":
+            self._stt_desired = False
+            dash = getattr(self.app, "view_dashboard", None)
+            if dash is not None:
+                dash.set_stt_enabled(False)
+            self._show_short_stt_message("local_stt.download_in_progress")
+            return False
+        if current_status in ("missing", "invalid", "download_failed"):
+            return self._handle_local_stt_unavailable(current_status)
         if self.hub is None or self.hub.stt is None:
             self._stt_desired = False
             dash = getattr(self.app, "view_dashboard", None)
@@ -762,19 +947,29 @@ class GuiController:
             return False
         try:
             await self.hub.stt.warmup()
+            self._local_stt_install_state = LocalSTTInstallState(status="ready")
+            if self._local_stt_runtime_status != "downloading":
+                self._local_stt_runtime_status = "ready"
+            self._sync_local_stt_notice()
             return True
         except LocalSTTModelMissingError:
-            message_key = "error.local_stt_model_missing"
+            return self._handle_local_stt_unavailable("missing")
         except (LocalSTTManifestInvalidError, LocalQwenSherpaLoadError):
-            message_key = "error.local_stt_model_invalid"
+            return self._handle_local_stt_unavailable("invalid")
 
-        self._stt_desired = False
-        dash = getattr(self.app, "view_dashboard", None)
-        if dash is not None:
-            dash.set_stt_enabled(False)
-            dash.set_stt_needs_key(False)
-        self._show_short_stt_message(message_key)
-        return False
+    async def _cancel_local_stt_download(self) -> None:
+        task = self._local_stt_download_task
+        cancel_event = self._local_stt_download_cancel_event
+        if cancel_event is not None:
+            cancel_event.set()
+        if task is None:
+            self._local_stt_download_cancel_event = None
+            return
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self._local_stt_download_task = None
+        self._local_stt_download_cancel_event = None
 
     async def _ensure_stt_switch(self) -> None:
         if self._stt_switch_task is None or self._stt_switch_task.done():
@@ -860,6 +1055,7 @@ class GuiController:
         )
         self.settings = settings
         self._save_settings()
+        self._refresh_local_stt_runtime_state()
 
         # low_latency_mode 변경 시 Qwen LLM 프로바이더 재생성 필요
         # (AsyncQwenLLMProvider vs QwenLLMProvider 전환)
