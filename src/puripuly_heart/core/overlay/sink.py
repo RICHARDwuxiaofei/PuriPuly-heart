@@ -32,8 +32,6 @@ class _TranscriptEvent(OverlayEvent):
     source_language: str
     target_language: str
     is_final: bool = True
-    speaker_label: str | None = None
-    peer_epoch: int | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -81,8 +79,6 @@ class TranslationStreamUpdate(OverlayEvent):
     target_language: str
     is_final: bool = False
     applied_context_mode: AppliedContextMode | None = None
-    speaker_label: str | None = None
-    peer_epoch: int | None = None
 
     EVENT_TYPE: ClassVar[str] = "translation_stream_update"
 
@@ -207,8 +203,6 @@ class OverlayEventAdapter:
             source_language=source_language,
             target_language=target_language,
             is_final=True,
-            speaker_label=transcript.speaker_label,
-            peer_epoch=transcript.peer_epoch,
         )
 
     def translation_stream_update(
@@ -220,8 +214,6 @@ class OverlayEventAdapter:
         source_language: str,
         target_language: str,
         applied_context_mode: AppliedContextMode | None,
-        speaker_label: str | None = None,
-        peer_epoch: int | None = None,
         created_at: float | None = None,
     ) -> TranslationStreamUpdate:
         return TranslationStreamUpdate(
@@ -235,8 +227,6 @@ class OverlayEventAdapter:
             target_language=target_language,
             is_final=False,
             applied_context_mode=applied_context_mode,
-            speaker_label=speaker_label,
-            peer_epoch=peer_epoch,
         )
 
     def self_active_update(
@@ -272,8 +262,6 @@ class OverlayEventAdapter:
         source_language: str,
         target_language: str,
         applied_context_mode: AppliedContextMode | None,
-        speaker_label: str | None = None,
-        peer_epoch: int | None = None,
         created_at: float | None = None,
     ) -> TranslationFinal:
         return TranslationFinal(
@@ -287,8 +275,6 @@ class OverlayEventAdapter:
             target_language=target_language,
             is_final=True,
             applied_context_mode=applied_context_mode,
-            speaker_label=speaker_label,
-            peer_epoch=peer_epoch,
         )
 
     def utterance_closed(

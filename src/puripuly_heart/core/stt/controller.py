@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Callable, Sequence
-from uuid import UUID, uuid5
+from typing import AsyncIterator
+from uuid import UUID
 
 import numpy as np
 
@@ -16,7 +16,6 @@ from puripuly_heart.core.clock import Clock, SystemClock
 from puripuly_heart.core.stt.backend import (
     STTBackend,
     STTBackendSession,
-    STTBackendSpeakerSegment,
 )
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadEvent
 from puripuly_heart.domain.events import (
@@ -34,7 +33,6 @@ class ManagedSTTProvider:
     backend: STTBackend
     sample_rate_hz: int
     channel: ChannelId = "self"
-    peer_epoch_resolver: Callable[[], int | None] | None = None
     clock: Clock = SystemClock()
     reset_deadline_s: float = 180.0
     drain_timeout_s: float = 1.5
@@ -211,10 +209,7 @@ class ManagedSTTProvider:
                 self._active_session = session
                 self._session_started_at = self.clock.now()
                 self._consumer_task = asyncio.create_task(
-                    self._consume_session_events(
-                        session,
-                        session_peer_epoch=self._resolve_session_peer_epoch(),
-                    )
+                    self._consume_session_events(session)
                 )
                 self._schedule_reset_timer()
                 await self._set_state(STTSessionState.STREAMING)
@@ -251,7 +246,6 @@ class ManagedSTTProvider:
         self._consumer_task = asyncio.create_task(
             self._consume_session_events(
                 new_session,
-                session_peer_epoch=self._resolve_session_peer_epoch(),
             )
         )
         self._schedule_reset_timer()
@@ -300,7 +294,6 @@ class ManagedSTTProvider:
         self._consumer_task = asyncio.create_task(
             self._consume_session_events(
                 new_session,
-                session_peer_epoch=self._resolve_session_peer_epoch(),
             )
         )
         self._schedule_reset_timer()
@@ -370,11 +363,6 @@ class ManagedSTTProvider:
             return
         await asyncio.sleep(self.finalize_grace_s)
 
-    def _resolve_session_peer_epoch(self) -> int | None:
-        if self.channel != "peer" or self.peer_epoch_resolver is None:
-            return None
-        return self.peer_epoch_resolver()
-
     def _build_transcript(
         self,
         *,
@@ -382,8 +370,6 @@ class ManagedSTTProvider:
         text: str,
         is_final: bool,
         created_at: float,
-        speaker_label: str | None = None,
-        peer_epoch: int | None = None,
     ) -> Transcript:
         return Transcript(
             utterance_id=utterance_id,
@@ -391,101 +377,11 @@ class ManagedSTTProvider:
             is_final=is_final,
             created_at=created_at,
             channel=self.channel,
-            speaker_label=speaker_label,
-            peer_epoch=peer_epoch,
-        )
-
-    def _stable_peer_segment_utterance_id(
-        self,
-        *,
-        parent_utterance_id: UUID,
-        index: int,
-        segment: STTBackendSpeakerSegment,
-    ) -> UUID:
-        _ = segment
-        return uuid5(parent_utterance_id, f"segment:{index}")
-
-    def _build_peer_final_events(
-        self,
-        *,
-        utterance_id: UUID,
-        event_text: str,
-        created_at: float,
-        speaker_label: str | None,
-        speaker_segments: Sequence[STTBackendSpeakerSegment],
-        peer_epoch: int | None,
-    ) -> list[STTFinalEvent]:
-        segments = [segment for segment in speaker_segments if segment.text.strip()]
-
-        if len(segments) <= 1:
-            resolved_speaker_label = speaker_label
-            if resolved_speaker_label is None and len(segments) == 1:
-                resolved_speaker_label = segments[0].speaker_label
-            resolved_text = event_text.strip()
-            if not resolved_text and len(segments) == 1:
-                resolved_text = segments[0].text.strip()
-            if not resolved_text:
-                return []
-            transcript = self._build_transcript(
-                utterance_id=utterance_id,
-                text=resolved_text,
-                is_final=True,
-                created_at=created_at,
-                speaker_label=resolved_speaker_label,
-                peer_epoch=peer_epoch,
-            )
-            return [STTFinalEvent(utterance_id, transcript)]
-
-        final_events: list[STTFinalEvent] = []
-        for index, segment in enumerate(segments):
-            segment_text = segment.text.strip()
-            if not segment_text:
-                continue
-            segment_utterance_id = self._stable_peer_segment_utterance_id(
-                parent_utterance_id=utterance_id,
-                index=index,
-                segment=segment,
-            )
-            transcript = self._build_transcript(
-                utterance_id=segment_utterance_id,
-                text=segment_text,
-                is_final=True,
-                created_at=created_at,
-                speaker_label=segment.speaker_label,
-                peer_epoch=peer_epoch,
-            )
-            final_events.append(STTFinalEvent(segment_utterance_id, transcript))
-        return final_events
-
-    async def _split_peer_final_for_test(
-        self,
-        *,
-        utterance_id: UUID,
-        segments: Sequence[dict[str, str | None]],
-        peer_epoch: int | None,
-    ) -> list[STTFinalEvent]:
-        speaker_segments = tuple(
-            STTBackendSpeakerSegment(
-                text=str(segment.get("text") or "").strip(),
-                speaker_label=segment.get("speaker_label"),
-            )
-            for segment in segments
-            if str(segment.get("text") or "").strip()
-        )
-        return self._build_peer_final_events(
-            utterance_id=utterance_id,
-            event_text=" ".join(segment.text for segment in speaker_segments),
-            created_at=self.clock.now(),
-            speaker_label=speaker_segments[0].speaker_label if len(speaker_segments) == 1 else None,
-            speaker_segments=speaker_segments,
-            peer_epoch=peer_epoch,
         )
 
     async def _consume_session_events(
         self,
         session: STTBackendSession,
-        *,
-        session_peer_epoch: int | None = None,
     ) -> None:
         try:
             async for ev in session.events():
@@ -493,33 +389,11 @@ class ManagedSTTProvider:
                 if utterance_id is None:
                     continue
                 created_at = self.clock.now()
-                if ev.is_final and self.channel == "peer":
-                    final_events = self._build_peer_final_events(
-                        utterance_id=utterance_id,
-                        event_text=ev.text,
-                        created_at=created_at,
-                        speaker_label=ev.speaker_label,
-                        speaker_segments=ev.speaker_segments,
-                        peer_epoch=session_peer_epoch,
-                    )
-                    for final_event in final_events:
-                        await self._events.put(final_event)
-                    if (
-                        final_events
-                        and self._pending_final_utterance_id == utterance_id
-                        and self._active_utterance_id is None
-                    ):
-                        self._pending_final_utterance_id = None
-                    if final_events:
-                        continue
-
                 transcript = self._build_transcript(
                     utterance_id=utterance_id,
                     text=ev.text,
                     is_final=ev.is_final,
                     created_at=created_at,
-                    speaker_label=ev.speaker_label,
-                    peer_epoch=session_peer_epoch if self.channel == "peer" else None,
                 )
                 if ev.is_final:
                     await self._events.put(STTFinalEvent(utterance_id, transcript))

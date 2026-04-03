@@ -257,8 +257,6 @@ async def test_headless_mic_runner_starts_peer_desktop_loop_when_peer_translatio
         async def stop(self):
             return None
 
-        def advance_peer_session_epoch(self) -> int:
-            return 1
 
     class FakeSource:
         async def close(self):
@@ -340,8 +338,6 @@ async def test_headless_mic_runner_isolates_peer_loop_runtime_failures(
         async def stop(self):
             return None
 
-        def advance_peer_session_epoch(self) -> int:
-            return 1
 
     class FakeSource:
         async def close(self):
@@ -403,6 +399,7 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
     settings = AppSettings()
     settings.ui.peer_translation_enabled = True
     settings.desktop_audio.output_device = "Headphones (Loopback)"
+    settings.desktop_audio.vad_speech_threshold = 0.72
     settings.desktop_audio.vad_hangover_ms = 950
     settings.desktop_audio.vad_pre_roll_ms = 420
     config_path = tmp_path / "settings.json"
@@ -426,8 +423,6 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
         async def stop(self):
             return None
 
-        def advance_peer_session_epoch(self) -> int:
-            return 1
 
     class FakeSource:
         async def close(self):
@@ -439,12 +434,15 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
     async def fake_run_audio_vad_loop(*_args, **_kwargs):
         return None
 
-    def fake_create_peer_vad_gating(*, engine, sample_rate_hz, ring_buffer_ms, hangover_ms):
+    def fake_create_peer_vad_gating(
+        *, engine, sample_rate_hz, ring_buffer_ms, speech_threshold, hangover_ms
+    ):
         helper_calls.append(
             {
                 "engine": engine,
                 "sample_rate_hz": sample_rate_hz,
                 "ring_buffer_ms": ring_buffer_ms,
+                "speech_threshold": speech_threshold,
                 "hangover_ms": hangover_ms,
             }
         )
@@ -491,6 +489,7 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
             "engine": engine,
             "sample_rate_hz": 16000,
             "ring_buffer_ms": 420,
+            "speech_threshold": 0.72,
             "hangover_ms": 950,
         }
     ]

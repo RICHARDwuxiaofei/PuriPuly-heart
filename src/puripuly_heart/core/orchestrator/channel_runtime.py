@@ -31,8 +31,6 @@ class ContextEntry:
     target_language: str
     timestamp: float
     channel: ChannelId = "self"
-    speaker_label: str | None = None
-    peer_epoch: int | None = None
 
     def __post_init__(self) -> None:
         _validate_channel(self.channel)
@@ -71,7 +69,6 @@ class ChannelRuntime:
     channel: ChannelId
     stt: object | None = None
     stt_task: asyncio.Task[None] | None = None
-    peer_epoch: int = 0
     utterances: dict[UUID, UtteranceBundle] = field(default_factory=dict)
     translation_tasks: dict[UUID, asyncio.Task[None]] = field(default_factory=dict)
     utterance_sources: dict[UUID, str] = field(default_factory=dict)
@@ -121,8 +118,6 @@ class ChannelRuntime:
         source_language: str = "",
         target_language: str = "",
         max_entries: int | None = None,
-        speaker_label: str | None = None,
-        peer_epoch: int | None = None,
     ) -> None:
         text_clean = text.strip()
         if len(text_clean) < 2:
@@ -135,8 +130,6 @@ class ChannelRuntime:
                 target_language=target_language,
                 timestamp=timestamp,
                 channel=self.channel,
-                speaker_label=speaker_label,
-                peer_epoch=peer_epoch,
             )
         )
         if max_entries is not None and max_entries > 0:

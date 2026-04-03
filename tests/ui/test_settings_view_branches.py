@@ -349,6 +349,24 @@ def test_overlay_controls_gate_peer_translation_until_overlay_is_connected(
     assert view._peer_translation_hint.value == ""
 
 
+def test_overlay_display_toggles_update_persistent_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings_calls: list[AppSettings] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: settings_calls.append(incoming)
+
+    view._on_overlay_translation_selected("off")
+    view._on_overlay_peer_original_selected("off")
+
+    assert settings.ui.show_overlay_translation is False
+    assert settings.ui.show_overlay_peer_original is False
+    assert settings_calls == [settings, settings]
+
+
 def test_first_peer_translation_enable_bootstraps_integrated_context_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -419,6 +437,8 @@ def test_overlay_failure_reason_keys_are_localized(locale: str) -> None:
     assert bundle["settings.overlay.failure.steamvr_not_installed"]
     assert bundle["settings.overlay.failure.steamvr_not_running"]
     assert bundle["settings.overlay.failure.hmd_not_found"]
+    assert bundle["settings.overlay.show_translation"]
+    assert bundle["settings.overlay.show_peer_original"]
 
 
 def test_overlay_calibration_controls_are_localized(
@@ -429,6 +449,8 @@ def test_overlay_calibration_controls_are_localized(
 
     assert view._overlay_calibration_title.value == t("settings.overlay.calibration")
     assert view._overlay_anchor_label.value == t("settings.overlay.calibration.anchor")
+    assert view._overlay_translation_label.value == t("settings.overlay.show_translation")
+    assert view._overlay_peer_original_label.value == t("settings.overlay.show_peer_original")
     assert view._overlay_calibration_apply_button.text == t("settings.overlay.calibration.apply")
     assert view._overlay_calibration_cancel_button.text == t("settings.overlay.calibration.cancel")
     assert view._overlay_calibration_reset_button.text == t("settings.overlay.calibration.reset")

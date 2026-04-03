@@ -374,6 +374,8 @@ class GuiController:
                 presenter = OverlayPresenter(
                     calibration=self.overlay_calibration.copy(),
                     clock=self.clock,
+                    show_translation=self.settings.ui.show_overlay_translation,
+                    show_peer_original=self.settings.ui.show_overlay_peer_original,
                 )
                 self._overlay_presenter = presenter
             bridge = OverlayBridge(
@@ -790,6 +792,13 @@ class GuiController:
             self.hub.chatbox_include_source = settings.osc.chatbox_include_source
             self._sync_effective_hub_flags(settings)
 
+        presenter = self._overlay_presenter
+        if presenter is not None:
+            await presenter.update_display_preferences(
+                show_translation=settings.ui.show_overlay_translation,
+                show_peer_original=settings.ui.show_overlay_peer_original,
+            )
+
         if prev_overlay_enabled != settings.ui.overlay_enabled:
             await self.set_overlay_enabled(settings.ui.overlay_enabled)
 
@@ -932,7 +941,6 @@ class GuiController:
                     backend=peer_backend,
                     sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
                     channel="peer",
-                    peer_epoch_resolver=self.hub.advance_peer_session_epoch,
                     clock=self.clock,
                     reset_deadline_s=STT_RESET_DEADLINE_S,
                     drain_timeout_s=self.settings.stt.drain_timeout_s,
@@ -1022,7 +1030,6 @@ class GuiController:
                     backend=peer_backend,
                     sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
                     channel="peer",
-                    peer_epoch_resolver=lambda: hub.advance_peer_session_epoch(),
                     clock=self.clock,
                     reset_deadline_s=STT_RESET_DEADLINE_S,
                     drain_timeout_s=self.settings.stt.drain_timeout_s,
@@ -1251,6 +1258,7 @@ class GuiController:
             engine=SileroVadOnnx(model_path=model_path),
             sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
             ring_buffer_ms=self.settings.desktop_audio.vad_pre_roll_ms,
+            speech_threshold=self.settings.desktop_audio.vad_speech_threshold,
             hangover_ms=self.settings.desktop_audio.vad_hangover_ms,
         )
         self._peer_audio_source = source

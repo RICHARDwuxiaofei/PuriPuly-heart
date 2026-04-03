@@ -9,11 +9,9 @@ import pytest
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
-from puripuly_heart.core.stt.controller import ManagedSTTProvider
-from puripuly_heart.core.vad.gating import SpeechEnd, SpeechStart
 from puripuly_heart.domain.events import UIEventType
 from puripuly_heart.domain.models import Translation
-from tests.helpers.fakes import RecordingOscQueue, samples
+from tests.helpers.fakes import RecordingOscQueue
 
 
 @dataclass(slots=True)
@@ -88,7 +86,6 @@ async def test_peer_desktop_transcripts_are_routed_to_peer_runtime_and_never_sen
 
     utterance_id = await hub.handle_peer_transcript_final_for_test(
         text="peer line",
-        speaker_label="Speaker 0",
     )
 
     bundle = hub.get_or_create_bundle(utterance_id, channel="peer")
@@ -103,9 +100,7 @@ async def test_peer_desktop_transcripts_are_routed_to_peer_runtime_and_never_sen
 
 
 @pytest.mark.asyncio
-async def test_peer_session_reset_increments_epoch_and_integrated_context_ignores_old_peer_epoch() -> (
-    None
-):
+async def test_integrated_context_always_includes_peer_entries() -> None:
     clock = FakeClock(_now=112.0)
     hub = ClientHub(
         stt=None,
@@ -123,17 +118,12 @@ async def test_peer_session_reset_increments_epoch_and_integrated_context_ignore
         source_language="en",
         target_language="ko",
     )
-    hub.peer_runtime.peer_epoch = 2
     hub.peer_runtime.remember_context(
-        "old peer line",
+        "peer line",
         timestamp=105.0,
         source_language="en",
         target_language="ko",
-        speaker_label="Speaker 0",
-        peer_epoch=2,
     )
-
-    hub.reset_peer_session_for_test()
 
     context, mode = hub.context_resolver.resolve_for_request(
         runtime=hub.self_runtime,
@@ -142,56 +132,11 @@ async def test_peer_session_reset_increments_epoch_and_integrated_context_ignore
         peer_translation_enabled=True,
         source_language="en",
         target_language="ko",
-        expected_peer_epoch=hub.peer_runtime.peer_epoch,
     )
 
-    assert hub.peer_runtime.peer_epoch == 3
-    assert mode == "local"
-    assert context == '- [12s ago] "self line"'
-    assert "old peer line" not in context
-
-
-@pytest.mark.asyncio
-async def test_peer_epoch_only_changes_when_a_new_provider_session_opens() -> None:
-    clock = FakeClock(_now=10.0)
-    hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), clock=clock)
-    backend = FakePeerBackend()
-    peer_stt = ManagedSTTProvider(
-        backend=backend,
-        sample_rate_hz=16000,
-        channel="peer",
-        peer_epoch_resolver=hub.advance_peer_session_epoch,
-        clock=clock,
-        reset_deadline_s=90.0,
-    )
-
-    await hub.replace_peer_stt_provider(peer_stt)
-    await hub.start(auto_flush_osc=False)
-
-    first_id = uuid4()
-    await hub.handle_peer_vad_event(
-        SpeechStart(first_id, pre_roll=samples(0.0), chunk=samples(1.0))
-    )
-
-    assert hub.peer_runtime.peer_epoch == 1
-    assert len(backend.sessions) == 1
-
-    await hub.handle_peer_vad_event(SpeechEnd(first_id))
-    await asyncio.sleep(0)
-
-    assert hub.peer_runtime.peer_epoch == 1
-    assert len(backend.sessions) == 1
-
-    await hub.peer_stt.close()
-    second_id = uuid4()
-    await hub.handle_peer_vad_event(
-        SpeechStart(second_id, pre_roll=samples(0.0), chunk=samples(1.0))
-    )
-
-    assert hub.peer_runtime.peer_epoch == 2
-    assert len(backend.sessions) == 2
-
-    await hub.stop()
+    assert mode == "integrated"
+    assert "self line" in context
+    assert "peer line" in context
 
 
 @pytest.mark.asyncio

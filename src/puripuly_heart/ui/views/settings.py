@@ -523,6 +523,16 @@ class SettingsView(ft.Column):
             size=16,
             color=COLOR_ON_BACKGROUND,
         )
+        self._overlay_translation_label = ft.Text(
+            t("settings.overlay.show_translation"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._overlay_peer_original_label = ft.Text(
+            t("settings.overlay.show_peer_original"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
         self._integrated_context_label = ft.Text(
             t("settings.integrated_context"),
             size=16,
@@ -535,6 +545,14 @@ class SettingsView(ft.Column):
         self._peer_translation_button = self._build_action_button(
             t("settings.option.off"),
             self._on_peer_translation_click,
+        )
+        self._overlay_translation_button = self._build_action_button(
+            t("settings.option.on"),
+            self._on_overlay_translation_click,
+        )
+        self._overlay_peer_original_button = self._build_action_button(
+            t("settings.option.on"),
+            self._on_overlay_peer_original_click,
         )
         self._integrated_context_button = self._build_action_button(
             t("settings.context.local"),
@@ -636,6 +654,14 @@ class SettingsView(ft.Column):
                     ),
                     self._peer_translation_hint,
                     self._build_setting_action_row(
+                        self._overlay_translation_label,
+                        self._overlay_translation_button,
+                    ),
+                    self._build_setting_action_row(
+                        self._overlay_peer_original_label,
+                        self._overlay_peer_original_button,
+                    ),
+                    self._build_setting_action_row(
                         self._integrated_context_label,
                         self._integrated_context_button,
                     ),
@@ -649,7 +675,7 @@ class SettingsView(ft.Column):
         )
         row5 = ft.Container(
             content=ft.Row([vrc_mic_card, overlay_card], spacing=16, expand=True),
-            height=320,
+            height=380,
         )
 
         # === Row 6: Overlay Calibration (2x1) ===
@@ -1542,6 +1568,12 @@ class SettingsView(ft.Column):
 
     def _sync_overlay_controls(self) -> None:
         overlay_enabled = bool(self._settings and self._settings.ui.overlay_enabled)
+        overlay_translation_enabled = bool(
+            self._settings and self._settings.ui.show_overlay_translation
+        )
+        overlay_peer_original_enabled = bool(
+            self._settings and self._settings.ui.show_overlay_peer_original
+        )
         peer_translation_enabled = bool(
             self._settings and self._settings.ui.peer_translation_enabled
         )
@@ -1555,6 +1587,12 @@ class SettingsView(ft.Column):
         self._peer_translation_button.text = t(
             "settings.option.on" if peer_translation_enabled else "settings.option.off"
         )
+        self._overlay_translation_button.text = t(
+            "settings.option.on" if overlay_translation_enabled else "settings.option.off"
+        )
+        self._overlay_peer_original_button.text = t(
+            "settings.option.on" if overlay_peer_original_enabled else "settings.option.off"
+        )
         self._integrated_context_button.text = t(
             "settings.context.integrated"
             if integrated_context_enabled
@@ -1565,6 +1603,8 @@ class SettingsView(ft.Column):
         integrated_context_available = peer_translation_available and peer_translation_enabled
 
         self._overlay_enabled_button.disabled = self._settings is None
+        self._overlay_translation_button.disabled = self._settings is None
+        self._overlay_peer_original_button.disabled = self._settings is None
         self._peer_translation_button.disabled = not peer_translation_available
         self._integrated_context_button.disabled = not integrated_context_available
 
@@ -1661,6 +1701,52 @@ class SettingsView(ft.Column):
         if enabled and not self._settings.ui.integrated_context_bootstrapped:
             self._settings.ui.integrated_context_enabled = True
             self._settings.ui.integrated_context_bootstrapped = True
+        self._sync_overlay_controls()
+        self._emit_settings_changed()
+
+    def _on_overlay_translation_click(self, e) -> None:
+        if not self.page or not self._settings or self._overlay_translation_button.disabled:
+            return
+        options = [
+            OptionItem(value="on", label=t("settings.option.on")),
+            OptionItem(value="off", label=t("settings.option.off")),
+        ]
+        modal = SettingsModal(
+            self.page,
+            t("settings.overlay.show_translation"),
+            options,
+            self._on_overlay_translation_selected,
+            show_description=False,
+        )
+        modal.open("on" if self._settings.ui.show_overlay_translation else "off")
+
+    def _on_overlay_translation_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+        self._settings.ui.show_overlay_translation = value == "on"
+        self._sync_overlay_controls()
+        self._emit_settings_changed()
+
+    def _on_overlay_peer_original_click(self, e) -> None:
+        if not self.page or not self._settings or self._overlay_peer_original_button.disabled:
+            return
+        options = [
+            OptionItem(value="on", label=t("settings.option.on")),
+            OptionItem(value="off", label=t("settings.option.off")),
+        ]
+        modal = SettingsModal(
+            self.page,
+            t("settings.overlay.show_peer_original"),
+            options,
+            self._on_overlay_peer_original_selected,
+            show_description=False,
+        )
+        modal.open("on" if self._settings.ui.show_overlay_peer_original else "off")
+
+    def _on_overlay_peer_original_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+        self._settings.ui.show_overlay_peer_original = value == "on"
         self._sync_overlay_controls()
         self._emit_settings_changed()
 
@@ -1992,6 +2078,8 @@ class SettingsView(ft.Column):
         self._peer_target_label.value = t("settings.peer_language.target")
         self._overlay_title.value = t("settings.section.overlay")
         self._overlay_enabled_label.value = t("settings.overlay.enabled")
+        self._overlay_translation_label.value = t("settings.overlay.show_translation")
+        self._overlay_peer_original_label.value = t("settings.overlay.show_peer_original")
         self._peer_translation_label.value = t("settings.peer_translation")
         self._integrated_context_label.value = t("settings.integrated_context")
         self._overlay_calibration_title.value = t("settings.overlay.calibration")
@@ -2014,6 +2102,10 @@ class SettingsView(ft.Column):
             self._qwen_region_btn.style = self._get_button_style(ui_font)
         if self._overlay_enabled_button:
             self._overlay_enabled_button.style = self._get_button_style(ui_font)
+        if self._overlay_translation_button:
+            self._overlay_translation_button.style = self._get_button_style(ui_font)
+        if self._overlay_peer_original_button:
+            self._overlay_peer_original_button.style = self._get_button_style(ui_font)
         if self._peer_translation_button:
             self._peer_translation_button.style = self._get_button_style(ui_font)
         if self._integrated_context_button:

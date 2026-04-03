@@ -40,7 +40,7 @@ def test_desktop_audio_settings_round_trip_with_defaults() -> None:
     settings = from_dict({})
 
     assert settings.desktop_audio.output_device == ""
-    assert settings.desktop_audio.vad_speech_threshold == 0.65
+    assert settings.desktop_audio.vad_speech_threshold == 0.6
     assert settings.desktop_audio.vad_hangover_ms == 900
     assert settings.desktop_audio.vad_pre_roll_ms == 500
 
@@ -97,3 +97,28 @@ def test_load_settings_drops_legacy_overlay_enabled_flag(tmp_path) -> None:
     assert settings.ui.overlay_enabled is False
     assert settings.ui.peer_translation_enabled is True
     assert "overlay_enabled" not in reloaded["ui"]
+
+
+def test_load_settings_forces_desktop_vad_threshold_to_v3_default(tmp_path) -> None:
+    from puripuly_heart.config.settings import SETTINGS_SCHEMA_VERSION, load_settings
+
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "settings_version": 2,
+                "desktop_audio": {
+                    "vad_speech_threshold": 0.72,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(path)
+    reloaded = json.loads(path.read_text(encoding="utf-8"))
+
+    assert settings.settings_version == SETTINGS_SCHEMA_VERSION
+    assert settings.desktop_audio.vad_speech_threshold == 0.6
+    assert reloaded["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert reloaded["desktop_audio"]["vad_speech_threshold"] == 0.6

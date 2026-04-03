@@ -133,7 +133,7 @@ async def test_hub_emits_self_and_peer_finals_to_overlay_sink() -> None:
     hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), overlay_sink=sink)
 
     await hub.submit_text("self text", source="You")
-    await hub.handle_peer_transcript_final_for_test(text="peer text", speaker_label="Speaker 0")
+    await hub.handle_peer_transcript_final_for_test(text="peer text")
 
     assert [event.type for event in sink.events] == [
         "self_transcript_final",
@@ -151,7 +151,7 @@ async def test_chatbox_stays_self_final_only_while_overlay_sink_receives_peer_fi
     hub = ClientHub(stt=None, llm=None, osc=osc, overlay_sink=sink)
 
     await hub.submit_text("self text", source="You")
-    await hub.handle_peer_transcript_final_for_test(text="peer text", speaker_label="Speaker 0")
+    await hub.handle_peer_transcript_final_for_test(text="peer text")
 
     assert len(osc.messages) == 1
     assert osc.messages[0].text == "self text"

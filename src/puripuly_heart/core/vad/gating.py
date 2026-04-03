@@ -274,9 +274,9 @@ class VadGating:
             )
 
 
-PEER_VAD_SPEECH_THRESHOLD = 0.70
+PEER_VAD_SPEECH_THRESHOLD = 0.60
 PEER_VAD_START_DEBOUNCE_CHUNKS = 3
-PEER_VAD_START_COMMIT_CHUNKS = 5
+PEER_VAD_START_COMMIT_CHUNKS = 3
 
 
 def create_peer_vad_gating(
@@ -284,13 +284,14 @@ def create_peer_vad_gating(
     *,
     sample_rate_hz: int,
     ring_buffer_ms: int,
+    speech_threshold: float = PEER_VAD_SPEECH_THRESHOLD,
     hangover_ms: int,
 ) -> VadGating:
     return VadGating(
         engine=engine,
         sample_rate_hz=sample_rate_hz,
         ring_buffer_ms=max(1, ring_buffer_ms),
-        speech_threshold=PEER_VAD_SPEECH_THRESHOLD,
+        speech_threshold=speech_threshold,
         hangover_ms=hangover_ms,
         start_debounce_chunks=PEER_VAD_START_DEBOUNCE_CHUNKS,
         start_commit_chunks=PEER_VAD_START_COMMIT_CHUNKS,

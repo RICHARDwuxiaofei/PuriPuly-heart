@@ -19,8 +19,6 @@ class Transcript:
     is_final: bool
     created_at: float | None = None  # monotonic seconds (Clock)
     channel: ChannelId = "self"
-    speaker_label: str | None = None
-    peer_epoch: int | None = None
 
     def __post_init__(self) -> None:
         _validate_channel(self.channel)
@@ -34,8 +32,6 @@ class Translation:
     source_language: str | None
     target_language: str | None
     channel: ChannelId
-    speaker_label: str | None
-    peer_epoch: int | None
     created_at: float | None = None  # monotonic seconds (Clock)
 
     def __init__(
@@ -48,8 +44,6 @@ class Translation:
         source_language: str | None = None,
         target_language: str | None = None,
         channel: ChannelId = "self",
-        speaker_label: str | None = None,
-        peer_epoch: int | None = None,
         created_at: float | None = None,
     ) -> None:
         if text is not None and translated_text is not None and text != translated_text:
@@ -67,8 +61,6 @@ class Translation:
         object.__setattr__(self, "source_language", source_language)
         object.__setattr__(self, "target_language", target_language)
         object.__setattr__(self, "channel", channel)
-        object.__setattr__(self, "speaker_label", speaker_label)
-        object.__setattr__(self, "peer_epoch", peer_epoch)
         object.__setattr__(self, "created_at", created_at)
 
     @property

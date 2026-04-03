@@ -232,7 +232,7 @@ def create_peer_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> S
         settings=settings,
         api_key=api_key,
         keyterms=effective_terms,
-        diarization=True,
+        stream_label="peer",
     )
 
 
@@ -241,7 +241,7 @@ def _create_deepgram_stt_backend(
     settings: AppSettings,
     api_key: str,
     keyterms: tuple[str, ...] | list[str],
-    diarization: bool = False,
+    stream_label: str | None = None,
 ) -> STTBackend:
     from puripuly_heart.core.language import get_deepgram_language
     from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
@@ -252,5 +252,5 @@ def _create_deepgram_stt_backend(
         language=get_deepgram_language(settings.languages.source_language),
         sample_rate_hz=settings.audio.internal_sample_rate_hz,
         keyterms=keyterms,
-        diarization=diarization,
+        stream_label=stream_label,
     )

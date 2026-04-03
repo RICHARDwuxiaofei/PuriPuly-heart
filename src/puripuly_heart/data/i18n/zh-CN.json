@@ -52,6 +52,8 @@
     "settings.option.on": "开启",
     "settings.option.off": "关闭",
     "settings.overlay.enabled": "叠加层",
+    "settings.overlay.show_translation": "显示翻译",
+    "settings.overlay.show_peer_original": "显示对方原文",
     "settings.peer_translation": "对方翻译",
     "settings.integrated_context": "整合上下文",
     "settings.context.local": "本地上下文",

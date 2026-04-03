@@ -13,8 +13,6 @@ def test_transcript_and_translation_models_preserve_channel_metadata() -> None:
         is_final=True,
         created_at=123.0,
         channel="peer",
-        speaker_label="Speaker 0",
-        peer_epoch=4,
     )
     translation = Translation(
         utterance_id=transcript.utterance_id,
@@ -23,15 +21,11 @@ def test_transcript_and_translation_models_preserve_channel_metadata() -> None:
         source_language="en",
         target_language="ko",
         channel="peer",
-        speaker_label="Speaker 0",
-        peer_epoch=4,
     )
 
     assert transcript.channel == "peer"
     assert translation.text == "안녕하세요"
     assert translation.translated_text == "안녕하세요"
-    assert translation.speaker_label == "Speaker 0"
-    assert translation.peer_epoch == 4
 
 
 def test_ui_and_stt_events_can_reference_self_or_peer_channels() -> None:

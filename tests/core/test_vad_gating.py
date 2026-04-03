@@ -3,7 +3,16 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadGating
+from puripuly_heart.core.vad.gating import (
+    PEER_VAD_SPEECH_THRESHOLD,
+    PEER_VAD_START_COMMIT_CHUNKS,
+    PEER_VAD_START_DEBOUNCE_CHUNKS,
+    SpeechChunk,
+    SpeechEnd,
+    SpeechStart,
+    VadGating,
+    create_peer_vad_gating,
+)
 from tests.helpers.vad import SequenceVadEngine, chunk_samples
 
 
@@ -55,15 +64,15 @@ def test_vad_gating_starts_on_first_positive_chunk_by_default():
 
 
 def test_vad_gating_buffers_candidate_until_commit_threshold():
-    probs = [0.0, 0.0, 0.9, 0.9, 0.9, 0.9, 0.9]
+    probs = [0.0, 0.0, 0.9, 0.9, 0.9]
     gating = VadGating(
         SequenceVadEngine(probs=probs),
         sample_rate_hz=16000,
         ring_buffer_ms=64,
-        speech_threshold=0.7,
+        speech_threshold=0.6,
         hangover_ms=64,
         start_debounce_chunks=3,
-        start_commit_chunks=5,
+        start_commit_chunks=3,
     )
 
     per_chunk_events = [
@@ -71,9 +80,9 @@ def test_vad_gating_buffers_candidate_until_commit_threshold():
         for i in range(len(probs))
     ]
 
-    assert all(not events for events in per_chunk_events[:6])
+    assert all(not events for events in per_chunk_events[:4])
 
-    events = per_chunk_events[6]
+    events = per_chunk_events[4]
     start = events[0]
     chunks = [start.chunk] + [event.chunk for event in events[1:] if isinstance(event, SpeechChunk)]
 
@@ -81,27 +90,21 @@ def test_vad_gating_buffers_candidate_until_commit_threshold():
     assert start.pre_roll.shape[0] == 1024
     assert np.allclose(start.pre_roll[:512], 0.0)
     assert np.allclose(start.pre_roll[512:], 1.0)
-    assert len(events) == 5
-    assert [type(event) for event in events] == [
-        SpeechStart,
-        SpeechChunk,
-        SpeechChunk,
-        SpeechChunk,
-        SpeechChunk,
-    ]
-    assert [float(chunk[0]) for chunk in chunks] == [2.0, 3.0, 4.0, 5.0, 6.0]
+    assert len(events) == 3
+    assert [type(event) for event in events] == [SpeechStart, SpeechChunk, SpeechChunk]
+    assert [float(chunk[0]) for chunk in chunks] == [2.0, 3.0, 4.0]
 
 
 def test_vad_gating_drops_short_candidate_before_commit():
-    probs = [0.0, 0.9, 0.9, 0.9, 0.9, 0.0]
+    probs = [0.0, 0.9, 0.9, 0.0]
     gating = VadGating(
         SequenceVadEngine(probs=probs),
         sample_rate_hz=16000,
         ring_buffer_ms=64,
-        speech_threshold=0.7,
+        speech_threshold=0.6,
         hangover_ms=64,
         start_debounce_chunks=3,
-        start_commit_chunks=5,
+        start_commit_chunks=3,
     )
 
     events: list[object] = []
@@ -123,3 +126,17 @@ def test_vad_gating_rejects_commit_threshold_lower_than_debounce_threshold():
             start_debounce_chunks=3,
             start_commit_chunks=2,
         )
+
+
+def test_create_peer_vad_gating_uses_helper_defaults():
+    gating = create_peer_vad_gating(
+        SequenceVadEngine(probs=[0.0]),
+        sample_rate_hz=16000,
+        ring_buffer_ms=64,
+        hangover_ms=64,
+    )
+
+    assert gating.speech_threshold == PEER_VAD_SPEECH_THRESHOLD
+    assert gating.start_debounce_chunks == PEER_VAD_START_DEBOUNCE_CHUNKS
+    assert gating.start_commit_chunks == PEER_VAD_START_COMMIT_CHUNKS
+    assert gating.candidate_log_label == "Peer"

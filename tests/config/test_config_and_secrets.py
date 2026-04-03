@@ -153,6 +153,67 @@ def test_from_dict_defaults_missing_vrc_mic_sync_to_off():
     assert loaded.osc.vrc_mic_intercept is False
 
 
+def test_overlay_display_preferences_roundtrip(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = AppSettings()
+    settings.ui.show_overlay_translation = False
+    settings.ui.show_overlay_peer_original = False
+    save_settings(path, settings)
+
+    loaded = load_settings(path)
+
+    assert loaded.ui.show_overlay_translation is False
+    assert loaded.ui.show_overlay_peer_original is False
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["ui"]["show_overlay_translation"] is False
+    assert persisted["ui"]["show_overlay_peer_original"] is False
+
+
+def test_from_dict_defaults_missing_overlay_display_preferences_to_true():
+    data = to_dict(AppSettings())
+    data.setdefault("ui", {}).pop("show_overlay_translation", None)
+    data["ui"].pop("show_overlay_peer_original", None)
+
+    loaded = from_dict(data)
+
+    assert loaded.ui.show_overlay_translation is True
+    assert loaded.ui.show_overlay_peer_original is True
+
+
+def test_load_settings_backfills_missing_overlay_display_preferences(tmp_path):
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy.setdefault("ui", {}).pop("show_overlay_translation", None)
+    legacy["ui"].pop("show_overlay_peer_original", None)
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+
+    assert loaded.ui.show_overlay_translation is True
+    assert loaded.ui.show_overlay_peer_original is True
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["ui"]["show_overlay_translation"] is True
+    assert persisted["ui"]["show_overlay_peer_original"] is True
+
+
+def test_load_settings_backfills_overlay_display_preferences_when_ui_section_missing(tmp_path):
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy.pop("ui", None)
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+
+    assert loaded.ui.show_overlay_translation is True
+    assert loaded.ui.show_overlay_peer_original is True
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["ui"]["show_overlay_translation"] is True
+    assert persisted["ui"]["show_overlay_peer_original"] is True
+
+
 def test_stt_custom_vocabulary_roundtrip(tmp_path):
     path = tmp_path / "settings.json"
     settings = AppSettings()

@@ -52,6 +52,8 @@
   "settings.option.on": "On",
   "settings.option.off": "Off",
   "settings.overlay.enabled": "Overlay",
+  "settings.overlay.show_translation": "Show Translation",
+  "settings.overlay.show_peer_original": "Show Peer Original",
   "settings.peer_translation": "Peer Translation",
   "settings.integrated_context": "Integrated Context",
   "settings.context.local": "Local Context",

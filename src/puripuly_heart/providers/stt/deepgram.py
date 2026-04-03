@@ -18,7 +18,6 @@ from typing import Any, AsyncIterator, Sequence
 from puripuly_heart.core.stt.backend import (
     STTBackend,
     STTBackendSession,
-    STTBackendSpeakerSegment,
     STTBackendTranscriptEvent,
 )
 
@@ -36,7 +35,7 @@ class DeepgramRealtimeSTTBackend(STTBackend):
     sample_rate_hz: int = 16000
     connect_timeout_s: float = 5.0
     keyterms: Sequence[str] = ()
-    diarization: bool = False
+    stream_label: str | None = None
 
     async def open_session(self) -> STTBackendSession:
         if self.sample_rate_hz not in (8000, 16000):
@@ -53,7 +52,7 @@ class DeepgramRealtimeSTTBackend(STTBackend):
             sample_rate_hz=self.sample_rate_hz,
             connect_timeout_s=self.connect_timeout_s,
             keyterms=list(self.keyterms),
-            diarization=self.diarization,
+            stream_label=self.stream_label,
         )
         await session.start()
         return session
@@ -98,7 +97,7 @@ class _DeepgramSDKSession(STTBackendSession):
     sample_rate_hz: int
     connect_timeout_s: float
     keyterms: list[str]
-    diarization: bool
+    stream_label: str | None = None
 
     _events: asyncio.Queue[STTBackendTranscriptEvent | BaseException | None] = field(
         init=False, repr=False
@@ -110,6 +109,9 @@ class _DeepgramSDKSession(STTBackendSession):
     _connected: threading.Event = field(init=False, repr=False)
     _connect_started_at: float | None = field(init=False, default=None, repr=False)
     _error_reported: bool = field(init=False, default=False, repr=False)
+    _emitted_finals: int = field(init=False, default=0, repr=False)
+    _empty_final_drops: int = field(init=False, default=0, repr=False)
+    _summary_logged: bool = field(init=False, default=False, repr=False)
 
     def __post_init__(self) -> None:
         self._events = asyncio.Queue()
@@ -118,73 +120,6 @@ class _DeepgramSDKSession(STTBackendSession):
 
     def _supports_keyterms(self) -> bool:
         return self.model.strip().lower() == _DEEPGRAM_KEYTERM_MODEL
-
-    def _speaker_label_from_value(self, value: Any) -> str | None:
-        if value is None:
-            return None
-        try:
-            speaker_id = int(value)
-        except (TypeError, ValueError):
-            return None
-        return f"Speaker {speaker_id}"
-
-    def _word_attr(self, word: Any, name: str) -> Any:
-        if isinstance(word, dict):
-            return word.get(name)
-        return getattr(word, name, None)
-
-    def _word_text(self, word: Any) -> str:
-        punctuated = self._word_attr(word, "punctuated_word")
-        if isinstance(punctuated, str) and punctuated.strip():
-            return punctuated.strip()
-        raw = self._word_attr(word, "word")
-        if isinstance(raw, str):
-            return raw.strip()
-        return ""
-
-    def _append_token(self, current: str, token: str) -> str:
-        if not current:
-            return token
-        if token[:1] in {".", ",", "!", "?", ";", ":", "%", ")", "]", "}"}:
-            return f"{current}{token}"
-        if current[-1:] in {"(", "[", "{", '"', "'"}:
-            return f"{current}{token}"
-        return f"{current} {token}"
-
-    def _extract_speaker_segments(
-        self,
-        words: Sequence[Any] | None,
-    ) -> tuple[STTBackendSpeakerSegment, ...]:
-        segments: list[STTBackendSpeakerSegment] = []
-        current_text = ""
-        current_label: str | None = None
-
-        for word in words or ():
-            token = self._word_text(word)
-            if not token:
-                continue
-            speaker_label = self._speaker_label_from_value(self._word_attr(word, "speaker"))
-            if current_text and speaker_label != current_label:
-                segments.append(
-                    STTBackendSpeakerSegment(text=current_text, speaker_label=current_label)
-                )
-                current_text = token
-                current_label = speaker_label
-                continue
-
-            if not current_text:
-                current_text = token
-                current_label = speaker_label
-                continue
-
-            current_text = self._append_token(current_text, token)
-
-        if current_text:
-            segments.append(
-                STTBackendSpeakerSegment(text=current_text, speaker_label=current_label)
-            )
-
-        return tuple(segments)
 
     def _build_transcript_event(self, result: Any) -> STTBackendTranscriptEvent | None:
         if not hasattr(result, "channel") or not hasattr(result.channel, "alternatives"):
@@ -202,37 +137,34 @@ class _DeepgramSDKSession(STTBackendSession):
             is_final,
             speech_final,
         )
-        if not (is_final or speech_final) or not transcript:
+        if not (is_final or speech_final):
             return None
-
-        speaker_segments = self._extract_speaker_segments(getattr(alternative, "words", None))
-        speaker_labels = {
-            segment.speaker_label
-            for segment in speaker_segments
-            if segment.speaker_label is not None
-        }
-        speaker_label = next(iter(speaker_labels)) if len(speaker_labels) == 1 else None
+        if not transcript:
+            if self.stream_label == "peer":
+                self._empty_final_drops += 1
+                logger.info(
+                    "[STT][peer] Empty final transcript dropped (is_final=%s, speech_final=%s)",
+                    is_final,
+                    speech_final,
+                )
+            return None
+        if self.stream_label == "peer":
+            self._emitted_finals += 1
 
         return STTBackendTranscriptEvent(
             text=transcript,
             is_final=True,
-            speaker_label=speaker_label,
-            speaker_segments=speaker_segments,
         )
 
     async def _emit_test_final(
         self,
         *,
         text: str,
-        speaker_label: str | None = None,
-        speaker_segments: Sequence[STTBackendSpeakerSegment] = (),
     ) -> None:
         await self._events.put(
             STTBackendTranscriptEvent(
                 text=text,
                 is_final=True,
-                speaker_label=speaker_label,
-                speaker_segments=tuple(speaker_segments),
             )
         )
 
@@ -271,7 +203,6 @@ class _DeepgramSDKSession(STTBackendSession):
                 "channels": 1,
                 "interim_results": False,
                 "punctuate": True,
-                "diarize": self.diarization,
                 "vad_events": False,  # Disabled: using local VAD + Finalize
                 "endpointing": False,  # Disabled: using local VAD for speech boundaries
             }
@@ -442,12 +373,14 @@ class _DeepgramSDKSession(STTBackendSession):
         self._audio_q.put_nowait(_FINALIZE)
 
     async def stop(self) -> None:
+        self._log_summary_once()
         if self._stopped:
             return
         self._stopped = True
         self._audio_q.put_nowait(_STOP)
 
     async def close(self) -> None:
+        self._log_summary_once()
         await self.stop()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
@@ -461,3 +394,19 @@ class _DeepgramSDKSession(STTBackendSession):
             if isinstance(item, BaseException):
                 raise item
             yield item
+
+    def _log_summary_once(self) -> None:
+        if self.stream_label != "peer" or self._summary_logged:
+            return
+        self._summary_logged = True
+        total_finals_seen = self._emitted_finals + self._empty_final_drops
+        empty_ratio = (
+            self._empty_final_drops / total_finals_seen if total_finals_seen > 0 else 0.0
+        )
+        logger.info(
+            "[STT][peer] Session summary: emitted_finals=%s empty_final_drops=%s total_finals_seen=%s empty_ratio=%.3f",
+            self._emitted_finals,
+            self._empty_final_drops,
+            total_finals_seen,
+            empty_ratio,
+        )

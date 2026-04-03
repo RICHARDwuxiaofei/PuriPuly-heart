@@ -21,7 +21,7 @@ from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.osc.receiver import VrcMicState
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
-from puripuly_heart.core.overlay.sink import SelfTranscriptFinal
+from puripuly_heart.core.overlay.sink import PeerTranscriptFinal, SelfTranscriptFinal, TranslationFinal
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -726,6 +726,7 @@ async def test_start_peer_loop_uses_shared_peer_vad_policy_helper(
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.desktop_audio.output_device = "Headphones (Loopback)"
+    controller.settings.desktop_audio.vad_speech_threshold = 0.72
     controller.settings.desktop_audio.vad_hangover_ms = 950
     controller.settings.desktop_audio.vad_pre_roll_ms = 420
 
@@ -739,12 +740,15 @@ async def test_start_peer_loop_uses_shared_peer_vad_policy_helper(
     async def fake_run_peer_mic_loop(self: GuiController) -> None:
         return None
 
-    def fake_create_peer_vad_gating(*, engine, sample_rate_hz, ring_buffer_ms, hangover_ms):
+    def fake_create_peer_vad_gating(
+        *, engine, sample_rate_hz, ring_buffer_ms, speech_threshold, hangover_ms
+    ):
         helper_calls.append(
             {
                 "engine": engine,
                 "sample_rate_hz": sample_rate_hz,
                 "ring_buffer_ms": ring_buffer_ms,
+                "speech_threshold": speech_threshold,
                 "hangover_ms": hangover_ms,
             }
         )
@@ -772,6 +776,7 @@ async def test_start_peer_loop_uses_shared_peer_vad_policy_helper(
             "engine": engine,
             "sample_rate_hz": 16000,
             "ring_buffer_ms": 420,
+            "speech_threshold": 0.72,
             "hangover_ms": 950,
         }
     ]
@@ -2409,3 +2414,151 @@ async def test_apply_overlay_calibration_persists_settings_and_emits_overlay_eve
     assert controller.settings.overlay_calibration.distance == 1.2
     assert saved == [(Path("settings.json"), controller.settings)]
     assert controller._overlay_bridge.snapshots[-1].calibration.distance == 1.2
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_updates_overlay_presenter_display_preferences() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+    controller._overlay_bridge = FakeOverlayBridge(session_token="token")
+    controller._overlay_presenter = OverlayPresenter(
+        bridge=controller._overlay_bridge,
+        calibration=controller.overlay_calibration.copy(),
+        clock=controller.clock,
+    )
+
+    updated = AppSettings()
+    updated.ui.show_overlay_translation = False
+    updated.ui.show_overlay_peer_original = False
+
+    await controller.apply_settings(updated)
+
+    assert controller._overlay_presenter.show_translation is False
+    assert controller._overlay_presenter.show_peer_original is False
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_pushes_updated_overlay_snapshot_to_bridge_and_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.overlay_enabled = True
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayBridge.instances) == 1)
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    presenter = controller._overlay_presenter
+    assert presenter is not None
+
+    utterance_id = uuid4()
+    await presenter.emit(
+        SelfTranscriptFinal(
+            event_id="self-final",
+            seq=1,
+            utterance_id=utterance_id,
+            channel="self",
+            created_at=10.0,
+            text="persist me",
+            source_language="ko",
+            target_language="en",
+            is_final=True,
+        )
+    )
+
+    initial_bridge = FakeOverlayBridge.instances[0]
+    assert initial_bridge.snapshots[-1].blocks[0].secondary_enabled is True
+
+    updated = AppSettings()
+    updated.ui.overlay_enabled = True
+    updated.ui.show_overlay_translation = False
+    updated.ui.show_overlay_peer_original = False
+
+    await controller.apply_settings(updated)
+
+    assert initial_bridge.snapshots[-1].blocks[0].secondary_enabled is False
+
+    await controller._teardown_overlay_runtime(preserve_presenter_state=True)
+    controller.overlay_state = "failed"
+    await controller._begin_overlay_start()
+    await _wait_until(lambda: len(FakeOverlayBridge.instances) == 2)
+
+    restarted_bridge = FakeOverlayBridge.instances[1]
+    assert restarted_bridge.initial_snapshot.blocks[0].secondary_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_pushes_peer_overlay_snapshot_preferences_to_bridge_and_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.overlay_enabled = True
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayBridge.instances) == 1)
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    presenter = controller._overlay_presenter
+    assert presenter is not None
+
+    utterance_id = uuid4()
+    await presenter.emit(
+        PeerTranscriptFinal(
+            event_id="peer-final",
+            seq=1,
+            utterance_id=utterance_id,
+            channel="peer",
+            created_at=10.0,
+            text="peer original",
+            source_language="en",
+            target_language="ko",
+            is_final=True,
+        )
+    )
+    await presenter.emit(
+        TranslationFinal(
+            event_id="peer-translation",
+            seq=2,
+            utterance_id=utterance_id,
+            channel="peer",
+            created_at=10.1,
+            text="상대 번역",
+            source_language="en",
+            target_language="ko",
+            is_final=True,
+            applied_context_mode=None,
+        )
+    )
+
+    initial_bridge = FakeOverlayBridge.instances[0]
+    assert initial_bridge.snapshots[-1].blocks[0].secondary_enabled is True
+
+    updated = AppSettings()
+    updated.ui.overlay_enabled = True
+    updated.ui.show_overlay_translation = True
+    updated.ui.show_overlay_peer_original = False
+
+    await controller.apply_settings(updated)
+
+    assert initial_bridge.snapshots[-1].blocks[0].secondary_enabled is False
+
+    await controller._teardown_overlay_runtime(preserve_presenter_state=True)
+    controller.overlay_state = "failed"
+    await controller._begin_overlay_start()
+    await _wait_until(lambda: len(FakeOverlayBridge.instances) == 2)
+
+    restarted_bridge = FakeOverlayBridge.instances[1]
+    assert restarted_bridge.initial_snapshot.blocks[0].secondary_enabled is False

@@ -58,7 +58,6 @@ class ContextResolver:
         peer_translation_enabled: bool,
         source_language: str,
         target_language: str,
-        expected_peer_epoch: int | None = None,
     ) -> tuple[str, ContextMode]:
         if requested_mode != "integrated" or not peer_translation_enabled:
             return self.resolve_local(
@@ -72,15 +71,6 @@ class ContextResolver:
             source_language=source_language,
             target_language=target_language,
         )
-        if not self._peer_entries_are_safe(
-            integrated_entries,
-            expected_peer_epoch=expected_peer_epoch,
-        ):
-            return self.resolve_local(
-                runtime=runtime,
-                source_language=source_language,
-                target_language=target_language,
-            )
         return self.format_integrated(integrated_entries), "integrated"
 
     def _format_entries(self, entries: list[ContextEntry]) -> str:
@@ -96,8 +86,8 @@ class ContextResolver:
         lines: list[str] = []
         for runtime, entry in entries:
             age_text = f"{self._relative_age(entry.timestamp)}s ago"
-            if runtime.channel == "peer" and entry.speaker_label:
-                prefix = f"{entry.speaker_label}, {age_text}"
+            if runtime.channel == "peer":
+                prefix = f"peer, {age_text}"
             else:
                 prefix = age_text
             lines.append(f'- [{prefix}] "{entry.text}"')
@@ -125,22 +115,6 @@ class ContextResolver:
         if self.integrated_max_entries > 0:
             return combined[-self.integrated_max_entries :]
         return combined
-
-    def _peer_entries_are_safe(
-        self,
-        entries: list[tuple[ChannelRuntime, ContextEntry]],
-        *,
-        expected_peer_epoch: int | None,
-    ) -> bool:
-        peer_entries = [entry for runtime, entry in entries if runtime.channel == "peer"]
-        if not peer_entries:
-            return True
-        if expected_peer_epoch is None:
-            return False
-        return all(
-            bool(entry.speaker_label) and entry.peer_epoch == expected_peer_epoch
-            for entry in peer_entries
-        )
 
     def _relative_age(self, timestamp: float) -> int:
         return max(0, int(self.clock.now() - timestamp))

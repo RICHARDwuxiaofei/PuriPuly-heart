@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import types
 
 import pytest
 
-from puripuly_heart.core.stt.backend import STTBackendSpeakerSegment, STTBackendTranscriptEvent
+from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.providers.stt import deepgram as deepgram_module
 from puripuly_heart.providers.stt.deepgram import _FINALIZE, _STOP, _DeepgramSDKSession
 from tests.helpers.fakes import NoopThread, TargetThread
@@ -16,7 +17,7 @@ def _make_session(
     *,
     model: str = "nova-3",
     keyterms: list[str] | None = None,
-    diarization: bool = False,
+    stream_label: str | None = None,
 ) -> _DeepgramSDKSession:
     return _DeepgramSDKSession(
         api_key="k",
@@ -25,7 +26,7 @@ def _make_session(
         sample_rate_hz=16000,
         connect_timeout_s=5.0,
         keyterms=keyterms or [],
-        diarization=diarization,
+        stream_label=stream_label,
     )
 
 
@@ -77,22 +78,88 @@ async def test_deepgram_session_events_yield_and_raise() -> None:
 
 
 @pytest.mark.asyncio
-async def test_deepgram_session_emits_peer_speaker_metadata_on_test_final() -> None:
-    session = _make_session(diarization=True)
+async def test_deepgram_session_emits_test_final() -> None:
+    session = _make_session()
 
-    await session._emit_test_final(
-        text="hello there",
-        speaker_label="Speaker 0",
-        speaker_segments=(STTBackendSpeakerSegment(text="hello there", speaker_label="Speaker 0"),),
-    )
+    await session._emit_test_final(text="hello there")
     event = await session._events.get()
 
     assert isinstance(event, STTBackendTranscriptEvent)
     assert event.text == "hello there"
-    assert event.speaker_label == "Speaker 0"
-    assert event.speaker_segments == (
-        STTBackendSpeakerSegment(text="hello there", speaker_label="Speaker 0"),
+    assert event.is_final is True
+
+
+def test_deepgram_peer_session_drops_empty_final_with_dedicated_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session = _make_session(stream_label="peer")
+    result = types.SimpleNamespace(
+        channel=types.SimpleNamespace(
+            alternatives=[types.SimpleNamespace(transcript="")]
+        ),
+        is_final=True,
+        speech_final=False,
     )
+
+    with caplog.at_level(logging.INFO, logger=deepgram_module.logger.name):
+        event = session._build_transcript_event(result)
+
+    assert event is None
+    assert session._empty_final_drops == 1
+    assert any("[STT][peer] Empty final transcript dropped" in message for message in caplog.messages)
+
+
+def test_deepgram_peer_session_counts_emitted_finals() -> None:
+    session = _make_session(stream_label="peer")
+    result = types.SimpleNamespace(
+        channel=types.SimpleNamespace(
+            alternatives=[types.SimpleNamespace(transcript="hello world")]
+        ),
+        is_final=True,
+        speech_final=False,
+    )
+
+    event = session._build_transcript_event(result)
+
+    assert isinstance(event, STTBackendTranscriptEvent)
+    assert event.text == "hello world"
+    assert session._emitted_finals == 1
+
+
+@pytest.mark.asyncio
+async def test_deepgram_peer_session_logs_summary_once_on_shutdown(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session = _make_session(stream_label="peer")
+    empty_result = types.SimpleNamespace(
+        channel=types.SimpleNamespace(
+            alternatives=[types.SimpleNamespace(transcript="")]
+        ),
+        is_final=True,
+        speech_final=False,
+    )
+    final_result = types.SimpleNamespace(
+        channel=types.SimpleNamespace(
+            alternatives=[types.SimpleNamespace(transcript="hello")]
+        ),
+        is_final=True,
+        speech_final=False,
+    )
+
+    session._build_transcript_event(empty_result)
+    session._build_transcript_event(final_result)
+
+    with caplog.at_level(logging.INFO, logger=deepgram_module.logger.name):
+        await session.stop()
+        await session.close()
+
+    summary_messages = [
+        message for message in caplog.messages if "[STT][peer] Session summary:" in message
+    ]
+    assert len(summary_messages) == 1
+    assert "emitted_finals=1" in summary_messages[0]
+    assert "empty_final_drops=1" in summary_messages[0]
+    assert "total_finals_seen=2" in summary_messages[0]
 
 
 @pytest.mark.asyncio
@@ -240,7 +307,7 @@ async def test_deepgram_session_run_sync_handles_message_finalize_and_stop(
     assert sent_controls == ["Finalize"]
     assert sent_media == [b"pcm"]
     assert session._connected.is_set() is True
-    assert connect_kwargs["diarize"] is False
+    assert "diarize" not in connect_kwargs
     assert connect_kwargs["keyterm"] == ["Puripuly", "VRChat"]
 
     # _run_sync posts termination markers in stop path/finally.
@@ -248,105 +315,6 @@ async def test_deepgram_session_run_sync_handles_message_finalize_and_stop(
     while not session._events.empty():
         tail.append(session._events.get_nowait())
     assert None in tail
-
-
-@pytest.mark.asyncio
-async def test_deepgram_session_run_sync_preserves_diarization_speaker_segments(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    session = _make_session(diarization=True)
-    session._loop = asyncio.get_running_loop()
-    session._connect_started_at = 1.0
-
-    connect_kwargs: dict[str, object] = {}
-
-    class FakeEventType:
-        OPEN = "open"
-        MESSAGE = "message"
-        ERROR = "error"
-        CLOSE = "close"
-
-    class FakeControlMessage:
-        def __init__(self, type: str):
-            self.type = type
-
-    class FakeConnection:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def on(self, event_type, callback):
-            if event_type == FakeEventType.OPEN:
-                callback(object())
-            if event_type == FakeEventType.MESSAGE:
-                words = [
-                    types.SimpleNamespace(word="hello", speaker=0),
-                    types.SimpleNamespace(word="there", speaker=0),
-                    types.SimpleNamespace(word="friend", speaker=1),
-                ]
-                alt = types.SimpleNamespace(transcript="hello there friend", words=words)
-                result = types.SimpleNamespace(
-                    channel=types.SimpleNamespace(alternatives=[alt]),
-                    is_final=True,
-                    speech_final=False,
-                )
-                callback(result)
-
-        def start_listening(self):
-            return None
-
-        def send_control(self, message):
-            _ = message
-
-        def send_media(self, data: bytes):
-            _ = data
-
-    class FakeV1:
-        def connect(self, **kwargs):
-            connect_kwargs.update(kwargs)
-            return FakeConnection()
-
-    class FakeListen:
-        v1 = FakeV1()
-
-    class FakeClient:
-        def __init__(self, api_key: str):
-            _ = api_key
-            self.listen = FakeListen()
-
-    deepgram_pkg = types.ModuleType("deepgram")
-    deepgram_pkg.DeepgramClient = FakeClient
-    deepgram_core = types.ModuleType("deepgram.core")
-    deepgram_events = types.ModuleType("deepgram.core.events")
-    deepgram_events.EventType = FakeEventType
-    deepgram_ext = types.ModuleType("deepgram.extensions")
-    deepgram_ext_types = types.ModuleType("deepgram.extensions.types")
-    deepgram_sockets = types.ModuleType("deepgram.extensions.types.sockets")
-    deepgram_sockets.ListenV1ControlMessage = FakeControlMessage
-
-    monkeypatch.setitem(sys.modules, "deepgram", deepgram_pkg)
-    monkeypatch.setitem(sys.modules, "deepgram.core", deepgram_core)
-    monkeypatch.setitem(sys.modules, "deepgram.core.events", deepgram_events)
-    monkeypatch.setitem(sys.modules, "deepgram.extensions", deepgram_ext)
-    monkeypatch.setitem(sys.modules, "deepgram.extensions.types", deepgram_ext_types)
-    monkeypatch.setitem(sys.modules, "deepgram.extensions.types.sockets", deepgram_sockets)
-    monkeypatch.setattr(deepgram_module.threading, "Thread", NoopThread)
-
-    session._audio_q.put_nowait(_STOP)
-    session._run_sync()
-    await asyncio.sleep(0)
-
-    first = await session._events.get()
-    assert isinstance(first, STTBackendTranscriptEvent)
-    assert first.text == "hello there friend"
-    assert first.speaker_label is None
-    assert first.speaker_segments == (
-        STTBackendSpeakerSegment(text="hello there", speaker_label="Speaker 0"),
-        STTBackendSpeakerSegment(text="friend", speaker_label="Speaker 1"),
-    )
-    assert connect_kwargs["diarize"] is True
 
 
 @pytest.mark.asyncio

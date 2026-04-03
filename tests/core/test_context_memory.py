@@ -414,7 +414,7 @@ class TestContextInternalPaths:
         assert mode == "local"
         assert context == '- [12s ago] "self only"'
 
-    def test_context_resolver_formats_integrated_with_speaker_label_and_relative_age(self):
+    def test_context_resolver_formats_integrated_with_channel_prefix_and_relative_age(self):
         self_runtime = ClientHub(
             stt=None,
             llm=None,
@@ -431,8 +431,6 @@ class TestContextInternalPaths:
         peer_runtime.remember_context(
             "hello from peer",
             timestamp=105.0,
-            speaker_label="Speaker 0",
-            peer_epoch=7,
         )
         resolver = ContextResolver(clock=FakeClock(initial_time=112.0))
 
@@ -443,13 +441,12 @@ class TestContextInternalPaths:
             peer_translation_enabled=True,
             source_language="en",
             target_language="ko",
-            expected_peer_epoch=7,
         )
 
         assert mode == "integrated"
-        assert context == ('- [12s ago] "I am ready"\n' '- [Speaker 0, 7s ago] "hello from peer"')
+        assert context == ('- [12s ago] "I am ready"\n' '- [peer, 7s ago] "hello from peer"')
 
-    def test_context_resolver_falls_back_to_local_when_integrated_peer_metadata_is_unsafe(self):
+    def test_context_resolver_always_uses_integrated_when_peer_enabled(self):
         self_runtime = ClientHub(
             stt=None,
             llm=None,
@@ -464,10 +461,8 @@ class TestContextInternalPaths:
         ).peer_runtime
         self_runtime.remember_context("safe local line", timestamp=100.0)
         peer_runtime.remember_context(
-            "stale peer line",
+            "peer line",
             timestamp=105.0,
-            speaker_label="Speaker 0",
-            peer_epoch=6,
         )
         resolver = ContextResolver(clock=FakeClock(initial_time=112.0))
 
@@ -478,11 +473,10 @@ class TestContextInternalPaths:
             peer_translation_enabled=True,
             source_language="en",
             target_language="ko",
-            expected_peer_epoch=7,
         )
 
-        assert mode == "local"
-        assert context == '- [12s ago] "safe local line"'
+        assert mode == "integrated"
+        assert '- [peer, 7s ago] "peer line"' in context
 
     def test_prepare_llm_request_formats_prompt_and_context(self):
         clock = FakeClock(initial_time=20.0)
@@ -646,14 +640,11 @@ class TestContextLogging:
         )
         hub.source_language = "en"
         hub.target_language = "ko"
-        hub.peer_runtime.peer_epoch = 7
         transcript = Transcript(
             utterance_id=uuid4(),
             text="peer hello",
             is_final=True,
             channel="peer",
-            speaker_label="Speaker 0",
-            peer_epoch=7,
         )
 
         await hub._handle_transcript(transcript, is_final=True, source="Peer")
@@ -690,8 +681,6 @@ class TestContextLogging:
             text="peer hello",
             is_final=True,
             channel="peer",
-            speaker_label="Speaker 0",
-            peer_epoch=7,
         )
 
         async def failing_translate(**kwargs):  # noqa: ANN003

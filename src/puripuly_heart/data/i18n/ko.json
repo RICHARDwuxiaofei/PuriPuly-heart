@@ -52,6 +52,8 @@
   "settings.option.on": "켜기",
   "settings.option.off": "끄기",
   "settings.overlay.enabled": "오버레이",
+  "settings.overlay.show_translation": "번역 표시",
+  "settings.overlay.show_peer_original": "상대 원문 표시",
   "settings.peer_translation": "상대 번역",
   "settings.integrated_context": "통합 문맥",
   "settings.context.local": "로컬 문맥",

@@ -164,7 +164,6 @@ def test_create_stt_backend_deepgram_uses_settings_and_secret() -> None:
     assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
     assert backend.language == get_deepgram_language(settings.languages.source_language)
     assert list(backend.keyterms) == ["아이리", "시나노"]
-    assert backend.diarization is False
 
 
 def test_create_stt_backend_deepgram_passes_effective_custom_terms() -> None:
@@ -201,7 +200,7 @@ def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None
     assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
     assert backend.language == get_deepgram_language(settings.languages.source_language)
     assert list(backend.keyterms) == ["아이리", "시나노"]
-    assert backend.diarization is True
+    assert backend.stream_label == "peer"
 
 
 def test_self_stt_provider_setting_does_not_change_peer_backend_choice() -> None:
@@ -216,8 +215,6 @@ def test_self_stt_provider_setting_does_not_change_peer_backend_choice() -> None
 
     assert isinstance(soniox_backend, DeepgramRealtimeSTTBackend)
     assert isinstance(qwen_backend, DeepgramRealtimeSTTBackend)
-    assert soniox_backend.diarization is True
-    assert qwen_backend.diarization is True
 
 
 def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:

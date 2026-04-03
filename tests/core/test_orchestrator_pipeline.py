@@ -85,21 +85,18 @@ async def test_client_hub_uses_integrated_context_when_enabled_and_safe():
         source_language="en",
         target_language="ko",
     )
-    hub.peer_runtime.peer_epoch = 7
     hub.peer_runtime.remember_context(
         "hello from peer",
         timestamp=105.0,
         source_language="en",
         target_language="ko",
-        speaker_label="Speaker 0",
-        peer_epoch=7,
     )
 
     await hub.submit_text("world")
     await asyncio.gather(*hub.self_runtime.translation_tasks.values(), return_exceptions=True)
 
     assert inner.calls[0]["context"] == (
-        '- [12s ago] "I am ready"\n' '- [Speaker 0, 7s ago] "hello from peer"'
+        '- [12s ago] "I am ready"\n' '- [peer, 7s ago] "hello from peer"'
     )
 
 

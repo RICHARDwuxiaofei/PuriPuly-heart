@@ -134,21 +134,21 @@ async def test_peer_pipeline_drops_short_candidate_before_opening_stt_session():
     hub = ClientHub(stt=None, peer_stt=peer_stt, llm=None, osc=osc, clock=clock)
     await hub.start(auto_flush_osc=False)
 
-    probs = [0.0, 0.9, 0.9, 0.9, 0.9, 0.0]
+    probs = [0.0, 0.9, 0.9, 0.0]
     vad = VadGating(
         SequenceVadEngine(probs=probs),
         sample_rate_hz=16000,
         ring_buffer_ms=64,
-        speech_threshold=0.7,
+        speech_threshold=0.6,
         hangover_ms=64,
         start_debounce_chunks=3,
-        start_commit_chunks=5,
+        start_commit_chunks=3,
     )
 
     audio = np.concatenate(
         [np.full((512,), float(i), dtype=np.float32) for i in range(len(probs))], axis=0
     )
-    frames = make_frames(audio, sample_rate_hz=16000, splits=[1000, 1000, audio.size - 2000])
+    frames = make_frames(audio, sample_rate_hz=16000, splits=[1000, audio.size - 1000])
     source = FakeAudioSource(frames)
     await run_audio_vad_loop(
         source=source,
@@ -178,21 +178,21 @@ async def test_peer_pipeline_commits_after_candidate_reaches_minimum_length():
     hub = ClientHub(stt=None, peer_stt=peer_stt, llm=None, osc=osc, clock=clock)
     await hub.start(auto_flush_osc=False)
 
-    probs = [0.0, 0.0, 0.9, 0.9, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0]
+    probs = [0.0, 0.0, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0]
     vad = VadGating(
         SequenceVadEngine(probs=probs),
         sample_rate_hz=16000,
         ring_buffer_ms=64,
-        speech_threshold=0.7,
+        speech_threshold=0.6,
         hangover_ms=64,
         start_debounce_chunks=3,
-        start_commit_chunks=5,
+        start_commit_chunks=3,
     )
 
     audio = np.concatenate(
         [np.full((512,), float(i), dtype=np.float32) for i in range(len(probs))], axis=0
     )
-    frames = make_frames(audio, sample_rate_hz=16000, splits=[1000, 1000, 1000, audio.size - 3000])
+    frames = make_frames(audio, sample_rate_hz=16000, splits=[1000, 1000, audio.size - 2000])
     source = FakeAudioSource(frames)
     await run_audio_vad_loop(
         source=source,

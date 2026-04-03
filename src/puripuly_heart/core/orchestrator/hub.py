@@ -290,8 +290,6 @@ class ClientHub:
         timestamp: float,
         *,
         runtime: ChannelRuntime | None = None,
-        speaker_label: str | None = None,
-        peer_epoch: int | None = None,
     ) -> None:
         runtime = runtime or self.self_runtime
         runtime.remember_context(
@@ -300,8 +298,6 @@ class ClientHub:
             source_language=self._source_language_for(runtime),
             target_language=self._target_language_for(runtime),
             max_entries=max(self.context_max_entries, self.integrated_context_max_entries),
-            speaker_label=speaker_label,
-            peer_epoch=peer_epoch,
         )
 
     def _log_context_mode_change(
@@ -581,8 +577,6 @@ class ClientHub:
                 source_language=self.source_language,
                 target_language=self.target_language,
                 applied_context_mode=applied_context_mode,
-                speaker_label=translation.speaker_label,
-                peer_epoch=translation.peer_epoch,
                 created_at=translation.created_at,
             )
         )
@@ -1369,36 +1363,15 @@ class ClientHub:
             return self.translation_enabled and self.peer_translation_enabled
         return self.translation_enabled
 
-    def advance_peer_session_epoch(self) -> int:
-        self.peer_runtime.peer_epoch += 1
-        return self.peer_runtime.peer_epoch
-
-    def reset_peer_session_for_test(self) -> int:
-        return self.advance_peer_session_epoch()
-
-    def _expected_peer_epoch(
-        self,
-        runtime: ChannelRuntime,
-        *,
-        explicit_peer_epoch: int | None = None,
-    ) -> int | None:
-        if explicit_peer_epoch is not None:
-            return explicit_peer_epoch
-        if runtime.channel == "peer":
-            return runtime.peer_epoch
-        return self.peer_runtime.peer_epoch
-
     def _prepare_llm_request(
         self,
         text: str,
         *,
         runtime: ChannelRuntime | None = None,
-        expected_peer_epoch: int | None = None,
     ) -> tuple[str, str, float]:
         formatted_prompt, context_str, now, _ = self._prepare_llm_request_with_mode(
             text,
             runtime=runtime,
-            expected_peer_epoch=expected_peer_epoch,
         )
         return formatted_prompt, context_str, now
 
@@ -1407,7 +1380,6 @@ class ClientHub:
         text: str,
         *,
         runtime: ChannelRuntime | None = None,
-        expected_peer_epoch: int | None = None,
     ) -> tuple[str, str, float, ContextMode]:
         _ = text
         runtime = runtime or self.self_runtime
@@ -1420,10 +1392,6 @@ class ClientHub:
             peer_translation_enabled=self.peer_translation_enabled,
             source_language=self._source_language_for(runtime),
             target_language=self._target_language_for(runtime),
-            expected_peer_epoch=self._expected_peer_epoch(
-                runtime,
-                explicit_peer_epoch=expected_peer_epoch,
-            ),
         )
         self._log_context_mode_change(runtime=runtime, applied_mode=applied_mode)
         self._log_context_application(text=text, runtime=runtime, context=context_str)
@@ -1436,8 +1404,6 @@ class ClientHub:
         *,
         runtime: ChannelRuntime,
         text: str,
-        speaker_label: str | None,
-        peer_epoch: int | None,
     ) -> Translation:
         return Translation(
             utterance_id=translation.utterance_id,
@@ -1446,8 +1412,6 @@ class ClientHub:
             source_language=self._source_language_for(runtime),
             target_language=self._target_language_for(runtime),
             channel=runtime.channel,
-            speaker_label=speaker_label,
-            peer_epoch=peer_epoch,
             created_at=translation.created_at,
         )
 
@@ -1457,8 +1421,6 @@ class ClientHub:
         text: str,
         *,
         runtime: ChannelRuntime | None = None,
-        speaker_label: str | None = None,
-        peer_epoch: int | None = None,
     ) -> Translation:
         if self.llm is None:
             raise RuntimeError("LLM is not configured")
@@ -1467,7 +1429,6 @@ class ClientHub:
         formatted_prompt, context_str, _ = self._prepare_llm_request(
             text,
             runtime=runtime,
-            expected_peer_epoch=peer_epoch,
         )
         translation = await self.llm.translate(
             utterance_id=utterance_id,
@@ -1481,8 +1442,6 @@ class ClientHub:
             translation,
             runtime=runtime,
             text=text,
-            speaker_label=speaker_label,
-            peer_epoch=peer_epoch,
         )
 
     async def _ensure_translation(self, transcript: Transcript) -> None:
@@ -1499,8 +1458,6 @@ class ClientHub:
                 utterance_id,
                 transcript.text,
                 runtime=runtime,
-                speaker_label=transcript.speaker_label,
-                peer_epoch=transcript.peer_epoch,
             )
         )
         runtime.translation_tasks[utterance_id] = task
@@ -1512,8 +1469,6 @@ class ClientHub:
         text: str,
         *,
         runtime: ChannelRuntime | None = None,
-        speaker_label: str | None = None,
-        peer_epoch: int | None = None,
     ) -> None:
         if self.llm is None:
             return
@@ -1523,7 +1478,6 @@ class ClientHub:
             formatted_prompt, context_str, now, applied_mode = self._prepare_llm_request_with_mode(
                 text,
                 runtime=runtime,
-                expected_peer_epoch=peer_epoch,
             )
 
             # Add current text to context history at REQUEST time
@@ -1531,8 +1485,6 @@ class ClientHub:
                 text,
                 now,
                 runtime=runtime,
-                speaker_label=speaker_label,
-                peer_epoch=peer_epoch,
             )
 
             if runtime.channel == "peer" and self.overlay_sink is not None:
@@ -1542,8 +1494,6 @@ class ClientHub:
                     system_prompt=formatted_prompt,
                     context=context_str,
                     runtime=runtime,
-                    speaker_label=speaker_label,
-                    peer_epoch=peer_epoch,
                     applied_mode=applied_mode,
                 )
             else:
@@ -1559,8 +1509,6 @@ class ClientHub:
                     raw_translation,
                     runtime=runtime,
                     text=text,
-                    speaker_label=speaker_label,
-                    peer_epoch=peer_epoch,
                 )
         except asyncio.CancelledError:
             if runtime.channel == "self":
@@ -1629,8 +1577,6 @@ class ClientHub:
         system_prompt: str,
         context: str,
         runtime: ChannelRuntime,
-        speaker_label: str | None,
-        peer_epoch: int | None,
         applied_mode: ContextMode,
     ) -> Translation:
         if self.llm is None:
@@ -1658,8 +1604,6 @@ class ClientHub:
                         source_language=src,
                         target_language=tgt,
                         applied_context_mode=applied_mode,
-                        speaker_label=speaker_label,
-                        peer_epoch=peer_epoch,
                     ),
                     self._emit_overlay_event,
                 )
@@ -1673,14 +1617,10 @@ class ClientHub:
                     source_language=src,
                     target_language=tgt,
                     channel=runtime.channel,
-                    speaker_label=speaker_label,
-                    peer_epoch=peer_epoch,
                     created_at=self.clock.now(),
                 ),
                 runtime=runtime,
                 text=text,
-                speaker_label=speaker_label,
-                peer_epoch=peer_epoch,
             )
             await self._emit_overlay_event(
                 self.overlay_event_adapter.translation_final(
@@ -1690,8 +1630,6 @@ class ClientHub:
                     source_language=src,
                     target_language=tgt,
                     applied_context_mode=applied_mode,
-                    speaker_label=speaker_label,
-                    peer_epoch=peer_epoch,
                 )
             )
             await self._emit_overlay_event(
@@ -1727,8 +1665,6 @@ class ClientHub:
         self,
         *,
         text: str,
-        speaker_label: str | None = None,
-        peer_epoch: int | None = None,
         source: str = "Peer",
     ) -> UUID:
         utterance_id = uuid4()
@@ -1738,11 +1674,6 @@ class ClientHub:
             is_final=True,
             created_at=self.clock.now(),
             channel="peer",
-            speaker_label=speaker_label,
-            peer_epoch=self._expected_peer_epoch(
-                self.peer_runtime,
-                explicit_peer_epoch=peer_epoch,
-            ),
         )
         await self._handle_transcript(transcript, is_final=True, source=source)
         if self.llm is not None and self.peer_translation_enabled:
@@ -1752,14 +1683,9 @@ class ClientHub:
     async def translate_peer_text_for_test(
         self,
         text: str,
-        *,
-        speaker_label: str | None = None,
-        peer_epoch: int | None = None,
     ) -> UUID:
         utterance_id = await self.handle_peer_transcript_final_for_test(
             text=text,
-            speaker_label=speaker_label,
-            peer_epoch=peer_epoch,
         )
         if self.peer_runtime.translation_tasks:
             await asyncio.gather(

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from puripuly_heart.core.clock import FakeClock
-from puripuly_heart.core.stt.backend import STTBackendSpeakerSegment, STTBackendTranscriptEvent
+from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.gating import SpeechEnd, SpeechStart
 from puripuly_heart.domain.events import STTFinalEvent, STTSessionState, STTSessionStateEvent
@@ -364,12 +364,11 @@ async def test_stt_controller_reconnect_fallback_on_failure():
     await stt.close()
 
 
-async def test_managed_stt_provider_keeps_peer_epoch_relevant_fields():
+async def test_managed_stt_provider_peer_channel_produces_final_event():
     provider = ManagedSTTProvider(
         backend=FakeBackend(),
         sample_rate_hz=16000,
         channel="peer",
-        peer_epoch_resolver=lambda: 5,
     )
     utterance_id = uuid4()
     provider._pending_final_utterance_id = utterance_id
@@ -380,89 +379,12 @@ async def test_managed_stt_provider_keeps_peer_epoch_relevant_fields():
                 STTBackendTranscriptEvent(
                     text="peer line",
                     is_final=True,
-                    speaker_label="Speaker 1",
-                    speaker_segments=(
-                        STTBackendSpeakerSegment(text="peer line", speaker_label="Speaker 1"),
-                    ),
                 )
             ]
         ),
-        session_peer_epoch=5,
     )
 
     event = await _next_event(provider.events())
     assert isinstance(event, STTFinalEvent)
     assert event.transcript.channel == "peer"
-    assert event.transcript.speaker_label == "Speaker 1"
-    assert event.transcript.peer_epoch == 5
-
-
-async def test_peer_multi_speaker_final_splits_into_stable_segment_events():
-    controller = ManagedSTTProvider(backend=FakeBackend(), sample_rate_hz=16000, channel="peer")
-    utterance_id = uuid4()
-
-    events = await controller._split_peer_final_for_test(
-        utterance_id=utterance_id,
-        segments=[
-            {"speaker_label": "Speaker 0", "text": "hello"},
-            {"speaker_label": "Speaker 1", "text": "there"},
-        ],
-        peer_epoch=3,
-    )
-    repeated = await controller._split_peer_final_for_test(
-        utterance_id=utterance_id,
-        segments=[
-            {"speaker_label": "Speaker 0", "text": "hello"},
-            {"speaker_label": "Speaker 1", "text": "there"},
-        ],
-        peer_epoch=3,
-    )
-
-    assert [event.transcript.text for event in events] == ["hello", "there"]
-    assert [event.transcript.speaker_label for event in events] == ["Speaker 0", "Speaker 1"]
-    assert len({event.utterance_id for event in events}) == 2
-    assert [event.utterance_id for event in events] == [event.utterance_id for event in repeated]
-
-
-async def test_peer_segment_ids_stay_stable_when_segment_text_changes():
-    controller = ManagedSTTProvider(backend=FakeBackend(), sample_rate_hz=16000, channel="peer")
-    utterance_id = uuid4()
-
-    baseline = await controller._split_peer_final_for_test(
-        utterance_id=utterance_id,
-        segments=[
-            {"speaker_label": "Speaker 0", "text": "hello"},
-            {"speaker_label": "Speaker 1", "text": "there"},
-        ],
-        peer_epoch=3,
-    )
-    updated = await controller._split_peer_final_for_test(
-        utterance_id=utterance_id,
-        segments=[
-            {"speaker_label": "Speaker 0", "text": "hello."},
-            {"speaker_label": "Speaker 1", "text": "there!"},
-        ],
-        peer_epoch=3,
-    )
-
-    assert [event.utterance_id for event in baseline] == [event.utterance_id for event in updated]
-
-
-async def test_peer_segment_events_do_not_reuse_an_existing_overlay_row_identity():
-    controller = ManagedSTTProvider(backend=FakeBackend(), sample_rate_hz=16000, channel="peer")
-
-    events = await controller._split_peer_final_for_test(
-        utterance_id=uuid4(),
-        segments=[
-            {"speaker_label": "Speaker 0", "text": "hello"},
-            {"speaker_label": "Speaker 1", "text": "there"},
-        ],
-        peer_epoch=4,
-    )
-
-    first, second = events
-    assert first.utterance_id != second.utterance_id
-    assert first.transcript.channel == "peer"
-    assert second.transcript.channel == "peer"
-    assert first.transcript.peer_epoch == 4
-    assert second.transcript.peer_epoch == 4
+    assert event.transcript.text == "peer line"

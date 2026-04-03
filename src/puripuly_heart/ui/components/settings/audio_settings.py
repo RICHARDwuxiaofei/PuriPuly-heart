@@ -28,7 +28,7 @@ class AudioSettings(ft.Column):
         self._current_host_api = ""
         self._current_microphone = ""
         self._current_desktop_output_device = ""
-        self._current_desktop_vad_threshold = 0.65
+        self._current_desktop_vad_threshold = 0.6
         self._current_desktop_hangover_ms = 900
         self._current_desktop_pre_roll_ms = 500
 

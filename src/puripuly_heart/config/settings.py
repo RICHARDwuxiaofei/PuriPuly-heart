@@ -9,7 +9,7 @@ from typing import Any
 
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 2
+SETTINGS_SCHEMA_VERSION = 3
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
     "ko": ("아이리", "시나노"),
@@ -106,7 +106,7 @@ class AudioSettings:
 @dataclass(slots=True)
 class DesktopAudioSettings:
     output_device: str = ""
-    vad_speech_threshold: float = 0.65
+    vad_speech_threshold: float = 0.6
     vad_hangover_ms: int = 900
     vad_pre_roll_ms: int = 500
 
@@ -293,6 +293,8 @@ class UiSettings:
     locale: str = "en"
     # Session-only toggle; intentionally not persisted to settings.json.
     overlay_enabled: bool = False
+    show_overlay_translation: bool = True
+    show_overlay_peer_original: bool = True
     peer_translation_enabled: bool = False
     integrated_context_enabled: bool = False
     integrated_context_bootstrapped: bool = False
@@ -449,6 +451,8 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         },
         "ui": {
             "locale": settings.ui.locale,
+            "show_overlay_translation": settings.ui.show_overlay_translation,
+            "show_overlay_peer_original": settings.ui.show_overlay_peer_original,
             "peer_translation_enabled": settings.ui.peer_translation_enabled,
             "integrated_context_enabled": settings.ui.integrated_context_enabled,
             "integrated_context_bootstrapped": settings.ui.integrated_context_bootstrapped,
@@ -576,6 +580,17 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 2
 
+    if version < 3:
+        desktop_audio_data = data.get("desktop_audio")
+        if not isinstance(desktop_audio_data, dict):
+            desktop_audio_data = {}
+            data["desktop_audio"] = desktop_audio_data
+            changed = True
+        if desktop_audio_data.get("vad_speech_threshold") != 0.6:
+            desktop_audio_data["vad_speech_threshold"] = 0.6
+            changed = True
+        version = 3
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -627,7 +642,20 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         changed = True
 
     ui_data = data.get("ui")
-    if isinstance(ui_data, dict) and "overlay_enabled" in ui_data:
+    if not isinstance(ui_data, dict):
+        ui_data = {}
+        data["ui"] = ui_data
+        changed = True
+
+    if "show_overlay_translation" not in ui_data:
+        ui_data["show_overlay_translation"] = True
+        changed = True
+
+    if "show_overlay_peer_original" not in ui_data:
+        ui_data["show_overlay_peer_original"] = True
+        changed = True
+
+    if "overlay_enabled" in ui_data:
         del ui_data["overlay_enabled"]
         changed = True
 
@@ -643,6 +671,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     desktop_audio_data = data.get("desktop_audio") or {}
     overlay_calibration_data = data.get("overlay_calibration") or {}
     stt_data = data.get("stt") or {}
+    ui_data = data.get("ui") or {}
 
     input_host_api_raw = audio_data.get("input_host_api")
     input_device_raw = audio_data.get("input_device")
@@ -694,7 +723,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 if desktop_audio_data.get("output_device") is not None
                 else ""
             ),
-            vad_speech_threshold=float(desktop_audio_data.get("vad_speech_threshold", 0.65)),
+            vad_speech_threshold=float(desktop_audio_data.get("vad_speech_threshold", 0.6)),
             vad_hangover_ms=int(desktop_audio_data.get("vad_hangover_ms", 900)),
             vad_pre_roll_ms=int(desktop_audio_data.get("vad_pre_roll_ms", 500)),
         ),
@@ -800,15 +829,13 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             encrypted_file_path=data.get("secrets", {}).get("encrypted_file_path", "secrets.json"),
         ),
         ui=UiSettings(
-            locale=str(data.get("ui", {}).get("locale", "en")),
-            peer_translation_enabled=bool(
-                data.get("ui", {}).get("peer_translation_enabled", False)
-            ),
-            integrated_context_enabled=bool(
-                data.get("ui", {}).get("integrated_context_enabled", False)
-            ),
+            locale=str(ui_data.get("locale", "en")),
+            show_overlay_translation=bool(ui_data.get("show_overlay_translation", True)),
+            show_overlay_peer_original=bool(ui_data.get("show_overlay_peer_original", True)),
+            peer_translation_enabled=bool(ui_data.get("peer_translation_enabled", False)),
+            integrated_context_enabled=bool(ui_data.get("integrated_context_enabled", False)),
             integrated_context_bootstrapped=bool(
-                data.get("ui", {}).get("integrated_context_bootstrapped", False)
+                ui_data.get("integrated_context_bootstrapped", False)
             ),
         ),
         api_key_verified=ApiKeyVerificationSettings(
