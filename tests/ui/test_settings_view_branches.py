@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 
+import flet as ft
 import pytest
 
 pytest.importorskip("flet")
@@ -65,6 +66,41 @@ def test_load_secret_value_migrates_legacy_value() -> None:
 
     assert value == "legacy"
     assert store.set_calls == [("new_key", "legacy")]
+
+
+def test_setting_action_text_size_shrinks_for_long_values() -> None:
+    assert settings_view._setting_action_text_size("영어") == 22
+    assert settings_view._setting_action_text_size("Deepgram") == 20
+    assert settings_view._setting_action_text_size("qwen3-asr-flash-realtime") == 16
+
+
+def test_peer_setting_values_use_single_line_action_style(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    text = view._peer_target_text.content
+
+    assert text.text_align == ft.TextAlign.RIGHT
+    assert text._get_attr("nowrap") is True
+    assert text.max_lines == 1
+    assert text.overflow == ft.TextOverflow.ELLIPSIS
+    assert text.size == settings_view._setting_action_text_size(text.value)
+
+
+def test_load_from_settings_resizes_long_peer_model_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.peer_qwen_asr_stt.model = "qwen3-asr-flash-realtime"
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._peer_qwen_model_text.content.value == "qwen3-asr-flash-realtime"
+    assert (
+        view._peer_qwen_model_text.content.size
+        == settings_view._setting_action_text_size("qwen3-asr-flash-realtime")
+    )
 
 
 def test_load_from_settings_uses_system_prompt_when_provider_prompt_missing(
@@ -852,7 +888,6 @@ def test_apply_locale_refreshes_peer_labels_and_inherit_texts(
 
     old_locale = i18n_module.get_locale()
     expected_peer_stt_label = ""
-    expected_peer_deepgram_model_label = ""
     expected_peer_qwen_region_label = ""
     expected_peer_qwen_model_label = ""
     expected_peer_soniox_model_label = ""
@@ -860,18 +895,15 @@ def test_apply_locale_refreshes_peer_labels_and_inherit_texts(
     try:
         i18n_module.set_locale("ko")
         view._peer_stt_label.value = "stale"
-        view._peer_deepgram_model_label.value = "stale"
         view._peer_qwen_region_label.value = "stale"
         view._peer_qwen_model_label.value = "stale"
         view._peer_soniox_model_label.value = "stale"
-        view._peer_deepgram_model_text.content.value = "stale"
         view._peer_qwen_region_text.content.value = "stale"
         view._peer_qwen_model_text.content.value = "stale"
         view._peer_soniox_model_text.content.value = "stale"
 
         view.apply_locale()
         expected_peer_stt_label = t("settings.peer_stt_provider")
-        expected_peer_deepgram_model_label = t("settings.peer_deepgram_model")
         expected_peer_qwen_region_label = t("settings.peer_qwen_region")
         expected_peer_qwen_model_label = t("settings.peer_qwen_model")
         expected_peer_soniox_model_label = t("settings.peer_soniox_model")
@@ -880,14 +912,21 @@ def test_apply_locale_refreshes_peer_labels_and_inherit_texts(
         i18n_module.set_locale(old_locale)
 
     assert view._peer_stt_label.value == expected_peer_stt_label
-    assert view._peer_deepgram_model_label.value == expected_peer_deepgram_model_label
     assert view._peer_qwen_region_label.value == expected_peer_qwen_region_label
     assert view._peer_qwen_model_label.value == expected_peer_qwen_model_label
     assert view._peer_soniox_model_label.value == expected_peer_soniox_model_label
-    assert view._peer_deepgram_model_text.content.value == expected_inherit_label
     assert view._peer_qwen_region_text.content.value == expected_inherit_label
     assert view._peer_qwen_model_text.content.value == expected_inherit_label
     assert view._peer_soniox_model_text.content.value == expected_inherit_label
+
+
+def test_settings_view_does_not_create_peer_deepgram_model_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    assert not hasattr(view, "_peer_deepgram_model_label")
+    assert not hasattr(view, "_peer_deepgram_model_text")
 
 
 def test_load_from_settings_updates_vrc_mic_toggle_label(

@@ -194,6 +194,7 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
         return LocalQwenSherpaSTTBackend(
             model_dir=default_local_stt_model_dir(),
             sample_rate_hz=settings.audio.internal_sample_rate_hz,
+            stream_label="self",
         )
 
     if settings.provider.stt == STTProviderName.DEEPGRAM:
@@ -262,7 +263,7 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
             source_language=peer_source_language,
             sample_rate_hz=settings.audio.internal_sample_rate_hz,
             keyterms=keyterms,
-            deepgram_model=settings.peer_deepgram_stt.model or settings.deepgram_stt.model,
+            deepgram_model=settings.deepgram_stt.model,
         )
 
     if provider == STTProviderName.QWEN_ASR:
@@ -389,6 +390,7 @@ def create_peer_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> S
         return LocalQwenSherpaSTTBackend(
             model_dir=default_local_stt_model_dir(),
             sample_rate_hz=resolved.sample_rate_hz,
+            stream_label="peer",
         )
 
     raise ValueError(f"Unsupported peer STT provider: {resolved.provider}")

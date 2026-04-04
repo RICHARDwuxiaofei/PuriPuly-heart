@@ -94,14 +94,14 @@ def test_from_dict_falls_back_to_deepgram_for_invalid_persisted_stt_provider() -
 def test_peer_stt_provider_roundtrips_through_settings_dict() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.SONIOX
-    settings.peer_deepgram_stt.model = "nova-3-general"
     settings.peer_qwen_asr_stt.region = QwenRegion.SINGAPORE
 
-    reloaded = from_dict(to_dict(settings))
+    persisted = to_dict(settings)
+    reloaded = from_dict(persisted)
 
     assert reloaded.provider.peer_stt == STTProviderName.SONIOX
-    assert reloaded.peer_deepgram_stt.model == "nova-3-general"
     assert reloaded.peer_qwen_asr_stt.region == QwenRegion.SINGAPORE
+    assert "peer_deepgram_stt" not in persisted
 
 
 def test_from_dict_defaults_missing_peer_stt_provider_to_deepgram() -> None:
@@ -143,9 +143,9 @@ def test_load_settings_backfills_peer_provider_defaults_without_copying_self_val
     persisted = json.loads(path.read_text(encoding="utf-8"))
 
     assert loaded.provider.peer_stt == STTProviderName.DEEPGRAM
-    assert loaded.peer_deepgram_stt.model is None
+    assert loaded.deepgram_stt.model == "nova-3-medical"
     assert persisted["provider"]["peer_stt"] == STTProviderName.DEEPGRAM.value
-    assert persisted["peer_deepgram_stt"]["model"] is None
+    assert "peer_deepgram_stt" not in persisted
 
 
 def test_from_dict_recovers_malformed_peer_soniox_override_values() -> None:
@@ -271,7 +271,6 @@ def test_load_settings_backfills_v4_peer_blocks_from_schema3_fixture(tmp_path) -
 
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.provider.peer_stt == STTProviderName.DEEPGRAM
-    assert loaded.peer_deepgram_stt.model is None
     assert loaded.peer_qwen_asr_stt.model is None
     assert loaded.peer_qwen_asr_stt.region is None
     assert loaded.peer_soniox_stt.model is None
@@ -280,7 +279,7 @@ def test_load_settings_backfills_v4_peer_blocks_from_schema3_fixture(tmp_path) -
     assert loaded.peer_soniox_stt.trailing_silence_ms is None
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["provider"]["peer_stt"] == STTProviderName.DEEPGRAM.value
-    assert persisted["peer_deepgram_stt"] == {"model": None}
+    assert "peer_deepgram_stt" not in persisted
     assert persisted["peer_qwen_asr_stt"] == {"model": None, "region": None}
     assert persisted["peer_soniox_stt"] == {
         "model": None,
@@ -288,6 +287,17 @@ def test_load_settings_backfills_v4_peer_blocks_from_schema3_fixture(tmp_path) -
         "keepalive_interval_s": None,
         "trailing_silence_ms": None,
     }
+
+
+def test_from_dict_ignores_legacy_peer_deepgram_override_block() -> None:
+    data = to_dict(AppSettings())
+    data["peer_deepgram_stt"] = {"model": "nova-3-general"}
+
+    loaded = from_dict(data)
+    persisted = to_dict(loaded)
+
+    assert loaded.deepgram_stt.model == AppSettings().deepgram_stt.model
+    assert "peer_deepgram_stt" not in persisted
 
 
 def test_app_settings_validate_checks_peer_provider_blocks() -> None:

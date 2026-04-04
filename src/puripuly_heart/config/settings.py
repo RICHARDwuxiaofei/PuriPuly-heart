@@ -198,15 +198,6 @@ class SonioxSTTSettings:
 
 
 @dataclass(slots=True)
-class PeerDeepgramSTTSettings:
-    model: str | None = None
-
-    def validate(self) -> None:
-        if self.model is not None and not self.model:
-            raise ValueError("peer deepgram model override must be non-empty")
-
-
-@dataclass(slots=True)
 class PeerQwenASRSTTSettings:
     model: str | None = None
     region: QwenRegion | None = None
@@ -373,7 +364,6 @@ class AppSettings:
     deepgram_stt: DeepgramSTTSettings = field(default_factory=DeepgramSTTSettings)
     qwen_asr_stt: QwenASRSTTSettings = field(default_factory=QwenASRSTTSettings)
     soniox_stt: SonioxSTTSettings = field(default_factory=SonioxSTTSettings)
-    peer_deepgram_stt: PeerDeepgramSTTSettings = field(default_factory=PeerDeepgramSTTSettings)
     peer_qwen_asr_stt: PeerQwenASRSTTSettings = field(default_factory=PeerQwenASRSTTSettings)
     peer_soniox_stt: PeerSonioxSTTSettings = field(default_factory=PeerSonioxSTTSettings)
     gemini: GeminiSettings = field(default_factory=GeminiSettings)
@@ -398,7 +388,6 @@ class AppSettings:
         self.deepgram_stt.validate()
         self.qwen_asr_stt.validate()
         self.soniox_stt.validate()
-        self.peer_deepgram_stt.validate()
         self.peer_qwen_asr_stt.validate()
         self.peer_soniox_stt.validate()
         self.gemini.validate()
@@ -477,9 +466,6 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "endpoint": settings.soniox_stt.endpoint,
             "keepalive_interval_s": settings.soniox_stt.keepalive_interval_s,
             "trailing_silence_ms": settings.soniox_stt.trailing_silence_ms,
-        },
-        "peer_deepgram_stt": {
-            "model": settings.peer_deepgram_stt.model,
         },
         "peer_qwen_asr_stt": {
             "model": settings.peer_qwen_asr_stt.model,
@@ -665,7 +651,6 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     data: dict[str, Any] = copy.deepcopy(raw)
     changed = False
     peer_block_defaults: dict[str, dict[str, Any]] = {
-        "peer_deepgram_stt": {"model": None},
         "peer_qwen_asr_stt": {"model": None, "region": None},
         "peer_soniox_stt": {
             "model": None,
@@ -780,6 +765,10 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             provider_data["peer_stt"] = normalized_peer_provider
             changed = True
 
+    if "peer_deepgram_stt" in data:
+        del data["peer_deepgram_stt"]
+        changed = True
+
     for key, default_block in peer_block_defaults.items():
         if _normalize_peer_block(data, key, default_block):
             changed = True
@@ -848,7 +837,6 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     overlay_calibration_data = data.get("overlay_calibration") or {}
     stt_data = data.get("stt") or {}
     ui_data = data.get("ui") or {}
-    peer_deepgram_data = data.get("peer_deepgram_stt") if isinstance(data.get("peer_deepgram_stt"), dict) else {}
     peer_qwen_raw = data.get("peer_qwen_asr_stt") if isinstance(data.get("peer_qwen_asr_stt"), dict) else {}
     peer_soniox_data = data.get("peer_soniox_stt") if isinstance(data.get("peer_soniox_stt"), dict) else {}
     raw_provider_data = data.get("provider")
@@ -988,9 +976,6 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 data.get("soniox_stt", {}).get("keepalive_interval_s", 10.0)
             ),
             trailing_silence_ms=int(data.get("soniox_stt", {}).get("trailing_silence_ms", 100)),
-        ),
-        peer_deepgram_stt=PeerDeepgramSTTSettings(
-            model=_parse_optional_str(peer_deepgram_data.get("model")),
         ),
         peer_qwen_asr_stt=PeerQwenASRSTTSettings(
             model=_parse_optional_str(peer_qwen_raw.get("model")),

@@ -53,6 +53,8 @@ from puripuly_heart.ui.theme import (
 
 logger = logging.getLogger(__name__)
 
+_CJK_START = 0x3000
+
 
 def _load_secret_value(store, key: str, *, legacy_keys: tuple[str, ...] = ()) -> str:
     """Load secret value with legacy key fallback."""
@@ -66,6 +68,21 @@ def _load_secret_value(store, key: str, *, legacy_keys: tuple[str, ...] = ()) ->
                 store.set(key, legacy_value)
             return legacy_value
     return ""
+
+
+def _weighted_len(text: str) -> int:
+    return sum(2 if ord(char) >= _CJK_START else 1 for char in text)
+
+
+def _setting_action_text_size(text: str) -> int:
+    length = _weighted_len(text or "")
+    if length <= 6:
+        return 22
+    if length <= 10:
+        return 20
+    if length <= 18:
+        return 18
+    return 16
 
 
 class SettingsView(ft.Column):
@@ -121,21 +138,52 @@ class SettingsView(ft.Column):
         )
 
     # --- Clickable Text Builders ---
-    def _build_clickable_text(self, text: str, on_click) -> ft.Container:
+    def _build_clickable_text(
+        self,
+        text: str,
+        on_click,
+        *,
+        size: int = 28,
+        text_align: ft.TextAlign = ft.TextAlign.CENTER,
+        alignment=ft.alignment.center,
+        no_wrap: bool = False,
+        max_lines: int | None = None,
+        overflow: ft.TextOverflow | None = None,
+    ) -> ft.Container:
         """Build a clickable centered text with hover effect."""
         text_control = ft.Text(
             text,
-            size=28,
+            size=size,
             color=COLOR_ON_BACKGROUND,
-            text_align=ft.TextAlign.CENTER,
+            text_align=text_align,
+            no_wrap=no_wrap,
+            max_lines=max_lines,
+            overflow=overflow,
         )
         return ft.Container(
             content=text_control,
-            alignment=ft.alignment.center,
+            alignment=alignment,
             expand=True,
             on_click=on_click,
             on_hover=self._on_text_hover,
         )
+
+    def _build_setting_action_text(self, text: str, on_click) -> ft.Container:
+        return self._build_clickable_text(
+            text,
+            on_click,
+            size=_setting_action_text_size(text),
+            text_align=ft.TextAlign.RIGHT,
+            alignment=ft.alignment.center_right,
+            no_wrap=True,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+
+    def _set_setting_action_text(self, control: ft.Container, text: str) -> None:
+        text_control = control.content
+        text_control.value = text
+        text_control.size = _setting_action_text_size(text)
 
     def _on_text_hover(self, e: ft.ControlEvent) -> None:
         """Handle hover effect on clickable text."""
@@ -466,11 +514,11 @@ class SettingsView(ft.Column):
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
-        self._peer_source_text = self._build_clickable_text(
+        self._peer_source_text = self._build_setting_action_text(
             t("settings.peer_language.follow"),
             self._on_peer_source_click,
         )
-        self._peer_target_text = self._build_clickable_text(
+        self._peer_target_text = self._build_setting_action_text(
             t("settings.peer_language.follow"),
             self._on_peer_target_click,
         )
@@ -484,7 +532,7 @@ class SettingsView(ft.Column):
             size=16,
             color=COLOR_ON_BACKGROUND,
         )
-        self._peer_stt_text = self._build_clickable_text(
+        self._peer_stt_text = self._build_setting_action_text(
             provider_label(STTProviderName.DEEPGRAM.value),
             self._on_peer_stt_click,
         )
@@ -493,16 +541,7 @@ class SettingsView(ft.Column):
             size=16,
             color=COLOR_ON_BACKGROUND,
         )
-        self._peer_deepgram_model_text = self._build_clickable_text(
-            self._inherit_label(),
-            self._on_peer_deepgram_model_click,
-        )
-        self._peer_deepgram_model_label = ft.Text(
-            t("settings.peer_deepgram_model"),
-            size=16,
-            color=COLOR_ON_BACKGROUND,
-        )
-        self._peer_qwen_region_text = self._build_clickable_text(
+        self._peer_qwen_region_text = self._build_setting_action_text(
             self._inherit_label(),
             self._on_peer_qwen_region_click,
         )
@@ -511,7 +550,7 @@ class SettingsView(ft.Column):
             size=16,
             color=COLOR_ON_BACKGROUND,
         )
-        self._peer_qwen_model_text = self._build_clickable_text(
+        self._peer_qwen_model_text = self._build_setting_action_text(
             self._inherit_label(),
             self._on_peer_qwen_model_click,
         )
@@ -520,7 +559,7 @@ class SettingsView(ft.Column):
             size=16,
             color=COLOR_ON_BACKGROUND,
         )
-        self._peer_soniox_model_text = self._build_clickable_text(
+        self._peer_soniox_model_text = self._build_setting_action_text(
             self._inherit_label(),
             self._on_peer_soniox_model_click,
         )
@@ -545,10 +584,6 @@ class SettingsView(ft.Column):
                     self._build_setting_action_row(
                         self._peer_target_label,
                         self._peer_target_text,
-                    ),
-                    self._build_setting_action_row(
-                        self._peer_deepgram_model_label,
-                        self._peer_deepgram_model_text,
                     ),
                     self._build_setting_action_row(
                         self._peer_qwen_region_label,
@@ -984,11 +1019,6 @@ class SettingsView(ft.Column):
     def _inherit_label(self) -> str:
         return t("settings.peer_provider.follow_self")
 
-    def _peer_deepgram_model_label_for(self, settings: AppSettings | None) -> str:
-        if settings is None or settings.peer_deepgram_stt.model is None:
-            return self._inherit_label()
-        return settings.peer_deepgram_stt.model
-
     def _peer_qwen_region_label_for(self, settings: AppSettings | None) -> str:
         if settings is None or settings.peer_qwen_asr_stt.region is None:
             return self._inherit_label()
@@ -1023,13 +1053,22 @@ class SettingsView(ft.Column):
 
         # STT Provider
         self._stt_text.content.value = provider_label(settings.provider.stt.value)
-        self._peer_stt_text.content.value = provider_label(settings.provider.peer_stt.value)
-        self._peer_deepgram_model_text.content.value = self._peer_deepgram_model_label_for(
-            settings
+        self._set_setting_action_text(
+            self._peer_stt_text,
+            provider_label(settings.provider.peer_stt.value),
         )
-        self._peer_qwen_region_text.content.value = self._peer_qwen_region_label_for(settings)
-        self._peer_qwen_model_text.content.value = self._peer_qwen_model_label_for(settings)
-        self._peer_soniox_model_text.content.value = self._peer_soniox_model_label_for(settings)
+        self._set_setting_action_text(
+            self._peer_qwen_region_text,
+            self._peer_qwen_region_label_for(settings),
+        )
+        self._set_setting_action_text(
+            self._peer_qwen_model_text,
+            self._peer_qwen_model_label_for(settings),
+        )
+        self._set_setting_action_text(
+            self._peer_soniox_model_text,
+            self._peer_soniox_model_label_for(settings),
+        )
         self._update_api_visibility()
 
         # LLM Provider
@@ -1062,11 +1101,13 @@ class SettingsView(ft.Column):
             if settings.osc.chatbox_include_source
             else "settings.chatbox_source.off"
         )
-        self._peer_source_text.content.value = self._peer_lang_display(
-            settings.languages.peer_source_language
+        self._set_setting_action_text(
+            self._peer_source_text,
+            self._peer_lang_display(settings.languages.peer_source_language),
         )
-        self._peer_target_text.content.value = self._peer_lang_display(
-            settings.languages.peer_target_language
+        self._set_setting_action_text(
+            self._peer_target_text,
+            self._peer_lang_display(settings.languages.peer_target_language),
         )
 
         # Prompt
@@ -1187,12 +1228,9 @@ class SettingsView(ft.Column):
             return
 
         peer_stt = self._settings.provider.peer_stt
-        show_deepgram = peer_stt == STTProviderName.DEEPGRAM
         show_qwen = peer_stt == STTProviderName.QWEN_ASR
         show_soniox = peer_stt == STTProviderName.SONIOX
 
-        self._peer_deepgram_model_label.visible = show_deepgram
-        self._peer_deepgram_model_text.visible = show_deepgram
         self._peer_qwen_region_label.visible = show_qwen
         self._peer_qwen_region_text.visible = show_qwen
         self._peer_qwen_model_label.visible = show_qwen
@@ -1294,40 +1332,11 @@ class SettingsView(ft.Column):
         if not self._settings:
             return
         self._settings.provider.peer_stt = STTProviderName(value)
-        self._peer_stt_text.content.value = provider_label(value)
+        self._set_setting_action_text(self._peer_stt_text, provider_label(value))
         self._update_api_visibility()
         if self.page:
             self._peer_stt_text.update()
             self._api_keys_column.update()
-        self.has_provider_changes = True
-        self.provider_change_requires_pipeline = True
-        self._emit_settings_changed()
-
-    def _on_peer_deepgram_model_click(self, e) -> None:
-        if not self.page or not self._settings:
-            return
-        options = [
-            OptionItem(value="", label=self._inherit_label()),
-            OptionItem(value="nova-3", label="nova-3"),
-            OptionItem(value="nova-3-general", label="nova-3-general"),
-        ]
-        SettingsModal(
-            self.page,
-            t("settings.peer_deepgram_model"),
-            options,
-            self._on_peer_deepgram_model_selected,
-            show_description=False,
-        ).open(self._settings.peer_deepgram_stt.model or "")
-
-    def _on_peer_deepgram_model_selected(self, value: str) -> None:
-        if not self._settings:
-            return
-        self._settings.peer_deepgram_stt.model = value or None
-        self._peer_deepgram_model_text.content.value = self._peer_deepgram_model_label_for(
-            self._settings
-        )
-        if self.page:
-            self._peer_deepgram_model_text.update()
         self.has_provider_changes = True
         self.provider_change_requires_pipeline = True
         self._emit_settings_changed()
@@ -1352,8 +1361,9 @@ class SettingsView(ft.Column):
         if not self._settings:
             return
         self._settings.peer_qwen_asr_stt.region = QwenRegion(value) if value else None
-        self._peer_qwen_region_text.content.value = self._peer_qwen_region_label_for(
-            self._settings
+        self._set_setting_action_text(
+            self._peer_qwen_region_text,
+            self._peer_qwen_region_label_for(self._settings),
         )
         self._update_api_visibility()
         if self.page:
@@ -1382,7 +1392,10 @@ class SettingsView(ft.Column):
         if not self._settings:
             return
         self._settings.peer_qwen_asr_stt.model = value or None
-        self._peer_qwen_model_text.content.value = self._peer_qwen_model_label_for(self._settings)
+        self._set_setting_action_text(
+            self._peer_qwen_model_text,
+            self._peer_qwen_model_label_for(self._settings),
+        )
         if self.page:
             self._peer_qwen_model_text.update()
         self.has_provider_changes = True
@@ -1408,8 +1421,9 @@ class SettingsView(ft.Column):
         if not self._settings:
             return
         self._settings.peer_soniox_stt.model = value or None
-        self._peer_soniox_model_text.content.value = self._peer_soniox_model_label_for(
-            self._settings
+        self._set_setting_action_text(
+            self._peer_soniox_model_text,
+            self._peer_soniox_model_label_for(self._settings),
         )
         if self.page:
             self._peer_soniox_model_text.update()
@@ -2172,8 +2186,9 @@ class SettingsView(ft.Column):
             self._settings.languages.peer_source_language = ""
         else:
             self._settings.languages.peer_source_language = lang_code
-        self._peer_source_text.content.value = self._peer_lang_display(
-            self._settings.languages.peer_source_language
+        self._set_setting_action_text(
+            self._peer_source_text,
+            self._peer_lang_display(self._settings.languages.peer_source_language),
         )
         if self.page:
             self._peer_source_text.update()
@@ -2200,8 +2215,9 @@ class SettingsView(ft.Column):
             self._settings.languages.peer_target_language = ""
         else:
             self._settings.languages.peer_target_language = lang_code
-        self._peer_target_text.content.value = self._peer_lang_display(
-            self._settings.languages.peer_target_language
+        self._set_setting_action_text(
+            self._peer_target_text,
+            self._peer_lang_display(self._settings.languages.peer_target_language),
         )
         if self.page:
             self._peer_target_text.update()
@@ -2356,7 +2372,6 @@ class SettingsView(ft.Column):
         self._peer_stt_label.value = t("settings.peer_stt_provider")
         self._peer_source_label.value = t("settings.peer_language.source")
         self._peer_target_label.value = t("settings.peer_language.target")
-        self._peer_deepgram_model_label.value = t("settings.peer_deepgram_model")
         self._peer_qwen_region_label.value = t("settings.peer_qwen_region")
         self._peer_qwen_model_label.value = t("settings.peer_qwen_model")
         self._peer_soniox_model_label.value = t("settings.peer_soniox_model")
@@ -2417,7 +2432,10 @@ class SettingsView(ft.Column):
         # Update text controls with current selection labels
         if self._settings:
             self._stt_text.content.value = provider_label(self._settings.provider.stt.value)
-            self._peer_stt_text.content.value = provider_label(self._settings.provider.peer_stt.value)
+            self._set_setting_action_text(
+                self._peer_stt_text,
+                provider_label(self._settings.provider.peer_stt.value),
+            )
             self._llm_text.content.value = self._get_llm_display_label(self._settings)
             self._ui_text.content.value = locale_label(self._settings.ui.locale)
             self._low_latency_text.content.value = t(
@@ -2433,23 +2451,25 @@ class SettingsView(ft.Column):
                 if self._settings.osc.chatbox_include_source
                 else "settings.chatbox_source.off"
             )
-            self._peer_source_text.content.value = self._peer_lang_display(
-                self._settings.languages.peer_source_language
+            self._set_setting_action_text(
+                self._peer_source_text,
+                self._peer_lang_display(self._settings.languages.peer_source_language),
             )
-            self._peer_target_text.content.value = self._peer_lang_display(
-                self._settings.languages.peer_target_language
+            self._set_setting_action_text(
+                self._peer_target_text,
+                self._peer_lang_display(self._settings.languages.peer_target_language),
             )
-            self._peer_deepgram_model_text.content.value = self._peer_deepgram_model_label_for(
-                self._settings
+            self._set_setting_action_text(
+                self._peer_qwen_region_text,
+                self._peer_qwen_region_label_for(self._settings),
             )
-            self._peer_qwen_region_text.content.value = self._peer_qwen_region_label_for(
-                self._settings
+            self._set_setting_action_text(
+                self._peer_qwen_model_text,
+                self._peer_qwen_model_label_for(self._settings),
             )
-            self._peer_qwen_model_text.content.value = self._peer_qwen_model_label_for(
-                self._settings
-            )
-            self._peer_soniox_model_text.content.value = self._peer_soniox_model_label_for(
-                self._settings
+            self._set_setting_action_text(
+                self._peer_soniox_model_text,
+                self._peer_soniox_model_label_for(self._settings),
             )
             self._sync_overlay_controls()
             self._sync_overlay_calibration_controls()

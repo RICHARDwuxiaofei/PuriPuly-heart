@@ -199,6 +199,7 @@ def test_create_stt_backend_local_qwen_uses_shared_model_path_without_secret() -
     assert isinstance(backend, LocalQwenSherpaSTTBackend)
     assert backend.model_dir == default_local_stt_model_dir()
     assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
+    assert backend.stream_label == "self"
 
 
 def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None:
@@ -251,11 +252,10 @@ def test_self_stt_provider_setting_does_not_change_peer_backend_choice() -> None
     assert isinstance(qwen_backend, DeepgramRealtimeSTTBackend)
 
 
-def test_resolve_peer_stt_config_inherits_self_deepgram_model_until_override() -> None:
+def test_resolve_peer_stt_config_always_uses_self_deepgram_model() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.DEEPGRAM
     settings.deepgram_stt.model = "nova-3-general"
-    settings.peer_deepgram_stt.model = None
 
     resolved = resolve_peer_stt_config(settings)
 
@@ -345,6 +345,7 @@ def test_create_peer_stt_backend_uses_peer_local_qwen_provider_and_sample_rate()
     assert isinstance(backend, LocalQwenSherpaSTTBackend)
     assert backend.model_dir == default_local_stt_model_dir()
     assert backend.sample_rate_hz == 44100
+    assert backend.stream_label == "peer"
 
 
 def test_resolve_peer_stt_config_inherits_soniox_endpoint_keepalive_and_trailing_silence_until_override() -> None:

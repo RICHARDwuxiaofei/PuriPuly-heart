@@ -224,7 +224,6 @@
   "settings.peer_language.target": "Target",
   "settings.peer_language.follow": "Same as Self",
   "settings.peer_stt_provider": "Peer STT Provider",
-  "settings.peer_deepgram_model": "Peer Deepgram Model",
   "settings.peer_qwen_region": "Peer Qwen Region",
   "settings.peer_qwen_model": "Peer Qwen Model",
   "settings.peer_soniox_model": "Peer Soniox Model",
