@@ -55,12 +55,15 @@ class PeerTranscriptFinal(_TranscriptEvent):
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SelfActiveUpdate(OverlayEvent):
     text: str
+    occupant_key: str
 
     EVENT_TYPE: ClassVar[str] = "self_active_update"
 
     def __post_init__(self) -> None:
         if self.channel != "self":
             raise ValueError("SelfActiveUpdate requires channel='self'")
+        if not self.occupant_key.strip():
+            raise ValueError("SelfActiveUpdate requires non-empty occupant_key")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -233,6 +236,7 @@ class OverlayEventAdapter:
         self,
         *,
         text: str,
+        occupant_key: str,
         created_at: float | None = None,
     ) -> SelfActiveUpdate:
         return SelfActiveUpdate(
@@ -242,6 +246,7 @@ class OverlayEventAdapter:
                 created_at=created_at,
             ),
             text=text,
+            occupant_key=occupant_key,
         )
 
     def self_active_clear(self, *, created_at: float | None = None) -> SelfActiveClear:

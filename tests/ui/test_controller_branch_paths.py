@@ -1078,9 +1078,26 @@ async def test_overlay_toggle_off_sends_shutdown_event_before_teardown(
     manager.complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
 
+    presenter = controller._overlay_presenter
+    assert presenter is not None
+    await presenter.emit(
+        SelfTranscriptFinal(
+            event_id="self-final",
+            seq=1,
+            utterance_id=uuid4(),
+            channel="self",
+            created_at=10.0,
+            text="discard me",
+            source_language="ko",
+            target_language="en",
+            is_final=True,
+        )
+    )
+
     await controller.set_overlay_enabled(False)
 
     assert bridge.shutdown_calls == 1
+    assert bridge.snapshots[-1].blocks == []
     assert manager.stop_calls == 1
 
 
@@ -1167,11 +1184,55 @@ async def test_explicit_overlay_disable_resets_presenter_scene_for_next_session(
     await controller.set_overlay_enabled(False)
 
     assert controller._overlay_presenter is None
+    assert FakeOverlayBridge.instances[0].snapshots[-1].blocks == []
 
     await controller.set_overlay_enabled(True)
     await _wait_until(lambda: len(FakeOverlayBridge.instances) == 2)
 
     assert FakeOverlayBridge.instances[1].initial_snapshot.blocks == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_overlay_runtime_dependencies_does_not_clear_overlay_scene(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub(peer_stt=object())
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    presenter = controller._overlay_presenter
+    bridge = FakeOverlayBridge.instances[0]
+    assert presenter is not None
+
+    await presenter.emit(
+        SelfTranscriptFinal(
+            event_id="self-final",
+            seq=1,
+            utterance_id=uuid4(),
+            channel="self",
+            created_at=10.0,
+            text="stay visible",
+            source_language="ko",
+            target_language="en",
+            is_final=True,
+        )
+    )
+    saved_snapshot = bridge.snapshots[-1]
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        controller.settings
+    )
+
+    await controller._refresh_overlay_runtime_dependencies()
+
+    assert bridge.snapshots[-1] == saved_snapshot
 
 
 @pytest.mark.asyncio

@@ -1,13 +1,13 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
 use crate::renderer::CaptionLayoutPolicy;
 
-const ENTER_DURATION_SECONDS: f32 = 0.18;
-const EXIT_DURATION_SECONDS: f32 = 0.12;
-const REFLOW_DURATION_SECONDS: f32 = 0.12;
-const BLOCK_SPACING_PX: f32 = 36.0;
+const ACCENT_PULSE_DURATION_SECONDS: f32 = 0.12;
+const SLOT_COUNT: usize = 2;
+const SLOT_TOP_PADDING_PX: f32 = 40.0;
+const SLOT_SPACING_PX: f32 = 36.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OverlayPresentationCalibration {
@@ -49,6 +49,8 @@ pub enum OverlayPresentationBlockVariant {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlayPresentationBlock {
     pub id: String,
+    pub occupant_key: String,
+    pub appearance_seq: u64,
     pub channel: String,
     pub block_variant: OverlayPresentationBlockVariant,
     pub primary_text: String,
@@ -71,207 +73,205 @@ pub struct OverlayPresentationSnapshot {
 pub type OverlayCalibration = OverlayPresentationCalibration;
 pub type OverlayStateSnapshot = OverlayPresentationSnapshot;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverlayStripLifecycle {
-    Entering,
-    Stable,
-    Exiting,
-}
-
 #[derive(Debug, Clone, PartialEq)]
-pub struct OverlayStrip {
+pub struct OverlaySlot {
+    pub slot_index: usize,
+    pub anchor_top_px: f32,
     pub id: String,
+    pub occupant_key: String,
+    pub appearance_seq: u64,
     pub channel: String,
     pub block_variant: OverlayPresentationBlockVariant,
     pub primary_text: String,
     pub secondary_text: String,
     pub secondary_enabled: bool,
-    pub order: usize,
-    pub previous_order: usize,
-    pub lifecycle: OverlayStripLifecycle,
-    pub enter_progress: f32,
-    pub exit_progress: f32,
-    pub reflow_progress: f32,
-    pub previous_top_px: f32,
-    pub current_top_px: f32,
-    pub previous_height_px: f32,
-    pub current_height_px: f32,
+    pub slot_entry_order: u64,
+    pub accent_started_at_s: Option<f32>,
+    pub accent_progress: f32,
 }
 
-impl OverlayStrip {
-    fn new(block: &OverlayPresentationBlock, order: usize, text_scale: f32) -> Self {
-        let height_px = measured_block_height_px(block, text_scale);
+impl OverlaySlot {
+    fn from_block(
+        block: &OverlayPresentationBlock,
+        slot_index: usize,
+        slot_entry_order: u64,
+        pulse_on_assign: bool,
+    ) -> Self {
         Self {
+            slot_index,
+            anchor_top_px: 0.0,
             id: block.id.clone(),
+            occupant_key: block.occupant_key.clone(),
+            appearance_seq: block.appearance_seq,
             channel: block.channel.clone(),
             block_variant: block.block_variant,
             primary_text: block.primary_text.clone(),
             secondary_text: block.secondary_text.clone(),
             secondary_enabled: block.secondary_enabled,
-            order,
-            previous_order: order,
-            lifecycle: OverlayStripLifecycle::Entering,
-            enter_progress: 0.0,
-            exit_progress: 0.0,
-            reflow_progress: 1.0,
-            previous_top_px: 0.0,
-            current_top_px: 0.0,
-            previous_height_px: height_px,
-            current_height_px: height_px,
+            slot_entry_order,
+            accent_started_at_s: pulse_on_assign.then_some(0.0),
+            accent_progress: if pulse_on_assign { 0.0 } else { 1.0 },
         }
     }
 
-    pub fn is_animating(&self) -> bool {
-        self.lifecycle != OverlayStripLifecycle::Stable || self.reflow_progress < 1.0
+    fn update_from_block(&mut self, block: &OverlayPresentationBlock) {
+        self.id = block.id.clone();
+        self.occupant_key = block.occupant_key.clone();
+        self.appearance_seq = block.appearance_seq;
+        self.channel = block.channel.clone();
+        self.block_variant = block.block_variant;
+        self.primary_text = block.primary_text.clone();
+        self.secondary_text = block.secondary_text.clone();
+        self.secondary_enabled = block.secondary_enabled;
+    }
+
+    pub fn accent_opacity(&self) -> f32 {
+        if self.accent_progress >= 1.0 {
+            0.0
+        } else {
+            1.0 - self.accent_progress.clamp(0.0, 1.0)
+        }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OverlayScene {
-    stable_finalized: Vec<OverlayStrip>,
-    exiting_finalized: Vec<OverlayStrip>,
-    active_self: Option<OverlayStrip>,
-    strips: Vec<OverlayStrip>,
+    slots: [Option<OverlaySlot>; SLOT_COUNT],
+    next_slot_entry_order: u64,
+}
+
+impl Default for OverlayScene {
+    fn default() -> Self {
+        Self {
+            slots: Default::default(),
+            next_slot_entry_order: 0,
+        }
+    }
 }
 
 impl OverlayScene {
-    pub fn strips(&self) -> &[OverlayStrip] {
-        &self.strips
+    pub fn slots(&self) -> &[Option<OverlaySlot>; SLOT_COUNT] {
+        &self.slots
     }
 
-    fn apply_snapshot(&mut self, blocks: &[OverlayPresentationBlock], text_scale: f32) -> bool {
-        let previous = self.strips.clone();
-        let mut existing_by_id: HashMap<String, OverlayStrip> = previous
-            .iter()
-            .cloned()
-            .map(|strip| (strip.id.clone(), strip))
-            .collect();
-        let finalized_blocks = select_stable_finalized_blocks(blocks);
-        let mut next_stable = finalized_blocks
-            .iter()
-            .enumerate()
-            .map(|(order, block)| build_live_strip(&mut existing_by_id, block, order, text_scale))
-            .collect::<Vec<_>>();
-        let mut next_top_px = 0.0;
-        for (order, strip) in next_stable.iter_mut().enumerate() {
-            assign_live_layout(strip, order, next_top_px);
-            next_top_px += strip.current_height_px + BLOCK_SPACING_PX;
-        }
+    pub fn slots_mut(&mut self) -> &mut [Option<OverlaySlot>; SLOT_COUNT] {
+        &mut self.slots
+    }
 
-        let next_active = blocks
-            .iter()
-            .rev()
-            .find(|block| block.block_variant == OverlayPresentationBlockVariant::ActiveSelf)
-            .map(|block| {
-                let order = next_stable.len();
-                let mut strip = build_live_strip(&mut existing_by_id, block, order, text_scale);
-                assign_live_layout(&mut strip, order, next_top_px);
-                strip
-            });
-        if let Some(active_strip) = &next_active {
-            next_top_px += active_strip.current_height_px + BLOCK_SPACING_PX;
-        }
-
-        let live_ids = next_stable
-            .iter()
-            .map(|strip| strip.id.as_str())
-            .chain(next_active.iter().map(|strip| strip.id.as_str()))
-            .collect::<Vec<_>>();
-        let removed_stable = self
-            .stable_finalized
-            .iter()
-            .filter(|strip| !live_ids.contains(&strip.id.as_str()))
-            .cloned()
-            .max_by_key(|strip| strip.order);
-        let exiting_candidate = removed_stable.or_else(|| {
-            self.exiting_finalized
-                .iter()
-                .find(|strip| strip.exit_progress < 1.0 && !live_ids.contains(&strip.id.as_str()))
-                .cloned()
+    fn apply_snapshot(
+        &mut self,
+        blocks: &[OverlayPresentationBlock],
+        text_scale: f32,
+        pulse_new_slots: bool,
+    ) -> bool {
+        let previous = self.slots.clone();
+        let mut sorted = blocks.to_vec();
+        sorted.sort_by(|left, right| {
+            left.appearance_seq
+                .cmp(&right.appearance_seq)
+                .then_with(|| left.occupant_key.cmp(&right.occupant_key))
         });
-        let next_exiting = exiting_candidate.map(|strip| {
-            let order = next_stable.len() + usize::from(next_active.is_some());
-            build_exiting_strip(strip, order, next_top_px)
-        });
+        debug_assert!(
+            sorted.len() <= SLOT_COUNT,
+            "presenter must cap visible blocks to two"
+        );
 
-        self.stable_finalized = next_stable;
-        self.active_self = next_active;
-        self.exiting_finalized = next_exiting.into_iter().collect();
-        self.rebuild_strips();
+        let mut assigned = self.update_existing_slots(&sorted);
+        self.clear_missing_slots(&sorted);
+        self.fill_empty_slots(&sorted, &mut assigned, pulse_new_slots);
+        self.recompute_slot_anchors(text_scale);
 
-        let changed = previous != self.strips;
-        changed
+        previous != self.slots
+    }
+
+    fn update_existing_slots(&mut self, blocks: &[OverlayPresentationBlock]) -> HashSet<String> {
+        let mut assigned = HashSet::new();
+        for block in blocks {
+            if let Some(slot) = self
+                .slots
+                .iter_mut()
+                .flatten()
+                .find(|slot| slot.occupant_key == block.occupant_key)
+            {
+                slot.update_from_block(block);
+                assigned.insert(block.occupant_key.clone());
+            }
+        }
+        assigned
+    }
+
+    fn clear_missing_slots(&mut self, blocks: &[OverlayPresentationBlock]) {
+        let snapshot_keys = blocks
+            .iter()
+            .map(|block| block.occupant_key.as_str())
+            .collect::<HashSet<_>>();
+        for slot in &mut self.slots {
+            if slot
+                .as_ref()
+                .is_some_and(|existing| !snapshot_keys.contains(existing.occupant_key.as_str()))
+            {
+                *slot = None;
+            }
+        }
+    }
+
+    fn fill_empty_slots(
+        &mut self,
+        blocks: &[OverlayPresentationBlock],
+        assigned: &mut HashSet<String>,
+        pulse_new_slots: bool,
+    ) {
+        for block in blocks {
+            if assigned.contains(&block.occupant_key) {
+                continue;
+            }
+            let Some((slot_index, slot)) = self
+                .slots
+                .iter_mut()
+                .enumerate()
+                .find(|(_, slot)| slot.is_none())
+            else {
+                break;
+            };
+            *slot = Some(OverlaySlot::from_block(
+                block,
+                slot_index,
+                self.next_slot_entry_order,
+                pulse_new_slots,
+            ));
+            self.next_slot_entry_order += 1;
+            assigned.insert(block.occupant_key.clone());
+        }
+    }
+
+    fn recompute_slot_anchors(&mut self, text_scale: f32) {
+        let slot_height_px = CaptionLayoutPolicy::default().stable_block_height_px(true, text_scale);
+        for (slot_index, slot) in self.slots.iter_mut().enumerate() {
+            if let Some(slot) = slot {
+                slot.slot_index = slot_index;
+                slot.anchor_top_px =
+                    SLOT_TOP_PADDING_PX + slot_index as f32 * (slot_height_px + SLOT_SPACING_PX);
+            }
+        }
     }
 
     fn sample_animations(&mut self, delta_seconds: f32, _sample_rate_hz: u32) -> bool {
-        let previous = self.strips.clone();
-
-        for strip in &mut self.strips {
-            match strip.lifecycle {
-                OverlayStripLifecycle::Entering => {
-                    strip.enter_progress =
-                        (strip.enter_progress + delta_seconds / ENTER_DURATION_SECONDS).min(1.0);
-                    if strip.enter_progress >= 1.0 {
-                        strip.lifecycle = OverlayStripLifecycle::Stable;
-                    }
-                }
-                OverlayStripLifecycle::Stable => {}
-                OverlayStripLifecycle::Exiting => {
-                    strip.exit_progress =
-                        (strip.exit_progress + delta_seconds / EXIT_DURATION_SECONDS).min(1.0);
-                }
-            }
-
-            if strip.reflow_progress < 1.0 {
-                strip.reflow_progress =
-                    (strip.reflow_progress + delta_seconds / REFLOW_DURATION_SECONDS).min(1.0);
-                if strip.reflow_progress >= 1.0 {
-                    strip.previous_order = strip.order;
-                    strip.previous_top_px = strip.current_top_px;
-                    strip.previous_height_px = strip.current_height_px;
-                }
+        let previous = self.slots.clone();
+        for slot in self.slots.iter_mut().flatten() {
+            if slot.accent_progress < 1.0 {
+                slot.accent_progress = (slot.accent_progress
+                    + delta_seconds / ACCENT_PULSE_DURATION_SECONDS)
+                    .min(1.0);
             }
         }
-
-        self.strips.retain(|strip| {
-            !(strip.lifecycle == OverlayStripLifecycle::Exiting && strip.exit_progress >= 1.0)
-        });
-        self.stable_finalized = self
-            .strips
-            .iter()
-            .filter(|strip| {
-                strip.block_variant == OverlayPresentationBlockVariant::Finalized
-                    && strip.lifecycle != OverlayStripLifecycle::Exiting
-            })
-            .cloned()
-            .collect();
-        self.active_self = self
-            .strips
-            .iter()
-            .find(|strip| strip.block_variant == OverlayPresentationBlockVariant::ActiveSelf)
-            .cloned();
-        self.exiting_finalized = self
-            .strips
-            .iter()
-            .filter(|strip| strip.lifecycle == OverlayStripLifecycle::Exiting)
-            .cloned()
-            .collect();
-
-        previous != self.strips
+        previous != self.slots
     }
 
     pub fn has_active_animation(&self) -> bool {
-        self.strips.iter().any(OverlayStrip::is_animating)
-    }
-
-    fn rebuild_strips(&mut self) {
-        self.strips = self
-            .stable_finalized
+        self.slots
             .iter()
-            .cloned()
-            .chain(self.active_self.iter().cloned())
-            .chain(self.exiting_finalized.iter().cloned())
-            .collect();
+            .flatten()
+            .any(|slot| slot.accent_progress < 1.0)
     }
 }
 
@@ -282,17 +282,23 @@ pub struct OverlayState {
 }
 
 impl OverlayState {
+    pub fn seed_snapshot(&mut self, snapshot: &OverlayPresentationSnapshot) -> bool {
+        let scene_changed = self
+            .scene
+            .apply_snapshot(&snapshot.blocks, snapshot.calibration.text_scale, false);
+        let visual_changed = self.snapshot.calibration != snapshot.calibration || scene_changed;
+        self.snapshot = snapshot.clone();
+        visual_changed
+    }
+
     pub fn apply_snapshot(&mut self, snapshot: &OverlayPresentationSnapshot) -> bool {
-        if snapshot.revision < self.snapshot.revision {
-            return false;
-        }
-        if snapshot.revision == self.snapshot.revision {
+        if snapshot.revision <= self.snapshot.revision {
             return false;
         }
 
         let scene_changed = self
             .scene
-            .apply_snapshot(&snapshot.blocks, snapshot.calibration.text_scale);
+            .apply_snapshot(&snapshot.blocks, snapshot.calibration.text_scale, true);
         let visual_changed = self.snapshot.calibration != snapshot.calibration || scene_changed;
         self.snapshot = snapshot.clone();
         visual_changed
@@ -343,125 +349,23 @@ fn default_secondary_enabled() -> bool {
     true
 }
 
-fn select_stable_finalized_blocks(
-    blocks: &[OverlayPresentationBlock],
-) -> Vec<&OverlayPresentationBlock> {
-    let finalized = blocks
-        .iter()
-        .filter(|block| block.block_variant == OverlayPresentationBlockVariant::Finalized)
-        .collect::<Vec<_>>();
-    let keep_start = finalized.len().saturating_sub(2);
-    finalized.into_iter().skip(keep_start).collect()
-}
-
-fn build_live_strip(
-    existing_by_id: &mut HashMap<String, OverlayStrip>,
-    block: &OverlayPresentationBlock,
-    order: usize,
-    text_scale: f32,
-) -> OverlayStrip {
-    let height_px = measured_block_height_px(block, text_scale);
-    let existing = existing_by_id.remove(&block.id);
-    let is_new = existing.is_none();
-    let mut strip = existing.unwrap_or_else(|| OverlayStrip::new(block, order, text_scale));
-    let previous_order = strip.order;
-    let previous_top_px = strip.current_top_px;
-    let previous_height_px = strip.current_height_px;
-    let was_entering =
-        strip.lifecycle == OverlayStripLifecycle::Entering && strip.enter_progress < 1.0;
-
-    strip.id = block.id.clone();
-    strip.channel = block.channel.clone();
-    strip.block_variant = block.block_variant;
-    strip.primary_text = block.primary_text.clone();
-    strip.secondary_text = block.secondary_text.clone();
-    strip.secondary_enabled = block.secondary_enabled;
-    strip.order = order;
-    strip.previous_order = previous_order;
-    strip.previous_top_px = previous_top_px;
-    strip.current_top_px = previous_top_px;
-    strip.previous_height_px = previous_height_px;
-    strip.current_height_px = height_px;
-    strip.exit_progress = 0.0;
-    if is_new {
-        strip.lifecycle = OverlayStripLifecycle::Entering;
-        strip.enter_progress = 0.0;
-        strip.previous_order = order;
-        strip.previous_top_px = 0.0;
-        strip.previous_height_px = height_px;
-    } else if !was_entering {
-        strip.lifecycle = OverlayStripLifecycle::Stable;
-    }
-    strip
-}
-
-fn assign_live_layout(strip: &mut OverlayStrip, order: usize, top_px: f32) {
-    let top_changed = (strip.previous_top_px - top_px).abs() > f32::EPSILON;
-    let height_changed = (strip.previous_height_px - strip.current_height_px).abs() > f32::EPSILON;
-
-    strip.order = order;
-    strip.current_top_px = top_px;
-    if strip.lifecycle == OverlayStripLifecycle::Entering && strip.enter_progress == 0.0 {
-        strip.previous_order = order;
-        strip.previous_top_px = top_px;
-        strip.previous_height_px = strip.current_height_px;
-        strip.reflow_progress = 1.0;
-        return;
-    }
-
-    if top_changed || height_changed || strip.previous_order != order {
-        strip.reflow_progress = 0.0;
-        return;
-    }
-
-    strip.previous_order = order;
-    strip.previous_top_px = top_px;
-    strip.previous_height_px = strip.current_height_px;
-    strip.reflow_progress = 1.0;
-}
-
-fn build_exiting_strip(mut strip: OverlayStrip, order: usize, top_px: f32) -> OverlayStrip {
-    if strip.lifecycle != OverlayStripLifecycle::Exiting {
-        strip.lifecycle = OverlayStripLifecycle::Exiting;
-        strip.exit_progress = 0.0;
-    }
-    strip.order = order;
-    strip.previous_order = order;
-    strip.current_top_px = top_px;
-    strip.previous_height_px = strip.current_height_px;
-    strip.reflow_progress = 1.0;
-    strip
-}
-
-fn measured_block_height_px(block: &OverlayPresentationBlock, text_scale: f32) -> f32 {
-    CaptionLayoutPolicy::default().measured_block_height_px(
-        block.secondary_enabled,
-        text_scale,
-        1.0,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
-        OverlayPresentationSnapshot, OverlayState, OverlayStripLifecycle,
+        OverlayPresentationSnapshot, OverlayState,
     };
 
-    fn block(
-        id: &str,
-        channel: &str,
-        primary_text: &str,
-        secondary_text: &str,
-        secondary_enabled: bool,
-    ) -> OverlayPresentationBlock {
+    fn block(id: &str) -> OverlayPresentationBlock {
         OverlayPresentationBlock {
             id: id.to_string(),
-            channel: channel.to_string(),
+            occupant_key: id.to_string(),
+            appearance_seq: 1,
+            channel: "self".to_string(),
             block_variant: OverlayPresentationBlockVariant::Finalized,
-            primary_text: primary_text.to_string(),
-            secondary_text: secondary_text.to_string(),
-            secondary_enabled,
+            primary_text: "hello".to_string(),
+            secondary_text: String::new(),
+            secondary_enabled: true,
         }
     }
 
@@ -472,17 +376,12 @@ mod tests {
         assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
             revision: 1,
             calibration: OverlayPresentationCalibration::default(),
-            blocks: vec![block("self:1", "self", "hello", "안녕", true)],
+            blocks: vec![block("self:1")],
         }));
 
         assert_eq!(state.snapshot().revision, 1);
         assert_eq!(state.blocks().len(), 1);
-        assert_eq!(state.blocks()[0].primary_text, "hello");
-        assert_eq!(state.blocks()[0].secondary_text, "안녕");
-        assert_eq!(
-            state.scene().strips()[0].lifecycle,
-            OverlayStripLifecycle::Entering
-        );
+        assert_eq!(state.scene().slots()[0].as_ref().unwrap().id, "self:1");
     }
 
     #[test]

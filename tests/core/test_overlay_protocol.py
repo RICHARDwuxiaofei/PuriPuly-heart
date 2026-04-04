@@ -7,6 +7,7 @@ from puripuly_heart.core.overlay.protocol import (
     OverlayPresentationCalibration,
     OverlayPresentationSnapshot,
 )
+from puripuly_heart.core.overlay.sink import OverlayEventAdapter
 
 
 def test_overlay_presentation_snapshot_round_trips_blocks_and_calibration() -> None:
@@ -23,6 +24,8 @@ def test_overlay_presentation_snapshot_round_trips_blocks_and_calibration() -> N
         blocks=[
             OverlayPresentationBlock(
                 id="self:1",
+                occupant_key="self:1",
+                appearance_seq=1,
                 channel="self",
                 block_variant="finalized",
                 primary_text="hello",
@@ -31,6 +34,8 @@ def test_overlay_presentation_snapshot_round_trips_blocks_and_calibration() -> N
             ),
             OverlayPresentationBlock(
                 id="self:active",
+                occupant_key="self:active",
+                appearance_seq=2,
                 channel="self",
                 block_variant="active_self",
                 primary_text="hola",
@@ -48,6 +53,8 @@ def test_overlay_presentation_snapshot_round_trips_blocks_and_calibration() -> N
     assert restored.blocks == [
         OverlayPresentationBlock(
             id="self:1",
+            occupant_key="self:1",
+            appearance_seq=1,
             channel="self",
             block_variant="finalized",
             primary_text="hello",
@@ -56,6 +63,8 @@ def test_overlay_presentation_snapshot_round_trips_blocks_and_calibration() -> N
         ),
         OverlayPresentationBlock(
             id="self:active",
+            occupant_key="self:active",
+            appearance_seq=2,
             channel="self",
             block_variant="active_self",
             primary_text="hola",
@@ -63,6 +72,38 @@ def test_overlay_presentation_snapshot_round_trips_blocks_and_calibration() -> N
             secondary_enabled=False,
         ),
     ]
+
+
+def test_overlay_presentation_block_round_trips_occupant_metadata() -> None:
+    block = OverlayPresentationBlock(
+        id="self:1234",
+        occupant_key="self:1234",
+        appearance_seq=7,
+        channel="self",
+        block_variant="finalized",
+        primary_text="hello",
+        secondary_text="안녕",
+        secondary_enabled=True,
+    )
+
+    encoded = block.to_dict()
+
+    assert encoded["occupant_key"] == "self:1234"
+    assert encoded["appearance_seq"] == 7
+    assert OverlayPresentationBlock.from_dict(encoded) == block
+
+
+def test_overlay_event_adapter_self_active_update_carries_occupant_key() -> None:
+    adapter = OverlayEventAdapter()
+
+    event = adapter.self_active_update(
+        text="hello live",
+        occupant_key="self:merge-1",
+        created_at=11.0,
+    )
+
+    assert event.type == "self_active_update"
+    assert event.occupant_key == "self:merge-1"
 
 
 def test_overlay_presentation_snapshot_rejects_non_list_blocks() -> None:
@@ -123,6 +164,8 @@ def test_overlay_presentation_block_rejects_invalid_field_types(
 ) -> None:
     payload = {
         "id": "self:1",
+        "occupant_key": "self:1",
+        "appearance_seq": 1,
         "channel": "self",
         "block_variant": "finalized",
         "primary_text": "hello",

@@ -41,6 +41,8 @@ class OverlayPresentationCalibration:
 @dataclass(frozen=True, slots=True)
 class OverlayPresentationBlock:
     id: str
+    occupant_key: str
+    appearance_seq: int
     channel: ChannelId
     block_variant: BlockVariant
     primary_text: str
@@ -50,6 +52,8 @@ class OverlayPresentationBlock:
     def to_dict(self) -> dict[str, object]:
         return {
             "id": self.id,
+            "occupant_key": self.occupant_key,
+            "appearance_seq": self.appearance_seq,
             "channel": self.channel,
             "block_variant": self.block_variant,
             "primary_text": self.primary_text,
@@ -71,8 +75,14 @@ class OverlayPresentationBlock:
             )
         if block_variant == "active_self" and channel != "self":
             raise ValueError("active_self blocks require channel='self'")
+        occupant_key = _require_string_field(data, "occupant_key").strip()
+        if not occupant_key:
+            raise ValueError("occupant_key must be a non-empty string")
+        appearance_seq = _require_non_negative_int_field(data, "appearance_seq")
         return cls(
             id=_require_string_field(data, "id"),
+            occupant_key=occupant_key,
+            appearance_seq=appearance_seq,
             channel=channel,
             block_variant=block_variant,
             primary_text=_require_string_field(data, "primary_text"),
@@ -132,4 +142,13 @@ def _require_bool_field(data: dict[str, object], key: str) -> bool:
     value = data.get(key)
     if not isinstance(value, bool):
         raise ValueError(f"{key} must be a bool")
+    return value
+
+
+def _require_non_negative_int_field(data: dict[str, object], key: str) -> int:
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{key} must be an int")
+    if value < 0:
+        raise ValueError(f"{key} must be non-negative")
     return value

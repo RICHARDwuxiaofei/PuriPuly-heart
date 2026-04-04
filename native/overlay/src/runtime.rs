@@ -19,15 +19,12 @@ use crate::openvr::{
 use crate::renderer::{
     CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionPresentation, CaptionRenderer,
 };
-use crate::state::{
-    OverlayPresentationSnapshot, OverlayState, OverlayStrip, OverlayStripLifecycle,
-};
+use crate::state::{OverlayPresentationSnapshot, OverlayState};
 
 const EMPTY_OVERLAY_HIDE_DELAY: Duration = Duration::from_millis(500);
 const FALLBACK_REFRESH_RATE_HZ: f32 = 90.0;
 const ANIMATION_SAMPLE_RATE_72_HZ: u32 = 36;
 const ANIMATION_SAMPLE_RATE_DEFAULT_HZ: u32 = 45;
-const ENTER_SLIDE_OFFSET_PX: f32 = 24.0;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StartupError {
@@ -130,7 +127,10 @@ impl OverlayRuntime {
             last_animation_tick: None,
             refresh_rate_hz: None,
         };
-        runtime.apply_snapshot(snapshot);
+        if runtime.state.seed_snapshot(&snapshot) {
+            runtime.redraw_requested = true;
+        }
+        runtime.sync_animation_schedule(Instant::now());
         runtime
     }
 
@@ -632,8 +632,9 @@ impl OverlayRuntime {
     pub fn caption_blocks(&self) -> Vec<CaptionBlock> {
         self.state
             .scene()
-            .strips()
+            .slots()
             .iter()
+            .flatten()
             .map(|strip| {
                 let channel = if strip.channel == "peer" {
                     CaptionChannel::PeerChannel
@@ -648,52 +649,16 @@ impl OverlayRuntime {
                         CaptionBlockVariant::Finalized
                     }
                 };
-                let (opacity, offset_y_px, height_scale) = strip_visual_state(strip);
                 CaptionBlock::new(strip.id.clone(), strip.primary_text.clone())
                     .with_channel(channel)
                     .with_variant(variant)
                     .with_secondary_text(strip.secondary_text.clone(), strip.secondary_enabled)
-                    .with_visual_state(opacity, offset_y_px, height_scale)
+                    .with_visual_state(1.0, 0.0, 1.0)
+                    .with_slot(strip.slot_index, strip.anchor_top_px)
+                    .with_accent_opacity(strip.accent_opacity())
             })
             .collect()
     }
-}
-
-fn strip_visual_state(strip: &OverlayStrip) -> (f32, f32, f32) {
-    let reflow_progress = strip.reflow_progress.clamp(0.0, 1.0);
-    let interpolated_top_px = match strip.lifecycle {
-        OverlayStripLifecycle::Exiting => strip.previous_top_px,
-        _ => lerp(strip.previous_top_px, strip.current_top_px, reflow_progress),
-    };
-    let reflow_offset = interpolated_top_px - strip.current_top_px;
-    let reflow_height_scale = if strip.current_height_px > f32::EPSILON {
-        let interpolated_height_px = lerp(
-            strip.previous_height_px,
-            strip.current_height_px,
-            reflow_progress,
-        );
-        (interpolated_height_px / strip.current_height_px).clamp(0.35, 4.0)
-    } else {
-        1.0
-    };
-
-    match strip.lifecycle {
-        OverlayStripLifecycle::Entering => (
-            strip.enter_progress.clamp(0.0, 1.0),
-            ENTER_SLIDE_OFFSET_PX * (1.0 - strip.enter_progress.clamp(0.0, 1.0)) + reflow_offset,
-            reflow_height_scale,
-        ),
-        OverlayStripLifecycle::Stable => (1.0, reflow_offset, reflow_height_scale),
-        OverlayStripLifecycle::Exiting => (
-            (1.0 - strip.exit_progress).clamp(0.0, 1.0),
-            reflow_offset,
-            (reflow_height_scale * (1.0 - strip.exit_progress * 0.45)).clamp(0.35, 4.0),
-        ),
-    }
-}
-
-fn lerp(start: f32, end: f32, progress: f32) -> f32 {
-    start + (end - start) * progress.clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -716,11 +681,32 @@ mod tests {
     ) -> OverlayPresentationBlock {
         OverlayPresentationBlock {
             id: id.to_string(),
+            occupant_key: id.to_string(),
+            appearance_seq: 1,
             channel: channel.to_string(),
             block_variant: OverlayPresentationBlockVariant::Finalized,
             primary_text: primary_text.to_string(),
             secondary_text: secondary_text.to_string(),
             secondary_enabled,
+        }
+    }
+
+    fn slot_block(
+        id: &str,
+        occupant_key: &str,
+        appearance_seq: u64,
+        channel: &str,
+        primary_text: &str,
+    ) -> OverlayPresentationBlock {
+        OverlayPresentationBlock {
+            id: id.to_string(),
+            occupant_key: occupant_key.to_string(),
+            appearance_seq,
+            channel: channel.to_string(),
+            block_variant: OverlayPresentationBlockVariant::Finalized,
+            primary_text: primary_text.to_string(),
+            secondary_text: String::new(),
+            secondary_enabled: true,
         }
     }
 
@@ -747,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_snapshot_replaces_snapshot_blocks_and_calibration_but_keeps_exiting_scene_blocks() {
+    fn apply_snapshot_replaces_snapshot_blocks_and_calibration_without_retaining_removed_rows() {
         let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
             revision: 1,
             calibration: OverlayPresentationCalibration::default(),
@@ -781,20 +767,20 @@ mod tests {
                 .iter()
                 .map(|block| (block.id.as_str(), block.primary_text.as_str()))
                 .collect::<Vec<_>>(),
-            vec![("peer:2", "peer two"), ("self:1", "self one")]
+            vec![("peer:2", "peer two")]
         );
         assert_eq!(runtime.state().snapshot().revision, 2);
         assert_eq!(runtime.state().snapshot().calibration.distance, 1.5);
     }
 
     #[test]
-    fn runtime_uses_snapshot_blocks_without_internal_reordering() {
+    fn runtime_orders_snapshot_blocks_by_appearance_seq() {
         let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
             revision: 4,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![
-                block("self:older", "self", "older", "", true),
-                block("peer:newer", "peer", "newer", "", true),
+                slot_block("peer:newer", "peer:newer", 2, "peer", "newer"),
+                slot_block("self:older", "self:older", 1, "self", "older"),
             ],
         });
 

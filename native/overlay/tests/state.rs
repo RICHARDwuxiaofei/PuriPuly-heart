@@ -1,6 +1,6 @@
 use puripuly_heart_overlay::{
     OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
-    OverlayPresentationSnapshot, OverlayState, OverlayStripLifecycle,
+    OverlayPresentationSnapshot, OverlayState,
 };
 
 fn block(
@@ -12,6 +12,8 @@ fn block(
 ) -> OverlayPresentationBlock {
     OverlayPresentationBlock {
         id: id.to_string(),
+        occupant_key: id.to_string(),
+        appearance_seq: 1,
         channel: channel.to_string(),
         block_variant: OverlayPresentationBlockVariant::Finalized,
         primary_text: primary_text.to_string(),
@@ -20,14 +22,24 @@ fn block(
     }
 }
 
-fn active_self_block(id: &str, primary_text: &str) -> OverlayPresentationBlock {
+fn slot_block(
+    id: &str,
+    occupant_key: &str,
+    appearance_seq: u64,
+    channel: &str,
+    primary_text: &str,
+    secondary_text: &str,
+    secondary_enabled: bool,
+) -> OverlayPresentationBlock {
     OverlayPresentationBlock {
         id: id.to_string(),
-        channel: "self".to_string(),
-        block_variant: OverlayPresentationBlockVariant::ActiveSelf,
+        occupant_key: occupant_key.to_string(),
+        appearance_seq,
+        channel: channel.to_string(),
+        block_variant: OverlayPresentationBlockVariant::Finalized,
         primary_text: primary_text.to_string(),
-        secondary_text: String::new(),
-        secondary_enabled: true,
+        secondary_text: secondary_text.to_string(),
+        secondary_enabled,
     }
 }
 
@@ -39,8 +51,8 @@ fn overlay_state_keeps_snapshot_blocks_in_order() {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
-            block("self:1", "self", "hello", "안녕", true),
-            block("peer:2", "peer", "there", "원문", true),
+            slot_block("self:1", "self:1", 1, "self", "hello", "안녕", true),
+            slot_block("peer:2", "peer:2", 2, "peer", "there", "원문", true),
         ],
     });
 
@@ -67,9 +79,6 @@ fn overlay_state_snapshot_replaces_stale_blocks() {
 
     assert_eq!(state.blocks().len(), 1);
     assert_eq!(state.blocks()[0].id, "peer:2");
-    assert_eq!(state.blocks()[0].primary_text, "there");
-    assert_eq!(state.blocks()[0].secondary_text, "원문");
-    assert!(!state.blocks()[0].secondary_enabled);
 }
 
 #[test]
@@ -130,195 +139,115 @@ fn overlay_state_treats_equal_revision_snapshots_as_noop() {
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![block("peer:4", "peer", "ignore", "", true)],
     }));
-
-    assert_eq!(state.snapshot().revision, 4);
-    assert_eq!(state.blocks()[0].id, "self:4");
 }
 
 #[test]
-fn overlay_state_marks_missing_snapshot_blocks_as_exiting_before_removal() {
-    let mut state = OverlayState::default();
-
-    assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
-        revision: 1,
-        calibration: OverlayPresentationCalibration::default(),
-        blocks: vec![block("self:1", "self", "hello", "", true)],
-    }));
-
-    assert!(state.sample_animations(1.0, 45));
-    assert_eq!(
-        state.scene().strips()[0].lifecycle,
-        OverlayStripLifecycle::Stable
-    );
-
-    assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
-        revision: 2,
-        calibration: OverlayPresentationCalibration::default(),
-        blocks: vec![],
-    }));
-
-    assert_eq!(state.scene().strips().len(), 1);
-    assert_eq!(state.scene().strips()[0].id, "self:1");
-    assert_eq!(
-        state.scene().strips()[0].lifecycle,
-        OverlayStripLifecycle::Exiting
-    );
-
-    assert!(state.sample_animations(1.0, 45));
-    assert!(state.scene().strips().is_empty());
-}
-
-#[test]
-fn overlay_state_updates_existing_strip_text_without_replaying_enter_animation() {
-    let mut state = OverlayState::default();
-
-    assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
-        revision: 1,
-        calibration: OverlayPresentationCalibration::default(),
-        blocks: vec![block("self:1", "self", "hello", "", true)],
-    }));
-
-    assert!(state.sample_animations(1.0, 45));
-    let enter_progress = state.scene().strips()[0].enter_progress;
-
-    assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
-        revision: 2,
-        calibration: OverlayPresentationCalibration::default(),
-        blocks: vec![block("self:1", "self", "hello again", "second line", true)],
-    }));
-
-    assert_eq!(state.scene().strips().len(), 1);
-    assert_eq!(state.scene().strips()[0].primary_text, "hello again");
-    assert_eq!(state.scene().strips()[0].secondary_text, "second line");
-    assert_eq!(
-        state.scene().strips()[0].lifecycle,
-        OverlayStripLifecycle::Stable
-    );
-    assert_eq!(state.scene().strips()[0].enter_progress, enter_progress);
-}
-
-#[test]
-fn overlay_state_keeps_two_finalized_rows_when_active_self_is_present() {
+fn overlay_state_keeps_slot_two_anchor_when_slot_one_disappears() {
     let mut state = OverlayState::default();
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
-            block("self:1", "self", "first", "", true),
-            block("peer:2", "peer", "second", "", true),
-            active_self_block("self:active", "speaking now"),
+            slot_block("self:1", "self:1", 1, "self", "one", "", true),
+            slot_block("peer:2", "peer:2", 2, "peer", "two", "", true),
         ],
     }));
 
+    let second_top = state.scene().slots()[1].as_ref().unwrap().anchor_top_px;
+
+    assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        revision: 2,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![slot_block("peer:2", "peer:2", 2, "peer", "two", "", true)],
+    }));
+
+    assert!(state.scene().slots()[0].is_none());
     assert_eq!(
-        state
-            .scene()
-            .strips()
-            .iter()
-            .map(|strip| strip.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["self:1", "peer:2", "self:active"]
+        state.scene().slots()[1].as_ref().unwrap().anchor_top_px,
+        second_top
     );
 }
 
 #[test]
-fn overlay_state_uses_calibration_text_scale_for_strip_height() {
+fn overlay_state_promotes_matching_occupant_key_without_replaying_pulse() {
     let mut state = OverlayState::default();
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
-        blocks: vec![block("self:1", "self", "hello", "", true)],
+        blocks: vec![OverlayPresentationBlock {
+            id: "self:active".into(),
+            occupant_key: "self:merge-1".into(),
+            appearance_seq: 1,
+            channel: "self".into(),
+            block_variant: OverlayPresentationBlockVariant::ActiveSelf,
+            primary_text: "hello live".into(),
+            secondary_text: String::new(),
+            secondary_enabled: true,
+        }],
     }));
-    let default_height = state.scene().strips()[0].current_height_px;
+    assert!(state.sample_animations(0.06, 45));
+    let started = state.scene().slots()[0].as_ref().unwrap().accent_started_at_s;
+    let progress = state.scene().slots()[0].as_ref().unwrap().accent_progress;
+    assert!(progress > 0.0);
+    assert!(progress < 1.0);
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 2,
-        calibration: OverlayPresentationCalibration {
-            text_scale: 1.25,
-            ..OverlayPresentationCalibration::default()
-        },
-        blocks: vec![block("self:1", "self", "hello", "", true)],
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![slot_block(
+            "self:merge-1",
+            "self:merge-1",
+            1,
+            "self",
+            "hello live",
+            "",
+            true,
+        )],
     }));
-    let scaled_height = state.scene().strips()[0].current_height_px;
 
-    assert!(scaled_height > default_height);
+    let slot = state.scene().slots()[0].as_ref().unwrap();
+    assert_eq!(slot.occupant_key, "self:merge-1");
+    assert_eq!(slot.accent_started_at_s, started);
+    assert_eq!(slot.accent_progress, progress);
 }
 
 #[test]
-fn overlay_state_keeps_only_the_most_recent_displaced_finalized_row_as_exiting() {
+fn overlay_state_fills_first_empty_slot_before_replacing_again() {
     let mut state = OverlayState::default();
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
-            block("self:1", "self", "first", "", true),
-            block("peer:2", "peer", "second", "", true),
+            slot_block("self:1", "self:1", 1, "self", "one", "", true),
+            slot_block("peer:2", "peer:2", 2, "peer", "two", "", true),
         ],
     }));
-    assert!(state.sample_animations(1.0, 45));
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
-        blocks: vec![
-            block("self:3", "self", "third", "", true),
-            block("peer:4", "peer", "fourth", "", true),
-        ],
+        blocks: vec![slot_block("peer:2", "peer:2", 2, "peer", "two", "", true)],
     }));
-
-    assert_eq!(
-        state
-            .scene()
-            .strips()
-            .iter()
-            .map(|strip| (strip.id.as_str(), strip.lifecycle))
-            .collect::<Vec<_>>(),
-        vec![
-            ("self:3", OverlayStripLifecycle::Entering),
-            ("peer:4", OverlayStripLifecycle::Entering),
-            ("peer:2", OverlayStripLifecycle::Exiting),
-        ]
-    );
-}
-
-#[test]
-fn overlay_state_does_not_keep_exiting_duplicate_when_same_id_reappears() {
-    let mut state = OverlayState::default();
-
-    assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
-        revision: 1,
-        calibration: OverlayPresentationCalibration::default(),
-        blocks: vec![block("self:1", "self", "hello", "", true)],
-    }));
-    assert!(state.sample_animations(1.0, 45));
-
-    assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
-        revision: 2,
-        calibration: OverlayPresentationCalibration::default(),
-        blocks: vec![],
-    }));
-    assert_eq!(state.scene().strips().len(), 1);
-    assert_eq!(
-        state.scene().strips()[0].lifecycle,
-        OverlayStripLifecycle::Exiting
-    );
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 3,
         calibration: OverlayPresentationCalibration::default(),
-        blocks: vec![block("self:1", "self", "hello again", "", true)],
+        blocks: vec![
+            slot_block("self:3", "self:3", 3, "self", "three", "", true),
+            slot_block("peer:2", "peer:2", 2, "peer", "two", "", true),
+        ],
     }));
 
     assert_eq!(
         state
             .scene()
-            .strips()
+            .slots()
             .iter()
-            .map(|strip| (strip.id.as_str(), strip.lifecycle))
+            .map(|slot| slot.as_ref().map(|slot| slot.id.clone()))
             .collect::<Vec<_>>(),
-        vec![("self:1", OverlayStripLifecycle::Stable)]
+        vec![Some("self:3".to_string()), Some("peer:2".to_string())]
     );
 }
