@@ -238,7 +238,7 @@ class TranslatorApp:
         # Sync verification result with dashboard needs_key flags (UI update on user click)
         if provider in ("deepgram", "soniox", "qwen_asr"):
             self.view_dashboard.set_stt_needs_key(not success, update_ui=False)
-        elif provider in ("google", "alibaba_beijing", "alibaba_singapore"):
+        elif provider in ("google", "openrouter", "alibaba_beijing", "alibaba_singapore"):
             self.view_dashboard.set_translation_needs_key(not success, update_ui=False)
 
         return success, msg
@@ -250,6 +250,7 @@ class TranslatorApp:
             "deepgram_api_key": "deepgram",
             "soniox_api_key": "soniox",
             "google_api_key": "google",
+            "openrouter_api_key": "openrouter",
             "alibaba_api_key": "alibaba_beijing",  # Use beijing as default
             "alibaba_api_key_beijing": "alibaba_beijing",
             "alibaba_api_key_singapore": "alibaba_singapore",
@@ -262,7 +263,7 @@ class TranslatorApp:
             # Update dashboard needs_key flag
             if provider in ("deepgram", "soniox"):
                 self.view_dashboard.set_stt_needs_key(True, update_ui=False)
-            elif provider in ("google", "alibaba_beijing", "alibaba_singapore"):
+            elif provider in ("google", "openrouter", "alibaba_beijing", "alibaba_singapore"):
                 self.view_dashboard.set_translation_needs_key(True, update_ui=False)
 
     def _show_snackbar(self, message: str, bgcolor, duration: int = 4000) -> None:

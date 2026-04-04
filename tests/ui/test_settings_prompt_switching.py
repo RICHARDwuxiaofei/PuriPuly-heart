@@ -11,6 +11,7 @@ from puripuly_heart.config.settings import (
     AppSettings,
     GeminiLLMModel,
     LLMProviderName,
+    OpenRouterLLMModel,
     QwenLLMModel,
     STTProviderName,
 )
@@ -64,6 +65,11 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
     assert view._prompt_editor.value == load_prompt_for_provider("gemini")
     assert settings.provider.llm == LLMProviderName.GEMINI
 
+    view._on_llm_selected(OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value)
+
+    assert view._prompt_editor.value == load_prompt_for_provider("openrouter")
+    assert settings.provider.llm == LLMProviderName.OPENROUTER
+
 
 def test_settings_view_shows_qwen_model_label(monkeypatch) -> None:
     settings = AppSettings()
@@ -81,6 +87,7 @@ def test_settings_view_preserves_provider_specific_prompts(monkeypatch) -> None:
     settings.provider.llm = LLMProviderName.GEMINI
     settings.system_prompts = {
         "gemini": "GEMINI CUSTOM",
+        "openrouter": "OPENROUTER CUSTOM",
         "qwen": "QWEN CUSTOM",
     }
     settings.system_prompt = "GEMINI CUSTOM"
@@ -100,6 +107,10 @@ def test_settings_view_preserves_provider_specific_prompts(monkeypatch) -> None:
     view._on_llm_selected(LLMProviderName.GEMINI.value)
     assert view._prompt_editor.value == "GEMINI CUSTOM"
     assert settings.system_prompt == "GEMINI CUSTOM"
+
+    view._on_llm_selected(OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value)
+    assert view._prompt_editor.value == "OPENROUTER CUSTOM"
+    assert settings.system_prompt == "OPENROUTER CUSTOM"
 
 
 def test_settings_view_llm_modal_orders_qwen_plus_before_flash(monkeypatch) -> None:
@@ -128,6 +139,7 @@ def test_settings_view_llm_modal_orders_qwen_plus_before_flash(monkeypatch) -> N
     assert values == [
         GeminiLLMModel.GEMINI_3_FLASH.value,
         GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
+        OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
         QwenLLMModel.QWEN_35_PLUS.value,
         QwenLLMModel.QWEN_35_FLASH.value,
     ]

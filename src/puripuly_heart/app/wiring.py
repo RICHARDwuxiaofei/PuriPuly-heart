@@ -23,6 +23,7 @@ from puripuly_heart.core.storage.secrets import (
 from puripuly_heart.core.stt.backend import STTBackend
 from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
+from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 
@@ -140,6 +141,16 @@ def create_llm_provider(settings: AppSettings, *, secrets: SecretStore) -> LLMPr
         base: LLMProvider = GeminiLLMProvider(
             api_key=api_key,
             model=settings.gemini.llm_model.value,
+        )
+    elif settings.provider.llm == LLMProviderName.OPENROUTER:
+        api_key = require_secret(
+            secrets,
+            key="openrouter_api_key",
+            env_var="OPENROUTER_API_KEY",
+        )
+        base = OpenRouterLLMProvider(
+            api_key=api_key,
+            model=settings.openrouter.llm_model.value,
         )
     elif settings.provider.llm == LLMProviderName.QWEN:
         from puripuly_heart.config.settings import QwenRegion

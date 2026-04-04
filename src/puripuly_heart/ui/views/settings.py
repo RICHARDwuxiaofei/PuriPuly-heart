@@ -15,6 +15,7 @@ from puripuly_heart.config.settings import (
     AppSettings,
     GeminiLLMModel,
     LLMProviderName,
+    OpenRouterLLMModel,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
@@ -345,6 +346,16 @@ class SettingsView(ft.Column):
                 self.show_snackbar(msg, bg) if self.show_snackbar else None
             ),
         )
+        self._openrouter_key = ApiKeyField(
+            "settings.openrouter_api_key",
+            "openrouter_api_key",
+            "openrouter",
+            on_verify=self._verify_key,
+            on_save=self._on_secret_change,
+            show_snackbar=lambda msg, bg: (
+                self.show_snackbar(msg, bg) if self.show_snackbar else None
+            ),
+        )
         self._alibaba_key_beijing = ApiKeyField(
             "settings.alibaba_api_key_beijing",
             "alibaba_api_key_beijing",
@@ -372,6 +383,7 @@ class SettingsView(ft.Column):
                 self._deepgram_key,
                 self._soniox_key,
                 self._google_key,
+                self._openrouter_key,
                 self._alibaba_key_beijing,
                 self._alibaba_key_singapore,
             ],
@@ -961,6 +973,8 @@ class SettingsView(ft.Column):
     def _get_llm_modal_value(self, settings: AppSettings) -> str:
         if settings.provider.llm == LLMProviderName.GEMINI:
             return settings.gemini.llm_model.value
+        if settings.provider.llm == LLMProviderName.OPENROUTER:
+            return settings.openrouter.llm_model.value
         return settings.qwen.llm_model.value
 
     def _get_llm_display_label(self, settings: AppSettings) -> str:
@@ -968,13 +982,19 @@ class SettingsView(ft.Column):
             if settings.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE:
                 return t("provider.gemini31_flash_lite")
             return t("provider.gemini3_flash")
+        if settings.provider.llm == LLMProviderName.OPENROUTER:
+            return t("provider.gemma4_26b_a4b_it")
         if settings.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS:
             return t("provider.qwen35_plus")
         return t("provider.qwen35_flash")
 
     def _active_prompt_key(self) -> str:
-        if not self._settings or self._settings.provider.llm == LLMProviderName.GEMINI:
+        if not self._settings:
             return "gemini"
+        if self._settings.provider.llm == LLMProviderName.GEMINI:
+            return "gemini"
+        if self._settings.provider.llm == LLMProviderName.OPENROUTER:
+            return "openrouter"
         return "qwen"
 
     def _current_source_language(self) -> str:
@@ -1111,7 +1131,7 @@ class SettingsView(ft.Column):
         )
 
         # Prompt
-        provider_name = "gemini" if settings.provider.llm == LLMProviderName.GEMINI else "qwen"
+        provider_name = self._active_prompt_key()
         self._prompt_editor.set_provider(provider_name)
         stored_prompt = settings.system_prompts.get(provider_name, "").strip()
         if stored_prompt:
@@ -1147,6 +1167,7 @@ class SettingsView(ft.Column):
             return
 
         self._google_key.value = store.get("google_api_key") or ""
+        self._openrouter_key.value = store.get("openrouter_api_key") or ""
         self._deepgram_key.value = store.get("deepgram_api_key") or ""
         self._soniox_key.value = store.get("soniox_api_key") or ""
 
@@ -1173,6 +1194,7 @@ class SettingsView(ft.Column):
             (self._deepgram_key, self._deepgram_key.value, verified.deepgram),
             (self._soniox_key, self._soniox_key.value, verified.soniox),
             (self._google_key, self._google_key.value, verified.google),
+            (self._openrouter_key, self._openrouter_key.value, verified.openrouter),
             (self._alibaba_key_beijing, self._alibaba_key_beijing.value, verified.alibaba_beijing),
             (
                 self._alibaba_key_singapore,
@@ -1211,6 +1233,7 @@ class SettingsView(ft.Column):
         self._soniox_key.visible = STTProviderName.SONIOX in active_stt_providers
 
         self._google_key.visible = llm == LLMProviderName.GEMINI
+        self._openrouter_key.visible = llm == LLMProviderName.OPENROUTER
 
         qwen_regions: set[QwenRegion] = set()
         if stt == STTProviderName.QWEN_ASR or llm == LLMProviderName.QWEN:
@@ -1447,6 +1470,11 @@ class SettingsView(ft.Column):
                 description=t("provider.gemini31_flash_lite.description", default=""),
             ),
             OptionItem(
+                value=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
+                label=t("provider.gemma4_26b_a4b_it"),
+                description=t("provider.gemma4_26b_a4b_it.description", default=""),
+            ),
+            OptionItem(
                 value=QwenLLMModel.QWEN_35_PLUS.value,
                 label=t("provider.qwen35_plus"),
                 description=t("provider.qwen35_plus.description", default=""),
@@ -1477,27 +1505,43 @@ class SettingsView(ft.Column):
             return
         old_provider = self._settings.provider.llm
         old_gemini_model = self._settings.gemini.llm_model
+        old_openrouter_model = self._settings.openrouter.llm_model
         old_qwen_model = self._settings.qwen.llm_model
 
         if value == LLMProviderName.GEMINI.value:
             provider = LLMProviderName.GEMINI
             gemini_model = GeminiLLMModel.GEMINI_3_FLASH
+            openrouter_model = old_openrouter_model
             qwen_model = old_qwen_model
         elif value == GeminiLLMModel.GEMINI_3_FLASH.value:
             provider = LLMProviderName.GEMINI
             gemini_model = GeminiLLMModel.GEMINI_3_FLASH
+            openrouter_model = old_openrouter_model
             qwen_model = old_qwen_model
         elif value == GeminiLLMModel.GEMINI_31_FLASH_LITE.value:
             provider = LLMProviderName.GEMINI
             gemini_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
+            openrouter_model = old_openrouter_model
+            qwen_model = old_qwen_model
+        elif value == LLMProviderName.OPENROUTER.value:
+            provider = LLMProviderName.OPENROUTER
+            gemini_model = old_gemini_model
+            openrouter_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+            qwen_model = old_qwen_model
+        elif value == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value:
+            provider = LLMProviderName.OPENROUTER
+            gemini_model = old_gemini_model
+            openrouter_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
             qwen_model = old_qwen_model
         elif value == QwenLLMModel.QWEN_35_PLUS.value:
             provider = LLMProviderName.QWEN
             gemini_model = old_gemini_model
+            openrouter_model = old_openrouter_model
             qwen_model = QwenLLMModel.QWEN_35_PLUS
         else:
             provider = LLMProviderName.QWEN
             gemini_model = old_gemini_model
+            openrouter_model = old_openrouter_model
             qwen_model = QwenLLMModel.QWEN_35_FLASH
 
         changes: list[str] = []
@@ -1505,6 +1549,10 @@ class SettingsView(ft.Column):
             changes.append(f"provider={old_provider.value}->{provider.value}")
         if old_gemini_model != gemini_model:
             changes.append(f"gemini_model={old_gemini_model.value}->{gemini_model.value}")
+        if old_openrouter_model != openrouter_model:
+            changes.append(
+                f"openrouter_model={old_openrouter_model.value}->{openrouter_model.value}"
+            )
         if old_qwen_model != qwen_model:
             changes.append(f"qwen_model={old_qwen_model.value}->{qwen_model.value}")
         if changes:
@@ -1513,6 +1561,8 @@ class SettingsView(ft.Column):
         self._settings.provider.llm = provider
         if provider == LLMProviderName.QWEN:
             self._settings.qwen.llm_model = qwen_model
+        elif provider == LLMProviderName.OPENROUTER:
+            self._settings.openrouter.llm_model = openrouter_model
         else:
             self._settings.gemini.llm_model = gemini_model
         llm_changed = (
@@ -1524,6 +1574,10 @@ class SettingsView(ft.Column):
                 provider == LLMProviderName.GEMINI
                 and old_gemini_model != self._settings.gemini.llm_model
             )
+            or (
+                provider == LLMProviderName.OPENROUTER
+                and old_openrouter_model != self._settings.openrouter.llm_model
+            )
         )
         self._update_api_visibility()
         self.has_provider_changes = llm_changed
@@ -1533,7 +1587,7 @@ class SettingsView(ft.Column):
 
         # Update prompt if provider changed
         if old_provider != provider:
-            provider_name = "gemini" if provider == LLMProviderName.GEMINI else "qwen"
+            provider_name = self._active_prompt_key()
             self._prompt_editor.set_provider(provider_name)
             next_prompt = self._settings.system_prompts.get(provider_name, "").strip()
             if next_prompt:
@@ -2484,6 +2538,7 @@ class SettingsView(ft.Column):
         self._deepgram_key.apply_locale()
         self._soniox_key.apply_locale()
         self._google_key.apply_locale()
+        self._openrouter_key.apply_locale()
         self._alibaba_key_beijing.apply_locale()
         self._alibaba_key_singapore.apply_locale()
         self._audio_settings.apply_locale()

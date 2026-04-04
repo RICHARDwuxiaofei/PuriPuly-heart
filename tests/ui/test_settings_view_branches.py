@@ -13,6 +13,7 @@ from puripuly_heart.config.settings import (
     AppSettings,
     GeminiLLMModel,
     LLMProviderName,
+    OpenRouterLLMModel,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
@@ -197,6 +198,20 @@ def test_update_api_visibility_tracks_provider_and_region(monkeypatch: pytest.Mo
     assert view._alibaba_key_singapore.visible is True
 
 
+def test_update_api_visibility_shows_openrouter_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+
+    view, _ = _make_settings_view(monkeypatch)
+    view._settings = settings
+    view._update_api_visibility()
+
+    assert view._google_key.visible is False
+    assert view._alibaba_key_beijing.visible is False
+    assert view._alibaba_key_singapore.visible is False
+    assert view._openrouter_key.visible is True
+
+
 def test_update_api_visibility_hides_secret_fields_for_local_qwen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -286,6 +301,28 @@ def test_on_llm_selected_updates_model_and_prompt_state(monkeypatch: pytest.Monk
 
     view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
     assert view.has_provider_changes is False
+
+
+def test_on_llm_selected_updates_openrouter_model_and_prompt_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.system_prompts = {
+        "gemini": "G",
+        "openrouter": "O",
+        "qwen": "Q",
+    }
+    settings.system_prompt = "G"
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view._on_llm_selected(OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value)
+
+    assert settings.provider.llm == LLMProviderName.OPENROUTER
+    assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    assert view._prompt_editor.value == "O"
+    assert settings.system_prompt == "O"
 
 
 def test_on_llm_selected_updates_gemini_model(monkeypatch: pytest.MonkeyPatch) -> None:

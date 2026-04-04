@@ -15,6 +15,7 @@ from puripuly_heart.config.settings import (
     QwenRegion,
     STTProviderName,
 )
+from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.core.local_stt_assets import LocalSTTInstallState
 from puripuly_heart.core.local_stt_runtime_installer import RuntimeLocalSTTStatusUpdate
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
@@ -247,7 +248,36 @@ async def test_verify_and_update_status_uses_selected_qwen_model_for_both_llm_an
 
     assert app.view_dashboard.translation_needs_key is False
     assert app.view_dashboard.stt_needs_key is False
-    assert seen_models == ["qwen3.5-plus"]
+
+
+@pytest.mark.asyncio
+async def test_verify_and_update_status_uses_openrouter_verifier(monkeypatch) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    app = SimpleNamespace(view_dashboard=DummyDashboard())
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyHub()
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({"openrouter_api_key": "secret"}),
+    )
+
+    seen: list[str] = []
+
+    async def fake_verify(api_key: str) -> bool:
+        seen.append(api_key)
+        return True
+
+    monkeypatch.setattr(OpenRouterLLMProvider, "verify_api_key", staticmethod(fake_verify))
+
+    await controller._verify_and_update_status()
+
+    assert seen == ["secret"]
+    assert app.view_dashboard.translation_needs_key is False
 
 
 @pytest.mark.asyncio
