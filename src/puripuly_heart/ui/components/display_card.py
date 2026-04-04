@@ -5,12 +5,9 @@ import flet as ft
 from puripuly_heart.ui.components.glow import create_glow_stack
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import (
-    COLOR_ERROR,
     COLOR_NEUTRAL,
     COLOR_NEUTRAL_DARK,
-    COLOR_PRIMARY,
     COLOR_SECONDARY,
-    COLOR_SUCCESS,
     COLOR_SURFACE,
     COLOR_WARNING,
     get_card_shadow,
@@ -59,6 +56,7 @@ class DisplayCard(ft.Container):
         self._primary_font_family: str | None = None
         self._secondary_font_family: str | None = None
         self._notice_value: str | None = None
+        self._notice_tone: str | None = None
 
         self._display_primary = ft.Text(
             self._primary_value,
@@ -207,21 +205,10 @@ class DisplayCard(ft.Container):
 
     def set_notice(self, text: str | None, tone: str | None = None) -> None:
         self._notice_value = text or None
-        if self._notice_value:
-            tone_colors = {
-                "info": COLOR_PRIMARY,
-                "success": COLOR_SUCCESS,
-                "error": COLOR_ERROR,
-                "warning": COLOR_WARNING,
-            }
-            self._notice_text.value = self._notice_value
-            self._notice_chip.bgcolor = tone_colors.get(tone or "warning", COLOR_WARNING)
-            self._notice_chip.visible = True
-        else:
-            self._notice_text.value = ""
-            self._notice_chip.visible = False
-        if self._notice_chip.page is not None:
-            self._notice_chip.update()
+        self._notice_tone = tone if self._notice_value else None
+        self._notice_text.value = ""
+        self._notice_chip.visible = False
+        self._sync_display()
 
     def clear_input(self):
         """Clear the input field."""
@@ -263,12 +250,12 @@ class DisplayCard(ft.Container):
             self._sync_display()
 
     def _sync_display(self, *, is_error: bool = False) -> None:
-        primary_text = self._primary_value or ""
-        secondary_text = self._secondary_value or ""
+        primary_text = self._notice_value or self._primary_value or ""
+        secondary_text = "" if self._notice_value else self._secondary_value or ""
         max_len = max(_weighted_len(primary_text), _weighted_len(secondary_text))
         new_size = _display_size_for_length(max_len)
 
-        text_color = COLOR_NEUTRAL_DARK if not is_error else COLOR_NEUTRAL_DARK
+        text_color = COLOR_NEUTRAL_DARK
 
         self._display_primary.value = primary_text
         self._display_primary.size = new_size

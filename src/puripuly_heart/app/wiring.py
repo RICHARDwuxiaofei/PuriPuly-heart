@@ -236,11 +236,13 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
 
 def create_peer_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBackend:
     api_key = require_secret(secrets, key="deepgram_api_key", env_var="DEEPGRAM_API_KEY")
-    effective_terms = get_effective_custom_terms(settings, settings.languages.source_language)
+    peer_source_language = settings.languages.effective_peer_source
+    effective_terms = get_effective_custom_terms(settings, peer_source_language)
     return _create_deepgram_stt_backend(
         settings=settings,
         api_key=api_key,
         keyterms=effective_terms,
+        source_language=peer_source_language,
         stream_label="peer",
     )
 
@@ -250,15 +252,17 @@ def _create_deepgram_stt_backend(
     settings: AppSettings,
     api_key: str,
     keyterms: tuple[str, ...] | list[str],
+    source_language: str | None = None,
     stream_label: str | None = None,
 ) -> STTBackend:
     from puripuly_heart.core.language import get_deepgram_language
     from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
 
+    source_language = source_language or settings.languages.source_language
     return DeepgramRealtimeSTTBackend(
         api_key=api_key,
         model=settings.deepgram_stt.model,
-        language=get_deepgram_language(settings.languages.source_language),
+        language=get_deepgram_language(source_language),
         sample_rate_hz=settings.audio.internal_sample_rate_hz,
         keyterms=keyterms,
         stream_label=stream_label,

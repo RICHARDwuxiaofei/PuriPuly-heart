@@ -97,3 +97,25 @@ def test_display_card_input_font_locale_and_sync_paths(monkeypatch: pytest.Monke
 
     card.clear_input()
     assert card._input_field.value == ""
+
+
+def test_display_card_notice_uses_primary_display_slot_and_restores_after_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    card = DisplayCard(on_submit=lambda _text: None)
+    monkeypatch.setattr(type(card._display_primary), "update", lambda self: None)
+    monkeypatch.setattr(type(card._display_secondary), "update", lambda self: None)
+
+    card.set_status("other", font_family="status-font")
+    original_color = card._display_primary.color
+    card.set_notice("STT files are missing", tone="warning")
+
+    assert card._display_primary.value == "STT files are missing"
+    assert card._display_secondary.visible is False
+    assert card._display_primary.color == original_color
+
+    card.set_notice(None, None)
+
+    assert card._display_primary.value == display_card_module.t("display.disconnected")
+    assert card._display_primary.font_family == "status-font"
+    assert card._display_primary.color == original_color

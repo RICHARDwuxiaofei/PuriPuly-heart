@@ -218,6 +218,23 @@ def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None
     assert backend.stream_label == "peer"
 
 
+def test_create_peer_stt_backend_uses_effective_peer_source_language_and_terms() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(stt=STTProviderName.SONIOX),
+        deepgram_stt=DeepgramSTTSettings(model="nova-3"),
+    )
+    settings.languages.source_language = "ko"
+    settings.languages.peer_source_language = "zh-CN"
+    secrets = InMemorySecretStore()
+    secrets.set("deepgram_api_key", "peer-k")
+
+    backend = create_peer_stt_backend(settings, secrets=secrets)
+
+    assert isinstance(backend, DeepgramRealtimeSTTBackend)
+    assert backend.language == get_deepgram_language(settings.languages.effective_peer_source)
+    assert list(backend.keyterms) == ["airi", "shinano"]
+
+
 def test_self_stt_provider_setting_does_not_change_peer_backend_choice() -> None:
     secrets = InMemorySecretStore()
     secrets.set("deepgram_api_key", "peer-k")

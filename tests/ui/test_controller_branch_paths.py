@@ -697,6 +697,18 @@ def test_peer_stt_runtime_signature_includes_peer_desktop_settings() -> None:
     assert baseline != changed
 
 
+def test_peer_stt_runtime_signature_includes_peer_source_language() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+
+    baseline = controller._build_peer_stt_runtime_signature(settings)
+
+    settings.languages.peer_source_language = "zh-CN"
+    changed = controller._build_peer_stt_runtime_signature(settings)
+
+    assert baseline != changed
+
+
 @pytest.mark.asyncio
 async def test_apply_settings_updates_peer_translation_flags_on_hub(
     monkeypatch: pytest.MonkeyPatch,

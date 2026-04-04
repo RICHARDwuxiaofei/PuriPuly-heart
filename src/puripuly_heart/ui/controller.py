@@ -326,7 +326,7 @@ class GuiController:
     ) -> tuple[bool, tuple[str, ...]]:
         return (
             settings.stt.custom_vocabulary_enabled,
-            tuple(get_effective_custom_terms(settings, settings.languages.source_language)),
+            tuple(get_effective_custom_terms(settings, settings.languages.effective_peer_source)),
         )
 
     def _build_self_stt_runtime_signature(self, settings: AppSettings) -> tuple[object, ...]:
@@ -357,7 +357,7 @@ class GuiController:
             settings
         )
         return (
-            settings.languages.source_language,
+            settings.languages.effective_peer_source,
             settings.audio.internal_sample_rate_hz,
             settings.deepgram_stt.model,
             settings.desktop_audio.output_device,
@@ -921,7 +921,9 @@ class GuiController:
             dash.set_stt_enabled(False)
             dash.set_stt_needs_key(False)
         self._sync_local_stt_notice()
-        self._show_local_stt_download_prompt(status)
+        if self._local_stt_download_task is None or self._local_stt_download_task.done():
+            self._local_stt_download_cancel_event = threading.Event()
+            self._local_stt_download_task = asyncio.create_task(self._run_local_stt_download())
         return False
 
     async def _ensure_local_stt_ready(self) -> bool:

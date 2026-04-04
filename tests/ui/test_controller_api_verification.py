@@ -15,10 +15,9 @@ from puripuly_heart.config.settings import (
     QwenRegion,
     STTProviderName,
 )
-from puripuly_heart.core.local_stt_assets import LocalSTTInstallState, LocalSTTModelMissingError
+from puripuly_heart.core.local_stt_assets import LocalSTTInstallState
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
-from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaLoadError
 from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
 from puripuly_heart.ui import controller as controller_module
 from puripuly_heart.ui.controller import GuiController
@@ -267,34 +266,36 @@ async def test_verify_and_update_status_treats_local_qwen_stt_as_keyless(
 
 
 @pytest.mark.asyncio
-async def test_set_stt_enabled_refuses_local_qwen_when_model_is_missing() -> None:
+async def test_set_stt_enabled_starts_local_qwen_runtime_install_when_model_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings = AppSettings()
     settings.provider.stt = STTProviderName.LOCAL_QWEN
-    actions: list[dict[str, object]] = []
+    install_calls: list[str] = []
+    release = SimpleNamespace(done=False)
     app = SimpleNamespace(
         view_dashboard=DummyDashboard(),
-        show_action_snackbar=lambda message, *, action_label, on_action, **kwargs: actions.append(
-            {
-                "message": message,
-                "action_label": action_label,
-                "on_action": on_action,
-                "kwargs": kwargs,
-            }
-        ),
+        _show_snackbar=lambda *_args, **_kwargs: None,
     )
-
-    class FailingStt:
-        async def warmup(self) -> None:
-            raise LocalSTTModelMissingError("missing")
 
     class DummyWarmupHub:
         def __init__(self) -> None:
-            self.stt = FailingStt()
+            self.stt = object()
             self.peer_stt = None
             self.promo_calls = 0
 
         def mark_promo_eligible(self) -> None:
             self.promo_calls += 1
+
+    async def fake_install(**_kwargs):
+        install_calls.append("install")
+        while not release.done:
+            await asyncio.sleep(0)
+        return object()
+
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", lambda self: asyncio.sleep(0))
 
     controller = GuiController(
         page=SimpleNamespace(),
@@ -306,44 +307,48 @@ async def test_set_stt_enabled_refuses_local_qwen_when_model_is_missing() -> Non
     controller._local_stt_install_state = LocalSTTInstallState(status="missing")
 
     await controller.set_stt_enabled(True)
+    await asyncio.sleep(0)
 
     assert controller._stt_desired is False
     assert app.view_dashboard.stt_enabled is False
-    assert app.view_dashboard.local_stt_notice_status == "missing"
-    assert len(actions) == 1
-    assert actions[0]["message"] == controller_module.t("local_stt.download_prompt_missing")
-    assert actions[0]["action_label"] == controller_module.t("local_stt.download_action")
+    assert app.view_dashboard.local_stt_notice_status == "downloading"
+    assert install_calls == ["install"]
+
+    release.done = True
+    await controller._local_stt_download_task
 
 
 @pytest.mark.asyncio
-async def test_set_stt_enabled_refuses_local_qwen_when_model_load_fails() -> None:
+async def test_set_stt_enabled_starts_local_qwen_runtime_install_when_model_load_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings = AppSettings()
     settings.provider.stt = STTProviderName.LOCAL_QWEN
-    actions: list[dict[str, object]] = []
+    install_calls: list[str] = []
+    release = SimpleNamespace(done=False)
     app = SimpleNamespace(
         view_dashboard=DummyDashboard(),
-        show_action_snackbar=lambda message, *, action_label, on_action, **kwargs: actions.append(
-            {
-                "message": message,
-                "action_label": action_label,
-                "on_action": on_action,
-                "kwargs": kwargs,
-            }
-        ),
+        _show_snackbar=lambda *_args, **_kwargs: None,
     )
-
-    class FailingStt:
-        async def warmup(self) -> None:
-            raise LocalQwenSherpaLoadError("load failed")
 
     class DummyWarmupHub:
         def __init__(self) -> None:
-            self.stt = FailingStt()
+            self.stt = object()
             self.peer_stt = None
             self.promo_calls = 0
 
         def mark_promo_eligible(self) -> None:
             self.promo_calls += 1
+
+    async def fake_install(**_kwargs):
+        install_calls.append("install")
+        while not release.done:
+            await asyncio.sleep(0)
+        return object()
+
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", lambda self: asyncio.sleep(0))
 
     controller = GuiController(
         page=SimpleNamespace(),
@@ -355,31 +360,39 @@ async def test_set_stt_enabled_refuses_local_qwen_when_model_load_fails() -> Non
     controller._local_stt_install_state = LocalSTTInstallState(status="invalid")
 
     await controller.set_stt_enabled(True)
+    await asyncio.sleep(0)
 
     assert controller._stt_desired is False
     assert app.view_dashboard.stt_enabled is False
-    assert app.view_dashboard.local_stt_notice_status == "invalid"
-    assert len(actions) == 1
-    assert actions[0]["message"] == controller_module.t("local_stt.download_prompt_invalid")
-    assert actions[0]["action_label"] == controller_module.t("local_stt.download_action")
+    assert app.view_dashboard.local_stt_notice_status == "downloading"
+    assert install_calls == ["install"]
+
+    release.done = True
+    await controller._local_stt_download_task
 
 
 @pytest.mark.asyncio
-async def test_set_stt_enabled_preserves_download_failed_notice_and_prompt() -> None:
+async def test_set_stt_enabled_retries_runtime_install_after_download_failed_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings = AppSettings()
     settings.provider.stt = STTProviderName.LOCAL_QWEN
-    actions: list[dict[str, object]] = []
+    install_calls: list[str] = []
+    release = SimpleNamespace(done=False)
     app = SimpleNamespace(
         view_dashboard=DummyDashboard(),
-        show_action_snackbar=lambda message, *, action_label, on_action, **kwargs: actions.append(
-            {
-                "message": message,
-                "action_label": action_label,
-                "on_action": on_action,
-                "kwargs": kwargs,
-            }
-        ),
+        _show_snackbar=lambda *_args, **_kwargs: None,
     )
+
+    async def fake_install(**_kwargs):
+        install_calls.append("install")
+        while not release.done:
+            await asyncio.sleep(0)
+        return object()
+
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", lambda self: asyncio.sleep(0))
 
     controller = GuiController(
         page=SimpleNamespace(),
@@ -391,32 +404,30 @@ async def test_set_stt_enabled_preserves_download_failed_notice_and_prompt() -> 
     controller._local_stt_runtime_status = "download_failed"
 
     await controller.set_stt_enabled(True)
+    await asyncio.sleep(0)
 
     assert controller._stt_desired is False
     assert app.view_dashboard.stt_enabled is False
-    assert app.view_dashboard.local_stt_notice_status == "download_failed"
-    assert len(actions) == 1
-    assert actions[0]["message"] == controller_module.t("local_stt.download_prompt_failed")
-    assert actions[0]["action_label"] == controller_module.t("local_stt.download_action")
+    assert app.view_dashboard.local_stt_notice_status == "downloading"
+    assert install_calls == ["install"]
+
+    release.done = True
+    await controller._local_stt_download_task
 
 
 @pytest.mark.asyncio
-async def test_local_qwen_download_action_starts_single_runtime_install_task(
+async def test_local_qwen_repeated_enable_during_runtime_install_is_single_flight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
     settings.provider.stt = STTProviderName.LOCAL_QWEN
     dashboard = DummyDashboard()
-    actions: list[dict[str, object]] = []
     status_messages: list[str] = []
     install_calls: list[str] = []
     release = SimpleNamespace(done=False)
 
     app = SimpleNamespace(
         view_dashboard=dashboard,
-        show_action_snackbar=lambda message, *, action_label, on_action, **kwargs: actions.append(
-            {"message": message, "action_label": action_label, "on_action": on_action}
-        ),
         _show_snackbar=lambda message, *_args, **_kwargs: status_messages.append(message),
     )
 
@@ -445,15 +456,13 @@ async def test_local_qwen_download_action_starts_single_runtime_install_task(
     controller._local_stt_install_state = LocalSTTInstallState(status="missing")
 
     await controller.set_stt_enabled(True)
-    assert len(actions) == 1
-
-    actions[0]["on_action"](None)
     await asyncio.sleep(0)
-    actions[0]["on_action"](None)
+    await controller.set_stt_enabled(True)
     await asyncio.sleep(0)
 
     assert install_calls == ["install"]
     assert dashboard.local_stt_notice_status == "downloading"
+    assert controller_module.t("local_stt.download_in_progress") in status_messages
 
     release.done = True
     await controller._local_stt_download_task
@@ -504,15 +513,11 @@ async def test_local_qwen_successful_runtime_install_retries_enable_once(
     settings = AppSettings()
     settings.provider.stt = STTProviderName.LOCAL_QWEN
     dashboard = DummyDashboard()
-    actions: list[dict[str, object]] = []
     rebuild_calls: list[str] = []
     switch_calls: list[bool] = []
 
     app = SimpleNamespace(
         view_dashboard=dashboard,
-        show_action_snackbar=lambda message, *, action_label, on_action, **kwargs: actions.append(
-            {"message": message, "action_label": action_label, "on_action": on_action}
-        ),
         _show_snackbar=lambda *_args, **_kwargs: None,
     )
 
@@ -544,7 +549,6 @@ async def test_local_qwen_successful_runtime_install_retries_enable_once(
     controller._local_stt_install_state = LocalSTTInstallState(status="missing")
 
     await controller.set_stt_enabled(True)
-    actions[0]["on_action"](None)
     await controller._local_stt_download_task
 
     assert rebuild_calls == ["rebuild"]
@@ -559,15 +563,11 @@ async def test_local_qwen_runtime_install_does_not_auto_enable_after_provider_sw
     settings = AppSettings()
     settings.provider.stt = STTProviderName.LOCAL_QWEN
     dashboard = DummyDashboard()
-    actions: list[dict[str, object]] = []
     switch_calls: list[bool] = []
     release = SimpleNamespace(done=False)
 
     app = SimpleNamespace(
         view_dashboard=dashboard,
-        show_action_snackbar=lambda message, *, action_label, on_action, **kwargs: actions.append(
-            {"message": message, "action_label": action_label, "on_action": on_action}
-        ),
         _show_snackbar=lambda *_args, **_kwargs: None,
     )
 
@@ -597,7 +597,6 @@ async def test_local_qwen_runtime_install_does_not_auto_enable_after_provider_sw
     controller._local_stt_install_state = LocalSTTInstallState(status="missing")
 
     await controller.set_stt_enabled(True)
-    actions[0]["on_action"](None)
     await asyncio.sleep(0)
 
     controller.settings.provider.stt = STTProviderName.DEEPGRAM
