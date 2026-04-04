@@ -42,6 +42,7 @@ from puripuly_heart.core.local_stt_assets import (
 from puripuly_heart.core.local_stt_runtime_installer import (
     LocalSTTRuntimeInstallCancelled,
     LocalSTTRuntimeInstallError,
+    RuntimeLocalSTTStatusUpdate,
     ensure_local_stt_installed,
 )
 from puripuly_heart.core.orchestrator.hub import ClientHub
@@ -148,6 +149,9 @@ class GuiController:
         default_factory=lambda: LocalSTTInstallState(status="ready"),
     )
     _local_stt_runtime_status: str = field(init=False, default="ready")
+    _local_stt_download_origin: str | None = field(init=False, default=None)
+    _local_stt_download_percent: int | None = field(init=False, default=None)
+    _local_stt_startup_download_attempted: bool = field(init=False, default=False)
     _local_stt_download_task: asyncio.Task[object] | None = field(
         init=False,
         default=None,
@@ -240,6 +244,7 @@ class GuiController:
 
         await self._init_pipeline()
         self._refresh_local_stt_runtime_state()
+        await self._maybe_startup_local_stt_download()
 
         assert self.hub is not None
 
@@ -797,12 +802,6 @@ class GuiController:
     def _refresh_local_stt_runtime_state(self) -> None:
         if self.settings is None:
             return
-        if self.settings.provider.stt != STTProviderName.LOCAL_QWEN:
-            self._local_stt_install_state = LocalSTTInstallState(status="ready")
-            if self._local_stt_runtime_status != "downloading":
-                self._local_stt_runtime_status = "ready"
-            self._sync_local_stt_notice()
-            return
         self._local_stt_install_state = inspect_local_stt_install_state()
         if self._local_stt_runtime_status not in ("downloading", "download_failed"):
             self._local_stt_runtime_status = self._local_stt_install_state.status
@@ -817,13 +816,15 @@ class GuiController:
         dash = getattr(self.app, "view_dashboard", None)
         if dash is None or self.settings is None:
             return
-        if self.settings.provider.stt != STTProviderName.LOCAL_QWEN:
-            with contextlib.suppress(Exception):
-                dash.set_local_stt_notice(None)
-            return
         status = self._current_local_stt_runtime_status()
+        should_show = status == "downloading" or (
+            self.settings.provider.stt == STTProviderName.LOCAL_QWEN and status != "ready"
+        )
         with contextlib.suppress(Exception):
-            dash.set_local_stt_notice(None if status == "ready" else status)
+            dash.set_local_stt_notice(
+                status if should_show else None,
+                percent=self._local_stt_download_percent if status == "downloading" else None,
+            )
 
     def _show_local_stt_download_prompt(self, status: str) -> None:
         show_action = getattr(self.app, "show_action_snackbar", None)
@@ -855,15 +856,36 @@ class GuiController:
         if self._local_stt_download_task is not None and not self._local_stt_download_task.done():
             self._show_short_stt_message("local_stt.download_in_progress")
             return
-        self._local_stt_download_cancel_event = threading.Event()
-        self._local_stt_download_task = asyncio.create_task(self._run_local_stt_download())
+        self._start_local_stt_download(origin="manual")
 
-    async def _run_local_stt_download(self) -> None:
+    def _start_local_stt_download(self, *, origin: str) -> bool:
+        task = self._local_stt_download_task
+        if task is not None and not task.done():
+            return False
+        self._local_stt_download_origin = origin
+        self._local_stt_download_percent = 0
+        self._local_stt_download_cancel_event = threading.Event()
+        self._local_stt_download_task = asyncio.create_task(
+            self._run_local_stt_download(origin=origin)
+        )
+        return True
+
+    async def _maybe_startup_local_stt_download(self) -> None:
+        if self.settings is None or self._local_stt_startup_download_attempted:
+            return
+        current_status = self._current_local_stt_runtime_status()
+        if current_status not in ("missing", "invalid"):
+            return
+        self._local_stt_startup_download_attempted = True
+        self._start_local_stt_download(origin="startup")
+
+    async def _run_local_stt_download(self, *, origin: str) -> None:
         current_task = asyncio.current_task()
         cancel_event = self._local_stt_download_cancel_event
         if self.settings is None:
             return
         self._local_stt_runtime_status = "downloading"
+        self._local_stt_download_percent = 0
         self._sync_local_stt_notice()
         try:
             installed = await ensure_local_stt_installed(
@@ -875,8 +897,10 @@ class GuiController:
             return
         except LocalSTTRuntimeInstallError as exc:
             self._local_stt_runtime_status = "download_failed"
+            self._local_stt_download_percent = None
             self._sync_local_stt_notice()
-            self._show_short_stt_message("local_stt.download_failed")
+            if origin == "manual":
+                self._show_short_stt_message("local_stt.download_failed")
             self._log_error(f"Local STT download failed: {exc}")
             return
         finally:
@@ -884,17 +908,23 @@ class GuiController:
                 self._local_stt_download_task = None
             if self._local_stt_download_cancel_event is cancel_event:
                 self._local_stt_download_cancel_event = None
+            if self._local_stt_download_origin == origin:
+                self._local_stt_download_origin = None
 
         self._local_stt_install_state = LocalSTTInstallState(
             status="ready",
             installed_manifest=installed,
         )
         self._local_stt_runtime_status = "ready"
+        self._local_stt_download_percent = None
         self._sync_local_stt_notice()
-        self._show_short_stt_message("local_stt.download_success")
+        if origin == "manual":
+            self._show_short_stt_message("local_stt.download_success")
 
         if (
-            self.settings.provider.stt == STTProviderName.LOCAL_QWEN
+            origin == "manual"
+            and self.settings is not None
+            and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
             and self._local_stt_pending_enable_after_install
         ):
             self._local_stt_pending_enable_after_install = False
@@ -905,8 +935,9 @@ class GuiController:
                 dash.set_stt_enabled(True)
             await self._ensure_stt_switch()
 
-    async def _handle_local_stt_download_status(self, status: str) -> None:
-        self._local_stt_runtime_status = status
+    async def _handle_local_stt_download_status(self, update: RuntimeLocalSTTStatusUpdate) -> None:
+        self._local_stt_runtime_status = update.status
+        self._local_stt_download_percent = update.percent
         self._sync_local_stt_notice()
 
     def _handle_local_stt_unavailable(self, status: str) -> bool:
@@ -914,6 +945,7 @@ class GuiController:
             self._local_stt_install_state = LocalSTTInstallState(status=status)
         if self._local_stt_runtime_status != "downloading":
             self._local_stt_runtime_status = status
+            self._local_stt_download_percent = None
         self._local_stt_pending_enable_after_install = True
         self._stt_desired = False
         dash = getattr(self.app, "view_dashboard", None)
@@ -921,9 +953,7 @@ class GuiController:
             dash.set_stt_enabled(False)
             dash.set_stt_needs_key(False)
         self._sync_local_stt_notice()
-        if self._local_stt_download_task is None or self._local_stt_download_task.done():
-            self._local_stt_download_cancel_event = threading.Event()
-            self._local_stt_download_task = asyncio.create_task(self._run_local_stt_download())
+        self._start_local_stt_download(origin="manual")
         return False
 
     async def _ensure_local_stt_ready(self) -> bool:

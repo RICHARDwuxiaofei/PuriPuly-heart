@@ -119,3 +119,8 @@ def test_display_card_notice_uses_primary_display_slot_and_restores_after_clear(
     assert card._display_primary.value == display_card_module.t("display.disconnected")
     assert card._display_primary.font_family == "status-font"
     assert card._display_primary.color == original_color
+
+    card.set_notice("STT 다운로드 중 63%", tone="info")
+
+    assert card._display_primary.value == "STT 다운로드 중 63%"
+    assert card._display_primary.color == original_color

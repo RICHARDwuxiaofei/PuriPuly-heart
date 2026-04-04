@@ -21,6 +21,7 @@ from puripuly_heart.core.local_stt_assets import (
 from puripuly_heart.core.local_stt_runtime_installer import (
     LocalSTTRuntimeInstallCancelled,
     LocalSTTRuntimeInstallError,
+    RuntimeLocalSTTStatusUpdate,
     ensure_local_stt_installed,
 )
 
@@ -93,6 +94,7 @@ def _build_manifest(
                 relative_path="model.int8.onnx",
                 sha256=_sha256_bytes(model_bytes),
                 size_bytes=len(model_bytes),
+                source_path_overrides={"modelscope": "modelscope/model.int8.onnx"},
             ),
             LocalSTTAssetFile(
                 relative_path="tokenizer/tokens.txt",
@@ -124,7 +126,7 @@ async def test_ensure_local_stt_installed_downloads_preferred_source_successfull
         model_bytes=model_bytes,
         token_bytes=token_bytes,
     )
-    statuses: list[str] = []
+    statuses: list[RuntimeLocalSTTStatusUpdate] = []
 
     installed = await ensure_local_stt_installed(
         preferred_source="huggingface",
@@ -134,8 +136,8 @@ async def test_ensure_local_stt_installed_downloads_preferred_source_successfull
     )
 
     assert installed.selected_source == "huggingface"
-    assert statuses[0] == "downloading"
-    assert statuses[-1] == "ready"
+    assert statuses[0] == RuntimeLocalSTTStatusUpdate(status="downloading", percent=0)
+    assert statuses[-1] == RuntimeLocalSTTStatusUpdate(status="ready", percent=None)
     state = inspect_local_stt_install_state((temp_dir / "appdata" / "models") / manifest.install_dirname, manifest=manifest)
     assert state.status == "ready"
 
@@ -148,7 +150,8 @@ async def test_ensure_local_stt_installed_falls_back_once_when_preferred_source_
     source_dir, base_url = file_server
     model_bytes = b"model-bytes"
     token_bytes = b"token-bytes"
-    (source_dir / "model.int8.onnx").write_bytes(model_bytes)
+    (source_dir / "modelscope").mkdir()
+    (source_dir / "modelscope" / "model.int8.onnx").write_bytes(model_bytes)
     (source_dir / "tokenizer").mkdir()
     (source_dir / "tokenizer" / "tokens.txt").write_bytes(token_bytes)
     manifest = _build_manifest(
@@ -168,6 +171,34 @@ async def test_ensure_local_stt_installed_falls_back_once_when_preferred_source_
 
 
 @pytest.mark.asyncio
+async def test_ensure_local_stt_installed_uses_source_specific_remote_paths(
+    temp_dir: Path,
+    file_server,
+) -> None:
+    source_dir, base_url = file_server
+    model_bytes = b"model-bytes"
+    token_bytes = b"token-bytes"
+    (source_dir / "modelscope").mkdir()
+    (source_dir / "modelscope" / "model.int8.onnx").write_bytes(model_bytes)
+    (source_dir / "tokenizer").mkdir()
+    (source_dir / "tokenizer" / "tokens.txt").write_bytes(token_bytes)
+    manifest = _build_manifest(
+        huggingface_url=f"{base_url}/missing",
+        modelscope_url=base_url,
+        model_bytes=model_bytes,
+        token_bytes=token_bytes,
+    )
+
+    installed = await ensure_local_stt_installed(
+        preferred_source="modelscope",
+        model_root=temp_dir / "appdata" / "models",
+        manifest=manifest,
+    )
+
+    assert installed.selected_source == "modelscope"
+
+
+@pytest.mark.asyncio
 async def test_ensure_local_stt_installed_raises_after_both_sources_fail(
     temp_dir: Path,
     file_server,
@@ -179,7 +210,7 @@ async def test_ensure_local_stt_installed_raises_after_both_sources_fail(
         model_bytes=b"model-bytes",
         token_bytes=b"token-bytes",
     )
-    statuses: list[str] = []
+    statuses: list[RuntimeLocalSTTStatusUpdate] = []
 
     with pytest.raises(LocalSTTRuntimeInstallError):
         await ensure_local_stt_installed(
@@ -189,9 +220,42 @@ async def test_ensure_local_stt_installed_raises_after_both_sources_fail(
             on_status=statuses.append,
         )
 
-    assert statuses[0] == "downloading"
-    assert statuses[-1] == "download_failed"
+    assert statuses[0] == RuntimeLocalSTTStatusUpdate(status="downloading", percent=0)
+    assert statuses[-1] == RuntimeLocalSTTStatusUpdate(status="download_failed", percent=None)
     assert not ((temp_dir / "appdata" / "models") / manifest.install_dirname).exists()
+
+
+@pytest.mark.asyncio
+async def test_ensure_local_stt_installed_reports_monotonic_overall_progress(
+    temp_dir: Path,
+    file_server,
+) -> None:
+    source_dir, base_url = file_server
+    model_bytes = b"m" * 70
+    token_bytes = b"t" * 30
+    (source_dir / "model.int8.onnx").write_bytes(model_bytes)
+    (source_dir / "tokenizer").mkdir()
+    (source_dir / "tokenizer" / "tokens.txt").write_bytes(token_bytes)
+    manifest = _build_manifest(
+        huggingface_url=base_url,
+        modelscope_url=f"{base_url}/unused",
+        model_bytes=model_bytes,
+        token_bytes=token_bytes,
+    )
+    statuses: list[RuntimeLocalSTTStatusUpdate] = []
+
+    await ensure_local_stt_installed(
+        preferred_source="huggingface",
+        model_root=temp_dir / "appdata" / "models",
+        manifest=manifest,
+        on_status=statuses.append,
+    )
+
+    percents = [status.percent for status in statuses if status.status == "downloading"]
+    assert percents
+    assert percents == sorted(percents)
+    assert percents[0] == 0
+    assert percents[-1] < 100
 
 
 @pytest.mark.asyncio

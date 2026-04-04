@@ -6,8 +6,9 @@ import inspect
 import json
 import shutil
 import threading
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Literal
 from uuid import uuid4
 
 import httpx
@@ -23,8 +24,16 @@ from puripuly_heart.core.local_stt_assets import (
     validate_local_stt_install,
 )
 
-RuntimeLocalSTTStatus = str
-StatusCallback = Callable[[RuntimeLocalSTTStatus], Awaitable[None] | None]
+RuntimeLocalSTTStatus = Literal["downloading", "ready", "download_failed"]
+
+
+@dataclass(slots=True, frozen=True)
+class RuntimeLocalSTTStatusUpdate:
+    status: RuntimeLocalSTTStatus
+    percent: int | None = None
+
+
+StatusCallback = Callable[[RuntimeLocalSTTStatusUpdate], Awaitable[None] | None]
 
 
 class LocalSTTRuntimeInstallError(LocalSTTAssetError):
@@ -38,12 +47,34 @@ class LocalSTTRuntimeInstallCancelled(LocalSTTAssetError):
 async def _emit_status(
     on_status: StatusCallback | None,
     status: RuntimeLocalSTTStatus,
+    *,
+    percent: int | None = None,
 ) -> None:
     if on_status is None:
         return
-    result = on_status(status)
+    result = on_status(RuntimeLocalSTTStatusUpdate(status=status, percent=percent))
     if inspect.isawaitable(result):
         await result
+
+
+class _DownloadProgress:
+    def __init__(self, total_bytes: int) -> None:
+        self._total_bytes = max(total_bytes, 0)
+        self._downloaded_bytes = 0
+        self._lock = threading.Lock()
+
+    def add(self, size_bytes: int) -> None:
+        if size_bytes <= 0:
+            return
+        with self._lock:
+            self._downloaded_bytes += size_bytes
+
+    def percent(self) -> int:
+        if self._total_bytes <= 0:
+            return 0
+        with self._lock:
+            downloaded_bytes = self._downloaded_bytes
+        return min(99, int(downloaded_bytes * 100 / self._total_bytes))
 
 
 def _source_order(
@@ -73,6 +104,7 @@ def _download_source_into_staging(
     staging_dir: Path,
     manifest: LocalSTTAssetManifest,
     cancel_event: threading.Event | None = None,
+    progress: _DownloadProgress | None = None,
 ) -> InstalledLocalSTTManifest:
     try:
         _raise_if_cancelled(cancel_event)
@@ -84,7 +116,9 @@ def _download_source_into_staging(
                 asset_path.parent.mkdir(parents=True, exist_ok=True)
                 digest = hashlib.sha256()
                 size_bytes = 0
-                url = source.download_url_template.format(path=asset.relative_path)
+                url = source.download_url_template.format(
+                    path=asset.remote_path_for_source(source_name)
+                )
                 with client.stream("GET", url) as response:
                     response.raise_for_status()
                     with asset_path.open("wb") as handle:
@@ -95,6 +129,8 @@ def _download_source_into_staging(
                             handle.write(chunk)
                             digest.update(chunk)
                             size_bytes += len(chunk)
+                            if progress is not None:
+                                progress.add(len(chunk))
                 if digest.hexdigest() != asset.sha256:
                     raise LocalSTTRuntimeInstallError(
                         f"checksum mismatch for required model file: {asset.relative_path}"
@@ -163,6 +199,7 @@ async def ensure_local_stt_installed(
     resolved_manifest = manifest or load_local_stt_asset_manifest()
     resolved_root = model_root or default_local_stt_model_root()
     install_dir = resolved_root / resolved_manifest.install_dirname
+    total_bytes = sum(asset.size_bytes or 0 for asset in resolved_manifest.files)
 
     _raise_if_cancelled(cancel_event)
     state = inspect_local_stt_install_state(install_dir, manifest=resolved_manifest)
@@ -180,7 +217,7 @@ async def ensure_local_stt_installed(
 
     _raise_if_cancelled(cancel_event)
     failures: list[str] = []
-    await _emit_status(on_status, "downloading")
+    last_progress_percent: int | None = None
 
     for source_name in _source_order(
         resolved_manifest,
@@ -190,21 +227,43 @@ async def ensure_local_stt_installed(
         _raise_if_cancelled(cancel_event)
         staging_dir = resolved_root / f"{resolved_manifest.install_dirname}.staging-{uuid4().hex}"
         shutil.rmtree(staging_dir, ignore_errors=True)
+        progress = _DownloadProgress(total_bytes)
         try:
-            installed = await asyncio.to_thread(
-                _download_source_into_staging,
-                source_name=source_name,
-                staging_dir=staging_dir,
-                manifest=resolved_manifest,
-                cancel_event=cancel_event,
+            current_percent = 0 if last_progress_percent is None else last_progress_percent
+            if current_percent != last_progress_percent:
+                last_progress_percent = current_percent
+                await _emit_status(on_status, "downloading", percent=current_percent)
+
+            download_task = asyncio.create_task(
+                asyncio.to_thread(
+                    _download_source_into_staging,
+                    source_name=source_name,
+                    staging_dir=staging_dir,
+                    manifest=resolved_manifest,
+                    cancel_event=cancel_event,
+                    progress=progress,
+                )
             )
+            while not download_task.done():
+                _raise_if_cancelled(cancel_event)
+                current_percent = max(last_progress_percent or 0, progress.percent())
+                if current_percent != last_progress_percent:
+                    last_progress_percent = current_percent
+                    await _emit_status(on_status, "downloading", percent=current_percent)
+                await asyncio.sleep(0.05)
+
+            installed = await download_task
+            current_percent = max(last_progress_percent or 0, progress.percent())
+            if current_percent != last_progress_percent:
+                last_progress_percent = current_percent
+                await _emit_status(on_status, "downloading", percent=current_percent)
             await asyncio.to_thread(
                 _promote_staging_install,
                 staging_dir=staging_dir,
                 install_dir=install_dir,
                 cancel_event=cancel_event,
             )
-            await _emit_status(on_status, "ready")
+            await _emit_status(on_status, "ready", percent=None)
             return installed
         except LocalSTTRuntimeInstallCancelled:
             shutil.rmtree(staging_dir, ignore_errors=True)
@@ -213,5 +272,5 @@ async def ensure_local_stt_installed(
             failures.append(f"{source_name}: {exc}")
             shutil.rmtree(staging_dir, ignore_errors=True)
 
-    await _emit_status(on_status, "download_failed")
+    await _emit_status(on_status, "download_failed", percent=None)
     raise LocalSTTRuntimeInstallError("; ".join(failures) or "runtime local STT install failed")

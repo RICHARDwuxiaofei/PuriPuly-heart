@@ -158,6 +158,7 @@
   "dashboard.local_stt_notice_missing": "STT files are missing",
   "dashboard.local_stt_notice_invalid": "STT files need repair",
   "dashboard.local_stt_notice_downloading": "Downloading STT files...",
+  "dashboard.local_stt_notice_downloading_progress": "Downloading STT files {percent}%",
   "dashboard.local_stt_notice_download_failed": "Failed to download STT files",
   "provider.local_qwen.description": "Runs on-device with no API key",
   "provider.qwen_asr": "Qwen ASR",

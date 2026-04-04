@@ -16,6 +16,7 @@ from puripuly_heart.config.settings import (
     STTProviderName,
 )
 from puripuly_heart.core.local_stt_assets import LocalSTTInstallState
+from puripuly_heart.core.local_stt_runtime_installer import RuntimeLocalSTTStatusUpdate
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
@@ -38,6 +39,7 @@ class DummyDashboard:
         self.stt_needs_key: bool | None = None
         self.stt_enabled: bool | None = None
         self.local_stt_notice_status: str | None = None
+        self.local_stt_notice_percent: int | None = None
 
     def set_translation_needs_key(self, value: bool) -> None:
         self.translation_needs_key = value
@@ -51,15 +53,21 @@ class DummyDashboard:
     def set_stt_enabled(self, value: bool) -> None:
         self.stt_enabled = value
 
-    def set_local_stt_notice(self, status: str | None) -> None:
+    def set_local_stt_notice(self, status: str | None, percent: int | None = None) -> None:
         self.local_stt_notice_status = status
+        self.local_stt_notice_percent = percent
 
 
 class DummyHub:
-    def __init__(self) -> None:
-        self.llm = object()
-        self.stt = object()
+    def __init__(self, *, llm: object | None = object(), stt: object | None = object()) -> None:
+        self.llm = llm
+        self.stt = stt
         self.translation_enabled = True
+        self.ui_events: asyncio.Queue[object] = asyncio.Queue()
+        self.start_calls: list[bool] = []
+
+    async def start(self, *, auto_flush_osc: bool) -> None:
+        self.start_calls.append(auto_flush_osc)
 
 
 @pytest.mark.asyncio
@@ -312,6 +320,7 @@ async def test_set_stt_enabled_starts_local_qwen_runtime_install_when_model_is_m
     assert controller._stt_desired is False
     assert app.view_dashboard.stt_enabled is False
     assert app.view_dashboard.local_stt_notice_status == "downloading"
+    assert app.view_dashboard.local_stt_notice_percent == 0
     assert install_calls == ["install"]
 
     release.done = True
@@ -365,6 +374,7 @@ async def test_set_stt_enabled_starts_local_qwen_runtime_install_when_model_load
     assert controller._stt_desired is False
     assert app.view_dashboard.stt_enabled is False
     assert app.view_dashboard.local_stt_notice_status == "downloading"
+    assert app.view_dashboard.local_stt_notice_percent == 0
     assert install_calls == ["install"]
 
     release.done = True
@@ -409,6 +419,7 @@ async def test_set_stt_enabled_retries_runtime_install_after_download_failed_sta
     assert controller._stt_desired is False
     assert app.view_dashboard.stt_enabled is False
     assert app.view_dashboard.local_stt_notice_status == "downloading"
+    assert app.view_dashboard.local_stt_notice_percent == 0
     assert install_calls == ["install"]
 
     release.done = True
@@ -462,6 +473,7 @@ async def test_local_qwen_repeated_enable_during_runtime_install_is_single_fligh
 
     assert install_calls == ["install"]
     assert dashboard.local_stt_notice_status == "downloading"
+    assert dashboard.local_stt_notice_percent == 0
     assert controller_module.t("local_stt.download_in_progress") in status_messages
 
     release.done = True
@@ -604,3 +616,118 @@ async def test_local_qwen_runtime_install_does_not_auto_enable_after_provider_sw
     await controller._local_stt_download_task
 
     assert switch_calls == []
+
+
+@pytest.mark.asyncio
+async def test_start_starts_provider_agnostic_startup_local_stt_download_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.DEEPGRAM
+    dash = DummyDashboard()
+    hub = DummyHub()
+    install_calls: list[str] = []
+    release = SimpleNamespace(done=False)
+
+    class FakeBridge:
+        def __init__(self, *, app, event_queue) -> None:
+            _ = (app, event_queue)
+
+        async def run(self) -> None:
+            await asyncio.sleep(0)
+
+    async def fake_init_pipeline(self) -> None:
+        self.hub = hub
+
+    async def fake_install(**kwargs):
+        on_status = kwargs["on_status"]
+        install_calls.append("install")
+        await on_status(RuntimeLocalSTTStatusUpdate(status="downloading", percent=63))
+        while not release.done:
+            await asyncio.sleep(0)
+        return object()
+
+    monkeypatch.setattr(GuiController, "_load_or_init_settings", lambda self, path: settings)
+    monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+    monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
+    monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_stt_install_state",
+        lambda *_args, **_kwargs: LocalSTTInstallState(status="missing"),
+    )
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+
+    controller = GuiController(page=SimpleNamespace(), app=SimpleNamespace(view_dashboard=dash), config_path=Path("settings.json"))
+
+    await controller.start()
+    await asyncio.sleep(0)
+    await controller._maybe_startup_local_stt_download()
+    await asyncio.sleep(0)
+
+    assert install_calls == ["install"]
+    assert controller._local_stt_startup_download_attempted is True
+    assert controller._local_stt_download_origin == "startup"
+    assert dash.local_stt_notice_status == "downloading"
+    assert dash.local_stt_notice_percent == 63
+
+    release.done = True
+    await controller._local_stt_download_task
+
+
+@pytest.mark.asyncio
+async def test_startup_local_stt_download_success_does_not_auto_enable_stt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    dash = DummyDashboard()
+    hub = DummyHub(stt=object())
+    rebuild_calls: list[str] = []
+    switch_calls: list[bool] = []
+
+    class FakeBridge:
+        def __init__(self, *, app, event_queue) -> None:
+            _ = (app, event_queue)
+
+        async def run(self) -> None:
+            await asyncio.sleep(0)
+
+    async def fake_init_pipeline(self) -> None:
+        self.hub = hub
+
+    async def fake_install(**kwargs):
+        on_status = kwargs["on_status"]
+        await on_status(RuntimeLocalSTTStatusUpdate(status="downloading", percent=63))
+        return object()
+
+    async def fake_rebuild(self):
+        rebuild_calls.append("rebuild")
+
+    async def fake_switch(self):
+        switch_calls.append(self._stt_desired)
+
+    monkeypatch.setattr(GuiController, "_load_or_init_settings", lambda self, path: settings)
+    monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+    monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
+    monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_stt_install_state",
+        lambda *_args, **_kwargs: LocalSTTInstallState(status="missing"),
+    )
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild)
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_switch)
+
+    controller = GuiController(page=SimpleNamespace(), app=SimpleNamespace(view_dashboard=dash), config_path=Path("settings.json"))
+
+    await controller.start()
+    await controller._local_stt_download_task
+
+    assert rebuild_calls == []
+    assert switch_calls == []
+    assert dash.stt_enabled is False
+    assert dash.local_stt_notice_status is None

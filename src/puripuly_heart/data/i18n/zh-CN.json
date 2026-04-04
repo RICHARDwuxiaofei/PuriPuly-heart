@@ -158,6 +158,7 @@
     "dashboard.local_stt_notice_missing": "STT 文件缺失",
     "dashboard.local_stt_notice_invalid": "STT 文件需要修复",
     "dashboard.local_stt_notice_downloading": "正在下载 STT 文件...",
+    "dashboard.local_stt_notice_downloading_progress": "STT 下载中 {percent}%",
     "dashboard.local_stt_notice_download_failed": "STT 文件下载失败",
     "provider.local_qwen.description": "无需 API 密钥，直接在本机运行",
     "provider.qwen_asr": "通义千问 ASR",

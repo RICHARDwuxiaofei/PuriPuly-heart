@@ -301,6 +301,50 @@ def test_inspect_local_stt_install_state_returns_ready_for_valid_install(tmp_pat
 def test_default_local_stt_source_for_locale_uses_modelscope_only_for_simplified_chinese() -> None:
     assert default_local_stt_source_for_locale("zh-CN") == "modelscope"
     assert default_local_stt_source_for_locale("zh-cn") == "modelscope"
+    assert default_local_stt_source_for_locale("zh-HK") == "modelscope"
+    assert default_local_stt_source_for_locale("zh_HK") == "modelscope"
+    assert default_local_stt_source_for_locale("zh-Hant-HK") == "modelscope"
     assert default_local_stt_source_for_locale("ko") == "huggingface"
     assert default_local_stt_source_for_locale("en") == "huggingface"
+    assert default_local_stt_source_for_locale("zh-TW") == "huggingface"
     assert default_local_stt_source_for_locale(None) == "huggingface"
+
+
+def test_local_stt_asset_file_round_trips_source_path_overrides() -> None:
+    payload = {
+        "relative_path": "conv_frontend.onnx",
+        "sha256": "d22dc4423e0940e49884e903d2ea2f7e5567c14fc1aed97e4e26d6b8f208ef9e",
+        "size_bytes": 44148281,
+        "source_path_overrides": {
+            "modelscope": "model_0.6B/conv_frontend.onnx",
+        },
+    }
+
+    asset = LocalSTTAssetFile.from_dict(payload)
+
+    assert asset.to_dict() == payload
+    assert asset.remote_path_for_source("huggingface") == "conv_frontend.onnx"
+    assert asset.remote_path_for_source("modelscope") == "model_0.6B/conv_frontend.onnx"
+
+
+def test_packaged_local_stt_manifest_matches_modelscope_fallback_contract() -> None:
+    manifest = load_local_stt_asset_manifest()
+
+    modelscope = manifest.sources["modelscope"]
+    assert modelscope.repo_id == "zengshuishui/Qwen3-ASR-onnx"
+    assert modelscope.revision == "c69fb1666ccb59a82c09840c511a6c894e6a2482"
+    assert (
+        modelscope.download_url_template
+        == "https://www.modelscope.cn/api/v1/models/zengshuishui/Qwen3-ASR-onnx/repo?Revision=c69fb1666ccb59a82c09840c511a6c894e6a2482&FilePath={path}"
+    )
+
+    files = {asset.relative_path: asset for asset in manifest.files}
+    assert files["conv_frontend.onnx"].remote_path_for_source("modelscope") == "model_0.6B/conv_frontend.onnx"
+    assert files["encoder.int8.onnx"].remote_path_for_source("modelscope") == "model_0.6B/encoder.int8.onnx"
+    assert files["decoder.int8.onnx"].remote_path_for_source("modelscope") == "model_0.6B/decoder.int8.onnx"
+    assert files["tokenizer/merges.txt"].remote_path_for_source("modelscope") == "tokenizer/merges.txt"
+    assert (
+        files["tokenizer/tokenizer_config.json"].remote_path_for_source("modelscope")
+        == "tokenizer/tokenizer_config.json"
+    )
+    assert files["tokenizer/vocab.json"].remote_path_for_source("modelscope") == "tokenizer/vocab.json"

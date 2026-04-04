@@ -15,26 +15,35 @@
     },
     "modelscope": {
       "name": "modelscope",
-      "repo_id": "puripuly-heart/qwen3-asr-0.6b-int8-sherpa",
-      "revision": "2cc50d1abfe4d4f2df8d71f536d108bb40f943d2",
-      "download_url_template": "https://www.modelscope.cn/models/puripuly-heart/qwen3-asr-0.6b-int8-sherpa/repo?Revision=2cc50d1abfe4d4f2df8d71f536d108bb40f943d2&FilePath={path}"
+      "repo_id": "zengshuishui/Qwen3-ASR-onnx",
+      "revision": "c69fb1666ccb59a82c09840c511a6c894e6a2482",
+      "download_url_template": "https://www.modelscope.cn/api/v1/models/zengshuishui/Qwen3-ASR-onnx/repo?Revision=c69fb1666ccb59a82c09840c511a6c894e6a2482&FilePath={path}"
     }
   },
   "files": [
     {
       "relative_path": "conv_frontend.onnx",
       "sha256": "d22dc4423e0940e49884e903d2ea2f7e5567c14fc1aed97e4e26d6b8f208ef9e",
-      "size_bytes": 44148281
+      "size_bytes": 44148281,
+      "source_path_overrides": {
+        "modelscope": "model_0.6B/conv_frontend.onnx"
+      }
     },
     {
       "relative_path": "decoder.int8.onnx",
       "sha256": "61e5f8249f9e7c82d5e01e1938c79fb3f5b3135f91664928033029e42451bd18",
-      "size_bytes": 756563239
+      "size_bytes": 756563239,
+      "source_path_overrides": {
+        "modelscope": "model_0.6B/decoder.int8.onnx"
+      }
     },
     {
       "relative_path": "encoder.int8.onnx",
       "sha256": "60748d3e6744a57c9c91e1b17424a6c2990567e8adceb0783940c03ed98fa9d9",
-      "size_bytes": 182491662
+      "size_bytes": 182491662,
+      "source_path_overrides": {
+        "modelscope": "model_0.6B/encoder.int8.onnx"
+      }
     },
     {
       "relative_path": "tokenizer/merges.txt",

@@ -60,6 +60,7 @@ class LocalSTTAssetFile:
     relative_path: str
     sha256: str
     size_bytes: int | None = None
+    source_path_overrides: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -68,16 +69,39 @@ class LocalSTTAssetFile:
         }
         if self.size_bytes is not None:
             payload["size_bytes"] = self.size_bytes
+        if self.source_path_overrides:
+            payload["source_path_overrides"] = dict(self.source_path_overrides)
         return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "LocalSTTAssetFile":
         size_bytes = data.get("size_bytes")
+        raw_overrides = data.get("source_path_overrides")
+        if raw_overrides is None:
+            source_path_overrides = None
+        else:
+            if not isinstance(raw_overrides, dict):
+                raise LocalSTTManifestInvalidError(
+                    "local STT asset manifest has invalid source_path_overrides"
+                )
+            source_path_overrides = {}
+            for source_name, remote_path in raw_overrides.items():
+                if not isinstance(source_name, str) or not isinstance(remote_path, str):
+                    raise LocalSTTManifestInvalidError(
+                        "local STT asset manifest has invalid source_path_overrides"
+                    )
+                source_path_overrides[source_name] = remote_path
         return cls(
             relative_path=str(data["relative_path"]),
             sha256=str(data["sha256"]).lower(),
             size_bytes=int(size_bytes) if size_bytes is not None else None,
+            source_path_overrides=source_path_overrides,
         )
+
+    def remote_path_for_source(self, source_name: str) -> str:
+        if self.source_path_overrides and source_name in self.source_path_overrides:
+            return self.source_path_overrides[source_name]
+        return self.relative_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,8 +221,8 @@ def default_local_stt_installed_manifest_path(model_dir: Path | None = None) -> 
 
 
 def default_local_stt_source_for_locale(locale: str | None) -> str:
-    normalized = (locale or "").strip().lower()
-    if normalized == "zh-cn":
+    normalized = (locale or "").strip().replace("_", "-").lower()
+    if normalized in {"zh-cn", "zh-hk", "zh-hant-hk"}:
         return "modelscope"
     return "huggingface"
 

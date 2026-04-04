@@ -217,12 +217,12 @@ def test_dashboard_local_stt_notice_can_change_and_clear_without_touching_displa
 
     view.set_local_stt_notice("missing")
     view.set_display_text("hello", language_code="ko")
-    view.set_local_stt_notice("downloading")
+    view.set_local_stt_notice("downloading", percent=63)
     view.set_local_stt_notice(None)
 
     assert view.display_card.display_calls == [("hello", False, "font-ko")]
     assert view.display_card.notice_calls == [
         (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
-        (dashboard_module.t("dashboard.local_stt_notice_downloading"), "info"),
+        (dashboard_module.t("dashboard.local_stt_notice_downloading_progress", percent=63), "info"),
         (None, None),
     ]
