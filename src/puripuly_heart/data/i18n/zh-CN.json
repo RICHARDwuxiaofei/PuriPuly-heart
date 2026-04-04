@@ -222,5 +222,11 @@
     "settings.peer_language": "对方翻译语言",
     "settings.peer_language.source": "原文",
     "settings.peer_language.target": "翻译",
-    "settings.peer_language.follow": "与自身相同"
+    "settings.peer_language.follow": "与自身相同",
+    "settings.peer_stt_provider": "对方 STT 服务商",
+    "settings.peer_deepgram_model": "对方 Deepgram 模型",
+    "settings.peer_qwen_region": "对方 Qwen 区域",
+    "settings.peer_qwen_model": "对方 Qwen 模型",
+    "settings.peer_soniox_model": "对方 Soniox 模型",
+    "settings.peer_provider.follow_self": "与自身相同"
 }

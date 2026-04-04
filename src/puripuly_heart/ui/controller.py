@@ -11,10 +11,12 @@ from pathlib import Path
 import flet as ft
 
 from puripuly_heart.app.wiring import (
+    build_peer_stt_provider_signature,
     create_llm_provider,
     create_peer_stt_backend,
     create_secret_store,
     create_stt_backend,
+    resolve_peer_stt_config,
 )
 from puripuly_heart.config.settings import (
     AppSettings,
@@ -57,6 +59,7 @@ from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.overlay.bridge import OverlayBridge
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
 from puripuly_heart.core.overlay.process import OverlayProcessManager
+from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
@@ -123,17 +126,15 @@ class GuiController:
     sender: VrchatOscUdpSender | None = None
     osc: SmartOscQueue | None = None
     hub: ClientHub | None = None
+    _peer_runtime: PeerChannelRuntime | None = None
     receiver: VrcOscReceiver | None = None
     vrc_mic_state: VrcMicState | None = None
     vrc_mic_audio_gate: VrcMicAudioGate | None = None
 
     _bridge_task: asyncio.Task[None] | None = None
     _mic_task: asyncio.Task[None] | None = None
-    _peer_mic_task: asyncio.Task[None] | None = None
     _audio_source: SoundDeviceAudioSource | None = None
-    _peer_audio_source: DesktopPeerPipeline | None = None
     _vad: VadGating | None = None
-    _peer_vad: VadGating | None = None
     _stt_desired: bool = False
     _stt_switch_lock: asyncio.Lock | None = None
     _stt_switch_task: asyncio.Task[None] | None = None
@@ -141,6 +142,7 @@ class GuiController:
     _last_stt_runtime_signature: tuple[object, ...] | None = None
     _last_self_stt_runtime_signature: tuple[object, ...] | None = None
     _last_peer_stt_runtime_signature: tuple[object, ...] | None = None
+    _last_peer_translation_enabled: bool | None = None
     _last_vrc_mic_sync_enabled: bool | None = None
     _vrc_receiver_lock: asyncio.Lock | None = None
     _ui_event_bridge: UIEventBridge | None = None
@@ -358,19 +360,34 @@ class GuiController:
         return self._build_self_stt_runtime_signature(settings)
 
     def _build_peer_stt_runtime_signature(self, settings: AppSettings) -> tuple[object, ...]:
-        custom_vocab_enabled, custom_terms = self._peer_stt_runtime_custom_vocabulary_signature(
-            settings
+        return self._build_peer_runtime_config(settings).runtime_signature
+
+    def _peer_runtime_should_be_active(self, settings: AppSettings) -> bool:
+        return bool(
+            settings.ui.peer_translation_enabled
+            and self._effective_peer_overlay_enabled_for(settings)
+            and self.hub is not None
+            and self._overlay_bridge is not None
         )
-        return (
-            settings.languages.effective_peer_source,
-            settings.audio.internal_sample_rate_hz,
-            settings.deepgram_stt.model,
-            settings.desktop_audio.output_device,
-            settings.desktop_audio.vad_speech_threshold,
-            settings.desktop_audio.vad_hangover_ms,
-            settings.desktop_audio.vad_pre_roll_ms,
-            custom_vocab_enabled,
-            custom_terms,
+
+    def _build_peer_runtime_config(self, settings: AppSettings) -> PeerRuntimeConfig:
+        backend = resolve_peer_stt_config(settings)
+        provider_signature = build_peer_stt_provider_signature(settings)
+        return PeerRuntimeConfig(
+            backend=backend,
+            output_device=settings.desktop_audio.output_device,
+            vad_threshold=settings.desktop_audio.vad_speech_threshold,
+            vad_hangover_ms=settings.desktop_audio.vad_hangover_ms,
+            vad_pre_roll_ms=settings.desktop_audio.vad_pre_roll_ms,
+            provider_signature=provider_signature,
+            runtime_signature=(
+                backend.source_language,
+                settings.desktop_audio.output_device,
+                settings.desktop_audio.vad_speech_threshold,
+                settings.desktop_audio.vad_hangover_ms,
+                settings.desktop_audio.vad_pre_roll_ms,
+                provider_signature,
+            ),
         )
 
     async def stop(self) -> None:
@@ -379,6 +396,10 @@ class GuiController:
         await self.set_stt_enabled(False)
         await self._configure_vrc_mic_receiver(enabled=False)
         await self._shutdown_overlay_runtime(preserve_failure_reason=True)
+        if self._peer_runtime is not None:
+            with contextlib.suppress(Exception):
+                await self._peer_runtime.close()
+            self._peer_runtime = None
 
         if self._bridge_task:
             self._bridge_task.cancel()
@@ -404,6 +425,7 @@ class GuiController:
         self.settings.ui.overlay_enabled = bool(enabled)
         if not enabled:
             self.settings.ui.peer_translation_enabled = False
+            self._last_peer_translation_enabled = False
         self._save_settings()
 
         if enabled:
@@ -1009,7 +1031,7 @@ class GuiController:
         await self._stt_switch_task
 
     async def _replace_runtime_stt_provider(self) -> None:
-        if self._mic_task is not None or self._peer_mic_task is not None:
+        if self._mic_task is not None:
             await self._stop_mic_loop()
         self._stt_restart_requested = False
         await self._rebuild_stt_provider()
@@ -1030,9 +1052,6 @@ class GuiController:
                     if self.hub is not None:
                         with contextlib.suppress(Exception):
                             await self.hub.stt.close()
-                        if self.hub.peer_stt is not None:
-                            with contextlib.suppress(Exception):
-                                await self.hub.peer_stt.close()
                 else:
                     if self.hub is None:
                         logger.warning("[STT] Enable requested before hub is ready")
@@ -1041,9 +1060,6 @@ class GuiController:
                         await self._stop_mic_loop()
                         with contextlib.suppress(Exception):
                             await self.hub.stt.close()
-                        if self.hub.peer_stt is not None:
-                            with contextlib.suppress(Exception):
-                                await self.hub.peer_stt.close()
                     if not await self._ensure_local_stt_ready():
                         break
                     await self._start_mic_loop()
@@ -1055,9 +1071,6 @@ class GuiController:
                     ):
                         with contextlib.suppress(Exception):
                             await self.hub.stt.warmup()
-                    if self.hub is not None and self.hub.peer_stt is not None:
-                        with contextlib.suppress(Exception):
-                            await self.hub.peer_stt.warmup()
 
                 if desired == self._stt_desired and not self._stt_restart_requested:
                     break
@@ -1074,6 +1087,11 @@ class GuiController:
         prev_locale = get_locale()
         prev_overlay_enabled = (
             self.settings.ui.overlay_enabled if self.settings is not None else False
+        )
+        prev_peer_translation_enabled = (
+            self._last_peer_translation_enabled
+            if self._last_peer_translation_enabled is not None
+            else (self.settings.ui.peer_translation_enabled if self.settings is not None else False)
         )
         prev_self_signature = (
             self._last_self_stt_runtime_signature or self._last_stt_runtime_signature
@@ -1144,11 +1162,13 @@ class GuiController:
         should_refresh_peer = (
             prev_peer_signature is None
             or current_peer_signature != prev_peer_signature
+            or prev_peer_translation_enabled != settings.ui.peer_translation_enabled
         )
 
         self._last_stt_runtime_signature = current_self_signature
         self._last_self_stt_runtime_signature = current_self_signature
         self._last_peer_stt_runtime_signature = current_peer_signature
+        self._last_peer_translation_enabled = settings.ui.peer_translation_enabled
 
         if should_refresh_peer and self.hub is not None:
             await self._refresh_peer_stt_runtime()
@@ -1284,73 +1304,51 @@ class GuiController:
 
         logger.info("[Settings] STT provider replacement completed successfully")
 
-    def _create_peer_stt_provider(self) -> ManagedSTTProvider:
+    def _create_peer_stt_provider_from_runtime_config(
+        self,
+        config: PeerRuntimeConfig,
+        on_terminal_failure,
+    ) -> ManagedSTTProvider:
         assert self.settings is not None
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
         peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
         return ManagedSTTProvider(
             backend=peer_backend,
-            sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+            sample_rate_hz=config.backend.sample_rate_hz,
             channel="peer",
             clock=self.clock,
             reset_deadline_s=STT_RESET_DEADLINE_S,
             drain_timeout_s=self.settings.stt.drain_timeout_s,
-            bridging_ms=max(1, self.settings.desktop_audio.vad_pre_roll_ms),
+            bridging_ms=max(1, config.vad_pre_roll_ms),
+            on_terminal_failure=on_terminal_failure,
+        )
+
+    def _create_peer_audio_source_from_runtime_config(self, config: PeerRuntimeConfig):
+        return DesktopPeerPipeline(
+            source=DesktopLoopbackAudioSource(device_name=config.output_device),
+            target_sample_rate_hz=config.backend.sample_rate_hz,
+        )
+
+    def _create_peer_vad_from_runtime_config(self, config: PeerRuntimeConfig, model_path: Path):
+        return create_peer_vad_gating(
+            engine=SileroVadOnnx(model_path=model_path),
+            sample_rate_hz=config.backend.sample_rate_hz,
+            ring_buffer_ms=config.vad_pre_roll_ms,
+            speech_threshold=config.vad_threshold,
+            hangover_ms=config.vad_hangover_ms,
         )
 
     async def _refresh_peer_stt_runtime(self) -> None:
-        if self.settings is None or self.hub is None:
+        if self.settings is None or self.hub is None or self._peer_runtime is None:
             return
 
-        previous_signature = self._last_peer_stt_runtime_signature
-        current_signature = self._build_peer_stt_runtime_signature(self.settings)
-
-        if not self._effective_peer_overlay_enabled_for(self.settings):
-            self._last_peer_stt_runtime_signature = current_signature
-            await self._stop_peer_loop()
-            peer_stt = getattr(self.hub, "peer_stt", None)
-            replace_peer = getattr(self.hub, "replace_peer_stt_provider", None)
-            if peer_stt is not None and callable(replace_peer):
-                await replace_peer(None)
-            self._sync_effective_hub_flags(self.settings)
-            return
-
-        should_rebuild = (
-            getattr(self.hub, "peer_stt", None) is None
-            or previous_signature is None
-            or current_signature != previous_signature
-        )
-
-        if should_rebuild:
-            await self._stop_peer_loop()
-            peer_stt = None
-            try:
-                peer_stt = self._create_peer_stt_provider()
-            except Exception as exc:
-                self._log_error(f"Peer STT backend not available: {exc}")
-            replace_peer = getattr(self.hub, "replace_peer_stt_provider", None)
-            if callable(replace_peer):
-                await replace_peer(peer_stt)
-            else:
-                self.hub.peer_stt = peer_stt  # type: ignore[attr-defined]
-        self._last_peer_stt_runtime_signature = current_signature
-
-        if (
-            self._stt_desired
-            and self._mic_task is not None
-            and getattr(self.hub, "peer_stt", None) is not None
-            and self._peer_mic_task is None
-        ):
-            try:
-                model_path = ensure_silero_vad_onnx()
-            except Exception as exc:
-                self._log_error(
-                    f"Failed to prepare Silero VAD model ({SILERO_VAD_VERSION}): {exc}"
-                )
-                return
-            await self._start_peer_loop(model_path)
+        config = self._build_peer_runtime_config(self.settings)
+        desired_active = self._peer_runtime_should_be_active(self.settings)
+        await self._peer_runtime.apply_policy(config=config, desired_active=desired_active)
+        self._last_peer_stt_runtime_signature = config.runtime_signature
+        if desired_active:
             with contextlib.suppress(Exception):
-                await self.hub.peer_stt.warmup()
+                await self._peer_runtime.warmup()
         self._sync_effective_hub_flags(self.settings)
 
     async def _rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
@@ -1359,6 +1357,12 @@ class GuiController:
             self._bridge_task.cancel()
             await asyncio.gather(self._bridge_task, return_exceptions=True)
             self._bridge_task = None
+
+        peer_runtime = self._peer_runtime
+        if peer_runtime is not None:
+            with contextlib.suppress(Exception):
+                await peer_runtime.close()
+            self._peer_runtime = None
 
         await self.set_stt_enabled(False)
         await self._configure_vrc_mic_receiver(enabled=False)
@@ -1475,17 +1479,25 @@ class GuiController:
         self.sender = sender
         self.osc = osc
         self.hub = hub
+        from puripuly_heart.app.headless_mic import run_audio_vad_loop
+
+        self._peer_runtime = PeerChannelRuntime(
+            hub=hub,
+            clock=self.clock,
+            stt_factory=self._create_peer_stt_provider_from_runtime_config,
+            source_factory=self._create_peer_audio_source_from_runtime_config,
+            vad_factory=self._create_peer_vad_from_runtime_config,
+            vad_model_resolver=ensure_silero_vad_onnx,
+            run_audio_loop=run_audio_vad_loop,
+        )
+        self._last_peer_translation_enabled = self.settings.ui.peer_translation_enabled
         await self._configure_vrc_mic_receiver(enabled=self.settings.osc.vrc_mic_intercept)
 
     async def _start_mic_loop(self) -> None:
         assert self.settings is not None
         assert self.hub is not None
 
-        if self._mic_task is not None and (
-            not self._effective_peer_overlay_enabled_for(self.settings)
-            or self._peer_mic_task is not None
-            or self.hub.peer_stt is None
-        ):
+        if self._mic_task is not None:
             return
 
         try:
@@ -1570,13 +1582,6 @@ class GuiController:
             self._audio_source = source
             self._mic_task = asyncio.create_task(self._run_mic_loop())
 
-        if (
-            self._effective_peer_overlay_enabled_for(self.settings)
-            and self.hub.peer_stt is not None
-            and self._peer_mic_task is None
-        ):
-            await self._start_peer_loop(model_path)
-
     async def _stop_mic_loop(self) -> None:
         if self._mic_task is not None:
             self._mic_task.cancel()
@@ -1588,21 +1593,8 @@ class GuiController:
                 await self._audio_source.close()
             self._audio_source = None
         self._vad = None
-        await self._stop_peer_loop()
         if self.vrc_mic_audio_gate is not None:
             self.vrc_mic_audio_gate.reset()
-
-    async def _stop_peer_loop(self) -> None:
-        if self._peer_mic_task is not None:
-            self._peer_mic_task.cancel()
-            await asyncio.gather(self._peer_mic_task, return_exceptions=True)
-            self._peer_mic_task = None
-
-        if self._peer_audio_source is not None:
-            with contextlib.suppress(Exception):
-                await self._peer_audio_source.close()
-            self._peer_audio_source = None
-        self._peer_vad = None
 
     async def _run_mic_loop(self) -> None:
         assert self.hub is not None
@@ -1623,49 +1615,6 @@ class GuiController:
             raise
         except Exception as exc:
             self._log_error(f"Mic loop error: {exc}")
-
-    async def _start_peer_loop(self, model_path) -> None:  # noqa: ANN001
-        assert self.settings is not None
-
-        try:
-            source = DesktopPeerPipeline(
-                source=DesktopLoopbackAudioSource(
-                    device_name=self.settings.desktop_audio.output_device
-                ),
-                target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-            )
-        except Exception as exc:
-            self._log_error(f"Desktop loopback open failed: {exc}")
-            return
-
-        self._peer_vad = create_peer_vad_gating(
-            engine=SileroVadOnnx(model_path=model_path),
-            sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
-            ring_buffer_ms=self.settings.desktop_audio.vad_pre_roll_ms,
-            speech_threshold=self.settings.desktop_audio.vad_speech_threshold,
-            hangover_ms=self.settings.desktop_audio.vad_hangover_ms,
-        )
-        self._peer_audio_source = source
-        self._peer_mic_task = asyncio.create_task(self._run_peer_mic_loop())
-
-    async def _run_peer_mic_loop(self) -> None:
-        assert self.hub is not None
-        assert self._peer_audio_source is not None
-        assert self._peer_vad is not None
-
-        from puripuly_heart.app.headless_mic import run_audio_vad_loop
-
-        try:
-            await run_audio_vad_loop(
-                source=self._peer_audio_source,
-                vad=self._peer_vad,
-                sink=_HubVadSink(hub=self.hub, channel="peer"),
-                target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,  # type: ignore[union-attr]
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self._log_error(f"Peer desktop loop error: {exc}")
 
     async def _configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
         if self._vrc_receiver_lock is None:

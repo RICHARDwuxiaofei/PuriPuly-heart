@@ -3,9 +3,11 @@ from __future__ import annotations
 import pytest
 
 from puripuly_heart.app.wiring import (
+    build_peer_stt_provider_signature,
     create_llm_provider,
     create_peer_stt_backend,
     create_stt_backend,
+    resolve_peer_stt_config,
 )
 from puripuly_heart.config.settings import (
     AppSettings,
@@ -247,6 +249,134 @@ def test_self_stt_provider_setting_does_not_change_peer_backend_choice() -> None
 
     assert isinstance(soniox_backend, DeepgramRealtimeSTTBackend)
     assert isinstance(qwen_backend, DeepgramRealtimeSTTBackend)
+
+
+def test_resolve_peer_stt_config_inherits_self_deepgram_model_until_override() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.DEEPGRAM
+    settings.deepgram_stt.model = "nova-3-general"
+    settings.peer_deepgram_stt.model = None
+
+    resolved = resolve_peer_stt_config(settings)
+
+    assert resolved.provider == STTProviderName.DEEPGRAM
+    assert resolved.deepgram_model == "nova-3-general"
+
+
+def test_create_peer_stt_backend_uses_peer_selected_soniox_provider() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    settings.languages.peer_source_language = "ko"
+    settings.peer_soniox_stt.model = "stt-rt-v4"
+    secrets = InMemorySecretStore()
+    secrets.set("soniox_api_key", "peer-soniox")
+
+    backend = create_peer_stt_backend(settings, secrets=secrets)
+
+    assert isinstance(backend, SonioxRealtimeSTTBackend)
+    assert backend.api_key == "peer-soniox"
+    assert backend.model == "stt-rt-v4"
+
+
+def test_create_peer_stt_backend_uses_peer_qwen_region_for_endpoint_and_secret() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.QWEN_ASR
+    settings.peer_qwen_asr_stt.region = QwenRegion.SINGAPORE
+    secrets = InMemorySecretStore()
+    secrets.set("alibaba_api_key_singapore", "peer-qwen")
+
+    backend = create_peer_stt_backend(settings, secrets=secrets)
+
+    assert isinstance(backend, QwenASRRealtimeSTTBackend)
+    assert backend.api_key == "peer-qwen"
+    assert backend.endpoint == "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+
+
+def test_build_peer_stt_provider_signature_includes_backend_affecting_values() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    settings.languages.peer_source_language = "zh-CN"
+    settings.peer_soniox_stt.model = "stt-rt-v4"
+    settings.peer_soniox_stt.trailing_silence_ms = 350
+
+    signature = build_peer_stt_provider_signature(settings)
+
+    assert STTProviderName.SONIOX in signature
+    assert "zh-CN" in signature
+    assert "stt-rt-v4" in signature
+    assert 350 in signature
+
+
+def test_build_peer_stt_provider_signature_includes_sample_rate_hz() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.QWEN_ASR
+    settings.audio.internal_sample_rate_hz = 48000
+
+    signature = build_peer_stt_provider_signature(settings)
+
+    assert 48000 in signature
+
+
+def test_resolve_peer_stt_config_inherits_peer_qwen_model_until_override() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.QWEN_ASR
+    settings.qwen_asr_stt.model = "self-qwen-asr"
+    settings.peer_qwen_asr_stt.model = None
+
+    resolved = resolve_peer_stt_config(settings)
+
+    assert resolved.qwen_model == "self-qwen-asr"
+
+    settings.peer_qwen_asr_stt.model = "peer-qwen-asr"
+
+    resolved = resolve_peer_stt_config(settings)
+
+    assert resolved.qwen_model == "peer-qwen-asr"
+
+
+def test_create_peer_stt_backend_uses_peer_local_qwen_provider_and_sample_rate() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    settings.audio.internal_sample_rate_hz = 44100
+    secrets = InMemorySecretStore()
+
+    backend = create_peer_stt_backend(settings, secrets=secrets)
+
+    assert isinstance(backend, LocalQwenSherpaSTTBackend)
+    assert backend.model_dir == default_local_stt_model_dir()
+    assert backend.sample_rate_hz == 44100
+
+
+def test_resolve_peer_stt_config_inherits_soniox_endpoint_keepalive_and_trailing_silence_until_override() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    settings.soniox_stt.model = "self-soniox"
+    settings.soniox_stt.endpoint = "wss://self-soniox.example/realtime"
+    settings.soniox_stt.keepalive_interval_s = 12.5
+    settings.soniox_stt.trailing_silence_ms = 900
+    settings.peer_soniox_stt.model = None
+    settings.peer_soniox_stt.endpoint = None
+    settings.peer_soniox_stt.keepalive_interval_s = None
+    settings.peer_soniox_stt.trailing_silence_ms = None
+
+    resolved = resolve_peer_stt_config(settings)
+
+    assert resolved.soniox_model == "self-soniox"
+    assert resolved.soniox_endpoint == "wss://self-soniox.example/realtime"
+    assert resolved.soniox_keepalive_interval_s == 12.5
+    assert resolved.soniox_trailing_silence_ms == 900
+
+    settings.peer_soniox_stt.model = "peer-soniox"
+    settings.peer_soniox_stt.endpoint = "wss://peer-soniox.example/realtime"
+    settings.peer_soniox_stt.keepalive_interval_s = 6.0
+    settings.peer_soniox_stt.trailing_silence_ms = 250
+
+    resolved = resolve_peer_stt_config(settings)
+
+    assert resolved.soniox_model == "peer-soniox"
+    assert resolved.soniox_endpoint == "wss://peer-soniox.example/realtime"
+    assert resolved.soniox_keepalive_interval_s == 6.0
+    assert resolved.soniox_trailing_silence_ms == 250
 
 
 def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:

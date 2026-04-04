@@ -222,5 +222,11 @@
   "settings.peer_language": "상대 번역 언어",
   "settings.peer_language.source": "원문",
   "settings.peer_language.target": "번역",
-  "settings.peer_language.follow": "셀프와 동일"
+  "settings.peer_language.follow": "셀프와 동일",
+  "settings.peer_stt_provider": "상대 STT 프로바이더",
+  "settings.peer_deepgram_model": "상대 Deepgram 모델",
+  "settings.peer_qwen_region": "상대 Qwen 리전",
+  "settings.peer_qwen_model": "상대 Qwen 모델",
+  "settings.peer_soniox_model": "상대 Soniox 모델",
+  "settings.peer_provider.follow_self": "셀프와 동일"
 }

@@ -197,6 +197,23 @@ def test_on_stt_selected_updates_provider_and_pipeline_flags(
     assert changed == [settings]
 
 
+def test_on_peer_stt_selected_updates_provider_and_pipeline_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._on_peer_stt_selected(STTProviderName.SONIOX.value)
+
+    assert settings.provider.peer_stt == STTProviderName.SONIOX
+    assert view.has_provider_changes is True
+    assert view.provider_change_requires_pipeline is True
+    assert changed == [settings]
+
+
 def test_on_overlay_selected_uses_dedicated_overlay_toggle_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -366,6 +383,206 @@ def test_overlay_controls_gate_peer_translation_until_overlay_is_connected(
 
     assert view._peer_translation_button.disabled is False
     assert view._peer_translation_hint.value == ""
+
+
+def test_peer_qwen_region_control_is_visible_before_peer_translation_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.QWEN_ASR
+    settings.ui.peer_translation_enabled = False
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._peer_qwen_region_text.visible is True
+    assert view._alibaba_key_beijing.visible is False
+    assert view._alibaba_key_singapore.visible is False
+
+
+def test_peer_qwen_region_override_can_be_cleared_back_to_inherited_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.QWEN_ASR
+    settings.peer_qwen_asr_stt.region = QwenRegion.BEIJING
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.page = object()
+
+    region_updates: list[str] = []
+    api_key_updates: list[str] = []
+    monkeypatch.setattr(
+        type(view._peer_qwen_region_text),
+        "update",
+        lambda self: region_updates.append("peer_qwen_region_text"),
+    )
+    monkeypatch.setattr(
+        type(view._api_keys_column),
+        "update",
+        lambda self: api_key_updates.append("api_keys_column"),
+    )
+
+    view._on_peer_qwen_region_selected("")
+
+    assert settings.peer_qwen_asr_stt.region is None
+    assert view._peer_qwen_region_text.content.value == t("settings.peer_provider.follow_self")
+    assert region_updates == ["peer_qwen_region_text"]
+    assert api_key_updates == ["api_keys_column"]
+
+
+def test_peer_soniox_model_override_can_be_cleared_back_to_inherited_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    settings.peer_soniox_stt.model = "stt-rt-v4"
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.page = object()
+
+    model_updates: list[str] = []
+    monkeypatch.setattr(
+        type(view._peer_soniox_model_text),
+        "update",
+        lambda self: model_updates.append("peer_soniox_model_text"),
+    )
+
+    view._on_peer_soniox_model_selected("")
+
+    assert settings.peer_soniox_stt.model is None
+    assert view._peer_soniox_model_text.content.value == t("settings.peer_provider.follow_self")
+    assert model_updates == ["peer_soniox_model_text"]
+
+
+def test_update_api_visibility_includes_enabled_peer_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    settings.provider.peer_stt = STTProviderName.DEEPGRAM
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.ui.peer_translation_enabled = True
+
+    view, _ = _make_settings_view(monkeypatch)
+    view._settings = settings
+    view._update_api_visibility()
+
+    assert view._deepgram_key.visible is True
+    assert view._google_key.visible is True
+
+
+def test_update_api_visibility_shows_both_qwen_region_keys_when_self_and_peer_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.QWEN_ASR
+    settings.provider.peer_stt = STTProviderName.QWEN_ASR
+    settings.ui.peer_translation_enabled = True
+    settings.qwen.region = QwenRegion.BEIJING
+    settings.peer_qwen_asr_stt.region = QwenRegion.SINGAPORE
+
+    view, _ = _make_settings_view(monkeypatch)
+    view._settings = settings
+    view._update_api_visibility()
+
+    assert view._alibaba_key_beijing.visible is True
+    assert view._alibaba_key_singapore.visible is True
+
+
+def test_on_peer_stt_selected_refreshes_api_visibility_and_redraws_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    settings.provider.peer_stt = STTProviderName.DEEPGRAM
+    settings.ui.peer_translation_enabled = True
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.page = object()
+
+    api_key_updates: list[str] = []
+    monkeypatch.setattr(
+        type(view._peer_stt_text),
+        "update",
+        lambda self: api_key_updates.append("peer_stt_text"),
+    )
+    monkeypatch.setattr(
+        type(view._api_keys_column),
+        "update",
+        lambda self: api_key_updates.append("api_keys_column"),
+    )
+
+    view._on_peer_stt_selected(STTProviderName.SONIOX.value)
+
+    assert settings.provider.peer_stt == STTProviderName.SONIOX
+    assert view._peer_stt_text.content.value == t("provider.soniox")
+    assert api_key_updates == ["peer_stt_text", "api_keys_column"]
+
+
+def test_on_peer_translation_selected_refreshes_api_visibility_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    settings.ui.peer_translation_enabled = False
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.set_overlay_runtime_state("connected")
+    view.page = object()
+
+    api_key_updates: list[str] = []
+    monkeypatch.setattr(
+        type(view._api_keys_column),
+        "update",
+        lambda self: api_key_updates.append("api_keys_column"),
+    )
+
+    view._on_peer_translation_selected("on")
+
+    assert settings.ui.peer_translation_enabled is True
+    assert view._soniox_key.visible is True
+    assert api_key_updates == ["api_keys_column"]
+
+
+def test_on_overlay_selected_refreshes_api_visibility_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    settings.provider.peer_stt = STTProviderName.DEEPGRAM
+    settings.ui.overlay_enabled = True
+    settings.ui.peer_translation_enabled = True
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.page = object()
+
+    api_key_updates: list[str] = []
+    monkeypatch.setattr(
+        type(view._api_keys_column),
+        "update",
+        lambda self: api_key_updates.append("api_keys_column"),
+    )
+
+    view._on_overlay_selected("off")
+
+    assert settings.ui.overlay_enabled is False
+    assert settings.ui.peer_translation_enabled is False
+    assert view._deepgram_key.visible is False
+    assert api_key_updates == ["api_keys_column"]
+
+
+def test_peer_provider_labels_are_backed_by_i18n(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = AppSettings()
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._peer_stt_label.value == t("settings.peer_stt_provider")
+    assert view._peer_qwen_region_label.value == t("settings.peer_qwen_region")
 
 
 def test_overlay_display_toggles_update_persistent_settings(
@@ -618,6 +835,59 @@ def test_apply_locale_and_refresh_prompt_if_empty(monkeypatch: pytest.MonkeyPatc
     assert view._stt_title.value == t("settings.section.stt")
     assert view._reset_prompt_btn.text == t("settings.reset_prompt")
     assert bool(view._prompt_editor.value.strip())
+
+
+def test_apply_locale_refreshes_peer_labels_and_inherit_texts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.ui.locale = "ko"
+    settings.provider.peer_stt = STTProviderName.QWEN_ASR
+    settings.peer_qwen_asr_stt.region = None
+    settings.peer_qwen_asr_stt.model = None
+    settings.peer_soniox_stt.model = None
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    old_locale = i18n_module.get_locale()
+    expected_peer_stt_label = ""
+    expected_peer_deepgram_model_label = ""
+    expected_peer_qwen_region_label = ""
+    expected_peer_qwen_model_label = ""
+    expected_peer_soniox_model_label = ""
+    expected_inherit_label = ""
+    try:
+        i18n_module.set_locale("ko")
+        view._peer_stt_label.value = "stale"
+        view._peer_deepgram_model_label.value = "stale"
+        view._peer_qwen_region_label.value = "stale"
+        view._peer_qwen_model_label.value = "stale"
+        view._peer_soniox_model_label.value = "stale"
+        view._peer_deepgram_model_text.content.value = "stale"
+        view._peer_qwen_region_text.content.value = "stale"
+        view._peer_qwen_model_text.content.value = "stale"
+        view._peer_soniox_model_text.content.value = "stale"
+
+        view.apply_locale()
+        expected_peer_stt_label = t("settings.peer_stt_provider")
+        expected_peer_deepgram_model_label = t("settings.peer_deepgram_model")
+        expected_peer_qwen_region_label = t("settings.peer_qwen_region")
+        expected_peer_qwen_model_label = t("settings.peer_qwen_model")
+        expected_peer_soniox_model_label = t("settings.peer_soniox_model")
+        expected_inherit_label = t("settings.peer_provider.follow_self")
+    finally:
+        i18n_module.set_locale(old_locale)
+
+    assert view._peer_stt_label.value == expected_peer_stt_label
+    assert view._peer_deepgram_model_label.value == expected_peer_deepgram_model_label
+    assert view._peer_qwen_region_label.value == expected_peer_qwen_region_label
+    assert view._peer_qwen_model_label.value == expected_peer_qwen_model_label
+    assert view._peer_soniox_model_label.value == expected_peer_soniox_model_label
+    assert view._peer_deepgram_model_text.content.value == expected_inherit_label
+    assert view._peer_qwen_region_text.content.value == expected_inherit_label
+    assert view._peer_qwen_model_text.content.value == expected_inherit_label
+    assert view._peer_soniox_model_text.content.value == expected_inherit_label
 
 
 def test_load_from_settings_updates_vrc_mic_toggle_label(

@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
+    QwenRegion,
     SecretsBackend,
     SecretsSettings,
     STTProviderName,
@@ -25,6 +27,21 @@ from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 
 SECRETS_PASSPHRASE_ENV = "PURIPULY_HEART_SECRETS_PASSPHRASE"
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedPeerSTTConfig:
+    provider: STTProviderName
+    source_language: str
+    sample_rate_hz: int
+    keyterms: tuple[str, ...]
+    deepgram_model: str | None = None
+    qwen_model: str | None = None
+    qwen_region: QwenRegion | None = None
+    soniox_model: str | None = None
+    soniox_endpoint: str | None = None
+    soniox_keepalive_interval_s: float | None = None
+    soniox_trailing_silence_ms: int | None = None
 
 
 def create_secret_store(
@@ -234,17 +251,147 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
     raise ValueError(f"Unsupported STT provider: {settings.provider.stt}")
 
 
-def create_peer_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBackend:
-    api_key = require_secret(secrets, key="deepgram_api_key", env_var="DEEPGRAM_API_KEY")
+def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
     peer_source_language = settings.languages.effective_peer_source
-    effective_terms = get_effective_custom_terms(settings, peer_source_language)
-    return _create_deepgram_stt_backend(
-        settings=settings,
-        api_key=api_key,
-        keyterms=effective_terms,
-        source_language=peer_source_language,
-        stream_label="peer",
+    keyterms = tuple(get_effective_custom_terms(settings, peer_source_language))
+    provider = settings.provider.peer_stt
+
+    if provider == STTProviderName.DEEPGRAM:
+        return ResolvedPeerSTTConfig(
+            provider=provider,
+            source_language=peer_source_language,
+            sample_rate_hz=settings.audio.internal_sample_rate_hz,
+            keyterms=keyterms,
+            deepgram_model=settings.peer_deepgram_stt.model or settings.deepgram_stt.model,
+        )
+
+    if provider == STTProviderName.QWEN_ASR:
+        return ResolvedPeerSTTConfig(
+            provider=provider,
+            source_language=peer_source_language,
+            sample_rate_hz=settings.audio.internal_sample_rate_hz,
+            keyterms=keyterms,
+            qwen_model=settings.peer_qwen_asr_stt.model or settings.qwen_asr_stt.model,
+            qwen_region=settings.peer_qwen_asr_stt.region or settings.qwen.region,
+        )
+
+    if provider == STTProviderName.SONIOX:
+        return ResolvedPeerSTTConfig(
+            provider=provider,
+            source_language=peer_source_language,
+            sample_rate_hz=settings.audio.internal_sample_rate_hz,
+            keyterms=keyterms,
+            soniox_model=settings.peer_soniox_stt.model or settings.soniox_stt.model,
+            soniox_endpoint=settings.peer_soniox_stt.endpoint or settings.soniox_stt.endpoint,
+            soniox_keepalive_interval_s=(
+                settings.peer_soniox_stt.keepalive_interval_s
+                if settings.peer_soniox_stt.keepalive_interval_s is not None
+                else settings.soniox_stt.keepalive_interval_s
+            ),
+            soniox_trailing_silence_ms=(
+                settings.peer_soniox_stt.trailing_silence_ms
+                if settings.peer_soniox_stt.trailing_silence_ms is not None
+                else settings.soniox_stt.trailing_silence_ms
+            ),
+        )
+
+    if provider == STTProviderName.LOCAL_QWEN:
+        return ResolvedPeerSTTConfig(
+            provider=provider,
+            source_language=peer_source_language,
+            sample_rate_hz=settings.audio.internal_sample_rate_hz,
+            keyterms=keyterms,
+        )
+
+    raise ValueError(f"Unsupported peer STT provider: {provider}")
+
+
+def build_peer_stt_provider_signature(settings: AppSettings) -> tuple[object, ...]:
+    resolved = resolve_peer_stt_config(settings)
+    return (
+        resolved.provider,
+        resolved.source_language,
+        resolved.sample_rate_hz,
+        resolved.deepgram_model,
+        resolved.qwen_model,
+        resolved.qwen_region,
+        resolved.soniox_model,
+        resolved.soniox_endpoint,
+        resolved.soniox_keepalive_interval_s,
+        resolved.soniox_trailing_silence_ms,
+        resolved.keyterms,
     )
+
+
+def create_peer_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBackend:
+    resolved = resolve_peer_stt_config(settings)
+
+    if resolved.provider == STTProviderName.DEEPGRAM:
+        api_key = require_secret(secrets, key="deepgram_api_key", env_var="DEEPGRAM_API_KEY")
+        return _create_deepgram_stt_backend(
+            settings=settings,
+            api_key=api_key,
+            keyterms=resolved.keyterms,
+            source_language=resolved.source_language,
+            stream_label="peer",
+            model=resolved.deepgram_model,
+        )
+
+    if resolved.provider == STTProviderName.QWEN_ASR:
+        from puripuly_heart.core.language import get_qwen_asr_language
+        from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
+
+        if resolved.qwen_region == QwenRegion.BEIJING:
+            api_key = require_secret_any(
+                secrets,
+                key="alibaba_api_key_beijing",
+                env_vars=("ALIBABA_API_KEY_BEIJING", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
+                legacy_keys=("alibaba_api_key",),
+            )
+            endpoint = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+        else:
+            api_key = require_secret_any(
+                secrets,
+                key="alibaba_api_key_singapore",
+                env_vars=("ALIBABA_API_KEY_SINGAPORE", "ALIBABA_API_KEY", "DASHSCOPE_API_KEY"),
+                legacy_keys=("alibaba_api_key",),
+            )
+            endpoint = "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+
+        return QwenASRRealtimeSTTBackend(
+            api_key=api_key,
+            model=resolved.qwen_model,
+            endpoint=endpoint,
+            language=get_qwen_asr_language(resolved.source_language),
+            sample_rate_hz=resolved.sample_rate_hz,
+        )
+
+    if resolved.provider == STTProviderName.SONIOX:
+        from puripuly_heart.core.language import get_soniox_language_hints
+        from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
+
+        api_key = require_secret(secrets, key="soniox_api_key", env_var="SONIOX_API_KEY")
+        return SonioxRealtimeSTTBackend(
+            api_key=api_key,
+            model=resolved.soniox_model,
+            endpoint=resolved.soniox_endpoint,
+            language_hints=get_soniox_language_hints(resolved.source_language),
+            sample_rate_hz=resolved.sample_rate_hz,
+            keepalive_interval_s=resolved.soniox_keepalive_interval_s,
+            trailing_silence_ms=resolved.soniox_trailing_silence_ms,
+            context_terms=resolved.keyterms,
+        )
+
+    if resolved.provider == STTProviderName.LOCAL_QWEN:
+        from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
+        from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaSTTBackend
+
+        return LocalQwenSherpaSTTBackend(
+            model_dir=default_local_stt_model_dir(),
+            sample_rate_hz=resolved.sample_rate_hz,
+        )
+
+    raise ValueError(f"Unsupported peer STT provider: {resolved.provider}")
 
 
 def _create_deepgram_stt_backend(
@@ -254,6 +401,7 @@ def _create_deepgram_stt_backend(
     keyterms: tuple[str, ...] | list[str],
     source_language: str | None = None,
     stream_label: str | None = None,
+    model: str | None = None,
 ) -> STTBackend:
     from puripuly_heart.core.language import get_deepgram_language
     from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
@@ -261,7 +409,7 @@ def _create_deepgram_stt_backend(
     source_language = source_language or settings.languages.source_language
     return DeepgramRealtimeSTTBackend(
         api_key=api_key,
-        model=settings.deepgram_stt.model,
+        model=model or settings.deepgram_stt.model,
         language=get_deepgram_language(source_language),
         sample_rate_hz=settings.audio.internal_sample_rate_hz,
         keyterms=keyterms,
