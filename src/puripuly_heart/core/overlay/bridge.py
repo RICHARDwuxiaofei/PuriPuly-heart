@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -11,6 +12,8 @@ from websockets.asyncio.server import Server, ServerConnection
 from websockets.exceptions import ConnectionClosed
 
 from .protocol import OverlayPresentationSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -86,6 +89,12 @@ class OverlayBridge:
             if snapshot.revision <= self._snapshot.revision:
                 return
             self._snapshot = snapshot
+            logger.info(
+                "[OverlayBridge] Snapshot updated: revision=%s block_count=%s authenticated_connections=%s",
+                snapshot.revision,
+                len(snapshot.blocks),
+                len(self._authenticated_connections),
+            )
             await self._broadcast_json({"type": "snapshot", "payload": snapshot.to_dict()})
 
     async def broadcast_shutdown(self) -> None:
@@ -99,11 +108,13 @@ class OverlayBridge:
         try:
             auth_payload = self._load_message(await connection.recv())
             if not self._is_valid_auth_payload(auth_payload):
+                logger.warning("[OverlayBridge] Rejected overlay auth request")
                 await connection.send(json.dumps({"type": "auth_error"}))
                 return
 
             async with self._snapshot_lock:
                 if not self._is_valid_auth_payload(auth_payload):
+                    logger.warning("[OverlayBridge] Rejected overlay auth request after lock")
                     await connection.send(json.dumps({"type": "auth_error"}))
                     return
                 self._token_consumed = True
@@ -117,11 +128,17 @@ class OverlayBridge:
                 )
                 self._authenticated_connections.add(connection)
                 authenticated = True
+                logger.info(
+                    "[OverlayBridge] Overlay authenticated: revision=%s authenticated_connections=%s",
+                    self._snapshot.revision,
+                    len(self._authenticated_connections),
+                )
 
             async for raw_message in connection:
                 message = self._load_message(raw_message)
                 await self.messages.put(message)
         except ConnectionClosed:
+            logger.info("[OverlayBridge] Overlay connection closed")
             return
         finally:
             if authenticated:

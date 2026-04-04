@@ -193,6 +193,16 @@ class TranslatorApp:
         if self.controller.settings is None:
             return
         settings = self.controller.settings
+        previous_source_code = settings.languages.source_language
+        previous_target_code = settings.languages.target_language
+        logger.info(
+            "[Dashboard] Language change requested: source=%s->%s target=%s->%s overlay_state=%s",
+            previous_source_code,
+            source_code,
+            previous_target_code,
+            target_code,
+            getattr(self, "overlay_state", "unknown"),
+        )
         settings.languages.source_language = source_code
         settings.languages.target_language = target_code
 

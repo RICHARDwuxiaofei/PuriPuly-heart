@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -26,6 +27,8 @@ from .sink import (
     TranslationStreamUpdate,
     UtteranceClosed,
 )
+
+logger = logging.getLogger(__name__)
 
 VISIBLE_WINDOW_TARGET_BLOCKS = 2
 _ACTIVE_SELF_BLOCK_ID = "self:active"
@@ -305,6 +308,21 @@ class OverlayPresenter(OverlaySink):
             revision=self._revision,
             calibration=next_calibration,
             blocks=next_blocks,
+        )
+        logger.info(
+            "[OverlayPresenter] Snapshot publish: revision=%s block_count=%s bridge_attached=%s blocks=%s",
+            self._snapshot.revision,
+            len(next_blocks),
+            self.bridge is not None,
+            [
+                {
+                    "id": block.id,
+                    "variant": block.block_variant,
+                    "primary_len": len(block.primary_text),
+                    "secondary_len": len(block.secondary_text),
+                }
+                for block in next_blocks
+            ],
         )
         if self.bridge is not None:
             await self.bridge.replace_snapshot(self._snapshot)

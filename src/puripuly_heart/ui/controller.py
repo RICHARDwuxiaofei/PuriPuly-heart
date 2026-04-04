@@ -1102,10 +1102,30 @@ class GuiController:
         prev_peer_signature = self._last_peer_stt_runtime_signature
         # hub.source_language를 기준으로 비교 (settings 객체는 이미 수정되어 전달될 수 있음)
         prev_source_lang = self.hub.source_language if self.hub else None
+        prev_target_lang = self.hub.target_language if self.hub else None
         prev_low_latency = self.hub.low_latency_mode if self.hub else None
         source_language_changed = (
             prev_source_lang is not None and prev_source_lang != settings.languages.source_language
         )
+        target_language_changed = (
+            prev_target_lang is not None and prev_target_lang != settings.languages.target_language
+        )
+        if source_language_changed or target_language_changed:
+            presenter = self._overlay_presenter
+            logger.info(
+                "[Settings] Applying languages: source=%s->%s target=%s->%s overlay_state=%s "
+                "presenter_attached=%s bridge_attached=%s overlay_sink_matches_presenter=%s",
+                prev_source_lang,
+                settings.languages.source_language,
+                prev_target_lang,
+                settings.languages.target_language,
+                self.overlay_state,
+                presenter is not None,
+                self._overlay_bridge is not None,
+                self.hub is not None
+                and presenter is not None
+                and getattr(self.hub, "overlay_sink", None) is presenter,
+            )
         self.settings = settings
         self._save_settings()
         self._refresh_local_stt_runtime_state()
