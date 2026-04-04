@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -422,3 +423,64 @@ async def test_local_qwen_session_close_is_idempotent(monkeypatch: pytest.Monkey
     gen = session.events()
     with pytest.raises(StopAsyncIteration):
         await gen.__anext__()
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_session_logs_inference_metrics_and_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    texts = iter(["first local qwen", "second local qwen"])
+
+    class FakeStream:
+        def __init__(self) -> None:
+            self.result = SimpleNamespace(text=next(texts))
+
+        def accept_waveform(self, sample_rate: int, samples) -> None:
+            _ = sample_rate, samples
+
+    class FakeRecognizer:
+        def create_stream(self) -> FakeStream:
+            return FakeStream()
+
+        def decode_stream(self, stream: FakeStream) -> None:
+            _ = stream
+
+    perf_values = iter([1.0, 1.25, 2.0, 2.2])
+    monkeypatch.setattr(local_qwen_module.time, "perf_counter", lambda: next(perf_values))
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    _install_fake_sherpa(monkeypatch, recognizer_factory=lambda _config: FakeRecognizer())
+
+    backend = LocalQwenSherpaSTTBackend(
+        model_dir=Path("/models/qwen"),
+        sample_rate_hz=16000,
+        stream_label="peer",
+    )
+    session = await backend.open_session()
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.stt.local_qwen_sherpa"):
+        await session.send_audio(b"\x00\x00" * 16000)
+        await session.on_speech_end()
+        await session.send_audio(b"\x00\x00" * 8000)
+        await session.on_speech_end()
+        await session.close()
+
+    messages = [record.getMessage() for record in caplog.records]
+    final_messages = [message for message in messages if "Transcript:" in message]
+    assert len(final_messages) == 2
+    assert (
+        "[STT][local_qwen][peer] Transcript: 'first local qwen' "
+        "(final, audio_ms=1000.0, inference_ms=250.0, rtf=0.250)"
+    ) in final_messages
+    assert (
+        "[STT][local_qwen][peer] Transcript: 'second local qwen' "
+        "(final, audio_ms=500.0, inference_ms=200.0, rtf=0.400)"
+    ) in final_messages
+    assert (
+        "[STT][local_qwen][peer] Session summary: utterances=2 "
+        "total_audio_ms=1500.0 total_inference_ms=450.0 weighted_total_rtf=0.300 mean_rtf=0.325"
+    ) in messages

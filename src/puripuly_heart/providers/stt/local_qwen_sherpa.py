@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator
@@ -18,6 +20,7 @@ from puripuly_heart.core.stt.backend import (
 
 DEFAULT_SHERPA_NUM_THREADS = 3
 LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ = 16000
+logger = logging.getLogger(__name__)
 
 
 class LocalQwenSherpaLoadError(RuntimeError):
@@ -26,6 +29,20 @@ class LocalQwenSherpaLoadError(RuntimeError):
 
 class LocalQwenSherpaInferenceError(RuntimeError):
     """Raised when local sherpa inference fails for an utterance."""
+
+
+def _log_prefix(stream_label: str | None) -> str:
+    prefix = "[STT][local_qwen]"
+    if stream_label:
+        return f"{prefix}[{stream_label}]"
+    return prefix
+
+
+def _pcm16le_duration_ms(pcm16le_size_bytes: int, sample_rate_hz: int) -> float:
+    if pcm16le_size_bytes <= 0 or sample_rate_hz <= 0:
+        return 0.0
+    sample_count = pcm16le_size_bytes / 2.0
+    return sample_count * 1000.0 / float(sample_rate_hz)
 
 
 def create_local_qwen_sherpa_recognizer(
@@ -76,6 +93,7 @@ class LocalQwenSherpaSTTBackend(STTBackend):
     num_threads: int = DEFAULT_SHERPA_NUM_THREADS
     feature_dim: int = 128
     provider: str = "cpu"
+    stream_label: str | None = None
     _recognizer: object | None = field(init=False, default=None, repr=False)
     _load_lock: asyncio.Lock = field(init=False, repr=False)
     _decode_lock: asyncio.Lock = field(init=False, repr=False)
@@ -159,6 +177,11 @@ class _LocalQwenSherpaSession(STTBackendSession):
     )
     _closed: bool = field(init=False, default=False, repr=False)
     _closed_event_enqueued: bool = field(init=False, default=False, repr=False)
+    _utterances: int = field(init=False, default=0, repr=False)
+    _total_audio_ms: float = field(init=False, default=0.0, repr=False)
+    _total_inference_ms: float = field(init=False, default=0.0, repr=False)
+    _total_rtf: float = field(init=False, default=0.0, repr=False)
+    _summary_logged: bool = field(init=False, default=False, repr=False)
 
     def __post_init__(self) -> None:
         self._buffer = bytearray()
@@ -176,20 +199,39 @@ class _LocalQwenSherpaSession(STTBackendSession):
 
         pcm16le = bytes(self._buffer)
         self._buffer.clear()
+        audio_ms = _pcm16le_duration_ms(len(pcm16le), self.backend.sample_rate_hz)
 
         try:
+            started_at = time.perf_counter()
             text = await self.backend.decode_pcm16le(pcm16le)
+            inference_ms = (time.perf_counter() - started_at) * 1000.0
         except Exception as exc:
             await self._events.put(exc)
             return
 
+        rtf = inference_ms / audio_ms if audio_ms > 0 else 0.0
+        self._utterances += 1
+        self._total_audio_ms += audio_ms
+        self._total_inference_ms += inference_ms
+        self._total_rtf += rtf
+
         if text:
+            logger.info(
+                "%s Transcript: '%s' (final, audio_ms=%.1f, inference_ms=%.1f, rtf=%.3f)",
+                _log_prefix(self.backend.stream_label),
+                text,
+                audio_ms,
+                inference_ms,
+                rtf,
+            )
             await self._events.put(STTBackendTranscriptEvent(text=text, is_final=True))
 
     async def stop(self) -> None:
+        self._log_summary_once()
         await self.close()
 
     async def close(self) -> None:
+        self._log_summary_once()
         self._closed = True
         self._buffer.clear()
         if self._closed_event_enqueued:
@@ -205,3 +247,21 @@ class _LocalQwenSherpaSession(STTBackendSession):
             if isinstance(event, BaseException):
                 raise event
             yield event
+
+    def _log_summary_once(self) -> None:
+        if self._summary_logged or self._utterances == 0:
+            return
+        self._summary_logged = True
+        weighted_total_rtf = (
+            self._total_inference_ms / self._total_audio_ms if self._total_audio_ms > 0 else 0.0
+        )
+        mean_rtf = self._total_rtf / self._utterances if self._utterances > 0 else 0.0
+        logger.info(
+            "%s Session summary: utterances=%s total_audio_ms=%.1f total_inference_ms=%.1f weighted_total_rtf=%.3f mean_rtf=%.3f",
+            _log_prefix(self.backend.stream_label),
+            self._utterances,
+            self._total_audio_ms,
+            self._total_inference_ms,
+            weighted_total_rtf,
+            mean_rtf,
+        )
