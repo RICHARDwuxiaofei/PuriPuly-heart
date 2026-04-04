@@ -20,6 +20,7 @@ from puripuly_heart.app.wiring import (
 )
 from puripuly_heart.config.settings import (
     AppSettings,
+    LLMProviderName,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
@@ -66,6 +67,7 @@ from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_va
 from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
+from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
@@ -267,7 +269,11 @@ class GuiController:
             # LLM: check current provider's verification status
             llm_provider = self.settings.provider.llm.value
             # Map llm provider to api_key_verified field name
-            llm_key_map = {"gemini": "google", "qwen": self._get_alibaba_verified_key()}
+            llm_key_map = {
+                "gemini": "google",
+                "openrouter": "openrouter",
+                "qwen": self._get_alibaba_verified_key(),
+            }
             llm_verified_key = llm_key_map.get(llm_provider, llm_provider)
             llm_verified = getattr(self.settings.api_key_verified, llm_verified_key, False)
             dash.translation_needs_key = (self.hub.llm is None) or (not llm_verified)
@@ -1228,6 +1234,8 @@ class GuiController:
             success = False
             if provider == "google":
                 success = await GeminiLLMProvider.verify_api_key(key)
+            elif provider == "openrouter":
+                success = await OpenRouterLLMProvider.verify_api_key(key)
             elif provider == "alibaba_beijing":
                 return await self._verify_qwen_key_with_model_fallback(
                     key,
@@ -1872,6 +1880,9 @@ class GuiController:
                 if provider_name == "gemini":
                     key = secrets.get("google_api_key") or "" if secrets is not None else ""
                     llm_valid = await GeminiLLMProvider.verify_api_key(key)
+                elif provider_name == LLMProviderName.OPENROUTER:
+                    key = secrets.get("openrouter_api_key") or "" if secrets is not None else ""
+                    llm_valid = await OpenRouterLLMProvider.verify_api_key(key)
                 elif provider_name == "qwen":
                     llm_valid = await _verify_alibaba_selected()
                 else:

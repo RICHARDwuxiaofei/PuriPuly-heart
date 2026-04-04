@@ -27,6 +27,7 @@ from puripuly_heart.core.overlay.sink import (
     TranslationFinal,
 )
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
+from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
@@ -2406,6 +2407,7 @@ async def test_apply_settings_skips_vrc_sync_when_setting_is_unchanged(
     [
         ("deepgram", True, (True, "Verification successful")),
         ("deepgram", False, (False, "Verification failed (check logs/console for details)")),
+        ("openrouter", True, (True, "Verification successful")),
         ("soniox", True, (True, "Verification successful")),
     ],
 )
@@ -2423,6 +2425,7 @@ async def test_verify_api_key_success_and_failure_paths(
         return result
 
     monkeypatch.setattr(DeepgramRealtimeSTTBackend, "verify_api_key", staticmethod(fake_verify))
+    monkeypatch.setattr(OpenRouterLLMProvider, "verify_api_key", staticmethod(fake_verify))
     monkeypatch.setattr(SonioxRealtimeSTTBackend, "verify_api_key", staticmethod(fake_verify))
 
     outcome = await controller.verify_api_key(provider, "secret")

@@ -11,6 +11,8 @@ from puripuly_heart.config.settings import (
     AudioSettings,
     GeminiLLMModel,
     LLMProviderName,
+    OpenRouterLLMModel,
+    OpenRouterSettings,
     OSCSettings,
     QwenLLMModel,
     QwenRegion,
@@ -641,6 +643,7 @@ def test_system_prompts_roundtrip(tmp_path):
     settings = AppSettings()
     settings.system_prompts = {
         "gemini": "gemini prompt",
+        "openrouter": "openrouter prompt",
         "qwen": "qwen prompt",
     }
     settings.provider.llm = LLMProviderName.QWEN
@@ -649,8 +652,43 @@ def test_system_prompts_roundtrip(tmp_path):
 
     loaded = load_settings(path)
     assert loaded.system_prompts["gemini"] == "gemini prompt"
+    assert loaded.system_prompts["openrouter"] == "openrouter prompt"
     assert loaded.system_prompts["qwen"] == "qwen prompt"
     assert loaded.system_prompt == "qwen prompt"
+
+
+def test_openrouter_settings_roundtrip(tmp_path):
+    path = tmp_path / "settings.json"
+    settings = AppSettings(
+        provider=AppSettings().provider,
+        openrouter=OpenRouterSettings(llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT),
+    )
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    save_settings(path, settings)
+
+    loaded = load_settings(path)
+
+    assert loaded.provider.llm == LLMProviderName.OPENROUTER
+    assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+
+
+def test_load_settings_backfills_openrouter_blocks_and_persists(tmp_path):
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["settings_version"] = 4
+    legacy.pop("openrouter", None)
+    legacy.setdefault("api_key_verified", {}).pop("openrouter", None)
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
+    assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    assert loaded.api_key_verified.openrouter is False
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert persisted["openrouter"]["llm_model"] == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value
+    assert persisted["api_key_verified"]["openrouter"] is False
 
 
 def test_from_dict_uses_prompt_for_selected_provider():
@@ -666,6 +704,22 @@ def test_from_dict_uses_prompt_for_selected_provider():
     assert loaded.system_prompt == "qwen custom"
     assert loaded.system_prompts["gemini"] == "gemini custom"
     assert loaded.system_prompts["qwen"] == "qwen custom"
+
+
+def test_from_dict_uses_openrouter_prompt_for_selected_provider():
+    data = to_dict(AppSettings())
+    data["provider"]["llm"] = "openrouter"
+    data["system_prompts"] = {
+        "gemini": "gemini custom",
+        "openrouter": "openrouter custom",
+        "qwen": "qwen custom",
+    }
+    data["system_prompt"] = "legacy"
+
+    loaded = from_dict(data)
+
+    assert loaded.system_prompt == "openrouter custom"
+    assert loaded.system_prompts["openrouter"] == "openrouter custom"
 
 
 def test_from_dict_backfills_legacy_system_prompt_to_selected_provider():

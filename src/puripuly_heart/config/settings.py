@@ -9,7 +9,7 @@ from typing import Any
 
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 4
+SETTINGS_SCHEMA_VERSION = 5
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
     "ko": ("아이리", "시나노"),
@@ -36,6 +36,7 @@ class STTProviderName(str, Enum):
 
 class LLMProviderName(str, Enum):
     GEMINI = "gemini"
+    OPENROUTER = "openrouter"
     QWEN = "qwen"
 
 
@@ -57,6 +58,10 @@ class GeminiLLMModel(str, Enum):
 class QwenLLMModel(str, Enum):
     QWEN_35_FLASH = "qwen3.5-flash"
     QWEN_35_PLUS = "qwen3.5-plus"
+
+
+class OpenRouterLLMModel(str, Enum):
+    GEMMA_4_26B_A4B_IT = "google/gemma-4-26b-a4b-it"
 
 
 @dataclass(slots=True)
@@ -323,6 +328,15 @@ class QwenSettings:
 
 
 @dataclass(slots=True)
+class OpenRouterSettings:
+    llm_model: OpenRouterLLMModel = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+
+    def validate(self) -> None:
+        if not isinstance(self.llm_model, OpenRouterLLMModel):
+            raise ValueError("invalid openrouter llm model")
+
+
+@dataclass(slots=True)
 class UiSettings:
     locale: str = "en"
     # Session-only toggle; intentionally not persisted to settings.json.
@@ -345,6 +359,7 @@ class ApiKeyVerificationSettings:
     deepgram: bool = False
     soniox: bool = False
     google: bool = False
+    openrouter: bool = False
     alibaba_beijing: bool = False
     alibaba_singapore: bool = False
 
@@ -367,6 +382,7 @@ class AppSettings:
     peer_qwen_asr_stt: PeerQwenASRSTTSettings = field(default_factory=PeerQwenASRSTTSettings)
     peer_soniox_stt: PeerSonioxSTTSettings = field(default_factory=PeerSonioxSTTSettings)
     gemini: GeminiSettings = field(default_factory=GeminiSettings)
+    openrouter: OpenRouterSettings = field(default_factory=OpenRouterSettings)
     qwen: QwenSettings = field(default_factory=QwenSettings)
     llm: LLMSettings = field(default_factory=LLMSettings)
     osc: OSCSettings = field(default_factory=OSCSettings)
@@ -391,6 +407,7 @@ class AppSettings:
         self.peer_qwen_asr_stt.validate()
         self.peer_soniox_stt.validate()
         self.gemini.validate()
+        self.openrouter.validate()
         self.qwen.validate()
         self.llm.validate()
         self.osc.validate()
@@ -484,6 +501,9 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         "gemini": {
             "llm_model": settings.gemini.llm_model.value,
         },
+        "openrouter": {
+            "llm_model": settings.openrouter.llm_model.value,
+        },
         "qwen": {
             "region": settings.qwen.region.value,
             "llm_model": settings.qwen.llm_model.value,
@@ -517,6 +537,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "deepgram": settings.api_key_verified.deepgram,
             "soniox": settings.api_key_verified.soniox,
             "google": settings.api_key_verified.google,
+            "openrouter": settings.api_key_verified.openrouter,
             "alibaba_beijing": settings.api_key_verified.alibaba_beijing,
             "alibaba_singapore": settings.api_key_verified.alibaba_singapore,
         },
@@ -534,6 +555,16 @@ def _parse_stt_provider(value: str) -> STTProviderName:
         return STTProviderName(value)
     except ValueError:
         return STTProviderName.DEEPGRAM
+
+
+def _parse_llm_provider(value: object) -> LLMProviderName:
+    if isinstance(value, str):
+        normalized = value.strip()
+        try:
+            return LLMProviderName(normalized)
+        except ValueError:
+            pass
+    return LLMProviderName.GEMINI
 
 
 def _parse_qwen_llm_model(value: object) -> QwenLLMModel:
@@ -562,8 +593,22 @@ def _parse_gemini_llm_model(value: object) -> GeminiLLMModel:
     return GeminiLLMModel.GEMINI_31_FLASH_LITE
 
 
+def _parse_openrouter_llm_model(value: object) -> OpenRouterLLMModel:
+    if isinstance(value, str):
+        normalized = value.strip()
+        try:
+            return OpenRouterLLMModel(normalized)
+        except ValueError:
+            pass
+    return OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+
+
 def _llm_prompt_key(provider: LLMProviderName) -> str:
-    return "gemini" if provider == LLMProviderName.GEMINI else "qwen"
+    if provider == LLMProviderName.GEMINI:
+        return "gemini"
+    if provider == LLMProviderName.OPENROUTER:
+        return "openrouter"
+    return "qwen"
 
 
 def _parse_system_prompts(value: object) -> dict[str, str]:
@@ -716,6 +761,25 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 4
 
+    if version < 5:
+        openrouter_data = data.get("openrouter")
+        if not isinstance(openrouter_data, dict):
+            data["openrouter"] = {
+                "llm_model": OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
+            }
+            changed = True
+
+        api_key_verified = data.get("api_key_verified")
+        if not isinstance(api_key_verified, dict):
+            api_key_verified = {}
+            data["api_key_verified"] = api_key_verified
+            changed = True
+        if "openrouter" not in api_key_verified:
+            api_key_verified["openrouter"] = False
+            changed = True
+
+        version = 5
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -794,6 +858,18 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         gemini_data["llm_model"] = normalized_gemini_model
         changed = True
 
+    openrouter_data = data.get("openrouter")
+    if not isinstance(openrouter_data, dict):
+        openrouter_data = {}
+        data["openrouter"] = openrouter_data
+        changed = True
+
+    raw_openrouter_model = openrouter_data.get("llm_model")
+    normalized_openrouter_model = _parse_openrouter_llm_model(raw_openrouter_model).value
+    if raw_openrouter_model != normalized_openrouter_model:
+        openrouter_data["llm_model"] = normalized_openrouter_model
+        changed = True
+
     qwen_data = data.get("qwen")
     if not isinstance(qwen_data, dict):
         qwen_data = {}
@@ -869,7 +945,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         provider=ProviderSettings(
             stt=_parse_stt_provider(str(stt_provider_value)),
             peer_stt=_parse_stt_provider(str(raw_peer_provider)),
-            llm=LLMProviderName(provider_data.get("llm", LLMProviderName.GEMINI.value)),
+            llm=_parse_llm_provider(provider_data.get("llm", LLMProviderName.GEMINI.value)),
         ),
         languages=LanguageSettings(
             source_language=data.get("languages", {}).get("source_language", "ko"),
@@ -996,6 +1072,14 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 data.get("gemini", {}).get("llm_model", GeminiLLMModel.GEMINI_31_FLASH_LITE.value)
             ),
         ),
+        openrouter=OpenRouterSettings(
+            llm_model=_parse_openrouter_llm_model(
+                data.get("openrouter", {}).get(
+                    "llm_model",
+                    OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
+                )
+            ),
+        ),
         qwen=QwenSettings(
             region=QwenRegion(data.get("qwen", {}).get("region", QwenRegion.BEIJING.value)),
             llm_model=_parse_qwen_llm_model(
@@ -1035,6 +1119,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             deepgram=bool(data.get("api_key_verified", {}).get("deepgram", False)),
             soniox=bool(data.get("api_key_verified", {}).get("soniox", False)),
             google=bool(data.get("api_key_verified", {}).get("google", False)),
+            openrouter=bool(data.get("api_key_verified", {}).get("openrouter", False)),
             alibaba_beijing=bool(data.get("api_key_verified", {}).get("alibaba_beijing", False)),
             alibaba_singapore=bool(
                 data.get("api_key_verified", {}).get("alibaba_singapore", False)

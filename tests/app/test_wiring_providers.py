@@ -16,6 +16,8 @@ from puripuly_heart.config.settings import (
     GeminiSettings,
     LLMProviderName,
     LLMSettings,
+    OpenRouterLLMModel,
+    OpenRouterSettings,
     ProviderSettings,
     QwenASRSTTSettings,
     QwenLLMModel,
@@ -30,6 +32,7 @@ from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
+from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
@@ -143,6 +146,39 @@ def test_create_llm_provider_qwen_standard_mode_singapore() -> None:
     assert provider.inner.api_key == "k3"
     assert provider.inner.base_url == "https://dashscope-intl.aliyuncs.com/api/v1"
     assert provider.inner.model == "qwen3.5-flash"
+
+
+def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        llm=LLMSettings(concurrency_limit=4),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "or-key")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, OpenRouterLLMProvider)
+    assert provider.inner.api_key == "or-key"
+    assert provider.inner.model == "google/gemma-4-26b-a4b-it"
+    assert provider.inner.base_url == "https://openrouter.ai/api/v1"
+    assert provider.semaphore._value == 4  # type: ignore[attr-defined]
+
+
+def test_create_llm_provider_openrouter_uses_env_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "env-or-key")
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.OPENROUTER))
+    secrets = InMemorySecretStore()
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, OpenRouterLLMProvider)
+    assert provider.inner.api_key == "env-or-key"
 
 
 def test_create_llm_provider_requires_secret(monkeypatch: pytest.MonkeyPatch) -> None:

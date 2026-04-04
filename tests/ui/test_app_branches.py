@@ -289,6 +289,7 @@ async def test_on_verify_api_key_persists_and_updates_dashboard_flags(
             deepgram=False,
             soniox=False,
             google=False,
+            openrouter=False,
             alibaba_beijing=False,
             alibaba_singapore=False,
         )
@@ -304,14 +305,17 @@ async def test_on_verify_api_key_persists_and_updates_dashboard_flags(
 
     deepgram_result = await app._on_verify_api_key("deepgram", "k")
     google_result = await app._on_verify_api_key("google", "k")
+    openrouter_result = await app._on_verify_api_key("openrouter", "k")
 
     assert deepgram_result == (True, "ok")
     assert google_result == (False, "ok")
+    assert openrouter_result == (False, "ok")
     assert settings.api_key_verified.deepgram is True
     assert settings.api_key_verified.google is False
+    assert settings.api_key_verified.openrouter is False
     assert app.view_dashboard.stt_calls[-1] == (False, False)
     assert app.view_dashboard.trans_calls[-1] == (True, False)
-    assert len(saves) == 2
+    assert len(saves) == 3
 
 
 def test_show_snackbar_opens_page_snackbar() -> None:
