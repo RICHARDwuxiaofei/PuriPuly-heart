@@ -12,7 +12,7 @@ This design keeps the existing overlay event names and logical turn model, but c
 - A left accent bar is the only update signal.
 - Slot continuity is driven by explicit occupant metadata rather than text matching heuristics.
 
-This design also assumes the peer subsystem rewrite preserves the current hub-to-overlay event contract for peer turns, even if peer runtime start, stop, and recovery timing changes.
+This design also assumes the peer subsystem rewrite preserves the current hub-to-overlay event contract for peer turns, even if peer runtime start, stop, and recovery timing changes. Peer runtime policy changes and peer-provider swaps are not themselves overlay clear signals.
 
 ## Goals
 
@@ -24,7 +24,7 @@ This design also assumes the peer subsystem rewrite preserves the current hub-to
 
 ## Non-Goals
 
-- No damage-band or ghosting investigation in this work.
+- No broad damage-band or ghosting investigation beyond the minimum renderer changes needed to clear the new accent chrome correctly.
 - No new user-facing settings for animation style or slot count.
 - No redesign of translation timing or utterance close semantics.
 - No increase beyond two visible slots.
@@ -103,24 +103,33 @@ The native slot manager must use `occupant_key` as the authoritative continuity 
 
 ### Assignment Priority
 
-When a snapshot arrives:
+Logical visible-set selection happens in the presenter before the snapshot reaches native state:
 
-1. Update any slot whose current occupant still exists in the new logical set.
+1. The presenter owns a capped logical visible set of at most two occupants.
+2. `active_self` counts as one visible occupant while it exists.
+3. If a new occupant must enter and both visible positions are already full, the presenter displaces the oldest visible finalized occupant.
+4. A displaced finalized occupant is tombstoned for overlay purposes and must not re-enter later due only to late translation, close, or other late-arriving updates.
+5. `appearance_seq` is assigned only when an occupant first becomes visible.
+6. Hidden peer turns do not receive `appearance_seq` until translation makes them visible for the first time.
+
+Native slot assignment happens only for the presenter-selected blocks:
+
+1. Update any slot whose current occupant still exists in the selected logical set.
 2. Promote matching `active_self` to finalized self in place.
-3. Assign brand-new occupants to the first empty slot in order `slot 1 -> slot 2`.
-4. If no slot is empty, replace the oldest finalized slot.
-5. Never evict a currently visible `active_self` to make room for a finalized update of that same turn.
-6. If a new `active_self` must enter while both slots are full, it replaces the oldest finalized slot.
+3. Assign brand-new selected occupants to the first empty slot in order `slot 1 -> slot 2`.
+4. Never evict a currently visible `active_self` to make room for a finalized update of that same turn.
 
-Snapshot processing must be deterministic. The presenter must emit publishable blocks sorted by `(appearance_seq, occupant_key)`, and native slot assignment must consume brand-new occupants in that order.
+Snapshot processing must be deterministic. The presenter must emit selected blocks sorted by `(appearance_seq, occupant_key)`, and native slot mapping must consume brand-new occupants in that order.
 
 ### Oldest-Finalized Rule
 
-The replacement target is the visible finalized slot with the earliest slot-entry order. This rule is intentionally physical-slot oriented, not strict visual recency sorting, and it is not affected by later translation or close updates.
+The replacement target is the oldest visible finalized occupant in the presenter-owned logical visible set. This rule is intentionally visibility-oriented, not strict recency sorting, and it is not affected by later translation or close updates.
 
 ## Expiration And Removal
 
-- Explicit scene reset, provider replacement, shutdown, and clear-style events must empty both slots immediately and reset all accent pulse state.
+- Explicit scene reset, explicit overlay disable, shutdown, and clear-style events must empty both slots immediately and reset all accent pulse state.
+- Overlay runtime restart or reconnect paths that preserve presenter state must not clear the logical visible set. The next bridge session must start from the last presenter snapshot.
+- Peer STT provider swap, peer runtime fault recovery, or peer runtime activation changes alone must not clear visible slots.
 - Closed finalized turns still respect the existing presenter expiration model.
 - Native rendering must not compact slots when a finalized turn expires.
 - If a finalized slot expires, that slot becomes empty in place.
@@ -135,15 +144,17 @@ This preserves a stable spatial model even when content ages out.
 `src/puripuly_heart/core/overlay/presenter.py`
 
 - Continue to own logical caption entries, tombstones, late arrival handling, translation attachment, and close/expiration semantics.
-- Stop owning physical visibility trimming to two blocks.
-- Emit all logically publishable blocks that remain eligible under presenter retention rules.
+- Own the capped logical visible set of at most two occupants.
+- Decide which visible finalized occupant is displaced when a new occupant must enter a full logical visible set.
+- Tombstone displaced finalized occupants so they do not re-enter later from late events.
 - Assign and preserve `occupant_key` and `appearance_seq` metadata for every emitted block.
 - Preserve the current peer publishability rule: peer entries become visible only once translation text is available.
 - Treat first-visible peer translation as the moment a peer occupant enters the slot system.
-- Preserve late-arrival and tombstone semantics independently of native slot selection.
+- Ensure hidden peer turns that are canceled before first visibility never receive `occupant_key`, `appearance_seq`, or a slot assignment.
+- Preserve late-arrival and tombstone semantics independently of native physical slot placement.
 - Preserve existing finalized-entry semantics and wire event types.
 
-The presenter should remain logical. It should not own physical slot numbers, accent pulse timing, or replacement effects between the two fixed slots.
+The presenter should remain logical. It should not own physical slot numbers, accent pulse timing, or motion effects between the two fixed slots.
 
 ### Native State Responsibilities
 
@@ -152,11 +163,11 @@ The presenter should remain logical. It should not own physical slot numbers, ac
 - Replace retained strip lifecycle animation with a retained two-slot scene model.
 - Track exactly two physical slots with per-slot occupant identity, fixed slot anchor position, slot-entry order, and accent pulse lifecycle.
 - Remove exiting-strip retention and vertical reflow behavior.
-- Own the only two-slot visible set, including hole retention and oldest-finalized replacement.
+- Own physical slot continuity, hole retention, and one-shot accent triggering for the presenter-selected blocks only.
 - Treat `active_self -> finalized` as an in-place occupant update when `occupant_key` matches.
 - Remove text-matching-based promotion heuristics once explicit occupant metadata is available.
 
-The state layer owns slot assignment and one-time accent triggering because those are visual-scene behaviors rather than presenter semantics.
+The state layer owns physical slot mapping and one-time accent triggering because those are visual-scene behaviors rather than presenter semantics.
 
 ### Runtime And Renderer Responsibilities
 
@@ -167,6 +178,7 @@ The state layer owns slot assignment and one-time accent triggering because thos
 - Render slots at fixed positions with `opacity = 1`, `offset_y = 0`, `height_scale = 1`.
 - Stop deriving vertical placement from input block order. Slot y-position must come from slot state (`slot_index` / fixed anchor top).
 - Add left accent bar rendering driven by slot pulse state.
+- Ensure damage/clear bounds include the accent chrome so pulse end and slot removal do not leave stale accent pixels behind.
 - Keep existing text layout and channel text fill behavior unless needed for slot rendering integration.
 
 ## Data And State Changes
@@ -190,7 +202,7 @@ The internal snapshot block schema extends to include:
 - `occupant_key: str`
 - `appearance_seq: int`
 
-This is an internal Python-to-native contract change. Event types stay stable, but snapshot payload metadata becomes richer so slot continuity is explicit rather than heuristic.
+This is an internal Python-to-native contract change. Event types stay stable, but snapshot payload metadata becomes richer so slot continuity is explicit rather than heuristic. Because these fields become required for the new slot model, the overlay runtime contract version must increase so mixed Python/native builds fail fast rather than accepting incompatible snapshots.
 
 ### Native Slot State
 
@@ -222,6 +234,7 @@ Exact field names are implementation detail, but the model must support in-place
 - If a peer finalized transcript was previously hidden and translation makes it visible for the first time, that event is treated as new occupant assignment.
 - The slot receives the one-shot accent pulse at first visibility.
 - Later peer translation updates for the same visible occupant do not replay the pulse.
+- If that hidden peer turn is canceled before first visibility, it never gets `occupant_key`, `appearance_seq`, or an accent pulse.
 
 ### Active Self Clears Without Final
 
@@ -244,35 +257,42 @@ Exact field names are implementation detail, but the model must support in-place
 ### Peer Runtime Deactivation Or Restart
 
 - Peer runtime activation changes alone do not clear visible peer slots.
-- Only existing overlay events, close handling, and TTL expiry may remove peer occupants from slots.
-- If peer runtime recovery yields a brand-new utterance with a new `utterance_id`, it is treated as a new occupant even if the text matches a previously shown peer line.
+- Peer STT provider swap or peer runtime fault recovery alone do not clear visible slots.
+- Only existing overlay events, close handling, explicit overlay teardown, and TTL expiry may remove peer occupants from slots.
+- If peer runtime recovery cancels a hidden peer turn before first visibility, that turn must not later surface as an in-place update.
+- If peer runtime recovery yields a brand-new utterance with a new `utterance_id`, it is treated as new occupancy even if the text matches a previously shown peer line.
+- Warmup completion is not a visibility boundary. Slot continuity is driven only by overlay events after the provider is attached.
 
 ### Tombstoned Or Late Events
 
 - Preserve the current tombstone behavior in the presenter.
 - If a turn is no longer logically eligible, late events should not resurrect it into a slot.
 
-### Reset And Provider Replacement
+### Overlay Restart Versus Full Clear
 
-- Reset, provider replacement, and shutdown must clear both slots and clear any in-progress accent pulse.
+- Overlay runtime restart or reconnect with preserved presenter state must seed the next bridge from the last presenter snapshot and must not blank the scene first.
+- Explicit overlay disable, explicit scene reset, and shutdown must clear both slots and clear any in-progress accent pulse.
 - After a full clear, any later caption appears as a new occupant assignment.
+- Peer-provider replacement or peer runtime fault recovery are not themselves equivalent to full overlay clear.
 
 ## Testing
 
 ### Presenter Tests
 
-- Presenter no longer trims publishable entries to two by `last_updated_seq`.
+- Presenter owns the capped two-occupant logical visible set rather than trimming by mutable `last_updated_seq`.
 - `active_self` and its matching finalized self entry share the same `occupant_key` across promotion.
 - `appearance_seq` is assigned on first visibility and does not change on translation or close updates.
 - Translation and close events still attach to the correct logical entry.
 - Existing tombstone and late-arrival protections remain intact.
 - Peer turns remain hidden until translation exists.
 - First-visible peer translation is treated as new occupancy rather than a silent in-place update.
+- Hidden peer turns canceled before first visibility never receive `appearance_seq` or become visible.
+- Displaced finalized occupants are tombstoned and do not re-enter.
 
 ### Native State Tests
 
 - Empty slots fill in `slot 1 -> slot 2` order.
-- New occupants replace the oldest finalized slot when full.
+- Native maps only the presenter-selected logical visible set and does not invent a third candidate pool.
 - `active_self` is not replaced by its own finalization.
 - Slot compaction does not occur on expiration or clear.
 - `active_self -> finalized` does not retrigger the accent pulse when `occupant_key` matches.
@@ -283,7 +303,8 @@ Exact field names are implementation detail, but the model must support in-place
 - Peer runtime restart that produces a new `utterance_id` is treated as new occupancy.
 - The concrete `self_active_update -> self_transcript_final -> translation_final -> utterance_closed` flow keeps one slot when `occupant_key` is stable.
 - Secondary-text changes in one slot do not change the other slot's fixed top position.
-- Reset, provider replacement, and shutdown clear slot state and pulse state completely.
+- Explicit full clear paths clear slot state and pulse state completely.
+- Overlay restart with preserved presenter state rehydrates the same logical scene without a forced intermediate blank frame.
 
 ### Runtime And Renderer Tests
 
@@ -291,8 +312,16 @@ Exact field names are implementation detail, but the model must support in-place
 - Enter, exit, and reflow visual transforms are absent.
 - Accent bar width and channel colors match the design values.
 - Accent pulse timing is driven by a constant duration of `0.12s`.
+- Damage bounds include accent chrome so pulse end and slot removal do not leave accent remnants behind.
 - Runtime timing tests must assert pulse state by explicit delta-time progression, not by refresh-rate-dependent frame counts.
 - Pulse completion tests should use a small epsilon tolerance over `0.12s` rather than exact frame count assumptions.
+
+### Controller And Bridge Tests
+
+- Overlay runtime restart with `preserve_presenter_state=True` seeds the next bridge from the last presenter snapshot.
+- Explicit overlay disable tears down the presenter state so the next session starts empty.
+- Peer runtime policy changes to inactive do not themselves force an overlay full clear.
+- Full clear paths publish a monotonic empty snapshot before bridge detach so revision ordering remains valid.
 
 ### Manual Acceptance
 
@@ -308,5 +337,5 @@ Exact field names are implementation detail, but the model must support in-place
 - This is a readability-first redesign. It intentionally trades strict time-order compaction for spatial stability.
 - The existing active-self promotion work remains useful, but it will be absorbed into the broader two-slot slot-assignment model.
 - The previous text-matching promotion heuristic is not part of the target design. Once `occupant_key` is available, promotion continuity is presenter-authored and native must stop inferring continuity from text equality.
-- Ghosting and damage-band cleanup stay out of scope and should be evaluated after the motion model is simplified.
-- The peer subsystem rewrite is compatible with this design only if peer overlay visibility continues to be expressed through the current hub overlay events. If peer output semantics change, peer slot-assignment and pulse rules must be revisited before implementation.
+- Broader ghosting investigation stays out of scope, but the new accent chrome must be included in damage clearing as part of the renderer integration.
+- The peer subsystem rewrite is compatible with this design only if peer overlay visibility continues to be expressed through the current hub overlay events. Peer runtime policy, provider swap, warmup, or fault recovery are not themselves overlay clear events. If peer output semantics change, peer slot-assignment and pulse rules must be revisited before implementation.
