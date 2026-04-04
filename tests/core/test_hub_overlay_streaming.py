@@ -367,7 +367,7 @@ async def test_low_latency_self_partial_no_longer_emits_overlay_event(
 
 
 @pytest.mark.asyncio
-async def test_low_latency_self_final_emits_active_update_from_merge_buffer() -> None:
+async def test_low_latency_self_final_emits_active_update_with_merge_occupant_key() -> None:
     sink = RecordingOverlaySink()
     hub = ClientHub(
         stt=None,
@@ -393,6 +393,7 @@ async def test_low_latency_self_final_emits_active_update_from_merge_buffer() ->
 
     assert [event.type for event in sink.events] == ["self_active_update"]
     assert sink.events[0].text == "hello live"
+    assert sink.events[0].occupant_key == f"self:{hub._merge_buffer.merge_id}"
     assert hub.ui_events.empty()
 
 
@@ -451,7 +452,7 @@ async def test_low_latency_self_active_updates_only_when_merged_text_changes() -
 
 
 @pytest.mark.asyncio
-async def test_low_latency_merge_commit_clears_active_self_before_emitting_self_final() -> None:
+async def test_low_latency_merge_commit_reuses_merge_identity_without_emitting_clear() -> None:
     sink = RecordingOverlaySink()
     hub = ClientHub(
         stt=None,
@@ -475,6 +476,7 @@ async def test_low_latency_merge_commit_clears_active_self_before_emitting_self_
             ),
         )
     )
+    active_event = sink.events[-1]
     await hub.handle_vad_event(SpeechEnd(utterance_id))
     await hub._handle_stt_event(
         STTFinalEvent(
@@ -490,10 +492,11 @@ async def test_low_latency_merge_commit_clears_active_self_before_emitting_self_
 
     assert [event.type for event in sink.events] == [
         "self_active_update",
-        "self_active_clear",
         "self_transcript_final",
         "utterance_closed",
     ]
+    final_event = next(event for event in sink.events if event.type == "self_transcript_final")
+    assert active_event.occupant_key == f"self:{final_event.utterance_id}"
 
 
 @pytest.mark.asyncio

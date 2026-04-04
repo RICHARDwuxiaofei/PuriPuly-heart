@@ -597,6 +597,9 @@ class ClientHub:
         elif getattr(event, "type", None) == "self_active_clear":
             self._overlay_active_self_text = None
 
+    def _active_self_occupant_key(self, buffer: _MergeBuffer) -> str:
+        return f"self:{buffer.merge_id}"
+
     async def _sync_overlay_active_self(
         self, buffer: _MergeBuffer | None, *, created_at: float | None = None
     ) -> None:
@@ -612,6 +615,7 @@ class ClientHub:
         await self._emit_overlay_active_self_event(
             self.overlay_event_adapter.self_active_update(
                 text=active_text,
+                occupant_key=self._active_self_occupant_key(buffer),
                 created_at=created_at,
             )
         )
@@ -1092,10 +1096,9 @@ class ClientHub:
         if self._merge_buffer is buffer:
             self._merge_buffer = None
 
-        await self.reset_overlay_preview()
-
         final_text = self._merge_text(buffer.parts)
         if not final_text:
+            await self.reset_overlay_preview()
             return
 
         if buffer.spec_task is not None and not buffer.spec_task.done():
@@ -1112,6 +1115,7 @@ class ClientHub:
             is_final=True,
             created_at=self.clock.now(),
         )
+        self._overlay_active_self_text = None
         await self._handle_transcript(transcript, is_final=True, source="Mic")
 
         if self.llm is None or not self.translation_enabled:
