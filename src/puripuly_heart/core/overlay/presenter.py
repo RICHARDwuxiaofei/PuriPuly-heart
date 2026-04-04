@@ -47,6 +47,8 @@ class _LogicalCaptionEntry:
     utterance_id: UUID
     original_text: str = ""
     translation_text: str = ""
+    occupant_key: str = ""
+    appearance_seq: int | None = None
     ever_publishable: bool = False
     visible_since: float | None = None
     last_updated_seq: int = 0
@@ -62,6 +64,8 @@ class _LogicalCaptionEntry:
 class _ActiveSelfEntry:
     text: str
     last_updated_seq: int
+    occupant_key: str
+    appearance_seq: int
 
 
 @dataclass(slots=True)
@@ -88,6 +92,7 @@ class OverlayPresenter(OverlaySink):
         default_factory=dict,
     )
     _revision: int = field(init=False, default=0)
+    _appearance_seq: int = field(init=False, default=0)
     _snapshot: OverlayPresentationSnapshot = field(init=False)
 
     def __post_init__(self) -> None:
@@ -112,11 +117,26 @@ class OverlayPresenter(OverlaySink):
         self._closed_tombstones.clear()
         self._active_self = None
         self._revision = 0
+        self._appearance_seq = 0
         self._snapshot = OverlayPresentationSnapshot(
             revision=0,
             calibration=_calibration_from_overlay(self.calibration),
             blocks=[],
         )
+
+    async def clear_for_runtime_detach(self) -> None:
+        self._cancel_all_expiration_tasks()
+        self._entries.clear()
+        self._closed_tombstones.clear()
+        self._active_self = None
+        self._revision += 1
+        self._snapshot = OverlayPresentationSnapshot(
+            revision=self._revision,
+            calibration=_calibration_from_overlay(self.calibration),
+            blocks=[],
+        )
+        if self.bridge is not None:
+            await self.bridge.replace_snapshot(self._snapshot)
 
     async def emit(self, event: OverlayEventUnion) -> None:
         changed = self._apply_event(event)
@@ -159,10 +179,27 @@ class OverlayPresenter(OverlaySink):
         if isinstance(event, SelfActiveUpdate):
             if self._active_self is not None and event.seq < self._active_self.last_updated_seq:
                 return False
-            next_active = _ActiveSelfEntry(text=event.text, last_updated_seq=event.seq)
-            if self._active_self == next_active:
+            if (
+                self._active_self is not None
+                and self._active_self.occupant_key == event.occupant_key
+            ):
+                appearance_seq = self._active_self.appearance_seq
+            else:
+                appearance_seq = self._next_appearance_seq()
+            if (
+                self._active_self is not None
+                and self._active_self.text == event.text
+                and self._active_self.occupant_key == event.occupant_key
+                and self._active_self.appearance_seq == appearance_seq
+            ):
+                self._active_self.last_updated_seq = event.seq
                 return False
-            self._active_self = next_active
+            self._active_self = _ActiveSelfEntry(
+                text=event.text,
+                last_updated_seq=event.seq,
+                occupant_key=event.occupant_key,
+                appearance_seq=appearance_seq,
+            )
             return True
 
         if isinstance(event, SelfActiveClear):
@@ -180,8 +217,18 @@ class OverlayPresenter(OverlaySink):
             entry = self._entry_for(event.channel, event.utterance_id)
             if event.seq < entry.last_updated_seq:
                 return False
+            consumed_active = False
+            finalized_occupant_key = self._finalized_occupant_key(event.channel, event.utterance_id)
+            if (
+                isinstance(event, SelfTranscriptFinal)
+                and self._active_self is not None
+                and event.seq >= self._active_self.last_updated_seq
+                and self._active_self.occupant_key == finalized_occupant_key
+            ):
+                self._active_self = None
+                consumed_active = True
             if entry.original_text == event.text and entry.last_updated_seq == event.seq:
-                return False
+                return consumed_active
             entry.original_text = event.text
             entry.last_updated_seq = event.seq
             self._refresh_entry_visibility_and_expiration(key, entry, now=now)
@@ -256,30 +303,20 @@ class OverlayPresenter(OverlaySink):
 
     def _visible_blocks(self) -> list[OverlayPresentationBlock]:
         self._expire_closed_entries(now=self.clock.now())
-        candidates: list[tuple[int, str, tuple[str, UUID], OverlayPresentationBlock]] = []
-
-        for key, entry in self._entries.items():
-            block = self._build_presentation_block(entry)
-            if block is None:
-                continue
-            candidates.append(
-                (
-                    entry.last_updated_seq,
-                    entry.block_id,
-                    key,
-                    block,
-                )
-            )
-
-        candidates.sort(key=lambda item: (item[0], item[1]))
-        selected = candidates[-self.visible_window_target_blocks :]
-        visible_entry_keys = {key for _, _, key, _ in selected}
-        self._prune_closed_invisible_entries(visible_entry_keys)
-        blocks = [block for _, _, _, block in selected]
+        visible_entry_keys = self._logical_visible_entry_keys()
+        self._prune_displaced_finalized_entries(set(visible_entry_keys))
+        blocks = [
+            block
+            for key in visible_entry_keys
+            if (entry := self._entries.get(key)) is not None
+            and (block := self._build_presentation_block(entry)) is not None
+        ]
         if self._active_self is not None and self._active_self.text:
             blocks.append(
                 OverlayPresentationBlock(
                     id=_ACTIVE_SELF_BLOCK_ID,
+                    occupant_key=self._active_self.occupant_key,
+                    appearance_seq=self._active_self.appearance_seq,
                     channel="self",
                     block_variant="active_self",
                     primary_text=self._active_self.text,
@@ -287,7 +324,30 @@ class OverlayPresenter(OverlaySink):
                     secondary_enabled=self.show_translation,
                 )
             )
+        blocks.sort(key=lambda block: (block.appearance_seq, block.occupant_key))
         return blocks
+
+    def _logical_visible_entry_keys(self) -> list[tuple[str, UUID]]:
+        finalized_limit = self.visible_window_target_blocks
+        if self._active_self is not None and self._active_self.text:
+            finalized_limit = max(finalized_limit - 1, 0)
+        if finalized_limit == 0:
+            return []
+
+        publishable: list[tuple[int, str, tuple[str, UUID]]] = []
+        for key, entry in self._entries.items():
+            if not self._entry_is_publishable(entry):
+                continue
+            self._ensure_entry_visibility_metadata(
+                entry,
+                occupant_key=self._finalized_occupant_key(entry.channel, entry.utterance_id),
+            )
+            if entry.appearance_seq is None:
+                continue
+            publishable.append((entry.appearance_seq, entry.occupant_key, key))
+
+        publishable.sort(key=lambda item: (item[0], item[1]))
+        return [key for _, _, key in publishable[-finalized_limit:]]
 
     def _build_presentation_block(
         self,
@@ -308,6 +368,8 @@ class OverlayPresenter(OverlaySink):
 
         return OverlayPresentationBlock(
             id=entry.block_id,
+            occupant_key=entry.occupant_key,
+            appearance_seq=entry.appearance_seq,
             channel=entry.channel,  # type: ignore[arg-type]
             block_variant="finalized",
             primary_text=primary_text,
@@ -315,16 +377,17 @@ class OverlayPresenter(OverlaySink):
             secondary_enabled=secondary_enabled,
         )
 
-    def _prune_closed_invisible_entries(self, visible_entry_keys: set[tuple[str, UUID]]) -> None:
-        stale_keys = [
+    def _prune_displaced_finalized_entries(self, visible_entry_keys: set[tuple[str, UUID]]) -> None:
+        displaced_keys = [
             key
             for key, entry in self._entries.items()
-            if entry.closed_seq is not None
-            and entry.ever_publishable
-            and key not in visible_entry_keys
+            if self._entry_is_publishable(entry) and key not in visible_entry_keys
         ]
-        for key in stale_keys:
-            self._remove_entry(key)
+        for key in displaced_keys:
+            entry = self._entries.get(key)
+            if entry is None:
+                continue
+            self._remove_entry(key, tombstone_seq=entry.last_updated_seq)
 
     def _entry_is_publishable(self, entry: _LogicalCaptionEntry) -> bool:
         if entry.channel == "peer":
@@ -339,11 +402,33 @@ class OverlayPresenter(OverlaySink):
         now: float,
     ) -> None:
         if self._entry_is_publishable(entry):
+            self._ensure_entry_visibility_metadata(
+                entry,
+                occupant_key=self._finalized_occupant_key(entry.channel, entry.utterance_id),
+            )
             entry.ever_publishable = True
             if entry.visible_since is None:
                 entry.visible_since = now
         if entry.closed_seq is not None:
             self._schedule_expiration(key, entry)
+
+    def _finalized_occupant_key(self, channel: str, utterance_id: UUID) -> str:
+        return f"{channel}:{utterance_id}"
+
+    def _next_appearance_seq(self) -> int:
+        self._appearance_seq += 1
+        return self._appearance_seq
+
+    def _ensure_entry_visibility_metadata(
+        self,
+        entry: _LogicalCaptionEntry,
+        *,
+        occupant_key: str,
+    ) -> None:
+        if not entry.occupant_key:
+            entry.occupant_key = occupant_key
+        if entry.appearance_seq is None:
+            entry.appearance_seq = self._next_appearance_seq()
 
     def _remember_tombstone(self, key: tuple[str, UUID], closed_seq: int) -> None:
         self._closed_tombstones.pop(key, None)
@@ -410,12 +495,16 @@ class OverlayPresenter(OverlaySink):
         key: tuple[str, UUID],
         *,
         current_task: asyncio.Task[None] | None = None,
+        tombstone_seq: int | None = None,
     ) -> None:
         if self._expiration_tasks.get(key) is not current_task:
             self._cancel_expiration_task(key)
         entry = self._entries.pop(key, None)
-        if entry is not None and entry.closed_seq is not None:
-            self._remember_tombstone(key, entry.closed_seq)
+        if entry is None:
+            return
+        seq = tombstone_seq if tombstone_seq is not None else entry.closed_seq
+        if seq is not None:
+            self._remember_tombstone(key, seq)
 
     def _cancel_expiration_task(self, key: tuple[str, UUID]) -> None:
         task = self._expiration_tasks.pop(key, None)

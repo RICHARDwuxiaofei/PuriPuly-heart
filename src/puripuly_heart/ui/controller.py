@@ -581,6 +581,9 @@ class GuiController:
             self._overlay_monitor_task = None
 
         presenter = self._overlay_presenter
+        if not preserve_presenter_state and presenter is not None:
+            with contextlib.suppress(Exception):
+                await presenter.clear_for_runtime_detach()
         if presenter is not None:
             presenter.detach_bridge()
         if (
@@ -591,9 +594,9 @@ class GuiController:
             if preserve_presenter_state:
                 self.hub.overlay_sink = presenter
             else:
+                self.hub.overlay_sink = None
                 with contextlib.suppress(Exception):
                     await self.hub.reset_overlay_preview()
-                self.hub.overlay_sink = None
         if not preserve_presenter_state and presenter is not None:
             presenter.reset_scene()
             self._overlay_presenter = None
