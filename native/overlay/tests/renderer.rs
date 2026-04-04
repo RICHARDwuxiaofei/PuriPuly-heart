@@ -189,6 +189,42 @@ fn renderer_damage_band_covers_old_and_new_strip_bounds() {
 }
 
 #[test]
+fn renderer_uses_slot_top_px_instead_of_stacking_input_order() {
+    let policy = CaptionLayoutPolicy::default();
+    let layout = policy.layout_blocks(
+        vec![
+            CaptionBlock::new("peer:2", "two")
+                .with_slot(1, 420.0)
+                .with_channel(CaptionChannel::PeerChannel),
+            CaptionBlock::new("self:1", "one")
+                .with_slot(0, 40.0)
+                .with_channel(CaptionChannel::SelfChannel),
+        ],
+        3840,
+        1024,
+    );
+
+    assert_eq!(layout.visible_blocks[0].bounds.top_px, 420.0);
+    assert_eq!(layout.visible_blocks[1].bounds.top_px, 40.0);
+}
+
+#[test]
+fn renderer_damage_bounds_include_accent_bar_extent() {
+    let policy = CaptionLayoutPolicy::default();
+    let layout = policy.layout_blocks(
+        vec![CaptionBlock::new("self:1", "one")
+            .with_slot(0, 40.0)
+            .with_channel(CaptionChannel::SelfChannel)
+            .with_accent_opacity(1.0)],
+        3840,
+        1024,
+    );
+
+    let block = &layout.visible_blocks[0];
+    assert!(block.visual_bounds.left_px <= block.bounds.left_px);
+}
+
+#[test]
 fn renderer_render_path_expands_damage_band_to_rendered_bounds_overhang() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
     let first = renderer

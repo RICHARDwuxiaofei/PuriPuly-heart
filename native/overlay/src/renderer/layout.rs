@@ -8,7 +8,8 @@ use super::types::{
     DEFAULT_HORIZONTAL_PADDING_PX, DEFAULT_PRIMARY_LINE_HEIGHT_PX,
     DEFAULT_SECONDARY_LINE_HEIGHT_PX, DEFAULT_STRIP_HORIZONTAL_PADDING_PX,
     DEFAULT_STRIP_VERTICAL_PADDING_PX, DEFAULT_SURFACE_HEIGHT_PX, DEFAULT_SURFACE_WIDTH_PX,
-    DEFAULT_VERTICAL_PADDING_PX, SECONDARY_FONT_SCALE, TEXT_OUTLINE_OVERHANG_PX,
+    DEFAULT_VERTICAL_PADDING_PX, SECONDARY_FONT_SCALE, SLOT_ACCENT_WIDTH_PX,
+    TEXT_OUTLINE_OVERHANG_PX,
 };
 #[cfg(windows)]
 use windows::core::PCWSTR;
@@ -196,14 +197,21 @@ impl CaptionLayoutPolicy {
             let layout_cache_key = layout_cache_key_for_block(&block, content_width_px, text_scale);
             let template = self.build_fallback_block_template(&block, content_width_px, text_scale);
             let stable_block_height_px = template.bounds.bottom_px - template.bounds.top_px;
+            let block_top_px = if block.slot_assigned {
+                block.slot_top_px
+            } else {
+                top_px
+            };
             resolved_blocks.push(materialize_resolved_block_layout(
                 &block,
                 layout_cache_key,
                 &template,
                 strip_left_px,
-                top_px,
+                block_top_px,
             ));
-            top_px += stable_block_height_px + self.block_spacing_px as f32;
+            if !block.slot_assigned {
+                top_px += stable_block_height_px + self.block_spacing_px as f32;
+            }
         }
 
         ResolvedFrameLayout {
@@ -469,14 +477,21 @@ impl CaptionLayoutPolicy {
                 self.build_windows_block_template(&engine, &block, content_width_px, text_scale)?
             };
             let stable_block_height_px = template.bounds.bottom_px - template.bounds.top_px;
+            let block_top_px = if block.slot_assigned {
+                block.slot_top_px
+            } else {
+                top_px
+            };
             resolved_blocks.push(materialize_resolved_block_layout(
                 &block,
                 layout_cache_key,
                 &template,
                 strip_left_px,
-                top_px,
+                block_top_px,
             ));
-            top_px += stable_block_height_px + self.block_spacing_px as f32;
+            if !block.slot_assigned {
+                top_px += stable_block_height_px + self.block_spacing_px as f32;
+            }
         }
 
         Ok(ResolvedFrameLayout {
@@ -910,10 +925,23 @@ fn materialize_resolved_block_layout(
     let secondary_line = template.secondary_line.as_ref().map(|line| {
         materialize_resolved_line_layout(line, strip_left_px, render_top_px, block.height_scale)
     });
-    let visual_bounds = template
+    let mut visual_bounds = template
         .visual_bounds
         .translate(strip_left_px, render_top_px)
         .scale_y_from_top(render_top_px, block.height_scale);
+    let accent_bounds = if block.accent_opacity > f32::EPSILON {
+        Some(BlockBounds::new(
+            bounds.left_px - SLOT_ACCENT_WIDTH_PX,
+            bounds.top_px,
+            bounds.left_px,
+            bounds.bottom_px,
+        ))
+    } else {
+        None
+    };
+    if let Some(accent_bounds) = accent_bounds {
+        visual_bounds = union_visual_and_block_bounds(visual_bounds, accent_bounds);
+    }
 
     ResolvedBlockLayout {
         id: block.id.clone(),
@@ -925,6 +953,8 @@ fn materialize_resolved_block_layout(
         secondary_reserved: template.secondary_reserved,
         bounds,
         visual_bounds,
+        accent_opacity: block.accent_opacity,
+        accent_bounds,
         content_width_px: template.content_width_px,
         opacity: block.opacity,
         render_offset_y_px: block.offset_y_px,
@@ -994,6 +1024,15 @@ fn block_visual_bounds_from_templates(
     }
 
     VisualBounds::new(left_px, top_px, right_px, bottom_px)
+}
+
+fn union_visual_and_block_bounds(visual: VisualBounds, block: BlockBounds) -> VisualBounds {
+    VisualBounds::new(
+        visual.left_px.min(block.left_px),
+        visual.top_px.min(block.top_px),
+        visual.right_px.max(block.right_px),
+        visual.bottom_px.max(block.bottom_px),
+    )
 }
 
 fn wrap_text(text: &str, max_width_px: f32, average_glyph_advance_px: f32) -> Vec<String> {

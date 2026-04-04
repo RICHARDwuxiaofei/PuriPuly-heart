@@ -20,6 +20,6 @@ pub use renderer::{
 pub use runtime::{run_cli, run_with_manifest, OverlayRuntime, RuntimeFailure, StartupError};
 pub use state::{
     OverlayCalibration, OverlayPresentationBlock, OverlayPresentationBlockVariant,
-    OverlayPresentationCalibration, OverlayPresentationSnapshot, OverlayScene, OverlayState,
-    OverlayStateSnapshot, OverlayStrip, OverlayStripLifecycle,
+    OverlayPresentationCalibration, OverlayPresentationSnapshot, OverlayScene, OverlaySlot,
+    OverlayState, OverlayStateSnapshot,
 };

@@ -57,6 +57,7 @@ use super::types::{
     effective_background_alpha, fill_color_for_channel, outline_offsets_px, text_script_bucket,
     BlockCacheKey, CaptionBlockVariant, CaptionChannel, LineCacheKey, LineRole,
     ResolvedBlockLayout, ResolvedLineLayout, ResolvedTextStyle, TextScriptBucket,
+    PEER_SLOT_ACCENT_COLOR, SELF_SLOT_ACCENT_COLOR,
     DEFAULT_SURFACE_HEIGHT_PX, DEFAULT_SURFACE_WIDTH_PX, TEXT_OUTLINE_COLOR,
 };
 use super::types::{
@@ -762,6 +763,12 @@ impl WindowsCaptionRenderer {
                     continue;
                 }
 
+                if let Some(accent_bounds) = block.accent_bounds {
+                    if block.accent_opacity > f32::EPSILON {
+                        self.draw_accent_bar(accent_bounds, block.channel, block.accent_opacity)?;
+                    }
+                }
+
                 if self.cacheable_block(block) {
                     let cached_block = self
                         .caches
@@ -821,6 +828,36 @@ impl WindowsCaptionRenderer {
             (Ok(_), Err(error)) => Err(error),
             (Ok(frame), Ok(())) => Ok(frame),
         }
+    }
+
+    fn draw_accent_bar(
+        &self,
+        bounds: BlockBounds,
+        channel: Option<CaptionChannel>,
+        opacity: f32,
+    ) -> Result<(), CaptionRenderError> {
+        let color = match channel {
+            Some(CaptionChannel::PeerChannel) => PEER_SLOT_ACCENT_COLOR,
+            _ => SELF_SLOT_ACCENT_COLOR,
+        };
+        let brush = unsafe {
+            self.d2d_context
+                .CreateSolidColorBrush(&d2d_color(color), None)
+                .map_err(|error| CaptionRenderError::Draw(error.to_string()))?
+        };
+        unsafe {
+            brush.SetOpacity(opacity);
+            self.d2d_context.FillRectangle(
+                &D2D_RECT_F {
+                    left: bounds.left_px,
+                    top: bounds.top_px,
+                    right: bounds.right_px,
+                    bottom: bounds.bottom_px,
+                },
+                &brush,
+            );
+        }
+        Ok(())
     }
 
     fn create_text_format(

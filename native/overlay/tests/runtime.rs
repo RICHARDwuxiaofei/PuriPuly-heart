@@ -8,7 +8,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use puripuly_heart_overlay::logging::OverlayLogger;
 use puripuly_heart_overlay::{
     run_with_manifest, submit_texture, validate_manifest, BridgeClient, CaptionBlock,
-    CaptionChannel, CaptionLayoutPolicy, CaptionRenderer, FakeOpenVr, OpenVrError,
+    CaptionChannel, CaptionRenderer, FakeOpenVr, OpenVrError,
     OverlayBridgeEvent, OverlayFrameSubmitter, OverlayManifest, OverlayPresentationBlock,
     OverlayPresentationBlockVariant, OverlayPresentationCalibration, OverlayPresentationSnapshot,
     OverlayRuntime, RenderedFrame, RuntimeFailure, StartupError, EXPECTED_CONTRACT_VERSION,
@@ -73,6 +73,8 @@ fn block(
 ) -> OverlayPresentationBlock {
     OverlayPresentationBlock {
         id: id.to_string(),
+        occupant_key: id.to_string(),
+        appearance_seq: 1,
         channel: channel.to_string(),
         block_variant: OverlayPresentationBlockVariant::Finalized,
         primary_text: primary_text.to_string(),
@@ -81,14 +83,24 @@ fn block(
     }
 }
 
-fn active_self_block(id: &str, primary_text: &str) -> OverlayPresentationBlock {
+fn slot_block(
+    id: &str,
+    occupant_key: &str,
+    appearance_seq: u64,
+    channel: &str,
+    primary_text: &str,
+    secondary_text: &str,
+    secondary_enabled: bool,
+) -> OverlayPresentationBlock {
     OverlayPresentationBlock {
         id: id.to_string(),
-        channel: "self".to_string(),
-        block_variant: OverlayPresentationBlockVariant::ActiveSelf,
+        occupant_key: occupant_key.to_string(),
+        appearance_seq,
+        channel: channel.to_string(),
+        block_variant: OverlayPresentationBlockVariant::Finalized,
         primary_text: primary_text.to_string(),
-        secondary_text: String::new(),
-        secondary_enabled: true,
+        secondary_text: secondary_text.to_string(),
+        secondary_enabled,
     }
 }
 
@@ -417,38 +429,64 @@ fn runtime_uses_half_refresh_animation_sampling() {
 }
 
 #[test]
-fn runtime_keeps_missing_snapshot_blocks_visible_until_exit_animation_finishes() {
+fn runtime_keeps_slot_two_top_fixed_when_slot_one_secondary_changes() {
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
-        blocks: vec![block("self:1", "self", "hello", "", true)],
+        blocks: vec![
+            slot_block("self:1", "self:1", 1, "self", "one", "", true),
+            slot_block("peer:2", "peer:2", 2, "peer", "two", "", true),
+        ],
+    });
+    let first = runtime.caption_blocks();
+
+    runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 2,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![
+            slot_block("self:1", "self:1", 1, "self", "one", "번역", true),
+            slot_block("peer:2", "peer:2", 2, "peer", "two", "", true),
+        ],
     });
 
-    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
-    runtime.clear_redraw_flag();
+    let second = runtime.caption_blocks();
+    assert_eq!(first[1].slot_top_px, second[1].slot_top_px);
+}
+
+#[test]
+fn runtime_clears_missing_snapshot_blocks_immediately() {
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![slot_block("self:1", "self:1", 1, "self", "hello", "", true)],
+    });
+
     runtime.apply_snapshot(OverlayPresentationSnapshot {
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![],
     });
 
-    assert_eq!(runtime.caption_blocks().len(), 1);
-    assert_eq!(runtime.caption_blocks()[0].id, "self:1");
-
-    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
-
     assert!(runtime.caption_blocks().is_empty());
 }
 
 #[test]
-fn runtime_keeps_two_finalized_rows_visible_when_active_self_is_present() {
+fn runtime_keeps_active_self_and_finalized_rows_visible_within_two_slot_cap() {
     let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
-            block("self:1", "self", "first", "", true),
-            block("peer:2", "peer", "second", "", true),
-            active_self_block("self:active", "speaking"),
+            slot_block("peer:2", "peer:2", 2, "peer", "second", "", true),
+            OverlayPresentationBlock {
+                id: "self:active".into(),
+                occupant_key: "self:merge-1".into(),
+                appearance_seq: 3,
+                channel: "self".into(),
+                block_variant: OverlayPresentationBlockVariant::ActiveSelf,
+                primary_text: "speaking".into(),
+                secondary_text: String::new(),
+                secondary_enabled: true,
+            },
         ],
     });
 
@@ -458,48 +496,27 @@ fn runtime_keeps_two_finalized_rows_visible_when_active_self_is_present() {
             .iter()
             .map(|block| block.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["self:1", "peer:2", "self:active"]
+        vec!["peer:2", "self:active"]
     );
 }
 
 #[test]
-fn runtime_reflow_tracks_actual_height_delta_when_secondary_slot_changes() {
-    let policy = CaptionLayoutPolicy::default();
-    let expected_before = policy.layout_blocks(
-        vec![
-            CaptionBlock::new("self:1", "hello").with_secondary_text("", false),
-            CaptionBlock::new("peer:2", "second").with_secondary_text("", false),
-        ],
-        3840,
-        4096,
-    );
-    let expected_after = policy.layout_blocks(
-        vec![
-            CaptionBlock::new("self:1", "hello").with_secondary_text("translated", true),
-            CaptionBlock::new("peer:2", "second").with_secondary_text("", false),
-        ],
-        3840,
-        4096,
-    );
-    let expected_shift = expected_after.visible_blocks[1].bounds.top_px
-        - expected_before.visible_blocks[1].bounds.top_px;
-
+fn runtime_keeps_fixed_slot_visual_state_when_secondary_slot_changes() {
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
-            block("self:1", "self", "hello", "", false),
-            block("peer:2", "peer", "second", "", false),
+            slot_block("self:1", "self:1", 1, "self", "hello", "", false),
+            slot_block("peer:2", "peer:2", 2, "peer", "second", "", false),
         ],
     });
-    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
 
     runtime.apply_snapshot(OverlayPresentationSnapshot {
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
-            block("self:1", "self", "hello", "translated", true),
-            block("peer:2", "peer", "second", "", false),
+            slot_block("self:1", "self:1", 1, "self", "hello", "translated", true),
+            slot_block("peer:2", "peer:2", 2, "peer", "second", "", false),
         ],
     });
 
@@ -514,92 +531,54 @@ fn runtime_reflow_tracks_actual_height_delta_when_secondary_slot_changes() {
         .find(|block| block.id == "self:1")
         .expect("self block should remain visible");
 
-    assert_eq!(second.offset_y_px, -expected_shift);
-    assert!(first.height_scale > 1.0);
+    assert_eq!(second.offset_y_px, 0.0);
+    assert_eq!(first.height_scale, 1.0);
 }
 
 #[test]
-fn runtime_reflow_animation_still_renders_shifted_bounds_from_visual_state_only() {
+fn runtime_renderer_uses_fixed_slot_bounds_when_secondary_slot_changes() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
-    let initial_layout = CaptionLayoutPolicy::default().layout_blocks(
-        vec![
-            CaptionBlock::new("self:1", "hello")
-                .with_channel(CaptionChannel::SelfChannel)
-                .with_secondary_text("", false),
-            CaptionBlock::new("peer:2", "second")
-                .with_channel(CaptionChannel::PeerChannel)
-                .with_secondary_text("", false),
-        ],
-        3840,
-        4096,
-    );
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
-            block("self:1", "self", "hello", "", false),
-            block("peer:2", "peer", "second", "", false),
+            slot_block("self:1", "self:1", 1, "self", "hello", "", false),
+            slot_block("peer:2", "peer:2", 2, "peer", "second", "", false),
         ],
     });
-    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
+    let initial = renderer.render_blocks(runtime.caption_blocks()).unwrap();
+
     runtime.apply_snapshot(OverlayPresentationSnapshot {
         revision: 2,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![
-            block("self:1", "self", "hello", "translated", true),
-            block("peer:2", "peer", "second", "", false),
+            slot_block("self:1", "self:1", 1, "self", "hello", "translated", true),
+            slot_block("peer:2", "peer:2", 2, "peer", "second", "", false),
         ],
     });
 
-    let animated = renderer.render_blocks(runtime.caption_blocks()).unwrap();
-    let final_layout = CaptionLayoutPolicy::default().layout_blocks(
-        vec![
-            CaptionBlock::new("self:1", "hello")
-                .with_channel(CaptionChannel::SelfChannel)
-                .with_secondary_text("translated", true),
-            CaptionBlock::new("peer:2", "second")
-                .with_channel(CaptionChannel::PeerChannel)
-                .with_secondary_text("", false),
-        ],
-        3840,
-        4096,
-    );
-
-    let animated_self = animated
+    let updated = renderer.render_blocks(runtime.caption_blocks()).unwrap();
+    let initial_peer = initial
         .layout()
-        .visible_blocks
-        .iter()
-        .find(|block| block.id == "self:1")
-        .expect("animated self block should render");
-    let animated_peer = animated
-        .layout()
-        .visible_blocks
-        .iter()
-        .find(|block| block.id == "peer:2")
-        .expect("animated peer block should render");
-    let initial_peer = initial_layout
         .visible_blocks
         .iter()
         .find(|block| block.id == "peer:2")
         .expect("initial peer block should render");
-    let final_self = final_layout
+    let updated_self = updated
+        .layout()
         .visible_blocks
         .iter()
         .find(|block| block.id == "self:1")
-        .expect("final self block should render");
-    let final_peer = final_layout
+        .expect("updated self block should render");
+    let updated_peer = updated
+        .layout()
         .visible_blocks
         .iter()
         .find(|block| block.id == "peer:2")
-        .expect("final peer block should render");
+        .expect("updated peer block should render");
 
-    assert_eq!(animated_peer.bounds.top_px, initial_peer.bounds.top_px);
-    assert_ne!(animated_peer.bounds.top_px, final_peer.bounds.top_px);
-    assert!(
-        animated_self.bounds.bottom_px - animated_self.bounds.top_px
-            > final_self.bounds.bottom_px - final_self.bounds.top_px,
-        "height_scale should still stretch the updated row during reflow"
-    );
+    assert_eq!(updated_self.bounds.top_px, initial.layout().visible_blocks[0].bounds.top_px);
+    assert_eq!(updated_peer.bounds.top_px, initial_peer.bounds.top_px);
 }
 
 #[cfg(windows)]
