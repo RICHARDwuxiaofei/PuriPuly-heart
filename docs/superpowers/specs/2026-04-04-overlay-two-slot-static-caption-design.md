@@ -11,6 +11,8 @@ This design keeps the existing overlay wire contract and logical turn model, but
 - Text is replaced in place.
 - A left accent bar is the only update signal.
 
+This design also assumes the peer subsystem rewrite preserves the current hub-to-overlay event contract for peer turns, even if peer runtime start, stop, and recovery timing changes.
+
 ## Goals
 
 - Remove perceived flicker caused by strip removal, re-entry, and vertical reflow.
@@ -30,6 +32,7 @@ This design keeps the existing overlay wire contract and logical turn model, but
 - The presenter currently allows two finalized blocks plus a separate `active_self` block, which can produce three visible rows.
 - The native overlay scene currently uses entering, exiting, and reflowing strips with sampled animation progress.
 - The overlay layout policy already targets two visible blocks, but the scene model still allows motion and transient exit strips.
+- Peer visibility today is publishability-driven: peer finalized transcripts can stay hidden until translation text arrives.
 
 The new design treats the two-block target as a hard visual slot limit rather than a soft layout preference.
 
@@ -55,7 +58,9 @@ The new design treats the two-block target as a hard visual slot limit rather th
 
 - Peer turns also occupy one of the two fixed slots.
 - A newly visible peer turn gets the same one-time update signal as a new self turn.
+- The first moment a peer turn becomes visible counts as new occupant assignment, even if the peer finalized transcript arrived earlier while the turn was still hidden waiting for translation.
 - Later translation attachment or close events do not replay the signal.
+- If peer runtime churn causes a peer turn to close before it ever becomes visible, no slot is assigned and no accent pulse is shown.
 
 ## Update Signal
 
@@ -118,6 +123,8 @@ This preserves a stable spatial model even when content ages out.
 - Continue to own logical caption entries, tombstones, late arrival handling, translation attachment, and close/expiration semantics.
 - Change visible block selection so the presenter emits at most two logical blocks total.
 - Treat `active_self` as part of the same two-slot candidate pool instead of always appending it as an extra row.
+- Preserve the current peer publishability rule: peer entries become visible only once translation text is available.
+- Treat first-visible peer translation as the moment a peer occupant enters the slot system.
 - Preserve existing finalized-entry semantics and wire event types.
 
 The presenter should remain logical. It should not own physical slot numbers, accent pulse timing, or visual replacement effects.
@@ -157,6 +164,7 @@ The public snapshot schema stays the same:
 - `utterance_closed`
 
 No new public event types or settings keys are introduced.
+The overlay layer assumes the peer subsystem rewrite continues to express peer visibility through these same events rather than adding peer-runtime-specific overlay events.
 
 ### Native Slot State
 
@@ -180,6 +188,12 @@ Exact field names are implementation detail, but the model must support in-place
 - If the turn is still visible, update the existing slot in place.
 - Do not replay the accent pulse.
 
+### Peer First-Visible Translation
+
+- If a peer finalized transcript was previously hidden and translation makes it visible for the first time, that event is treated as new occupant assignment.
+- The slot receives the one-shot accent pulse at first visibility.
+- Later peer translation updates for the same visible occupant do not replay the pulse.
+
 ### Active Self Clears Without Final
 
 - Remove the active self occupant from its slot.
@@ -196,6 +210,12 @@ Exact field names are implementation detail, but the model must support in-place
 - Each new turn replaces the oldest finalized slot at the moment of assignment.
 - The replacement happens in place, one slot at a time.
 
+### Peer Runtime Deactivation Or Restart
+
+- Peer runtime activation changes alone do not clear visible peer slots.
+- Only existing overlay events, close handling, and TTL expiry may remove peer occupants from slots.
+- If peer runtime recovery yields a brand-new utterance with a new `utterance_id`, it is treated as a new occupant even if the text matches a previously shown peer line.
+
 ### Tombstoned Or Late Events
 
 - Preserve the current tombstone behavior in the presenter.
@@ -210,6 +230,8 @@ Exact field names are implementation detail, but the model must support in-place
 - `active_self` can occupy a slot and promote to finalized without duplicate visibility.
 - Translation and close events still attach to the correct logical entry.
 - Existing tombstone and late-arrival protections remain intact.
+- Peer turns remain hidden until translation exists.
+- First-visible peer translation is treated as new occupancy rather than a silent in-place update.
 
 ### Native State Tests
 
@@ -220,6 +242,8 @@ Exact field names are implementation detail, but the model must support in-place
 - `active_self -> finalized` does not retrigger the accent pulse.
 - Translation attachment and close do not retrigger the accent pulse.
 - No exiting strip remains after snapshots change.
+- First-visible peer translation triggers the accent pulse exactly once.
+- Peer runtime restart that produces a new `utterance_id` is treated as new occupancy.
 
 ### Runtime And Renderer Tests
 
@@ -235,9 +259,11 @@ Exact field names are implementation detail, but the model must support in-place
 - Only first appearance of a new self or peer slot occupant produces the accent bar.
 - Translation attachment and close do not flicker.
 - TTL expiry does not cause the remaining slot to jump.
+- Peer reconnect or restart does not surface stale invisible turns as if they were in-place updates.
 
 ## Rollout Notes
 
 - This is a readability-first redesign. It intentionally trades strict time-order compaction for spatial stability.
 - The existing active-self promotion work remains useful, but it will be absorbed into the broader two-slot slot-assignment model.
 - Ghosting and damage-band cleanup stay out of scope and should be evaluated after the motion model is simplified.
+- The peer subsystem rewrite is compatible with this design only if peer overlay visibility continues to be expressed through the current hub overlay events. If peer output semantics change, peer slot-assignment and pulse rules must be revisited before implementation.
