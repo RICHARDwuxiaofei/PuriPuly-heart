@@ -228,3 +228,4 @@ docs/plans/
 docs/superpowers
 .worktrees/
 .superpowers/
+/settings.json
