@@ -174,6 +174,22 @@ class DummyHub:
         self.peer_stt = stt
 
 
+class DummyPeerRuntime:
+    def __init__(self) -> None:
+        self.policy_calls: list[dict[str, object]] = []
+        self.closed = False
+        self.warmup_calls = 0
+
+    async def apply_policy(self, *, config, desired_active: bool) -> None:
+        self.policy_calls.append({"config": config, "desired_active": desired_active})
+
+    async def warmup(self) -> None:
+        self.warmup_calls += 1
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 class DummyGate:
     def __init__(self) -> None:
         self.state = None
@@ -711,6 +727,30 @@ def test_peer_stt_runtime_signature_includes_peer_source_language() -> None:
     assert baseline != changed
 
 
+def test_build_peer_runtime_config_includes_provider_signature_and_desktop_settings() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    settings.desktop_audio.output_device = "Headphones (Loopback)"
+    settings.desktop_audio.vad_speech_threshold = 0.72
+    settings.desktop_audio.vad_hangover_ms = 950
+    settings.desktop_audio.vad_pre_roll_ms = 420
+
+    config = controller._build_peer_runtime_config(settings)
+
+    assert config.backend.provider == STTProviderName.SONIOX
+    assert config.output_device == "Headphones (Loopback)"
+    assert config.vad_threshold == 0.72
+    assert config.runtime_signature == (
+        config.backend.source_language,
+        config.output_device,
+        config.vad_threshold,
+        config.vad_hangover_ms,
+        config.vad_pre_roll_ms,
+        config.provider_signature,
+    )
+
+
 @pytest.mark.asyncio
 async def test_apply_settings_updates_peer_translation_flags_on_hub(
     monkeypatch: pytest.MonkeyPatch,
@@ -744,6 +784,87 @@ async def test_apply_settings_updates_peer_translation_flags_on_hub(
 
 
 @pytest.mark.asyncio
+async def test_apply_settings_routes_peer_activation_toggles_through_peer_runtime_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+    controller.settings = settings
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    controller.overlay_state = "connected"
+    controller._overlay_bridge = object()
+    controller._peer_runtime = DummyPeerRuntime()
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        settings
+    )
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
+    )
+
+    enabled = AppSettings()
+    enabled.ui.peer_translation_enabled = True
+    await controller.apply_settings(enabled)
+
+    disabled = AppSettings()
+    disabled.ui.peer_translation_enabled = False
+    await controller.apply_settings(disabled)
+
+    assert [call["desired_active"] for call in controller._peer_runtime.policy_calls] == [
+        True,
+        False,
+    ]
+    assert controller.hub.peer_translation_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_rebuild_pipeline_closes_previous_peer_runtime_before_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    old_runtime = DummyPeerRuntime()
+    controller._peer_runtime = old_runtime
+
+    new_runtime = DummyPeerRuntime()
+    new_hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+
+    class FakeUIEventBridge:
+        def __init__(self, *, app, event_queue) -> None:
+            self.app = app
+            self.event_queue = event_queue
+
+        async def run(self) -> None:
+            return None
+
+    async def fake_init_pipeline(self: GuiController) -> None:
+        assert old_runtime.closed is True
+        controller.hub = new_hub
+        controller._peer_runtime = new_runtime
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(controller_module, "UIEventBridge", FakeUIEventBridge)
+    monkeypatch.setattr(
+        GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0)
+    )
+    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+
+    await controller._rebuild_pipeline(rebuild_stt=True)
+
+    assert controller._peer_runtime is new_runtime
+    assert controller._peer_runtime.closed is False
+
+
+@pytest.mark.asyncio
 async def test_init_pipeline_keeps_peer_original_runtime_available_without_peer_translation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -762,10 +883,11 @@ async def test_init_pipeline_keeps_peer_original_runtime_available_without_peer_
     hub = created["hub"]
     assert hub.peer_stt is None
     assert hub.peer_translation_enabled is False
+    assert controller._peer_runtime is not None
 
 
 @pytest.mark.asyncio
-async def test_overlay_runtime_refresh_replaces_only_peer_provider(
+async def test_refresh_peer_stt_runtime_returns_without_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
@@ -773,61 +895,100 @@ async def test_overlay_runtime_refresh_replaces_only_peer_provider(
     controller.settings.ui.peer_translation_enabled = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller.overlay_state = "connected"
+    controller._overlay_bridge = object()
 
-    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
-    monkeypatch.setattr(controller_module, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend")
-    monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "peer-stt")
-    monkeypatch.setattr(GuiController, "_start_peer_loop", lambda self, model_path: asyncio.sleep(0))
-
-    await controller._refresh_overlay_runtime_dependencies()
+    await controller._refresh_peer_stt_runtime()
 
     assert controller.hub.replace_stt_calls == []
-    assert controller.hub.replace_peer_stt_calls == ["peer-stt"]
+    assert controller.hub.replace_peer_stt_calls == []
 
 
 @pytest.mark.asyncio
-async def test_overlay_runtime_failure_drops_only_peer_provider(
+async def test_create_peer_audio_source_from_runtime_config_uses_desktop_loopback_device(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    config = controller._build_peer_runtime_config(AppSettings())
+    opened: list[dict[str, object]] = []
+
+    class FakePeerSource:
+        pass
+
+    monkeypatch.setattr(
+        controller_module,
+        "DesktopLoopbackAudioSource",
+        lambda *args, **kwargs: opened.append(kwargs) or object(),
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "DesktopPeerPipeline",
+        lambda *args, **kwargs: FakePeerSource(),
+    )
+
+    source = controller._create_peer_audio_source_from_runtime_config(config)
+
+    assert isinstance(source, FakePeerSource)
+    assert opened == [{"device_name": config.output_device}]
+
+
+@pytest.mark.asyncio
+async def test_refresh_overlay_runtime_dependencies_applies_peer_runtime_policy() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+    controller.overlay_state = "connected"
+    controller._overlay_bridge = object()
+
+    peer_runtime = DummyPeerRuntime()
+    controller._peer_runtime = peer_runtime
+
+    await controller._refresh_overlay_runtime_dependencies()
+
+    assert len(peer_runtime.policy_calls) == 1
+    assert peer_runtime.policy_calls[0]["desired_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_overlay_runtime_dependencies_disables_peer_runtime_when_overlay_fails() -> None:
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.ui.peer_translation_enabled = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
     controller.overlay_state = "failed"
+    controller._overlay_bridge = None
 
-    async def fake_stop_peer_loop(self: GuiController) -> None:
-        self._peer_mic_task = None
-        self._peer_audio_source = None
-        self._peer_vad = None
-
-    monkeypatch.setattr(GuiController, "_stop_peer_loop", fake_stop_peer_loop)
+    peer_runtime = DummyPeerRuntime()
+    controller._peer_runtime = peer_runtime
 
     await controller._refresh_overlay_runtime_dependencies()
 
+    assert peer_runtime.policy_calls[-1]["desired_active"] is False
     assert controller.hub.replace_stt_calls == []
-    assert controller.hub.replace_peer_stt_calls == [None]
+
+
+def test_dashboard_stt_needs_key_remains_self_oriented_when_peer_provider_differs() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN
+    controller.settings.provider.peer_stt = STTProviderName.DEEPGRAM
+
+    assert controller._dashboard_stt_needs_key(stt_available=True) is False
 
 
 @pytest.mark.asyncio
-async def test_start_peer_loop_uses_shared_peer_vad_policy_helper(
+async def test_create_peer_vad_from_runtime_config_uses_shared_peer_vad_policy_helper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
-    controller.settings = AppSettings()
-    controller.settings.desktop_audio.output_device = "Headphones (Loopback)"
-    controller.settings.desktop_audio.vad_speech_threshold = 0.72
-    controller.settings.desktop_audio.vad_hangover_ms = 950
-    controller.settings.desktop_audio.vad_pre_roll_ms = 420
+    settings = AppSettings()
+    settings.desktop_audio.vad_speech_threshold = 0.72
+    settings.desktop_audio.vad_hangover_ms = 950
+    settings.desktop_audio.vad_pre_roll_ms = 420
+    config = controller._build_peer_runtime_config(settings)
 
     helper_calls: list[dict[str, object]] = []
     engine = object()
-
-    class FakePeerSource:
-        async def close(self) -> None:
-            return None
-
-    async def fake_run_peer_mic_loop(self: GuiController) -> None:
-        return None
 
     def fake_create_peer_vad_gating(
         *, engine, sample_rate_hz, ring_buffer_ms, speech_threshold, hangover_ms
@@ -843,23 +1004,12 @@ async def test_start_peer_loop_uses_shared_peer_vad_policy_helper(
         )
         return "peer-vad"
 
-    monkeypatch.setattr(
-        controller_module,
-        "DesktopLoopbackAudioSource",
-        lambda *args, **kwargs: object(),
-    )
-    monkeypatch.setattr(
-        controller_module,
-        "DesktopPeerPipeline",
-        lambda *args, **kwargs: FakePeerSource(),
-    )
     monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *args, **kwargs: engine)
     monkeypatch.setattr(controller_module, "create_peer_vad_gating", fake_create_peer_vad_gating)
-    monkeypatch.setattr(GuiController, "_run_peer_mic_loop", fake_run_peer_mic_loop)
 
-    await controller._start_peer_loop(Path("vad.onnx"))
-    assert controller._peer_audio_source is not None
-    assert controller._peer_vad == "peer-vad"
+    vad = controller._create_peer_vad_from_runtime_config(config, Path("vad.onnx"))
+
+    assert vad == "peer-vad"
     assert helper_calls == [
         {
             "engine": engine,
@@ -869,8 +1019,6 @@ async def test_start_peer_loop_uses_shared_peer_vad_policy_helper(
             "hangover_ms": 950,
         }
     ]
-    assert controller._peer_mic_task is not None
-    await controller._peer_mic_task
 
 
 @pytest.mark.asyncio
@@ -1263,6 +1411,33 @@ async def test_stop_disables_vrc_receiver_before_teardown(
     assert controller.hub is None
     assert controller.sender is None
     assert controller._bridge_task is None
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_peer_runtime_without_replacing_self_stt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    controller._peer_runtime = DummyPeerRuntime()
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_shutdown_overlay_runtime",
+        lambda self, preserve_failure_reason: asyncio.sleep(0),
+    )
+
+    await controller.stop()
+
+    assert controller._peer_runtime is None
+    assert controller.hub is None
 
 
 @pytest.mark.asyncio
@@ -1694,22 +1869,28 @@ async def test_run_stt_switch_stop_path_closes_backend(
     controller._stt_desired = False
     stop_calls: list[str] = []
     backend_calls: list[str] = []
+    peer_calls: list[str] = []
 
     class FakeStt:
         async def close(self) -> None:
             backend_calls.append("close")
+
+    class FakePeerStt:
+        async def close(self) -> None:
+            peer_calls.append("close")
 
     async def fake_stop_mic_loop(self) -> None:
         _ = self
         stop_calls.append("stop_mic")
 
     monkeypatch.setattr(GuiController, "_stop_mic_loop", fake_stop_mic_loop)
-    controller.hub = DummyHub(stt=FakeStt())
+    controller.hub = DummyHub(stt=FakeStt(), peer_stt=FakePeerStt())
 
     await controller._run_stt_switch()
 
     assert stop_calls == ["stop_mic"]
     assert backend_calls == ["close"]
+    assert peer_calls == []
 
 
 @pytest.mark.asyncio
@@ -1734,6 +1915,7 @@ async def test_run_stt_switch_restart_path_closes_and_warms_backend(
     controller._stt_desired = True
     controller._stt_restart_requested = True
     calls: list[str] = []
+    peer_calls: list[str] = []
 
     class FakeStt:
         async def close(self) -> None:
@@ -1741,6 +1923,13 @@ async def test_run_stt_switch_restart_path_closes_and_warms_backend(
 
         async def warmup(self) -> None:
             calls.append("warmup")
+
+    class FakePeerStt:
+        async def close(self) -> None:
+            peer_calls.append("close")
+
+        async def warmup(self) -> None:
+            peer_calls.append("warmup")
 
     async def fake_stop_mic_loop(self) -> None:
         _ = self
@@ -1752,11 +1941,12 @@ async def test_run_stt_switch_restart_path_closes_and_warms_backend(
 
     monkeypatch.setattr(GuiController, "_stop_mic_loop", fake_stop_mic_loop)
     monkeypatch.setattr(GuiController, "_start_mic_loop", fake_start_mic_loop)
-    controller.hub = DummyHub(stt=FakeStt())
+    controller.hub = DummyHub(stt=FakeStt(), peer_stt=FakePeerStt())
 
     await controller._run_stt_switch()
 
     assert calls == ["stop_mic", "close", "start_mic", "warmup"]
+    assert peer_calls == []
 
 
 @pytest.mark.asyncio

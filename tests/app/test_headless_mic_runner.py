@@ -5,7 +5,7 @@ import logging
 import pytest
 
 import puripuly_heart.app.headless_mic as headless_mic
-from puripuly_heart.config.settings import AppSettings
+from puripuly_heart.config.settings import AppSettings, STTProviderName
 
 
 @pytest.mark.asyncio
@@ -493,3 +493,93 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
             "hangover_ms": 950,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_headless_runner_uses_selected_peer_provider_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    settings = AppSettings()
+    settings.ui.peer_translation_enabled = True
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    settings.peer_soniox_stt.model = "peer-soniox"
+    settings.peer_soniox_stt.endpoint = "wss://peer-soniox.example/realtime"
+    settings.peer_soniox_stt.keepalive_interval_s = 8.0
+    settings.peer_soniox_stt.trailing_silence_ms = 300
+    calls: list[AppSettings] = []
+    created_hub: dict[str, object] = {}
+    peer_backend = object()
+    config_path = tmp_path / "settings.json"
+    vad_path = tmp_path / "vad.onnx"
+    vad_path.write_text("dummy", encoding="utf-8")
+
+    class FakeManagedSTTProvider:
+        def __init__(self, *, backend, sample_rate_hz, channel=None, **kwargs):
+            self.backend = backend
+            self.sample_rate_hz = sample_rate_hz
+            self.channel = channel
+            self.kwargs = kwargs
+
+    def fake_create_peer_stt_backend(settings: AppSettings, *, secrets):
+        _ = secrets
+        calls.append(settings)
+        return peer_backend
+
+    class FakeHub:
+        def __init__(self, *args, **kwargs):
+            created_hub.update(kwargs)
+            self.peer_stt = kwargs.get("peer_stt")
+
+        async def start(self, *args, **kwargs):
+            return None
+
+        async def stop(self):
+            return None
+
+    class FakeSender:
+        def close(self):
+            return None
+
+    class FakeSource:
+        async def close(self):
+            return None
+
+    async def fake_run_audio_vad_loop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(headless_mic, "create_peer_stt_backend", fake_create_peer_stt_backend)
+    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
+    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
+    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(headless_mic, "ManagedSTTProvider", FakeManagedSTTProvider)
+    monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
+    monkeypatch.setattr(headless_mic, "ClientHub", FakeHub)
+    monkeypatch.setattr(headless_mic, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "SoundDeviceAudioSource", lambda *a, **k: FakeSource())
+    monkeypatch.setattr(headless_mic, "DesktopLoopbackAudioSource", lambda *a, **k: FakeSource())
+    monkeypatch.setattr(headless_mic, "DesktopPeerPipeline", lambda *a, **k: FakeSource())
+    monkeypatch.setattr(headless_mic, "run_audio_vad_loop", fake_run_audio_vad_loop)
+    monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", lambda *a, **k: None)
+
+    runner = headless_mic.HeadlessMicRunner(
+        settings=settings,
+        config_path=config_path,
+        vad_model_path=vad_path,
+        use_llm=False,
+    )
+
+    result = await runner.run()
+
+    assert result == 0
+    assert len(calls) == 1
+    peer_settings = calls[0]
+    assert peer_settings.provider.peer_stt == STTProviderName.SONIOX
+    assert peer_settings.peer_soniox_stt.model == "peer-soniox"
+    assert peer_settings.peer_soniox_stt.endpoint == "wss://peer-soniox.example/realtime"
+    assert peer_settings.peer_soniox_stt.keepalive_interval_s == 8.0
+    assert peer_settings.peer_soniox_stt.trailing_silence_ms == 300
+    assert isinstance(created_hub["peer_stt"], FakeManagedSTTProvider)
+    assert created_hub["peer_stt"].backend is peer_backend
+    assert created_hub["peer_stt"].channel == "peer"

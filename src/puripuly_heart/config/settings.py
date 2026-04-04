@@ -9,7 +9,7 @@ from typing import Any
 
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 3
+SETTINGS_SCHEMA_VERSION = 4
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
     "ko": ("아이리", "시나노"),
@@ -198,6 +198,45 @@ class SonioxSTTSettings:
 
 
 @dataclass(slots=True)
+class PeerDeepgramSTTSettings:
+    model: str | None = None
+
+    def validate(self) -> None:
+        if self.model is not None and not self.model:
+            raise ValueError("peer deepgram model override must be non-empty")
+
+
+@dataclass(slots=True)
+class PeerQwenASRSTTSettings:
+    model: str | None = None
+    region: QwenRegion | None = None
+
+    def validate(self) -> None:
+        if self.model is not None and not self.model:
+            raise ValueError("peer qwen asr model override must be non-empty")
+        if self.region is not None and not isinstance(self.region, QwenRegion):
+            raise ValueError("invalid peer qwen asr region")
+
+
+@dataclass(slots=True)
+class PeerSonioxSTTSettings:
+    model: str | None = None
+    endpoint: str | None = None
+    keepalive_interval_s: float | None = None
+    trailing_silence_ms: int | None = None
+
+    def validate(self) -> None:
+        if self.model is not None and not self.model:
+            raise ValueError("peer soniox model override must be non-empty")
+        if self.endpoint is not None and not self.endpoint:
+            raise ValueError("peer soniox endpoint override must be non-empty")
+        if self.keepalive_interval_s is not None and self.keepalive_interval_s <= 0:
+            raise ValueError("peer soniox keepalive override must be > 0")
+        if self.trailing_silence_ms is not None and self.trailing_silence_ms < 0:
+            raise ValueError("peer soniox trailing silence override must be >= 0")
+
+
+@dataclass(slots=True)
 class LLMSettings:
     concurrency_limit: int = 2
 
@@ -237,11 +276,14 @@ class OSCSettings:
 @dataclass(slots=True)
 class ProviderSettings:
     stt: STTProviderName = STTProviderName.LOCAL_QWEN
+    peer_stt: STTProviderName = STTProviderName.DEEPGRAM
     llm: LLMProviderName = LLMProviderName.GEMINI
 
     def validate(self) -> None:
         if not isinstance(self.stt, STTProviderName):
             raise ValueError("invalid stt provider")
+        if not isinstance(self.peer_stt, STTProviderName):
+            raise ValueError("invalid peer stt provider")
         if not isinstance(self.llm, LLMProviderName):
             raise ValueError("invalid llm provider")
 
@@ -331,6 +373,9 @@ class AppSettings:
     deepgram_stt: DeepgramSTTSettings = field(default_factory=DeepgramSTTSettings)
     qwen_asr_stt: QwenASRSTTSettings = field(default_factory=QwenASRSTTSettings)
     soniox_stt: SonioxSTTSettings = field(default_factory=SonioxSTTSettings)
+    peer_deepgram_stt: PeerDeepgramSTTSettings = field(default_factory=PeerDeepgramSTTSettings)
+    peer_qwen_asr_stt: PeerQwenASRSTTSettings = field(default_factory=PeerQwenASRSTTSettings)
+    peer_soniox_stt: PeerSonioxSTTSettings = field(default_factory=PeerSonioxSTTSettings)
     gemini: GeminiSettings = field(default_factory=GeminiSettings)
     qwen: QwenSettings = field(default_factory=QwenSettings)
     llm: LLMSettings = field(default_factory=LLMSettings)
@@ -353,6 +398,9 @@ class AppSettings:
         self.deepgram_stt.validate()
         self.qwen_asr_stt.validate()
         self.soniox_stt.validate()
+        self.peer_deepgram_stt.validate()
+        self.peer_qwen_asr_stt.validate()
+        self.peer_soniox_stt.validate()
         self.gemini.validate()
         self.qwen.validate()
         self.llm.validate()
@@ -380,7 +428,11 @@ def _enum_to_value(obj: object) -> object:
 def to_dict(settings: AppSettings) -> dict[str, Any]:
     data: dict[str, Any] = {
         "settings_version": settings.settings_version,
-        "provider": {"stt": settings.provider.stt.value, "llm": settings.provider.llm.value},
+        "provider": {
+            "stt": settings.provider.stt.value,
+            "peer_stt": settings.provider.peer_stt.value,
+            "llm": settings.provider.llm.value,
+        },
         "languages": {
             "source_language": settings.languages.source_language,
             "target_language": settings.languages.target_language,
@@ -425,6 +477,23 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "endpoint": settings.soniox_stt.endpoint,
             "keepalive_interval_s": settings.soniox_stt.keepalive_interval_s,
             "trailing_silence_ms": settings.soniox_stt.trailing_silence_ms,
+        },
+        "peer_deepgram_stt": {
+            "model": settings.peer_deepgram_stt.model,
+        },
+        "peer_qwen_asr_stt": {
+            "model": settings.peer_qwen_asr_stt.model,
+            "region": (
+                settings.peer_qwen_asr_stt.region.value
+                if settings.peer_qwen_asr_stt.region is not None
+                else None
+            ),
+        },
+        "peer_soniox_stt": {
+            "model": settings.peer_soniox_stt.model,
+            "endpoint": settings.peer_soniox_stt.endpoint,
+            "keepalive_interval_s": settings.peer_soniox_stt.keepalive_interval_s,
+            "trailing_silence_ms": settings.peer_soniox_stt.trailing_silence_ms,
         },
         "gemini": {
             "llm_model": settings.gemini.llm_model.value,
@@ -558,9 +627,53 @@ def _coerce_int(value: object, fallback: int) -> int:
         return fallback
 
 
+def _parse_optional_str(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _parse_optional_float(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_optional_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_peer_block(
+    data: dict[str, Any], key: str, default_block: dict[str, Any]
+) -> bool:
+    if isinstance(data.get(key), dict):
+        return False
+    data[key] = copy.deepcopy(default_block)
+    return True
+
+
 def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     data: dict[str, Any] = copy.deepcopy(raw)
     changed = False
+    peer_block_defaults: dict[str, dict[str, Any]] = {
+        "peer_deepgram_stt": {"model": None},
+        "peer_qwen_asr_stt": {"model": None, "region": None},
+        "peer_soniox_stt": {
+            "model": None,
+            "endpoint": None,
+            "keepalive_interval_s": None,
+            "trailing_silence_ms": None,
+        },
+    }
 
     version = _coerce_int(data.get("settings_version"), 1)
     if version < 1:
@@ -592,6 +705,32 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             changed = True
         version = 3
 
+    if version < 4:
+        raw_provider_data = data.get("provider")
+        if raw_provider_data is None:
+            provider_data = {}
+            data["provider"] = provider_data
+            changed = True
+        elif isinstance(raw_provider_data, dict):
+            provider_data = raw_provider_data
+        else:
+            provider_data = {
+                "stt": STTProviderName.DEEPGRAM.value,
+                "llm": LLMProviderName.GEMINI.value,
+            }
+            data["provider"] = provider_data
+            changed = True
+
+        if "peer_stt" not in provider_data:
+            provider_data["peer_stt"] = STTProviderName.DEEPGRAM.value
+            changed = True
+
+        for key, default_block in peer_block_defaults.items():
+            if _normalize_peer_block(data, key, default_block):
+                changed = True
+
+        version = 4
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -612,7 +751,9 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     raw_provider_data = data.get("provider")
     provider_data: dict[str, Any] | None
     if raw_provider_data is None:
-        provider_data = None
+        provider_data = {}
+        data["provider"] = provider_data
+        changed = True
     elif not isinstance(raw_provider_data, dict):
         provider_data = {
             "stt": STTProviderName.DEEPGRAM.value,
@@ -628,6 +769,19 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         normalized_stt_provider = _parse_stt_provider(str(raw_stt_provider)).value
         if raw_stt_provider != normalized_stt_provider:
             provider_data["stt"] = normalized_stt_provider
+            changed = True
+    if isinstance(provider_data, dict) and "peer_stt" not in provider_data:
+        provider_data["peer_stt"] = STTProviderName.DEEPGRAM.value
+        changed = True
+    if isinstance(provider_data, dict) and "peer_stt" in provider_data:
+        raw_peer_provider = provider_data.get("peer_stt")
+        normalized_peer_provider = _parse_stt_provider(str(raw_peer_provider)).value
+        if raw_peer_provider != normalized_peer_provider:
+            provider_data["peer_stt"] = normalized_peer_provider
+            changed = True
+
+    for key, default_block in peer_block_defaults.items():
+        if _normalize_peer_block(data, key, default_block):
             changed = True
 
     # Keep schema at v2 but backfill Soniox legacy default model upgrade.
@@ -694,6 +848,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     overlay_calibration_data = data.get("overlay_calibration") or {}
     stt_data = data.get("stt") or {}
     ui_data = data.get("ui") or {}
+    peer_deepgram_data = data.get("peer_deepgram_stt") if isinstance(data.get("peer_deepgram_stt"), dict) else {}
+    peer_qwen_raw = data.get("peer_qwen_asr_stt") if isinstance(data.get("peer_qwen_asr_stt"), dict) else {}
+    peer_soniox_data = data.get("peer_soniox_stt") if isinstance(data.get("peer_soniox_stt"), dict) else {}
     raw_provider_data = data.get("provider")
     provider_data = raw_provider_data if isinstance(raw_provider_data, dict) else {}
     if raw_provider_data is None:
@@ -702,6 +859,11 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         stt_provider_value = provider_data.get("stt", STTProviderName.LOCAL_QWEN.value)
     else:
         stt_provider_value = STTProviderName.DEEPGRAM.value
+    raw_peer_provider = (
+        provider_data.get("peer_stt", STTProviderName.DEEPGRAM.value)
+        if isinstance(raw_provider_data, dict)
+        else STTProviderName.DEEPGRAM.value
+    )
 
     input_host_api_raw = audio_data.get("input_host_api")
     input_device_raw = audio_data.get("input_device")
@@ -718,6 +880,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         settings_version=_coerce_int(data.get("settings_version"), SETTINGS_SCHEMA_VERSION),
         provider=ProviderSettings(
             stt=_parse_stt_provider(str(stt_provider_value)),
+            peer_stt=_parse_stt_provider(str(raw_peer_provider)),
             llm=LLMProviderName(provider_data.get("llm", LLMProviderName.GEMINI.value)),
         ),
         languages=LanguageSettings(
@@ -825,6 +988,23 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 data.get("soniox_stt", {}).get("keepalive_interval_s", 10.0)
             ),
             trailing_silence_ms=int(data.get("soniox_stt", {}).get("trailing_silence_ms", 100)),
+        ),
+        peer_deepgram_stt=PeerDeepgramSTTSettings(
+            model=_parse_optional_str(peer_deepgram_data.get("model")),
+        ),
+        peer_qwen_asr_stt=PeerQwenASRSTTSettings(
+            model=_parse_optional_str(peer_qwen_raw.get("model")),
+            region=(
+                QwenRegion(peer_qwen_raw["region"])
+                if peer_qwen_raw.get("region") in {region.value for region in QwenRegion}
+                else None
+            ),
+        ),
+        peer_soniox_stt=PeerSonioxSTTSettings(
+            model=_parse_optional_str(peer_soniox_data.get("model")),
+            endpoint=_parse_optional_str(peer_soniox_data.get("endpoint")),
+            keepalive_interval_s=_parse_optional_float(peer_soniox_data.get("keepalive_interval_s")),
+            trailing_silence_ms=_parse_optional_int(peer_soniox_data.get("trailing_silence_ms")),
         ),
         gemini=GeminiSettings(
             llm_model=_parse_gemini_llm_model(

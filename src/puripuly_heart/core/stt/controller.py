@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import AsyncIterator
+from typing import AsyncIterator, Awaitable, Callable
 from uuid import UUID
 
 import numpy as np
@@ -42,6 +42,7 @@ class ManagedSTTProvider:
     connect_retry_base_s: float = 0.8
     connect_retry_max_s: float = 6.0
     reconnect_window_s: float = 20.0
+    on_terminal_failure: Callable[[Exception], Awaitable[None] | None] | None = None
 
     _state: STTSessionState = STTSessionState.DISCONNECTED
     _active_session: STTBackendSession | None = None
@@ -167,8 +168,12 @@ class ManagedSTTProvider:
 
     async def _send_audio(self, samples_f32: np.ndarray) -> None:
         samples_f32 = np.asarray(samples_f32, dtype=np.float32).reshape(-1)
+        if samples_f32.size == 0:
+            return
         self._audio_ring.append(samples_f32)  # type: ignore[union-attr]
         pcm = float32_to_pcm16le_bytes(samples_f32)
+        if not pcm:
+            return
         if self._active_session is None:
             raise RuntimeError("STT session is not active")
         await self._active_session.send_audio(pcm)
@@ -407,7 +412,36 @@ class ManagedSTTProvider:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await self._events.put(STTErrorEvent(f"STT session error: {exc}", channel=self.channel))
+            await self._handle_terminal_session_failure(session, exc)
+
+    async def _handle_terminal_session_failure(
+        self,
+        session: STTBackendSession,
+        exc: Exception,
+    ) -> None:
+        is_active_session = session is self._active_session
+        if is_active_session:
+            self._active_session = None
+            self._consumer_task = None
+            self._session_started_at = None
+            self._active_utterance_id = None
+            self._pending_final_utterance_id = None
+            self._last_speech_end_time = None
+            if self._reset_timer is not None:
+                self._reset_timer.cancel()
+                self._reset_timer = None
+            await self._set_state(STTSessionState.DISCONNECTED)
+            if self.on_terminal_failure is not None:
+                maybe_awaitable = self.on_terminal_failure(exc)
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+
+        with contextlib.suppress(Exception):
+            await session.stop()
+        with contextlib.suppress(Exception):
+            await session.close()
+
+        await self._events.put(STTErrorEvent(f"STT session error: {exc}", channel=self.channel))
 
     async def _set_state(self, state: STTSessionState) -> None:
         if self._state == state:
@@ -451,3 +485,4 @@ class ManagedSTTProvider:
 
 
 import contextlib  # placed at bottom to keep the main logic compact
+import inspect

@@ -484,11 +484,60 @@ class SettingsView(ft.Column):
             size=16,
             color=COLOR_ON_BACKGROUND,
         )
+        self._peer_stt_text = self._build_clickable_text(
+            provider_label(STTProviderName.DEEPGRAM.value),
+            self._on_peer_stt_click,
+        )
+        self._peer_stt_label = ft.Text(
+            t("settings.peer_stt_provider"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._peer_deepgram_model_text = self._build_clickable_text(
+            self._inherit_label(),
+            self._on_peer_deepgram_model_click,
+        )
+        self._peer_deepgram_model_label = ft.Text(
+            t("settings.peer_deepgram_model"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._peer_qwen_region_text = self._build_clickable_text(
+            self._inherit_label(),
+            self._on_peer_qwen_region_click,
+        )
+        self._peer_qwen_region_label = ft.Text(
+            t("settings.peer_qwen_region"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._peer_qwen_model_text = self._build_clickable_text(
+            self._inherit_label(),
+            self._on_peer_qwen_model_click,
+        )
+        self._peer_qwen_model_label = ft.Text(
+            t("settings.peer_qwen_model"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._peer_soniox_model_text = self._build_clickable_text(
+            self._inherit_label(),
+            self._on_peer_soniox_model_click,
+        )
+        self._peer_soniox_model_label = ft.Text(
+            t("settings.peer_soniox_model"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
         peer_lang_card = self._wrap_card(
             ft.Column(
                 [
                     self._peer_lang_title,
                     ft.Container(height=12),
+                    self._build_setting_action_row(
+                        self._peer_stt_label,
+                        self._peer_stt_text,
+                    ),
                     self._build_setting_action_row(
                         self._peer_source_label,
                         self._peer_source_text,
@@ -496,6 +545,22 @@ class SettingsView(ft.Column):
                     self._build_setting_action_row(
                         self._peer_target_label,
                         self._peer_target_text,
+                    ),
+                    self._build_setting_action_row(
+                        self._peer_deepgram_model_label,
+                        self._peer_deepgram_model_text,
+                    ),
+                    self._build_setting_action_row(
+                        self._peer_qwen_region_label,
+                        self._peer_qwen_region_text,
+                    ),
+                    self._build_setting_action_row(
+                        self._peer_qwen_model_label,
+                        self._peer_qwen_model_text,
+                    ),
+                    self._build_setting_action_row(
+                        self._peer_soniox_model_label,
+                        self._peer_soniox_model_text,
                     ),
                 ],
                 spacing=6,
@@ -916,6 +981,29 @@ class SettingsView(ft.Column):
             terms.append(normalized)
         return terms, unique_count
 
+    def _inherit_label(self) -> str:
+        return t("settings.peer_provider.follow_self")
+
+    def _peer_deepgram_model_label_for(self, settings: AppSettings | None) -> str:
+        if settings is None or settings.peer_deepgram_stt.model is None:
+            return self._inherit_label()
+        return settings.peer_deepgram_stt.model
+
+    def _peer_qwen_region_label_for(self, settings: AppSettings | None) -> str:
+        if settings is None or settings.peer_qwen_asr_stt.region is None:
+            return self._inherit_label()
+        return t(f"region.{settings.peer_qwen_asr_stt.region.value}")
+
+    def _peer_qwen_model_label_for(self, settings: AppSettings | None) -> str:
+        if settings is None or settings.peer_qwen_asr_stt.model is None:
+            return self._inherit_label()
+        return settings.peer_qwen_asr_stt.model
+
+    def _peer_soniox_model_label_for(self, settings: AppSettings | None) -> str:
+        if settings is None or settings.peer_soniox_stt.model is None:
+            return self._inherit_label()
+        return settings.peer_soniox_stt.model
+
     # --- Load Settings ---
     def load_from_settings(
         self,
@@ -935,6 +1023,13 @@ class SettingsView(ft.Column):
 
         # STT Provider
         self._stt_text.content.value = provider_label(settings.provider.stt.value)
+        self._peer_stt_text.content.value = provider_label(settings.provider.peer_stt.value)
+        self._peer_deepgram_model_text.content.value = self._peer_deepgram_model_label_for(
+            settings
+        )
+        self._peer_qwen_region_text.content.value = self._peer_qwen_region_label_for(settings)
+        self._peer_qwen_model_text.content.value = self._peer_qwen_model_label_for(settings)
+        self._peer_soniox_model_text.content.value = self._peer_soniox_model_label_for(settings)
         self._update_api_visibility()
 
         # LLM Provider
@@ -1065,20 +1160,45 @@ class SettingsView(ft.Column):
 
         stt = self._settings.provider.stt
         llm = self._settings.provider.llm
+        peer_stt = self._settings.provider.peer_stt
+        peer_enabled = bool(self._settings.ui.peer_translation_enabled)
 
-        # STT-related keys
-        self._deepgram_key.visible = stt == STTProviderName.DEEPGRAM
-        self._soniox_key.visible = stt == STTProviderName.SONIOX
+        active_stt_providers = {stt}
+        if peer_enabled:
+            active_stt_providers.add(peer_stt)
+        self._deepgram_key.visible = STTProviderName.DEEPGRAM in active_stt_providers
+        self._soniox_key.visible = STTProviderName.SONIOX in active_stt_providers
 
-        # LLM-related keys
         self._google_key.visible = llm == LLMProviderName.GEMINI
 
-        # Qwen keys (visible if either uses Qwen, based on selected region)
-        uses_qwen = stt == STTProviderName.QWEN_ASR or llm == LLMProviderName.QWEN
-        self._qwen_region_btn.visible = uses_qwen
-        qwen_region = self._settings.qwen.region
-        self._alibaba_key_beijing.visible = uses_qwen and qwen_region == QwenRegion.BEIJING
-        self._alibaba_key_singapore.visible = uses_qwen and qwen_region == QwenRegion.SINGAPORE
+        qwen_regions: set[QwenRegion] = set()
+        if stt == STTProviderName.QWEN_ASR or llm == LLMProviderName.QWEN:
+            qwen_regions.add(self._settings.qwen.region)
+        if peer_enabled and peer_stt == STTProviderName.QWEN_ASR:
+            qwen_regions.add(self._settings.peer_qwen_asr_stt.region or self._settings.qwen.region)
+
+        self._qwen_region_btn.visible = stt == STTProviderName.QWEN_ASR or llm == LLMProviderName.QWEN
+        self._alibaba_key_beijing.visible = QwenRegion.BEIJING in qwen_regions
+        self._alibaba_key_singapore.visible = QwenRegion.SINGAPORE in qwen_regions
+        self._update_peer_provider_visibility()
+
+    def _update_peer_provider_visibility(self) -> None:
+        if not self._settings:
+            return
+
+        peer_stt = self._settings.provider.peer_stt
+        show_deepgram = peer_stt == STTProviderName.DEEPGRAM
+        show_qwen = peer_stt == STTProviderName.QWEN_ASR
+        show_soniox = peer_stt == STTProviderName.SONIOX
+
+        self._peer_deepgram_model_label.visible = show_deepgram
+        self._peer_deepgram_model_text.visible = show_deepgram
+        self._peer_qwen_region_label.visible = show_qwen
+        self._peer_qwen_region_text.visible = show_qwen
+        self._peer_qwen_model_label.visible = show_qwen
+        self._peer_qwen_model_text.visible = show_qwen
+        self._peer_soniox_model_label.visible = show_soniox
+        self._peer_soniox_model_text.visible = show_soniox
 
     # --- Event Handlers ---
     def _on_stt_click(self, e) -> None:
@@ -1144,6 +1264,157 @@ class SettingsView(ft.Column):
             self._qwen_region_btn.update()
             self._api_keys_column.update()
             self._stt_text.update()
+        self._emit_settings_changed()
+
+    def _on_peer_stt_click(self, e) -> None:
+        if not self.page:
+            return
+        options = [
+            OptionItem(
+                value=provider.value,
+                label=provider_label(provider.value),
+                description=t(f"provider.{provider.value}.description", default=""),
+            )
+            for provider in STTProviderName
+        ]
+        current = (
+            self._settings.provider.peer_stt.value
+            if self._settings
+            else STTProviderName.DEEPGRAM.value
+        )
+        SettingsModal(
+            self.page,
+            t("settings.peer_stt_provider"),
+            options,
+            self._on_peer_stt_selected,
+            show_description=True,
+        ).open(current)
+
+    def _on_peer_stt_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+        self._settings.provider.peer_stt = STTProviderName(value)
+        self._peer_stt_text.content.value = provider_label(value)
+        self._update_api_visibility()
+        if self.page:
+            self._peer_stt_text.update()
+            self._api_keys_column.update()
+        self.has_provider_changes = True
+        self.provider_change_requires_pipeline = True
+        self._emit_settings_changed()
+
+    def _on_peer_deepgram_model_click(self, e) -> None:
+        if not self.page or not self._settings:
+            return
+        options = [
+            OptionItem(value="", label=self._inherit_label()),
+            OptionItem(value="nova-3", label="nova-3"),
+            OptionItem(value="nova-3-general", label="nova-3-general"),
+        ]
+        SettingsModal(
+            self.page,
+            t("settings.peer_deepgram_model"),
+            options,
+            self._on_peer_deepgram_model_selected,
+            show_description=False,
+        ).open(self._settings.peer_deepgram_stt.model or "")
+
+    def _on_peer_deepgram_model_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+        self._settings.peer_deepgram_stt.model = value or None
+        self._peer_deepgram_model_text.content.value = self._peer_deepgram_model_label_for(
+            self._settings
+        )
+        if self.page:
+            self._peer_deepgram_model_text.update()
+        self.has_provider_changes = True
+        self.provider_change_requires_pipeline = True
+        self._emit_settings_changed()
+
+    def _on_peer_qwen_region_click(self, e) -> None:
+        if not self.page or not self._settings:
+            return
+        options = [
+            OptionItem(value="", label=self._inherit_label()),
+            OptionItem(value=QwenRegion.BEIJING.value, label=t("region.beijing")),
+            OptionItem(value=QwenRegion.SINGAPORE.value, label=t("region.singapore")),
+        ]
+        SettingsModal(
+            self.page,
+            t("settings.peer_qwen_region"),
+            options,
+            self._on_peer_qwen_region_selected,
+            show_description=False,
+        ).open(self._settings.peer_qwen_asr_stt.region.value if self._settings.peer_qwen_asr_stt.region else "")
+
+    def _on_peer_qwen_region_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+        self._settings.peer_qwen_asr_stt.region = QwenRegion(value) if value else None
+        self._peer_qwen_region_text.content.value = self._peer_qwen_region_label_for(
+            self._settings
+        )
+        self._update_api_visibility()
+        if self.page:
+            self._peer_qwen_region_text.update()
+            self._api_keys_column.update()
+        self.has_provider_changes = True
+        self.provider_change_requires_pipeline = True
+        self._emit_settings_changed()
+
+    def _on_peer_qwen_model_click(self, e) -> None:
+        if not self.page or not self._settings:
+            return
+        options = [
+            OptionItem(value="", label=self._inherit_label()),
+            OptionItem(value="qwen3-asr-flash-realtime", label="qwen3-asr-flash-realtime"),
+        ]
+        SettingsModal(
+            self.page,
+            t("settings.peer_qwen_model"),
+            options,
+            self._on_peer_qwen_model_selected,
+            show_description=False,
+        ).open(self._settings.peer_qwen_asr_stt.model or "")
+
+    def _on_peer_qwen_model_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+        self._settings.peer_qwen_asr_stt.model = value or None
+        self._peer_qwen_model_text.content.value = self._peer_qwen_model_label_for(self._settings)
+        if self.page:
+            self._peer_qwen_model_text.update()
+        self.has_provider_changes = True
+        self.provider_change_requires_pipeline = True
+        self._emit_settings_changed()
+
+    def _on_peer_soniox_model_click(self, e) -> None:
+        if not self.page or not self._settings:
+            return
+        options = [
+            OptionItem(value="", label=self._inherit_label()),
+            OptionItem(value="stt-rt-v4", label="stt-rt-v4"),
+        ]
+        SettingsModal(
+            self.page,
+            t("settings.peer_soniox_model"),
+            options,
+            self._on_peer_soniox_model_selected,
+            show_description=False,
+        ).open(self._settings.peer_soniox_stt.model or "")
+
+    def _on_peer_soniox_model_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+        self._settings.peer_soniox_stt.model = value or None
+        self._peer_soniox_model_text.content.value = self._peer_soniox_model_label_for(
+            self._settings
+        )
+        if self.page:
+            self._peer_soniox_model_text.update()
+        self.has_provider_changes = True
+        self.provider_change_requires_pipeline = True
         self._emit_settings_changed()
 
     def _on_llm_click(self, e) -> None:
@@ -1674,6 +1945,9 @@ class SettingsView(ft.Column):
         if not enabled:
             self._settings.ui.peer_translation_enabled = False
         self._sync_overlay_controls()
+        self._update_api_visibility()
+        if self.page:
+            self._api_keys_column.update()
         if self.on_overlay_toggle is not None:
             self.on_overlay_toggle(enabled)
             return
@@ -1704,6 +1978,9 @@ class SettingsView(ft.Column):
             self._settings.ui.integrated_context_enabled = True
             self._settings.ui.integrated_context_bootstrapped = True
         self._sync_overlay_controls()
+        self._update_api_visibility()
+        if self.page:
+            self._api_keys_column.update()
         self._emit_settings_changed()
 
     def _on_overlay_translation_click(self, e) -> None:
@@ -2076,8 +2353,13 @@ class SettingsView(ft.Column):
         self._vrc_mic_title.value = t("settings.vrc_mic_intercept")
         self._chatbox_source_title.value = t("settings.chatbox_include_source")
         self._peer_lang_title.value = t("settings.peer_language")
+        self._peer_stt_label.value = t("settings.peer_stt_provider")
         self._peer_source_label.value = t("settings.peer_language.source")
         self._peer_target_label.value = t("settings.peer_language.target")
+        self._peer_deepgram_model_label.value = t("settings.peer_deepgram_model")
+        self._peer_qwen_region_label.value = t("settings.peer_qwen_region")
+        self._peer_qwen_model_label.value = t("settings.peer_qwen_model")
+        self._peer_soniox_model_label.value = t("settings.peer_soniox_model")
         self._overlay_title.value = t("settings.section.overlay")
         self._overlay_enabled_label.value = t("settings.overlay.enabled")
         self._overlay_translation_label.value = t("settings.overlay.show_translation")
@@ -2135,6 +2417,7 @@ class SettingsView(ft.Column):
         # Update text controls with current selection labels
         if self._settings:
             self._stt_text.content.value = provider_label(self._settings.provider.stt.value)
+            self._peer_stt_text.content.value = provider_label(self._settings.provider.peer_stt.value)
             self._llm_text.content.value = self._get_llm_display_label(self._settings)
             self._ui_text.content.value = locale_label(self._settings.ui.locale)
             self._low_latency_text.content.value = t(
@@ -2156,8 +2439,21 @@ class SettingsView(ft.Column):
             self._peer_target_text.content.value = self._peer_lang_display(
                 self._settings.languages.peer_target_language
             )
+            self._peer_deepgram_model_text.content.value = self._peer_deepgram_model_label_for(
+                self._settings
+            )
+            self._peer_qwen_region_text.content.value = self._peer_qwen_region_label_for(
+                self._settings
+            )
+            self._peer_qwen_model_text.content.value = self._peer_qwen_model_label_for(
+                self._settings
+            )
+            self._peer_soniox_model_text.content.value = self._peer_soniox_model_label_for(
+                self._settings
+            )
             self._sync_overlay_controls()
             self._sync_overlay_calibration_controls()
+            self._update_peer_provider_visibility()
 
         # Qwen Region label
         if self._settings:

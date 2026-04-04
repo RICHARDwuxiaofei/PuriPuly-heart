@@ -4,6 +4,8 @@ import asyncio
 from dataclasses import dataclass
 from uuid import uuid4
 
+import numpy as np
+
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
@@ -82,6 +84,85 @@ class EventOnlySession:
     async def events(self):
         for item in self.items:
             yield item
+
+
+@dataclass(slots=True)
+class EventOnlyBackend:
+    session: object
+
+    async def open_session(self):
+        return self.session
+
+
+@dataclass(slots=True)
+class FailingSession:
+    error: Exception
+    audio: list[bytes]
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.audio = []
+
+    async def send_audio(self, pcm16le: bytes) -> None:
+        self.audio.append(pcm16le)
+
+    async def on_speech_end(self, *, trailing_silence_ms: int | None = None) -> None:
+        _ = trailing_silence_ms
+
+    async def stop(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def events(self):
+        if False:
+            yield None
+        raise self.error
+
+
+@dataclass(slots=True)
+class FailingBackend:
+    error: Exception
+
+    async def open_session(self):
+        return FailingSession(self.error)
+
+
+@dataclass(slots=True)
+class TerminalFailureSession:
+    closed: bool = False
+    stopped: bool = False
+
+    async def send_audio(self, pcm16le: bytes) -> None:
+        _ = pcm16le
+
+    async def on_speech_end(self, *, trailing_silence_ms: int | None = None) -> None:
+        _ = trailing_silence_ms
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def events(self):
+        if False:
+            yield STTBackendTranscriptEvent(text="", is_final=False)
+        raise RuntimeError("backend closed")
+
+
+@dataclass(slots=True)
+class TerminalFailureBackend:
+    sessions: list[TerminalFailureSession]
+
+    def __init__(self) -> None:
+        self.sessions = []
+
+    async def open_session(self) -> TerminalFailureSession:
+        session = TerminalFailureSession()
+        self.sessions.append(session)
+        return session
 
 
 async def _next_event(stream, *, timeout_s: float = 0.2):
@@ -388,3 +469,60 @@ async def test_managed_stt_provider_peer_channel_produces_final_event():
     assert isinstance(event, STTFinalEvent)
     assert event.transcript.channel == "peer"
     assert event.transcript.text == "peer line"
+
+
+async def test_managed_stt_provider_skips_empty_audio_send() -> None:
+    session = FakeSession()
+    backend = EventOnlyBackend(session=session)
+    stt = ManagedSTTProvider(backend=backend, sample_rate_hz=16000, channel="peer")
+
+    uid = uuid4()
+    await stt.handle_vad_event(
+        SpeechStart(uid, pre_roll=np.zeros(0, dtype=np.float32), chunk=samples(1.0))
+    )
+
+    assert b"" not in session.audio
+
+
+async def test_managed_stt_provider_invokes_terminal_failure_callback_after_consumer_error() -> None:
+    errors: list[str] = []
+    backend = FailingBackend(RuntimeError("closed"))
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        channel="peer",
+        connect_attempts=1,
+        on_terminal_failure=lambda exc: errors.append(str(exc)),
+    )
+
+    uid = uuid4()
+    await stt.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+    await asyncio.sleep(0)
+
+    assert stt.state == STTSessionState.DISCONNECTED
+    assert stt._active_session is None
+    assert errors == ["closed"]
+
+
+async def test_stt_controller_closes_failed_session_after_consumer_error() -> None:
+    backend = TerminalFailureBackend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        reset_deadline_s=90.0,
+        drain_timeout_s=0.05,
+    )
+
+    uid = uuid4()
+    stream = stt.events()
+    await stt.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+    await _next_state(stream, STTSessionState.STREAMING)
+
+    await asyncio.sleep(0.01)
+
+    assert stt.state == STTSessionState.DISCONNECTED
+    assert stt._active_session is None
+    assert stt._consumer_task is None
+    assert backend.sessions[0].closed is True
+
+    await stt.close()

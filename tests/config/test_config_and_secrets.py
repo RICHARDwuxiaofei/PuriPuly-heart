@@ -13,6 +13,7 @@ from puripuly_heart.config.settings import (
     LLMProviderName,
     OSCSettings,
     QwenLLMModel,
+    QwenRegion,
     STTProviderName,
     from_dict,
     load_settings,
@@ -88,6 +89,213 @@ def test_from_dict_falls_back_to_deepgram_for_invalid_persisted_stt_provider() -
     loaded = from_dict(data)
 
     assert loaded.provider.stt == STTProviderName.DEEPGRAM
+
+
+def test_peer_stt_provider_roundtrips_through_settings_dict() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    settings.peer_deepgram_stt.model = "nova-3-general"
+    settings.peer_qwen_asr_stt.region = QwenRegion.SINGAPORE
+
+    reloaded = from_dict(to_dict(settings))
+
+    assert reloaded.provider.peer_stt == STTProviderName.SONIOX
+    assert reloaded.peer_deepgram_stt.model == "nova-3-general"
+    assert reloaded.peer_qwen_asr_stt.region == QwenRegion.SINGAPORE
+
+
+def test_from_dict_defaults_missing_peer_stt_provider_to_deepgram() -> None:
+    data = to_dict(AppSettings())
+    data["provider"].pop("peer_stt", None)
+
+    loaded = from_dict(data)
+
+    assert loaded.provider.peer_stt == STTProviderName.DEEPGRAM
+
+
+def test_from_dict_falls_back_to_deepgram_for_invalid_peer_stt_provider() -> None:
+    data = to_dict(AppSettings())
+    data["provider"]["peer_stt"] = "broken-peer-provider"
+
+    loaded = from_dict(data)
+
+    assert loaded.provider.peer_stt == STTProviderName.DEEPGRAM
+
+
+def test_from_dict_preserves_legacy_malformed_provider_fallback_behavior() -> None:
+    loaded = from_dict({"provider": "legacy-string"})
+
+    assert loaded.provider.stt == STTProviderName.DEEPGRAM
+    assert loaded.provider.peer_stt == STTProviderName.DEEPGRAM
+
+
+def test_load_settings_backfills_peer_provider_defaults_without_copying_self_values(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["provider"].pop("peer_stt", None)
+    legacy.pop("peer_deepgram_stt", None)
+    legacy.pop("peer_qwen_asr_stt", None)
+    legacy.pop("peer_soniox_stt", None)
+    legacy["deepgram_stt"]["model"] = "nova-3-medical"
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.provider.peer_stt == STTProviderName.DEEPGRAM
+    assert loaded.peer_deepgram_stt.model is None
+    assert persisted["provider"]["peer_stt"] == STTProviderName.DEEPGRAM.value
+    assert persisted["peer_deepgram_stt"]["model"] is None
+
+
+def test_from_dict_recovers_malformed_peer_soniox_override_values() -> None:
+    data = to_dict(AppSettings())
+    data["peer_soniox_stt"] = {
+        "model": "",
+        "endpoint": "",
+        "keepalive_interval_s": "broken",
+        "trailing_silence_ms": "broken",
+    }
+
+    loaded = from_dict(data)
+
+    assert loaded.peer_soniox_stt.model is None
+    assert loaded.peer_soniox_stt.endpoint is None
+    assert loaded.peer_soniox_stt.keepalive_interval_s is None
+    assert loaded.peer_soniox_stt.trailing_silence_ms is None
+
+
+def test_load_settings_backfills_v4_peer_blocks_from_schema3_fixture(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    legacy = {
+        "settings_version": 3,
+        "provider": {
+            "stt": STTProviderName.LOCAL_QWEN.value,
+            "llm": LLMProviderName.GEMINI.value,
+            "peer_soniox_stt": "broken",
+        },
+        "languages": {
+            "source_language": "ko",
+            "target_language": "en",
+            "peer_source_language": "",
+            "peer_target_language": "",
+            "recent_source_languages": ["en", "zh-CN", "ja"],
+            "recent_target_languages": ["en", "zh-CN", "ja"],
+        },
+        "audio": {
+            "internal_sample_rate_hz": 16000,
+            "internal_channels": 1,
+            "ring_buffer_ms": 500,
+            "input_host_api": "Windows DirectSound",
+            "input_device": "",
+        },
+        "desktop_audio": {
+            "output_device": "",
+            "vad_speech_threshold": 0.6,
+            "vad_hangover_ms": 900,
+            "vad_pre_roll_ms": 500,
+        },
+        "overlay_calibration": to_dict(AppSettings())["overlay_calibration"],
+        "stt": {
+            "drain_timeout_s": 2.0,
+            "vad_speech_threshold": 0.5,
+            "low_latency_mode": True,
+            "low_latency_vad_hangover_ms": 600,
+            "low_latency_merge_gap_ms": 600,
+            "low_latency_spec_retry_max": 10,
+            "custom_vocabulary_enabled": True,
+            "custom_terms": {
+                "ko": ["아이리", "시나노"],
+                "en": ["airi", "shinano"],
+                "zh-CN": ["airi", "shinano"],
+            },
+        },
+        "deepgram_stt": {"model": "nova-3"},
+        "qwen_asr_stt": {
+            "model": "qwen3-asr-flash-realtime",
+            "endpoint": "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime",
+        },
+        "soniox_stt": {
+            "model": "stt-rt-v3",
+            "endpoint": "wss://stt-rt.soniox.com/transcribe-websocket",
+            "keepalive_interval_s": 10.0,
+            "trailing_silence_ms": 100,
+        },
+        "peer_deepgram_stt": "broken",
+        "peer_qwen_asr_stt": ["broken"],
+        "peer_soniox_stt": {"model": "", "endpoint": ""},
+        "gemini": {"llm_model": GeminiLLMModel.GEMINI_31_FLASH_LITE.value},
+        "qwen": {
+            "region": QwenRegion.BEIJING.value,
+            "llm_model": QwenLLMModel.QWEN_35_PLUS.value,
+        },
+        "llm": {"concurrency_limit": 2},
+        "osc": {
+            "host": "127.0.0.1",
+            "port": 9000,
+            "chatbox_address": "/chatbox/input",
+            "chatbox_send": True,
+            "chatbox_clear": False,
+            "chatbox_max_chars": 144,
+            "cooldown_s": 1.5,
+            "ttl_s": 7.0,
+            "vrc_mic_intercept": False,
+            "chatbox_include_source": True,
+        },
+        "secrets": {
+            "backend": "keyring",
+            "encrypted_file_path": "secrets.json",
+        },
+        "ui": {
+            "locale": "en",
+            "show_overlay_translation": True,
+            "show_overlay_peer_original": True,
+            "peer_translation_enabled": False,
+            "integrated_context_enabled": False,
+            "integrated_context_bootstrapped": False,
+        },
+        "api_key_verified": {
+            "deepgram": False,
+            "soniox": False,
+            "google": False,
+            "alibaba_beijing": False,
+            "alibaba_singapore": False,
+        },
+        "system_prompt": "",
+        "system_prompts": {},
+    }
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
+    assert loaded.provider.peer_stt == STTProviderName.DEEPGRAM
+    assert loaded.peer_deepgram_stt.model is None
+    assert loaded.peer_qwen_asr_stt.model is None
+    assert loaded.peer_qwen_asr_stt.region is None
+    assert loaded.peer_soniox_stt.model is None
+    assert loaded.peer_soniox_stt.endpoint is None
+    assert loaded.peer_soniox_stt.keepalive_interval_s is None
+    assert loaded.peer_soniox_stt.trailing_silence_ms is None
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert persisted["provider"]["peer_stt"] == STTProviderName.DEEPGRAM.value
+    assert persisted["peer_deepgram_stt"] == {"model": None}
+    assert persisted["peer_qwen_asr_stt"] == {"model": None, "region": None}
+    assert persisted["peer_soniox_stt"] == {
+        "model": None,
+        "endpoint": None,
+        "keepalive_interval_s": None,
+        "trailing_silence_ms": None,
+    }
+
+
+def test_app_settings_validate_checks_peer_provider_blocks() -> None:
+    settings = AppSettings()
+    settings.peer_soniox_stt.keepalive_interval_s = -1.0
+
+    with pytest.raises(ValueError, match="peer soniox keepalive override must be > 0"):
+        settings.validate()
 
 
 def test_from_dict_recovers_non_dict_provider_payload_to_deepgram() -> None:

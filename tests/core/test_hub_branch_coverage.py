@@ -217,6 +217,62 @@ async def test_replace_stt_provider_none_stops_event_loop_and_clears_runtime_sta
     await hub.stop()
 
 
+@pytest.mark.asyncio
+async def test_replace_peer_stt_provider_running_restarts_event_loop_and_clears_runtime_state() -> (
+    None
+):
+    old_stt = QueueingSTT()
+    new_stt = QueueingSTT()
+    hub = ClientHub(
+        stt=None,
+        peer_stt=old_stt,
+        llm=StubLLM(),
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+    )
+    await hub.start(auto_flush_osc=False)
+    old_task = hub._peer_stt_task
+
+    utterance_id = uuid4()
+    hub.peer_runtime.get_or_create_bundle(utterance_id)
+    hub.peer_runtime.utterance_sources[utterance_id] = "Peer"
+    hub.peer_runtime.utterance_start_times[utterance_id] = 2.0
+    hub.peer_runtime.speech_ended_ids.add(utterance_id)
+    hub.peer_runtime.translation_history.append(
+        ContextEntry("peer line", "en", "ko", 1.0, channel="peer")
+    )
+    hub.peer_runtime.translation_tasks[utterance_id] = asyncio.create_task(asyncio.sleep(60.0))
+    buffer = _MergeBuffer(merge_id=uuid4(), parts=["peer"], utterance_ids=[utterance_id])
+    buffer.spec_task = asyncio.create_task(asyncio.sleep(60.0))
+    buffer.finalize_wait_task = asyncio.create_task(asyncio.sleep(60.0))
+    buffer.awaiting_vad_timeout_task = asyncio.create_task(asyncio.sleep(60.0))
+    buffer.resume_end_timeout_task = asyncio.create_task(asyncio.sleep(60.0))
+    hub.peer_runtime.merge_buffer = buffer
+
+    await hub.replace_peer_stt_provider(new_stt)
+
+    assert old_stt.closed is True
+    assert hub.peer_stt is new_stt
+    assert hub.peer_runtime.stt is new_stt
+    assert hub._peer_stt_task is not None
+    assert hub._peer_stt_task is not old_task
+    assert hub.peer_runtime.translation_tasks == {}
+    assert hub.peer_runtime.utterances == {}
+    assert hub.peer_runtime.utterance_sources == {}
+    assert hub.peer_runtime.utterance_start_times == {}
+    assert hub.peer_runtime.speech_ended_ids == set()
+    assert hub.peer_runtime.translation_history == []
+    assert hub.peer_runtime.merge_buffer is None
+
+    await new_stt.emit(STTSessionStateEvent(state=STTSessionState.STREAMING, channel="peer"))
+    await asyncio.sleep(0)
+    event = await hub.ui_events.get()
+    assert event.type == UIEventType.SESSION_STATE_CHANGED
+    assert event.channel == "peer"
+
+    await hub.stop()
+
+
 def test_send_stt_connected_notification_respects_eligibility_and_interval() -> None:
     clock = FakeClock()
     osc = RecordingOscQueue(immediate_result=True)
