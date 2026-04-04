@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::renderer::CaptionLayoutPolicy;
 
-const ACCENT_PULSE_DURATION_SECONDS: f32 = 0.12;
 const SLOT_COUNT: usize = 2;
 const SLOT_TOP_PADDING_PX: f32 = 40.0;
 const SLOT_SPACING_PX: f32 = 36.0;
@@ -86,8 +85,6 @@ pub struct OverlaySlot {
     pub secondary_text: String,
     pub secondary_enabled: bool,
     pub slot_entry_order: u64,
-    pub accent_started_at_s: Option<f32>,
-    pub accent_progress: f32,
 }
 
 impl OverlaySlot {
@@ -95,7 +92,6 @@ impl OverlaySlot {
         block: &OverlayPresentationBlock,
         slot_index: usize,
         slot_entry_order: u64,
-        pulse_on_assign: bool,
     ) -> Self {
         Self {
             slot_index,
@@ -109,8 +105,6 @@ impl OverlaySlot {
             secondary_text: block.secondary_text.clone(),
             secondary_enabled: block.secondary_enabled,
             slot_entry_order,
-            accent_started_at_s: pulse_on_assign.then_some(0.0),
-            accent_progress: if pulse_on_assign { 0.0 } else { 1.0 },
         }
     }
 
@@ -123,14 +117,6 @@ impl OverlaySlot {
         self.primary_text = block.primary_text.clone();
         self.secondary_text = block.secondary_text.clone();
         self.secondary_enabled = block.secondary_enabled;
-    }
-
-    pub fn accent_opacity(&self) -> f32 {
-        if self.accent_progress >= 1.0 {
-            0.0
-        } else {
-            1.0 - self.accent_progress.clamp(0.0, 1.0)
-        }
     }
 }
 
@@ -158,12 +144,7 @@ impl OverlayScene {
         &mut self.slots
     }
 
-    fn apply_snapshot(
-        &mut self,
-        blocks: &[OverlayPresentationBlock],
-        text_scale: f32,
-        pulse_new_slots: bool,
-    ) -> bool {
+    fn apply_snapshot(&mut self, blocks: &[OverlayPresentationBlock], text_scale: f32) -> bool {
         let previous = self.slots.clone();
         let mut sorted = blocks.to_vec();
         sorted.sort_by(|left, right| {
@@ -178,7 +159,7 @@ impl OverlayScene {
 
         let mut assigned = self.update_existing_slots(&sorted);
         self.clear_missing_slots(&sorted);
-        self.fill_empty_slots(&sorted, &mut assigned, pulse_new_slots);
+        self.fill_empty_slots(&sorted, &mut assigned);
         self.recompute_slot_anchors(text_scale);
 
         previous != self.slots
@@ -219,7 +200,6 @@ impl OverlayScene {
         &mut self,
         blocks: &[OverlayPresentationBlock],
         assigned: &mut HashSet<String>,
-        pulse_new_slots: bool,
     ) {
         for block in blocks {
             if assigned.contains(&block.occupant_key) {
@@ -237,7 +217,6 @@ impl OverlayScene {
                 block,
                 slot_index,
                 self.next_slot_entry_order,
-                pulse_new_slots,
             ));
             self.next_slot_entry_order += 1;
             assigned.insert(block.occupant_key.clone());
@@ -245,7 +224,8 @@ impl OverlayScene {
     }
 
     fn recompute_slot_anchors(&mut self, text_scale: f32) {
-        let slot_height_px = CaptionLayoutPolicy::default().stable_block_height_px(true, text_scale);
+        let slot_height_px =
+            CaptionLayoutPolicy::default().stable_block_height_px(true, text_scale);
         for (slot_index, slot) in self.slots.iter_mut().enumerate() {
             if let Some(slot) = slot {
                 slot.slot_index = slot_index;
@@ -253,25 +233,6 @@ impl OverlayScene {
                     SLOT_TOP_PADDING_PX + slot_index as f32 * (slot_height_px + SLOT_SPACING_PX);
             }
         }
-    }
-
-    fn sample_animations(&mut self, delta_seconds: f32, _sample_rate_hz: u32) -> bool {
-        let previous = self.slots.clone();
-        for slot in self.slots.iter_mut().flatten() {
-            if slot.accent_progress < 1.0 {
-                slot.accent_progress = (slot.accent_progress
-                    + delta_seconds / ACCENT_PULSE_DURATION_SECONDS)
-                    .min(1.0);
-            }
-        }
-        previous != self.slots
-    }
-
-    pub fn has_active_animation(&self) -> bool {
-        self.slots
-            .iter()
-            .flatten()
-            .any(|slot| slot.accent_progress < 1.0)
     }
 }
 
@@ -285,7 +246,7 @@ impl OverlayState {
     pub fn seed_snapshot(&mut self, snapshot: &OverlayPresentationSnapshot) -> bool {
         let scene_changed = self
             .scene
-            .apply_snapshot(&snapshot.blocks, snapshot.calibration.text_scale, false);
+            .apply_snapshot(&snapshot.blocks, snapshot.calibration.text_scale);
         let visual_changed = self.snapshot.calibration != snapshot.calibration || scene_changed;
         self.snapshot = snapshot.clone();
         visual_changed
@@ -298,18 +259,10 @@ impl OverlayState {
 
         let scene_changed = self
             .scene
-            .apply_snapshot(&snapshot.blocks, snapshot.calibration.text_scale, true);
+            .apply_snapshot(&snapshot.blocks, snapshot.calibration.text_scale);
         let visual_changed = self.snapshot.calibration != snapshot.calibration || scene_changed;
         self.snapshot = snapshot.clone();
         visual_changed
-    }
-
-    pub fn sample_animations(&mut self, delta_seconds: f32, sample_rate_hz: u32) -> bool {
-        self.scene.sample_animations(delta_seconds, sample_rate_hz)
-    }
-
-    pub fn has_active_animation(&self) -> bool {
-        self.scene.has_active_animation()
     }
 
     pub fn snapshot(&self) -> &OverlayPresentationSnapshot {

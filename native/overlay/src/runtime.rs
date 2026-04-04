@@ -22,9 +22,6 @@ use crate::renderer::{
 use crate::state::{OverlayPresentationSnapshot, OverlayState};
 
 const EMPTY_OVERLAY_HIDE_DELAY: Duration = Duration::from_millis(500);
-const FALLBACK_REFRESH_RATE_HZ: f32 = 90.0;
-const ANIMATION_SAMPLE_RATE_72_HZ: u32 = 36;
-const ANIMATION_SAMPLE_RATE_DEFAULT_HZ: u32 = 45;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StartupError {
@@ -108,9 +105,6 @@ pub struct OverlayRuntime {
     state: OverlayState,
     redraw_requested: bool,
     hide_deadline: Option<Instant>,
-    animation_deadline: Option<Instant>,
-    last_animation_tick: Option<Instant>,
-    refresh_rate_hz: Option<f32>,
 }
 
 impl OverlayRuntime {
@@ -123,14 +117,10 @@ impl OverlayRuntime {
             state: OverlayState::default(),
             redraw_requested: false,
             hide_deadline: None,
-            animation_deadline: None,
-            last_animation_tick: None,
-            refresh_rate_hz: None,
         };
         if runtime.state.seed_snapshot(&snapshot) {
             runtime.redraw_requested = true;
         }
-        runtime.sync_animation_schedule(Instant::now());
         runtime
     }
 
@@ -160,7 +150,6 @@ impl OverlayRuntime {
         if self.state.apply_snapshot(&snapshot) {
             self.redraw_requested = true;
         }
-        self.sync_animation_schedule(Instant::now());
     }
 
     pub fn redraw_requested(&self) -> bool {
@@ -169,22 +158,6 @@ impl OverlayRuntime {
 
     pub fn clear_redraw_flag(&mut self) {
         self.redraw_requested = false;
-    }
-
-    pub fn set_refresh_rate_for_test(&mut self, refresh_rate_hz: Option<f32>) {
-        self.refresh_rate_hz = refresh_rate_hz;
-    }
-
-    pub fn animation_interval_for_test(&self) -> Duration {
-        self.animation_interval()
-    }
-
-    pub fn advance_animation_for_test(&mut self, delta: Duration) {
-        let changed = self
-            .state
-            .sample_animations(delta.as_secs_f32(), self.animation_sample_rate_hz());
-        self.redraw_requested = changed;
-        self.sync_animation_schedule(Instant::now());
     }
 
     pub async fn handle_event(&mut self, event: OverlayBridgeEvent) -> Result<(), RuntimeFailure> {
@@ -241,9 +214,6 @@ impl OverlayRuntime {
             background_alpha: self.state.calibration().background_alpha,
             text_scale: self.state.calibration().text_scale,
         });
-        if self.refresh_rate_hz.is_none() {
-            self.refresh_rate_hz = openvr.display_refresh_rate_hz();
-        }
         openvr
             .apply_calibration(self.state.calibration())
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
@@ -277,7 +247,6 @@ impl OverlayRuntime {
             self.overlay_visible = true;
         }
         self.redraw_requested = false;
-        self.sync_animation_schedule(Instant::now());
 
         if !self.first_texture_submitted {
             logger
@@ -300,14 +269,10 @@ impl OverlayRuntime {
     ) -> Result<(), RuntimeFailure> {
         loop {
             let hide_deadline = self.hide_deadline;
-            let animation_deadline = self.animation_deadline;
 
             tokio::select! {
                 _ = sleep_until(hide_deadline.unwrap_or_else(Instant::now)), if hide_deadline.is_some() => {
                     self.handle_hide_deadline(openvr).await?;
-                }
-                _ = sleep_until(animation_deadline.unwrap_or_else(Instant::now)), if animation_deadline.is_some() => {
-                    self.handle_animation_deadline(renderer, openvr, bridge, logger).await?;
                 }
                 message = bridge.next_message() => {
                     if !self
@@ -380,53 +345,10 @@ impl OverlayRuntime {
         Ok(())
     }
 
-    async fn handle_animation_deadline<S: OverlayFrameSubmitter>(
-        &mut self,
-        renderer: &CaptionRenderer,
-        openvr: &mut S,
-        bridge: &mut BridgeClient,
-        logger: &OverlayLogger,
-    ) -> Result<(), RuntimeFailure> {
-        let now = Instant::now();
-        let delta = now
-            .saturating_duration_since(self.last_animation_tick.unwrap_or(now))
-            .as_secs_f32();
-        self.last_animation_tick = Some(now);
-        let changed = self
-            .state
-            .sample_animations(delta, self.animation_sample_rate_hz());
-        self.redraw_requested = changed;
-        self.sync_animation_schedule(now);
-        self.submit_frame_if_needed(renderer, openvr, bridge, logger)
-            .await
-    }
-
     fn has_drawable_text(&self) -> bool {
         self.caption_blocks()
             .iter()
             .any(CaptionBlock::has_drawable_text)
-    }
-
-    fn animation_sample_rate_hz(&self) -> u32 {
-        match self.refresh_rate_hz.unwrap_or(FALLBACK_REFRESH_RATE_HZ) {
-            hz if (hz - 72.0).abs() < 1.0 => ANIMATION_SAMPLE_RATE_72_HZ,
-            _ => ANIMATION_SAMPLE_RATE_DEFAULT_HZ,
-        }
-    }
-
-    fn animation_interval(&self) -> Duration {
-        Duration::from_secs_f32(1.0 / self.animation_sample_rate_hz() as f32)
-    }
-
-    fn sync_animation_schedule(&mut self, now: Instant) {
-        if self.state.has_active_animation() {
-            self.last_animation_tick.get_or_insert(now);
-            self.animation_deadline = Some(now + self.animation_interval());
-            return;
-        }
-
-        self.animation_deadline = None;
-        self.last_animation_tick = None;
     }
 }
 
@@ -655,7 +577,6 @@ impl OverlayRuntime {
                     .with_secondary_text(strip.secondary_text.clone(), strip.secondary_enabled)
                     .with_visual_state(1.0, 0.0, 1.0)
                     .with_slot(strip.slot_index, strip.anchor_top_px)
-                    .with_accent_opacity(strip.accent_opacity())
             })
             .collect()
     }
@@ -670,7 +591,6 @@ mod tests {
         OverlayPresentationSnapshot,
     };
     use std::cell::Cell;
-    use std::time::Duration;
 
     fn block(
         id: &str,
@@ -739,7 +659,6 @@ mod tests {
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![block("self:1", "self", "self one", "", true)],
         });
-        runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
 
         runtime.apply_snapshot(OverlayPresentationSnapshot {
             revision: 2,

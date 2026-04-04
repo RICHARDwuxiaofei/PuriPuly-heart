@@ -16,17 +16,10 @@ pub(crate) const DEFAULT_AVERAGE_GLYPH_ADVANCE_PX: u32 = 80;
 pub(crate) const DEFAULT_FONT_SIZE_PX: f32 = 140.0;
 pub(crate) const SECONDARY_FONT_SCALE: f32 = 0.66;
 pub(crate) const TEXT_OUTLINE_OVERHANG_PX: f32 = 5.0;
-pub(crate) const SLOT_ACCENT_WIDTH_PX: f32 = 6.0;
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) const SELF_TEXT_FILL_COLOR: (f32, f32, f32, f32) = (1.0, 1.0, 1.0, 1.0);
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) const PEER_TEXT_FILL_COLOR: (f32, f32, f32, f32) = (1.0, 215.0 / 255.0, 0.0, 1.0);
-#[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) const SELF_SLOT_ACCENT_COLOR: (f32, f32, f32, f32) =
-    (195.0 / 255.0, 206.0 / 255.0, 218.0 / 255.0, 1.0);
-#[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) const PEER_SLOT_ACCENT_COLOR: (f32, f32, f32, f32) =
-    (210.0 / 255.0, 162.0 / 255.0, 79.0 / 255.0, 1.0);
 #[cfg(windows)]
 pub(crate) const TEXT_OUTLINE_COLOR: (f32, f32, f32, f32) = (0.0, 0.0, 0.0, 1.0);
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -55,7 +48,6 @@ pub struct CaptionBlock {
     pub slot_index: usize,
     pub slot_top_px: f32,
     pub slot_assigned: bool,
-    pub accent_opacity: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -85,7 +77,6 @@ impl CaptionBlock {
             slot_index: 0,
             slot_top_px: 0.0,
             slot_assigned: false,
-            accent_opacity: 0.0,
         }
     }
 
@@ -120,11 +111,6 @@ impl CaptionBlock {
         self.slot_index = slot_index;
         self.slot_top_px = slot_top_px;
         self.slot_assigned = true;
-        self
-    }
-
-    pub fn with_accent_opacity(mut self, accent_opacity: f32) -> Self {
-        self.accent_opacity = accent_opacity.clamp(0.0, 1.0);
         self
     }
 
@@ -317,8 +303,6 @@ pub struct ResolvedBlockLayout {
     pub secondary_reserved: bool,
     pub bounds: BlockBounds,
     pub visual_bounds: VisualBounds,
-    pub accent_opacity: f32,
-    pub accent_bounds: Option<BlockBounds>,
     pub content_width_px: f32,
     pub opacity: f32,
     pub render_offset_y_px: f32,

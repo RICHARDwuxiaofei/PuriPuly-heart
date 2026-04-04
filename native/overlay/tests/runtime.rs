@@ -8,8 +8,8 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use puripuly_heart_overlay::logging::OverlayLogger;
 use puripuly_heart_overlay::{
     run_with_manifest, submit_texture, validate_manifest, BridgeClient, CaptionBlock,
-    CaptionChannel, CaptionRenderer, FakeOpenVr, OpenVrError,
-    OverlayBridgeEvent, OverlayFrameSubmitter, OverlayManifest, OverlayPresentationBlock,
+    CaptionChannel, CaptionRenderer, FakeOpenVr, OpenVrError, OverlayBridgeEvent,
+    OverlayFrameSubmitter, OverlayManifest, OverlayPresentationBlock,
     OverlayPresentationBlockVariant, OverlayPresentationCalibration, OverlayPresentationSnapshot,
     OverlayRuntime, RenderedFrame, RuntimeFailure, StartupError, EXPECTED_CONTRACT_VERSION,
 };
@@ -406,7 +406,7 @@ async fn runtime_caption_blocks_keep_channel_metadata_for_color_only_rendering()
 }
 
 #[test]
-fn runtime_seeds_initial_snapshot_without_replaying_accent_pulse() {
+fn runtime_seeds_initial_snapshot_with_static_block_visual_state() {
     let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
@@ -415,12 +415,12 @@ fn runtime_seeds_initial_snapshot_without_replaying_accent_pulse() {
 
     let blocks = runtime.caption_blocks();
     assert_eq!(blocks.len(), 1);
-    assert_eq!(blocks[0].accent_opacity, 0.0);
-    assert!(!runtime.state().has_active_animation());
+    assert_eq!(blocks[0].offset_y_px, 0.0);
+    assert_eq!(blocks[0].height_scale, 1.0);
 }
 
 #[test]
-fn runtime_new_snapshot_triggers_accent_pulse_after_seeded_start() {
+fn runtime_new_snapshot_keeps_blocks_static_after_seeded_start() {
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
@@ -441,31 +441,8 @@ fn runtime_new_snapshot_triggers_accent_pulse_after_seeded_start() {
         .into_iter()
         .find(|block| block.id == "peer:2")
         .expect("new peer block should render");
-    assert!(peer_block.accent_opacity > 0.0);
-    assert!(runtime.state().has_active_animation());
-}
-
-#[test]
-fn runtime_uses_half_refresh_animation_sampling() {
-    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
-
-    runtime.set_refresh_rate_for_test(Some(72.0));
-    assert_eq!(
-        runtime.animation_interval_for_test(),
-        Duration::from_secs_f32(1.0 / 36.0)
-    );
-
-    runtime.set_refresh_rate_for_test(Some(90.0));
-    assert_eq!(
-        runtime.animation_interval_for_test(),
-        Duration::from_secs_f32(1.0 / 45.0)
-    );
-
-    runtime.set_refresh_rate_for_test(None);
-    assert_eq!(
-        runtime.animation_interval_for_test(),
-        Duration::from_secs_f32(1.0 / 45.0)
-    );
+    assert_eq!(peer_block.offset_y_px, 0.0);
+    assert_eq!(peer_block.height_scale, 1.0);
 }
 
 #[test]
@@ -617,7 +594,10 @@ fn runtime_renderer_uses_fixed_slot_bounds_when_secondary_slot_changes() {
         .find(|block| block.id == "peer:2")
         .expect("updated peer block should render");
 
-    assert_eq!(updated_self.bounds.top_px, initial.layout().visible_blocks[0].bounds.top_px);
+    assert_eq!(
+        updated_self.bounds.top_px,
+        initial.layout().visible_blocks[0].bounds.top_px
+    );
     assert_eq!(updated_peer.bounds.top_px, initial_peer.bounds.top_px);
 }
 
@@ -645,7 +625,6 @@ fn runtime_does_not_render_duplicate_row_when_same_id_reappears_during_exit() {
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![block("self:1", "self", "hello", "", true)],
     });
-    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
 
     runtime.apply_snapshot(OverlayPresentationSnapshot {
         revision: 2,
@@ -666,32 +645,6 @@ fn runtime_does_not_render_duplicate_row_when_same_id_reappears_during_exit() {
             .collect::<Vec<_>>(),
         vec!["self:1"]
     );
-}
-
-#[test]
-fn runtime_requests_redraws_while_animation_is_active_and_stops_when_scene_is_idle() {
-    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
-
-    runtime.apply_snapshot(OverlayPresentationSnapshot {
-        revision: 1,
-        calibration: OverlayPresentationCalibration::default(),
-        blocks: vec![block("self:1", "self", "hello", "", true)],
-    });
-
-    assert!(runtime.redraw_requested());
-    runtime.clear_redraw_flag();
-    assert!(!runtime.redraw_requested());
-
-    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0 / 45.0));
-    assert!(runtime.redraw_requested());
-
-    runtime.clear_redraw_flag();
-    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
-    assert!(runtime.redraw_requested());
-
-    runtime.clear_redraw_flag();
-    runtime.advance_animation_for_test(Duration::from_secs_f32(1.0));
-    assert!(!runtime.redraw_requested());
 }
 
 #[tokio::test]
