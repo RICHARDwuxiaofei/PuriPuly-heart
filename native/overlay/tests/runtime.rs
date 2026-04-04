@@ -1122,7 +1122,7 @@ fn check_startup_contract_reports_current_contract_version() {
 
     assert!(output.status.success());
     let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(payload["contract_version"], EXPECTED_CONTRACT_VERSION);
+    assert_eq!(payload["contract_version"], 4);
 }
 
 #[test]

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::runtime::StartupError;
 
-pub const EXPECTED_CONTRACT_VERSION: u32 = 3;
+pub const EXPECTED_CONTRACT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

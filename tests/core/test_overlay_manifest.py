@@ -6,12 +6,12 @@ from puripuly_heart.core.overlay.manifest import OVERLAY_CONTRACT_VERSION, Overl
 
 
 def test_overlay_manifest_uses_structured_block_contract_version() -> None:
-    assert OVERLAY_CONTRACT_VERSION == 3
+    assert OVERLAY_CONTRACT_VERSION == 4
 
 
 def test_overlay_manifest_round_trips_contract_fields() -> None:
     manifest = OverlayLaunchManifest(
-        contract_version=3,
+        contract_version=OVERLAY_CONTRACT_VERSION,
         app_version="1.2.3",
         overlay_instance_id="overlay-1",
         bridge_url="ws://127.0.0.1:8765",
@@ -26,7 +26,7 @@ def test_overlay_manifest_round_trips_contract_fields() -> None:
 
     restored = OverlayLaunchManifest.from_dict(manifest.to_dict())
 
-    assert restored.contract_version == 3
+    assert restored.contract_version == 4
     assert restored.app_version == "1.2.3"
     assert restored.overlay_instance_id == "overlay-1"
     assert restored.bridge_url == "ws://127.0.0.1:8765"
@@ -39,7 +39,7 @@ def test_overlay_manifest_rejects_live_runtime_state_fields() -> None:
     with pytest.raises(ValueError):
         OverlayLaunchManifest.from_dict(
             {
-                "contract_version": 3,
+                "contract_version": 4,
                 "app_version": "1.2.3",
                 "overlay_instance_id": "overlay-1",
                 "bridge_url": "ws://127.0.0.1:8765",
