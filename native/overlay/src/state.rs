@@ -91,7 +91,12 @@ pub struct OverlaySlot {
 }
 
 impl OverlaySlot {
-    fn from_block(block: &OverlayPresentationBlock, slot_index: usize, slot_entry_order: u64) -> Self {
+    fn from_block(
+        block: &OverlayPresentationBlock,
+        slot_index: usize,
+        slot_entry_order: u64,
+        pulse_on_assign: bool,
+    ) -> Self {
         Self {
             slot_index,
             anchor_top_px: 0.0,
@@ -104,8 +109,8 @@ impl OverlaySlot {
             secondary_text: block.secondary_text.clone(),
             secondary_enabled: block.secondary_enabled,
             slot_entry_order,
-            accent_started_at_s: Some(0.0),
-            accent_progress: 0.0,
+            accent_started_at_s: pulse_on_assign.then_some(0.0),
+            accent_progress: if pulse_on_assign { 0.0 } else { 1.0 },
         }
     }
 
@@ -153,7 +158,12 @@ impl OverlayScene {
         &mut self.slots
     }
 
-    fn apply_snapshot(&mut self, blocks: &[OverlayPresentationBlock], text_scale: f32) -> bool {
+    fn apply_snapshot(
+        &mut self,
+        blocks: &[OverlayPresentationBlock],
+        text_scale: f32,
+        pulse_new_slots: bool,
+    ) -> bool {
         let previous = self.slots.clone();
         let mut sorted = blocks.to_vec();
         sorted.sort_by(|left, right| {
@@ -168,7 +178,7 @@ impl OverlayScene {
 
         let mut assigned = self.update_existing_slots(&sorted);
         self.clear_missing_slots(&sorted);
-        self.fill_empty_slots(&sorted, &mut assigned);
+        self.fill_empty_slots(&sorted, &mut assigned, pulse_new_slots);
         self.recompute_slot_anchors(text_scale);
 
         previous != self.slots
@@ -209,6 +219,7 @@ impl OverlayScene {
         &mut self,
         blocks: &[OverlayPresentationBlock],
         assigned: &mut HashSet<String>,
+        pulse_new_slots: bool,
     ) {
         for block in blocks {
             if assigned.contains(&block.occupant_key) {
@@ -226,6 +237,7 @@ impl OverlayScene {
                 block,
                 slot_index,
                 self.next_slot_entry_order,
+                pulse_new_slots,
             ));
             self.next_slot_entry_order += 1;
             assigned.insert(block.occupant_key.clone());
@@ -270,6 +282,15 @@ pub struct OverlayState {
 }
 
 impl OverlayState {
+    pub fn seed_snapshot(&mut self, snapshot: &OverlayPresentationSnapshot) -> bool {
+        let scene_changed = self
+            .scene
+            .apply_snapshot(&snapshot.blocks, snapshot.calibration.text_scale, false);
+        let visual_changed = self.snapshot.calibration != snapshot.calibration || scene_changed;
+        self.snapshot = snapshot.clone();
+        visual_changed
+    }
+
     pub fn apply_snapshot(&mut self, snapshot: &OverlayPresentationSnapshot) -> bool {
         if snapshot.revision <= self.snapshot.revision {
             return false;
@@ -277,7 +298,7 @@ impl OverlayState {
 
         let scene_changed = self
             .scene
-            .apply_snapshot(&snapshot.blocks, snapshot.calibration.text_scale);
+            .apply_snapshot(&snapshot.blocks, snapshot.calibration.text_scale, true);
         let visual_changed = self.snapshot.calibration != snapshot.calibration || scene_changed;
         self.snapshot = snapshot.clone();
         visual_changed

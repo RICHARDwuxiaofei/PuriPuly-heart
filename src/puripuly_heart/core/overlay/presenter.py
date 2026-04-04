@@ -66,6 +66,7 @@ class _ActiveSelfEntry:
     last_updated_seq: int
     occupant_key: str
     appearance_seq: int
+    visible_since: float
 
 
 @dataclass(slots=True)
@@ -184,8 +185,10 @@ class OverlayPresenter(OverlaySink):
                 and self._active_self.occupant_key == event.occupant_key
             ):
                 appearance_seq = self._active_self.appearance_seq
+                visible_since = self._active_self.visible_since
             else:
                 appearance_seq = self._next_appearance_seq()
+                visible_since = now
             if (
                 self._active_self is not None
                 and self._active_self.text == event.text
@@ -199,6 +202,7 @@ class OverlayPresenter(OverlaySink):
                 last_updated_seq=event.seq,
                 occupant_key=event.occupant_key,
                 appearance_seq=appearance_seq,
+                visible_since=visible_since,
             )
             return True
 
@@ -218,6 +222,7 @@ class OverlayPresenter(OverlaySink):
             if event.seq < entry.last_updated_seq:
                 return False
             consumed_active = False
+            active_self_metadata: _ActiveSelfEntry | None = None
             finalized_occupant_key = self._finalized_occupant_key(event.channel, event.utterance_id)
             if (
                 isinstance(event, SelfTranscriptFinal)
@@ -225,12 +230,15 @@ class OverlayPresenter(OverlaySink):
                 and event.seq >= self._active_self.last_updated_seq
                 and self._active_self.occupant_key == finalized_occupant_key
             ):
+                active_self_metadata = self._active_self
                 self._active_self = None
                 consumed_active = True
             if entry.original_text == event.text and entry.last_updated_seq == event.seq:
                 return consumed_active
             entry.original_text = event.text
             entry.last_updated_seq = event.seq
+            if active_self_metadata is not None:
+                self._inherit_active_self_visibility_metadata(entry, active_self_metadata)
             self._refresh_entry_visibility_and_expiration(key, entry, now=now)
             return True
 
@@ -429,6 +437,18 @@ class OverlayPresenter(OverlaySink):
             entry.occupant_key = occupant_key
         if entry.appearance_seq is None:
             entry.appearance_seq = self._next_appearance_seq()
+
+    def _inherit_active_self_visibility_metadata(
+        self,
+        entry: _LogicalCaptionEntry,
+        active_entry: _ActiveSelfEntry,
+    ) -> None:
+        if not entry.occupant_key:
+            entry.occupant_key = active_entry.occupant_key
+        if entry.appearance_seq is None:
+            entry.appearance_seq = active_entry.appearance_seq
+        if entry.visible_since is None:
+            entry.visible_since = active_entry.visible_since
 
     def _remember_tombstone(self, key: tuple[str, UUID], closed_seq: int) -> None:
         self._closed_tombstones.pop(key, None)

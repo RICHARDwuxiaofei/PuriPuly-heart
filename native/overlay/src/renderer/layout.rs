@@ -931,9 +931,9 @@ fn materialize_resolved_block_layout(
         .scale_y_from_top(render_top_px, block.height_scale);
     let accent_bounds = if block.accent_opacity > f32::EPSILON {
         Some(BlockBounds::new(
-            bounds.left_px - SLOT_ACCENT_WIDTH_PX,
-            bounds.top_px,
             bounds.left_px,
+            bounds.top_px,
+            bounds.left_px + SLOT_ACCENT_WIDTH_PX,
             bounds.bottom_px,
         ))
     } else {

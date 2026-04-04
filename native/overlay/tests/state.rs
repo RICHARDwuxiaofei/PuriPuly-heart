@@ -187,7 +187,11 @@ fn overlay_state_promotes_matching_occupant_key_without_replaying_pulse() {
             secondary_enabled: true,
         }],
     }));
+    assert!(state.sample_animations(0.06, 45));
     let started = state.scene().slots()[0].as_ref().unwrap().accent_started_at_s;
+    let progress = state.scene().slots()[0].as_ref().unwrap().accent_progress;
+    assert!(progress > 0.0);
+    assert!(progress < 1.0);
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 2,
@@ -206,6 +210,7 @@ fn overlay_state_promotes_matching_occupant_key_without_replaying_pulse() {
     let slot = state.scene().slots()[0].as_ref().unwrap();
     assert_eq!(slot.occupant_key, "self:merge-1");
     assert_eq!(slot.accent_started_at_s, started);
+    assert_eq!(slot.accent_progress, progress);
 }
 
 #[test]

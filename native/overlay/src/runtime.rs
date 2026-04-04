@@ -127,7 +127,10 @@ impl OverlayRuntime {
             last_animation_tick: None,
             refresh_rate_hz: None,
         };
-        runtime.apply_snapshot(snapshot);
+        if runtime.state.seed_snapshot(&snapshot) {
+            runtime.redraw_requested = true;
+        }
+        runtime.sync_animation_schedule(Instant::now());
         runtime
     }
 

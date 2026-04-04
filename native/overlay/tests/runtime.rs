@@ -406,6 +406,46 @@ async fn runtime_caption_blocks_keep_channel_metadata_for_color_only_rendering()
 }
 
 #[test]
+fn runtime_seeds_initial_snapshot_without_replaying_accent_pulse() {
+    let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![slot_block("self:1", "self:1", 1, "self", "hello", "", true)],
+    });
+
+    let blocks = runtime.caption_blocks();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].accent_opacity, 0.0);
+    assert!(!runtime.state().has_active_animation());
+}
+
+#[test]
+fn runtime_new_snapshot_triggers_accent_pulse_after_seeded_start() {
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![slot_block("self:1", "self:1", 1, "self", "hello", "", true)],
+    });
+
+    runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 2,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![
+            slot_block("self:1", "self:1", 1, "self", "hello", "", true),
+            slot_block("peer:2", "peer:2", 2, "peer", "two", "", true),
+        ],
+    });
+
+    let peer_block = runtime
+        .caption_blocks()
+        .into_iter()
+        .find(|block| block.id == "peer:2")
+        .expect("new peer block should render");
+    assert!(peer_block.accent_opacity > 0.0);
+    assert!(runtime.state().has_active_animation());
+}
+
+#[test]
 fn runtime_uses_half_refresh_animation_sampling() {
     let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
 
@@ -630,7 +670,9 @@ fn runtime_does_not_render_duplicate_row_when_same_id_reappears_during_exit() {
 
 #[test]
 fn runtime_requests_redraws_while_animation_is_active_and_stops_when_scene_is_idle() {
-    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
+
+    runtime.apply_snapshot(OverlayPresentationSnapshot {
         revision: 1,
         calibration: OverlayPresentationCalibration::default(),
         blocks: vec![block("self:1", "self", "hello", "", true)],
