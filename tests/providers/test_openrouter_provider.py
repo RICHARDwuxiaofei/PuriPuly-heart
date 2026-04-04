@@ -221,7 +221,9 @@ async def test_openrouter_verify_api_key_uses_key_endpoint(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_httpx_openrouter_client_builds_reasoning_disabled_request(monkeypatch) -> None:
+async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_ordered_fallback(
+    monkeypatch,
+) -> None:
     fake_client = FakeAsyncClient()
     monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
 
@@ -247,6 +249,7 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request(monkeyp
     body = fake_client.last_request["json"]
     assert body["model"] == "google/gemma-4-26b-a4b-it"
     assert body["reasoning"] == {"effort": "none"}
+    assert body["provider"] == {"order": ["Novita", "Parasail"], "allow_fallbacks": True}
     assert body["messages"][0] == {"role": "system", "content": "SYSTEM"}
     assert body["messages"][1]["role"] == "user"
     assert "<context>" in body["messages"][1]["content"]
@@ -278,6 +281,10 @@ async def test_httpx_openrouter_client_stream_translate_builds_streaming_request
     assert request["headers"]["Authorization"] == "Bearer k"
     assert request["json"]["stream"] is True
     assert request["json"]["reasoning"] == {"effort": "none"}
+    assert request["json"]["provider"] == {
+        "order": ["Novita", "Parasail"],
+        "allow_fallbacks": True,
+    }
 
 
 @pytest.mark.asyncio

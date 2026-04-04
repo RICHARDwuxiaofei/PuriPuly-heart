@@ -23,7 +23,7 @@ Interpret ${sourceName} input into the ${targetName} naturally, preserving the s
 
 ### Language Rules
 * **Chinese**
-  * Prefer softeners (e.g., 一下/有点/还挺/真的) to add subtle warmth.
+  * Prefer to use softeners (e.g., 一下/有点/还挺/真的).
   * Only use "你".
 * **Japanese**
   * Tone Mirroring (Casual=ため口, Polite=prefer to use 終助詞).

@@ -15,6 +15,7 @@ from puripuly_heart.domain.models import Translation
 
 logger = logging.getLogger(__name__)
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
+_OPENROUTER_PROVIDER_ORDER = ["Novita", "Parasail"]
 
 
 def _build_system_prompt(
@@ -270,6 +271,10 @@ class HttpxOpenRouterClient:
                 {"role": "user", "content": user_message},
             ],
             "reasoning": {"effort": "none"},
+            "provider": {
+                "order": _OPENROUTER_PROVIDER_ORDER,
+                "allow_fallbacks": True,
+            },
         }
         if stream:
             request_body["stream"] = True
