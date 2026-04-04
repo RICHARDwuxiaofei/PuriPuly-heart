@@ -170,7 +170,7 @@ fn overlay_state_keeps_slot_two_anchor_when_slot_one_disappears() {
 }
 
 #[test]
-fn overlay_state_promotes_matching_occupant_key_without_replaying_pulse() {
+fn overlay_state_promotes_matching_occupant_key_without_reassigning_slot() {
     let mut state = OverlayState::default();
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
@@ -187,11 +187,9 @@ fn overlay_state_promotes_matching_occupant_key_without_replaying_pulse() {
             secondary_enabled: true,
         }],
     }));
-    assert!(state.sample_animations(0.06, 45));
-    let started = state.scene().slots()[0].as_ref().unwrap().accent_started_at_s;
-    let progress = state.scene().slots()[0].as_ref().unwrap().accent_progress;
-    assert!(progress > 0.0);
-    assert!(progress < 1.0);
+    let original_slot = state.scene().slots()[0].as_ref().unwrap().slot_index;
+    let original_anchor_top = state.scene().slots()[0].as_ref().unwrap().anchor_top_px;
+    let original_entry_order = state.scene().slots()[0].as_ref().unwrap().slot_entry_order;
 
     assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
         revision: 2,
@@ -208,9 +206,11 @@ fn overlay_state_promotes_matching_occupant_key_without_replaying_pulse() {
     }));
 
     let slot = state.scene().slots()[0].as_ref().unwrap();
+    assert_eq!(slot.slot_index, original_slot);
+    assert_eq!(slot.anchor_top_px, original_anchor_top);
+    assert_eq!(slot.slot_entry_order, original_entry_order);
     assert_eq!(slot.occupant_key, "self:merge-1");
-    assert_eq!(slot.accent_started_at_s, started);
-    assert_eq!(slot.accent_progress, progress);
+    assert_eq!(slot.id, "self:merge-1");
 }
 
 #[test]

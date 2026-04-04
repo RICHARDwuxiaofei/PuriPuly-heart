@@ -222,6 +222,103 @@ async def test_presenter_keeps_closed_hidden_peer_entry_publishable_until_transl
 
     clock.advance(1.1)
     await presenter._publish_if_changed()
+    assert [block.id for block in presenter.snapshot().blocks] == [
+        f"peer:{peer_transcript.utterance_id}"
+    ]
+
+    clock.advance(5.0)
+    await presenter._publish_if_changed()
+    assert presenter.snapshot().blocks == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_reschedules_hidden_peer_expiration_when_translation_becomes_visible() -> None:
+    bridge = RecordingPresentationBridge()
+    clock = FakeClock(_now=10.0)
+    sleep_calls: list[float] = []
+    cancelled_delays: list[float] = []
+    sleep_events: list[asyncio.Event] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+        release = asyncio.Event()
+        sleep_events.append(release)
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled_delays.append(delay)
+            raise
+        clock.advance(delay)
+        await asyncio.sleep(0)
+
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=clock,
+        sleep=fake_sleep,
+    )
+    adapter = OverlayEventAdapter(clock=clock)
+    peer_transcript = Transcript(
+        utterance_id=uuid4(),
+        channel="peer",
+        text="peer original",
+        is_final=True,
+        created_at=11.0,
+    )
+
+    await presenter.emit(
+        adapter.transcript_final(
+            peer_transcript,
+            source_language="en",
+            target_language="ko",
+        )
+    )
+    await presenter.emit(
+        adapter.utterance_closed(
+            utterance_id=peer_transcript.utterance_id,
+            channel="peer",
+            created_at=11.2,
+        )
+    )
+
+    await asyncio.sleep(0)
+
+    assert sleep_calls == [5.0]
+    assert presenter.snapshot().blocks == []
+
+    clock.advance(2.0)
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=peer_transcript.utterance_id,
+            channel="peer",
+            text="상대 번역",
+            source_language="en",
+            target_language="ko",
+            applied_context_mode=None,
+            created_at=13.2,
+        )
+    )
+
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert cancelled_delays == [5.0]
+    assert sleep_calls == [5.0, 10.0]
+    assert [block.id for block in presenter.snapshot().blocks] == [
+        f"peer:{peer_transcript.utterance_id}"
+    ]
+
+    sleep_events[0].set()
+    await asyncio.sleep(0)
+
+    assert [block.id for block in presenter.snapshot().blocks] == [
+        f"peer:{peer_transcript.utterance_id}"
+    ]
+
+    sleep_events[1].set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
     assert presenter.snapshot().blocks == []
 
 
@@ -694,7 +791,7 @@ async def test_presenter_reset_scene_clears_closed_entry_tombstones() -> None:
 
 
 @pytest.mark.asyncio
-async def test_presenter_expires_visible_finalized_entry_after_five_seconds() -> None:
+async def test_presenter_expires_visible_finalized_entry_after_ten_seconds() -> None:
     bridge = RecordingPresentationBridge()
     clock = FakeClock(_now=10.0)
     sleep_calls: list[float] = []
@@ -743,7 +840,7 @@ async def test_presenter_expires_visible_finalized_entry_after_five_seconds() ->
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
-    assert sleep_calls == [5.0]
+    assert sleep_calls == [10.0]
     assert presenter.snapshot().blocks == []
     assert len(bridge.snapshots) == 2
     assert bridge.snapshots[-1].blocks == []
@@ -1008,7 +1105,7 @@ async def test_presenter_keeps_first_visible_ttl_when_active_self_promotes_to_fi
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
-    assert sleep_calls == [3.0]
+    assert sleep_calls == [8.0]
     assert presenter.snapshot().blocks == []
 
 
