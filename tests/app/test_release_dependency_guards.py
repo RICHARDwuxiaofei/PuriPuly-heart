@@ -163,10 +163,30 @@ def test_installer_script_guards_against_repo_checkout_installs() -> None:
     assert "FileExists(AddBackslash(ProbePath) + 'pyproject.toml')" in script
     assert "FileExists(AddBackslash(ProbePath) + 'AGENTS.md')" in script
     assert "procedure ResetSuspiciousInstallDir();" in script
+    assert "if DirectoryLooksLikeRepositoryCheckout(CandidateDir) then begin" in script
+    assert "Resetting suspicious install dir inside a repository checkout:" in script
     assert "WizardForm.DirEdit.Text := DefaultDir;" in script
     assert r"DefaultDir := ExpandConstant('{autopf}\{#MyAppDirName}');" in script
     assert "procedure InitializeWizard();" in script
     assert "function PrepareToInstall(var NeedsRestart: Boolean): String;" in script
+
+
+def test_installer_script_guards_against_temporary_install_dirs() -> None:
+    script = (ROOT / "installer.iss").read_text(encoding="utf-8")
+
+    assert "function DirectoryLooksLikeTemporaryLocation(Path: String): Boolean;" in script
+    assert "TempRoot := RemoveBackslashUnlessRoot(GetEnv('TEMP'));" in script
+    assert "TempRoot := RemoveBackslashUnlessRoot(GetEnv('TMP'));" in script
+    assert r"TempRoot := RemoveBackslashUnlessRoot(ExpandConstant('{localappdata}\Temp'));" in script
+    assert r"TempRoot := RemoveBackslashUnlessRoot(ExpandConstant('{tmp}'));" in script
+    assert r"TempRoot := RemoveBackslashUnlessRoot(ExpandConstant('{win}\Temp'));" in script
+    assert "if DirectoryLooksLikeTemporaryLocation(CandidateDir) then begin" in script
+
+
+def test_installer_script_path_prefix_helper_handles_drive_root_boundaries() -> None:
+    script = (ROOT / "installer.iss").read_text(encoding="utf-8")
+
+    assert r"(NormalizedRoot[Length(NormalizedRoot)] = '\')" in script
 
 
 def test_installer_script_adds_local_stt_source_controls_and_provisioning_hook() -> None:

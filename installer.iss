@@ -134,6 +134,70 @@ begin
   end;
 end;
 
+function PathEqualsOrIsUnder(Path: String; RootPath: String): Boolean;
+var
+  NormalizedPath: String;
+  NormalizedRoot: String;
+begin
+  NormalizedPath := RemoveBackslashUnlessRoot(Path);
+  NormalizedRoot := RemoveBackslashUnlessRoot(RootPath);
+
+  if (NormalizedPath = '') or (NormalizedRoot = '') then begin
+    Result := False;
+    exit;
+  end;
+
+  if CompareText(NormalizedPath, NormalizedRoot) = 0 then begin
+    Result := True;
+    exit;
+  end;
+
+  Result :=
+    (Length(NormalizedPath) > Length(NormalizedRoot)) and
+    (CompareText(Copy(NormalizedPath, 1, Length(NormalizedRoot)), NormalizedRoot) = 0) and
+    (
+      (NormalizedRoot[Length(NormalizedRoot)] = '\') or
+      (NormalizedPath[Length(NormalizedRoot) + 1] = '\')
+    );
+end;
+
+function DirectoryLooksLikeTemporaryLocation(Path: String): Boolean;
+var
+  TempRoot: String;
+begin
+  Result := False;
+
+  TempRoot := RemoveBackslashUnlessRoot(GetEnv('TEMP'));
+  if PathEqualsOrIsUnder(Path, TempRoot) then begin
+    Result := True;
+    exit;
+  end;
+
+  TempRoot := RemoveBackslashUnlessRoot(GetEnv('TMP'));
+  if PathEqualsOrIsUnder(Path, TempRoot) then begin
+    Result := True;
+    exit;
+  end;
+
+  TempRoot := RemoveBackslashUnlessRoot(ExpandConstant('{localappdata}\Temp'));
+  if PathEqualsOrIsUnder(Path, TempRoot) then begin
+    Result := True;
+    exit;
+  end;
+
+  TempRoot := RemoveBackslashUnlessRoot(ExpandConstant('{tmp}'));
+  if PathEqualsOrIsUnder(Path, TempRoot) then begin
+    Result := True;
+    exit;
+  end;
+
+  TempRoot := RemoveBackslashUnlessRoot(ExpandConstant('{win}\Temp'));
+  if PathEqualsOrIsUnder(Path, TempRoot) then begin
+    Result := True;
+    exit;
+  end;
+end;
+
 procedure ResetSuspiciousInstallDir();
 var
   CandidateDir: String;
@@ -144,17 +208,22 @@ begin
     exit;
   end;
 
-  if not DirectoryLooksLikeRepositoryCheckout(CandidateDir) then begin
-    exit;
-  end;
-
   DefaultDir := ExpandConstant('{autopf}\{#MyAppDirName}');
   if RemoveBackslashUnlessRoot(DefaultDir) = CandidateDir then begin
     exit;
   end;
 
-  Log('Resetting suspicious install dir inside a repository checkout: ' + CandidateDir);
-  WizardForm.DirEdit.Text := DefaultDir;
+  if DirectoryLooksLikeRepositoryCheckout(CandidateDir) then begin
+    Log('Resetting suspicious install dir inside a repository checkout: ' + CandidateDir);
+    WizardForm.DirEdit.Text := DefaultDir;
+    exit;
+  end;
+
+  if DirectoryLooksLikeTemporaryLocation(CandidateDir) then begin
+    Log('Resetting suspicious install dir inside a temporary directory: ' + CandidateDir);
+    WizardForm.DirEdit.Text := DefaultDir;
+    exit;
+  end;
 end;
 
 function GetDefaultLocalSttSource(): String;
