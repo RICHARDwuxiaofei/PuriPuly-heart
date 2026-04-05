@@ -866,6 +866,123 @@ async def test_rebuild_pipeline_closes_previous_peer_runtime_before_replacement(
 
 
 @pytest.mark.asyncio
+async def test_rebuild_pipeline_rebinds_overlay_presenter_to_new_hub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.overlay_state = "connected"
+
+    presenter = OverlayPresenter(
+        calibration=controller.overlay_calibration.copy(),
+        clock=controller.clock,
+    )
+    old_hub = DummyHub(llm=object(), stt=object())
+    old_hub.overlay_sink = presenter
+    controller.hub = old_hub
+    controller._overlay_presenter = presenter
+
+    new_hub = DummyHub(llm=object(), stt=object())
+
+    class FakeUIEventBridge:
+        def __init__(self, *, app, event_queue) -> None:
+            self.app = app
+            self.event_queue = event_queue
+
+        async def run(self) -> None:
+            return None
+
+    async def fake_init_pipeline(self: GuiController) -> None:
+        self.hub = new_hub
+        self.sender = object()
+        self.osc = object()
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, *, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_refresh_overlay_runtime_dependencies",
+        lambda self: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(controller_module, "UIEventBridge", FakeUIEventBridge)
+    monkeypatch.setattr(
+        GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0)
+    )
+    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+
+    await controller._rebuild_pipeline(rebuild_stt=True)
+
+    assert getattr(new_hub, "overlay_sink", None) is presenter
+
+
+@pytest.mark.asyncio
+async def test_rebuild_pipeline_refreshes_overlay_dependencies_without_overlay_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.overlay_state = "connected"
+
+    presenter = OverlayPresenter(
+        calibration=controller.overlay_calibration.copy(),
+        clock=controller.clock,
+    )
+    old_hub = DummyHub(llm=object(), stt=object())
+    old_hub.overlay_sink = presenter
+    controller.hub = old_hub
+    controller._overlay_presenter = presenter
+
+    new_hub = DummyHub(llm=object(), stt=object())
+    events: list[tuple[str, object]] = []
+
+    class FakeUIEventBridge:
+        def __init__(self, *, app, event_queue) -> None:
+            events.append(("bridge_init", event_queue))
+
+        async def run(self) -> None:
+            events.append(("bridge_run", True))
+
+    async def fake_init_pipeline(self: GuiController) -> None:
+        self.hub = new_hub
+        self.sender = object()
+        self.osc = object()
+        events.append(("init_pipeline", True))
+
+    async def fail_set_overlay_enabled(self: GuiController, enabled: bool) -> None:
+        raise AssertionError(f"unexpected overlay restart: {enabled}")
+
+    async def fake_refresh_overlay_runtime_dependencies(self: GuiController) -> None:
+        events.append(("refresh_overlay_dependencies", self.overlay_state))
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, *, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+    monkeypatch.setattr(GuiController, "set_overlay_enabled", fail_set_overlay_enabled)
+    monkeypatch.setattr(
+        GuiController,
+        "_refresh_overlay_runtime_dependencies",
+        fake_refresh_overlay_runtime_dependencies,
+    )
+    monkeypatch.setattr(
+        GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0)
+    )
+    monkeypatch.setattr(controller_module, "UIEventBridge", FakeUIEventBridge)
+
+    await controller._rebuild_pipeline(rebuild_stt=True)
+    await asyncio.sleep(0)
+
+    assert events.count(("refresh_overlay_dependencies", "connected")) == 1
+
+
+@pytest.mark.asyncio
 async def test_init_pipeline_keeps_peer_original_runtime_available_without_peer_translation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

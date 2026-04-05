@@ -175,8 +175,8 @@ class TranslatorApp:
         logger.info(
             "[Dashboard] Translation toggle requested: enabled=%s dashboard_state=%s overlay_state=%s",
             enabled,
-            getattr(self.view_dashboard, "is_translation_on", None),
-            self.overlay_state,
+            getattr(getattr(self, "view_dashboard", None), "is_translation_on", None),
+            getattr(self, "overlay_state", "unknown"),
         )
 
         async def _task():
@@ -188,8 +188,8 @@ class TranslatorApp:
         logger.info(
             "[Dashboard] STT toggle requested: enabled=%s dashboard_state=%s overlay_state=%s",
             enabled,
-            getattr(self.view_dashboard, "is_stt_on", None),
-            self.overlay_state,
+            getattr(getattr(self, "view_dashboard", None), "is_stt_on", None),
+            getattr(self, "overlay_state", "unknown"),
         )
 
         async def _task():
@@ -201,8 +201,8 @@ class TranslatorApp:
         logger.info(
             "[Settings] Overlay toggle requested: enabled=%s overlay_state=%s failure_reason=%s",
             enabled,
-            self.overlay_state,
-            self.overlay_failure_reason,
+            getattr(self, "overlay_state", "unknown"),
+            getattr(self, "overlay_failure_reason", None),
         )
 
         async def _task():

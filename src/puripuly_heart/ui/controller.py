@@ -1454,6 +1454,9 @@ class GuiController:
         self.hub = None
         await self._init_pipeline()
         assert self.hub is not None
+        presenter = self._overlay_presenter
+        if presenter is not None:
+            self.hub.overlay_sink = presenter
 
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
@@ -1469,6 +1472,9 @@ class GuiController:
 
         bridge = UIEventBridge(app=self.app, event_queue=self.hub.ui_events)
         self._bridge_task = asyncio.create_task(bridge.run())
+
+        if self.overlay_state == "connected" and presenter is not None:
+            await self._refresh_overlay_runtime_dependencies()
 
         # Trigger background verification to sync button colors
         asyncio.create_task(self._verify_and_update_status())
