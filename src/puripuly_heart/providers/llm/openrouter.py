@@ -11,11 +11,11 @@ from uuid import UUID
 
 import httpx
 
+from puripuly_heart.config.settings import OpenRouterRoutingMode
 from puripuly_heart.domain.models import Translation
 
 logger = logging.getLogger(__name__)
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
-_OPENROUTER_PROVIDER_ORDER = ["Novita", "Parasail"]
 
 
 def _build_system_prompt(
@@ -119,6 +119,16 @@ def _extract_stream_delta(data: object) -> str:
     return ""
 
 
+def _build_provider_preferences(
+    routing_mode: OpenRouterRoutingMode,
+) -> dict[str, object]:
+    if routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST:
+        return {"order": ["Parasail", "Novita"], "allow_fallbacks": True}
+    if routing_mode == OpenRouterRoutingMode.NOVITA_FIRST:
+        return {"order": ["Novita", "Parasail"], "allow_fallbacks": True}
+    return {"sort": "latency", "allow_fallbacks": True}
+
+
 class OpenRouterClient(Protocol):
     async def translate(
         self,
@@ -148,6 +158,7 @@ class OpenRouterLLMProvider:
     api_key: str
     base_url: str = "https://openrouter.ai/api/v1"
     model: str = "google/gemma-4-26b-a4b-it"
+    routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
     timeout: float = 30.0
     client: OpenRouterClient | None = None
     _internal_client: OpenRouterClient | None = field(init=False, default=None, repr=False)
@@ -160,6 +171,7 @@ class OpenRouterLLMProvider:
                 api_key=self.api_key,
                 model=self.model,
                 base_url=self.base_url,
+                routing_mode=self.routing_mode,
                 timeout=self.timeout,
             )
         return self._internal_client
@@ -234,6 +246,7 @@ class HttpxOpenRouterClient:
     api_key: str
     model: str
     base_url: str = "https://openrouter.ai/api/v1"
+    routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
     timeout: float = 30.0
     _client: httpx.AsyncClient | None = field(init=False, default=None, repr=False)
     _client_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock, repr=False)
@@ -271,10 +284,7 @@ class HttpxOpenRouterClient:
                 {"role": "user", "content": user_message},
             ],
             "reasoning": {"effort": "none"},
-            "provider": {
-                "order": _OPENROUTER_PROVIDER_ORDER,
-                "allow_fallbacks": True,
-            },
+            "provider": _build_provider_preferences(self.routing_mode),
         }
         if stream:
             request_body["stream"] = True

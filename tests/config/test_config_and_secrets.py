@@ -12,6 +12,7 @@ from puripuly_heart.config.settings import (
     GeminiLLMModel,
     LLMProviderName,
     OpenRouterLLMModel,
+    OpenRouterRoutingMode,
     OpenRouterSettings,
     OSCSettings,
     QwenLLMModel,
@@ -677,7 +678,10 @@ def test_openrouter_settings_roundtrip(tmp_path):
     path = tmp_path / "settings.json"
     settings = AppSettings(
         provider=AppSettings().provider,
-        openrouter=OpenRouterSettings(llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+        ),
     )
     settings.provider.llm = LLMProviderName.OPENROUTER
     save_settings(path, settings)
@@ -686,6 +690,7 @@ def test_openrouter_settings_roundtrip(tmp_path):
 
     assert loaded.provider.llm == LLMProviderName.OPENROUTER
     assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    assert loaded.openrouter.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
 
 
 def test_load_settings_backfills_openrouter_blocks_and_persists(tmp_path):
@@ -701,10 +706,21 @@ def test_load_settings_backfills_openrouter_blocks_and_persists(tmp_path):
 
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    assert loaded.openrouter.routing_mode == OpenRouterRoutingMode.LATENCY
     assert loaded.api_key_verified.openrouter is False
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["openrouter"]["llm_model"] == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value
+    assert persisted["openrouter"]["routing_mode"] == OpenRouterRoutingMode.LATENCY.value
     assert persisted["api_key_verified"]["openrouter"] is False
+
+
+def test_from_dict_defaults_invalid_openrouter_routing_mode_to_latency() -> None:
+    data = to_dict(AppSettings())
+    data["openrouter"]["routing_mode"] = "broken"
+
+    loaded = from_dict(data)
+
+    assert loaded.openrouter.routing_mode == OpenRouterRoutingMode.LATENCY
 
 
 def test_from_dict_uses_prompt_for_selected_provider():

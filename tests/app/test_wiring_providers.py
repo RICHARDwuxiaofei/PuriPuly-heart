@@ -17,6 +17,7 @@ from puripuly_heart.config.settings import (
     LLMProviderName,
     LLMSettings,
     OpenRouterLLMModel,
+    OpenRouterRoutingMode,
     OpenRouterSettings,
     ProviderSettings,
     QwenASRSTTSettings,
@@ -155,6 +156,7 @@ def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
         llm=LLMSettings(concurrency_limit=4),
         openrouter=OpenRouterSettings(
             llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
         ),
     )
     secrets = InMemorySecretStore()
@@ -167,6 +169,7 @@ def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
     assert provider.inner.api_key == "or-key"
     assert provider.inner.model == "google/gemma-4-26b-a4b-it"
     assert provider.inner.base_url == "https://openrouter.ai/api/v1"
+    assert provider.inner.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
     assert provider.semaphore._value == 4  # type: ignore[attr-defined]
 
 

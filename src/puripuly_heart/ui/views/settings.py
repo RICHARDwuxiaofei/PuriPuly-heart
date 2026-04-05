@@ -16,6 +16,7 @@ from puripuly_heart.config.settings import (
     GeminiLLMModel,
     LLMProviderName,
     OpenRouterLLMModel,
+    OpenRouterRoutingMode,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
@@ -845,7 +846,36 @@ class SettingsView(ft.Column):
             expand=False,
         )
 
-        # === Row 7: Persona (2x2) - Licenses style ===
+        # === Row 7: OpenRouter Routing (1x1 + 1x1) ===
+        self._openrouter_routing_title = ft.Text(
+            t("settings.openrouter_routing"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._openrouter_routing_text = self._build_clickable_text(
+            t("settings.openrouter_routing.latency"),
+            self._on_openrouter_routing_click,
+        )
+        self._openrouter_routing_card = self._wrap_card(
+            ft.Column(
+                [self._openrouter_routing_title, self._openrouter_routing_text],
+                spacing=0,
+                expand=True,
+            )
+        )
+        self._openrouter_routing_empty_card = self._wrap_card(ft.Container(expand=True))
+        self._openrouter_routing_row = ft.Container(
+            content=ft.Row(
+                [self._openrouter_routing_card, self._openrouter_routing_empty_card],
+                spacing=16,
+                expand=True,
+            ),
+            height=280,
+            visible=False,
+        )
+
+        # === Row 8: Persona (2x2) - Licenses style ===
         self._prompt_editor = PromptEditor(on_change=self._on_prompt_change)
         self._persona_title = ft.Text(
             t("settings.section.persona"), size=24, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL
@@ -898,7 +928,7 @@ class SettingsView(ft.Column):
             ),
         )
 
-        # === Row 8: Custom Vocabulary (2x1) ===
+        # === Row 9: Custom Vocabulary (2x1) ===
         self._custom_vocab_title = ft.Text(
             t("settings.section.custom_vocabulary"),
             size=24,
@@ -952,6 +982,7 @@ class SettingsView(ft.Column):
             row5,
             row_chatbox_source,
             overlay_calibration_card,
+            self._openrouter_routing_row,
             persona_card,
             row7,
         ]
@@ -987,6 +1018,16 @@ class SettingsView(ft.Column):
         if settings.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS:
             return t("provider.qwen35_plus")
         return t("provider.qwen35_flash")
+
+    def _get_openrouter_routing_display_label(self, settings: AppSettings | None) -> str:
+        if settings is None:
+            return t("settings.openrouter_routing.latency")
+        return t(f"settings.openrouter_routing.{settings.openrouter.routing_mode.value}")
+
+    def _set_openrouter_routing_text(self, text: str) -> None:
+        text_control = self._openrouter_routing_text.content
+        text_control.value = text
+        text_control.size = 28
 
     def _active_prompt_key(self) -> str:
         if not self._settings:
@@ -1093,6 +1134,9 @@ class SettingsView(ft.Column):
 
         # LLM Provider
         self._llm_text.content.value = self._get_llm_display_label(settings)
+        self._set_openrouter_routing_text(
+            self._get_openrouter_routing_display_label(settings),
+        )
 
         # Qwen Region
         region_label = t(f"region.{settings.qwen.region.value}")
@@ -1234,6 +1278,7 @@ class SettingsView(ft.Column):
 
         self._google_key.visible = llm == LLMProviderName.GEMINI
         self._openrouter_key.visible = llm == LLMProviderName.OPENROUTER
+        self._openrouter_routing_row.visible = llm == LLMProviderName.OPENROUTER
 
         qwen_regions: set[QwenRegion] = set()
         if stt == STTProviderName.QWEN_ASR or llm == LLMProviderName.QWEN:
@@ -1584,6 +1629,9 @@ class SettingsView(ft.Column):
 
         # Update text
         self._llm_text.content.value = self._get_llm_display_label(self._settings)
+        self._set_openrouter_routing_text(
+            self._get_openrouter_routing_display_label(self._settings),
+        )
 
         # Update prompt if provider changed
         if old_provider != provider:
@@ -1602,7 +1650,65 @@ class SettingsView(ft.Column):
             self._qwen_region_btn.update()
             self._api_keys_column.update()
             self._llm_text.update()
+            self._openrouter_routing_row.update()
 
+    def _on_openrouter_routing_click(self, e) -> None:
+        """Open OpenRouter routing selection modal."""
+        if not self.page:
+            return
+        options = [
+            OptionItem(
+                value=OpenRouterRoutingMode.LATENCY.value,
+                label=t("settings.openrouter_routing.latency"),
+                description=t("settings.openrouter_routing.latency.description", default=""),
+            ),
+            OptionItem(
+                value=OpenRouterRoutingMode.PARASAIL_FIRST.value,
+                label=t("settings.openrouter_routing.parasail_first"),
+                description=t("settings.openrouter_routing.parasail_first.description", default=""),
+            ),
+            OptionItem(
+                value=OpenRouterRoutingMode.NOVITA_FIRST.value,
+                label=t("settings.openrouter_routing.novita_first"),
+                description=t("settings.openrouter_routing.novita_first.description", default=""),
+            ),
+        ]
+        current = (
+            self._settings.openrouter.routing_mode.value
+            if self._settings
+            else OpenRouterRoutingMode.LATENCY.value
+        )
+        modal = SettingsModal(
+            self.page,
+            t("settings.openrouter_routing"),
+            options,
+            self._on_openrouter_routing_selected,
+            show_description=True,
+        )
+        modal.open(current)
+
+    def _on_openrouter_routing_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+
+        old_value = self._settings.openrouter.routing_mode
+        try:
+            new_value = OpenRouterRoutingMode(value)
+        except ValueError:
+            new_value = OpenRouterRoutingMode.LATENCY
+
+        if old_value == new_value:
+            return
+
+        logger.info("[Settings] OpenRouter routing mode changed: %s -> %s", old_value, new_value)
+        self._settings.openrouter.routing_mode = new_value
+        self.has_provider_changes = True
+        self.provider_change_requires_pipeline = True
+        self._set_openrouter_routing_text(
+            self._get_openrouter_routing_display_label(self._settings),
+        )
+        if self.page:
+            self._openrouter_routing_text.update()
         self._emit_settings_changed()
 
     def _on_ui_click(self, e) -> None:
@@ -2417,6 +2523,7 @@ class SettingsView(ft.Column):
         self._audio_title.value = t("settings.section.audio")
         self._vad_title.value = t("settings.vad_sensitivity")
         self._low_latency_title.value = t("settings.low_latency_mode")
+        self._openrouter_routing_title.value = t("settings.openrouter_routing")
         self._persona_title.value = t("settings.section.persona")
         self._custom_vocab_title.value = t("settings.section.custom_vocabulary")
         self._custom_vocab_info_icon.tooltip = t("settings.custom_vocabulary_tooltip")
@@ -2491,6 +2598,9 @@ class SettingsView(ft.Column):
                 provider_label(self._settings.provider.peer_stt.value),
             )
             self._llm_text.content.value = self._get_llm_display_label(self._settings)
+            self._set_openrouter_routing_text(
+                self._get_openrouter_routing_display_label(self._settings),
+            )
             self._ui_text.content.value = locale_label(self._settings.ui.locale)
             self._low_latency_text.content.value = t(
                 "toggle.on" if self._settings.stt.low_latency_mode else "toggle.off"

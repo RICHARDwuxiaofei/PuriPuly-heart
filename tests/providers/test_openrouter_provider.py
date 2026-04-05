@@ -11,6 +11,7 @@ from puripuly_heart.providers.llm.openrouter import (
     OpenRouterClient,
     OpenRouterLLMProvider,
 )
+from puripuly_heart.config.settings import OpenRouterRoutingMode
 
 
 @dataclass
@@ -221,7 +222,7 @@ async def test_openrouter_verify_api_key_uses_key_endpoint(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_ordered_fallback(
+async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_latency_sort(
     monkeypatch,
 ) -> None:
     fake_client = FakeAsyncClient()
@@ -249,11 +250,34 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_or
     body = fake_client.last_request["json"]
     assert body["model"] == "google/gemma-4-26b-a4b-it"
     assert body["reasoning"] == {"effort": "none"}
-    assert body["provider"] == {"order": ["Novita", "Parasail"], "allow_fallbacks": True}
+    assert body["provider"] == {"sort": "latency", "allow_fallbacks": True}
     assert body["messages"][0] == {"role": "system", "content": "SYSTEM"}
     assert body["messages"][1]["role"] == "user"
     assert "<context>" in body["messages"][1]["content"]
     assert "Input: hello" in body["messages"][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_httpx_openrouter_client_builds_ordered_request_for_parasail_first(monkeypatch) -> None:
+    fake_client = FakeAsyncClient()
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+
+    client = HttpxOpenRouterClient(
+        api_key="test-key",
+        model="google/gemma-4-26b-a4b-it",
+        base_url="https://example",
+        routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+    )
+    result = await client.translate(
+        text="hello",
+        system_prompt="SYSTEM",
+        source_language="ko-KR",
+        target_language="en",
+    )
+
+    assert result == "OK"
+    body = fake_client.last_request["json"]
+    assert body["provider"] == {"order": ["Parasail", "Novita"], "allow_fallbacks": True}
 
 
 @pytest.mark.asyncio
@@ -281,10 +305,7 @@ async def test_httpx_openrouter_client_stream_translate_builds_streaming_request
     assert request["headers"]["Authorization"] == "Bearer k"
     assert request["json"]["stream"] is True
     assert request["json"]["reasoning"] == {"effort": "none"}
-    assert request["json"]["provider"] == {
-        "order": ["Novita", "Parasail"],
-        "allow_fallbacks": True,
-    }
+    assert request["json"]["provider"] == {"sort": "latency", "allow_fallbacks": True}
 
 
 @pytest.mark.asyncio

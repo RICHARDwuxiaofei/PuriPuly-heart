@@ -64,6 +64,12 @@ class OpenRouterLLMModel(str, Enum):
     GEMMA_4_26B_A4B_IT = "google/gemma-4-26b-a4b-it"
 
 
+class OpenRouterRoutingMode(str, Enum):
+    LATENCY = "latency"
+    PARASAIL_FIRST = "parasail_first"
+    NOVITA_FIRST = "novita_first"
+
+
 @dataclass(slots=True)
 class LanguageSettings:
     source_language: str = "ko"
@@ -330,10 +336,13 @@ class QwenSettings:
 @dataclass(slots=True)
 class OpenRouterSettings:
     llm_model: OpenRouterLLMModel = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
 
     def validate(self) -> None:
         if not isinstance(self.llm_model, OpenRouterLLMModel):
             raise ValueError("invalid openrouter llm model")
+        if not isinstance(self.routing_mode, OpenRouterRoutingMode):
+            raise ValueError("invalid openrouter routing mode")
 
 
 @dataclass(slots=True)
@@ -503,6 +512,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         },
         "openrouter": {
             "llm_model": settings.openrouter.llm_model.value,
+            "routing_mode": settings.openrouter.routing_mode.value,
         },
         "qwen": {
             "region": settings.qwen.region.value,
@@ -601,6 +611,16 @@ def _parse_openrouter_llm_model(value: object) -> OpenRouterLLMModel:
         except ValueError:
             pass
     return OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+
+
+def _parse_openrouter_routing_mode(value: object) -> OpenRouterRoutingMode:
+    if isinstance(value, str):
+        normalized = value.strip()
+        try:
+            return OpenRouterRoutingMode(normalized)
+        except ValueError:
+            pass
+    return OpenRouterRoutingMode.LATENCY
 
 
 def _llm_prompt_key(provider: LLMProviderName) -> str:
@@ -886,6 +906,14 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         openrouter_data["llm_model"] = normalized_openrouter_model
         changed = True
 
+    raw_openrouter_routing_mode = openrouter_data.get("routing_mode")
+    normalized_openrouter_routing_mode = _parse_openrouter_routing_mode(
+        raw_openrouter_routing_mode
+    ).value
+    if raw_openrouter_routing_mode != normalized_openrouter_routing_mode:
+        openrouter_data["routing_mode"] = normalized_openrouter_routing_mode
+        changed = True
+
     qwen_data = data.get("qwen")
     if not isinstance(qwen_data, dict):
         qwen_data = {}
@@ -1093,6 +1121,12 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 data.get("openrouter", {}).get(
                     "llm_model",
                     OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
+                )
+            ),
+            routing_mode=_parse_openrouter_routing_mode(
+                data.get("openrouter", {}).get(
+                    "routing_mode",
+                    OpenRouterRoutingMode.LATENCY.value,
                 )
             ),
         ),

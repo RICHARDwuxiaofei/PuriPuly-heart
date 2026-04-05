@@ -14,6 +14,7 @@ from puripuly_heart.config.settings import (
     GeminiLLMModel,
     LLMProviderName,
     OpenRouterLLMModel,
+    OpenRouterRoutingMode,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
@@ -210,6 +211,20 @@ def test_update_api_visibility_shows_openrouter_key(monkeypatch: pytest.MonkeyPa
     assert view._alibaba_key_beijing.visible is False
     assert view._alibaba_key_singapore.visible is False
     assert view._openrouter_key.visible is True
+    assert view._openrouter_routing_row.visible is True
+
+
+def test_update_api_visibility_hides_openrouter_routing_for_non_openrouter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+
+    view, _ = _make_settings_view(monkeypatch)
+    view._settings = settings
+    view._update_api_visibility()
+
+    assert view._openrouter_routing_row.visible is False
 
 
 def test_update_api_visibility_hides_secret_fields_for_local_qwen(
@@ -323,6 +338,43 @@ def test_on_llm_selected_updates_openrouter_model_and_prompt_state(
     assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     assert view._prompt_editor.value == "O"
     assert settings.system_prompt == "O"
+    assert view._openrouter_routing_row.visible is True
+
+
+def test_load_from_settings_shows_openrouter_routing_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.routing_mode = OpenRouterRoutingMode.NOVITA_FIRST
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._openrouter_routing_row.visible is True
+    assert view._openrouter_routing_text.content.value == t(
+        "settings.openrouter_routing.novita_first"
+    )
+
+
+def test_on_openrouter_routing_selected_updates_settings_and_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    changed: list[AppSettings] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._on_openrouter_routing_selected(OpenRouterRoutingMode.PARASAIL_FIRST.value)
+
+    assert settings.openrouter.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+    assert view._openrouter_routing_text.content.value == t(
+        "settings.openrouter_routing.parasail_first"
+    )
+    assert view.has_provider_changes is True
+    assert view.provider_change_requires_pipeline is True
+    assert changed == [settings]
 
 
 def test_on_llm_selected_updates_gemini_model(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -855,7 +907,7 @@ def test_overlay_calibration_section_uses_dedicated_row_card(
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
 
-    assert len(view.controls) == 9
+    assert len(view.controls) == 10
 
     row5 = view.controls[4]
     overlay_column = row5.content.controls[1].content.controls[1].content.content
@@ -867,6 +919,25 @@ def test_overlay_calibration_section_uses_dedicated_row_card(
     assert view._overlay_calibration_apply_button in calibration_column.controls[-1].controls
     assert view._overlay_calibration_cancel_button in calibration_column.controls[-1].controls
     assert view._overlay_calibration_reset_button in calibration_column.controls[-1].controls
+
+    row7 = view.controls[7]
+    assert row7 is view._openrouter_routing_row
+    assert row7.content.controls[0] is view._openrouter_routing_card
+    assert row7.content.controls[1] is view._openrouter_routing_empty_card
+    openrouter_column = row7.content.controls[0].content.controls[1].content.content
+    assert openrouter_column.controls[0] is view._openrouter_routing_title
+    assert openrouter_column.controls[1] is view._openrouter_routing_text
+
+
+def test_translation_card_no_longer_contains_openrouter_routing_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    row1 = view.controls[0]
+    translation_column = row1.content.controls[1].content.controls[1].content.content
+
+    assert view._openrouter_routing_row not in translation_column.controls
 
 
 @pytest.mark.asyncio
@@ -908,6 +979,7 @@ def test_apply_locale_and_refresh_prompt_if_empty(monkeypatch: pytest.MonkeyPatc
     assert view._stt_title.value == t("settings.section.stt")
     assert view._reset_prompt_btn.text == t("settings.reset_prompt")
     assert bool(view._prompt_editor.value.strip())
+    assert view._openrouter_routing_title.value == t("settings.openrouter_routing")
 
 
 def test_apply_locale_refreshes_peer_labels_and_inherit_texts(

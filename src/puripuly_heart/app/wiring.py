@@ -151,6 +151,7 @@ def create_llm_provider(settings: AppSettings, *, secrets: SecretStore) -> LLMPr
         base = OpenRouterLLMProvider(
             api_key=api_key,
             model=settings.openrouter.llm_model.value,
+            routing_mode=settings.openrouter.routing_mode,
         )
     elif settings.provider.llm == LLMProviderName.QWEN:
         from puripuly_heart.config.settings import QwenRegion
