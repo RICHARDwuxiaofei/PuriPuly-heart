@@ -303,7 +303,7 @@ async def test_presenter_reschedules_hidden_peer_expiration_when_translation_bec
     await asyncio.sleep(0)
 
     assert cancelled_delays == [5.0]
-    assert sleep_calls == [5.0, 10.0]
+    assert sleep_calls == [5.0, 8.0]
     assert [block.id for block in presenter.snapshot().blocks] == [
         f"peer:{peer_transcript.utterance_id}"
     ]
@@ -791,7 +791,7 @@ async def test_presenter_reset_scene_clears_closed_entry_tombstones() -> None:
 
 
 @pytest.mark.asyncio
-async def test_presenter_expires_visible_finalized_entry_after_ten_seconds() -> None:
+async def test_presenter_expires_visible_finalized_entry_after_eight_seconds() -> None:
     bridge = RecordingPresentationBridge()
     clock = FakeClock(_now=10.0)
     sleep_calls: list[float] = []
@@ -840,7 +840,7 @@ async def test_presenter_expires_visible_finalized_entry_after_ten_seconds() -> 
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
-    assert sleep_calls == [10.0]
+    assert sleep_calls == [8.0]
     assert presenter.snapshot().blocks == []
     assert len(bridge.snapshots) == 2
     assert bridge.snapshots[-1].blocks == []
@@ -1105,7 +1105,7 @@ async def test_presenter_keeps_first_visible_ttl_when_active_self_promotes_to_fi
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
-    assert sleep_calls == [8.0]
+    assert sleep_calls == [6.0]
     assert presenter.snapshot().blocks == []
 
 

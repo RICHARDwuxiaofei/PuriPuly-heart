@@ -248,6 +248,27 @@ fn renderer_secondary_line_is_single_line_with_ellipsis() {
 }
 
 #[test]
+fn renderer_primary_lines_do_not_append_ellipsis_when_over_budget() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.layout_blocks(
+        vec![bilingual_block(
+            "peer",
+            "this primary translation line is intentionally long enough to exceed the measured two-line budget and should clip without appending an ellipsis marker to the rendered text",
+            "secondary",
+            true,
+        )],
+        1100,
+        900,
+    );
+
+    let block = &result.visible_blocks[0];
+    let last_primary = block.primary_lines.last().unwrap();
+
+    assert!(block.truncated_primary);
+    assert!(!last_primary.text.ends_with("..."));
+}
+
+#[test]
 fn renderer_reserves_secondary_row_height_even_before_secondary_text_arrives() {
     let policy = CaptionLayoutPolicy::default();
     let empty_secondary = policy.layout_blocks(

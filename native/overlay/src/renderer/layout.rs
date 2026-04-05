@@ -559,26 +559,8 @@ impl DirectWriteLayoutEngine {
             remaining = remaining[line.len()..].trim_start();
         }
 
-        let truncated = !remaining.is_empty();
-        if truncated {
-            let prefix = lines
-                .iter()
-                .take(lines.len().saturating_sub(1))
-                .map(String::as_str)
-                .collect::<Vec<_>>();
-            let remaining_text = if prefix.is_empty() {
-                text.trim()
-            } else {
-                remaining
-            };
-            let ellipsized =
-                self.ellipsize_text(policy, remaining_text, max_width_px, font_size_px)?;
-            if let Some(last) = lines.last_mut() {
-                *last = ellipsized;
-            }
-        }
-
-        Ok((lines, truncated))
+        // Primary rows clip once the reserved line budget is exhausted.
+        Ok((lines, !remaining.is_empty()))
     }
 
     fn ellipsize_secondary_text(
