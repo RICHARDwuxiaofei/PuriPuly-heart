@@ -37,7 +37,6 @@ def test_language_modal_open_builds_dialog_and_recent_grid() -> None:
 
     assert len(page.opened) == 1
     assert modal._dialog is not None
-    assert modal._dialog.modal is True
 
     grid = modal._build_recent_grid(["ko", "en", "ja"], current="ko")
     assert isinstance(grid, ft.Row)

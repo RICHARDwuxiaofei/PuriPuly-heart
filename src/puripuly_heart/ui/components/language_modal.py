@@ -114,7 +114,7 @@ class LanguageModal:
 
         # Transparent AlertDialog, content handles the background/shadow/glow
         self._dialog = ft.AlertDialog(
-            modal=True,
+            modal=False,
             content=create_glow_stack(modal_content),
             content_padding=0,
             bgcolor=ft.Colors.TRANSPARENT,
