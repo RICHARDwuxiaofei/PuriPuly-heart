@@ -9,7 +9,7 @@ from typing import Any
 
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 5
+SETTINGS_SCHEMA_VERSION = 6
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
     "ko": ("아이리", "시나노"),
@@ -234,7 +234,7 @@ class PeerSonioxSTTSettings:
 
 @dataclass(slots=True)
 class LLMSettings:
-    concurrency_limit: int = 2
+    concurrency_limit: int = 5
 
     def validate(self) -> None:
         if self.concurrency_limit <= 0:
@@ -780,6 +780,22 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 5
 
+    if version < 6:
+        llm_data = data.get("llm")
+        if not isinstance(llm_data, dict):
+            llm_data = {}
+            data["llm"] = llm_data
+            changed = True
+
+        concurrency_limit = _coerce_int(llm_data.get("concurrency_limit"), 2)
+        # Migrate previous default-sized limits up to the faster default while preserving
+        # explicit higher custom values.
+        if concurrency_limit <= 2:
+            llm_data["concurrency_limit"] = 5
+            changed = True
+
+        version = 6
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -1086,7 +1102,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 data.get("qwen", {}).get("llm_model", QwenLLMModel.QWEN_35_PLUS.value)
             ),
         ),
-        llm=LLMSettings(concurrency_limit=int(data.get("llm", {}).get("concurrency_limit", 2))),
+        llm=LLMSettings(concurrency_limit=int(data.get("llm", {}).get("concurrency_limit", 5))),
         osc=OSCSettings(
             host=str(data.get("osc", {}).get("host", "127.0.0.1")),
             port=int(data.get("osc", {}).get("port", 9000)),

@@ -231,7 +231,7 @@ def test_load_settings_backfills_v4_peer_blocks_from_schema3_fixture(tmp_path) -
             "region": QwenRegion.BEIJING.value,
             "llm_model": QwenLLMModel.QWEN_35_PLUS.value,
         },
-        "llm": {"concurrency_limit": 2},
+        "llm": {"concurrency_limit": 5},
         "osc": {
             "host": "127.0.0.1",
             "port": 9000,
@@ -356,11 +356,27 @@ def test_load_settings_migrates_legacy_concurrency_limit_and_persists(tmp_path):
 
     loaded = load_settings(path)
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
-    assert loaded.llm.concurrency_limit == 2
+    assert loaded.llm.concurrency_limit == 5
 
     persisted = json.loads(path.read_text(encoding="utf-8"))
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
-    assert persisted["llm"]["concurrency_limit"] == 2
+    assert persisted["llm"]["concurrency_limit"] == 5
+
+
+def test_load_settings_migrates_previous_default_concurrency_limit_and_persists(tmp_path):
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["settings_version"] = 5
+    legacy["llm"]["concurrency_limit"] = 2
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
+    assert loaded.llm.concurrency_limit == 5
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert persisted["llm"]["concurrency_limit"] == 5
 
 
 def test_load_settings_migration_preserves_custom_concurrency_limit(tmp_path):

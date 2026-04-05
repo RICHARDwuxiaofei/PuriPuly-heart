@@ -83,6 +83,7 @@ def test_create_llm_provider_qwen_uses_secret() -> None:
     assert provider.inner.api_key == "k2"
     assert provider.inner.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert provider.inner.model == "qwen3.5-plus"
+    assert provider.semaphore._value == 5  # type: ignore[attr-defined]
 
 
 def test_create_llm_provider_qwen_uses_singapore_region() -> None:
