@@ -1,32 +1,20 @@
-use std::path::{Path, PathBuf};
-
 use serde_json::Value;
-use tokio::fs::{create_dir_all, File, OpenOptions};
-use tokio::io::{self, AsyncWriteExt};
+use tokio::io::{self, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
+type LogStream = std::pin::Pin<Box<dyn AsyncWrite + Send>>;
+
 pub struct OverlayLogger {
-    file: Mutex<File>,
-    path: PathBuf,
+    stdout: Mutex<LogStream>,
+    stderr: Mutex<LogStream>,
 }
 
 impl OverlayLogger {
-    pub async fn open(log_dir: impl AsRef<Path>) -> io::Result<Self> {
-        create_dir_all(log_dir.as_ref()).await?;
-        let path = log_dir.as_ref().join("puripuly_heart_overlay.log");
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await?;
-        Ok(Self {
-            file: Mutex::new(file),
-            path,
-        })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub async fn open(_log_dir: impl AsRef<std::path::Path>) -> io::Result<Self> {
+        Ok(Self::from_streams(
+            Box::pin(tokio::io::stdout()),
+            Box::pin(tokio::io::stderr()),
+        ))
     }
 
     pub async fn info(&self, message: impl AsRef<str>) -> io::Result<()> {
@@ -51,28 +39,115 @@ impl OverlayLogger {
             .await
     }
 
-    async fn log_line(&self, level: &str, message: &str) -> io::Result<()> {
-        let line = format!("[overlay][{level}] {message}\n");
-        {
-            let mut file = self.file.lock().await;
-            file.write_all(line.as_bytes()).await?;
-            file.flush().await?;
+    fn from_streams(stdout: LogStream, stderr: LogStream) -> Self {
+        Self {
+            stdout: Mutex::new(stdout),
+            stderr: Mutex::new(stderr),
         }
-        self.write_stream_line(level != "ERROR", line.trim_end())
+    }
+
+    async fn log_line(&self, level: &str, message: &str) -> io::Result<()> {
+        self.write_stream_line(level != "ERROR", &format!("[overlay][{level}] {message}"))
             .await
     }
 
     async fn write_stream_line(&self, stdout: bool, line: &str) -> io::Result<()> {
         if stdout {
-            let mut stream = tokio::io::stdout();
+            let mut stream = self.stdout.lock().await;
             stream.write_all(line.as_bytes()).await?;
             stream.write_all(b"\n").await?;
             stream.flush().await
         } else {
-            let mut stream = tokio::io::stderr();
+            let mut stream = self.stderr.lock().await;
             stream.write_all(line.as_bytes()).await?;
             stream.write_all(b"\n").await?;
             stream.flush().await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use std::task::{Context, Poll};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use tokio::io::AsyncWrite;
+
+    #[derive(Clone, Default)]
+    struct RecordingSink {
+        buffer: Arc<StdMutex<Vec<u8>>>,
+    }
+
+    impl RecordingSink {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn bytes(&self) -> Vec<u8> {
+            self.buffer.lock().unwrap().clone()
+        }
+    }
+
+    impl AsyncWrite for RecordingSink {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<Result<usize, io::Error>> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn unique_log_dir(name: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_nanos();
+        std::env::temp_dir().join(format!("puripuly-heart-overlay-logger-{name}-{nonce}"))
+    }
+
+    #[tokio::test]
+    async fn overlay_logger_does_not_create_dedicated_log_file() {
+        let log_dir = unique_log_dir("no-file");
+        let log_path = log_dir.join("puripuly_heart_overlay.log");
+
+        let logger = OverlayLogger::open(&log_dir).await.unwrap();
+        logger.info("hello").await.unwrap();
+
+        assert!(!log_path.exists());
+    }
+
+    #[tokio::test]
+    async fn overlay_logger_routes_info_and_error_lines_to_streams_only() {
+        let stdout = RecordingSink::new();
+        let stderr = RecordingSink::new();
+        let logger =
+            OverlayLogger::from_streams(Box::pin(stdout.clone()), Box::pin(stderr.clone()));
+
+        logger.info("child line").await.unwrap();
+        logger.error("bad line").await.unwrap();
+
+        assert_eq!(
+            String::from_utf8(stdout.bytes()).unwrap(),
+            "[overlay][INFO] child line\n"
+        );
+        assert_eq!(
+            String::from_utf8(stderr.bytes()).unwrap(),
+            "[overlay][ERROR] bad line\n"
+        );
     }
 }

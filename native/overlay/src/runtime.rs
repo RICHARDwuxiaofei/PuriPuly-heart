@@ -17,9 +17,13 @@ use crate::openvr::{
     perform_startup_preflight, OpenVrOverlay, OpenVrStartupPreflightError, OverlayFrameSubmitter,
 };
 use crate::renderer::{
-    CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionPresentation, CaptionRenderer,
+    CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutResult, CaptionPresentation,
+    CaptionRenderer, VisibleCaptionBlock,
 };
-use crate::state::{OverlayPresentationSnapshot, OverlayState};
+use crate::state::{
+    OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationSnapshot,
+    OverlayScene, OverlayState,
+};
 
 const EMPTY_OVERLAY_HIDE_DELAY: Duration = Duration::from_millis(500);
 
@@ -107,6 +111,20 @@ pub struct OverlayRuntime {
     hide_deadline: Option<Instant>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotApplyOutcome {
+    Applied {
+        incoming_revision: u64,
+        current_revision: u64,
+        visual_changed: bool,
+        redraw_requested: bool,
+    },
+    Ignored {
+        incoming_revision: u64,
+        current_revision: u64,
+    },
+}
+
 impl OverlayRuntime {
     pub fn new(snapshot: OverlayPresentationSnapshot) -> Self {
         let mut runtime = Self {
@@ -146,9 +164,27 @@ impl OverlayRuntime {
         Ok(())
     }
 
-    pub fn apply_snapshot(&mut self, snapshot: OverlayPresentationSnapshot) {
-        if self.state.apply_snapshot(&snapshot) {
+    pub fn apply_snapshot(
+        &mut self,
+        snapshot: OverlayPresentationSnapshot,
+    ) -> SnapshotApplyOutcome {
+        let current_revision = self.state.snapshot().revision;
+        if snapshot.revision <= current_revision {
+            return SnapshotApplyOutcome::Ignored {
+                incoming_revision: snapshot.revision,
+                current_revision,
+            };
+        }
+
+        let visual_changed = self.state.apply_snapshot(&snapshot);
+        if visual_changed {
             self.redraw_requested = true;
+        }
+        SnapshotApplyOutcome::Applied {
+            incoming_revision: snapshot.revision,
+            current_revision: self.state.snapshot().revision,
+            visual_changed,
+            redraw_requested: self.redraw_requested,
         }
     }
 
@@ -218,6 +254,7 @@ impl OverlayRuntime {
             .apply_calibration(self.state.calibration())
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
         let blocks = self.caption_blocks();
+        log_runtime_info(logger, format_caption_blocks_built_log(&blocks)).await?;
         let has_drawable_text = blocks.iter().any(CaptionBlock::has_drawable_text);
         let should_show_after_submit = has_drawable_text && !self.overlay_visible;
         if has_drawable_text {
@@ -237,6 +274,11 @@ impl OverlayRuntime {
                 .render_blocks(blocks)
                 .map_err(|error| RuntimeFailure::Render(error.to_string()))?
         };
+        log_runtime_info(
+            logger,
+            format_frame_rendered_log(frame.layout(), frame.is_fully_transparent()),
+        )
+        .await?;
         openvr
             .submit_frame(&frame)
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
@@ -245,6 +287,12 @@ impl OverlayRuntime {
                 .set_overlay_visible(true)
                 .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
             self.overlay_visible = true;
+            log_runtime_info(
+                logger,
+                "overlay_visibility_changed visible=true reason=frame_submit_text_visible"
+                    .to_string(),
+            )
+            .await?;
         }
         self.redraw_requested = false;
 
@@ -272,7 +320,7 @@ impl OverlayRuntime {
 
             tokio::select! {
                 _ = sleep_until(hide_deadline.unwrap_or_else(Instant::now)), if hide_deadline.is_some() => {
-                    self.handle_hide_deadline(openvr).await?;
+                    self.handle_hide_deadline(openvr, logger).await?;
                 }
                 message = bridge.next_message() => {
                     if !self
@@ -297,7 +345,13 @@ impl OverlayRuntime {
         match message {
             Ok(BridgeIncoming::Heartbeat) => Ok(true),
             Ok(BridgeIncoming::Snapshot(snapshot)) => {
-                self.apply_snapshot(snapshot);
+                log_runtime_info(logger, format_snapshot_received_log(&snapshot)).await?;
+                let outcome = self.apply_snapshot(snapshot);
+                log_runtime_info(
+                    logger,
+                    format_state_snapshot_log(&outcome, self.state(), self.redraw_requested),
+                )
+                .await?;
                 self.submit_frame_if_needed(renderer, openvr, bridge, logger)
                     .await?;
                 Ok(true)
@@ -333,6 +387,7 @@ impl OverlayRuntime {
     async fn handle_hide_deadline<S: OverlayFrameSubmitter>(
         &mut self,
         openvr: &mut S,
+        logger: &OverlayLogger,
     ) -> Result<(), RuntimeFailure> {
         self.hide_deadline = None;
         if !self.first_texture_submitted || !self.overlay_visible || self.has_drawable_text() {
@@ -342,6 +397,11 @@ impl OverlayRuntime {
             .set_overlay_visible(false)
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
         self.overlay_visible = false;
+        log_runtime_info(
+            logger,
+            "overlay_visibility_changed visible=false reason=idle_hide_deadline".to_string(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -350,6 +410,155 @@ impl OverlayRuntime {
             .iter()
             .any(CaptionBlock::has_drawable_text)
     }
+}
+
+fn log_runtime_secondary_state(enabled: bool, text: &str) -> String {
+    format!(
+        "{}/{}",
+        if enabled { "enabled" } else { "disabled" },
+        text.len()
+    )
+}
+
+fn overlay_variant_name(variant: OverlayPresentationBlockVariant) -> &'static str {
+    match variant {
+        OverlayPresentationBlockVariant::ActiveSelf => "active_self",
+        OverlayPresentationBlockVariant::Finalized => "finalized",
+    }
+}
+
+fn caption_variant_name(variant: CaptionBlockVariant) -> &'static str {
+    match variant {
+        CaptionBlockVariant::ActiveSelf => "active_self",
+        CaptionBlockVariant::Finalized => "finalized",
+    }
+}
+
+fn format_snapshot_block_summary(block: &OverlayPresentationBlock) -> String {
+    format!(
+        "id={} variant={} sec={}",
+        block.id,
+        overlay_variant_name(block.block_variant),
+        log_runtime_secondary_state(block.secondary_enabled, &block.secondary_text)
+    )
+}
+
+fn format_snapshot_received_log(snapshot: &OverlayPresentationSnapshot) -> String {
+    format!(
+        "bridge_snapshot_received revision={} block_count={} blocks=[{}]",
+        snapshot.revision,
+        snapshot.blocks.len(),
+        snapshot
+            .blocks
+            .iter()
+            .map(format_snapshot_block_summary)
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
+}
+
+fn format_scene_slots(scene: &OverlayScene) -> String {
+    scene
+        .slots()
+        .iter()
+        .enumerate()
+        .map(|(slot_index, slot)| match slot {
+            Some(slot) => format!(
+                "slot{}=id={} variant={} sec={}",
+                slot_index,
+                slot.id,
+                overlay_variant_name(slot.block_variant),
+                log_runtime_secondary_state(slot.secondary_enabled, &slot.secondary_text)
+            ),
+            None => format!("slot{}=empty", slot_index),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn format_state_snapshot_log(
+    outcome: &SnapshotApplyOutcome,
+    state: &OverlayState,
+    redraw_requested: bool,
+) -> String {
+    match outcome {
+        SnapshotApplyOutcome::Applied {
+            incoming_revision,
+            current_revision,
+            visual_changed,
+            redraw_requested: outcome_redraw_requested,
+        } => format!(
+            "state_snapshot_applied incoming_revision={} current_revision={} visual_changed={} redraw_requested={} slots=[{}]",
+            incoming_revision,
+            current_revision,
+            visual_changed,
+            outcome_redraw_requested,
+            format_scene_slots(state.scene())
+        ),
+        SnapshotApplyOutcome::Ignored {
+            incoming_revision,
+            current_revision,
+        } => format!(
+            "state_snapshot_ignored incoming_revision={} current_revision={} redraw_requested={} slots=[{}]",
+            incoming_revision,
+            current_revision,
+            redraw_requested,
+            format_scene_slots(state.scene())
+        ),
+    }
+}
+
+fn format_caption_block_summary(block: &CaptionBlock) -> String {
+    format!(
+        "id={} variant={} sec={}",
+        block.id,
+        caption_variant_name(block.block_variant),
+        log_runtime_secondary_state(block.secondary_enabled, &block.secondary_text)
+    )
+}
+
+fn format_caption_blocks_built_log(blocks: &[CaptionBlock]) -> String {
+    format!(
+        "caption_blocks_built block_count={} blocks=[{}]",
+        blocks.len(),
+        blocks
+            .iter()
+            .map(format_caption_block_summary)
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
+}
+
+fn format_visible_block_summary(block: &VisibleCaptionBlock) -> String {
+    format!(
+        "id={} variant={} secondary_present={} secondary_reserved={} truncated_secondary={}",
+        block.id,
+        caption_variant_name(block.block_variant),
+        block.secondary_line.is_some(),
+        block.secondary_reserved,
+        block.truncated_secondary
+    )
+}
+
+fn format_frame_rendered_log(layout: &CaptionLayoutResult, fully_transparent: bool) -> String {
+    format!(
+        "frame_rendered visible_block_count={} fully_transparent={} blocks=[{}]",
+        layout.visible_blocks.len(),
+        fully_transparent,
+        layout
+            .visible_blocks
+            .iter()
+            .map(format_visible_block_summary)
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
+}
+
+async fn log_runtime_info(logger: &OverlayLogger, message: String) -> Result<(), RuntimeFailure> {
+    logger
+        .info(message)
+        .await
+        .map_err(|error| RuntimeFailure::Bridge(error.to_string()))
 }
 
 pub fn startup_error_from_bridge_error(error: BridgeError) -> StartupError {
@@ -414,6 +623,7 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
     };
     let _ = logger.info("bridge_connected").await;
     let _ = logger.info("bridge_authenticated").await;
+    let _ = logger.info(format_snapshot_received_log(&snapshot)).await;
 
     let (renderer, mut openvr) = match initialize_runtime_resources(&manifest, &logger).await {
         Ok(resources) => resources,
@@ -425,6 +635,19 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
     };
 
     let mut runtime = OverlayRuntime::new(snapshot);
+    let initial_outcome = SnapshotApplyOutcome::Applied {
+        incoming_revision: runtime.state().snapshot().revision,
+        current_revision: runtime.state().snapshot().revision,
+        visual_changed: runtime.redraw_requested(),
+        redraw_requested: runtime.redraw_requested(),
+    };
+    let _ = logger
+        .info(format_state_snapshot_log(
+            &initial_outcome,
+            runtime.state(),
+            runtime.redraw_requested(),
+        ))
+        .await;
     if let Err(error) = runtime
         .submit_frame_if_needed(&renderer, &mut openvr, &mut bridge, &logger)
         .await
@@ -584,8 +807,14 @@ impl OverlayRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_openvr_runtime, OverlayRuntime, StartupError};
+    use super::{
+        format_caption_blocks_built_log, format_frame_rendered_log, format_snapshot_received_log,
+        prepare_openvr_runtime, OverlayRuntime, SnapshotApplyOutcome, StartupError,
+    };
     use crate::openvr::{OpenVrError, OpenVrStartupPreflightError};
+    use crate::renderer::{
+        CaptionBlock, CaptionBlockVariant, CaptionLayoutPolicy, CaptionPresentation,
+    };
     use crate::state::{
         OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
         OverlayPresentationSnapshot,
@@ -762,6 +991,89 @@ mod tests {
 
         assert_eq!(result, Ok("overlay-ready"));
         assert_eq!(overlay_factory_calls.get(), 1);
+    }
+
+    #[test]
+    fn snapshot_summary_includes_variants_and_secondary_lengths() {
+        let summary = format_snapshot_received_log(&OverlayPresentationSnapshot {
+            revision: 7,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![
+                block("self:1", "self", "hello", "", true),
+                OverlayPresentationBlock {
+                    id: "self:active".into(),
+                    occupant_key: "self:merge-1".into(),
+                    appearance_seq: 2,
+                    channel: "self".into(),
+                    block_variant: OverlayPresentationBlockVariant::ActiveSelf,
+                    primary_text: "speaking".into(),
+                    secondary_text: "hidden".into(),
+                    secondary_enabled: false,
+                },
+            ],
+        });
+
+        assert!(summary.contains("bridge_snapshot_received revision=7 block_count=2"));
+        assert!(summary.contains("id=self:1 variant=finalized sec=enabled/0"));
+        assert!(summary.contains("id=self:active variant=active_self sec=disabled/6"));
+    }
+
+    #[test]
+    fn caption_block_summary_includes_hidden_secondary_and_active_variant() {
+        let summary = format_caption_blocks_built_log(&[
+            CaptionBlock::new("self:1", "hello").with_secondary_text("", true),
+            CaptionBlock::new("self:active", "speaking")
+                .with_variant(CaptionBlockVariant::ActiveSelf)
+                .with_secondary_text("hidden", false),
+        ]);
+
+        assert!(summary.contains("caption_blocks_built block_count=2"));
+        assert!(summary.contains("id=self:1 variant=finalized sec=enabled/0"));
+        assert!(summary.contains("id=self:active variant=active_self sec=disabled/6"));
+    }
+
+    #[test]
+    fn frame_rendered_summary_reports_secondary_presence_and_truncation() {
+        let layout = CaptionLayoutPolicy::default().layout_blocks_for_presentation(
+            vec![CaptionBlock::new("self:1", "primary").with_secondary_text(
+                "this secondary line should be truncated in a narrow layout",
+                true,
+            )],
+            320,
+            600,
+            &CaptionPresentation::default(),
+        );
+
+        let summary = format_frame_rendered_log(&layout, false);
+
+        assert!(summary.contains("frame_rendered visible_block_count=1 fully_transparent=false"));
+        assert!(summary.contains("id=self:1 variant=finalized secondary_present=true"));
+        assert!(summary.contains("truncated_secondary=true"));
+    }
+
+    #[test]
+    fn runtime_apply_snapshot_reports_ignored_revisions_without_redraw() {
+        let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            revision: 3,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![block("self:1", "self", "hello", "", true)],
+        });
+        runtime.clear_redraw_flag();
+
+        let outcome = runtime.apply_snapshot(OverlayPresentationSnapshot {
+            revision: 2,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![block("peer:2", "peer", "ignored", "", true)],
+        });
+
+        assert_eq!(
+            outcome,
+            SnapshotApplyOutcome::Ignored {
+                incoming_revision: 2,
+                current_revision: 3,
+            }
+        );
+        assert!(!runtime.redraw_requested());
     }
 }
 
