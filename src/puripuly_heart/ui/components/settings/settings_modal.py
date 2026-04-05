@@ -104,7 +104,7 @@ class SettingsModal:
 
         # Transparent AlertDialog
         self._dialog = ft.AlertDialog(
-            modal=False,
+            modal=True,
             content=create_glow_stack(modal_content),
             content_padding=0,
             bgcolor=ft.Colors.TRANSPARENT,

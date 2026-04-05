@@ -428,6 +428,13 @@ class GuiController:
         if self.settings is None:
             return
 
+        logger.info(
+            "[Overlay] Toggle request: enabled=%s current_state=%s has_bridge=%s has_manager=%s",
+            enabled,
+            self.overlay_state,
+            self._overlay_bridge is not None,
+            self._overlay_manager is not None,
+        )
         self.settings.ui.overlay_enabled = bool(enabled)
         if not enabled:
             self.settings.ui.peer_translation_enabled = False
@@ -562,6 +569,14 @@ class GuiController:
         if self._overlay_lock is None:
             self._overlay_lock = asyncio.Lock()
 
+        logger.info(
+            "[Overlay] Shutdown requested: preserve_failure_reason=%s state=%s has_bridge=%s has_manager=%s presenter_attached=%s",
+            preserve_failure_reason,
+            self.overlay_state,
+            self._overlay_bridge is not None,
+            self._overlay_manager is not None,
+            self._overlay_presenter is not None,
+        )
         async with self._overlay_lock:
             has_runtime = (
                 self._overlay_bridge is not None
@@ -748,6 +763,12 @@ class GuiController:
     async def set_translation_enabled(self, enabled: bool) -> None:
         if self.hub is None:
             return
+        logger.info(
+            "[Translation] Toggle request: enabled=%s current_enabled=%s llm_available=%s",
+            enabled,
+            self.hub.translation_enabled,
+            self.hub.llm is not None,
+        )
         if enabled and self.hub.llm is None:
             self.hub.translation_enabled = False
             dash = getattr(self.app, "view_dashboard", None)
@@ -777,6 +798,12 @@ class GuiController:
                     await llm.warmup()
 
     async def set_stt_enabled(self, enabled: bool) -> None:
+        logger.info(
+            "[STT] Toggle request: enabled=%s desired_before=%s overlay_state=%s",
+            enabled,
+            self._stt_desired,
+            self.overlay_state,
+        )
         self._stt_desired = bool(enabled)
 
         # Log provider info when enabling
@@ -1040,6 +1067,11 @@ class GuiController:
         await self._stt_switch_task
 
     async def _replace_runtime_stt_provider(self) -> None:
+        logger.info(
+            "[STT] Replacing runtime provider: desired=%s mic_task_active=%s",
+            self._stt_desired,
+            self._mic_task is not None,
+        )
         if self._mic_task is not None:
             await self._stop_mic_loop()
         self._stt_restart_requested = False
@@ -1198,6 +1230,15 @@ class GuiController:
         self._last_self_stt_runtime_signature = current_self_signature
         self._last_peer_stt_runtime_signature = current_peer_signature
         self._last_peer_translation_enabled = settings.ui.peer_translation_enabled
+
+        if source_language_changed or target_language_changed:
+            logger.info(
+                "[Settings] Runtime impact after language apply: should_restart_stt=%s should_refresh_peer=%s prev_overlay_enabled=%s next_overlay_enabled=%s",
+                should_restart_stt,
+                should_refresh_peer,
+                prev_overlay_enabled,
+                settings.ui.overlay_enabled,
+            )
 
         if should_refresh_peer and self.hub is not None:
             await self._refresh_peer_stt_runtime()
@@ -1383,6 +1424,11 @@ class GuiController:
         self._sync_effective_hub_flags(self.settings)
 
     async def _rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
+        logger.info(
+            "[Settings] Rebuilding pipeline: rebuild_stt=%s overlay_state=%s",
+            rebuild_stt,
+            self.overlay_state,
+        )
         _ = rebuild_stt
         if self._bridge_task:
             self._bridge_task.cancel()

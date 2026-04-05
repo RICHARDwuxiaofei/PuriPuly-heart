@@ -4,6 +4,7 @@ Provides a reusable modal dialog for selecting source or target language
 with recent language chips and a scrollable full list.
 """
 
+import logging
 from typing import Callable, Sequence
 
 import flet as ft
@@ -18,6 +19,8 @@ from puripuly_heart.ui.theme import (
     COLOR_SURFACE,
     get_card_shadow,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class LanguageModal:
@@ -111,7 +114,7 @@ class LanguageModal:
 
         # Transparent AlertDialog, content handles the background/shadow/glow
         self._dialog = ft.AlertDialog(
-            modal=False,
+            modal=True,
             content=create_glow_stack(modal_content),
             content_padding=0,
             bgcolor=ft.Colors.TRANSPARENT,
@@ -264,6 +267,7 @@ class LanguageModal:
 
     def _select(self, name: str) -> None:
         """Handle language selection."""
+        logger.info("[LanguageModal] Selection requested: %s", name)
         if self._dialog:
             self._page.close(self._dialog)
         self._on_select(name)

@@ -172,18 +172,39 @@ class TranslatorApp:
         self.page.run_task(_task)
 
     def _on_translation_toggle(self, enabled: bool) -> None:
+        logger.info(
+            "[Dashboard] Translation toggle requested: enabled=%s dashboard_state=%s overlay_state=%s",
+            enabled,
+            getattr(self.view_dashboard, "is_translation_on", None),
+            self.overlay_state,
+        )
+
         async def _task():
             await self.controller.set_translation_enabled(enabled)
 
         self.page.run_task(_task)
 
     def _on_stt_toggle(self, enabled: bool) -> None:
+        logger.info(
+            "[Dashboard] STT toggle requested: enabled=%s dashboard_state=%s overlay_state=%s",
+            enabled,
+            getattr(self.view_dashboard, "is_stt_on", None),
+            self.overlay_state,
+        )
+
         async def _task():
             await self.controller.set_stt_enabled(enabled)
 
         self.page.run_task(_task)
 
     def _on_overlay_toggle(self, enabled: bool) -> None:
+        logger.info(
+            "[Settings] Overlay toggle requested: enabled=%s overlay_state=%s failure_reason=%s",
+            enabled,
+            self.overlay_state,
+            self.overlay_failure_reason,
+        )
+
         async def _task():
             await self.controller.set_overlay_enabled(enabled)
 
@@ -351,6 +372,12 @@ class TranslatorApp:
         state: str,
         failure_reason: str | None = None,
     ) -> None:
+        logger.info(
+            "[Overlay] State changed: %s -> %s failure_reason=%s",
+            getattr(self, "overlay_state", "unknown"),
+            state,
+            failure_reason,
+        )
         self.overlay_state = state
         self.overlay_failure_reason = failure_reason
         self.view_settings.set_overlay_runtime_state(state, failure_reason=failure_reason)
