@@ -209,6 +209,13 @@ def test_installer_script_supports_local_stt_appdata_override_for_smoke_runs() -
     assert "GetEnv('PURIPULY_HEART_LOCAL_STT_APPDATA_ROOT')" in script
 
 
+def test_installer_script_deletes_managed_default_vad_cache_on_install() -> None:
+    script = (ROOT / "installer.iss").read_text(encoding="utf-8")
+
+    assert "[InstallDelete]" in script
+    assert 'Type: files; Name: "{localappdata}\\puripuly-heart\\silero_vad.onnx"' in script
+
+
 def test_local_stt_installer_script_uses_manifest_validation_and_atomic_promotion() -> None:
     script = (ROOT / "scripts" / "installer" / "install-local-stt-model.ps1").read_text(
         encoding="utf-8"

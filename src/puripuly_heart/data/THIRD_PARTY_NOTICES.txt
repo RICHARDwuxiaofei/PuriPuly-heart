@@ -1,4 +1,4 @@
-Silero VAD (v5.1.2)
+Silero VAD (v6.2.1)
 Source: https://github.com/snakers4/silero-vad
 License: MIT
 

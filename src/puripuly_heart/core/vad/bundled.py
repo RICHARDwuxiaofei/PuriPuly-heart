@@ -6,9 +6,9 @@ from pathlib import Path
 
 from puripuly_heart.config.paths import default_vad_model_path
 
-SILERO_VAD_VERSION = "5.1.2"
+SILERO_VAD_VERSION = "6.2.1"
 SILERO_VAD_RESOURCE_RELATIVE_PATH = "data/vad/silero_vad.onnx"
-SILERO_VAD_RESOURCE_SHA256 = "2623a2953f6ff3d2c1e61740c6cdb7168133479b267dfef114a4a3cc5bdd788f"
+SILERO_VAD_RESOURCE_SHA256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
 
 
 def bundled_silero_vad_onnx_path() -> resources.abc.Traversable:

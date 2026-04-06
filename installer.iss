@@ -93,6 +93,10 @@ Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppGroupName}"
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
+[InstallDelete]
+; Remove the managed default-path VAD cache so the app can rehydrate it from the bundled model.
+Type: files; Name: "{localappdata}\puripuly-heart\silero_vad.onnx"
+
 [UninstallDelete]
 ; Clean up user config on uninstall (optional)
 Type: filesandordirs; Name: "{localappdata}\puripuly-heart"
