@@ -125,14 +125,14 @@ class TranslatorApp:
 
         # Auto-apply provider changes when leaving Settings (tab 1)
         if previous_tab == 1 and index != 1 and self.view_settings.has_provider_changes:
-            rebuild_stt = self.view_settings.provider_change_requires_pipeline
-            self.view_settings.has_provider_changes = False
-            self.view_settings.provider_change_requires_pipeline = False
+            pending_settings = self.view_settings.consume_provider_apply_settings()
+            if pending_settings is not None:
+                self.view_settings.has_provider_changes = False
 
-            async def _task():
-                await self.controller.apply_providers(rebuild_stt=rebuild_stt)
+                async def _task():
+                    await self.controller.apply_providers(pending_settings)
 
-            self.page.run_task(_task)
+                self.page.run_task(_task)
 
         if index == 0:
             self.content_area.content = self.view_dashboard

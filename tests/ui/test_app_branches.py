@@ -96,24 +96,23 @@ async def test_on_nav_change_applies_provider_changes_when_leaving_settings() ->
     app.view_about = object()
     app.view_settings = SimpleNamespace(
         has_provider_changes=True,
-        provider_change_requires_pipeline=True,
+        consume_provider_apply_settings=lambda: "merged-settings",
         refresh_prompt_if_empty=lambda: None,
     )
     app.content_area = DummyContent()
-    seen: list[bool] = []
+    seen: list[object] = []
 
-    async def fake_apply_providers(*, rebuild_stt: bool = True) -> None:
-        seen.append(rebuild_stt)
+    async def fake_apply_providers(settings) -> None:
+        seen.append(settings)
 
     app.controller = SimpleNamespace(apply_providers=fake_apply_providers)
 
     app._on_nav_change(0)
     assert app.content_area.content is app.view_dashboard
     assert app.view_settings.has_provider_changes is False
-    assert app.view_settings.provider_change_requires_pipeline is False
     assert len(app.page.tasks) == 1
     await app.page.tasks[0]()
-    assert seen == [True]
+    assert seen == ["merged-settings"]
 
 
 @pytest.mark.asyncio
@@ -130,13 +129,12 @@ async def test_on_nav_change_refreshes_prompt_and_schedules_log_scroll() -> None
     app.view_dashboard = object()
     app.view_settings = SimpleNamespace(
         has_provider_changes=False,
-        provider_change_requires_pipeline=False,
         refresh_prompt_if_empty=lambda: refreshed.__setitem__("count", refreshed["count"] + 1),
     )
     app.view_logs = SimpleNamespace(scroll_to_bottom=fake_scroll_to_bottom)
     app.view_about = object()
     app.content_area = DummyContent()
-    app.controller = SimpleNamespace(apply_providers=lambda **kwargs: asyncio.sleep(0))
+    app.controller = SimpleNamespace(apply_providers=lambda _settings=None: asyncio.sleep(0))
 
     app._on_nav_change(1)
     assert app.content_area.content is app.view_settings

@@ -55,20 +55,29 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
     assert view._prompt_editor.value == load_prompt_for_provider("gemini")
 
     view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+    pending = view.build_provider_apply_settings()
 
     assert view._prompt_editor.value == load_prompt_for_provider("qwen")
-    assert settings.provider.llm == LLMProviderName.QWEN
-    assert settings.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS
+    assert settings.provider.llm == LLMProviderName.GEMINI
+    assert pending is not None
+    assert pending.provider.llm == LLMProviderName.QWEN
+    assert pending.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS
 
     view._on_llm_selected(GeminiLLMModel.GEMINI_3_FLASH.value)
+    pending = view.build_provider_apply_settings()
 
     assert view._prompt_editor.value == load_prompt_for_provider("gemini")
     assert settings.provider.llm == LLMProviderName.GEMINI
+    assert pending is not None
+    assert pending.provider.llm == LLMProviderName.GEMINI
 
     view._on_llm_selected(OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value)
+    pending = view.build_provider_apply_settings()
 
     assert view._prompt_editor.value == load_prompt_for_provider("openrouter")
-    assert settings.provider.llm == LLMProviderName.OPENROUTER
+    assert settings.provider.llm == LLMProviderName.GEMINI
+    assert pending is not None
+    assert pending.provider.llm == LLMProviderName.OPENROUTER
 
 
 def test_settings_view_shows_qwen_model_label(monkeypatch) -> None:
@@ -98,19 +107,31 @@ def test_settings_view_preserves_provider_specific_prompts(monkeypatch) -> None:
     assert view._prompt_editor.value == "GEMINI CUSTOM"
 
     view._on_llm_selected(QwenLLMModel.QWEN_35_FLASH.value)
+    pending = view.build_provider_apply_settings()
     assert view._prompt_editor.value == "QWEN CUSTOM"
-    assert settings.system_prompt == "QWEN CUSTOM"
+    assert settings.system_prompt == "GEMINI CUSTOM"
+    assert pending is not None
+    assert pending.system_prompt == "QWEN CUSTOM"
 
     view._on_prompt_change("QWEN EDITED")
-    assert settings.system_prompts["qwen"] == "QWEN EDITED"
+    pending = view.build_provider_apply_settings()
+    assert settings.system_prompts["qwen"] == "QWEN CUSTOM"
+    assert pending is not None
+    assert pending.system_prompts["qwen"] == "QWEN EDITED"
 
     view._on_llm_selected(LLMProviderName.GEMINI.value)
+    pending = view.build_provider_apply_settings()
     assert view._prompt_editor.value == "GEMINI CUSTOM"
     assert settings.system_prompt == "GEMINI CUSTOM"
+    assert pending is not None
+    assert pending.system_prompt == "GEMINI CUSTOM"
 
     view._on_llm_selected(OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value)
+    pending = view.build_provider_apply_settings()
     assert view._prompt_editor.value == "OPENROUTER CUSTOM"
-    assert settings.system_prompt == "OPENROUTER CUSTOM"
+    assert settings.system_prompt == "GEMINI CUSTOM"
+    assert pending is not None
+    assert pending.system_prompt == "OPENROUTER CUSTOM"
 
 
 def test_settings_view_llm_modal_orders_qwen_plus_before_flash(monkeypatch) -> None:
@@ -148,6 +169,7 @@ def test_settings_view_llm_modal_orders_qwen_plus_before_flash(monkeypatch) -> N
 def test_settings_view_updates_gemini_model_without_provider_switch(monkeypatch) -> None:
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.GEMINI
+    settings.gemini.llm_model = GeminiLLMModel.GEMINI_3_FLASH
     settings.system_prompts = {
         "gemini": "GEMINI CUSTOM",
         "qwen": "QWEN CUSTOM",
@@ -158,9 +180,12 @@ def test_settings_view_updates_gemini_model_without_provider_switch(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     view._on_llm_selected(GeminiLLMModel.GEMINI_31_FLASH_LITE.value)
+    pending = view.build_provider_apply_settings()
 
     assert settings.provider.llm == LLMProviderName.GEMINI
-    assert settings.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
+    assert settings.gemini.llm_model == GeminiLLMModel.GEMINI_3_FLASH
+    assert pending is not None
+    assert pending.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
     assert settings.system_prompt == "GEMINI CUSTOM"
     assert view._prompt_editor.value == "GEMINI CUSTOM"
 

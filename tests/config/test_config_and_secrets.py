@@ -67,6 +67,36 @@ def test_from_dict_preserves_cloud_qwen_asr_provider_value() -> None:
     assert loaded.provider.stt == STTProviderName.QWEN_ASR
 
 
+def test_qwen_asr_endpoint_is_normalized_from_region_on_load_and_save() -> None:
+    data = to_dict(AppSettings())
+    data["qwen"]["region"] = QwenRegion.BEIJING.value
+    data["qwen_asr_stt"]["endpoint"] = "wss://legacy.example.invalid/realtime"
+
+    loaded = from_dict(data)
+    persisted = to_dict(loaded)
+
+    assert loaded.qwen_asr_stt.endpoint == loaded.qwen.get_asr_endpoint()
+    assert persisted["qwen_asr_stt"]["endpoint"] == loaded.qwen.get_asr_endpoint()
+
+
+def test_load_settings_infers_missing_qwen_region_from_legacy_asr_endpoint(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["qwen"] = {
+        "llm_model": QwenLLMModel.QWEN_35_PLUS.value,
+    }
+    legacy["qwen_asr_stt"]["endpoint"] = "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.qwen.region == QwenRegion.SINGAPORE
+    assert loaded.qwen_asr_stt.endpoint == loaded.qwen.get_asr_endpoint()
+    assert persisted["qwen"]["region"] == QwenRegion.SINGAPORE.value
+    assert persisted["qwen_asr_stt"]["endpoint"] == loaded.qwen.get_asr_endpoint()
+
+
 def test_from_dict_defaults_missing_stt_provider_to_local_qwen() -> None:
     data = to_dict(AppSettings())
     data["provider"].pop("stt", None)

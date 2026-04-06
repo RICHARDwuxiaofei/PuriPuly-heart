@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import contextlib
 import logging
 from pathlib import Path
@@ -109,9 +110,9 @@ class SettingsView(ft.Column):
 
         # State
         self._settings: AppSettings | None = None
+        self._provider_settings_draft: AppSettings | None = None
         self._config_path: Path | None = None
         self.has_provider_changes: bool = False
-        self.provider_change_requires_pipeline: bool = False
         self._custom_vocab_draft_terms: dict[str, str] = {}
         self._overlay_state: str = "off"
         self._overlay_failure_reason: str | None = None
@@ -1029,14 +1030,17 @@ class SettingsView(ft.Column):
         text_control.value = text
         text_control.size = 28
 
-    def _active_prompt_key(self) -> str:
-        if not self._settings:
+    def _active_prompt_key_for_settings(self, settings: AppSettings | None) -> str:
+        if settings is None:
             return "gemini"
-        if self._settings.provider.llm == LLMProviderName.GEMINI:
+        if settings.provider.llm == LLMProviderName.GEMINI:
             return "gemini"
-        if self._settings.provider.llm == LLMProviderName.OPENROUTER:
+        if settings.provider.llm == LLMProviderName.OPENROUTER:
             return "openrouter"
         return "qwen"
+
+    def _active_prompt_key(self) -> str:
+        return self._active_prompt_key_for_settings(self._build_settings_with_provider_draft())
 
     def _current_source_language(self) -> str:
         if not self._settings:
@@ -1095,6 +1099,48 @@ class SettingsView(ft.Column):
             return self._inherit_label()
         return settings.peer_soniox_stt.model
 
+    def _copy_provider_draft_fields(self, source: AppSettings, target: AppSettings) -> None:
+        target.provider.stt = source.provider.stt
+        target.provider.peer_stt = source.provider.peer_stt
+        target.provider.llm = source.provider.llm
+        target.peer_qwen_asr_stt.model = source.peer_qwen_asr_stt.model
+        target.peer_qwen_asr_stt.region = source.peer_qwen_asr_stt.region
+        target.peer_soniox_stt.model = source.peer_soniox_stt.model
+        target.gemini.llm_model = source.gemini.llm_model
+        target.openrouter.llm_model = source.openrouter.llm_model
+        target.openrouter.routing_mode = source.openrouter.routing_mode
+        target.qwen.llm_model = source.qwen.llm_model
+        target.qwen.region = source.qwen.region
+        target.system_prompt = source.system_prompt
+        target.system_prompts = copy.deepcopy(source.system_prompts)
+
+    def _build_settings_with_provider_draft(self) -> AppSettings | None:
+        if self._settings is None:
+            return None
+        if self._provider_settings_draft is None:
+            return self._settings
+        merged = copy.deepcopy(self._settings)
+        self._copy_provider_draft_fields(self._provider_settings_draft, merged)
+        return merged
+
+    def _ensure_provider_settings_draft(self) -> AppSettings:
+        assert self._settings is not None
+        if self._provider_settings_draft is None:
+            self._provider_settings_draft = copy.deepcopy(self._settings)
+        return self._provider_settings_draft
+
+    def build_provider_apply_settings(self) -> AppSettings | None:
+        return self._build_settings_with_provider_draft()
+
+    def consume_provider_apply_settings(self) -> AppSettings | None:
+        settings = self._build_settings_with_provider_draft()
+        if settings is None:
+            return None
+        self._settings = settings
+        self._provider_settings_draft = None
+        self.has_provider_changes = False
+        return settings
+
     # --- Load Settings ---
     def load_from_settings(
         self,
@@ -1105,9 +1151,9 @@ class SettingsView(ft.Column):
     ) -> None:
         """Load current settings into the UI."""
         self._settings = settings
+        self._provider_settings_draft = None
         self._config_path = config_path
         self.has_provider_changes = False
-        self.provider_change_requires_pipeline = False
 
         # UI Language
         self._ui_text.content.value = locale_label(settings.ui.locale)
@@ -1262,13 +1308,14 @@ class SettingsView(ft.Column):
     # --- Visibility Updates ---
     def _update_api_visibility(self) -> None:
         """Update API key field visibility based on selected providers."""
-        if not self._settings:
+        settings = self._build_settings_with_provider_draft()
+        if settings is None:
             return
 
-        stt = self._settings.provider.stt
-        llm = self._settings.provider.llm
-        peer_stt = self._settings.provider.peer_stt
-        peer_enabled = bool(self._settings.ui.peer_translation_enabled)
+        stt = settings.provider.stt
+        llm = settings.provider.llm
+        peer_stt = settings.provider.peer_stt
+        peer_enabled = bool(settings.ui.peer_translation_enabled)
 
         active_stt_providers = {stt}
         if peer_enabled:
@@ -1282,9 +1329,9 @@ class SettingsView(ft.Column):
 
         qwen_regions: set[QwenRegion] = set()
         if stt == STTProviderName.QWEN_ASR or llm == LLMProviderName.QWEN:
-            qwen_regions.add(self._settings.qwen.region)
+            qwen_regions.add(settings.qwen.region)
         if peer_enabled and peer_stt == STTProviderName.QWEN_ASR:
-            qwen_regions.add(self._settings.peer_qwen_asr_stt.region or self._settings.qwen.region)
+            qwen_regions.add(settings.peer_qwen_asr_stt.region or settings.qwen.region)
 
         self._qwen_region_btn.visible = stt == STTProviderName.QWEN_ASR or llm == LLMProviderName.QWEN
         self._alibaba_key_beijing.visible = QwenRegion.BEIJING in qwen_regions
@@ -1292,10 +1339,11 @@ class SettingsView(ft.Column):
         self._update_peer_provider_visibility()
 
     def _update_peer_provider_visibility(self) -> None:
-        if not self._settings:
+        settings = self._build_settings_with_provider_draft()
+        if settings is None:
             return
 
-        peer_stt = self._settings.provider.peer_stt
+        peer_stt = settings.provider.peer_stt
         show_qwen = peer_stt == STTProviderName.QWEN_ASR
         show_soniox = peer_stt == STTProviderName.SONIOX
 
@@ -1319,9 +1367,10 @@ class SettingsView(ft.Column):
             )
             for p in STTProviderName
         ]
+        display_settings = self._build_settings_with_provider_draft()
         current = (
-            self._settings.provider.stt.value
-            if self._settings
+            display_settings.provider.stt.value
+            if display_settings is not None
             else STTProviderName.LOCAL_QWEN.value
         )
         modal = SettingsModal(
@@ -1337,13 +1386,17 @@ class SettingsView(ft.Column):
         """Handle STT provider selection from modal."""
         if not self._settings:
             return
+        current_settings = self._build_settings_with_provider_draft()
+        assert current_settings is not None
         provider = STTProviderName(value)
-        old_provider = self._settings.provider.stt.value
+        old_provider = current_settings.provider.stt.value
+        if old_provider == provider.value:
+            return
         logger.info(f"[Settings] STT provider changed: {old_provider} -> {provider.value}")
-        self._settings.provider.stt = provider
+        draft = self._ensure_provider_settings_draft()
+        draft.provider.stt = provider
         self._update_api_visibility()
         self.has_provider_changes = True
-        self.provider_change_requires_pipeline = True
 
         # Update text
         self._stt_text.content.value = provider_label(provider.value)
@@ -1370,7 +1423,6 @@ class SettingsView(ft.Column):
             self._qwen_region_btn.update()
             self._api_keys_column.update()
             self._stt_text.update()
-        self._emit_settings_changed()
 
     def _on_peer_stt_click(self, e) -> None:
         if not self.page:
@@ -1383,9 +1435,10 @@ class SettingsView(ft.Column):
             )
             for provider in STTProviderName
         ]
+        display_settings = self._build_settings_with_provider_draft()
         current = (
-            self._settings.provider.peer_stt.value
-            if self._settings
+            display_settings.provider.peer_stt.value
+            if display_settings is not None
             else STTProviderName.DEEPGRAM.value
         )
         SettingsModal(
@@ -1399,18 +1452,23 @@ class SettingsView(ft.Column):
     def _on_peer_stt_selected(self, value: str) -> None:
         if not self._settings:
             return
-        self._settings.provider.peer_stt = STTProviderName(value)
+        current_settings = self._build_settings_with_provider_draft()
+        assert current_settings is not None
+        provider = STTProviderName(value)
+        if current_settings.provider.peer_stt == provider:
+            return
+        draft = self._ensure_provider_settings_draft()
+        draft.provider.peer_stt = provider
         self._set_setting_action_text(self._peer_stt_text, provider_label(value))
         self._update_api_visibility()
         if self.page:
             self._peer_stt_text.update()
             self._api_keys_column.update()
         self.has_provider_changes = True
-        self.provider_change_requires_pipeline = True
-        self._emit_settings_changed()
 
     def _on_peer_qwen_region_click(self, e) -> None:
-        if not self.page or not self._settings:
+        display_settings = self._build_settings_with_provider_draft()
+        if not self.page or display_settings is None:
             return
         options = [
             OptionItem(value="", label=self._inherit_label()),
@@ -1423,26 +1481,35 @@ class SettingsView(ft.Column):
             options,
             self._on_peer_qwen_region_selected,
             show_description=False,
-        ).open(self._settings.peer_qwen_asr_stt.region.value if self._settings.peer_qwen_asr_stt.region else "")
+        ).open(
+            display_settings.peer_qwen_asr_stt.region.value
+            if display_settings.peer_qwen_asr_stt.region
+            else ""
+        )
 
     def _on_peer_qwen_region_selected(self, value: str) -> None:
         if not self._settings:
             return
-        self._settings.peer_qwen_asr_stt.region = QwenRegion(value) if value else None
+        current_settings = self._build_settings_with_provider_draft()
+        assert current_settings is not None
+        region = QwenRegion(value) if value else None
+        if current_settings.peer_qwen_asr_stt.region == region:
+            return
+        draft = self._ensure_provider_settings_draft()
+        draft.peer_qwen_asr_stt.region = region
         self._set_setting_action_text(
             self._peer_qwen_region_text,
-            self._peer_qwen_region_label_for(self._settings),
+            self._peer_qwen_region_label_for(self._build_settings_with_provider_draft()),
         )
         self._update_api_visibility()
         if self.page:
             self._peer_qwen_region_text.update()
             self._api_keys_column.update()
         self.has_provider_changes = True
-        self.provider_change_requires_pipeline = True
-        self._emit_settings_changed()
 
     def _on_peer_qwen_model_click(self, e) -> None:
-        if not self.page or not self._settings:
+        display_settings = self._build_settings_with_provider_draft()
+        if not self.page or display_settings is None:
             return
         options = [
             OptionItem(value="", label=self._inherit_label()),
@@ -1454,24 +1521,29 @@ class SettingsView(ft.Column):
             options,
             self._on_peer_qwen_model_selected,
             show_description=False,
-        ).open(self._settings.peer_qwen_asr_stt.model or "")
+        ).open(display_settings.peer_qwen_asr_stt.model or "")
 
     def _on_peer_qwen_model_selected(self, value: str) -> None:
         if not self._settings:
             return
-        self._settings.peer_qwen_asr_stt.model = value or None
+        current_settings = self._build_settings_with_provider_draft()
+        assert current_settings is not None
+        model = value or None
+        if current_settings.peer_qwen_asr_stt.model == model:
+            return
+        draft = self._ensure_provider_settings_draft()
+        draft.peer_qwen_asr_stt.model = model
         self._set_setting_action_text(
             self._peer_qwen_model_text,
-            self._peer_qwen_model_label_for(self._settings),
+            self._peer_qwen_model_label_for(self._build_settings_with_provider_draft()),
         )
         if self.page:
             self._peer_qwen_model_text.update()
         self.has_provider_changes = True
-        self.provider_change_requires_pipeline = True
-        self._emit_settings_changed()
 
     def _on_peer_soniox_model_click(self, e) -> None:
-        if not self.page or not self._settings:
+        display_settings = self._build_settings_with_provider_draft()
+        if not self.page or display_settings is None:
             return
         options = [
             OptionItem(value="", label=self._inherit_label()),
@@ -1483,21 +1555,25 @@ class SettingsView(ft.Column):
             options,
             self._on_peer_soniox_model_selected,
             show_description=False,
-        ).open(self._settings.peer_soniox_stt.model or "")
+        ).open(display_settings.peer_soniox_stt.model or "")
 
     def _on_peer_soniox_model_selected(self, value: str) -> None:
         if not self._settings:
             return
-        self._settings.peer_soniox_stt.model = value or None
+        current_settings = self._build_settings_with_provider_draft()
+        assert current_settings is not None
+        model = value or None
+        if current_settings.peer_soniox_stt.model == model:
+            return
+        draft = self._ensure_provider_settings_draft()
+        draft.peer_soniox_stt.model = model
         self._set_setting_action_text(
             self._peer_soniox_model_text,
-            self._peer_soniox_model_label_for(self._settings),
+            self._peer_soniox_model_label_for(self._build_settings_with_provider_draft()),
         )
         if self.page:
             self._peer_soniox_model_text.update()
         self.has_provider_changes = True
-        self.provider_change_requires_pipeline = True
-        self._emit_settings_changed()
 
     def _on_llm_click(self, e) -> None:
         """Open LLM provider selection modal."""
@@ -1530,9 +1606,10 @@ class SettingsView(ft.Column):
                 description=t("provider.qwen35_flash.description", default=""),
             ),
         ]
+        display_settings = self._build_settings_with_provider_draft()
         current = (
-            self._get_llm_modal_value(self._settings)
-            if self._settings
+            self._get_llm_modal_value(display_settings)
+            if display_settings is not None
             else GeminiLLMModel.GEMINI_3_FLASH.value
         )
         modal = SettingsModal(
@@ -1548,10 +1625,12 @@ class SettingsView(ft.Column):
         """Handle LLM provider selection from modal."""
         if not self._settings:
             return
-        old_provider = self._settings.provider.llm
-        old_gemini_model = self._settings.gemini.llm_model
-        old_openrouter_model = self._settings.openrouter.llm_model
-        old_qwen_model = self._settings.qwen.llm_model
+        current_settings = self._build_settings_with_provider_draft()
+        assert current_settings is not None
+        old_provider = current_settings.provider.llm
+        old_gemini_model = current_settings.gemini.llm_model
+        old_openrouter_model = current_settings.openrouter.llm_model
+        old_qwen_model = current_settings.qwen.llm_model
 
         if value == LLMProviderName.GEMINI.value:
             provider = LLMProviderName.GEMINI
@@ -1602,49 +1681,40 @@ class SettingsView(ft.Column):
             changes.append(f"qwen_model={old_qwen_model.value}->{qwen_model.value}")
         if changes:
             logger.info("[Settings] LLM selection changed: %s", ", ".join(changes))
-
-        self._settings.provider.llm = provider
-        if provider == LLMProviderName.QWEN:
-            self._settings.qwen.llm_model = qwen_model
-        elif provider == LLMProviderName.OPENROUTER:
-            self._settings.openrouter.llm_model = openrouter_model
         else:
-            self._settings.gemini.llm_model = gemini_model
-        llm_changed = (
-            old_provider != provider
-            or (
-                provider == LLMProviderName.QWEN and old_qwen_model != self._settings.qwen.llm_model
-            )
-            or (
-                provider == LLMProviderName.GEMINI
-                and old_gemini_model != self._settings.gemini.llm_model
-            )
-            or (
-                provider == LLMProviderName.OPENROUTER
-                and old_openrouter_model != self._settings.openrouter.llm_model
-            )
-        )
+            return
+
+        draft = self._ensure_provider_settings_draft()
+        draft.provider.llm = provider
+        if provider == LLMProviderName.QWEN:
+            draft.qwen.llm_model = qwen_model
+        elif provider == LLMProviderName.OPENROUTER:
+            draft.openrouter.llm_model = openrouter_model
+        else:
+            draft.gemini.llm_model = gemini_model
         self._update_api_visibility()
-        self.has_provider_changes = llm_changed
+        self.has_provider_changes = True
 
         # Update text
-        self._llm_text.content.value = self._get_llm_display_label(self._settings)
+        display_settings = self._build_settings_with_provider_draft()
+        assert display_settings is not None
+        self._llm_text.content.value = self._get_llm_display_label(display_settings)
         self._set_openrouter_routing_text(
-            self._get_openrouter_routing_display_label(self._settings),
+            self._get_openrouter_routing_display_label(display_settings),
         )
 
         # Update prompt if provider changed
         if old_provider != provider:
             provider_name = self._active_prompt_key()
             self._prompt_editor.set_provider(provider_name)
-            next_prompt = self._settings.system_prompts.get(provider_name, "").strip()
+            next_prompt = draft.system_prompts.get(provider_name, "").strip()
             if next_prompt:
                 self._prompt_editor.value = next_prompt
             else:
                 self._prompt_editor.load_default_prompt()
                 next_prompt = self._prompt_editor.value
-                self._settings.system_prompts[provider_name] = next_prompt
-            self._settings.system_prompt = next_prompt
+                draft.system_prompts[provider_name] = next_prompt
+            draft.system_prompt = next_prompt
 
         if self.page:
             self._qwen_region_btn.update()
@@ -1673,9 +1743,10 @@ class SettingsView(ft.Column):
                 description=t("settings.openrouter_routing.novita_first.description", default=""),
             ),
         ]
+        display_settings = self._build_settings_with_provider_draft()
         current = (
-            self._settings.openrouter.routing_mode.value
-            if self._settings
+            display_settings.openrouter.routing_mode.value
+            if display_settings is not None
             else OpenRouterRoutingMode.LATENCY.value
         )
         modal = SettingsModal(
@@ -1691,7 +1762,9 @@ class SettingsView(ft.Column):
         if not self._settings:
             return
 
-        old_value = self._settings.openrouter.routing_mode
+        current_settings = self._build_settings_with_provider_draft()
+        assert current_settings is not None
+        old_value = current_settings.openrouter.routing_mode
         try:
             new_value = OpenRouterRoutingMode(value)
         except ValueError:
@@ -1701,15 +1774,14 @@ class SettingsView(ft.Column):
             return
 
         logger.info("[Settings] OpenRouter routing mode changed: %s -> %s", old_value, new_value)
-        self._settings.openrouter.routing_mode = new_value
+        draft = self._ensure_provider_settings_draft()
+        draft.openrouter.routing_mode = new_value
         self.has_provider_changes = True
-        self.provider_change_requires_pipeline = True
         self._set_openrouter_routing_text(
-            self._get_openrouter_routing_display_label(self._settings),
+            self._get_openrouter_routing_display_label(self._build_settings_with_provider_draft()),
         )
         if self.page:
             self._openrouter_routing_text.update()
-        self._emit_settings_changed()
 
     def _on_ui_click(self, e) -> None:
         """Open UI language selection modal."""
@@ -1745,7 +1817,12 @@ class SettingsView(ft.Column):
         if not self.page:
             return
         options = [OptionItem(value=r.value, label=t(f"region.{r.value}")) for r in QwenRegion]
-        current = self._settings.qwen.region.value if self._settings else QwenRegion.BEIJING.value
+        display_settings = self._build_settings_with_provider_draft()
+        current = (
+            display_settings.qwen.region.value
+            if display_settings is not None
+            else QwenRegion.BEIJING.value
+        )
         modal = SettingsModal(
             self.page,
             t("settings.qwen_region"),
@@ -1759,11 +1836,15 @@ class SettingsView(ft.Column):
         if not self._settings:
             return
 
-        old_region = self._settings.qwen.region.value
+        current_settings = self._build_settings_with_provider_draft()
+        assert current_settings is not None
+        old_region = current_settings.qwen.region.value
+        if old_region == value:
+            return
         logger.info(f"[Settings] Qwen region changed: {old_region} -> {value}")
-        self._settings.qwen.region = QwenRegion(value)
+        draft = self._ensure_provider_settings_draft()
+        draft.qwen.region = QwenRegion(value)
         self.has_provider_changes = True
-        self.provider_change_requires_pipeline = True
 
         # Update text
         self._qwen_region_btn.text = f"{t('settings.qwen_region')} {t(f'region.{value}')}"
@@ -1773,7 +1854,6 @@ class SettingsView(ft.Column):
         self._update_api_visibility()
         if self.page:
             self._api_keys_column.update()
-        self._emit_settings_changed()
 
     def _on_secret_change(self, key: str, value: str) -> None:
         if not self._settings or not self._config_path:
@@ -2428,17 +2508,22 @@ class SettingsView(ft.Column):
     def _on_prompt_change(self, value: str) -> None:
         if not self._settings:
             return
-        self._settings.system_prompt = value
-        self._settings.system_prompts[self._active_prompt_key()] = value
-        self._emit_settings_changed()
+        prompt_key = self._active_prompt_key()
+        if self._provider_settings_draft is not None:
+            draft = self._ensure_provider_settings_draft()
+            draft.system_prompt = value
+            draft.system_prompts[prompt_key] = value
+        base_prompt_key = self._active_prompt_key_for_settings(self._settings)
+        if self._provider_settings_draft is None or prompt_key == base_prompt_key:
+            self._settings.system_prompt = value
+            self._settings.system_prompts[prompt_key] = value
+            self._emit_settings_changed()
 
     def _on_reset_prompt(self, e) -> None:
         """Reset prompt to default for current provider."""
         self._prompt_editor.load_default_prompt()
         if self._settings:
-            self._settings.system_prompt = self._prompt_editor.value
-            self._settings.system_prompts[self._active_prompt_key()] = self._prompt_editor.value
-            self._emit_settings_changed()
+            self._on_prompt_change(self._prompt_editor.value)
 
     def _apply_custom_vocabulary(self) -> None:
         if not self._settings:
@@ -2591,57 +2676,58 @@ class SettingsView(ft.Column):
         # Update text controls with current selection labels
 
         # Update text controls with current selection labels
-        if self._settings:
-            self._stt_text.content.value = provider_label(self._settings.provider.stt.value)
+        display_settings = self._build_settings_with_provider_draft()
+        if display_settings:
+            self._stt_text.content.value = provider_label(display_settings.provider.stt.value)
             self._set_setting_action_text(
                 self._peer_stt_text,
-                provider_label(self._settings.provider.peer_stt.value),
+                provider_label(display_settings.provider.peer_stt.value),
             )
-            self._llm_text.content.value = self._get_llm_display_label(self._settings)
+            self._llm_text.content.value = self._get_llm_display_label(display_settings)
             self._set_openrouter_routing_text(
-                self._get_openrouter_routing_display_label(self._settings),
+                self._get_openrouter_routing_display_label(display_settings),
             )
-            self._ui_text.content.value = locale_label(self._settings.ui.locale)
+            self._ui_text.content.value = locale_label(display_settings.ui.locale)
             self._low_latency_text.content.value = t(
-                "toggle.on" if self._settings.stt.low_latency_mode else "toggle.off"
+                "toggle.on" if display_settings.stt.low_latency_mode else "toggle.off"
             )
             self._vrc_mic_text.content.value = t(
                 "settings.vrc_mic.on"
-                if self._settings.osc.vrc_mic_intercept
+                if display_settings.osc.vrc_mic_intercept
                 else "settings.vrc_mic.off"
             )
             self._chatbox_source_text.content.value = t(
                 "settings.chatbox_source.on"
-                if self._settings.osc.chatbox_include_source
+                if display_settings.osc.chatbox_include_source
                 else "settings.chatbox_source.off"
             )
             self._set_setting_action_text(
                 self._peer_source_text,
-                self._peer_lang_display(self._settings.languages.peer_source_language),
+                self._peer_lang_display(display_settings.languages.peer_source_language),
             )
             self._set_setting_action_text(
                 self._peer_target_text,
-                self._peer_lang_display(self._settings.languages.peer_target_language),
+                self._peer_lang_display(display_settings.languages.peer_target_language),
             )
             self._set_setting_action_text(
                 self._peer_qwen_region_text,
-                self._peer_qwen_region_label_for(self._settings),
+                self._peer_qwen_region_label_for(display_settings),
             )
             self._set_setting_action_text(
                 self._peer_qwen_model_text,
-                self._peer_qwen_model_label_for(self._settings),
+                self._peer_qwen_model_label_for(display_settings),
             )
             self._set_setting_action_text(
                 self._peer_soniox_model_text,
-                self._peer_soniox_model_label_for(self._settings),
+                self._peer_soniox_model_label_for(display_settings),
             )
             self._sync_overlay_controls()
             self._sync_overlay_calibration_controls()
             self._update_peer_provider_visibility()
 
         # Qwen Region label
-        if self._settings:
-            region_val = self._settings.qwen.region.value
+        if display_settings:
+            region_val = display_settings.qwen.region.value
             self._qwen_region_btn.text = f"{t('settings.qwen_region')} {t(f'region.{region_val}')}"
 
         # Components

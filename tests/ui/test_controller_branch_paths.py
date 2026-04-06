@@ -13,6 +13,7 @@ pytest.importorskip("flet")
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
+    OpenRouterRoutingMode,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
@@ -1002,6 +1003,45 @@ async def test_init_pipeline_keeps_peer_original_runtime_available_without_peer_
     assert hub.peer_stt is None
     assert hub.peer_translation_enabled is False
     assert controller._peer_runtime is not None
+
+
+@pytest.mark.asyncio
+async def test_init_pipeline_passes_chatbox_and_peer_language_settings_to_hub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "create_llm_provider", lambda *_a, **_k: "llm")
+    monkeypatch.setattr(controller_module, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "stt")
+    monkeypatch.setattr(controller_module, "VrchatOscUdpSender", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "SmartOscQueue", lambda *a, **k: object())
+
+    def fake_hub(*_args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            llm=kwargs.get("llm"),
+            stt=kwargs.get("stt"),
+            peer_stt=kwargs.get("peer_stt"),
+        )
+
+    monkeypatch.setattr(controller_module, "ClientHub", fake_hub)
+    monkeypatch.setattr(
+        GuiController, "_configure_vrc_mic_receiver", lambda self, enabled: asyncio.sleep(0)
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.osc.chatbox_include_source = False
+    controller.settings.languages.peer_source_language = "ja"
+    controller.settings.languages.peer_target_language = "en"
+
+    await controller._init_pipeline()
+
+    assert captured["chatbox_include_source"] is False
+    assert captured["peer_source_language"] == "ja"
+    assert captured["peer_target_language"] == "en"
 
 
 @pytest.mark.asyncio
@@ -2572,28 +2612,198 @@ async def test_verify_api_key_routes_alibaba_singapore_to_qwen_fallback(
 
 
 @pytest.mark.asyncio
-async def test_apply_providers_routes_based_on_rebuild_flag(
+async def test_apply_providers_replaces_runtime_self_stt_once_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    controller = _make_controller(app=SimpleNamespace())
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+    controller._stt_desired = True
     calls: list[str] = []
 
-    async def fake_rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
-        calls.append(f"pipeline:{rebuild_stt}")
+    updated = AppSettings()
+    updated.provider.stt = STTProviderName.SONIOX
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        calls.append("replace")
+
+    async def fake_rebuild_stt_provider(self) -> None:
+        calls.append("rebuild_stt")
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        calls.append("peer")
 
     async def fake_rebuild_llm_provider(self) -> None:
         calls.append("llm")
 
-    monkeypatch.setattr(GuiController, "_rebuild_pipeline", fake_rebuild_pipeline)
+    async def fake_rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
+        calls.append(f"pipeline:{rebuild_stt}")
+
+    monkeypatch.setattr(GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild_stt_provider)
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
     monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+    monkeypatch.setattr(GuiController, "_rebuild_pipeline", fake_rebuild_pipeline)
 
-    await controller.apply_providers()
+    await controller.apply_providers(updated)
 
+    assert controller.settings is updated
+    assert calls == ["replace"]
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_rebuilds_self_stt_only_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
     controller.settings = AppSettings()
-    await controller.apply_providers(rebuild_stt=True)
-    await controller.apply_providers(rebuild_stt=False)
+    controller.hub = DummyHub()
+    controller._stt_desired = False
+    calls: list[str] = []
 
-    assert calls == ["pipeline:True", "llm"]
+    updated = AppSettings()
+    updated.provider.stt = STTProviderName.SONIOX
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        calls.append("replace")
+
+    async def fake_rebuild_stt_provider(self) -> None:
+        calls.append("rebuild_stt")
+
+    async def fake_rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
+        calls.append(f"pipeline:{rebuild_stt}")
+
+    monkeypatch.setattr(GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild_stt_provider)
+    monkeypatch.setattr(GuiController, "_rebuild_pipeline", fake_rebuild_pipeline)
+
+    await controller.apply_providers(updated)
+
+    assert calls == ["rebuild_stt"]
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_refreshes_only_peer_runtime_for_peer_provider_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+    calls: list[str] = []
+
+    updated = AppSettings()
+    updated.provider.peer_stt = STTProviderName.SONIOX
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        calls.append("peer")
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        calls.append("replace")
+
+    async def fake_rebuild_llm_provider(self) -> None:
+        calls.append("llm")
+
+    async def fake_rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
+        calls.append(f"pipeline:{rebuild_stt}")
+
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+    monkeypatch.setattr(GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider)
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+    monkeypatch.setattr(GuiController, "_rebuild_pipeline", fake_rebuild_pipeline)
+
+    await controller.apply_providers(updated)
+
+    assert calls == ["peer"]
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_rebuilds_only_llm_for_openrouter_routing_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.hub = DummyHub()
+    calls: list[str] = []
+
+    updated = AppSettings()
+    updated.provider.llm = LLMProviderName.OPENROUTER
+    updated.openrouter.routing_mode = OpenRouterRoutingMode.PARASAIL_FIRST
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+
+    async def fake_rebuild_llm_provider(self) -> None:
+        calls.append("llm")
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        calls.append("peer")
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        calls.append("replace")
+
+    async def fake_rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
+        calls.append(f"pipeline:{rebuild_stt}")
+
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+    monkeypatch.setattr(GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider)
+    monkeypatch.setattr(GuiController, "_rebuild_pipeline", fake_rebuild_pipeline)
+
+    await controller.apply_providers(updated)
+
+    assert calls == ["llm"]
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_splits_qwen_region_refresh_by_active_consumers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.QWEN
+    controller.settings.provider.stt = STTProviderName.QWEN_ASR
+    controller.settings.provider.peer_stt = STTProviderName.QWEN_ASR
+    controller.hub = DummyHub()
+    controller._stt_desired = True
+    calls: list[str] = []
+
+    updated = AppSettings()
+    updated.provider.llm = LLMProviderName.QWEN
+    updated.provider.stt = STTProviderName.QWEN_ASR
+    updated.provider.peer_stt = STTProviderName.QWEN_ASR
+    updated.qwen.region = QwenRegion.SINGAPORE
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+
+    async def fake_rebuild_llm_provider(self) -> None:
+        calls.append("llm")
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        calls.append("peer")
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        calls.append("replace")
+
+    async def fake_rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
+        calls.append(f"pipeline:{rebuild_stt}")
+
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+    monkeypatch.setattr(GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider)
+    monkeypatch.setattr(GuiController, "_rebuild_pipeline", fake_rebuild_pipeline)
+
+    await controller.apply_providers(updated)
+
+    assert calls.count("llm") == 1
+    assert calls.count("peer") == 1
+    assert calls.count("replace") == 1
+    assert not any(call.startswith("pipeline:") for call in calls)
 
 
 def test_load_or_init_settings_loads_existing_file(
@@ -2733,6 +2943,50 @@ async def test_rebuild_pipeline_restarts_runtime_and_schedules_verify(
     assert any(item[0] == "bridge_init" for item in events if isinstance(item, tuple))
     assert "bridge_run" in events
     assert "verify_run" in events
+
+
+@pytest.mark.asyncio
+async def test_rebuild_pipeline_restores_stt_when_it_was_previously_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.hub = DummyHub(llm=object(), stt=object())
+    controller.sender = object()
+    controller.osc = object()
+    controller._stt_desired = True
+    calls: list[bool] = []
+
+    async def fake_set_stt_enabled(self, enabled: bool) -> None:
+        self._stt_desired = enabled
+        calls.append(enabled)
+
+    async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
+        _ = (self, enabled)
+
+    async def fake_init_pipeline(self) -> None:
+        self.hub = DummyHub(llm=object(), stt=object())
+        self.sender = object()
+        self.osc = object()
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", fake_set_stt_enabled)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        fake_configure_vrc_mic_receiver,
+    )
+    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+    monkeypatch.setattr(GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(
+        controller_module,
+        "UIEventBridge",
+        lambda **kwargs: SimpleNamespace(run=lambda: asyncio.sleep(0)),
+    )
+
+    await controller._rebuild_pipeline(rebuild_stt=True)
+
+    assert calls == [False, True]
 
 
 @pytest.mark.asyncio

@@ -144,6 +144,9 @@ class GuiController:
     _last_stt_runtime_signature: tuple[object, ...] | None = None
     _last_self_stt_runtime_signature: tuple[object, ...] | None = None
     _last_peer_stt_runtime_signature: tuple[object, ...] | None = None
+    _last_self_stt_provider_signature: tuple[object, ...] | None = None
+    _last_peer_stt_provider_signature: tuple[object, ...] | None = None
+    _last_llm_provider_signature: tuple[object, ...] | None = None
     _last_peer_translation_enabled: bool | None = None
     _last_vrc_mic_sync_enabled: bool | None = None
     _vrc_receiver_lock: asyncio.Lock | None = None
@@ -362,11 +365,69 @@ class GuiController:
             custom_terms,
         )
 
+    def _build_self_stt_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
+        local_qwen_identity = None
+        if settings.provider.stt == STTProviderName.LOCAL_QWEN:
+            from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
+
+            local_qwen_identity = str(default_local_stt_model_dir())
+
+        return (
+            settings.provider.stt,
+            settings.deepgram_stt.model if settings.provider.stt == STTProviderName.DEEPGRAM else None,
+            settings.qwen.region if settings.provider.stt == STTProviderName.QWEN_ASR else None,
+            settings.qwen_asr_stt.model if settings.provider.stt == STTProviderName.QWEN_ASR else None,
+            settings.soniox_stt.model if settings.provider.stt == STTProviderName.SONIOX else None,
+            settings.soniox_stt.endpoint if settings.provider.stt == STTProviderName.SONIOX else None,
+            (
+                settings.soniox_stt.keepalive_interval_s
+                if settings.provider.stt == STTProviderName.SONIOX
+                else None
+            ),
+            (
+                settings.soniox_stt.trailing_silence_ms
+                if settings.provider.stt == STTProviderName.SONIOX
+                else None
+            ),
+            local_qwen_identity,
+        )
+
     def _build_stt_runtime_signature(self, settings: AppSettings) -> tuple[object, ...]:
         return self._build_self_stt_runtime_signature(settings)
 
     def _build_peer_stt_runtime_signature(self, settings: AppSettings) -> tuple[object, ...]:
         return self._build_peer_runtime_config(settings).runtime_signature
+
+    def _build_peer_stt_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
+        return build_peer_stt_provider_signature(settings)
+
+    def _build_llm_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
+        return (
+            settings.provider.llm,
+            settings.gemini.llm_model if settings.provider.llm == LLMProviderName.GEMINI else None,
+            (
+                settings.openrouter.llm_model
+                if settings.provider.llm == LLMProviderName.OPENROUTER
+                else None
+            ),
+            (
+                settings.openrouter.routing_mode
+                if settings.provider.llm == LLMProviderName.OPENROUTER
+                else None
+            ),
+            settings.qwen.llm_model if settings.provider.llm == LLMProviderName.QWEN else None,
+            settings.qwen.region if settings.provider.llm == LLMProviderName.QWEN else None,
+        )
+
+    def _sync_signature_caches(self, settings: AppSettings) -> None:
+        current_self_signature = self._build_self_stt_runtime_signature(settings)
+        self._last_stt_runtime_signature = current_self_signature
+        self._last_self_stt_runtime_signature = current_self_signature
+        self._last_peer_stt_runtime_signature = self._build_peer_stt_runtime_signature(settings)
+        self._last_self_stt_provider_signature = self._build_self_stt_provider_signature(settings)
+        self._last_peer_stt_provider_signature = self._build_peer_stt_provider_signature(settings)
+        self._last_llm_provider_signature = self._build_llm_provider_signature(settings)
+        self._last_peer_translation_enabled = settings.ui.peer_translation_enabled
 
     def _peer_runtime_should_be_active(self, settings: AppSettings) -> bool:
         return bool(
@@ -1226,10 +1287,7 @@ class GuiController:
             or prev_peer_translation_enabled != settings.ui.peer_translation_enabled
         )
 
-        self._last_stt_runtime_signature = current_self_signature
-        self._last_self_stt_runtime_signature = current_self_signature
-        self._last_peer_stt_runtime_signature = current_peer_signature
-        self._last_peer_translation_enabled = settings.ui.peer_translation_enabled
+        self._sync_signature_caches(settings)
 
         if source_language_changed or target_language_changed:
             logger.info(
@@ -1303,13 +1361,75 @@ class GuiController:
             self._log_error(msg)
             return False, str(exc)
 
-    async def apply_providers(self, *, rebuild_stt: bool = True) -> None:
-        if self.settings is None:
+    async def apply_providers(self, settings: AppSettings | None = None) -> None:
+        next_settings = settings or self.settings
+        if next_settings is None:
             return
-        if rebuild_stt:
-            await self._rebuild_pipeline(rebuild_stt=True)
-            return
-        await self._rebuild_llm_provider()
+
+        prev_settings = self.settings
+        prev_self_provider_signature = self._last_self_stt_provider_signature
+        prev_peer_provider_signature = self._last_peer_stt_provider_signature
+        prev_llm_provider_signature = self._last_llm_provider_signature
+
+        if prev_settings is not None:
+            if prev_self_provider_signature is None:
+                prev_self_provider_signature = self._build_self_stt_provider_signature(prev_settings)
+            if prev_peer_provider_signature is None:
+                prev_peer_provider_signature = self._build_peer_stt_provider_signature(prev_settings)
+            if prev_llm_provider_signature is None:
+                prev_llm_provider_signature = self._build_llm_provider_signature(prev_settings)
+
+        next_self_provider_signature = self._build_self_stt_provider_signature(next_settings)
+        next_peer_provider_signature = self._build_peer_stt_provider_signature(next_settings)
+        next_llm_provider_signature = self._build_llm_provider_signature(next_settings)
+
+        should_rebuild_llm = (
+            prev_llm_provider_signature is None
+            or next_llm_provider_signature != prev_llm_provider_signature
+        )
+        should_refresh_peer = (
+            prev_peer_provider_signature is None
+            or next_peer_provider_signature != prev_peer_provider_signature
+        )
+        should_refresh_self_stt = (
+            prev_self_provider_signature is None
+            or next_self_provider_signature != prev_self_provider_signature
+        )
+
+        self.settings = next_settings
+        self._save_settings()
+
+        if self.hub is not None:
+            self.hub.source_language = next_settings.languages.source_language
+            self.hub.target_language = next_settings.languages.target_language
+            self.hub.peer_source_language = next_settings.languages.peer_source_language
+            self.hub.peer_target_language = next_settings.languages.peer_target_language
+            self.hub.system_prompt = next_settings.system_prompt
+            self.hub.low_latency_mode = next_settings.stt.low_latency_mode
+            self.hub.low_latency_merge_gap_ms = next_settings.stt.low_latency_merge_gap_ms
+            self.hub.low_latency_spec_retry_max = next_settings.stt.low_latency_spec_retry_max
+            self.hub.hangover_s = (
+                next_settings.stt.low_latency_vad_hangover_ms / 1000.0
+                if next_settings.stt.low_latency_mode
+                else 1.1
+            )
+            self.hub.chatbox_include_source = next_settings.osc.chatbox_include_source
+            self._sync_effective_hub_flags(next_settings)
+
+        if should_rebuild_llm:
+            await self._rebuild_llm_provider()
+
+        if should_refresh_peer:
+            await self._refresh_peer_stt_runtime()
+            self._sync_effective_hub_flags(next_settings)
+
+        if should_refresh_self_stt:
+            if self._stt_desired:
+                await self._replace_runtime_stt_provider()
+            else:
+                await self._rebuild_stt_provider()
+
+        self._sync_signature_caches(next_settings)
 
     def _load_or_init_settings(self, path: Path) -> AppSettings:
         if path.exists():
@@ -1430,6 +1550,7 @@ class GuiController:
             self.overlay_state,
         )
         _ = rebuild_stt
+        restore_stt_enabled = self._stt_desired
         if self._bridge_task:
             self._bridge_task.cancel()
             await asyncio.gather(self._bridge_task, return_exceptions=True)
@@ -1476,18 +1597,15 @@ class GuiController:
         if self.overlay_state == "connected" and presenter is not None:
             await self._refresh_overlay_runtime_dependencies()
 
+        if restore_stt_enabled:
+            await self.set_stt_enabled(True)
+
         # Trigger background verification to sync button colors
         asyncio.create_task(self._verify_and_update_status())
 
     async def _init_pipeline(self) -> None:
         assert self.settings is not None
-        self._last_stt_runtime_signature = self._build_stt_runtime_signature(self.settings)
-        self._last_self_stt_runtime_signature = self._build_self_stt_runtime_signature(
-            self.settings
-        )
-        self._last_peer_stt_runtime_signature = self._build_peer_stt_runtime_signature(
-            self.settings
-        )
+        self._sync_signature_caches(self.settings)
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
 
         llm = None
@@ -1531,7 +1649,10 @@ class GuiController:
             clock=self.clock,
             source_language=self.settings.languages.source_language,
             target_language=self.settings.languages.target_language,
+            peer_source_language=self.settings.languages.peer_source_language,
+            peer_target_language=self.settings.languages.peer_target_language,
             system_prompt=self.settings.system_prompt,
+            chatbox_include_source=self.settings.osc.chatbox_include_source,
             fallback_transcript_only=True,
             translation_enabled=True,
             peer_translation_enabled=False,

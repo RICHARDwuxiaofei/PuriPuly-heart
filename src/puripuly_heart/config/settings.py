@@ -181,7 +181,7 @@ class DeepgramSTTSettings:
 @dataclass(slots=True)
 class QwenASRSTTSettings:
     model: str = "qwen3-asr-flash-realtime"
-    endpoint: str = "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
+    endpoint: str = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
 
     def validate(self) -> None:
         if not self.model:
@@ -485,7 +485,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         },
         "qwen_asr_stt": {
             "model": settings.qwen_asr_stt.model,
-            "endpoint": settings.qwen_asr_stt.endpoint,
+            "endpoint": settings.qwen.get_asr_endpoint(),
         },
         "soniox_stt": {
             "model": settings.soniox_stt.model,
@@ -621,6 +621,32 @@ def _parse_openrouter_routing_mode(value: object) -> OpenRouterRoutingMode:
         except ValueError:
             pass
     return OpenRouterRoutingMode.LATENCY
+
+
+def _infer_qwen_region_from_legacy_asr_endpoint(value: object) -> QwenRegion | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if "dashscope-intl.aliyuncs.com" in normalized:
+        return QwenRegion.SINGAPORE
+    if "dashscope.aliyuncs.com" in normalized:
+        return QwenRegion.BEIJING
+    return None
+
+
+def _parse_qwen_region(value: object, *, legacy_asr_endpoint: object = None) -> QwenRegion:
+    if isinstance(value, str):
+        normalized = value.strip()
+        try:
+            return QwenRegion(normalized)
+        except ValueError:
+            pass
+    inferred = _infer_qwen_region_from_legacy_asr_endpoint(legacy_asr_endpoint)
+    if inferred is not None:
+        return inferred
+    return QwenRegion.BEIJING
 
 
 def _llm_prompt_key(provider: LLMProviderName) -> str:
@@ -920,6 +946,20 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         data["qwen"] = qwen_data
         changed = True
 
+    qwen_asr_data = data.get("qwen_asr_stt")
+    qwen_asr_endpoint = (
+        qwen_asr_data.get("endpoint") if isinstance(qwen_asr_data, dict) else None
+    )
+
+    raw_qwen_region = qwen_data.get("region")
+    normalized_qwen_region = _parse_qwen_region(
+        raw_qwen_region,
+        legacy_asr_endpoint=qwen_asr_endpoint,
+    ).value
+    if raw_qwen_region != normalized_qwen_region:
+        qwen_data["region"] = normalized_qwen_region
+        changed = True
+
     raw_qwen_model = qwen_data.get("llm_model")
     normalized_qwen_model = _parse_qwen_llm_model(raw_qwen_model).value
     if raw_qwen_model != normalized_qwen_model:
@@ -983,6 +1023,18 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         custom_vocabulary_enabled = bool(stt_data.get("custom_vocabulary_enabled"))
     else:
         custom_vocabulary_enabled = any(bool(terms) for terms in parsed_custom_terms.values())
+
+    qwen_raw = data.get("qwen") if isinstance(data.get("qwen"), dict) else {}
+    qwen_asr_raw = data.get("qwen_asr_stt") if isinstance(data.get("qwen_asr_stt"), dict) else {}
+    qwen_settings = QwenSettings(
+        region=_parse_qwen_region(
+            qwen_raw.get("region"),
+            legacy_asr_endpoint=qwen_asr_raw.get("endpoint"),
+        ),
+        llm_model=_parse_qwen_llm_model(
+            qwen_raw.get("llm_model", QwenLLMModel.QWEN_35_PLUS.value)
+        ),
+    )
 
     settings = AppSettings(
         settings_version=_coerce_int(data.get("settings_version"), SETTINGS_SCHEMA_VERSION),
@@ -1079,11 +1131,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         ),
         qwen_asr_stt=QwenASRSTTSettings(
             model=str(data.get("qwen_asr_stt", {}).get("model", "qwen3-asr-flash-realtime")),
-            endpoint=str(
-                data.get("qwen_asr_stt", {}).get(
-                    "endpoint", "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime"
-                )
-            ),
+            endpoint=qwen_settings.get_asr_endpoint(),
         ),
         soniox_stt=SonioxSTTSettings(
             model=str(data.get("soniox_stt", {}).get("model", "stt-rt-v4")),
@@ -1130,12 +1178,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 )
             ),
         ),
-        qwen=QwenSettings(
-            region=QwenRegion(data.get("qwen", {}).get("region", QwenRegion.BEIJING.value)),
-            llm_model=_parse_qwen_llm_model(
-                data.get("qwen", {}).get("llm_model", QwenLLMModel.QWEN_35_PLUS.value)
-            ),
-        ),
+        qwen=qwen_settings,
         llm=LLMSettings(concurrency_limit=int(data.get("llm", {}).get("concurrency_limit", 5))),
         osc=OSCSettings(
             host=str(data.get("osc", {}).get("host", "127.0.0.1")),

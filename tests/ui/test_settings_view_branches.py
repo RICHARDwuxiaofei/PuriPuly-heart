@@ -257,10 +257,13 @@ def test_on_stt_selected_updates_provider_and_pipeline_flags(
 
     view._on_stt_selected(STTProviderName.SONIOX.value)
 
-    assert settings.provider.stt == STTProviderName.SONIOX
+    pending = view.build_provider_apply_settings()
+
+    assert settings.provider.stt == STTProviderName.LOCAL_QWEN
+    assert pending is not None
+    assert pending.provider.stt == STTProviderName.SONIOX
     assert view.has_provider_changes is True
-    assert view.provider_change_requires_pipeline is True
-    assert changed == [settings]
+    assert changed == []
 
 
 def test_on_peer_stt_selected_updates_provider_and_pipeline_flags(
@@ -274,10 +277,13 @@ def test_on_peer_stt_selected_updates_provider_and_pipeline_flags(
 
     view._on_peer_stt_selected(STTProviderName.SONIOX.value)
 
-    assert settings.provider.peer_stt == STTProviderName.SONIOX
+    pending = view.build_provider_apply_settings()
+
+    assert settings.provider.peer_stt == STTProviderName.DEEPGRAM
+    assert pending is not None
+    assert pending.provider.peer_stt == STTProviderName.SONIOX
     assert view.has_provider_changes is True
-    assert view.provider_change_requires_pipeline is True
-    assert changed == [settings]
+    assert changed == []
 
 
 def test_on_overlay_selected_uses_dedicated_overlay_toggle_callback(
@@ -309,13 +315,17 @@ def test_on_llm_selected_updates_model_and_prompt_state(monkeypatch: pytest.Monk
     view.load_from_settings(settings, config_path=Path("settings.json"))
     view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
 
-    assert settings.provider.llm == LLMProviderName.QWEN
-    assert settings.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS
+    pending = view.build_provider_apply_settings()
+
+    assert settings.provider.llm == LLMProviderName.GEMINI
+    assert pending is not None
+    assert pending.provider.llm == LLMProviderName.QWEN
+    assert pending.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS
     assert view._prompt_editor.value == "Q"
-    assert settings.system_prompt == "Q"
+    assert settings.system_prompt == "G"
 
     view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
-    assert view.has_provider_changes is False
+    assert view.has_provider_changes is True
 
 
 def test_on_llm_selected_updates_openrouter_model_and_prompt_state(
@@ -334,10 +344,14 @@ def test_on_llm_selected_updates_openrouter_model_and_prompt_state(
     view.load_from_settings(settings, config_path=Path("settings.json"))
     view._on_llm_selected(OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value)
 
-    assert settings.provider.llm == LLMProviderName.OPENROUTER
-    assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    pending = view.build_provider_apply_settings()
+
+    assert settings.provider.llm == LLMProviderName.GEMINI
+    assert pending is not None
+    assert pending.provider.llm == LLMProviderName.OPENROUTER
+    assert pending.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     assert view._prompt_editor.value == "O"
-    assert settings.system_prompt == "O"
+    assert settings.system_prompt == "G"
     assert view._openrouter_routing_row.visible is True
 
 
@@ -368,13 +382,16 @@ def test_on_openrouter_routing_selected_updates_settings_and_flags(
 
     view._on_openrouter_routing_selected(OpenRouterRoutingMode.PARASAIL_FIRST.value)
 
-    assert settings.openrouter.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+    pending = view.build_provider_apply_settings()
+
+    assert settings.openrouter.routing_mode == OpenRouterRoutingMode.LATENCY
+    assert pending is not None
+    assert pending.openrouter.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
     assert view._openrouter_routing_text.content.value == t(
         "settings.openrouter_routing.parasail_first"
     )
     assert view.has_provider_changes is True
-    assert view.provider_change_requires_pipeline is True
-    assert changed == [settings]
+    assert changed == []
 
 
 def test_on_llm_selected_updates_gemini_model(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -388,8 +405,12 @@ def test_on_llm_selected_updates_gemini_model(monkeypatch: pytest.MonkeyPatch) -
     view.load_from_settings(settings, config_path=Path("settings.json"))
     view._on_llm_selected(GeminiLLMModel.GEMINI_31_FLASH_LITE.value)
 
+    pending = view.build_provider_apply_settings()
+
     assert settings.provider.llm == LLMProviderName.GEMINI
-    assert settings.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
+    assert settings.gemini.llm_model == GeminiLLMModel.GEMINI_3_FLASH
+    assert pending is not None
+    assert pending.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
     assert view._prompt_editor.value == "G"
     assert settings.system_prompt == "G"
     assert view.has_provider_changes is True
@@ -445,10 +466,52 @@ def test_on_ui_and_region_selection_emit_changes(monkeypatch: pytest.MonkeyPatch
     view._on_qwen_region_selected(QwenRegion.SINGAPORE.value)
 
     assert settings.ui.locale == "ko"
-    assert settings.qwen.region == QwenRegion.SINGAPORE
+    assert settings.qwen.region == QwenRegion.BEIJING
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.qwen.region == QwenRegion.SINGAPORE
     assert view.has_provider_changes is True
-    assert view.provider_change_requires_pipeline is True
-    assert len(changed) == 2
+    assert len(changed) == 1
+    assert changed[0].qwen.region == QwenRegion.BEIJING
+
+
+def test_provider_draft_does_not_leak_into_immediate_settings_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._on_stt_selected(STTProviderName.SONIOX.value)
+    view._on_ui_selected("ko")
+
+    pending = view.build_provider_apply_settings()
+
+    assert len(changed) == 1
+    assert changed[0].ui.locale == "ko"
+    assert changed[0].provider.stt == STTProviderName.LOCAL_QWEN
+    assert pending is not None
+    assert pending.provider.stt == STTProviderName.SONIOX
+
+
+def test_provider_selection_equality_guards_skip_noop_draft_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._on_stt_selected(STTProviderName.LOCAL_QWEN.value)
+    view._on_peer_stt_selected(STTProviderName.DEEPGRAM.value)
+    view._on_openrouter_routing_selected(OpenRouterRoutingMode.LATENCY.value)
+    view._on_qwen_region_selected(QwenRegion.BEIJING.value)
+
+    assert view.has_provider_changes is False
+    assert changed == []
 
 
 def test_on_secret_change_saves_and_clears_keys(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -550,7 +613,11 @@ def test_peer_qwen_region_override_can_be_cleared_back_to_inherited_none(
 
     view._on_peer_qwen_region_selected("")
 
-    assert settings.peer_qwen_asr_stt.region is None
+    pending = view.build_provider_apply_settings()
+
+    assert settings.peer_qwen_asr_stt.region == QwenRegion.BEIJING
+    assert pending is not None
+    assert pending.peer_qwen_asr_stt.region is None
     assert view._peer_qwen_region_text.content.value == t("settings.peer_provider.follow_self")
     assert region_updates == ["peer_qwen_region_text"]
     assert api_key_updates == ["api_keys_column"]
@@ -575,7 +642,11 @@ def test_peer_soniox_model_override_can_be_cleared_back_to_inherited_none(
 
     view._on_peer_soniox_model_selected("")
 
-    assert settings.peer_soniox_stt.model is None
+    pending = view.build_provider_apply_settings()
+
+    assert settings.peer_soniox_stt.model == "stt-rt-v4"
+    assert pending is not None
+    assert pending.peer_soniox_stt.model is None
     assert view._peer_soniox_model_text.content.value == t("settings.peer_provider.follow_self")
     assert model_updates == ["peer_soniox_model_text"]
 
@@ -641,7 +712,11 @@ def test_on_peer_stt_selected_refreshes_api_visibility_and_redraws_immediately(
 
     view._on_peer_stt_selected(STTProviderName.SONIOX.value)
 
-    assert settings.provider.peer_stt == STTProviderName.SONIOX
+    pending = view.build_provider_apply_settings()
+
+    assert settings.provider.peer_stt == STTProviderName.DEEPGRAM
+    assert pending is not None
+    assert pending.provider.peer_stt == STTProviderName.SONIOX
     assert view._peer_stt_text.content.value == t("provider.soniox")
     assert api_key_updates == ["peer_stt_text", "api_keys_column"]
 
