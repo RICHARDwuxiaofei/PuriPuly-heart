@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import app from '../src/index';
-import { BROKER_SERVICE_NAME } from '../src/contract';
+import {
+  BROKER_SERVICE_NAME,
+  MANAGED_TRIAL_BUDGET_POLICY,
+  MANAGED_TRIAL_COST_ACCOUNTING_POLICY,
+  MANAGED_TRIAL_ENTITLEMENT_POLICY,
+  MANAGED_TRIAL_LIVE_USAGE_POLICY,
+  TRIAL_PROVIDER_POLICY,
+} from '../src/contract';
 
 describe('broker foundation', () => {
   it('exposes a fetch-compatible Hono worker app with explicit bindings', async () => {
@@ -47,6 +54,13 @@ describe('broker foundation', () => {
         },
         upstreamProviderRouting: 'unpinned-by-broker',
         excludedProviders: ['Alibaba'],
+      },
+      managedTrialPolicy: {
+        managedPath: TRIAL_PROVIDER_POLICY.managedFreeTrial,
+        budget: MANAGED_TRIAL_BUDGET_POLICY,
+        onboardingCostAccounting: MANAGED_TRIAL_COST_ACCOUNTING_POLICY,
+        entitlement: MANAGED_TRIAL_ENTITLEMENT_POLICY,
+        liveUsage: MANAGED_TRIAL_LIVE_USAGE_POLICY,
       },
     });
   });

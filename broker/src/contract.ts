@@ -1,3 +1,19 @@
+import {
+  MANAGED_TRIAL_POLICY,
+  TRIAL_PROVIDER_POLICY,
+} from './trial-policy';
+
+export {
+  MANAGED_TRIAL_BUDGET_POLICY,
+  MANAGED_TRIAL_COST_ACCOUNTING_POLICY,
+  MANAGED_TRIAL_ENTITLEMENT_POLICY,
+  MANAGED_TRIAL_LIFECYCLE_VALUES,
+  MANAGED_TRIAL_LIVE_USAGE_POLICY,
+  MANAGED_TRIAL_POLICY,
+  TRIAL_PROVIDER_POLICY,
+} from './trial-policy';
+export type { ManagedTrialLifecycle } from './trial-policy';
+
 export const BROKER_SERVICE_NAME = 'puripuly-heart-broker';
 
 export const BROKER_RUNTIME_STACK = {
@@ -41,15 +57,6 @@ export const SERVICE_BOUNDARY = {
   inferencePath: 'app-direct-to-openrouter',
 } as const;
 
-export const TRIAL_PROVIDER_POLICY = {
-  managedFreeTrial: {
-    provider: 'OpenRouter',
-    model: 'google/gemma-4-26b-a4b-it',
-  },
-  upstreamProviderRouting: 'unpinned-by-broker',
-  excludedProviders: ['Alibaba'],
-} as const;
-
 export const FOUNDATION_RESPONSE = {
   service: BROKER_SERVICE_NAME,
   runtime: BROKER_RUNTIME_STACK,
@@ -57,4 +64,5 @@ export const FOUNDATION_RESPONSE = {
   hosting: HOSTING_ASSUMPTIONS,
   serviceBoundary: SERVICE_BOUNDARY,
   trialProviderPolicy: TRIAL_PROVIDER_POLICY,
+  managedTrialPolicy: MANAGED_TRIAL_POLICY,
 } as const;
