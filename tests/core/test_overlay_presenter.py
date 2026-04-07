@@ -323,6 +323,92 @@ async def test_presenter_reschedules_hidden_peer_expiration_when_translation_bec
 
 
 @pytest.mark.asyncio
+async def test_presenter_reschedules_closed_self_expiration_with_translation_bonus() -> None:
+    bridge = RecordingPresentationBridge()
+    clock = FakeClock(_now=10.0)
+    sleep_calls: list[float] = []
+    cancelled_delays: list[float] = []
+    sleep_events: list[asyncio.Event] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+        release = asyncio.Event()
+        sleep_events.append(release)
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled_delays.append(delay)
+            raise
+        clock.advance(delay)
+        await asyncio.sleep(0)
+
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=clock,
+        sleep=fake_sleep,
+    )
+    adapter = OverlayEventAdapter(clock=clock)
+    transcript = Transcript(
+        utterance_id=uuid4(),
+        channel="self",
+        text="self original",
+        is_final=True,
+        created_at=10.0,
+    )
+
+    await presenter.emit(
+        adapter.transcript_final(
+            transcript,
+            source_language="ko",
+            target_language="en",
+        )
+    )
+    await presenter.emit(
+        adapter.utterance_closed(
+            utterance_id=transcript.utterance_id,
+            channel="self",
+            created_at=10.1,
+        )
+    )
+
+    await asyncio.sleep(0)
+
+    assert sleep_calls == [8.0]
+
+    clock.advance(7.0)
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=transcript.utterance_id,
+            channel="self",
+            text="self translation",
+            source_language="ko",
+            target_language="en",
+            applied_context_mode=None,
+            created_at=17.0,
+        )
+    )
+
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert cancelled_delays == [8.0]
+    assert sleep_calls == [8.0, 5.0]
+    assert presenter.snapshot().blocks[0].secondary_text == "self translation"
+
+    sleep_events[0].set()
+    await asyncio.sleep(0)
+
+    assert presenter.snapshot().blocks[0].secondary_text == "self translation"
+
+    sleep_events[1].set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert presenter.snapshot().blocks == []
+
+
+@pytest.mark.asyncio
 async def test_presenter_drops_closed_hidden_peer_entry_once_translation_ttl_expires() -> None:
     bridge = RecordingPresentationBridge()
     clock = FakeClock(_now=10.0)

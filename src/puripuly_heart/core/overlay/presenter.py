@@ -35,6 +35,7 @@ _ACTIVE_SELF_BLOCK_ID = "self:active"
 _CLOSED_TOMBSTONE_LIMIT = 64
 LATE_ARRIVAL_WINDOW_SECONDS = 5.0
 VISIBLE_TTL_SECONDS = 8.0
+SELF_TRANSLATION_TTL_BONUS_SECONDS = 4.0
 SleepFn = Callable[[float], Awaitable[None]]
 
 
@@ -526,7 +527,10 @@ class OverlayPresenter(OverlaySink):
             return None
         if entry.visible_since is None:
             return entry.closed_at + LATE_ARRIVAL_WINDOW_SECONDS
-        return max(entry.closed_at, entry.visible_since + VISIBLE_TTL_SECONDS)
+        visible_ttl_seconds = VISIBLE_TTL_SECONDS
+        if entry.channel == "self" and entry.translation_text.strip():
+            visible_ttl_seconds += SELF_TRANSLATION_TTL_BONUS_SECONDS
+        return max(entry.closed_at, entry.visible_since + visible_ttl_seconds)
 
     def _remove_entry(
         self,
