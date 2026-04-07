@@ -229,3 +229,4 @@ docs/superpowers
 .worktrees/
 .superpowers/
 /settings.json
+opencode.json
