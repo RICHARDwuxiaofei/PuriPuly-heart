@@ -18,4 +18,4 @@ Use `pnpm --filter @puripuly-heart/broker run verify:config` to exercise the pin
 
 ## Verification environment
 
-Broker verification is WSL/Linux-only. Run `pnpm install`, Vitest, and Wrangler from a WSL-internal workspace, not from Windows or shared `/mnt/c/...` `node_modules`.
+Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from a Linux-native workspace (for example, a WSL-internal path or a regular Linux checkout), not from Windows or shared `/mnt/c/...` `node_modules`.
