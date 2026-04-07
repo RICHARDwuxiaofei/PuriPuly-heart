@@ -197,6 +197,12 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 
+# Node / pnpm
+node_modules/
+.pnpm-store/
+broker/worker-configuration.d.ts
+
+
 # PyPI configuration file
 .pypirc
 
