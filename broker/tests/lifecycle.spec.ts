@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   MANAGED_TRIAL_ENTITLEMENT_POLICY,
   MANAGED_TRIAL_LIFECYCLE_VALUES,
+  OPENROUTER_ENTITLEMENT_STATUS_VALUES,
 } from '../src/contract';
 
 describe('managed trial entitlement lifecycle', () => {
@@ -24,5 +25,14 @@ describe('managed trial entitlement lifecycle', () => {
       field: 'managed_availability',
       reportedSeparatelyFromLifecycle: true,
     });
+  });
+
+  it('stores concrete entitlement rows only and treats none as row absence', () => {
+    expect(OPENROUTER_ENTITLEMENT_STATUS_VALUES).toEqual([
+      'pending_release',
+      'active',
+      'expired',
+      'revoked',
+    ]);
   });
 });

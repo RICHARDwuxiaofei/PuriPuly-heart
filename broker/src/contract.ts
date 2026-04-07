@@ -4,6 +4,15 @@ import {
 } from './trial-policy';
 
 export {
+  BROKER_PERSISTENCE_MODEL,
+  BROKER_RETENTION_POLICY,
+  BROKER_RUNTIME_CONFIG_KEYS,
+  BROKER_RUNTIME_CONFIG_SCHEMA,
+  DEFAULT_BROKER_ABUSE_CONTROLS,
+  FINGERPRINT_SALT_POLICY,
+  OPENROUTER_ENTITLEMENT_STATUS_VALUES,
+} from './persistence';
+export {
   MANAGED_TRIAL_BUDGET_POLICY,
   MANAGED_TRIAL_COST_ACCOUNTING_POLICY,
   MANAGED_TRIAL_ENTITLEMENT_POLICY,
@@ -12,6 +21,17 @@ export {
   MANAGED_TRIAL_POLICY,
   TRIAL_PROVIDER_POLICY,
 } from './trial-policy';
+export type {
+  BrokerDailyIssuanceCapConfig,
+  BrokerEndpointRateLimitConfig,
+  BrokerAbuseControlsConfigValue,
+  BrokerConfigRow,
+  FingerprintSaltConfigValue,
+  FingerprintSaltVersion,
+  InstallationRecord,
+  OpenRouterEntitlementRecord,
+  OpenRouterEntitlementStatus,
+} from './persistence';
 export type { ManagedTrialLifecycle } from './trial-policy';
 
 export const BROKER_SERVICE_NAME = 'puripuly-heart-broker';

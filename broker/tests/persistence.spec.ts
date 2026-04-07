@@ -1,0 +1,201 @@
+import { existsSync, readFileSync } from 'node:fs';
+
+import { describe, expect, it } from 'vitest';
+
+import app from '../src/index';
+
+const FIRST_MIGRATION = new URL(
+  '../migrations/0000_define_broker_persistent_state.sql',
+  import.meta.url,
+);
+
+describe('broker persistent state model', () => {
+  it('defines the D1 table contract, runtime config keys, and minimal release-session state', async () => {
+    const contract = await import('../src/contract');
+
+    expect(contract).toHaveProperty('BROKER_RUNTIME_CONFIG_KEYS', {
+      fingerprintSalt: 'fingerprint_salt',
+      abuseControls: 'abuse_controls',
+    });
+    expect(contract).toHaveProperty('BROKER_RUNTIME_CONFIG_SCHEMA', {
+      fingerprint_salt: ['current', 'previous', 'rotated_at'],
+      abuse_controls: {
+        trialChallenge: {
+          endpoint: 'POST /v1/trial/challenge',
+          scope: 'ip',
+          maxRequests: 10,
+          windowMinutes: 15,
+        },
+        trialChallengeVerify: {
+          endpoint: 'POST /v1/trial/challenge/verify',
+          scope: 'installation_id',
+          maxRequests: 5,
+          windowMinutes: 15,
+        },
+        openrouterIssue: {
+          endpoint: 'POST /v1/providers/openrouter/issue',
+          scope: 'installation_id',
+          maxRequests: 3,
+          windowMinutes: 15,
+        },
+        trialStatus: {
+          endpoint: 'GET /v1/trial/status',
+          scope: 'installation_id',
+          maxRequests: 30,
+          windowMinutes: 15,
+        },
+        newActiveEntitlementsPerDay: {
+          endpoint: 'POST /v1/providers/openrouter/issue',
+          scope: 'global',
+          maxCount: null,
+          windowDays: 1,
+        },
+      },
+    });
+    expect(contract).toHaveProperty('BROKER_PERSISTENCE_MODEL', {
+      database: 'Cloudflare D1',
+      tables: {
+        brokerConfig: {
+          name: 'broker_config',
+          primaryKey: 'key',
+          columns: ['key', 'value', 'updated_at'],
+          valueEncoding: 'JSON',
+          supportedKeys: ['fingerprint_salt', 'abuse_controls'],
+          constraints: {
+            key: 'supported-keys-only',
+            value: 'valid-json',
+          },
+          seedRows: ['fingerprint_salt', 'abuse_controls'],
+        },
+        installations: {
+          name: 'installations',
+          primaryKey: 'installation_id',
+          columns: [
+            'installation_id',
+            'device_public_key',
+            'hardware_hash',
+            'hardware_hash_salt_version',
+            'app_version',
+            'challenge',
+            'challenge_expires_at',
+            'challenge_salt_version',
+            'created_at',
+            'last_seen_at',
+          ],
+          unique: ['device_public_key'],
+          indexed: [
+            'hardware_hash',
+            'hardware_hash_salt_version',
+            'challenge_expires_at',
+            'last_seen_at',
+          ],
+          updateRules: {
+            onChallenge: [
+              'overwrite challenge',
+              'overwrite challenge_expires_at',
+              'overwrite challenge_salt_version',
+              'overwrite app_version',
+              'touch last_seen_at',
+            ],
+            onVerify: [
+              'clear challenge',
+              'clear challenge_expires_at',
+              'clear challenge_salt_version',
+              'persist hardware_hash only after successful verify',
+              'persist hardware_hash_salt_version with hardware_hash',
+            ],
+            beforeVerify: ['hardware_hash stays null until verify'],
+          },
+        },
+        openrouterEntitlements: {
+          name: 'openrouter_entitlements',
+          provider: 'OpenRouter',
+          rowCardinality: 'zero-or-one-row-per-installation',
+          primaryKey: 'installation_id',
+          absenceRepresents: 'none',
+          storedStatuses: ['pending_release', 'active', 'expired', 'revoked'],
+          columns: [
+            'installation_id',
+            'status',
+            'budget_usd',
+            'managed_credential_ref',
+            'issued_at',
+            'expires_at',
+            'release_session_ref',
+            'release_token_hash',
+            'release_token_expires_at',
+          ],
+          unique: ['managed_credential_ref'],
+          indexed: ['status', 'expires_at'],
+          partialUniqueIndexes: [
+            {
+              name: 'idx_openrouter_entitlements_release_token_hash',
+              columns: ['release_token_hash'],
+              predicate: 'release_token_hash IS NOT NULL',
+            },
+          ],
+          updateStrategy: 'in-place',
+          liveRemainingBudgetSource: 'OpenRouter metadata',
+          releaseSessionState: {
+            storage: 'ephemeral-columns-on-openrouter_entitlements',
+            fields: [
+              'release_session_ref',
+              'release_token_hash',
+              'release_token_expires_at',
+            ],
+            releaseToken: {
+              binding: 'installation-bound',
+              oneTimeUse: true,
+              ttlMinutes: 15,
+              issuanceIdempotencyKey: 'installation_identity + release_session_ref',
+              verifyBehavior: 'rotate for existing pending_release row',
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it('keeps persistence details out of the public foundation response', async () => {
+    const response = await app.request('http://broker.test/v1/foundation');
+    expect(response.status).toBe(200);
+
+    const payload = (await response.json()) as Record<string, unknown>;
+
+    expect(payload).not.toHaveProperty('persistence');
+    expect(payload).not.toHaveProperty('brokerPersistenceModel');
+    expect(payload).not.toHaveProperty('runtimeConfig');
+  });
+
+  it('ships a first D1 migration that creates the documented tables and indexes', () => {
+    expect(existsSync(FIRST_MIGRATION)).toBe(true);
+    if (!existsSync(FIRST_MIGRATION)) {
+      return;
+    }
+
+    const migration = readFileSync(FIRST_MIGRATION, 'utf8');
+
+    expect(migration).toContain('CREATE TABLE broker_config');
+    expect(migration).toContain('CREATE TABLE installations');
+    expect(migration).toContain('CREATE TABLE openrouter_entitlements');
+    expect(migration).toContain('device_public_key TEXT NOT NULL UNIQUE');
+    expect(migration).toContain('hardware_hash TEXT');
+    expect(migration).toContain('hardware_hash_salt_version INTEGER');
+    expect(migration).toContain('challenge TEXT');
+    expect(migration).toContain('challenge_expires_at TEXT');
+    expect(migration).toContain('challenge_salt_version INTEGER');
+    expect(migration).toContain("INSERT INTO broker_config (key, value)");
+    expect(migration).toContain("'abuse_controls'");
+    expect(migration).toContain("CHECK(status IN ('pending_release', 'active', 'expired', 'revoked'))");
+    expect(migration).toContain('managed_credential_ref TEXT UNIQUE');
+    expect(migration).toContain('release_session_ref TEXT');
+    expect(migration).toContain('release_token_hash TEXT');
+    expect(migration).toContain('release_token_expires_at TEXT');
+    expect(migration).toContain('CREATE INDEX idx_installations_hardware_hash');
+    expect(migration).toContain('CREATE INDEX idx_installations_hardware_hash_salt_version');
+    expect(migration).toContain('CREATE INDEX idx_installations_challenge_expires_at');
+    expect(migration).toContain('CREATE INDEX idx_installations_last_seen_at');
+    expect(migration).toContain('CREATE INDEX idx_openrouter_entitlements_status');
+    expect(migration).toContain('CREATE INDEX idx_openrouter_entitlements_expires_at');
+  });
+});
