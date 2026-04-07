@@ -56,6 +56,7 @@ class PeerTranscriptFinal(_TranscriptEvent):
 class SelfActiveUpdate(OverlayEvent):
     text: str
     occupant_key: str
+    secondary_text: str = ""
 
     EVENT_TYPE: ClassVar[str] = "self_active_update"
 
@@ -236,6 +237,7 @@ class OverlayEventAdapter:
         self,
         *,
         text: str,
+        secondary_text: str = "",
         occupant_key: str,
         created_at: float | None = None,
     ) -> SelfActiveUpdate:
@@ -246,6 +248,7 @@ class OverlayEventAdapter:
                 created_at=created_at,
             ),
             text=text,
+            secondary_text=secondary_text,
             occupant_key=occupant_key,
         )
 

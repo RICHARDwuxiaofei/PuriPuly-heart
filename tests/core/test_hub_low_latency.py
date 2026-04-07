@@ -608,6 +608,44 @@ class TestResumeEndTimeout:
 
         await hub.stop()
 
+    @pytest.mark.asyncio
+    async def test_resume_confirmed_without_stt_clears_active_secondary_in_same_call(self):
+        clock = FakeClock(initial_time=10.0)
+        overlay_sink = RecordingOverlaySink()
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            overlay_sink=overlay_sink,
+            clock=clock,
+            low_latency_mode=True,
+        )
+        first_utterance_id = uuid4()
+        resumed_utterance_id = uuid4()
+        merge_id = uuid4()
+        buffer = _MergeBuffer(
+            merge_id=merge_id,
+            parts=["첫 번째"],
+            utterance_ids=[first_utterance_id],
+            spec_text="첫 번째",
+            spec_translation=Translation(utterance_id=merge_id, text="translated live"),
+            resume_pending=True,
+            resume_utterance_id=resumed_utterance_id,
+            resume_chunk_count=2,
+        )
+        hub._merge_buffer = buffer
+        hub._overlay_active_self_text = "첫 번째"
+        hub._overlay_active_self_secondary_text = "translated live"
+
+        await hub.handle_vad_event(SpeechChunk(resumed_utterance_id, chunk=samples(0.5)))
+
+        assert buffer.resume_confirmed is True
+        assert buffer.spec_translation is None
+        assert [event.type for event in overlay_sink.events] == ["self_active_update"]
+        assert overlay_sink.events[0].text == "첫 번째"
+        assert overlay_sink.events[0].secondary_text == ""
+        assert hub._overlay_active_self_secondary_text == ""
+
 
 class TestSpecCommitPaths:
     def test_soft_reuse_mode_accepts_only_safe_boundary_changes(self):

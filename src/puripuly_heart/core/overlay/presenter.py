@@ -67,6 +67,7 @@ class _LogicalCaptionEntry:
 @dataclass(slots=True)
 class _ActiveSelfEntry:
     text: str
+    secondary_text: str
     last_updated_seq: int
     occupant_key: str
     appearance_seq: int
@@ -196,6 +197,7 @@ class OverlayPresenter(OverlaySink):
             if (
                 self._active_self is not None
                 and self._active_self.text == event.text
+                and self._active_self.secondary_text == event.secondary_text
                 and self._active_self.occupant_key == event.occupant_key
                 and self._active_self.appearance_seq == appearance_seq
             ):
@@ -203,6 +205,7 @@ class OverlayPresenter(OverlaySink):
                 return False
             self._active_self = _ActiveSelfEntry(
                 text=event.text,
+                secondary_text=event.secondary_text,
                 last_updated_seq=event.seq,
                 occupant_key=event.occupant_key,
                 appearance_seq=appearance_seq,
@@ -347,7 +350,7 @@ class OverlayPresenter(OverlaySink):
                     channel="self",
                     block_variant="active_self",
                     primary_text=self._active_self.text,
-                    secondary_text="",
+                    secondary_text=self._active_self.secondary_text,
                     secondary_enabled=self.show_translation,
                 )
             )

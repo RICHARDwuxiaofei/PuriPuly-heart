@@ -104,6 +104,22 @@ def test_overlay_event_adapter_self_active_update_carries_occupant_key() -> None
 
     assert event.type == "self_active_update"
     assert event.occupant_key == "self:merge-1"
+    assert event.secondary_text == ""
+
+
+def test_overlay_event_adapter_self_active_update_accepts_secondary_text() -> None:
+    adapter = OverlayEventAdapter()
+
+    event = adapter.self_active_update(
+        text="hello live",
+        secondary_text="translated live",
+        occupant_key="self:merge-1",
+        created_at=11.0,
+    )
+
+    assert event.type == "self_active_update"
+    assert event.occupant_key == "self:merge-1"
+    assert event.secondary_text == "translated live"
 
 
 def test_overlay_presentation_snapshot_rejects_non_list_blocks() -> None:

@@ -4,12 +4,13 @@ import asyncio
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
+import numpy as np
 import pytest
 
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.orchestrator.hub import ClientHub, ContextEntry, _MergeBuffer
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
-from puripuly_heart.core.vad.gating import SpeechEnd
+from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd
 from puripuly_heart.domain.events import (
     STTErrorEvent,
     STTFinalEvent,
@@ -87,6 +88,18 @@ class QueueingSTT:
             if item is None:
                 return
             yield item
+
+
+@dataclass(slots=True)
+class BlockingOverlaySink:
+    events: list[object] = field(default_factory=list)
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def emit(self, event: object) -> None:
+        self.events.append(event)
+        self.started.set()
+        await self.release.wait()
 
 
 @pytest.mark.asyncio
@@ -431,6 +444,52 @@ async def test_handle_vad_event_speech_end_tracks_timing_and_forwards_to_stt() -
     assert hub._utterance_start_times[utterance_id] == 10.0
     assert utterance_id in hub._speech_ended_ids
     assert stt.handled == [SpeechEnd(utterance_id)]
+
+
+@pytest.mark.asyncio
+async def test_handle_vad_event_forwards_resume_confirming_chunk_before_overlay_resync() -> None:
+    stt = StubSTT()
+    sink = BlockingOverlaySink()
+    clock = FakeClock(_now=10.0)
+    hub = ClientHub(
+        stt=stt,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        clock=clock,
+        low_latency_mode=True,
+    )
+    first_utterance_id = uuid4()
+    resumed_utterance_id = uuid4()
+    merge_id = uuid4()
+    chunk = SpeechChunk(resumed_utterance_id, chunk=np.zeros((1,), dtype=np.float32))
+
+    hub._merge_buffer = _MergeBuffer(
+        merge_id=merge_id,
+        parts=["hello live"],
+        utterance_ids=[first_utterance_id],
+        spec_text="hello live",
+        spec_translation=Translation(utterance_id=merge_id, text="translated live"),
+        resume_pending=True,
+        resume_utterance_id=resumed_utterance_id,
+        resume_chunk_count=2,
+    )
+    hub._overlay_active_self_text = "hello live"
+    hub._overlay_active_self_secondary_text = "translated live"
+
+    task = asyncio.create_task(hub.handle_vad_event(chunk))
+    await sink.started.wait()
+
+    assert len(stt.handled) == 1
+    assert stt.handled[0] is chunk
+    assert task.done() is False
+
+    sink.release.set()
+    await task
+
+    assert sink.events[-1].type == "self_active_update"
+    assert sink.events[-1].text == "hello live"
+    assert sink.events[-1].secondary_text == ""
 
 
 @pytest.mark.asyncio

@@ -5,13 +5,14 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
+import numpy as np
 import pytest
 
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.orchestrator import hub as hub_module
 from puripuly_heart.core.orchestrator.hub import ClientHub
-from puripuly_heart.core.vad.gating import SpeechEnd
+from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
 from puripuly_heart.domain.events import STTFinalEvent, STTPartialEvent
 from puripuly_heart.domain.models import Transcript
 from tests.helpers.fakes import RecordingOscQueue
@@ -122,6 +123,33 @@ class BlockingTranslateLLMProvider(LLMProvider):
             self.release = asyncio.get_running_loop().create_future()
         await self.release
         raise AssertionError("blocking provider should be cancelled before release")
+
+    async def close(self) -> None:
+        return
+
+
+@dataclass(slots=True)
+class SequencedTranslateLLMProvider(LLMProvider):
+    responses: list[str]
+    delay_s: float = 0.01
+    calls: list[str] = field(default_factory=list)
+
+    async def translate(
+        self,
+        *,
+        utterance_id: UUID,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ):
+        _ = (utterance_id, system_prompt, source_language, target_language, context)
+        self.calls.append(text)
+        await asyncio.sleep(self.delay_s)
+        if not self.responses:
+            raise AssertionError("no translate response configured")
+        return hub_module.Translation(utterance_id=utterance_id, text=self.responses.pop(0))
 
     async def close(self) -> None:
         return
@@ -449,6 +477,167 @@ async def test_low_latency_self_active_updates_only_when_merged_text_changes() -
         "self_active_update",
     ]
     assert [event.text for event in sink.events] == ["hello", "hello world"]
+
+
+@pytest.mark.asyncio
+async def test_low_latency_self_spec_translation_re_emits_active_update_with_secondary_only() -> None:
+    sink = RecordingOverlaySink()
+    osc = RecordingOscQueue()
+    hub = ClientHub(
+        stt=None,
+        llm=SequencedTranslateLLMProvider(responses=["translated live"]),
+        osc=osc,
+        overlay_sink=sink,
+        clock=FakeClock(_now=10.0),
+        low_latency_mode=True,
+        low_latency_awaiting_vad_timeout_s=10.0,
+    )
+    utterance_id = uuid4()
+
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=utterance_id,
+            transcript=Transcript(
+                utterance_id=utterance_id,
+                text="hello live",
+                is_final=True,
+                created_at=11.0,
+            ),
+        )
+    )
+    buffer = hub._merge_buffer
+    assert buffer is not None
+    assert buffer.spec_task is not None
+    await asyncio.gather(buffer.spec_task, return_exceptions=True)
+
+    assert [event.type for event in sink.events] == [
+        "self_active_update",
+        "self_active_update",
+    ]
+    assert sink.events[0].text == "hello live"
+    assert sink.events[0].secondary_text == ""
+    assert sink.events[1].occupant_key == sink.events[0].occupant_key
+    assert sink.events[1].text == "hello live"
+    assert sink.events[1].secondary_text == "translated live"
+    assert [event.type for event in sink.events if event.type != "self_active_update"] == []
+    assert hub._merge_buffer is buffer
+    assert osc.messages == []
+
+
+@pytest.mark.asyncio
+async def test_low_latency_self_active_secondary_clears_on_soft_reuse_mismatch_then_recovers() -> None:
+    sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=SequencedTranslateLLMProvider(responses=["translated one", "translated two"]),
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        clock=FakeClock(_now=10.0),
+        low_latency_mode=True,
+        low_latency_awaiting_vad_timeout_s=10.0,
+    )
+    utterance_id = uuid4()
+
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=utterance_id,
+            transcript=Transcript(
+                utterance_id=utterance_id,
+                text="hello live",
+                is_final=True,
+                created_at=11.0,
+            ),
+        )
+    )
+    buffer = hub._merge_buffer
+    assert buffer is not None
+    assert buffer.spec_task is not None
+    await asyncio.gather(buffer.spec_task, return_exceptions=True)
+
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=utterance_id,
+            transcript=Transcript(
+                utterance_id=utterance_id,
+                text="bye now",
+                is_final=True,
+                created_at=12.0,
+            ),
+        )
+    )
+    assert buffer.spec_task is not None
+    await asyncio.gather(buffer.spec_task, return_exceptions=True)
+
+    active_events = [event for event in sink.events if event.type == "self_active_update"]
+    assert [event.secondary_text for event in active_events] == [
+        "",
+        "translated one",
+        "",
+        "translated two",
+    ]
+    assert [event.text for event in active_events] == [
+        "hello live",
+        "hello live",
+        "hello live bye now",
+        "hello live bye now",
+    ]
+    assert [event.type for event in sink.events if event.type != "self_active_update"] == []
+
+
+@pytest.mark.asyncio
+async def test_low_latency_self_active_secondary_clears_when_resume_is_confirmed() -> None:
+    sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=SequencedTranslateLLMProvider(responses=["translated live"]),
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        clock=FakeClock(_now=10.0),
+        low_latency_mode=True,
+        low_latency_awaiting_vad_timeout_s=10.0,
+    )
+    first_utterance_id = uuid4()
+    resumed_utterance_id = uuid4()
+
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=first_utterance_id,
+            transcript=Transcript(
+                utterance_id=first_utterance_id,
+                text="hello live",
+                is_final=True,
+                created_at=11.0,
+            ),
+        )
+    )
+    buffer = hub._merge_buffer
+    assert buffer is not None
+    assert buffer.spec_task is not None
+    await asyncio.gather(buffer.spec_task, return_exceptions=True)
+
+    await hub.handle_vad_event(
+        SpeechStart(
+            resumed_utterance_id,
+            pre_roll=np.zeros((0,), dtype=np.float32),
+            chunk=np.zeros((1,), dtype=np.float32),
+        )
+    )
+    for _ in range(3):
+        await hub.handle_vad_event(
+            SpeechChunk(
+                resumed_utterance_id,
+                chunk=np.zeros((1,), dtype=np.float32),
+            )
+        )
+
+    active_events = [event for event in sink.events if event.type == "self_active_update"]
+    assert [event.secondary_text for event in active_events] == [
+        "",
+        "translated live",
+        "",
+    ]
+    assert [event.type for event in sink.events if event.type != "self_active_update"] == []
+    assert hub._merge_buffer is buffer
 
 
 @pytest.mark.asyncio

@@ -1078,6 +1078,87 @@ async def test_presenter_keeps_active_self_and_matching_final_on_same_occupant_k
 
 
 @pytest.mark.asyncio
+async def test_presenter_renders_active_self_secondary_text() -> None:
+    bridge = RecordingPresentationBridge()
+    presenter = OverlayPresenter(bridge=bridge, calibration=OverlayCalibration())
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+
+    await presenter.emit(
+        adapter.self_active_update(
+            text="hello live",
+            secondary_text="translated live",
+            occupant_key="self:merge-live",
+            created_at=10.0,
+        )
+    )
+
+    blocks = presenter.snapshot().blocks
+    assert len(blocks) == 1
+    assert blocks[0].id == "self:active"
+    assert blocks[0].block_variant == "active_self"
+    assert blocks[0].primary_text == "hello live"
+    assert blocks[0].secondary_text == "translated live"
+    assert blocks[0].secondary_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_presenter_updates_active_self_when_secondary_changes_only() -> None:
+    bridge = RecordingPresentationBridge()
+    presenter = OverlayPresenter(bridge=bridge, calibration=OverlayCalibration())
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+
+    await presenter.emit(
+        adapter.self_active_update(
+            text="hello live",
+            occupant_key="self:merge-live",
+            created_at=10.0,
+        )
+    )
+    revision_before_secondary = presenter.snapshot().revision
+
+    await presenter.emit(
+        adapter.self_active_update(
+            text="hello live",
+            secondary_text="translated live",
+            occupant_key="self:merge-live",
+            created_at=11.0,
+        )
+    )
+
+    assert presenter.snapshot().revision == revision_before_secondary + 1
+    assert presenter.snapshot().blocks[-1].secondary_text == "translated live"
+
+
+@pytest.mark.asyncio
+async def test_presenter_clears_active_self_secondary_text_on_empty_update() -> None:
+    bridge = RecordingPresentationBridge()
+    presenter = OverlayPresenter(bridge=bridge, calibration=OverlayCalibration())
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+
+    await presenter.emit(
+        adapter.self_active_update(
+            text="hello live",
+            secondary_text="translated live",
+            occupant_key="self:merge-live",
+            created_at=10.0,
+        )
+    )
+    revision_before_clear = presenter.snapshot().revision
+
+    await presenter.emit(
+        adapter.self_active_update(
+            text="hello live",
+            secondary_text="",
+            occupant_key="self:merge-live",
+            created_at=11.0,
+        )
+    )
+
+    assert presenter.snapshot().revision == revision_before_clear + 1
+    assert presenter.snapshot().blocks[-1].secondary_text == ""
+
+
+@pytest.mark.asyncio
 async def test_presenter_keeps_snapshot_order_when_active_self_promotes_to_finalized() -> None:
     bridge = RecordingPresentationBridge()
     clock = FakeClock(_now=10.0)

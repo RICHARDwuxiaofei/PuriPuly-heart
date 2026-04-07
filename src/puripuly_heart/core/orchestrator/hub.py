@@ -124,6 +124,7 @@ class ClientHub:
         default_factory=lambda: {"self": None, "peer": None},
     )
     _overlay_active_self_text: str | None = field(init=False, default=None)
+    _overlay_active_self_secondary_text: str | None = field(init=False, default=None)
     overlay_stream_coalesce_ms: int = 300
     last_error_source: str | None = None
 
@@ -331,13 +332,15 @@ class ClientHub:
             logger.info("[Hub] Context[%s]: %s", index, display_line)
 
     async def handle_vad_event(self, event: VadEvent) -> None:
+        resume_overlay_resync_buffer: _MergeBuffer | None = None
+
         if isinstance(event, SpeechStart):
             if self.low_latency_mode:
                 self._mark_resume_pending(event)
 
         if isinstance(event, SpeechChunk):
             if self.low_latency_mode:
-                self._maybe_confirm_resume(event)
+                resume_overlay_resync_buffer = self._maybe_confirm_resume(event)
 
         # Record start time for E2E latency tracking (from speech end)
         if isinstance(event, SpeechEnd):
@@ -351,6 +354,12 @@ class ClientHub:
 
         if self.stt is not None:
             await self.stt.handle_vad_event(event)
+
+        if (
+            resume_overlay_resync_buffer is not None
+            and self._merge_buffer is resume_overlay_resync_buffer
+        ):
+            await self._sync_overlay_active_self(resume_overlay_resync_buffer)
 
     async def handle_peer_vad_event(self, event: VadEvent) -> None:
         if self.peer_stt is not None:
@@ -594,8 +603,21 @@ class ClientHub:
         await self._emit_overlay_event(event)
         if getattr(event, "type", None) == "self_active_update":
             self._overlay_active_self_text = getattr(event, "text", None)
+            self._overlay_active_self_secondary_text = getattr(event, "secondary_text", "")
         elif getattr(event, "type", None) == "self_active_clear":
             self._overlay_active_self_text = None
+            self._overlay_active_self_secondary_text = None
+
+    def _overlay_active_self_secondary(self, buffer: _MergeBuffer) -> str:
+        translation = buffer.spec_translation
+        if not isinstance(translation, Translation):
+            return ""
+        active_text = self._merge_text(buffer.parts)
+        if not active_text:
+            return ""
+        if self._soft_reuse_mode(buffer.spec_text, active_text) is None:
+            return ""
+        return translation.text.strip()
 
     def _active_self_occupant_key(self, buffer: _MergeBuffer) -> str:
         return f"self:{buffer.merge_id}"
@@ -609,12 +631,17 @@ class ClientHub:
         active_text = self._merge_text(buffer.parts)
         if not active_text:
             return
-        if active_text == self._overlay_active_self_text:
+        secondary_text = self._overlay_active_self_secondary(buffer)
+        if (
+            active_text == self._overlay_active_self_text
+            and secondary_text == (self._overlay_active_self_secondary_text or "")
+        ):
             return
 
         await self._emit_overlay_active_self_event(
             self.overlay_event_adapter.self_active_update(
                 text=active_text,
+                secondary_text=secondary_text,
                 occupant_key=self._active_self_occupant_key(buffer),
                 created_at=created_at,
             )
@@ -625,6 +652,7 @@ class ClientHub:
             return
         if self.overlay_sink is None:
             self._overlay_active_self_text = None
+            self._overlay_active_self_secondary_text = None
             return
         await self._emit_overlay_active_self_event(self.overlay_event_adapter.self_active_clear())
 
@@ -941,17 +969,17 @@ class ClientHub:
             str(event.utterance_id)[:8],
         )
 
-    def _maybe_confirm_resume(self, event: SpeechChunk) -> None:
+    def _maybe_confirm_resume(self, event: SpeechChunk) -> _MergeBuffer | None:
         buffer = self._merge_buffer
         if buffer is None or not buffer.resume_pending:
-            return
+            return None
         if buffer.resume_utterance_id != event.utterance_id:
-            return
+            return None
         if buffer.resume_confirmed:
-            return
+            return None
         buffer.resume_chunk_count += 1
         if buffer.resume_chunk_count < 3:
-            return
+            return None
         buffer.resume_confirmed = True
         confirm_ms = 0
         if buffer.resume_started_at is not None:
@@ -961,6 +989,16 @@ class ClientHub:
             str(buffer.merge_id)[:8],
             confirm_ms,
             buffer.resume_chunk_count,
+        )
+        cleared_spec_state = any(
+            value is not None
+            for value in (
+                buffer.spec_task,
+                buffer.spec_translation,
+                buffer.spec_text,
+                buffer.spec_started_at,
+                buffer.spec_done_at,
+            )
         )
         if buffer.spec_task is not None and not buffer.spec_task.done():
             buffer.spec_task.cancel()
@@ -978,6 +1016,9 @@ class ClientHub:
         buffer.spec_text = None
         buffer.spec_started_at = None
         buffer.spec_done_at = None
+        if not cleared_spec_state:
+            return None
+        return buffer
 
     async def _maybe_clear_resume_on_end(self, event: SpeechEnd) -> None:
         buffer = self._merge_buffer
@@ -1116,6 +1157,7 @@ class ClientHub:
             created_at=self.clock.now(),
         )
         self._overlay_active_self_text = None
+        self._overlay_active_self_secondary_text = None
         await self._handle_transcript(transcript, is_final=True, source="Mic")
 
         if self.llm is None or not self.translation_enabled:
@@ -1193,6 +1235,7 @@ class ClientHub:
         if self.llm is None or not self.translation_enabled:
             return
 
+        cleared_spec_state = False
         if buffer.spec_task is not None:
             if not buffer.spec_task.done():
                 buffer.spec_task.cancel()
@@ -1208,6 +1251,9 @@ class ClientHub:
             buffer.spec_text = None
             buffer.spec_started_at = None
             buffer.spec_done_at = None
+            cleared_spec_state = True
+        if cleared_spec_state:
+            await self._sync_overlay_active_self(buffer)
 
         merged_text = self._merge_text(buffer.parts)
         if not merged_text:
@@ -1262,6 +1308,7 @@ class ClientHub:
             latency_ms,
             len(translation.text),
         )
+        await self._sync_overlay_active_self(buffer, created_at=translation.created_at)
         await self._try_commit_after_spec(buffer, reason="spec_done", allow_fallback=False)
 
     async def _try_commit_after_spec(
