@@ -29,7 +29,7 @@ class AudioSettings(ft.Column):
         self._current_microphone = ""
         self._current_desktop_output_device = ""
         self._current_desktop_vad_threshold = 0.6
-        self._current_desktop_hangover_ms = 900
+        self._current_desktop_hangover_ms = 700
         self._current_desktop_pre_roll_ms = 500
 
         self._host_api_label = self._build_section_label(t("settings.audio_host_api"))
