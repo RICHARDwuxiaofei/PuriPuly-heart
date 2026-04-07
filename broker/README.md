@@ -15,3 +15,7 @@ This directory establishes the managed-trial broker as a separate deployable ser
 `broker/wrangler.jsonc` intentionally uses a non-secret placeholder `database_id`. A real Cloudflare D1 identifier must be supplied in deployment-specific configuration before the service is deployed.
 
 Use `pnpm --filter @puripuly-heart/broker run verify:config` to exercise the pinned Wrangler CLI against `broker/wrangler.jsonc` without requiring cloud credentials.
+
+## Verification environment
+
+Broker verification is WSL/Linux-only. Run `pnpm install`, Vitest, and Wrangler from a WSL-internal workspace, not from Windows or shared `/mnt/c/...` `node_modules`.

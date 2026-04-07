@@ -20,6 +20,8 @@
 - If `.venv` exists, Windows shells should use `.venv`.
 - If `.venv-wsl` exists, Linux / WSL shells should use `.venv-wsl`.
 - In WSL shells, use `direnv exec <repo> ...` or explicit `UV_PROJECT_ENVIRONMENT=.venv-wsl`; do not rely on `bash -i -c`.
+- Broker Node verification (`pnpm`, `vitest`, `wrangler`) must run from a Linux / WSL workspace only; do not run it from Windows shells.
+- In WSL, install broker Node dependencies inside the Linux workspace; do not reuse Windows-installed `node_modules` from `/mnt/c/...`.
 
 ## Verification Contract & Evidence
 

@@ -236,3 +236,5 @@ docs/superpowers
 .superpowers/
 /settings.json
 opencode.json
+.skills/
+.opencode/
