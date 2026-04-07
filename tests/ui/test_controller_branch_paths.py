@@ -1062,6 +1062,23 @@ async def test_refresh_peer_stt_runtime_returns_without_runtime(
 
 
 @pytest.mark.asyncio
+async def test_refresh_peer_stt_runtime_does_not_warm_peer_runtime() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+    controller.overlay_state = "connected"
+    controller._overlay_bridge = object()
+    controller._peer_runtime = DummyPeerRuntime()
+
+    await controller._refresh_peer_stt_runtime()
+
+    assert len(controller._peer_runtime.policy_calls) == 1
+    assert controller._peer_runtime.policy_calls[0]["desired_active"] is True
+    assert controller._peer_runtime.warmup_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_create_peer_audio_source_from_runtime_config_uses_desktop_loopback_device(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

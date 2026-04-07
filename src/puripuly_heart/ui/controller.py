@@ -1538,9 +1538,6 @@ class GuiController:
         desired_active = self._peer_runtime_should_be_active(self.settings)
         await self._peer_runtime.apply_policy(config=config, desired_active=desired_active)
         self._last_peer_stt_runtime_signature = config.runtime_signature
-        if desired_active:
-            with contextlib.suppress(Exception):
-                await self._peer_runtime.warmup()
         self._sync_effective_hub_flags(self.settings)
 
     async def _rebuild_pipeline(self, *, rebuild_stt: bool) -> None:

@@ -9,7 +9,7 @@ from typing import Any
 
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 7
+SETTINGS_SCHEMA_VERSION = 8
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
     "ko": ("아이리", "시나노"),
@@ -119,7 +119,7 @@ class AudioSettings:
 class DesktopAudioSettings:
     output_device: str = ""
     vad_speech_threshold: float = 0.6
-    vad_hangover_ms: int = 700
+    vad_hangover_ms: int = 600
     vad_pre_roll_ms: int = 500
 
     def validate(self) -> None:
@@ -850,6 +850,14 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 7
 
+    if version < 8:
+        desktop_audio_data = data.get("desktop_audio")
+        if isinstance(desktop_audio_data, dict) and desktop_audio_data.get("vad_hangover_ms") == 700:
+            desktop_audio_data["vad_hangover_ms"] = 600
+            changed = True
+
+        version = 8
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -1083,7 +1091,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 else ""
             ),
             vad_speech_threshold=float(desktop_audio_data.get("vad_speech_threshold", 0.6)),
-            vad_hangover_ms=int(desktop_audio_data.get("vad_hangover_ms", 700)),
+            vad_hangover_ms=int(desktop_audio_data.get("vad_hangover_ms", 600)),
             vad_pre_roll_ms=int(desktop_audio_data.get("vad_pre_roll_ms", 500)),
         ),
         overlay_calibration=OverlayCalibration(
