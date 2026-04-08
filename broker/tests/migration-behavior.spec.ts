@@ -3,17 +3,37 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { describe, expect, it } from 'vitest';
 
+import { validatePublicInput } from '../src/public-input';
+import {
+  applyBrokerMigrations,
+  readBrokerMigrationSql,
+} from './test-support/migrations';
+
 const FIRST_MIGRATION = new URL(
   '../migrations/0000_define_broker_persistent_state.sql',
   import.meta.url,
 );
+const SECOND_MIGRATION = new URL(
+  '../migrations/0001_harden_installation_public_inputs.sql',
+  import.meta.url,
+);
 
-const MIGRATION_SQL = readFileSync(FIRST_MIGRATION, 'utf8');
+const FIRST_MIGRATION_SQL = readFileSync(FIRST_MIGRATION, 'utf8');
 
 function withMigratedDatabase(run: (db: DatabaseSync) => void): void {
   const db = new DatabaseSync(':memory:');
   try {
-    db.exec(MIGRATION_SQL);
+    applyBrokerMigrations(db);
+    run(db);
+  } finally {
+    db.close();
+  }
+}
+
+function withLegacyDatabase(run: (db: DatabaseSync) => void): void {
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec(FIRST_MIGRATION_SQL);
     run(db);
   } finally {
     db.close();
@@ -211,6 +231,371 @@ describe('broker migration behavior', () => {
         ),
       ).not.toThrow();
     });
+  });
+
+  it('rejects persisted installation text that contains control characters or newlines', () => {
+    withMigratedDatabase((db) => {
+      const insertInstallation = db.prepare(
+        `INSERT INTO installations (
+          installation_id,
+          device_public_key,
+          hardware_hash,
+          hardware_hash_salt_version,
+          app_version,
+          challenge,
+          challenge_expires_at,
+          challenge_salt_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+
+      expect(() =>
+        insertInstallation.run(
+          'install-newline\nvalue',
+          'device-public-key-newline-installation-id',
+          null,
+          null,
+          '1.0.0',
+          'challenge-token',
+          '2026-04-08T06:00:00Z',
+          2,
+        ),
+      ).toThrow(/constraint/i);
+
+      expect(() =>
+        insertInstallation.run(
+          'install-control-app-version',
+          'device-public-key-control-app-version',
+          null,
+          null,
+          '1.0.0\tbeta',
+          'challenge-token',
+          '2026-04-08T06:00:00Z',
+          2,
+        ),
+      ).toThrow(/constraint/i);
+
+      expect(() =>
+        insertInstallation.run(
+          'install-control-hardware-hash',
+          'device-public-key-control-hardware-hash',
+          'hardware-hash\rvalue',
+          2,
+          '1.0.0',
+          'challenge-token',
+          '2026-04-08T06:00:00Z',
+          2,
+        ),
+      ).toThrow(/constraint/i);
+    });
+  });
+
+  it('rejects persisted installation text that is blank or whitespace-only', () => {
+    withMigratedDatabase((db) => {
+      const insertInstallation = db.prepare(
+        `INSERT INTO installations (
+          installation_id,
+          device_public_key,
+          hardware_hash,
+          hardware_hash_salt_version,
+          app_version,
+          challenge,
+          challenge_expires_at,
+          challenge_salt_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+
+      expect(() =>
+        insertInstallation.run(
+          '   ',
+          'device-public-key-whitespace-installation-id',
+          null,
+          null,
+          '1.0.0',
+          'challenge-token',
+          '2026-04-08T06:00:00Z',
+          2,
+        ),
+      ).toThrow(/constraint/i);
+
+      expect(() =>
+        insertInstallation.run(
+          'install-whitespace-app-version',
+          'device-public-key-whitespace-app-version',
+          null,
+          null,
+          ' \u00A0 ',
+          'challenge-token',
+          '2026-04-08T06:00:00Z',
+          2,
+        ),
+      ).toThrow(/constraint/i);
+
+      expect(() =>
+        insertInstallation.run(
+          'install-whitespace-hardware-hash',
+          'device-public-key-whitespace-hardware-hash',
+          '   ',
+          2,
+          '1.0.0',
+          'challenge-token',
+          '2026-04-08T06:00:00Z',
+          2,
+        ),
+      ).toThrow(/constraint/i);
+    });
+  });
+
+  it('ships a follow-up migration that upgrades already-initialized installations to hardened text constraints', () => {
+    expect(() => readFileSync(SECOND_MIGRATION, 'utf8')).not.toThrow();
+  });
+
+  it('upgrades clean legacy installations and entitlements in place while hardening future writes', () => {
+    withLegacyDatabase((db) => {
+      db.prepare(
+        `INSERT INTO installations (
+          installation_id,
+          device_public_key,
+          hardware_hash,
+          hardware_hash_salt_version,
+          app_version,
+          challenge,
+          challenge_expires_at,
+          challenge_salt_version,
+          created_at,
+          last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        'legacy-installation',
+        'legacy-device-public-key',
+        null,
+        null,
+        '1.0.0',
+        'legacy-challenge',
+        '2026-04-08T06:05:00.000Z',
+        7,
+        '2026-04-08T06:00:00.000Z',
+        '2026-04-08T06:00:00.000Z',
+      );
+      db.prepare(
+        `INSERT INTO openrouter_entitlements (
+          installation_id,
+          status,
+          budget_usd,
+          managed_credential_ref,
+          issued_at,
+          expires_at,
+          release_session_ref,
+          release_token_hash,
+          release_token_expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        'legacy-installation',
+        'active',
+        0.07,
+        'managed-credential-legacy-installation',
+        '2026-04-08T06:00:00.000Z',
+        '2026-10-08T06:00:00.000Z',
+        null,
+        null,
+        null,
+      );
+
+      db.exec(readBrokerMigrationSql('0001_harden_installation_public_inputs.sql'));
+
+      const upgradedRow = db
+        .prepare(
+          `SELECT installation_id, device_public_key, app_version, challenge,
+                  challenge_expires_at, challenge_salt_version
+             FROM installations
+            WHERE installation_id = ?`,
+        )
+        .get('legacy-installation') as Record<string, unknown>;
+
+      expect(upgradedRow).toEqual({
+        installation_id: 'legacy-installation',
+        device_public_key: 'legacy-device-public-key',
+        app_version: '1.0.0',
+        challenge: 'legacy-challenge',
+        challenge_expires_at: '2026-04-08T06:05:00.000Z',
+        challenge_salt_version: 7,
+      });
+
+      const upgradedEntitlement = db
+        .prepare(
+          `SELECT installation_id, status, managed_credential_ref, issued_at, expires_at
+             FROM openrouter_entitlements
+            WHERE installation_id = ?`,
+        )
+        .get('legacy-installation') as Record<string, unknown>;
+
+      expect(upgradedEntitlement).toEqual({
+        installation_id: 'legacy-installation',
+        status: 'active',
+        managed_credential_ref: 'managed-credential-legacy-installation',
+        issued_at: '2026-04-08T06:00:00.000Z',
+        expires_at: '2026-10-08T06:00:00.000Z',
+      });
+
+      expect(() =>
+        db.prepare(
+          `INSERT INTO installations (
+            installation_id,
+            device_public_key,
+            hardware_hash,
+            hardware_hash_salt_version,
+            app_version,
+            challenge,
+            challenge_expires_at,
+            challenge_salt_version
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          'legacy-installation\nnewline',
+          'legacy-device-public-key-newline',
+          null,
+          null,
+          '1.0.0',
+          'legacy-challenge',
+          '2026-04-08T06:05:00.000Z',
+          7,
+        ),
+      ).toThrow(/constraint/i);
+    });
+  });
+
+  it('fails hardening migration when existing installations already contain newly invalid public input', () => {
+    withLegacyDatabase((db) => {
+      db.prepare(
+        `INSERT INTO installations (
+          installation_id,
+          device_public_key,
+          hardware_hash,
+          hardware_hash_salt_version,
+          app_version,
+          challenge,
+          challenge_expires_at,
+          challenge_salt_version,
+          created_at,
+          last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        'legacy-installation\nid',
+        'legacy-device-public-key-invalid-installation',
+        '   ',
+        7,
+        ' \u00A0 ',
+        'legacy-challenge',
+        '2026-04-08T06:05:00.000Z',
+        7,
+        '2026-04-08T06:00:00.000Z',
+        '2026-04-08T06:00:00.000Z',
+      );
+
+      expect(() =>
+        db.exec(readBrokerMigrationSql('0001_harden_installation_public_inputs.sql')),
+      ).toThrow(/constraint/i);
+    });
+  });
+
+  it('keeps runtime and migrated SQL validation aligned for representative public input samples', () => {
+    const cases = [
+      {
+        field: 'installation_id' as const,
+        value: 'install-aligned-ok',
+        accepted: true,
+      },
+      {
+        field: 'installation_id' as const,
+        value: 'install-aligned\nnewline',
+        accepted: false,
+      },
+      {
+        field: 'installation_id' as const,
+        value: `install-aligned${String.fromCharCode(0x80)}c1`,
+        accepted: false,
+      },
+      {
+        field: 'installation_id' as const,
+        value: ' \u00A0 ',
+        accepted: false,
+      },
+      {
+        field: 'installation_id' as const,
+        value: '😀'.repeat(128),
+        accepted: true,
+      },
+      {
+        field: 'installation_id' as const,
+        value: '😀'.repeat(129),
+        accepted: false,
+      },
+      {
+        field: 'app_version' as const,
+        value: '2.0.0',
+        accepted: true,
+      },
+      {
+        field: 'app_version' as const,
+        value: '2.0.0\tbeta',
+        accepted: false,
+      },
+      {
+        field: 'app_version' as const,
+        value: '   ',
+        accepted: false,
+      },
+      {
+        field: 'hardware_hash' as const,
+        value: 'hardware-hash-aligned',
+        accepted: true,
+      },
+      {
+        field: 'hardware_hash' as const,
+        value: `hardware${String.fromCharCode(0x2028)}hash`,
+        accepted: false,
+      },
+      {
+        field: 'hardware_hash' as const,
+        value: ' \u00A0 ',
+        accepted: false,
+      },
+    ];
+
+    for (const testCase of cases) {
+      withMigratedDatabase((db) => {
+        const runtimeAccepted = validatePublicInput(testCase.field, testCase.value) === null;
+        const insertInstallation = db.prepare(
+          `INSERT INTO installations (
+            installation_id,
+            device_public_key,
+            hardware_hash,
+            hardware_hash_salt_version,
+            app_version,
+            challenge,
+            challenge_expires_at,
+            challenge_salt_version
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        );
+
+        let sqlAccepted = true;
+        try {
+          insertInstallation.run(
+            testCase.field === 'installation_id' ? testCase.value : 'install-aligned',
+            `device-${testCase.field}`,
+            testCase.field === 'hardware_hash' ? testCase.value : null,
+            testCase.field === 'hardware_hash' ? 7 : null,
+            testCase.field === 'app_version' ? testCase.value : '1.0.0',
+            'aligned-challenge',
+            '2026-04-08T06:05:00.000Z',
+            7,
+          );
+        } catch {
+          sqlAccepted = false;
+        }
+
+        expect(runtimeAccepted).toBe(testCase.accepted);
+        expect(sqlAccepted).toBe(testCase.accepted);
+      });
+    }
   });
 
   it('enforces release-session all-or-none fields, unique release token hashes, and cascades entitlement deletion', () => {

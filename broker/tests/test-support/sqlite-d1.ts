@@ -1,12 +1,6 @@
-import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
-const FIRST_MIGRATION = new URL(
-  '../../migrations/0000_define_broker_persistent_state.sql',
-  import.meta.url,
-);
-
-const MIGRATION_SQL = readFileSync(FIRST_MIGRATION, 'utf8');
+import { applyBrokerMigrations } from './migrations';
 
 type BindValue = string | number | bigint | null;
 
@@ -113,7 +107,7 @@ export interface TestBrokerEnv extends Record<string, unknown> {
 
 export function createTestBrokerEnv(options: SqliteD1Hooks = {}): TestBrokerEnv {
   const db = new DatabaseSync(':memory:');
-  db.exec(MIGRATION_SQL);
+  applyBrokerMigrations(db);
   db.prepare('UPDATE broker_config SET value = ? WHERE key = ?').run(
     JSON.stringify({
       current: {

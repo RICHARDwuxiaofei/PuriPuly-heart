@@ -8,10 +8,19 @@ const FIRST_MIGRATION = new URL(
 );
 
 describe('broker persistence retention model', () => {
-  it('retains inactive pending_release installations for 30 days before installation-level cleanup', async () => {
+  it('retains preflight-only none rows long enough to preserve in-flight challenges before cleanup', async () => {
     const contract = await import('../src/contract');
 
     expect(contract).toHaveProperty('BROKER_RETENTION_POLICY', {
+      challengePreflight: {
+        statuses: ['none'],
+        entitlementRow: 'absent',
+        challengeState: 'present',
+        inactiveDays: 1,
+        reference: 'max(installations.last_seen_at, installations.challenge_expires_at)',
+        deleteFrom: 'installations',
+        cascadesTo: [],
+      },
       pendingRelease: {
         statuses: ['pending_release'],
         inactiveDays: 30,

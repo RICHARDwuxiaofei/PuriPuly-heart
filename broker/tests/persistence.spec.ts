@@ -3,11 +3,11 @@ import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import app from '../src/index';
-
-const FIRST_MIGRATION = new URL(
-  '../migrations/0000_define_broker_persistent_state.sql',
-  import.meta.url,
-);
+import {
+  BROKER_MIGRATION_FILENAMES,
+  FIRST_BROKER_MIGRATION,
+  LATEST_BROKER_MIGRATION,
+} from './test-support/migrations';
 
 describe('broker persistent state model', () => {
   it('defines the D1 table contract, runtime config keys, and minimal release-session state', async () => {
@@ -56,15 +56,24 @@ describe('broker persistent state model', () => {
       installation_id: {
         minLength: 1,
         maxLength: 128,
+        rejectWhitespaceOnly: true,
+        rejectControlCharacters: true,
+        rejectNewlines: true,
       },
       app_version: {
         minLength: 1,
         maxLength: 64,
+        rejectWhitespaceOnly: true,
+        rejectControlCharacters: true,
+        rejectNewlines: true,
       },
       hardware_hash: {
         minLength: 1,
         maxLength: 128,
         nullable: true,
+        rejectWhitespaceOnly: true,
+        rejectControlCharacters: true,
+        rejectNewlines: true,
       },
     });
     expect(contract).toHaveProperty('BROKER_PERSISTENCE_MODEL', {
@@ -108,15 +117,24 @@ describe('broker persistent state model', () => {
             installation_id: {
               minLength: 1,
               maxLength: 128,
+              rejectWhitespaceOnly: true,
+              rejectControlCharacters: true,
+              rejectNewlines: true,
             },
             app_version: {
               minLength: 1,
               maxLength: 64,
+              rejectWhitespaceOnly: true,
+              rejectControlCharacters: true,
+              rejectNewlines: true,
             },
             hardware_hash: {
               minLength: 1,
               maxLength: 128,
               nullable: true,
+              rejectWhitespaceOnly: true,
+              rejectControlCharacters: true,
+              rejectNewlines: true,
             },
           },
           updateRules: {
@@ -200,12 +218,18 @@ describe('broker persistent state model', () => {
   });
 
   it('ships a first D1 migration that creates the documented tables and indexes', () => {
-    expect(existsSync(FIRST_MIGRATION)).toBe(true);
-    if (!existsSync(FIRST_MIGRATION)) {
+    expect(BROKER_MIGRATION_FILENAMES).toEqual([
+      '0000_define_broker_persistent_state.sql',
+      '0001_harden_installation_public_inputs.sql',
+    ]);
+    expect(existsSync(FIRST_BROKER_MIGRATION)).toBe(true);
+    expect(existsSync(LATEST_BROKER_MIGRATION)).toBe(true);
+    if (!existsSync(FIRST_BROKER_MIGRATION) || !existsSync(LATEST_BROKER_MIGRATION)) {
       return;
     }
 
-    const migration = readFileSync(FIRST_MIGRATION, 'utf8');
+    const migration = readFileSync(FIRST_BROKER_MIGRATION, 'utf8');
+    const latestMigration = readFileSync(LATEST_BROKER_MIGRATION, 'utf8');
 
     expect(migration).toContain('CREATE TABLE broker_config');
     expect(migration).toContain('CREATE TABLE installations');
@@ -234,5 +258,15 @@ describe('broker persistent state model', () => {
     expect(migration).toContain('CREATE INDEX idx_installations_last_seen_at');
     expect(migration).toContain('CREATE INDEX idx_openrouter_entitlements_status');
     expect(migration).toContain('CREATE INDEX idx_openrouter_entitlements_expires_at');
+    expect(latestMigration).toContain('PRAGMA defer_foreign_keys = on');
+    expect(latestMigration).toContain('CREATE TABLE installations_hardened');
+    expect(latestMigration).toContain('CREATE TABLE openrouter_entitlements_hardened');
+    expect(latestMigration).toContain('INSERT INTO installations_hardened');
+    expect(latestMigration).toContain('INSERT INTO openrouter_entitlements_hardened');
+    expect(latestMigration).toContain('DROP TABLE openrouter_entitlements;');
+    expect(latestMigration).toContain('ALTER TABLE installations_hardened RENAME TO installations');
+    expect(latestMigration).toContain('PRAGMA foreign_key_check');
+    expect(latestMigration).not.toContain('legacy_installation_id_mapping');
+    expect(latestMigration).not.toContain('legacy-invalid-app-version');
   });
 });

@@ -25,6 +25,7 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
 - `POST /v1/trial/challenge`
   - request: `installation_id`, base64url `device_public_key`, `app_version`
   - public input bounds: `installation_id` `1-128` chars, `app_version` `1-64` chars
+  - `installation_id` and `app_version` must not be blank or whitespace-only, and must not contain embedded control characters or newline separators
   - rejects client-supplied `hardware_hash`, `signed_at`, and `signature`
   - response: `challenge`, `challenge_expires_at`, `fingerprint_salt`, normalized `managed_state`, and `current_entitlement`
   - challenge TTL: `5` minutes
@@ -32,6 +33,7 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
 - `POST /v1/trial/challenge/verify`
   - request: `installation_id`, base64url `device_public_key`, `challenge`, `challenge_expires_at`, `hardware_hash`, `app_version`, `signed_at`, base64url `signature`
   - public input bounds: `installation_id` `1-128` chars, `app_version` `1-64` chars, `hardware_hash` `1-128` chars
+  - `installation_id`, `app_version`, and `hardware_hash` must not be blank or whitespace-only, and must not contain embedded control characters or newline separators
   - supported timestamp subset for `challenge_expires_at` and `signed_at`: `YYYY-MM-DDTHH:MM:SS(.mmm)?(Z|±HH:MM)` with a real calendar date/time
   - Ed25519 signature payload is canonical UTF-8 text joined by newlines in this order:
     1. `installation_id`
@@ -49,6 +51,7 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
   - query: `installation_id`
   - headers: `X-Puripuly-Timestamp`, `X-Puripuly-Signature`
   - `installation_id` keeps the same public bound: `1-128` chars
+  - `installation_id` must not be blank or whitespace-only, and must not contain embedded control characters or newline separators
   - `X-Puripuly-Timestamp` must be a valid ISO-8601 timestamp in the same strict subset used by verify
   - `X-Puripuly-Signature` must transport a base64url Ed25519 signature
   - canonical status-signing payload is UTF-8 text joined by newlines in this order:
@@ -62,6 +65,7 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
   - live remaining budget stays upstream in OpenRouter metadata instead of being mirrored into broker status
 - `POST /v1/providers/openrouter/issue`
   - request: `installation_id`, base64url `device_public_key`, base64url `release_token`, `reason`, `budget_usd`, `model`, `signed_at`, base64url `signature`
+  - `installation_id` keeps the same public bound: `1-128` chars and must not be blank or whitespace-only, and must not contain embedded control characters or newline separators
   - activation reason is fixed to `llm_start`
   - `budget_usd` must match the managed-trial hard limit and `model` must match the pinned managed OpenRouter model
   - supported timestamp subset for `signed_at`: `YYYY-MM-DDTHH:MM:SS(.mmm)?(Z|±HH:MM)` with a real calendar date/time
@@ -80,7 +84,10 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
 
 ## Persistence model
 
-`broker/src/persistence.ts` and `broker/migrations/0000_define_broker_persistent_state.sql` define the initial D1-backed state contract.
+`broker/src/persistence.ts` and `broker/migrations/*.sql` define the D1-backed state contract and its upgrade path.
+
+- `0001_harden_installation_public_inputs.sql` rebuilds `installations` (and the dependent `openrouter_entitlements` table) under deferred foreign-key checks so already-initialized clean schemas pick up the hardened public-input constraints.
+- The follow-up migration copies existing rows unchanged and assumes stored data already satisfies the tightened contract; invalid historical rows are not auto-corrected or remapped.
 
 - `broker_config`
   - columns: `key`, `value`, `updated_at`
@@ -95,7 +102,7 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
     - global daily cap on new active entitlements, stored as a runtime-configurable broker value
 - `installations`
   - columns: `installation_id`, `device_public_key`, `hardware_hash`, `hardware_hash_salt_version`, `app_version`, `challenge`, `challenge_expires_at`, `challenge_salt_version`, `created_at`, `last_seen_at`
-  - constraints: `installation_id` primary key, `device_public_key` unique, `hardware_hash` indexed, and bounded persisted public text (`installation_id <= 128`, `app_version <= 64`, `hardware_hash <= 128` when present)
+  - constraints: `installation_id` primary key, `device_public_key` unique, `hardware_hash` indexed, bounded persisted public text (`installation_id <= 128`, `app_version <= 64`, `hardware_hash <= 128` when present), no blank/whitespace-only persisted public values, and rejected embedded control/newline characters for those persisted public fields
   - update rules: each challenge overwrites `challenge`, `challenge_expires_at`, `challenge_salt_version`, and `app_version`; it clears stored `hardware_hash` / `hardware_hash_salt_version` only when lifecycle is `none` or `pending_release`, and preserves fingerprint state for `active`, `expired`, and `revoked`; verify clears the challenge fields; `hardware_hash` stays `NULL` until verify succeeds
 - `openrouter_entitlements`
   - zero or one row per installation, keyed by `installation_id` when present
@@ -109,7 +116,10 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
 ## Retention and salt rotation
 
 - Inactive `pending_release` installations may be deleted after `30` days from `last_seen_at`.
+- Preflight-only `none` rows created by challenge issuance but never verified may be deleted after `1` day from `max(last_seen_at, challenge_expires_at)`, so cleanup does not invalidate an in-flight challenge before its TTL boundary.
+- Broker request handling opportunistically applies that preflight cleanup when the installation identity is touched again, so stale unauthenticated rows can age out without broadening retention into a separate store redesign.
 - Terminal `expired` or `revoked` installations may be deleted after `90` days from `max(last_seen_at, expires_at)`.
 - Retention cleanup deletes from `installations`; the entitlement row is removed by `ON DELETE CASCADE`.
+- Because `hardware_hash` remains `NULL` until verify succeeds, preflight-row cleanup does not discard duplicate-detection fingerprint state.
 - `fingerprint_salt` remains one server-managed global salt shared across clients for duplicate detection.
 - Rotation keeps one current salt and one previous salt version. Duplicate matching only uses `hardware_hash` values tagged with the current version. In-flight challenges may complete on the previous version until their existing `challenge_expires_at`, after which stale hashes are refreshed in place on successful verify or cleared when the broker reissues a challenge for `none` / `pending_release` state.
