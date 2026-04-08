@@ -9,7 +9,7 @@ from typing import Any
 
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 8
+SETTINGS_SCHEMA_VERSION = 9
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
     "ko": ("아이리", "시나노"),
@@ -377,6 +377,23 @@ class ApiKeyVerificationSettings:
 
 
 @dataclass(slots=True)
+class ManagedIdentitySettings:
+    installation_id: str = ""
+    release_token: str | None = None
+    release_token_expires_at: str | None = None
+
+    def validate(self) -> None:
+        if not isinstance(self.installation_id, str):
+            raise ValueError("managed installation_id must be a string")
+        if self.release_token is not None and not isinstance(self.release_token, str):
+            raise ValueError("managed release_token must be a string or None")
+        if self.release_token_expires_at is not None and not isinstance(
+            self.release_token_expires_at, str
+        ):
+            raise ValueError("managed release_token_expires_at must be a string or None")
+
+
+@dataclass(slots=True)
 class AppSettings:
     settings_version: int = SETTINGS_SCHEMA_VERSION
     provider: ProviderSettings = field(default_factory=ProviderSettings)
@@ -398,6 +415,7 @@ class AppSettings:
     secrets: SecretsSettings = field(default_factory=SecretsSettings)
     ui: UiSettings = field(default_factory=UiSettings)
     api_key_verified: ApiKeyVerificationSettings = field(default_factory=ApiKeyVerificationSettings)
+    managed_identity: ManagedIdentitySettings = field(default_factory=ManagedIdentitySettings)
     system_prompt: str = ""
     system_prompts: dict[str, str] = field(default_factory=dict)
 
@@ -423,6 +441,7 @@ class AppSettings:
         self.secrets.validate()
         self.ui.validate()
         self.api_key_verified.validate()
+        self.managed_identity.validate()
         for key, value in self.system_prompts.items():
             if not isinstance(key, str):
                 raise ValueError("system_prompts keys must be strings")
@@ -550,6 +569,11 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "openrouter": settings.api_key_verified.openrouter,
             "alibaba_beijing": settings.api_key_verified.alibaba_beijing,
             "alibaba_singapore": settings.api_key_verified.alibaba_singapore,
+        },
+        "managed_identity": {
+            "installation_id": settings.managed_identity.installation_id,
+            "release_token": settings.managed_identity.release_token,
+            "release_token_expires_at": settings.managed_identity.release_token_expires_at,
         },
         "system_prompt": settings.system_prompt,
         "system_prompts": settings.system_prompts,
@@ -729,9 +753,7 @@ def _parse_optional_int(value: object) -> int | None:
         return None
 
 
-def _normalize_peer_block(
-    data: dict[str, Any], key: str, default_block: dict[str, Any]
-) -> bool:
+def _normalize_peer_block(data: dict[str, Any], key: str, default_block: dict[str, Any]) -> bool:
     if isinstance(data.get(key), dict):
         return False
     data[key] = copy.deepcopy(default_block)
@@ -844,7 +866,10 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
     if version < 7:
         desktop_audio_data = data.get("desktop_audio")
-        if isinstance(desktop_audio_data, dict) and desktop_audio_data.get("vad_hangover_ms") == 900:
+        if (
+            isinstance(desktop_audio_data, dict)
+            and desktop_audio_data.get("vad_hangover_ms") == 900
+        ):
             desktop_audio_data["vad_hangover_ms"] = 700
             changed = True
 
@@ -852,11 +877,33 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
     if version < 8:
         desktop_audio_data = data.get("desktop_audio")
-        if isinstance(desktop_audio_data, dict) and desktop_audio_data.get("vad_hangover_ms") == 700:
+        if (
+            isinstance(desktop_audio_data, dict)
+            and desktop_audio_data.get("vad_hangover_ms") == 700
+        ):
             desktop_audio_data["vad_hangover_ms"] = 600
             changed = True
 
         version = 8
+
+    if version < 9:
+        managed_identity_data = data.get("managed_identity")
+        if not isinstance(managed_identity_data, dict):
+            managed_identity_data = {}
+            data["managed_identity"] = managed_identity_data
+            changed = True
+
+        if "installation_id" not in managed_identity_data:
+            managed_identity_data["installation_id"] = ""
+            changed = True
+        if "release_token" not in managed_identity_data:
+            managed_identity_data["release_token"] = None
+            changed = True
+        if "release_token_expires_at" not in managed_identity_data:
+            managed_identity_data["release_token_expires_at"] = None
+            changed = True
+
+        version = 9
 
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
@@ -963,9 +1010,7 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         changed = True
 
     qwen_asr_data = data.get("qwen_asr_stt")
-    qwen_asr_endpoint = (
-        qwen_asr_data.get("endpoint") if isinstance(qwen_asr_data, dict) else None
-    )
+    qwen_asr_endpoint = qwen_asr_data.get("endpoint") if isinstance(qwen_asr_data, dict) else None
 
     raw_qwen_region = qwen_data.get("region")
     normalized_qwen_region = _parse_qwen_region(
@@ -1000,6 +1045,32 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         del ui_data["overlay_enabled"]
         changed = True
 
+    managed_identity_data = data.get("managed_identity")
+    if not isinstance(managed_identity_data, dict):
+        managed_identity_data = {}
+        data["managed_identity"] = managed_identity_data
+        changed = True
+
+    raw_installation_id = managed_identity_data.get("installation_id")
+    normalized_installation_id = (
+        raw_installation_id.strip() if isinstance(raw_installation_id, str) else ""
+    )
+    if raw_installation_id != normalized_installation_id:
+        managed_identity_data["installation_id"] = normalized_installation_id
+        changed = True
+
+    raw_release_token = managed_identity_data.get("release_token")
+    normalized_release_token = _parse_optional_str(raw_release_token)
+    if raw_release_token != normalized_release_token:
+        managed_identity_data["release_token"] = normalized_release_token
+        changed = True
+
+    raw_release_token_expires_at = managed_identity_data.get("release_token_expires_at")
+    normalized_release_token_expires_at = _parse_optional_str(raw_release_token_expires_at)
+    if raw_release_token_expires_at != normalized_release_token_expires_at:
+        managed_identity_data["release_token_expires_at"] = normalized_release_token_expires_at
+        changed = True
+
     if data.get("settings_version") != version:
         data["settings_version"] = version
         changed = True
@@ -1013,8 +1084,15 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     overlay_calibration_data = data.get("overlay_calibration") or {}
     stt_data = data.get("stt") or {}
     ui_data = data.get("ui") or {}
-    peer_qwen_raw = data.get("peer_qwen_asr_stt") if isinstance(data.get("peer_qwen_asr_stt"), dict) else {}
-    peer_soniox_data = data.get("peer_soniox_stt") if isinstance(data.get("peer_soniox_stt"), dict) else {}
+    managed_identity_data = (
+        data.get("managed_identity") if isinstance(data.get("managed_identity"), dict) else {}
+    )
+    peer_qwen_raw = (
+        data.get("peer_qwen_asr_stt") if isinstance(data.get("peer_qwen_asr_stt"), dict) else {}
+    )
+    peer_soniox_data = (
+        data.get("peer_soniox_stt") if isinstance(data.get("peer_soniox_stt"), dict) else {}
+    )
     raw_provider_data = data.get("provider")
     provider_data = raw_provider_data if isinstance(raw_provider_data, dict) else {}
     if raw_provider_data is None:
@@ -1047,9 +1125,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             qwen_raw.get("region"),
             legacy_asr_endpoint=qwen_asr_raw.get("endpoint"),
         ),
-        llm_model=_parse_qwen_llm_model(
-            qwen_raw.get("llm_model", QwenLLMModel.QWEN_35_PLUS.value)
-        ),
+        llm_model=_parse_qwen_llm_model(qwen_raw.get("llm_model", QwenLLMModel.QWEN_35_PLUS.value)),
     )
 
     settings = AppSettings(
@@ -1172,7 +1248,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         peer_soniox_stt=PeerSonioxSTTSettings(
             model=_parse_optional_str(peer_soniox_data.get("model")),
             endpoint=_parse_optional_str(peer_soniox_data.get("endpoint")),
-            keepalive_interval_s=_parse_optional_float(peer_soniox_data.get("keepalive_interval_s")),
+            keepalive_interval_s=_parse_optional_float(
+                peer_soniox_data.get("keepalive_interval_s")
+            ),
             trailing_silence_ms=_parse_optional_int(peer_soniox_data.get("trailing_silence_ms")),
         ),
         gemini=GeminiSettings(
@@ -1234,6 +1312,13 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 data.get("api_key_verified", {}).get("alibaba_singapore", False)
             ),
         ),
+        managed_identity=ManagedIdentitySettings(
+            installation_id=_parse_optional_str(managed_identity_data.get("installation_id")) or "",
+            release_token=_parse_optional_str(managed_identity_data.get("release_token")),
+            release_token_expires_at=_parse_optional_str(
+                managed_identity_data.get("release_token_expires_at")
+            ),
+        ),
         system_prompt=legacy_system_prompt,
         system_prompts=system_prompts,
     )
@@ -1268,4 +1353,21 @@ def load_settings(path: Path) -> AppSettings:
 def save_settings(path: Path, settings: AppSettings) -> None:
     settings.validate()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(to_dict(settings), ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_text(
+        path,
+        json.dumps(to_dict(settings), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _atomic_write_text(path: Path, content: str, *, encoding: str) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp_path.write_text(content, encoding=encoding)
+        tmp_path.replace(path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -37,6 +38,44 @@ def test_settings_roundtrip(tmp_path):
     expected.languages.recent_target_languages = ["en", "zh-CN", "ja", "ko", "es", "fr"]
 
     assert loaded == expected
+
+
+def test_save_settings_writes_via_temp_replace(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "settings.json"
+    settings = AppSettings()
+    replace_calls: list[tuple[str, str]] = []
+    path_type = type(path)
+    original_replace = path_type.replace
+
+    def recording_replace(self: Path, target: Path) -> Path:
+        replace_calls.append((self.name, Path(target).name))
+        return original_replace(self, target)
+
+    monkeypatch.setattr(path_type, "replace", recording_replace)
+
+    save_settings(path, settings)
+
+    assert replace_calls == [("settings.json.tmp", "settings.json")]
+
+
+def test_save_settings_preserves_existing_file_when_replace_fails(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "settings.json"
+    original_payload = {"keep": True}
+    path.write_text(json.dumps(original_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    path_type = type(path)
+
+    def failing_replace(self: Path, target: Path) -> Path:
+        raise RuntimeError("replace failed")
+
+    monkeypatch.setattr(path_type, "replace", failing_replace)
+
+    with pytest.raises(RuntimeError, match="replace failed"):
+        save_settings(path, AppSettings())
+
+    assert json.loads(path.read_text(encoding="utf-8")) == original_payload
+    assert not path.with_suffix(path.suffix + ".tmp").exists()
 
 
 def test_settings_validation_rejects_invalid_audio():
@@ -162,7 +201,9 @@ def test_from_dict_preserves_legacy_malformed_provider_fallback_behavior() -> No
     assert loaded.provider.peer_stt == STTProviderName.DEEPGRAM
 
 
-def test_load_settings_backfills_peer_provider_defaults_without_copying_self_values(tmp_path) -> None:
+def test_load_settings_backfills_peer_provider_defaults_without_copying_self_values(
+    tmp_path,
+) -> None:
     path = tmp_path / "settings.json"
     legacy = to_dict(AppSettings())
     legacy["provider"].pop("peer_stt", None)
