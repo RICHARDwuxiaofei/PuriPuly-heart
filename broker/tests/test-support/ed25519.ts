@@ -15,6 +15,16 @@ export interface SignedVerifyRequestInput {
   signed_at: string;
 }
 
+export interface SignedIssueRequestInput {
+  installation_id: string;
+  device_public_key: string;
+  release_token: string;
+  reason: string;
+  budget_usd: number;
+  model: string;
+  signed_at: string;
+}
+
 export async function createDeviceKeyPair(): Promise<DeviceKeyPair> {
   const keyPair = await crypto.subtle.generateKey('Ed25519', true, [
     'sign',
@@ -48,6 +58,26 @@ export async function signNonCanonicalVerifyRequest(
   };
 }
 
+export async function signCanonicalIssueRequest(
+  privateKey: CryptoKey,
+  input: SignedIssueRequestInput,
+): Promise<SignedIssueRequestInput & { signature: string }> {
+  return {
+    ...input,
+    signature: await signPayload(privateKey, canonicalIssuePayload(input)),
+  };
+}
+
+export async function signNonCanonicalIssueRequest(
+  privateKey: CryptoKey,
+  input: SignedIssueRequestInput,
+): Promise<SignedIssueRequestInput & { signature: string }> {
+  return {
+    ...input,
+    signature: await signPayload(privateKey, nonCanonicalIssuePayload(input)),
+  };
+}
+
 function canonicalVerifyPayload(input: SignedVerifyRequestInput): Uint8Array {
   return encoder.encode(
     [
@@ -71,6 +101,34 @@ function nonCanonicalVerifyPayload(input: SignedVerifyRequestInput): Uint8Array 
       input.challenge_expires_at,
       input.hardware_hash,
       input.app_version,
+      input.signed_at,
+    ].join('\n'),
+  );
+}
+
+function canonicalIssuePayload(input: SignedIssueRequestInput): Uint8Array {
+  return encoder.encode(
+    [
+      input.installation_id,
+      input.device_public_key,
+      input.release_token,
+      input.reason,
+      String(input.budget_usd),
+      input.model,
+      input.signed_at,
+    ].join('\n'),
+  );
+}
+
+function nonCanonicalIssuePayload(input: SignedIssueRequestInput): Uint8Array {
+  return encoder.encode(
+    [
+      input.release_token,
+      input.installation_id,
+      input.device_public_key,
+      input.reason,
+      String(input.budget_usd),
+      input.model,
       input.signed_at,
     ].join('\n'),
   );
