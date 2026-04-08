@@ -5,6 +5,10 @@ import {
   FOUNDATION_RESPONSE,
   type BrokerEnv,
 } from './contract';
+import {
+  handleTrialChallenge,
+  handleTrialChallengeVerify,
+} from './trial-handshake';
 
 export const app = new Hono<BrokerEnv>();
 
@@ -18,5 +22,8 @@ app.get('/healthz', (c) => {
 app.get('/v1/foundation', (c) => {
   return c.json(FOUNDATION_RESPONSE);
 });
+
+app.post('/v1/trial/challenge', handleTrialChallenge);
+app.post('/v1/trial/challenge/verify', handleTrialChallengeVerify);
 
 export default app;

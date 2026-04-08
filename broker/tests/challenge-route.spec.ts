@@ -1,0 +1,586 @@
+import { Buffer } from 'node:buffer';
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import app from '../src/index';
+import { createDeviceKeyPair, signCanonicalVerifyRequest } from './test-support/ed25519';
+import { createTestBrokerEnv } from './test-support/sqlite-d1';
+import { issueChallenge, postVerify } from './test-support/trial-api';
+
+const DEVICE_PUBLIC_KEY = Buffer.alloc(32, 7).toString('base64url');
+
+const OVERSIZED_INSTALLATION_ID = 'i'.repeat(129);
+const OVERSIZED_APP_VERSION = 'v'.repeat(65);
+
+interface ChallengeBoundsCase {
+  name: 'installation_id' | 'app_version';
+  body: {
+    installation_id: string;
+    device_public_key: string;
+    app_version: string;
+  };
+  message: string;
+}
+
+function createDeferred(): {
+  promise: Promise<void>;
+  resolve: () => void;
+} {
+  let resolve!: () => void;
+  return {
+    promise: new Promise<void>((resolvePromise) => {
+      resolve = resolvePromise;
+    }),
+    resolve,
+  };
+}
+
+describe('POST /v1/trial/challenge', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('accepts installation identity preflight input and returns a non-consuming challenge contract', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const env = createTestBrokerEnv();
+    const response = await app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-123',
+          device_public_key: DEVICE_PUBLIC_KEY,
+          app_version: '1.2.3',
+        }),
+      },
+      env,
+    );
+
+    expect(response.status).toBe(200);
+
+    const payload = (await response.json()) as Record<string, unknown>;
+
+    expect(payload).toEqual({
+      challenge: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      challenge_expires_at: '2026-04-08T06:05:00.000Z',
+      fingerprint_salt: {
+        version: 7,
+        salt: 'shared-server-fingerprint-salt',
+      },
+      managed_state: {
+        lifecycle: 'none',
+        managed_availability: true,
+      },
+      current_entitlement: null,
+    });
+    expect(payload).not.toHaveProperty('release_token');
+    expect(payload).not.toHaveProperty('managed_credential_ref');
+
+    const installation = env.__db
+      .prepare(
+        `SELECT installation_id, device_public_key, hardware_hash, app_version, challenge,
+                challenge_expires_at, challenge_salt_version
+           FROM installations
+          WHERE installation_id = ?`,
+      )
+      .get('install-123') as Record<string, unknown>;
+
+    expect(installation).toEqual({
+      installation_id: 'install-123',
+      device_public_key: DEVICE_PUBLIC_KEY,
+      hardware_hash: null,
+      app_version: '1.2.3',
+      challenge: payload.challenge,
+      challenge_expires_at: '2026-04-08T06:05:00.000Z',
+      challenge_salt_version: 7,
+    });
+  });
+
+  it('rejects hardware_hash and client signature fields on challenge preflight', async () => {
+    const env = createTestBrokerEnv();
+    const response = await app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-123',
+          device_public_key: DEVICE_PUBLIC_KEY,
+          app_version: '1.2.3',
+          hardware_hash: 'forbidden-on-challenge',
+          signature: 'forbidden-on-challenge',
+        }),
+      },
+      env,
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'invalid_request',
+        message:
+          'challenge request must not include hardware_hash, signed_at, or signature',
+      },
+    });
+
+    const installationCount = env.__db
+      .prepare('SELECT COUNT(*) AS count FROM installations')
+      .get() as { count: number };
+
+    expect(installationCount.count).toBe(0);
+  });
+
+  it('rejects non-object JSON bodies with invalid_request instead of throwing', async () => {
+    const env = createTestBrokerEnv();
+    const response = await app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: 'null',
+      },
+      env,
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'invalid_request',
+        message: 'request body must be a JSON object',
+      },
+    });
+  });
+
+  it.each([
+    {
+      name: 'installation_id',
+      body: {
+        installation_id: OVERSIZED_INSTALLATION_ID,
+        device_public_key: DEVICE_PUBLIC_KEY,
+        app_version: '1.2.3',
+      },
+      message: 'installation_id must be between 1 and 128 characters',
+    },
+    {
+      name: 'app_version',
+      body: {
+        installation_id: 'install-oversized-app-version',
+        device_public_key: DEVICE_PUBLIC_KEY,
+        app_version: OVERSIZED_APP_VERSION,
+      },
+      message: 'app_version must be between 1 and 64 characters',
+    },
+  ] satisfies ChallengeBoundsCase[])(
+    'rejects oversized $name values before persistence',
+    async (testCase: ChallengeBoundsCase) => {
+      const { body, message } = testCase;
+    const env = createTestBrokerEnv();
+    const response = await app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      },
+      env,
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'invalid_request',
+        message,
+      },
+    });
+
+    const installationCount = env.__db
+      .prepare('SELECT COUNT(*) AS count FROM installations')
+      .get() as { count: number };
+    expect(installationCount.count).toBe(0);
+    },
+  );
+
+  it('clears stored hardware hash state when reissuing a challenge', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const env = createTestBrokerEnv();
+    const keyPair = await createDeviceKeyPair();
+    const firstChallenge = await issueChallenge({
+      env,
+      installationId: 'install-reissue-clears-hash',
+      devicePublicKey: keyPair.devicePublicKey,
+      appVersion: '1.2.3',
+    });
+    const verifyRequest = await signCanonicalVerifyRequest(keyPair.privateKey, {
+      installation_id: 'install-reissue-clears-hash',
+      device_public_key: keyPair.devicePublicKey,
+      challenge: firstChallenge.challenge,
+      challenge_expires_at: firstChallenge.challenge_expires_at,
+      hardware_hash: 'hardware-hash-before-reissue',
+      app_version: '1.2.3',
+      signed_at: '2026-04-08T06:00:30.000Z',
+    });
+
+    const verifyResponse = await postVerify(env, verifyRequest);
+    expect(verifyResponse.status).toBe(200);
+
+    vi.setSystemTime(new Date('2026-04-08T06:01:00Z'));
+
+    const response = await app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-reissue-clears-hash',
+          device_public_key: keyPair.devicePublicKey,
+          app_version: '1.2.4',
+        }),
+      },
+      env,
+    );
+
+    expect(response.status).toBe(200);
+
+    const installation = env.__db
+      .prepare(
+        `SELECT hardware_hash, hardware_hash_salt_version, app_version, challenge,
+                challenge_expires_at, challenge_salt_version
+           FROM installations
+          WHERE installation_id = ?`,
+      )
+      .get('install-reissue-clears-hash') as Record<string, unknown>;
+
+    expect(installation).toEqual({
+      hardware_hash: null,
+      hardware_hash_salt_version: null,
+      app_version: '1.2.4',
+      challenge: expect.any(String),
+      challenge_expires_at: '2026-04-08T06:06:00.000Z',
+      challenge_salt_version: 7,
+    });
+  });
+
+  it('handles first-time same-binding challenge races without surfacing a 500 and keeps one installation row', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    let armInsertPause = false;
+    let insertAttemptCount = 0;
+    const firstInsertReady = createDeferred();
+    const secondInsertReady = createDeferred();
+    const releaseBothInserts = createDeferred();
+    const env = createTestBrokerEnv({
+      beforeRun: async ({ sql }) => {
+        if (armInsertPause && sql.includes('INSERT INTO installations')) {
+          insertAttemptCount += 1;
+          if (insertAttemptCount === 1) {
+            firstInsertReady.resolve();
+          }
+          if (insertAttemptCount === 2) {
+            secondInsertReady.resolve();
+          }
+          await releaseBothInserts.promise;
+        }
+      },
+    });
+
+    armInsertPause = true;
+    const firstResponsePromise = app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-race-challenge',
+          device_public_key: DEVICE_PUBLIC_KEY,
+          app_version: '1.2.3',
+        }),
+      },
+      env,
+    );
+
+    await firstInsertReady.promise;
+
+    const secondResponsePromise = app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-race-challenge',
+          device_public_key: DEVICE_PUBLIC_KEY,
+          app_version: '1.2.3',
+        }),
+      },
+      env,
+    );
+
+    await secondInsertReady.promise;
+    releaseBothInserts.resolve();
+
+    const [firstResponse, secondResponse] = await Promise.all([
+      firstResponsePromise,
+      secondResponsePromise,
+    ]);
+
+    expect(firstResponse.status).toBe(200);
+    expect(secondResponse.status).toBe(200);
+
+    const firstPayload = (await firstResponse.json()) as Record<string, unknown>;
+    const secondPayload = (await secondResponse.json()) as Record<string, unknown>;
+
+    expect(firstPayload).toMatchObject({
+      challenge: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      challenge_expires_at: '2026-04-08T06:05:00.000Z',
+    });
+    expect(secondPayload).toMatchObject({
+      challenge: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      challenge_expires_at: '2026-04-08T06:05:00.000Z',
+    });
+
+    const installationCount = env.__db
+      .prepare('SELECT COUNT(*) AS count FROM installations')
+      .get() as { count: number };
+    expect(installationCount.count).toBe(1);
+
+    const installation = env.__db
+      .prepare(
+        `SELECT installation_id, device_public_key, app_version, challenge,
+                challenge_expires_at
+           FROM installations
+          WHERE installation_id = ?`,
+      )
+      .get('install-race-challenge') as Record<string, unknown>;
+
+    expect(installation.installation_id).toBe('install-race-challenge');
+    expect(installation.device_public_key).toBe(DEVICE_PUBLIC_KEY);
+    expect(installation.app_version).toBe('1.2.3');
+    expect(installation.challenge_expires_at).toBe('2026-04-08T06:05:00.000Z');
+    expect(firstPayload.challenge).toBe(installation.challenge);
+    expect(secondPayload.challenge).toBe(installation.challenge);
+  });
+
+  it('keeps existing-installation reissue races idempotent by returning the final persisted challenge in every 200 response', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    let armUpdatePause = false;
+    let updateAttemptCount = 0;
+    const firstUpdateReady = createDeferred();
+    const secondUpdateReady = createDeferred();
+    const releaseBothUpdates = createDeferred();
+    const env = createTestBrokerEnv({
+      beforeRun: async ({ sql }) => {
+        if (
+          armUpdatePause &&
+          sql.includes('UPDATE installations') &&
+          sql.includes('challenge = ?')
+        ) {
+          updateAttemptCount += 1;
+          if (updateAttemptCount === 1) {
+            firstUpdateReady.resolve();
+          }
+          if (updateAttemptCount === 2) {
+            secondUpdateReady.resolve();
+          }
+          await releaseBothUpdates.promise;
+        }
+      },
+    });
+
+    await issueChallenge({
+      env,
+      installationId: 'install-race-existing',
+      devicePublicKey: DEVICE_PUBLIC_KEY,
+      appVersion: '1.2.3',
+    });
+
+    vi.setSystemTime(new Date('2026-04-08T06:01:00Z'));
+    armUpdatePause = true;
+
+    const firstResponsePromise = app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-race-existing',
+          device_public_key: DEVICE_PUBLIC_KEY,
+          app_version: '1.2.4',
+        }),
+      },
+      env,
+    );
+
+    await firstUpdateReady.promise;
+
+    const secondResponsePromise = app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-race-existing',
+          device_public_key: DEVICE_PUBLIC_KEY,
+          app_version: '1.2.4',
+        }),
+      },
+      env,
+    );
+
+    await secondUpdateReady.promise;
+    releaseBothUpdates.resolve();
+
+    const [firstResponse, secondResponse] = await Promise.all([
+      firstResponsePromise,
+      secondResponsePromise,
+    ]);
+
+    expect(firstResponse.status).toBe(200);
+    expect(secondResponse.status).toBe(200);
+
+    const firstPayload = (await firstResponse.json()) as Record<string, unknown>;
+    const secondPayload = (await secondResponse.json()) as Record<string, unknown>;
+
+    const installation = env.__db
+      .prepare(
+        `SELECT app_version, challenge, challenge_expires_at
+           FROM installations
+          WHERE installation_id = ?`,
+      )
+      .get('install-race-existing') as Record<string, unknown>;
+
+    expect(installation.app_version).toBe('1.2.4');
+    expect(installation.challenge_expires_at).toBe('2026-04-08T06:06:00.000Z');
+    expect(firstPayload.challenge).toBe(installation.challenge);
+    expect(secondPayload.challenge).toBe(installation.challenge);
+  });
+
+  it('returns a fresh persisted challenge when reissue loses its CAS update to concurrent verify consumption', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    let armUpdatePause = false;
+    let pausedOnce = false;
+    const updatePaused = createDeferred();
+    const releaseUpdate = createDeferred();
+    const env = createTestBrokerEnv({
+      beforeRun: async ({ sql }) => {
+        if (
+          armUpdatePause &&
+          !pausedOnce &&
+          sql.includes('UPDATE installations') &&
+          sql.includes('challenge = ?')
+        ) {
+          pausedOnce = true;
+          updatePaused.resolve();
+          await releaseUpdate.promise;
+        }
+      },
+    });
+    const keyPair = await createDeviceKeyPair();
+    const initialChallenge = await issueChallenge({
+      env,
+      installationId: 'install-race-reissue-vs-verify',
+      devicePublicKey: keyPair.devicePublicKey,
+      appVersion: '1.2.3',
+    });
+
+    vi.setSystemTime(new Date('2026-04-08T06:01:00Z'));
+    armUpdatePause = true;
+
+    const reissueResponsePromise = app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-race-reissue-vs-verify',
+          device_public_key: keyPair.devicePublicKey,
+          app_version: '1.2.4',
+        }),
+      },
+      env,
+    );
+
+    await updatePaused.promise;
+
+    const verifyRequest = await signCanonicalVerifyRequest(keyPair.privateKey, {
+      installation_id: 'install-race-reissue-vs-verify',
+      device_public_key: keyPair.devicePublicKey,
+      challenge: initialChallenge.challenge,
+      challenge_expires_at: initialChallenge.challenge_expires_at,
+      hardware_hash: 'hardware-hash-race-reissue-vs-verify',
+      app_version: '1.2.3',
+      signed_at: '2026-04-08T06:00:30.000Z',
+    });
+
+    const verifyResponse = await postVerify(env, verifyRequest);
+    expect(verifyResponse.status).toBe(200);
+
+    releaseUpdate.resolve();
+
+    const reissueResponse = await reissueResponsePromise;
+    expect(reissueResponse.status).toBe(200);
+
+    const payload = (await reissueResponse.json()) as Record<string, unknown>;
+    const installation = env.__db
+      .prepare(
+        `SELECT app_version, hardware_hash, hardware_hash_salt_version, challenge,
+                challenge_expires_at, challenge_salt_version
+           FROM installations
+          WHERE installation_id = ?`,
+      )
+      .get('install-race-reissue-vs-verify') as Record<string, unknown>;
+
+    expect(payload).toMatchObject({
+      challenge: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      challenge_expires_at: '2026-04-08T06:06:00.000Z',
+      managed_state: {
+        lifecycle: 'pending_release',
+        managed_availability: true,
+      },
+      current_entitlement: {
+        provider: 'OpenRouter',
+        budget_usd: 0.07,
+        issued_at: null,
+        expires_at: null,
+      },
+    });
+    expect(payload.challenge).toBe(installation.challenge);
+    expect(payload.challenge_expires_at).toBe(installation.challenge_expires_at);
+    expect(installation).toEqual({
+      app_version: '1.2.4',
+      hardware_hash: null,
+      hardware_hash_salt_version: null,
+      challenge: payload.challenge,
+      challenge_expires_at: '2026-04-08T06:06:00.000Z',
+      challenge_salt_version: 7,
+    });
+  });
+});

@@ -36,7 +36,7 @@ describe('broker fingerprint salt persistence', () => {
         staleHardwareHash:
           'exclude non-current hardware_hash from duplicate matching until refreshed or cleared',
         migrationPath:
-          'overwrite hardware_hash in place on next verify with current salt, otherwise clear on challenge reissue',
+          'overwrite hardware_hash in place on next verify with current salt, otherwise clear on challenge reissue only for none or pending_release lifecycles',
       },
     });
   });

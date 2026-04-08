@@ -100,6 +100,22 @@ export interface InstallationRecord {
   last_seen_at: string;
 }
 
+export const BROKER_PUBLIC_INPUT_BOUNDS = {
+  installation_id: {
+    minLength: 1,
+    maxLength: 128,
+  },
+  app_version: {
+    minLength: 1,
+    maxLength: 64,
+  },
+  hardware_hash: {
+    minLength: 1,
+    maxLength: 128,
+    nullable: true,
+  },
+} as const;
+
 export const OPENROUTER_ENTITLEMENT_STATUS_VALUES = [
   'pending_release',
   'active',
@@ -159,14 +175,17 @@ export const BROKER_PERSISTENCE_MODEL = {
         'challenge_expires_at',
         'last_seen_at',
       ],
+      textBounds: BROKER_PUBLIC_INPUT_BOUNDS,
       updateRules: {
         onChallenge: [
           'overwrite challenge',
-          'overwrite challenge_expires_at',
-          'overwrite challenge_salt_version',
-          'overwrite app_version',
-          'touch last_seen_at',
-        ],
+            'overwrite challenge_expires_at',
+            'overwrite challenge_salt_version',
+            'overwrite app_version',
+            'clear hardware_hash and hardware_hash_salt_version only when lifecycle is none or pending_release',
+            'preserve hardware_hash state for active, expired, and revoked lifecycles',
+            'touch last_seen_at',
+          ],
         onVerify: [
           'clear challenge',
           'clear challenge_expires_at',
@@ -267,6 +286,6 @@ export const FINGERPRINT_SALT_POLICY = {
     staleHardwareHash:
       'exclude non-current hardware_hash from duplicate matching until refreshed or cleared',
     migrationPath:
-      'overwrite hardware_hash in place on next verify with current salt, otherwise clear on challenge reissue',
+      'overwrite hardware_hash in place on next verify with current salt, otherwise clear on challenge reissue only for none or pending_release lifecycles',
   },
 } as const;

@@ -20,6 +20,32 @@ Use `pnpm --filter @puripuly-heart/broker run verify:config` to exercise the pin
 
 Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from a Linux-native workspace (for example, a WSL-internal path or a regular Linux checkout), not from Windows or shared `/mnt/c/...` `node_modules`.
 
+## Trial challenge + verify handshake
+
+- `POST /v1/trial/challenge`
+  - request: `installation_id`, base64url `device_public_key`, `app_version`
+  - public input bounds: `installation_id` `1-128` chars, `app_version` `1-64` chars
+  - rejects client-supplied `hardware_hash`, `signed_at`, and `signature`
+  - response: `challenge`, `challenge_expires_at`, `fingerprint_salt`, normalized `managed_state`, and `current_entitlement`
+  - challenge TTL: `5` minutes
+  - never returns `release_token`, release-session state, or raw managed credentials
+- `POST /v1/trial/challenge/verify`
+  - request: `installation_id`, base64url `device_public_key`, `challenge`, `challenge_expires_at`, `hardware_hash`, `app_version`, `signed_at`, base64url `signature`
+  - public input bounds: `installation_id` `1-128` chars, `app_version` `1-64` chars, `hardware_hash` `1-128` chars
+  - supported timestamp subset for `challenge_expires_at` and `signed_at`: `YYYY-MM-DDTHH:MM:SS(.mmm)?(Z|±HH:MM)` with a real calendar date/time
+  - Ed25519 signature payload is canonical UTF-8 text joined by newlines in this order:
+    1. `installation_id`
+    2. `device_public_key`
+    3. `challenge`
+    4. `challenge_expires_at`
+    5. `hardware_hash`
+    6. `app_version`
+    7. `signed_at`
+  - enforces signed clock skew within `±60` seconds
+  - uses the already registered `device_public_key`; verify does not rebind installation identity
+  - successful verify consumes the active challenge, persists `hardware_hash` with the issued challenge salt version, and returns `release_token`, `release_token_expires_at`, normalized `managed_state`, and `current_entitlement`
+  - release token TTL: `15` minutes
+
 ## Persistence model
 
 `broker/src/persistence.ts` and `broker/migrations/0000_define_broker_persistent_state.sql` define the initial D1-backed state contract.
@@ -37,8 +63,8 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
     - global daily cap on new active entitlements, stored as a runtime-configurable broker value
 - `installations`
   - columns: `installation_id`, `device_public_key`, `hardware_hash`, `hardware_hash_salt_version`, `app_version`, `challenge`, `challenge_expires_at`, `challenge_salt_version`, `created_at`, `last_seen_at`
-  - constraints: `installation_id` primary key, `device_public_key` unique, `hardware_hash` indexed
-  - update rules: each challenge overwrites `challenge`, `challenge_expires_at`, `challenge_salt_version`, and `app_version`; verify clears the challenge fields; `hardware_hash` stays `NULL` until verify succeeds
+  - constraints: `installation_id` primary key, `device_public_key` unique, `hardware_hash` indexed, and bounded persisted public text (`installation_id <= 128`, `app_version <= 64`, `hardware_hash <= 128` when present)
+  - update rules: each challenge overwrites `challenge`, `challenge_expires_at`, `challenge_salt_version`, and `app_version`; it clears stored `hardware_hash` / `hardware_hash_salt_version` only when lifecycle is `none` or `pending_release`, and preserves fingerprint state for `active`, `expired`, and `revoked`; verify clears the challenge fields; `hardware_hash` stays `NULL` until verify succeeds
 - `openrouter_entitlements`
   - zero or one row per installation, keyed by `installation_id` when present
   - columns: `installation_id`, `status`, `budget_usd`, `managed_credential_ref`, `issued_at`, `expires_at`, plus minimal release-session columns `release_session_ref`, `release_token_hash`, `release_token_expires_at`
@@ -54,4 +80,4 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
 - Terminal `expired` or `revoked` installations may be deleted after `90` days from `max(last_seen_at, expires_at)`.
 - Retention cleanup deletes from `installations`; the entitlement row is removed by `ON DELETE CASCADE`.
 - `fingerprint_salt` remains one server-managed global salt shared across clients for duplicate detection.
-- Rotation keeps one current salt and one previous salt version. Duplicate matching only uses `hardware_hash` values tagged with the current version. In-flight challenges may complete on the previous version until their existing `challenge_expires_at`, after which stale hashes are refreshed in place on successful verify or cleared when the broker reissues a challenge.
+- Rotation keeps one current salt and one previous salt version. Duplicate matching only uses `hardware_hash` values tagged with the current version. In-flight challenges may complete on the previous version until their existing `challenge_expires_at`, after which stale hashes are refreshed in place on successful verify or cleared when the broker reissues a challenge for `none` / `pending_release` state.

@@ -37,6 +37,9 @@ CREATE TABLE installations (
     (hardware_hash IS NULL AND hardware_hash_salt_version IS NULL)
     OR (hardware_hash IS NOT NULL AND hardware_hash_salt_version IS NOT NULL)
   ),
+  CHECK (length(installation_id) BETWEEN 1 AND 128),
+  CHECK (length(app_version) BETWEEN 1 AND 64),
+  CHECK (hardware_hash IS NULL OR length(hardware_hash) BETWEEN 1 AND 128),
   CHECK (
     (challenge IS NULL AND challenge_expires_at IS NULL AND challenge_salt_version IS NULL)
     OR (challenge IS NOT NULL AND challenge_expires_at IS NOT NULL AND challenge_salt_version IS NOT NULL)

@@ -144,6 +144,75 @@ describe('broker migration behavior', () => {
     });
   });
 
+  it('enforces length bounds on persisted public installation inputs', () => {
+    withMigratedDatabase((db) => {
+      const insertInstallation = db.prepare(
+        `INSERT INTO installations (
+          installation_id,
+          device_public_key,
+          hardware_hash,
+          hardware_hash_salt_version,
+          app_version,
+          challenge,
+          challenge_expires_at,
+          challenge_salt_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+
+      expect(() =>
+        insertInstallation.run(
+          'i'.repeat(129),
+          'device-public-key-too-long-installation-id',
+          null,
+          null,
+          '1.0.0',
+          'challenge-token',
+          '2026-04-08T06:00:00Z',
+          2,
+        ),
+      ).toThrow(/constraint/i);
+
+      expect(() =>
+        insertInstallation.run(
+          'install-too-long-app-version',
+          'device-public-key-too-long-app-version',
+          null,
+          null,
+          'v'.repeat(65),
+          'challenge-token',
+          '2026-04-08T06:00:00Z',
+          2,
+        ),
+      ).toThrow(/constraint/i);
+
+      expect(() =>
+        insertInstallation.run(
+          'install-too-long-hardware-hash',
+          'device-public-key-too-long-hardware-hash',
+          'h'.repeat(129),
+          2,
+          '1.0.0',
+          'challenge-token',
+          '2026-04-08T06:00:00Z',
+          2,
+        ),
+      ).toThrow(/constraint/i);
+
+      expect(() =>
+        insertInstallation.run(
+          'i'.repeat(128),
+          'device-public-key-at-limit',
+          'h'.repeat(128),
+          2,
+          'v'.repeat(64),
+          'challenge-token',
+          '2026-04-08T06:00:00Z',
+          2,
+        ),
+      ).not.toThrow();
+    });
+  });
+
   it('enforces release-session all-or-none fields, unique release token hashes, and cascades entitlement deletion', () => {
     withMigratedDatabase((db) => {
       db.prepare(

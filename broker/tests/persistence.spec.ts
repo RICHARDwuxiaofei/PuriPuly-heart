@@ -52,6 +52,21 @@ describe('broker persistent state model', () => {
         },
       },
     });
+    expect(contract).toHaveProperty('BROKER_PUBLIC_INPUT_BOUNDS', {
+      installation_id: {
+        minLength: 1,
+        maxLength: 128,
+      },
+      app_version: {
+        minLength: 1,
+        maxLength: 64,
+      },
+      hardware_hash: {
+        minLength: 1,
+        maxLength: 128,
+        nullable: true,
+      },
+    });
     expect(contract).toHaveProperty('BROKER_PERSISTENCE_MODEL', {
       database: 'Cloudflare D1',
       tables: {
@@ -89,12 +104,29 @@ describe('broker persistent state model', () => {
             'challenge_expires_at',
             'last_seen_at',
           ],
+          textBounds: {
+            installation_id: {
+              minLength: 1,
+              maxLength: 128,
+            },
+            app_version: {
+              minLength: 1,
+              maxLength: 64,
+            },
+            hardware_hash: {
+              minLength: 1,
+              maxLength: 128,
+              nullable: true,
+            },
+          },
           updateRules: {
             onChallenge: [
               'overwrite challenge',
               'overwrite challenge_expires_at',
               'overwrite challenge_salt_version',
               'overwrite app_version',
+              'clear hardware_hash and hardware_hash_salt_version only when lifecycle is none or pending_release',
+              'preserve hardware_hash state for active, expired, and revoked lifecycles',
               'touch last_seen_at',
             ],
             onVerify: [
@@ -184,6 +216,11 @@ describe('broker persistent state model', () => {
     expect(migration).toContain('challenge TEXT');
     expect(migration).toContain('challenge_expires_at TEXT');
     expect(migration).toContain('challenge_salt_version INTEGER');
+    expect(migration).toContain('CHECK (length(installation_id) BETWEEN 1 AND 128)');
+    expect(migration).toContain('CHECK (length(app_version) BETWEEN 1 AND 64)');
+    expect(migration).toContain(
+      'CHECK (hardware_hash IS NULL OR length(hardware_hash) BETWEEN 1 AND 128)',
+    );
     expect(migration).toContain("INSERT INTO broker_config (key, value)");
     expect(migration).toContain("'abuse_controls'");
     expect(migration).toContain("CHECK(status IN ('pending_release', 'active', 'expired', 'revoked'))");
