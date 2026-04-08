@@ -20,7 +20,20 @@ def test_pyproject_caps_deepgram_sdk_below_v6() -> None:
 def test_pyproject_includes_sherpa_onnx_dependency() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert "sherpa-onnx>=1.12.35" in pyproject["project"]["dependencies"]
+    assert "sherpa-onnx>=1.12.36" in pyproject["project"]["dependencies"]
+
+
+def test_uv_lock_pins_sherpa_onnx_version() -> None:
+    uv_lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+
+    match = re.search(
+        r'\[\[package\]\]\s+name = "sherpa-onnx"\s+version = "([^"]+)"',
+        uv_lock,
+        re.MULTILINE,
+    )
+
+    assert match is not None
+    assert match.group(1) == "1.12.36"
 
 
 def test_release_workflow_uses_frozen_lockfile_sync() -> None:
@@ -81,7 +94,9 @@ def test_shared_windows_build_script_runs_packaged_smoke_test() -> None:
     assert "Get-Command choco" in script
 
 
-def test_shared_windows_build_script_uses_alternate_app_id_and_isolated_installer_smoke_dir() -> None:
+def test_shared_windows_build_script_uses_alternate_app_id_and_isolated_installer_smoke_dir() -> (
+    None
+):
     script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
 
     assert "$InstallerTestAppId" in script
@@ -98,7 +113,9 @@ def test_shared_windows_build_script_builds_release_installer_without_alternate_
     assert 'Invoke-ExternalProcess -FilePath $isccPath -ArgumentList @("installer.iss")' in script
 
 
-def test_shared_windows_build_script_uses_separate_smoke_installer_build_with_alternate_app_id() -> None:
+def test_shared_windows_build_script_uses_separate_smoke_installer_build_with_alternate_app_id() -> (
+    None
+):
     script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
 
     assert "$InstallerSmokeBuildDir" in script
@@ -177,7 +194,9 @@ def test_installer_script_guards_against_temporary_install_dirs() -> None:
     assert "function DirectoryLooksLikeTemporaryLocation(Path: String): Boolean;" in script
     assert "TempRoot := RemoveBackslashUnlessRoot(GetEnv('TEMP'));" in script
     assert "TempRoot := RemoveBackslashUnlessRoot(GetEnv('TMP'));" in script
-    assert r"TempRoot := RemoveBackslashUnlessRoot(ExpandConstant('{localappdata}\Temp'));" in script
+    assert (
+        r"TempRoot := RemoveBackslashUnlessRoot(ExpandConstant('{localappdata}\Temp'));" in script
+    )
     assert r"TempRoot := RemoveBackslashUnlessRoot(ExpandConstant('{tmp}'));" in script
     assert r"TempRoot := RemoveBackslashUnlessRoot(ExpandConstant('{win}\Temp'));" in script
     assert "if DirectoryLooksLikeTemporaryLocation(CandidateDir) then begin" in script
@@ -230,7 +249,9 @@ def test_local_stt_installer_script_uses_manifest_validation_and_atomic_promotio
     assert "selectedSource" in script or "SelectedSource" in script
 
 
-def test_local_stt_installer_script_writes_bomless_manifest_and_treats_invalid_install_as_recoverable() -> None:
+def test_local_stt_installer_script_writes_bomless_manifest_and_treats_invalid_install_as_recoverable() -> (
+    None
+):
     script = (ROOT / "scripts" / "installer" / "install-local-stt-model.ps1").read_text(
         encoding="utf-8"
     )
