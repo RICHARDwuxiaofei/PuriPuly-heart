@@ -1010,8 +1010,6 @@ class GuiController:
         self._local_stt_runtime_status = "ready"
         self._local_stt_download_percent = None
         self._sync_local_stt_notice()
-        if origin == "manual":
-            self._show_short_stt_message("local_stt.download_success")
 
         if (
             origin == "manual"

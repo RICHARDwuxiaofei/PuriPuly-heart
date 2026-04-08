@@ -577,11 +577,12 @@ async def test_local_qwen_successful_runtime_install_retries_enable_once(
     settings.provider.stt = STTProviderName.LOCAL_QWEN
     dashboard = DummyDashboard()
     rebuild_calls: list[str] = []
+    status_messages: list[str] = []
     switch_calls: list[bool] = []
 
     app = SimpleNamespace(
         view_dashboard=dashboard,
-        _show_snackbar=lambda *_args, **_kwargs: None,
+        _show_snackbar=lambda message, *_args, **_kwargs: status_messages.append(message),
     )
 
     class DummyWarmupHub:
@@ -617,6 +618,7 @@ async def test_local_qwen_successful_runtime_install_retries_enable_once(
     assert rebuild_calls == ["rebuild"]
     assert switch_calls == [True]
     assert dashboard.local_stt_notice_status is None
+    assert controller_module.t("local_stt.download_success") not in status_messages
 
 
 @pytest.mark.asyncio
