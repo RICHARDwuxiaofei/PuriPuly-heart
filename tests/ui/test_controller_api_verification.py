@@ -335,6 +335,35 @@ async def test_verify_and_update_status_uses_selected_managed_openrouter_key(mon
 
 
 @pytest.mark.asyncio
+async def test_verify_and_update_status_keeps_managed_openrouter_toggle_available_without_local_key(
+    monkeypatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    app = SimpleNamespace(view_dashboard=DummyDashboard())
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyHub(llm=object())
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+
+    async def fail_verify(_api_key: str) -> bool:
+        raise AssertionError("verify_api_key should not be called without a local managed key")
+
+    monkeypatch.setattr(OpenRouterLLMProvider, "verify_api_key", staticmethod(fail_verify))
+
+    await controller._verify_and_update_status()
+
+    assert app.view_dashboard.translation_needs_key is False
+
+
+@pytest.mark.asyncio
 async def test_verify_and_update_status_marks_openrouter_none_selected_source_as_needs_key(
     monkeypatch,
 ) -> None:

@@ -9,13 +9,17 @@ from pathlib import Path
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
+    OpenRouterCredentialSource,
     QwenRegion,
     SecretsBackend,
     SecretsSettings,
     STTProviderName,
 )
 from puripuly_heart.core.llm.provider import LLMProvider, SemaphoreLLMProvider
-from puripuly_heart.core.openrouter_credentials import require_openrouter_execution_api_key
+from puripuly_heart.core.openrouter_credentials import (
+    require_openrouter_execution_api_key,
+    resolve_openrouter_credentials,
+)
 from puripuly_heart.core.storage.secrets import (
     EncryptedFileSecretStore,
     KeyringSecretStore,
@@ -136,7 +140,12 @@ def require_secret(
     raise ValueError(f"Missing secret `{key}` (or env var {env_var})")
 
 
-def create_llm_provider(settings: AppSettings, *, secrets: SecretStore) -> LLMProvider:
+def create_llm_provider(
+    settings: AppSettings,
+    *,
+    secrets: SecretStore,
+    managed_release_service: object | None = None,
+) -> LLMProvider:
     if settings.provider.llm == LLMProviderName.GEMINI:
         api_key = require_secret(secrets, key="google_api_key", env_var="GOOGLE_API_KEY")
         base: LLMProvider = GeminiLLMProvider(
@@ -144,12 +153,29 @@ def create_llm_provider(settings: AppSettings, *, secrets: SecretStore) -> LLMPr
             model=settings.gemini.llm_model.value,
         )
     elif settings.provider.llm == LLMProviderName.OPENROUTER:
-        api_key = require_openrouter_execution_api_key(settings, secrets=secrets)
-        base = OpenRouterLLMProvider(
-            api_key=api_key,
-            model=settings.openrouter.llm_model.value,
-            routing_mode=settings.openrouter.routing_mode,
-        )
+        resolution = resolve_openrouter_credentials(settings, secrets=secrets)
+        if (
+            settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+            and resolution.api_key is None
+            and managed_release_service is not None
+        ):
+            from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterLLMProvider
+
+            base = ManagedOpenRouterLLMProvider(
+                release_service=managed_release_service,
+                delegate_factory=lambda api_key: OpenRouterLLMProvider(
+                    api_key=api_key,
+                    model=settings.openrouter.llm_model.value,
+                    routing_mode=settings.openrouter.routing_mode,
+                ),
+            )
+        else:
+            api_key = require_openrouter_execution_api_key(settings, secrets=secrets)
+            base = OpenRouterLLMProvider(
+                api_key=api_key,
+                model=settings.openrouter.llm_model.value,
+                routing_mode=settings.openrouter.routing_mode,
+            )
     elif settings.provider.llm == LLMProviderName.QWEN:
         from puripuly_heart.config.settings import QwenRegion
 

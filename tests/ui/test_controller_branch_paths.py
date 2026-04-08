@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+import flet as ft
 import pytest
 
 pytest.importorskip("flet")
@@ -21,6 +22,10 @@ from puripuly_heart.config.settings import (
 )
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
+from puripuly_heart.core.managed_openrouter_release import (
+    ManagedOpenRouterReleaseBehavior,
+    ManagedOpenRouterReleaseResult,
+)
 from puripuly_heart.core.osc.receiver import VrcMicState
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
 from puripuly_heart.core.overlay.sink import (
@@ -36,6 +41,7 @@ from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
 from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 from puripuly_heart.ui import controller as controller_module
 from puripuly_heart.ui.controller import GuiController
+from puripuly_heart.ui.i18n import t
 
 
 class DummySecrets:
@@ -208,6 +214,20 @@ class DummyGate:
 
     def reset(self) -> None:
         self.reset_calls += 1
+
+
+class DummyManagedReleaseService:
+    def __init__(self, result: ManagedOpenRouterReleaseResult) -> None:
+        self.result = result
+        self.prepare_calls = 0
+        self.close_calls = 0
+
+    async def prepare_for_translation(self) -> ManagedOpenRouterReleaseResult:
+        self.prepare_calls += 1
+        return self.result
+
+    async def close(self) -> None:
+        self.close_calls += 1
 
 
 class FakeOverlayBridge:
@@ -614,6 +634,60 @@ async def test_set_translation_enabled_warms_supported_provider(
     assert controller.hub.translation_enabled is True
     assert controller.hub.clear_context_calls == 1
     assert called == [("secret", "https://dashscope.aliyuncs.com/api/v1", "qwen3.5-plus")]
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_runs_managed_release_prepare_before_enabling() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            pending_issue=True,
+            local_key_available=False,
+        )
+    )
+
+    await controller.set_translation_enabled(True)
+
+    assert controller._managed_openrouter_release_service.prepare_calls == 1
+    assert controller.hub.translation_enabled is True
+    assert controller.hub.clear_context_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_keeps_managed_translation_disabled_on_retry_result() -> None:
+    snackbar_calls: list[tuple[str, str]] = []
+    controller = _make_controller(
+        app=SimpleNamespace(
+            _show_snackbar=lambda message, color: snackbar_calls.append((message, color))
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.RETRY,
+            message_key="managed_release.retry_after_ms",
+            message_kwargs={"retry_after_ms": 5000},
+            retry_after_ms=5000,
+        )
+    )
+
+    await controller.set_translation_enabled(True)
+
+    assert controller._managed_openrouter_release_service.prepare_calls == 1
+    assert controller.hub.translation_enabled is False
+    assert controller.hub.clear_context_calls == 0
+    assert snackbar_calls == [
+        (t("managed_release.retry_after_ms", retry_after_ms=5000), ft.Colors.ORANGE_700)
+    ]
 
 
 def test_verified_key_and_runtime_signature_depend_on_region_and_settings() -> None:
@@ -2046,6 +2120,45 @@ async def test_start_initializes_dashboard_and_bridge(
 
 
 @pytest.mark.asyncio
+async def test_start_keeps_managed_openrouter_dashboard_toggle_available_without_local_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.api_key_verified.openrouter = False
+
+    dash = DummyDashboard()
+    logs = DummyLogsView()
+    hub = DummyHub(llm=object(), stt=object())
+
+    async def fake_init_pipeline(self) -> None:
+        self.hub = hub
+
+    monkeypatch.setattr(GuiController, "_load_or_init_settings", lambda self, path: settings)
+    monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+    monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
+
+    class FakeBridge:
+        def __init__(self, *, app, event_queue) -> None:
+            _ = (app, event_queue)
+
+        async def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
+
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash, view_logs=logs))
+
+    await controller.start()
+    await asyncio.sleep(0)
+
+    assert dash.translation_needs_key is False
+    assert dash.translation_enabled is False
+
+
+@pytest.mark.asyncio
 async def test_set_translation_enabled_returns_when_hub_missing() -> None:
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
@@ -2845,6 +2958,47 @@ async def test_apply_providers_rebuilds_only_llm_for_openrouter_selected_source_
 
 
 @pytest.mark.asyncio
+async def test_apply_providers_switch_to_managed_blocks_concurrent_toggle_from_using_old_llm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+
+    class SlowClosingLlm:
+        async def close(self) -> None:
+            close_started.set()
+            await release_close.wait()
+
+    controller.hub = DummyHub(llm=SlowClosingLlm())
+
+    updated = AppSettings()
+    updated.provider.llm = LLMProviderName.OPENROUTER
+    updated.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "create_llm_provider", lambda *_a, **_k: object())
+
+    apply_task = asyncio.create_task(controller.apply_providers(updated))
+    await close_started.wait()
+
+    await controller.set_translation_enabled(True)
+
+    assert controller.hub.translation_enabled is False
+    assert controller.hub.clear_context_calls == 0
+    assert dash.translation_enabled is False
+
+    release_close.set()
+    await apply_task
+
+
+@pytest.mark.asyncio
 async def test_apply_providers_splits_qwen_region_refresh_by_active_consumers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2951,6 +3105,61 @@ async def test_rebuild_llm_provider_closes_existing_provider_and_updates_dashboa
     assert close_calls == ["close"]
     assert controller.hub.llm is new_llm
     assert dash.translation_needs_key is False
+
+
+@pytest.mark.asyncio
+async def test_rebuild_llm_provider_closes_previous_managed_release_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    old_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+        )
+    )
+    new_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+        )
+    )
+    controller._managed_openrouter_release_service = old_service
+
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        GuiController,
+        "_create_managed_openrouter_release_service",
+        lambda self, *, secrets: new_service,
+    )
+    monkeypatch.setattr(controller_module, "create_llm_provider", lambda *_a, **_k: object())
+
+    await controller._rebuild_llm_provider()
+
+    assert old_service.close_calls == 1
+    assert controller._managed_openrouter_release_service is new_service
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_managed_openrouter_release_service() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+        )
+    )
+    controller._managed_openrouter_release_service = service
+
+    await controller.stop()
+
+    assert service.close_calls == 1
+    assert controller._managed_openrouter_release_service is None
 
 
 @pytest.mark.asyncio
