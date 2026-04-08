@@ -11,6 +11,7 @@ pytest.importorskip("flet")
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
+    OpenRouterCredentialSource,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
@@ -275,6 +276,7 @@ async def test_verify_and_update_status_uses_selected_qwen_model_for_both_llm_an
 async def test_verify_and_update_status_uses_openrouter_verifier(monkeypatch) -> None:
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
     app = SimpleNamespace(view_dashboard=DummyDashboard())
 
     controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
@@ -299,6 +301,67 @@ async def test_verify_and_update_status_uses_openrouter_verifier(monkeypatch) ->
 
     assert seen == ["secret"]
     assert app.view_dashboard.translation_needs_key is False
+
+
+@pytest.mark.asyncio
+async def test_verify_and_update_status_uses_selected_managed_openrouter_key(monkeypatch) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    app = SimpleNamespace(view_dashboard=DummyDashboard())
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyHub()
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({"openrouter_managed_api_key": "managed-secret"}),
+    )
+
+    seen: list[str] = []
+
+    async def fake_verify(api_key: str) -> bool:
+        seen.append(api_key)
+        return True
+
+    monkeypatch.setattr(OpenRouterLLMProvider, "verify_api_key", staticmethod(fake_verify))
+
+    await controller._verify_and_update_status()
+
+    assert seen == ["managed-secret"]
+    assert app.view_dashboard.translation_needs_key is False
+
+
+@pytest.mark.asyncio
+async def test_verify_and_update_status_marks_openrouter_none_selected_source_as_needs_key(
+    monkeypatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.NONE
+    app = SimpleNamespace(view_dashboard=DummyDashboard())
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyHub(llm=None)
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({"openrouter_api_key": "secret"}),
+    )
+
+    async def fail_verify(_api_key: str) -> bool:
+        raise AssertionError("verify_api_key should not be called")
+
+    monkeypatch.setattr(OpenRouterLLMProvider, "verify_api_key", staticmethod(fail_verify))
+
+    await controller._verify_and_update_status()
+
+    assert app.view_dashboard.translation_needs_key is True
+    assert app.view_dashboard.translation_enabled is False
 
 
 @pytest.mark.asyncio

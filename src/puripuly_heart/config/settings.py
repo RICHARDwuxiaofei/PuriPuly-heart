@@ -9,7 +9,7 @@ from typing import Any
 
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 9
+SETTINGS_SCHEMA_VERSION = 11
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
     "ko": ("아이리", "시나노"),
@@ -68,6 +68,12 @@ class OpenRouterRoutingMode(str, Enum):
     LATENCY = "latency"
     PARASAIL_FIRST = "parasail_first"
     NOVITA_FIRST = "novita_first"
+
+
+class OpenRouterCredentialSource(str, Enum):
+    NONE = "none"
+    MANAGED = "managed"
+    BYOK = "byok"
 
 
 @dataclass(slots=True)
@@ -337,12 +343,15 @@ class QwenSettings:
 class OpenRouterSettings:
     llm_model: OpenRouterLLMModel = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
+    selected_source: OpenRouterCredentialSource = OpenRouterCredentialSource.NONE
 
     def validate(self) -> None:
         if not isinstance(self.llm_model, OpenRouterLLMModel):
             raise ValueError("invalid openrouter llm model")
         if not isinstance(self.routing_mode, OpenRouterRoutingMode):
             raise ValueError("invalid openrouter routing mode")
+        if not isinstance(self.selected_source, OpenRouterCredentialSource):
+            raise ValueError("invalid openrouter credential source")
 
 
 @dataclass(slots=True)
@@ -532,6 +541,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         "openrouter": {
             "llm_model": settings.openrouter.llm_model.value,
             "routing_mode": settings.openrouter.routing_mode.value,
+            "selected_source": settings.openrouter.selected_source.value,
         },
         "qwen": {
             "region": settings.qwen.region.value,
@@ -645,6 +655,42 @@ def _parse_openrouter_routing_mode(value: object) -> OpenRouterRoutingMode:
         except ValueError:
             pass
     return OpenRouterRoutingMode.LATENCY
+
+
+def _parse_openrouter_credential_source(
+    value: object,
+    *,
+    fallback: OpenRouterCredentialSource = OpenRouterCredentialSource.NONE,
+) -> OpenRouterCredentialSource:
+    if isinstance(value, str):
+        normalized = value.strip()
+        try:
+            return OpenRouterCredentialSource(normalized)
+        except ValueError:
+            pass
+    return fallback
+
+
+def _default_openrouter_credential_source_value(data: dict[str, Any]) -> OpenRouterCredentialSource:
+    provider_data = data.get("provider")
+    provider_llm_value = (
+        provider_data.get("llm", LLMProviderName.GEMINI.value)
+        if isinstance(provider_data, dict)
+        else LLMProviderName.GEMINI.value
+    )
+    if _parse_llm_provider(provider_llm_value) == LLMProviderName.OPENROUTER:
+        return OpenRouterCredentialSource.BYOK
+    return OpenRouterCredentialSource.NONE
+
+
+def _get_raw_openrouter_selected_source(openrouter_data: dict[str, Any]) -> object:
+    if "selected_source" in openrouter_data:
+        return openrouter_data["selected_source"]
+    if "credential_source" in openrouter_data:
+        return openrouter_data["credential_source"]
+    if "selected_credential_source" in openrouter_data:
+        return openrouter_data["selected_credential_source"]
+    return None
 
 
 def _infer_qwen_region_from_legacy_asr_endpoint(value: object) -> QwenRegion | None:
@@ -905,6 +951,58 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 9
 
+    if version < 10:
+        openrouter_data = data.get("openrouter")
+        if not isinstance(openrouter_data, dict):
+            openrouter_data = {}
+            data["openrouter"] = openrouter_data
+            changed = True
+
+        raw_selected_source = _get_raw_openrouter_selected_source(openrouter_data)
+        normalized_selected_source = _parse_openrouter_credential_source(
+            raw_selected_source,
+            fallback=_default_openrouter_credential_source_value(data),
+        )
+        if openrouter_data.get("selected_source") != normalized_selected_source.value:
+            openrouter_data["selected_source"] = normalized_selected_source.value
+            changed = True
+        if "credential_source" in openrouter_data:
+            del openrouter_data["credential_source"]
+            changed = True
+        if "selected_credential_source" in openrouter_data:
+            del openrouter_data["selected_credential_source"]
+            changed = True
+
+        version = 10
+
+    if version < 11:
+        openrouter_data = data.get("openrouter")
+        if not isinstance(openrouter_data, dict):
+            openrouter_data = {}
+            data["openrouter"] = openrouter_data
+            changed = True
+
+        normalized_selected_source = _parse_openrouter_credential_source(
+            _get_raw_openrouter_selected_source(openrouter_data),
+            fallback=_default_openrouter_credential_source_value(data),
+        )
+        if (
+            _default_openrouter_credential_source_value(data) == OpenRouterCredentialSource.BYOK
+            and normalized_selected_source == OpenRouterCredentialSource.NONE
+        ):
+            normalized_selected_source = OpenRouterCredentialSource.BYOK
+        if openrouter_data.get("selected_source") != normalized_selected_source.value:
+            openrouter_data["selected_source"] = normalized_selected_source.value
+            changed = True
+        if "credential_source" in openrouter_data:
+            del openrouter_data["credential_source"]
+            changed = True
+        if "selected_credential_source" in openrouter_data:
+            del openrouter_data["selected_credential_source"]
+            changed = True
+
+        version = 11
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -1001,6 +1099,21 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     ).value
     if raw_openrouter_routing_mode != normalized_openrouter_routing_mode:
         openrouter_data["routing_mode"] = normalized_openrouter_routing_mode
+        changed = True
+
+    raw_openrouter_selected_source = _get_raw_openrouter_selected_source(openrouter_data)
+    normalized_openrouter_selected_source = _parse_openrouter_credential_source(
+        raw_openrouter_selected_source,
+        fallback=_default_openrouter_credential_source_value(data),
+    )
+    if openrouter_data.get("selected_source") != normalized_openrouter_selected_source.value:
+        openrouter_data["selected_source"] = normalized_openrouter_selected_source.value
+        changed = True
+    if "credential_source" in openrouter_data:
+        del openrouter_data["credential_source"]
+        changed = True
+    if "selected_credential_source" in openrouter_data:
+        del openrouter_data["selected_credential_source"]
         changed = True
 
     qwen_data = data.get("qwen")
@@ -1120,6 +1233,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
 
     qwen_raw = data.get("qwen") if isinstance(data.get("qwen"), dict) else {}
     qwen_asr_raw = data.get("qwen_asr_stt") if isinstance(data.get("qwen_asr_stt"), dict) else {}
+    openrouter_raw = data.get("openrouter") if isinstance(data.get("openrouter"), dict) else {}
     qwen_settings = QwenSettings(
         region=_parse_qwen_region(
             qwen_raw.get("region"),
@@ -1260,16 +1374,20 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         ),
         openrouter=OpenRouterSettings(
             llm_model=_parse_openrouter_llm_model(
-                data.get("openrouter", {}).get(
+                openrouter_raw.get(
                     "llm_model",
                     OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
                 )
             ),
             routing_mode=_parse_openrouter_routing_mode(
-                data.get("openrouter", {}).get(
+                openrouter_raw.get(
                     "routing_mode",
                     OpenRouterRoutingMode.LATENCY.value,
                 )
+            ),
+            selected_source=_parse_openrouter_credential_source(
+                _get_raw_openrouter_selected_source(openrouter_raw),
+                fallback=_default_openrouter_credential_source_value(data),
             ),
         ),
         qwen=qwen_settings,

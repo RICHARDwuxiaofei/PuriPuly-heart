@@ -13,6 +13,7 @@ pytest.importorskip("flet")
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
+    OpenRouterCredentialSource,
     OpenRouterRoutingMode,
     QwenLLMModel,
     QwenRegion,
@@ -771,9 +772,7 @@ async def test_apply_settings_updates_peer_translation_flags_on_hub(
     monkeypatch.setattr(
         GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
     )
-    monkeypatch.setattr(
-        GuiController, "_refresh_peer_stt_runtime", lambda self: asyncio.sleep(0)
-    )
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", lambda self: asyncio.sleep(0))
 
     updated = AppSettings()
     updated.ui.peer_translation_enabled = True
@@ -855,9 +854,7 @@ async def test_rebuild_pipeline_closes_previous_peer_runtime_before_replacement(
         lambda self, enabled: asyncio.sleep(0),
     )
     monkeypatch.setattr(controller_module, "UIEventBridge", FakeUIEventBridge)
-    monkeypatch.setattr(
-        GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0)
-    )
+    monkeypatch.setattr(GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0))
     monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
 
     await controller._rebuild_pipeline(rebuild_stt=True)
@@ -910,9 +907,7 @@ async def test_rebuild_pipeline_rebinds_overlay_presenter_to_new_hub(
         lambda self: asyncio.sleep(0),
     )
     monkeypatch.setattr(controller_module, "UIEventBridge", FakeUIEventBridge)
-    monkeypatch.setattr(
-        GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0)
-    )
+    monkeypatch.setattr(GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0))
     monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
 
     await controller._rebuild_pipeline(rebuild_stt=True)
@@ -972,9 +967,7 @@ async def test_rebuild_pipeline_refreshes_overlay_dependencies_without_overlay_r
         "_refresh_overlay_runtime_dependencies",
         fake_refresh_overlay_runtime_dependencies,
     )
-    monkeypatch.setattr(
-        GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0)
-    )
+    monkeypatch.setattr(GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0))
     monkeypatch.setattr(controller_module, "UIEventBridge", FakeUIEventBridge)
 
     await controller._rebuild_pipeline(rebuild_stt=True)
@@ -1125,7 +1118,9 @@ async def test_refresh_overlay_runtime_dependencies_applies_peer_runtime_policy(
 
 
 @pytest.mark.asyncio
-async def test_refresh_overlay_runtime_dependencies_disables_peer_runtime_when_overlay_fails() -> None:
+async def test_refresh_overlay_runtime_dependencies_disables_peer_runtime_when_overlay_fails() -> (
+    None
+):
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.ui.peer_translation_enabled = True
@@ -2658,7 +2653,9 @@ async def test_apply_providers_replaces_runtime_self_stt_once_when_enabled(
     async def fake_rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
         calls.append(f"pipeline:{rebuild_stt}")
 
-    monkeypatch.setattr(GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
     monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild_stt_provider)
     monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
     monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
@@ -2694,7 +2691,9 @@ async def test_apply_providers_rebuilds_self_stt_only_when_disabled(
     async def fake_rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
         calls.append(f"pipeline:{rebuild_stt}")
 
-    monkeypatch.setattr(GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
     monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild_stt_provider)
     monkeypatch.setattr(GuiController, "_rebuild_pipeline", fake_rebuild_pipeline)
 
@@ -2730,7 +2729,9 @@ async def test_apply_providers_refreshes_only_peer_runtime_for_peer_provider_dra
         calls.append(f"pipeline:{rebuild_stt}")
 
     monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
-    monkeypatch.setattr(GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
     monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
     monkeypatch.setattr(GuiController, "_rebuild_pipeline", fake_rebuild_pipeline)
 
@@ -2769,7 +2770,50 @@ async def test_apply_providers_rebuilds_only_llm_for_openrouter_routing_change(
 
     monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
     monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
-    monkeypatch.setattr(GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
+    monkeypatch.setattr(GuiController, "_rebuild_pipeline", fake_rebuild_pipeline)
+
+    await controller.apply_providers(updated)
+
+    assert calls == ["llm"]
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_rebuilds_only_llm_for_openrouter_selected_source_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    controller.hub = DummyHub()
+    calls: list[str] = []
+
+    updated = AppSettings()
+    updated.provider.llm = LLMProviderName.OPENROUTER
+    updated.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+
+    async def fake_rebuild_llm_provider(self) -> None:
+        calls.append("llm")
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        calls.append("peer")
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        calls.append("replace")
+
+    async def fake_rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
+        calls.append(f"pipeline:{rebuild_stt}")
+
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
     monkeypatch.setattr(GuiController, "_rebuild_pipeline", fake_rebuild_pipeline)
 
     await controller.apply_providers(updated)
@@ -2812,7 +2856,9 @@ async def test_apply_providers_splits_qwen_region_refresh_by_active_consumers(
 
     monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
     monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
-    monkeypatch.setattr(GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
     monkeypatch.setattr(GuiController, "_rebuild_pipeline", fake_rebuild_pipeline)
 
     await controller.apply_providers(updated)

@@ -5,6 +5,7 @@ import json
 from puripuly_heart.config.settings import (
     SETTINGS_SCHEMA_VERSION,
     AppSettings,
+    OpenRouterCredentialSource,
     from_dict,
     load_settings,
     to_dict,
@@ -22,11 +23,21 @@ def test_managed_identity_settings_round_trip() -> None:
     assert restored.managed_identity == settings.managed_identity
 
 
+def test_openrouter_selected_source_round_trip() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    restored = from_dict(to_dict(settings))
+
+    assert restored.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+
+
 def test_load_settings_backfills_managed_identity_defaults(tmp_path) -> None:
     path = tmp_path / "settings.json"
     legacy = to_dict(AppSettings())
     legacy["settings_version"] = SETTINGS_SCHEMA_VERSION - 1
     legacy.pop("managed_identity", None)
+    legacy["openrouter"].pop("selected_source", None)
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
@@ -35,9 +46,11 @@ def test_load_settings_backfills_managed_identity_defaults(tmp_path) -> None:
     assert loaded.managed_identity.installation_id == ""
     assert loaded.managed_identity.release_token is None
     assert loaded.managed_identity.release_token_expires_at is None
+    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.NONE
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["managed_identity"] == {
         "installation_id": "",
         "release_token": None,
         "release_token_expires_at": None,
     }
+    assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.NONE.value

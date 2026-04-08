@@ -15,6 +15,7 @@ from puripuly_heart.config.settings import (
     STTProviderName,
 )
 from puripuly_heart.core.llm.provider import LLMProvider, SemaphoreLLMProvider
+from puripuly_heart.core.openrouter_credentials import require_openrouter_execution_api_key
 from puripuly_heart.core.storage.secrets import (
     EncryptedFileSecretStore,
     KeyringSecretStore,
@@ -143,11 +144,7 @@ def create_llm_provider(settings: AppSettings, *, secrets: SecretStore) -> LLMPr
             model=settings.gemini.llm_model.value,
         )
     elif settings.provider.llm == LLMProviderName.OPENROUTER:
-        api_key = require_secret(
-            secrets,
-            key="openrouter_api_key",
-            env_var="OPENROUTER_API_KEY",
-        )
+        api_key = require_openrouter_execution_api_key(settings, secrets=secrets)
         base = OpenRouterLLMProvider(
             api_key=api_key,
             model=settings.openrouter.llm_model.value,
