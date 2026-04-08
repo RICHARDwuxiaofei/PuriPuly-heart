@@ -158,7 +158,6 @@ class GuiController:
     _local_stt_runtime_status: str = field(init=False, default="ready")
     _local_stt_download_origin: str | None = field(init=False, default=None)
     _local_stt_download_percent: int | None = field(init=False, default=None)
-    _local_stt_startup_download_attempted: bool = field(init=False, default=False)
     _local_stt_download_task: asyncio.Task[object] | None = field(
         init=False,
         default=None,
@@ -251,7 +250,6 @@ class GuiController:
 
         await self._init_pipeline()
         self._refresh_local_stt_runtime_state()
-        await self._maybe_startup_local_stt_download()
 
         assert self.hub is not None
 
@@ -374,11 +372,23 @@ class GuiController:
 
         return (
             settings.provider.stt,
-            settings.deepgram_stt.model if settings.provider.stt == STTProviderName.DEEPGRAM else None,
+            (
+                settings.deepgram_stt.model
+                if settings.provider.stt == STTProviderName.DEEPGRAM
+                else None
+            ),
             settings.qwen.region if settings.provider.stt == STTProviderName.QWEN_ASR else None,
-            settings.qwen_asr_stt.model if settings.provider.stt == STTProviderName.QWEN_ASR else None,
+            (
+                settings.qwen_asr_stt.model
+                if settings.provider.stt == STTProviderName.QWEN_ASR
+                else None
+            ),
             settings.soniox_stt.model if settings.provider.stt == STTProviderName.SONIOX else None,
-            settings.soniox_stt.endpoint if settings.provider.stt == STTProviderName.SONIOX else None,
+            (
+                settings.soniox_stt.endpoint
+                if settings.provider.stt == STTProviderName.SONIOX
+                else None
+            ),
             (
                 settings.soniox_stt.keepalive_interval_s
                 if settings.provider.stt == STTProviderName.SONIOX
@@ -876,7 +886,11 @@ class GuiController:
             else:
                 logger.info(f"[STT] Enabled with provider: {provider}")
 
-        if enabled and self.settings is not None and self.settings.provider.stt == STTProviderName.LOCAL_QWEN:
+        if (
+            enabled
+            and self.settings is not None
+            and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
+        ):
             current_status = self._current_local_stt_runtime_status()
             if current_status == "downloading":
                 self._stt_desired = False
@@ -945,38 +959,6 @@ class GuiController:
                 percent=self._local_stt_download_percent if status == "downloading" else None,
             )
 
-    def _show_local_stt_download_prompt(self, status: str) -> None:
-        show_action = getattr(self.app, "show_action_snackbar", None)
-        if not callable(show_action):
-            fallback_key = (
-                "error.local_stt_model_missing"
-                if status == "missing"
-                else "local_stt.download_failed"
-                if status == "download_failed"
-                else "error.local_stt_model_invalid"
-            )
-            self._show_short_stt_message(fallback_key)
-            return
-
-        message_key = (
-            "local_stt.download_prompt_missing"
-            if status == "missing"
-            else "local_stt.download_prompt_failed"
-            if status == "download_failed"
-            else "local_stt.download_prompt_invalid"
-        )
-        show_action(
-            t(message_key),
-            action_label=t("local_stt.download_action"),
-            on_action=self._on_local_stt_download_action,
-        )
-
-    def _on_local_stt_download_action(self, _e) -> None:
-        if self._local_stt_download_task is not None and not self._local_stt_download_task.done():
-            self._show_short_stt_message("local_stt.download_in_progress")
-            return
-        self._start_local_stt_download(origin="manual")
-
     def _start_local_stt_download(self, *, origin: str) -> bool:
         task = self._local_stt_download_task
         if task is not None and not task.done():
@@ -988,15 +970,6 @@ class GuiController:
             self._run_local_stt_download(origin=origin)
         )
         return True
-
-    async def _maybe_startup_local_stt_download(self) -> None:
-        if self.settings is None or self._local_stt_startup_download_attempted:
-            return
-        current_status = self._current_local_stt_runtime_status()
-        if current_status not in ("missing", "invalid"):
-            return
-        self._local_stt_startup_download_attempted = True
-        self._start_local_stt_download(origin="startup")
 
     async def _run_local_stt_download(self, *, origin: str) -> None:
         current_task = asyncio.current_task()
@@ -1373,9 +1346,13 @@ class GuiController:
 
         if prev_settings is not None:
             if prev_self_provider_signature is None:
-                prev_self_provider_signature = self._build_self_stt_provider_signature(prev_settings)
+                prev_self_provider_signature = self._build_self_stt_provider_signature(
+                    prev_settings
+                )
             if prev_peer_provider_signature is None:
-                prev_peer_provider_signature = self._build_peer_stt_provider_signature(prev_settings)
+                prev_peer_provider_signature = self._build_peer_stt_provider_signature(
+                    prev_settings
+                )
             if prev_llm_provider_signature is None:
                 prev_llm_provider_signature = self._build_llm_provider_signature(prev_settings)
 
@@ -1579,7 +1556,9 @@ class GuiController:
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             dash.set_translation_needs_key(self.hub.llm is None)
-            dash.set_stt_needs_key(self._dashboard_stt_needs_key(stt_available=self.hub.stt is not None))
+            dash.set_stt_needs_key(
+                self._dashboard_stt_needs_key(stt_available=self.hub.stt is not None)
+            )
 
             self.hub.translation_enabled = (
                 bool(getattr(dash, "is_translation_on", True)) and self.hub.llm is not None

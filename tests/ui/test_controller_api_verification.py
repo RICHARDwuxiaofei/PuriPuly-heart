@@ -15,13 +15,13 @@ from puripuly_heart.config.settings import (
     QwenRegion,
     STTProviderName,
 )
-from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.core.local_stt_assets import LocalSTTInstallState
-from puripuly_heart.core.local_stt_runtime_installer import RuntimeLocalSTTStatusUpdate
+from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 from puripuly_heart.providers.stt.qwen_asr import QwenASRRealtimeSTTBackend
 from puripuly_heart.ui import controller as controller_module
+from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.controller import GuiController
 
 
@@ -69,6 +69,27 @@ class DummyHub:
 
     async def start(self, *, auto_flush_osc: bool) -> None:
         self.start_calls.append(auto_flush_osc)
+
+
+def test_local_stt_download_prompt_helpers_removed() -> None:
+    assert not hasattr(GuiController, "_show_local_stt_download_prompt")
+    assert not hasattr(GuiController, "_on_local_stt_download_action")
+
+
+def test_action_snackbar_helper_removed_from_app_source() -> None:
+    app_source = (Path(controller_module.__file__).parent / "app.py").read_text(encoding="utf-8")
+
+    assert "def show_action_snackbar(" not in app_source
+
+
+@pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
+def test_obsolete_local_stt_prompt_keys_are_removed(locale: str) -> None:
+    bundle = i18n_module._load_bundle(locale)
+
+    assert "local_stt.download_prompt_missing" not in bundle
+    assert "local_stt.download_prompt_invalid" not in bundle
+    assert "local_stt.download_prompt_failed" not in bundle
+    assert "local_stt.download_action" not in bundle
 
 
 @pytest.mark.asyncio
@@ -649,15 +670,15 @@ async def test_local_qwen_runtime_install_does_not_auto_enable_after_provider_sw
 
 
 @pytest.mark.asyncio
-async def test_start_starts_provider_agnostic_startup_local_stt_download_once(
+async def test_start_inspects_local_stt_without_auto_download_for_non_local_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
     settings.provider.stt = STTProviderName.DEEPGRAM
     dash = DummyDashboard()
     hub = DummyHub()
+    inspect_calls: list[str] = []
     install_calls: list[str] = []
-    release = SimpleNamespace(done=False)
 
     class FakeBridge:
         def __init__(self, *, app, event_queue) -> None:
@@ -670,52 +691,48 @@ async def test_start_starts_provider_agnostic_startup_local_stt_download_once(
         self.hub = hub
 
     async def fake_install(**kwargs):
-        on_status = kwargs["on_status"]
+        _ = kwargs
         install_calls.append("install")
-        await on_status(RuntimeLocalSTTStatusUpdate(status="downloading", percent=63))
-        while not release.done:
-            await asyncio.sleep(0)
         return object()
+
+    def fake_inspect(*_args, **_kwargs):
+        inspect_calls.append("inspect")
+        return LocalSTTInstallState(status="missing")
 
     monkeypatch.setattr(GuiController, "_load_or_init_settings", lambda self, path: settings)
     monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
     monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
     monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
     monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
-    monkeypatch.setattr(
-        controller_module,
-        "inspect_local_stt_install_state",
-        lambda *_args, **_kwargs: LocalSTTInstallState(status="missing"),
-    )
+    monkeypatch.setattr(controller_module, "inspect_local_stt_install_state", fake_inspect)
     monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
 
-    controller = GuiController(page=SimpleNamespace(), app=SimpleNamespace(view_dashboard=dash), config_path=Path("settings.json"))
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(view_dashboard=dash),
+        config_path=Path("settings.json"),
+    )
 
     await controller.start()
     await asyncio.sleep(0)
-    await controller._maybe_startup_local_stt_download()
-    await asyncio.sleep(0)
 
-    assert install_calls == ["install"]
-    assert controller._local_stt_startup_download_attempted is True
-    assert controller._local_stt_download_origin == "startup"
-    assert dash.local_stt_notice_status == "downloading"
-    assert dash.local_stt_notice_percent == 63
-
-    release.done = True
-    await controller._local_stt_download_task
+    assert inspect_calls == ["inspect"]
+    assert install_calls == []
+    assert controller._local_stt_download_task is None
+    assert dash.local_stt_notice_status is None
+    assert dash.local_stt_notice_percent is None
 
 
 @pytest.mark.asyncio
-async def test_startup_local_stt_download_success_does_not_auto_enable_stt(
+async def test_start_with_local_qwen_missing_shows_notice_without_auto_download(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
     settings.provider.stt = STTProviderName.LOCAL_QWEN
     dash = DummyDashboard()
     hub = DummyHub(stt=object())
-    rebuild_calls: list[str] = []
-    switch_calls: list[bool] = []
+    inspect_calls: list[str] = []
+    install_calls: list[str] = []
 
     class FakeBridge:
         def __init__(self, *, app, event_queue) -> None:
@@ -728,36 +745,33 @@ async def test_startup_local_stt_download_success_does_not_auto_enable_stt(
         self.hub = hub
 
     async def fake_install(**kwargs):
-        on_status = kwargs["on_status"]
-        await on_status(RuntimeLocalSTTStatusUpdate(status="downloading", percent=63))
+        _ = kwargs
+        install_calls.append("install")
         return object()
 
-    async def fake_rebuild(self):
-        rebuild_calls.append("rebuild")
-
-    async def fake_switch(self):
-        switch_calls.append(self._stt_desired)
+    def fake_inspect(*_args, **_kwargs):
+        inspect_calls.append("inspect")
+        return LocalSTTInstallState(status="missing")
 
     monkeypatch.setattr(GuiController, "_load_or_init_settings", lambda self, path: settings)
     monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
     monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
     monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
     monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
-    monkeypatch.setattr(
-        controller_module,
-        "inspect_local_stt_install_state",
-        lambda *_args, **_kwargs: LocalSTTInstallState(status="missing"),
-    )
+    monkeypatch.setattr(controller_module, "inspect_local_stt_install_state", fake_inspect)
     monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
-    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild)
-    monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_switch)
 
-    controller = GuiController(page=SimpleNamespace(), app=SimpleNamespace(view_dashboard=dash), config_path=Path("settings.json"))
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(view_dashboard=dash),
+        config_path=Path("settings.json"),
+    )
 
     await controller.start()
-    await controller._local_stt_download_task
 
-    assert rebuild_calls == []
-    assert switch_calls == []
+    assert inspect_calls == ["inspect"]
+    assert install_calls == []
+    assert controller._local_stt_download_task is None
     assert dash.stt_enabled is False
-    assert dash.local_stt_notice_status is None
+    assert dash.local_stt_notice_status == "missing"
+    assert dash.local_stt_notice_percent is None
