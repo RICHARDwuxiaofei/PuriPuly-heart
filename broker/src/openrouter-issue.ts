@@ -5,6 +5,8 @@ import type {
   OpenRouterEntitlementRecord,
 } from './persistence';
 import type { BrokerEnv } from './contract';
+import { deleteExpiredChallengePreflightInstallations } from './preflight-retention';
+import { nonEmptyString, stringValue, validatePublicInput } from './public-input';
 import {
   checkEndpointRateLimit,
   checkVelocityCapHook,
@@ -53,7 +55,7 @@ export async function handleOpenRouterIssue(
     return invalidRequestBodyResponse(c, body.reason);
   }
 
-  const installationId = nonEmptyString(body.value.installation_id);
+  const installationId = stringValue(body.value.installation_id);
   const devicePublicKey = nonEmptyString(body.value.device_public_key);
   const releaseToken = nonEmptyString(body.value.release_token);
   const reason = nonEmptyString(body.value.reason);
@@ -78,6 +80,14 @@ export async function handleOpenRouterIssue(
       'invalid_request',
       'installation_id, device_public_key, release_token, reason, budget_usd, model, signed_at, and signature are required',
     );
+  }
+
+  const installationIdBoundsError = validatePublicInput(
+    'installation_id',
+    installationId,
+  );
+  if (installationIdBoundsError) {
+    return errorResponse(c, 400, 'invalid_request', installationIdBoundsError);
   }
 
   if (!isBase64Url(devicePublicKey, 32) || !isBase64Url(releaseToken, 32) || !isBase64Url(signature, 64)) {
@@ -112,6 +122,12 @@ export async function handleOpenRouterIssue(
   }
 
   const now = new Date();
+  await deleteExpiredChallengePreflightInstallations(c.env.BROKER_DB, {
+    installationId,
+    devicePublicKey,
+    now,
+  });
+
   const requestContext = {
     endpoint: 'POST /v1/providers/openrouter/issue',
     now,
@@ -456,10 +472,6 @@ function invalidRequestBodyResponse(
       ? 'request body must be valid JSON'
       : 'request body must be a JSON object',
   );
-}
-
-function nonEmptyString(value: unknown): string | null {
-  return typeof value === 'string' && value.trim().length > 0 ? value : null;
 }
 
 function errorResponse(

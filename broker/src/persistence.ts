@@ -104,15 +104,24 @@ export const BROKER_PUBLIC_INPUT_BOUNDS = {
   installation_id: {
     minLength: 1,
     maxLength: 128,
+    rejectWhitespaceOnly: true,
+    rejectControlCharacters: true,
+    rejectNewlines: true,
   },
   app_version: {
     minLength: 1,
     maxLength: 64,
+    rejectWhitespaceOnly: true,
+    rejectControlCharacters: true,
+    rejectNewlines: true,
   },
   hardware_hash: {
     minLength: 1,
     maxLength: 128,
     nullable: true,
+    rejectWhitespaceOnly: true,
+    rejectControlCharacters: true,
+    rejectNewlines: true,
   },
 } as const;
 
@@ -342,6 +351,15 @@ export const BROKER_PERSISTENCE_MODEL = {
 } as const;
 
 export const BROKER_RETENTION_POLICY = {
+  challengePreflight: {
+    statuses: ['none'],
+    entitlementRow: 'absent',
+    challengeState: 'present',
+    inactiveDays: 1,
+    reference: 'max(installations.last_seen_at, installations.challenge_expires_at)',
+    deleteFrom: 'installations',
+    cascadesTo: [],
+  },
   pendingRelease: {
     statuses: ['pending_release'],
     inactiveDays: 30,

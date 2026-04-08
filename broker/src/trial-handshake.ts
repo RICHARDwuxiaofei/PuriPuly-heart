@@ -5,8 +5,9 @@ import type {
   InstallationRecord,
   OpenRouterEntitlementRecord,
 } from './persistence';
-import { BROKER_PUBLIC_INPUT_BOUNDS } from './persistence';
 import type { BrokerEnv } from './contract';
+import { deleteExpiredChallengePreflightInstallations } from './preflight-retention';
+import { nonEmptyString, stringValue, validatePublicInput } from './public-input';
 import {
   checkDailyIssuanceCap,
   checkEndpointRateLimit,
@@ -94,9 +95,9 @@ export async function handleTrialChallenge(
     );
   }
 
-  const installationId = nonEmptyString(request.installation_id);
+  const installationId = stringValue(request.installation_id);
   const devicePublicKey = nonEmptyString(request.device_public_key);
-  const appVersion = nonEmptyString(request.app_version);
+  const appVersion = stringValue(request.app_version);
 
   if (!installationId || !devicePublicKey || !appVersion) {
     return errorResponse(
@@ -107,7 +108,7 @@ export async function handleTrialChallenge(
     );
   }
 
-  const installationIdBoundsError = validatePublicInputBounds(
+  const installationIdBoundsError = validatePublicInput(
     'installation_id',
     installationId,
   );
@@ -115,7 +116,7 @@ export async function handleTrialChallenge(
     return errorResponse(c, 400, 'invalid_request', installationIdBoundsError);
   }
 
-  const appVersionBoundsError = validatePublicInputBounds('app_version', appVersion);
+  const appVersionBoundsError = validatePublicInput('app_version', appVersion);
   if (appVersionBoundsError) {
     return errorResponse(c, 400, 'invalid_request', appVersionBoundsError);
   }
@@ -129,11 +130,17 @@ export async function handleTrialChallenge(
     );
   }
 
+  const now = new Date();
+  await deleteExpiredChallengePreflightInstallations(c.env.BROKER_DB, {
+    installationId,
+    devicePublicKey,
+    now,
+  });
+
   const existingInstallation = await getInstallation(c.env.BROKER_DB, installationId);
   const entitlement = existingInstallation
     ? await getEntitlement(c.env.BROKER_DB, installationId)
     : null;
-  const now = new Date();
   const trustedInstallationId =
     existingInstallation && existingInstallation.device_public_key !== devicePublicKey
       ? null
@@ -352,12 +359,12 @@ export async function handleTrialChallengeVerify(
     return invalidRequestBodyResponse(c, body.reason);
   }
 
-  const installationId = nonEmptyString(body.value.installation_id);
+  const installationId = stringValue(body.value.installation_id);
   const devicePublicKey = nonEmptyString(body.value.device_public_key);
   const challenge = nonEmptyString(body.value.challenge);
   const challengeExpiresAt = nonEmptyString(body.value.challenge_expires_at);
-  const hardwareHash = nonEmptyString(body.value.hardware_hash);
-  const appVersion = nonEmptyString(body.value.app_version);
+  const hardwareHash = stringValue(body.value.hardware_hash);
+  const appVersion = stringValue(body.value.app_version);
   const signedAt = nonEmptyString(body.value.signed_at);
   const signature = nonEmptyString(body.value.signature);
 
@@ -379,7 +386,7 @@ export async function handleTrialChallengeVerify(
     );
   }
 
-  const installationIdBoundsError = validatePublicInputBounds(
+  const installationIdBoundsError = validatePublicInput(
     'installation_id',
     installationId,
   );
@@ -387,12 +394,12 @@ export async function handleTrialChallengeVerify(
     return errorResponse(c, 400, 'invalid_request', installationIdBoundsError);
   }
 
-  const appVersionBoundsError = validatePublicInputBounds('app_version', appVersion);
+  const appVersionBoundsError = validatePublicInput('app_version', appVersion);
   if (appVersionBoundsError) {
     return errorResponse(c, 400, 'invalid_request', appVersionBoundsError);
   }
 
-  const hardwareHashBoundsError = validatePublicInputBounds(
+  const hardwareHashBoundsError = validatePublicInput(
     'hardware_hash',
     hardwareHash,
   );
@@ -410,6 +417,12 @@ export async function handleTrialChallengeVerify(
   }
 
   const now = new Date();
+  await deleteExpiredChallengePreflightInstallations(c.env.BROKER_DB, {
+    installationId,
+    devicePublicKey,
+    now,
+  });
+
   const requestContext = {
     endpoint: 'POST /v1/trial/challenge/verify',
     now,
@@ -674,8 +687,8 @@ export async function handleTrialChallengeVerify(
 }
 
 export async function handleTrialStatus(c: Context<BrokerEnv>): Promise<Response> {
-  const installationId = nonEmptyString(c.req.query('installation_id'));
-  if (!installationId) {
+  const installationId = stringValue(c.req.query('installation_id'));
+  if (installationId === null) {
     return errorResponse(
       c,
       400,
@@ -684,7 +697,7 @@ export async function handleTrialStatus(c: Context<BrokerEnv>): Promise<Response
     );
   }
 
-  const installationIdBoundsError = validatePublicInputBounds(
+  const installationIdBoundsError = validatePublicInput(
     'installation_id',
     installationId,
   );
@@ -732,6 +745,11 @@ export async function handleTrialStatus(c: Context<BrokerEnv>): Promise<Response
   }
 
   const now = new Date();
+  await deleteExpiredChallengePreflightInstallations(c.env.BROKER_DB, {
+    installationId,
+    now,
+  });
+
   const requestContext = {
     endpoint: 'GET /v1/trial/status',
     now,
@@ -760,6 +778,7 @@ export async function handleTrialStatus(c: Context<BrokerEnv>): Promise<Response
       class: 'terminal',
       subcode: 'installation_not_found',
       message: 'installation_id is not registered with the broker',
+      entitlement: currentEntitlement,
     });
   }
 
@@ -867,23 +886,6 @@ function invalidRequestBodyResponse(
       ? 'request body must be valid JSON'
       : 'request body must be a JSON object',
   );
-}
-
-function validatePublicInputBounds(
-  field: keyof typeof BROKER_PUBLIC_INPUT_BOUNDS,
-  value: string,
-): string | null {
-  const bounds = BROKER_PUBLIC_INPUT_BOUNDS[field];
-
-  if (value.length < bounds.minLength || value.length > bounds.maxLength) {
-    return `${field} must be between ${bounds.minLength} and ${bounds.maxLength} characters`;
-  }
-
-  return null;
-}
-
-function nonEmptyString(value: unknown): string | null {
-  return typeof value === 'string' && value.trim().length > 0 ? value : null;
 }
 
 function errorResponse(

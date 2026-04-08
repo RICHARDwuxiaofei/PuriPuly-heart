@@ -383,6 +383,188 @@ describe('POST /v1/trial/challenge', () => {
     expect(secondPayload.challenge).toBe(installation.challenge);
   });
 
+  it('reclaims stale preflight-only rows by installation_id after the retention window elapses', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const env = createTestBrokerEnv();
+    env.__db
+      .prepare(
+        `INSERT INTO installations (
+            installation_id,
+            device_public_key,
+            app_version,
+            challenge,
+            challenge_expires_at,
+            challenge_salt_version,
+            created_at,
+            last_seen_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'install-stale-preflight-id',
+        Buffer.alloc(32, 5).toString('base64url'),
+        '1.0.0',
+        'stale-challenge-token',
+        '2026-04-06T06:05:00.000Z',
+        7,
+        '2026-04-06T06:00:00.000Z',
+        '2026-04-06T06:00:00.000Z',
+      );
+
+    const response = await app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-stale-preflight-id',
+          device_public_key: DEVICE_PUBLIC_KEY,
+          app_version: '2.0.0',
+        }),
+      },
+      env,
+    );
+
+    expect(response.status).toBe(200);
+
+    const installation = env.__db
+      .prepare(
+        `SELECT installation_id, device_public_key, app_version, challenge_expires_at
+           FROM installations
+          WHERE installation_id = ?`,
+      )
+      .get('install-stale-preflight-id') as Record<string, unknown>;
+
+    expect(installation).toEqual({
+      installation_id: 'install-stale-preflight-id',
+      device_public_key: DEVICE_PUBLIC_KEY,
+      app_version: '2.0.0',
+      challenge_expires_at: '2026-04-08T06:05:00.000Z',
+    });
+  });
+
+  it('reclaims stale preflight-only rows by device_public_key after the retention window elapses', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const env = createTestBrokerEnv();
+    env.__db
+      .prepare(
+        `INSERT INTO installations (
+            installation_id,
+            device_public_key,
+            app_version,
+            challenge,
+            challenge_expires_at,
+            challenge_salt_version,
+            created_at,
+            last_seen_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'install-stale-preflight-public-key',
+        DEVICE_PUBLIC_KEY,
+        '1.0.0',
+        'stale-challenge-token',
+        '2026-04-06T06:05:00.000Z',
+        7,
+        '2026-04-06T06:00:00.000Z',
+        '2026-04-06T06:00:00.000Z',
+      );
+
+    const response = await app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-fresh-after-stale-public-key',
+          device_public_key: DEVICE_PUBLIC_KEY,
+          app_version: '2.0.0',
+        }),
+      },
+      env,
+    );
+
+    expect(response.status).toBe(200);
+
+    const installation = env.__db
+      .prepare(
+        `SELECT installation_id, device_public_key, app_version, challenge_expires_at
+           FROM installations
+          WHERE installation_id = ?`,
+      )
+      .get('install-fresh-after-stale-public-key') as Record<string, unknown>;
+
+    expect(installation).toEqual({
+      installation_id: 'install-fresh-after-stale-public-key',
+      device_public_key: DEVICE_PUBLIC_KEY,
+      app_version: '2.0.0',
+      challenge_expires_at: '2026-04-08T06:05:00.000Z',
+    });
+  });
+
+  it('does not reclaim a preflight-only row before its challenge_expires_at boundary', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const env = createTestBrokerEnv();
+    env.__db
+      .prepare(
+        `INSERT INTO installations (
+            installation_id,
+            device_public_key,
+            app_version,
+            challenge,
+            challenge_expires_at,
+            challenge_salt_version,
+            created_at,
+            last_seen_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'install-preflight-boundary',
+        Buffer.alloc(32, 4).toString('base64url'),
+        '1.0.0',
+        'boundary-challenge-token',
+        '2026-04-08T06:00:01.000Z',
+        7,
+        '2026-04-06T06:00:00.000Z',
+        '2026-04-06T06:00:00.000Z',
+      );
+
+    const response = await app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-preflight-boundary',
+          device_public_key: DEVICE_PUBLIC_KEY,
+          app_version: '2.0.0',
+        }),
+      },
+      env,
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'trial_not_eligible',
+        class: 'security_fail',
+        subcode: 'installation_binding_mismatch',
+        message: 'installation_id is already bound to a different device_public_key',
+      }),
+    );
+  });
+
   it('keeps existing-installation reissue races idempotent by returning the final persisted challenge in every 200 response', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
