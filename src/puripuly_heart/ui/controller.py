@@ -21,6 +21,7 @@ from puripuly_heart.app.wiring import (
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
+    OpenRouterCredentialSource,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
@@ -47,6 +48,11 @@ from puripuly_heart.core.local_stt_runtime_installer import (
     LocalSTTRuntimeInstallError,
     RuntimeLocalSTTStatusUpdate,
     ensure_local_stt_installed,
+)
+from puripuly_heart.core.managed_openrouter_release import (
+    ManagedOpenRouterReleaseBehavior,
+    ManagedOpenRouterReleaseService,
+    UnavailableManagedOpenRouterReleaseClient,
 )
 from puripuly_heart.core.openrouter_credentials import resolve_openrouter_credentials
 from puripuly_heart.core.orchestrator.hub import ClientHub
@@ -125,6 +131,7 @@ class GuiController:
 
     settings: AppSettings | None = None
     clock: SystemClock = SystemClock()
+    _managed_openrouter_release_service: ManagedOpenRouterReleaseService | None = None
 
     sender: VrchatOscUdpSender | None = None
     osc: SmartOscQueue | None = None
@@ -278,7 +285,11 @@ class GuiController:
             }
             llm_verified_key = llm_key_map.get(llm_provider, llm_provider)
             llm_verified = getattr(self.settings.api_key_verified, llm_verified_key, False)
-            dash.translation_needs_key = (self.hub.llm is None) or (not llm_verified)
+            dash.translation_needs_key = (
+                False
+                if self._managed_openrouter_can_attempt_translation()
+                else (self.hub.llm is None) or (not llm_verified)
+            )
 
             # Set initial enabled states (all start as off/gray)
             dash.set_translation_enabled(False)
@@ -412,6 +423,15 @@ class GuiController:
     def _build_peer_stt_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
         return build_peer_stt_provider_signature(settings)
 
+    def _managed_openrouter_can_attempt_translation(self) -> bool:
+        return bool(
+            self.settings is not None
+            and self.settings.provider.llm == LLMProviderName.OPENROUTER
+            and self.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+            and self.hub is not None
+            and self.hub.llm is not None
+        )
+
     def _build_llm_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
         return (
             settings.provider.llm,
@@ -500,6 +520,7 @@ class GuiController:
                 self.sender.close()
             self.sender = None
         self.osc = None
+        await self._replace_managed_openrouter_release_service(None)
 
     async def set_overlay_enabled(self, enabled: bool) -> None:
         if self.settings is None:
@@ -846,6 +867,8 @@ class GuiController:
             self.hub.translation_enabled,
             self.hub.llm is not None,
         )
+        if enabled and await self._handle_managed_translation_enable() is False:
+            return
         if enabled and self.hub.llm is None:
             self.hub.translation_enabled = False
             dash = getattr(self.app, "view_dashboard", None)
@@ -916,7 +939,10 @@ class GuiController:
         await self._ensure_stt_switch()
 
     def _show_short_stt_message(self, message_key: str) -> None:
-        message = t(message_key)
+        self._show_short_message(message_key)
+
+    def _show_short_message(self, message_key: str, **message_kwargs: object) -> None:
+        message = t(message_key, **message_kwargs)
         show_snackbar = getattr(self.app, "_show_snackbar", None)
         if callable(show_snackbar):
             with contextlib.suppress(Exception):
@@ -937,6 +963,30 @@ class GuiController:
                 )
                 return
         self._log_error(message)
+
+    async def _handle_managed_translation_enable(self) -> bool:
+        if self.settings is None or self.hub is None:
+            return True
+        if self.settings.provider.llm != LLMProviderName.OPENROUTER:
+            return True
+        if self.settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED:
+            return True
+        service = self._managed_openrouter_release_service
+        if service is None:
+            return True
+
+        result = await service.prepare_for_translation()
+        if result.behavior == ManagedOpenRouterReleaseBehavior.READY:
+            if self.hub.llm is None:
+                await self._rebuild_llm_provider()
+            return True
+
+        self.hub.translation_enabled = False
+        dash = getattr(self.app, "view_dashboard", None)
+        if dash is not None:
+            dash.set_translation_enabled(False)
+        self._show_short_message(result.message_key, **dict(result.message_kwargs))
+        return False
 
     def _refresh_local_stt_runtime_state(self) -> None:
         if self.settings is None:
@@ -1426,15 +1476,25 @@ class GuiController:
             return
 
         # Close existing LLM provider
-        if self.hub.llm is not None:
+        previous_llm = self.hub.llm
+        self.hub.llm = None
+        if previous_llm is not None:
             with contextlib.suppress(Exception):
-                await self.hub.llm.close()
+                await previous_llm.close()
 
         # Create new LLM provider with current settings
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+        new_managed_release_service = self._create_managed_openrouter_release_service(
+            secrets=secrets
+        )
+        await self._replace_managed_openrouter_release_service(new_managed_release_service)
         llm = None
         with contextlib.suppress(Exception):
-            llm = create_llm_provider(self.settings, secrets=secrets)
+            llm = create_llm_provider(
+                self.settings,
+                secrets=secrets,
+                managed_release_service=self._managed_openrouter_release_service,
+            )
 
         # Update hub's LLM provider
         self.hub.llm = llm
@@ -1587,10 +1647,18 @@ class GuiController:
         assert self.settings is not None
         self._sync_signature_caches(self.settings)
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+        new_managed_release_service = self._create_managed_openrouter_release_service(
+            secrets=secrets
+        )
+        await self._replace_managed_openrouter_release_service(new_managed_release_service)
 
         llm = None
         with contextlib.suppress(Exception):
-            llm = create_llm_provider(self.settings, secrets=secrets)
+            llm = create_llm_provider(
+                self.settings,
+                secrets=secrets,
+                managed_release_service=self._managed_openrouter_release_service,
+            )
 
         stt = None
         try:
@@ -1676,6 +1744,40 @@ class GuiController:
         )
         self._last_peer_translation_enabled = self.settings.ui.peer_translation_enabled
         await self._configure_vrc_mic_receiver(enabled=self.settings.osc.vrc_mic_intercept)
+
+    async def _replace_managed_openrouter_release_service(
+        self,
+        service: ManagedOpenRouterReleaseService | None,
+    ) -> None:
+        previous = self._managed_openrouter_release_service
+        self._managed_openrouter_release_service = service
+        if previous is not None and previous is not service:
+            with contextlib.suppress(Exception):
+                await previous.close()
+
+    def _create_managed_openrouter_release_service(
+        self, *, secrets
+    ) -> ManagedOpenRouterReleaseService | None:
+        if self.settings is None:
+            return None
+        if self.settings.provider.llm != LLMProviderName.OPENROUTER:
+            return None
+        if self.settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED:
+            return None
+
+        from puripuly_heart import __version__
+
+        def _missing_hardware_hash() -> str:
+            raise RuntimeError("managed hardware fingerprint provider is not configured")
+
+        return ManagedOpenRouterReleaseService(
+            settings=self.settings,
+            secrets=secrets,
+            client=UnavailableManagedOpenRouterReleaseClient(),
+            persist_settings=lambda updated: save_settings(self.config_path, updated),
+            hardware_hash_provider=_missing_hardware_hash,
+            app_version=__version__,
+        )
 
     async def _start_mic_loop(self) -> None:
         assert self.settings is not None
@@ -2039,10 +2141,19 @@ class GuiController:
                         if secrets is not None
                         else None
                     )
-                    key = (
-                        resolution.api_key if resolution is not None and resolution.api_key else ""
-                    )
-                    llm_valid = bool(key) and await OpenRouterLLMProvider.verify_api_key(key)
+                    if (
+                        self.settings.openrouter.selected_source
+                        == OpenRouterCredentialSource.MANAGED
+                        and (resolution is None or resolution.api_key is None)
+                    ):
+                        llm_valid = self._managed_openrouter_can_attempt_translation()
+                    else:
+                        key = (
+                            resolution.api_key
+                            if resolution is not None and resolution.api_key
+                            else ""
+                        )
+                        llm_valid = bool(key) and await OpenRouterLLMProvider.verify_api_key(key)
                 elif provider_name == "qwen":
                     llm_valid = await _verify_alibaba_selected()
                 else:

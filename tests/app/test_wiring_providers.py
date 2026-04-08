@@ -32,6 +32,7 @@ from puripuly_heart.config.settings import (
 from puripuly_heart.core.language import get_deepgram_language, get_qwen_asr_language
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
+from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterLLMProvider
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
@@ -216,6 +217,27 @@ def test_create_llm_provider_openrouter_does_not_fallback_to_byok_when_managed_s
 
     with pytest.raises(ValueError, match="managed key"):
         create_llm_provider(settings, secrets=secrets)
+
+
+def test_create_llm_provider_openrouter_uses_managed_wrapper_when_release_service_is_available() -> (
+    None
+):
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.MANAGED),
+    )
+    secrets = InMemorySecretStore()
+    managed_release_service = object()
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=managed_release_service,
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, ManagedOpenRouterLLMProvider)
+    assert provider.inner.release_service is managed_release_service
 
 
 def test_create_llm_provider_openrouter_rejects_none_selected_source_even_with_keys() -> None:
