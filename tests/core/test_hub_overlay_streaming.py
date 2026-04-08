@@ -12,6 +12,7 @@ from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.orchestrator import hub as hub_module
 from puripuly_heart.core.orchestrator.hub import ClientHub
+from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
 from puripuly_heart.domain.events import STTFinalEvent, STTPartialEvent
 from puripuly_heart.domain.models import Transcript
@@ -582,6 +583,74 @@ async def test_low_latency_self_active_secondary_stays_sticky_on_soft_reuse_mism
         "hello live bye now",
     ]
     assert [event.type for event in sink.events if event.type != "self_active_update"] == []
+
+
+@pytest.mark.asyncio
+async def test_low_latency_self_active_secondary_diagnostics_record_blank_sticky_and_spec_sources(
+    tmp_path,
+) -> None:
+    sink = RecordingOverlaySink()
+    diagnostics = OverlayDiagnosticsRecorder(
+        overlay_instance_id="overlay-test",
+        diagnostics_dir=tmp_path,
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=SequencedTranslateLLMProvider(responses=["translated one", "translated two"]),
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        overlay_diagnostics=diagnostics,
+        clock=FakeClock(_now=10.0),
+        low_latency_mode=True,
+        low_latency_awaiting_vad_timeout_s=10.0,
+    )
+    utterance_id = uuid4()
+
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=utterance_id,
+            transcript=Transcript(
+                utterance_id=utterance_id,
+                text="hello live",
+                is_final=True,
+                created_at=11.0,
+            ),
+        )
+    )
+    buffer = hub._merge_buffer
+    assert buffer is not None
+    assert buffer.spec_task is not None
+    await asyncio.gather(buffer.spec_task, return_exceptions=True)
+
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=utterance_id,
+            transcript=Transcript(
+                utterance_id=utterance_id,
+                text="bye now",
+                is_final=True,
+                created_at=12.0,
+            ),
+        )
+    )
+
+    diagnostic_sources = [
+        event["source"]
+        for event in diagnostics.hub_events
+        if event["event"] == "active_self_secondary"
+    ]
+
+    assert diagnostic_sources[:3] == ["blank", "spec", "sticky_cache"]
+
+    assert buffer.spec_task is not None
+    await asyncio.gather(buffer.spec_task, return_exceptions=True)
+
+    diagnostic_sources = [
+        event["source"]
+        for event in diagnostics.hub_events
+        if event["event"] == "active_self_secondary"
+    ]
+    assert diagnostic_sources[-1] == "spec"
 
 
 @pytest.mark.asyncio

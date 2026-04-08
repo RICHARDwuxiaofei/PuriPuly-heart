@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -488,3 +489,87 @@ async def test_overlay_process_manager_maps_bridge_runtime_error_after_ready() -
 
     assert manager.state == "failed"
     assert manager.failure_reason == "runtime_disconnected"
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_writes_runtime_crash_dump_with_recent_child_output(
+    tmp_path: Path,
+) -> None:
+    script_path = tmp_path / "overlay_stub_runtime_crash.py"
+    script_path.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import sys",
+                "assert sys.argv[1] == '--config'",
+                "for index in range(105):",
+                '    print(f\"stdout-line-{index}\", flush=True)',
+                "for index in range(3):",
+                '    print(f\"stderr-line-{index}\", file=sys.stderr, flush=True)',
+                'print(\'{\"type\": \"overlay_ready\"}\', flush=True)',
+                "raise SystemExit(1)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+    manager = OverlayProcessManager(
+        process_runner=DefaultOverlayProcessRunner(executable_path=script_path),
+        startup_timeout_ms=500,
+        diagnostics_dir=tmp_path,
+    )
+
+    await manager.start()
+    for _ in range(50):
+        if manager.state == "failed":
+            break
+        await asyncio.sleep(0.01)
+
+    assert manager.state == "failed"
+    assert manager.failure_reason == "runtime_crashed"
+
+    dump_files = sorted(tmp_path.glob("overlay-diagnostics-*.jsonl"))
+    assert len(dump_files) == 1
+    dump_rows = [json.loads(line) for line in dump_files[0].read_text(encoding="utf-8").splitlines()]
+
+    summary = dump_rows[0]
+    assert summary["event"] == "failure_summary"
+    assert summary["overlay_instance_id"] == manager.overlay_instance_id
+    assert summary["phase"] == "connected"
+    assert summary["exit_code"] == 1
+    assert summary["failure_reason"] == "runtime_crashed"
+
+    stdout_rows = [row for row in dump_rows if row.get("stream") == "stdout"]
+    stderr_rows = [row for row in dump_rows if row.get("stream") == "stderr"]
+    assert len(stdout_rows) == 100
+    assert "stdout-line-0" not in {row["line"] for row in stdout_rows}
+    assert "stdout-line-104" in {row["line"] for row in stdout_rows}
+    assert {row["line"] for row in stderr_rows} == {
+        "stderr-line-0",
+        "stderr-line-1",
+        "stderr-line-2",
+    }
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_dump_marks_startup_phase_for_pre_ready_exit(
+    tmp_path: Path,
+) -> None:
+    manager = OverlayProcessManager(
+        process_runner=FakeProcessRunner(exit_code=21),
+        diagnostics_dir=tmp_path,
+    )
+
+    await manager.start()
+
+    assert manager.state == "failed"
+    assert manager.failure_reason == "renderer_init_failed"
+
+    dump_files = sorted(tmp_path.glob("overlay-diagnostics-*.jsonl"))
+    assert len(dump_files) == 1
+    summary = json.loads(dump_files[0].read_text(encoding="utf-8").splitlines()[0])
+    assert summary["event"] == "failure_summary"
+    assert summary["phase"] == "startup"
+    assert summary["exit_code"] == 21
+    assert summary["failure_reason"] == "renderer_init_failed"

@@ -1570,6 +1570,29 @@ async def test_overlay_runtime_crash_keeps_saved_preferences_without_auto_restar
     assert controller.auto_restart_scheduled is False
 
 
+def test_overlay_runtime_crash_logs_state_transition(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.overlay_state = "connected"
+    controller._overlay_manager = SimpleNamespace(state="failed")
+    controller._overlay_presenter = object()  # type: ignore[assignment]
+    controller._overlay_bridge = object()  # type: ignore[assignment]
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.ui.controller"):
+        controller.on_overlay_runtime_crashed()
+
+    assert controller.overlay_state == "failed"
+    assert any(
+        "State transition: connected -> failed" in message
+        and "failure_reason=runtime_crashed" in message
+        and "presenter_attached=True" in message
+        and "bridge_attached=True" in message
+        and "manager_state=failed" in message
+        for message in caplog.messages
+    )
+
+
 @pytest.mark.asyncio
 async def test_overlay_successful_recovery_clears_previous_failure_reason(
     monkeypatch: pytest.MonkeyPatch,

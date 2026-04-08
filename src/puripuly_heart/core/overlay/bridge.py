@@ -11,6 +11,7 @@ import websockets
 from websockets.asyncio.server import Server, ServerConnection
 from websockets.exceptions import ConnectionClosed
 
+from .diagnostics import OverlayDiagnosticsRecorder
 from .protocol import OverlayPresentationSnapshot
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,8 @@ class OverlayBridge:
     heartbeat_interval_ms: int = 1000
     host: str = "127.0.0.1"
     port: int = 0
+    overlay_instance_id: str | None = None
+    diagnostics: OverlayDiagnosticsRecorder | None = None
 
     url: str = field(init=False, default="")
     messages: asyncio.Queue[dict[str, Any]] = field(
@@ -38,6 +41,7 @@ class OverlayBridge:
     _snapshot: OverlayPresentationSnapshot = field(init=False)
     _snapshot_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock)
     _token_consumed: bool = field(init=False, default=False)
+    _last_snapshot_revision: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         if self.initial_snapshot is None:
@@ -45,8 +49,10 @@ class OverlayBridge:
             return
         if isinstance(self.initial_snapshot, OverlayPresentationSnapshot):
             self._snapshot = self.initial_snapshot
+            self._last_snapshot_revision = self._snapshot.revision
             return
         self._snapshot = OverlayPresentationSnapshot.from_dict(self.initial_snapshot)
+        self._last_snapshot_revision = self._snapshot.revision
 
     async def start(self) -> None:
         if self._server is not None:
@@ -89,8 +95,10 @@ class OverlayBridge:
             if snapshot.revision <= self._snapshot.revision:
                 return
             self._snapshot = snapshot
+            self._last_snapshot_revision = snapshot.revision
             logger.info(
-                "[OverlayBridge] Snapshot updated: revision=%s block_count=%s authenticated_connections=%s",
+                "[OverlayBridge] Snapshot updated: overlay_instance_id=%s revision=%s block_count=%s authenticated_connections=%s",
+                self.overlay_instance_id,
                 snapshot.revision,
                 len(snapshot.blocks),
                 len(self._authenticated_connections),
@@ -105,6 +113,7 @@ class OverlayBridge:
 
     async def _handle_connection(self, connection: ServerConnection) -> None:
         authenticated = False
+        connection_id = self._connection_id(connection)
         try:
             auth_payload = self._load_message(await connection.recv())
             if not self._is_valid_auth_payload(auth_payload):
@@ -129,20 +138,57 @@ class OverlayBridge:
                 self._authenticated_connections.add(connection)
                 authenticated = True
                 logger.info(
-                    "[OverlayBridge] Overlay authenticated: revision=%s authenticated_connections=%s",
+                    "[OverlayBridge] Overlay authenticated: overlay_instance_id=%s connection_id=%s revision=%s authenticated_connections=%s",
+                    self.overlay_instance_id,
+                    connection_id,
                     self._snapshot.revision,
                     len(self._authenticated_connections),
                 )
+                if self.diagnostics is not None:
+                    self.diagnostics.record_bridge(
+                        "connection_authenticated",
+                        connection_id=connection_id,
+                        authenticated_connections=len(self._authenticated_connections),
+                        revision=self._snapshot.revision,
+                    )
 
             async for raw_message in connection:
                 message = self._load_message(raw_message)
                 await self.messages.put(message)
-        except ConnectionClosed:
-            logger.info("[OverlayBridge] Overlay connection closed")
+        except ConnectionClosed as exc:
+            close_code = self._close_code(exc)
+            close_reason = self._close_reason(exc)
+            logger.info(
+                "[OverlayBridge] Overlay connection closed: overlay_instance_id=%s connection_id=%s code=%s reason=%s authenticated=%s authenticated_connections=%s last_snapshot_revision=%s",
+                self.overlay_instance_id,
+                connection_id,
+                close_code,
+                close_reason,
+                authenticated,
+                len(self._authenticated_connections),
+                self._last_snapshot_revision,
+            )
+            if self.diagnostics is not None:
+                self.diagnostics.record_bridge(
+                    "connection_closed",
+                    connection_id=connection_id,
+                    authenticated=authenticated,
+                    authenticated_connections=len(self._authenticated_connections),
+                    code=close_code,
+                    reason=close_reason,
+                    last_snapshot_revision=self._last_snapshot_revision,
+                )
             return
         finally:
             if authenticated:
                 self._authenticated_connections.discard(connection)
+                if self.diagnostics is not None:
+                    self.diagnostics.record_bridge(
+                        "connection_detached",
+                        connection_id=connection_id,
+                        authenticated_connections=len(self._authenticated_connections),
+                        last_snapshot_revision=self._last_snapshot_revision,
+                    )
             with contextlib.suppress(ConnectionClosed):
                 await connection.close()
 
@@ -174,15 +220,50 @@ class OverlayBridge:
             return
 
         message = json.dumps(payload)
+        revision: int | None = None
+        if payload.get("type") == "snapshot":
+            revision = payload.get("payload", {}).get("revision")  # type: ignore[assignment]
         stale_connections: list[ServerConnection] = []
         for connection in tuple(self._authenticated_connections):
             try:
                 await connection.send(message)
-            except Exception:
+            except Exception as exc:
                 stale_connections.append(connection)
+                logger.warning(
+                    "[OverlayBridge] Broadcast send failed: overlay_instance_id=%s connection_id=%s revision=%s exception_type=%s",
+                    self.overlay_instance_id,
+                    self._connection_id(connection),
+                    revision,
+                    type(exc).__name__,
+                )
+                if self.diagnostics is not None:
+                    self.diagnostics.record_bridge(
+                        "send_failure",
+                        connection_id=self._connection_id(connection),
+                        revision=revision,
+                        exception_type=type(exc).__name__,
+                        removed=True,
+                    )
 
         for connection in stale_connections:
             self._authenticated_connections.discard(connection)
+
+    def _connection_id(self, connection: ServerConnection) -> str:
+        return f"conn-{id(connection):x}"
+
+    def _close_code(self, exc: ConnectionClosed) -> int | None:
+        if exc.rcvd is not None:
+            return exc.rcvd.code
+        if exc.sent is not None:
+            return exc.sent.code
+        return None
+
+    def _close_reason(self, exc: ConnectionClosed) -> str | None:
+        if exc.rcvd is not None:
+            return exc.rcvd.reason
+        if exc.sent is not None:
+            return exc.sent.reason
+        return None
 
     def _drain_messages(self) -> None:
         while True:

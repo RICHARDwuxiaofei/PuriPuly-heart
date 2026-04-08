@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from puripuly_heart.core.clock import FakeClock
+from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
 from puripuly_heart.core.overlay.protocol import OverlayPresentationCalibration
 from puripuly_heart.core.overlay.sink import (
@@ -514,6 +515,140 @@ async def test_presenter_restarts_self_translation_min_visibility_when_translati
     await asyncio.sleep(0)
 
     assert presenter.snapshot().blocks == []
+
+
+@pytest.mark.asyncio
+async def test_presenter_records_expired_entry_diagnostic_with_deadlines(
+    tmp_path,
+) -> None:
+    bridge = RecordingPresentationBridge()
+    clock = FakeClock(_now=10.0)
+    diagnostics = OverlayDiagnosticsRecorder(
+        overlay_instance_id="overlay-test",
+        diagnostics_dir=tmp_path,
+    )
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=clock,
+        diagnostics=diagnostics,
+    )
+    adapter = OverlayEventAdapter(clock=clock)
+    utterance_id = uuid4()
+
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=utterance_id,
+                channel="self",
+                text="self original",
+                is_final=True,
+                created_at=10.0,
+            ),
+            source_language="ko",
+            target_language="en",
+        )
+    )
+    await presenter.emit(
+        adapter.utterance_closed(
+            utterance_id=utterance_id,
+            channel="self",
+            created_at=10.1,
+        )
+    )
+    clock.advance(7.0)
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=utterance_id,
+            channel="self",
+            text="self translation",
+            source_language="ko",
+            target_language="en",
+            applied_context_mode=None,
+            created_at=17.0,
+        )
+    )
+
+    clock.advance(4.1)
+    await presenter._publish_if_changed()
+
+    removal_event = diagnostics.presenter_removal_events[-1]
+    assert removal_event["event"] == "entry_removed"
+    assert removal_event["reason"] == "expired"
+    assert removal_event["channel"] == "self"
+    assert removal_event["translation_deadline"] == pytest.approx(21.0)
+    assert removal_event["visible_deadline"] == pytest.approx(18.0)
+    assert removal_event["effective_deadline"] == pytest.approx(21.0)
+
+
+@pytest.mark.asyncio
+async def test_presenter_records_window_selection_and_displaced_entry_diagnostics(
+    tmp_path,
+) -> None:
+    bridge = RecordingPresentationBridge()
+    clock = FakeClock(_now=10.0)
+    diagnostics = OverlayDiagnosticsRecorder(
+        overlay_instance_id="overlay-test",
+        diagnostics_dir=tmp_path,
+    )
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=clock,
+        diagnostics=diagnostics,
+    )
+    adapter = OverlayEventAdapter(clock=clock)
+    utterance_ids = [uuid4(), uuid4(), uuid4()]
+
+    for index, utterance_id in enumerate(utterance_ids, start=1):
+        await presenter.emit(
+            adapter.transcript_final(
+                Transcript(
+                    utterance_id=utterance_id,
+                    channel="self",
+                    text=f"original {index}",
+                    is_final=True,
+                    created_at=float(index),
+                ),
+                source_language="ko",
+                target_language="en",
+            )
+        )
+        await presenter.emit(
+            adapter.translation_final(
+                utterance_id=utterance_id,
+                channel="self",
+                text=f"translation {index}",
+                source_language="ko",
+                target_language="en",
+                applied_context_mode=None,
+                created_at=float(index) + 0.1,
+            )
+        )
+        await presenter.emit(
+            adapter.utterance_closed(
+                utterance_id=utterance_id,
+                channel="self",
+                is_final=True,
+                created_at=float(index) + 0.2,
+            )
+        )
+
+    window_events = [
+        event for event in diagnostics.presenter_events if event["event"] == "visible_window"
+    ]
+    assert window_events[-1]["finalized_limit"] == 2
+    assert window_events[-1]["selected_keys"] == [
+        f"self:{utterance_ids[1]}",
+        f"self:{utterance_ids[2]}",
+    ]
+    assert any(
+        event["dropped_keys"] == [f"self:{utterance_ids[0]}"] for event in window_events
+    )
+
+    removal_event = diagnostics.presenter_removal_events[-1]
+    assert removal_event["reason"] == "displaced_window"
+    assert removal_event["entry_key"] == f"self:{utterance_ids[0]}"
 
 
 @pytest.mark.asyncio

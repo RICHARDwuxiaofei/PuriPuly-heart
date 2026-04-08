@@ -8,6 +8,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosedError
 
 from puripuly_heart.core.overlay.bridge import OverlayBridge
+from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.overlay.protocol import (
     OverlayPresentationCalibration,
     OverlayPresentationSnapshot,
@@ -66,6 +67,18 @@ class _BlockingInitialSnapshotConnection:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _FailingSendConnection:
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    async def send(self, payload: str) -> None:
+        _ = payload
+        raise RuntimeError("boom")
+
+    async def close(self) -> None:
+        self.close_calls += 1
 
 
 @pytest.mark.asyncio
@@ -285,3 +298,80 @@ async def test_overlay_bridge_ignores_stale_snapshot_replacements() -> None:
 
     assert bridge.snapshot().revision == 2
     assert bridge.snapshot().calibration.distance == 1.4
+
+
+@pytest.mark.asyncio
+async def test_overlay_bridge_records_disconnect_code_and_reason(
+    tmp_path,
+) -> None:
+    diagnostics = OverlayDiagnosticsRecorder(
+        overlay_instance_id="overlay-test",
+        diagnostics_dir=tmp_path,
+    )
+    bridge = OverlayBridge(
+        session_token="expected-token",
+        overlay_instance_id="overlay-test",
+        diagnostics=diagnostics,
+        initial_snapshot=OverlayPresentationSnapshot(
+            revision=0,
+            calibration=OverlayPresentationCalibration(),
+            blocks=[],
+        ),
+    )
+    await bridge.start()
+
+    try:
+        async with connect(bridge.url) as ws:
+            await ws.send(json.dumps({"type": "auth", "session_token": "expected-token"}))
+            await asyncio.wait_for(ws.recv(), timeout=0.5)
+            await ws.close(code=4001, reason="client_bye")
+            await asyncio.sleep(0.05)
+    finally:
+        await bridge.stop()
+
+    close_events = [
+        event for event in diagnostics.bridge_events if event["event"] == "connection_closed"
+    ]
+    assert close_events[-1]["overlay_instance_id"] == "overlay-test"
+    assert close_events[-1]["code"] == 4001
+    assert close_events[-1]["reason"] == "client_bye"
+    assert close_events[-1]["last_snapshot_revision"] == 0
+
+
+@pytest.mark.asyncio
+async def test_overlay_bridge_records_send_failures_and_prunes_stale_connections(
+    tmp_path,
+) -> None:
+    diagnostics = OverlayDiagnosticsRecorder(
+        overlay_instance_id="overlay-test",
+        diagnostics_dir=tmp_path,
+    )
+    bridge = OverlayBridge(
+        session_token="expected-token",
+        overlay_instance_id="overlay-test",
+        diagnostics=diagnostics,
+        initial_snapshot=OverlayPresentationSnapshot(
+            revision=0,
+            calibration=OverlayPresentationCalibration(),
+            blocks=[],
+        ),
+    )
+    connection = _FailingSendConnection()
+    bridge._authenticated_connections.add(connection)  # type: ignore[arg-type]
+
+    await bridge.replace_snapshot(
+        OverlayPresentationSnapshot(
+            revision=1,
+            calibration=OverlayPresentationCalibration(),
+            blocks=[],
+        )
+    )
+
+    send_failure_events = [
+        event for event in diagnostics.bridge_events if event["event"] == "send_failure"
+    ]
+    assert send_failure_events[-1]["overlay_instance_id"] == "overlay-test"
+    assert send_failure_events[-1]["exception_type"] == "RuntimeError"
+    assert send_failure_events[-1]["revision"] == 1
+    assert send_failure_events[-1]["removed"] is True
+    assert bridge._authenticated_connections == set()

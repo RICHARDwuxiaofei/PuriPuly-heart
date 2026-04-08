@@ -18,6 +18,7 @@ from puripuly_heart.core.orchestrator.channel_runtime import (
 )
 from puripuly_heart.core.orchestrator.context import ContextMode, ContextResolver
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
+from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.overlay.sink import (
     OverlayEventAdapter,
     OverlaySink,
@@ -72,6 +73,7 @@ class ClientHub:
     osc: SmartOscQueue
     peer_stt: STTProvider | None = None
     overlay_sink: OverlaySink | None = None
+    overlay_diagnostics: OverlayDiagnosticsRecorder | None = None
     clock: Clock = SystemClock()
 
     source_language: str = "ko"
@@ -127,6 +129,10 @@ class ClientHub:
     _overlay_active_self_secondary_text: str | None = field(init=False, default=None)
     overlay_stream_coalesce_ms: int = 300
     last_error_source: str | None = None
+    _last_overlay_secondary_diagnostic_signature: tuple[object, ...] | None = field(
+        init=False,
+        default=None,
+    )
 
     def __post_init__(self) -> None:
         self.overlay_event_adapter = OverlayEventAdapter(clock=self.clock)
@@ -578,6 +584,12 @@ class ClientHub:
         if self.overlay_sink is None:
             return
 
+        self._record_overlay_emit(
+            event_kind="translation_final",
+            utterance_id=translation.utterance_id,
+            channel=translation.channel,
+            secondary_len=len(translation.text.strip()),
+        )
         await self._emit_overlay_event(
             self.overlay_event_adapter.translation_final(
                 utterance_id=translation.utterance_id,
@@ -609,15 +621,26 @@ class ClientHub:
             self._overlay_active_self_secondary_text = None
 
     def _overlay_active_self_secondary(self, buffer: _MergeBuffer) -> str:
+        secondary_text, _source, _reuse_mode = self._overlay_active_self_secondary_decision(buffer)
+        return secondary_text
+
+    def _overlay_active_self_secondary_decision(
+        self,
+        buffer: _MergeBuffer,
+    ) -> tuple[str, str, str | None]:
         translation = buffer.spec_translation
         active_text = self._merge_text(buffer.parts)
         if not active_text:
-            return ""
-        if isinstance(translation, Translation) and self._soft_reuse_mode(
-            buffer.spec_text, active_text
-        ) is not None:
-            return translation.text.strip()
-        return (self._overlay_active_self_secondary_text or "").strip()
+            return "", "blank", None
+        reuse_mode = None
+        if isinstance(translation, Translation):
+            reuse_mode = self._soft_reuse_mode(buffer.spec_text, active_text)
+            if reuse_mode is not None:
+                return translation.text.strip(), "spec", reuse_mode
+        sticky_secondary = (self._overlay_active_self_secondary_text or "").strip()
+        if sticky_secondary:
+            return sticky_secondary, "sticky_cache", reuse_mode
+        return "", "blank", reuse_mode
 
     def _active_self_occupant_key(self, buffer: _MergeBuffer) -> str:
         return f"self:{buffer.merge_id}"
@@ -631,13 +654,28 @@ class ClientHub:
         active_text = self._merge_text(buffer.parts)
         if not active_text:
             return
-        secondary_text = self._overlay_active_self_secondary(buffer)
+        secondary_text, source, reuse_mode = self._overlay_active_self_secondary_decision(buffer)
+        self._record_overlay_active_self_secondary_decision(
+            buffer=buffer,
+            active_text=active_text,
+            secondary_text=secondary_text,
+            source=source,
+            reuse_mode=reuse_mode,
+        )
         if (
             active_text == self._overlay_active_self_text
             and secondary_text == (self._overlay_active_self_secondary_text or "")
         ):
             return
 
+        utterance_id = buffer.utterance_ids[-1] if buffer.utterance_ids else None
+        if utterance_id is not None:
+            self._record_overlay_emit(
+                event_kind="active_self",
+                utterance_id=utterance_id,
+                channel="self",
+                secondary_len=len(secondary_text),
+            )
         await self._emit_overlay_active_self_event(
             self.overlay_event_adapter.self_active_update(
                 text=active_text,
@@ -758,6 +796,65 @@ class ClientHub:
         while end > start and self._is_soft_reuse_boundary_char(text[end - 1]):
             end -= 1
         return text[start:end]
+
+    def _record_overlay_active_self_secondary_decision(
+        self,
+        *,
+        buffer: _MergeBuffer,
+        active_text: str,
+        secondary_text: str,
+        source: str,
+        reuse_mode: str | None,
+    ) -> None:
+        if self.overlay_diagnostics is None:
+            return
+        spec_translation_len = 0
+        if isinstance(buffer.spec_translation, Translation):
+            spec_translation_len = len(buffer.spec_translation.text.strip())
+        signature = (
+            buffer.merge_id,
+            active_text,
+            secondary_text,
+            source,
+            reuse_mode,
+            buffer.resume_pending,
+            buffer.resume_confirmed,
+        )
+        if signature == self._last_overlay_secondary_diagnostic_signature:
+            return
+        self._last_overlay_secondary_diagnostic_signature = signature
+        self.overlay_diagnostics.record_hub(
+            "active_self_secondary",
+            merge_id=str(buffer.merge_id),
+            source=source,
+            active_text_len=len(active_text),
+            secondary_len=len(secondary_text),
+            spec_text_len=len((buffer.spec_text or "").strip()),
+            spec_translation_len=spec_translation_len,
+            cached_secondary_len=len((self._overlay_active_self_secondary_text or "").strip()),
+            reuse_mode=reuse_mode,
+            resume_pending=buffer.resume_pending,
+            resume_confirmed=buffer.resume_confirmed,
+        )
+
+    def _record_overlay_emit(
+        self,
+        *,
+        event_kind: str,
+        utterance_id: UUID,
+        channel: ChannelId,
+        secondary_len: int,
+    ) -> None:
+        if self.overlay_diagnostics is None:
+            return
+        self.overlay_diagnostics.record_hub(
+            "overlay_emit",
+            event_kind=event_kind,
+            utterance_id=str(utterance_id),
+            channel=channel,
+            secondary_len=secondary_len,
+            sink_type=type(self.overlay_sink).__name__ if self.overlay_sink is not None else None,
+        )
 
     def _is_soft_reuse_boundary_char(self, ch: str) -> bool:
         return ch.isspace() or ch in _SOFT_REUSE_PUNCT

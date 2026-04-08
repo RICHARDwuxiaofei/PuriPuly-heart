@@ -59,6 +59,7 @@ from puripuly_heart.core.osc.receiver import (
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.overlay.bridge import OverlayBridge
+from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
 from puripuly_heart.core.overlay.process import OverlayProcessManager
 from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
@@ -173,6 +174,7 @@ class GuiController:
     _overlay_bridge: OverlayBridge | None = None
     _overlay_presenter: OverlayPresenter | None = None
     _overlay_manager: OverlayProcessManager | None = None
+    _overlay_diagnostics: OverlayDiagnosticsRecorder | None = None
     _overlay_start_task: asyncio.Task[None] | None = None
     _overlay_monitor_task: asyncio.Task[None] | None = None
     _overlay_lock: asyncio.Lock | None = None
@@ -525,9 +527,11 @@ class GuiController:
         await self._shutdown_overlay_runtime(preserve_failure_reason=True)
 
     def on_overlay_start_failed(self, failure_reason: str | None) -> None:
+        previous_state = self.overlay_state
         self.overlay_state = "failed"
         self.failure_reason = self._normalize_overlay_failure_reason(failure_reason)
         self.auto_restart_scheduled = False
+        self._log_overlay_state_transition(previous_state, self.overlay_state)
         self._sync_effective_hub_flags()
         self._notify_overlay_state()
 
@@ -546,8 +550,10 @@ class GuiController:
                 return
 
             await self._teardown_overlay_runtime(preserve_presenter_state=True)
+            previous_state = self.overlay_state
             self.overlay_state = "starting"
             self.auto_restart_scheduled = False
+            self._log_overlay_state_transition(previous_state, self.overlay_state)
             self._notify_overlay_state()
             self._overlay_start_task = asyncio.create_task(self._run_overlay_start())
 
@@ -559,22 +565,31 @@ class GuiController:
                 return
 
             presenter = self._overlay_presenter
+            overlay_instance_id = f"overlay-{secrets.token_hex(8)}"
+            diagnostics = OverlayDiagnosticsRecorder(overlay_instance_id=overlay_instance_id)
             if presenter is None:
                 presenter = OverlayPresenter(
                     calibration=self.overlay_calibration.copy(),
                     clock=self.clock,
+                    diagnostics=diagnostics,
                     show_translation=self.settings.ui.show_overlay_translation,
                     show_peer_original=self.settings.ui.show_overlay_peer_original,
                 )
                 self._overlay_presenter = presenter
+            else:
+                presenter.diagnostics = diagnostics
             bridge = OverlayBridge(
                 session_token=secrets.token_urlsafe(16),
                 initial_snapshot=presenter.snapshot(),
+                overlay_instance_id=overlay_instance_id,
+                diagnostics=diagnostics,
             )
             await bridge.start()
             presenter.attach_bridge(bridge)
             self._overlay_bridge = bridge
+            self._overlay_diagnostics = diagnostics
             self.hub.overlay_sink = presenter
+            self.hub.overlay_diagnostics = diagnostics
 
             manager = OverlayProcessManager(
                 bridge_url=bridge.url,
@@ -582,6 +597,9 @@ class GuiController:
                 session_token=bridge.session_token,
                 locale=self.settings.ui.locale,
                 startup_timeout_ms=OVERLAY_STARTUP_TIMEOUT_MS,
+                overlay_instance_id=overlay_instance_id,
+                diagnostics_enabled=True,
+                diagnostics=diagnostics,
             )
             self._overlay_manager = manager
             await manager.start()
@@ -663,15 +681,19 @@ class GuiController:
             if not has_runtime and self.overlay_state == "off":
                 return
 
+            previous_state = self.overlay_state
             self.overlay_state = "stopping"
             self.auto_restart_scheduled = False
+            self._log_overlay_state_transition(previous_state, self.overlay_state)
             self._notify_overlay_state()
 
             await self._emit_overlay_shutdown()
             await self._teardown_overlay_runtime(preserve_presenter_state=False)
+            previous_state = self.overlay_state
             self.overlay_state = "off"
             if not preserve_failure_reason:
                 self.failure_reason = None
+            self._log_overlay_state_transition(previous_state, self.overlay_state)
             self._sync_effective_hub_flags()
             await self._refresh_overlay_runtime_dependencies()
             self._notify_overlay_state()
@@ -720,6 +742,7 @@ class GuiController:
                 self.hub.overlay_sink = presenter
             else:
                 self.hub.overlay_sink = None
+                self.hub.overlay_diagnostics = None
                 with contextlib.suppress(Exception):
                     await self.hub.reset_overlay_preview()
         if not preserve_presenter_state and presenter is not None:
@@ -737,11 +760,15 @@ class GuiController:
         if bridge is not None:
             with contextlib.suppress(Exception):
                 await bridge.stop()
+        if not preserve_presenter_state:
+            self._overlay_diagnostics = None
 
     def _mark_overlay_connected(self) -> None:
+        previous_state = self.overlay_state
         self.overlay_state = "connected"
         self.failure_reason = None
         self.auto_restart_scheduled = False
+        self._log_overlay_state_transition(previous_state, self.overlay_state)
         self._sync_effective_hub_flags()
         self._notify_overlay_state()
 
@@ -754,6 +781,18 @@ class GuiController:
         bridge = self._ui_event_bridge
         if bridge is not None:
             bridge.report_overlay_state(self.overlay_state, failure_reason=self.failure_reason)
+
+    def _log_overlay_state_transition(self, previous_state: str, next_state: str) -> None:
+        manager = self._overlay_manager
+        logger.info(
+            "[Overlay] State transition: %s -> %s failure_reason=%s presenter_attached=%s bridge_attached=%s manager_state=%s",
+            previous_state,
+            next_state,
+            self.failure_reason,
+            self._overlay_presenter is not None,
+            self._overlay_bridge is not None,
+            manager.state if manager is not None else None,
+        )
 
     def begin_overlay_calibration(self) -> OverlayCalibration:
         if self._overlay_calibration_draft is None:

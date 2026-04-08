@@ -11,6 +11,7 @@ from uuid import UUID
 from puripuly_heart.core.clock import Clock, SystemClock
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
+from .diagnostics import OverlayDiagnosticsRecorder
 from .protocol import (
     OverlayPresentationBlock,
     OverlayPresentationCalibration,
@@ -80,6 +81,7 @@ class _ActiveSelfEntry:
 class OverlayPresenter(OverlaySink):
     calibration: OverlayCalibration
     bridge: OverlayPresentationTransport | None = None
+    diagnostics: OverlayDiagnosticsRecorder | None = None
     clock: Clock = field(default_factory=SystemClock)
     sleep: SleepFn = asyncio.sleep
     visible_window_target_blocks: int = VISIBLE_WINDOW_TARGET_BLOCKS
@@ -102,6 +104,7 @@ class OverlayPresenter(OverlaySink):
     _revision: int = field(init=False, default=0)
     _appearance_seq: int = field(init=False, default=0)
     _snapshot: OverlayPresentationSnapshot = field(init=False)
+    _last_visible_window_signature: tuple[object, ...] | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         self._snapshot = OverlayPresentationSnapshot(
@@ -121,11 +124,12 @@ class OverlayPresenter(OverlaySink):
 
     def reset_scene(self) -> None:
         self._cancel_all_expiration_tasks()
-        self._entries.clear()
+        self._clear_entries_for_reason("scene_reset")
         self._closed_tombstones.clear()
         self._active_self = None
         self._revision = 0
         self._appearance_seq = 0
+        self._last_visible_window_signature = None
         self._snapshot = OverlayPresentationSnapshot(
             revision=0,
             calibration=_calibration_from_overlay(self.calibration),
@@ -134,10 +138,11 @@ class OverlayPresenter(OverlaySink):
 
     async def clear_for_runtime_detach(self) -> None:
         self._cancel_all_expiration_tasks()
-        self._entries.clear()
+        self._clear_entries_for_reason("scene_reset")
         self._closed_tombstones.clear()
         self._active_self = None
         self._revision += 1
+        self._last_visible_window_signature = None
         self._snapshot = OverlayPresentationSnapshot(
             revision=self._revision,
             calibration=_calibration_from_overlay(self.calibration),
@@ -349,6 +354,22 @@ class OverlayPresenter(OverlaySink):
                 for block in next_blocks
             ],
         )
+        if self.diagnostics is not None:
+            self.diagnostics.record_presenter(
+                "snapshot_publish",
+                revision=self._snapshot.revision,
+                block_count=len(next_blocks),
+                bridge_attached=self.bridge is not None,
+                blocks=[
+                    {
+                        "id": block.id,
+                        "variant": block.block_variant,
+                        "primary_len": len(block.primary_text),
+                        "secondary_len": len(block.secondary_text),
+                    }
+                    for block in next_blocks
+                ],
+            )
         if self.bridge is not None:
             await self.bridge.replace_snapshot(self._snapshot)
 
@@ -380,9 +401,16 @@ class OverlayPresenter(OverlaySink):
 
     def _logical_visible_entry_keys(self) -> list[tuple[str, UUID]]:
         finalized_limit = self.visible_window_target_blocks
-        if self._active_self is not None and self._active_self.text:
+        active_self_present = self._active_self is not None and bool(self._active_self.text)
+        if active_self_present:
             finalized_limit = max(finalized_limit - 1, 0)
         if finalized_limit == 0:
+            self._record_visible_window_selection(
+                active_self_present=active_self_present,
+                finalized_limit=finalized_limit,
+                candidate_keys=[],
+                selected_keys=[],
+            )
             return []
 
         publishable: list[tuple[int, str, tuple[str, UUID]]] = []
@@ -398,7 +426,14 @@ class OverlayPresenter(OverlaySink):
             publishable.append((entry.appearance_seq, entry.occupant_key, key))
 
         publishable.sort(key=lambda item: (item[0], item[1]))
-        return [key for _, _, key in publishable[-finalized_limit:]]
+        selected = [key for _, _, key in publishable[-finalized_limit:]]
+        self._record_visible_window_selection(
+            active_self_present=active_self_present,
+            finalized_limit=finalized_limit,
+            candidate_keys=[key for _, _, key in publishable],
+            selected_keys=selected,
+        )
+        return selected
 
     def _build_presentation_block(
         self,
@@ -438,7 +473,12 @@ class OverlayPresenter(OverlaySink):
             entry = self._entries.get(key)
             if entry is None:
                 continue
-            self._remove_entry(key, tombstone_seq=entry.last_updated_seq)
+            self._remove_entry(
+                key,
+                reason="displaced_window",
+                now=self.clock.now(),
+                tombstone_seq=entry.last_updated_seq,
+            )
 
     def _entry_is_publishable(self, entry: _LogicalCaptionEntry) -> bool:
         if entry.channel == "peer":
@@ -524,6 +564,7 @@ class OverlayPresenter(OverlaySink):
         self._cancel_expiration_task(key)
         if entry.closed_seq is None:
             return
+        self._record_deadline(entry)
         self._expiration_tasks[key] = asyncio.create_task(
             self._expire_entry_after_ttl(key, entry.closed_seq)
         )
@@ -543,7 +584,12 @@ class OverlayPresenter(OverlaySink):
                     await self.sleep(remaining)
                     continue
 
-                self._remove_entry(key, current_task=self._current_task())
+                self._remove_entry(
+                    key,
+                    reason="expired",
+                    now=self.clock.now(),
+                    current_task=self._current_task(),
+                )
                 await self._publish_if_changed()
                 return
         except asyncio.CancelledError:
@@ -561,26 +607,42 @@ class OverlayPresenter(OverlaySink):
         ]
         current_task = self._current_task()
         for key in expired_keys:
-            self._remove_entry(key, current_task=current_task)
+            self._remove_entry(
+                key,
+                reason="expired",
+                now=now,
+                current_task=current_task,
+            )
 
     def _entry_expiration_deadline(self, entry: _LogicalCaptionEntry) -> float | None:
+        return self._entry_expiration_components(entry)[0]
+
+    def _entry_expiration_components(
+        self,
+        entry: _LogicalCaptionEntry,
+    ) -> tuple[float | None, float | None, float | None]:
         if entry.closed_at is None:
-            return None
+            return None, None, None
         if entry.visible_since is None:
-            deadline = entry.closed_at + LATE_ARRIVAL_WINDOW_SECONDS
+            visible_deadline = entry.closed_at + LATE_ARRIVAL_WINDOW_SECONDS
         else:
-            deadline = max(entry.closed_at, entry.visible_since + VISIBLE_TTL_SECONDS)
+            visible_deadline = max(entry.closed_at, entry.visible_since + VISIBLE_TTL_SECONDS)
+        translation_deadline: float | None = None
         if entry.channel == "self" and entry.translation_visible_since is not None:
-            deadline = max(
-                deadline,
-                entry.translation_visible_since + SELF_TRANSLATION_MIN_VISIBLE_SECONDS,
+            translation_deadline = (
+                entry.translation_visible_since + SELF_TRANSLATION_MIN_VISIBLE_SECONDS
             )
-        return deadline
+        effective_deadline = visible_deadline
+        if translation_deadline is not None:
+            effective_deadline = max(effective_deadline, translation_deadline)
+        return effective_deadline, visible_deadline, translation_deadline
 
     def _remove_entry(
         self,
         key: tuple[str, UUID],
         *,
+        reason: str,
+        now: float | None = None,
         current_task: asyncio.Task[None] | None = None,
         tombstone_seq: int | None = None,
     ) -> None:
@@ -589,6 +651,25 @@ class OverlayPresenter(OverlaySink):
         entry = self._entries.pop(key, None)
         if entry is None:
             return
+        effective_deadline, visible_deadline, translation_deadline = (
+            self._entry_expiration_components(entry)
+        )
+        if self.diagnostics is not None:
+            self.diagnostics.record_presenter_removal(
+                reason=reason,
+                entry_key=self._format_entry_key(key),
+                appearance_seq=entry.appearance_seq,
+                channel=entry.channel,
+                primary_len=len(entry.original_text.strip()),
+                secondary_len=len(entry.translation_text.strip()),
+                visible_since=entry.visible_since,
+                translation_visible_since=entry.translation_visible_since,
+                closed_at=entry.closed_at,
+                now=now if now is not None else self.clock.now(),
+                visible_deadline=visible_deadline,
+                translation_deadline=translation_deadline,
+                effective_deadline=effective_deadline,
+            )
         seq = tombstone_seq if tombstone_seq is not None else entry.closed_seq
         if seq is not None:
             self._remember_tombstone(key, seq)
@@ -609,6 +690,63 @@ class OverlayPresenter(OverlaySink):
             return asyncio.current_task()
         except RuntimeError:
             return None
+
+    def _clear_entries_for_reason(self, reason: str) -> None:
+        for key in list(self._entries):
+            self._remove_entry(key, reason=reason, now=self.clock.now())
+
+    def _record_visible_window_selection(
+        self,
+        *,
+        active_self_present: bool,
+        finalized_limit: int,
+        candidate_keys: list[tuple[str, UUID]],
+        selected_keys: list[tuple[str, UUID]],
+    ) -> None:
+        if self.diagnostics is None:
+            return
+        candidate_labels = [self._format_entry_key(key) for key in candidate_keys]
+        selected_labels = [self._format_entry_key(key) for key in selected_keys]
+        dropped_labels = [label for label in candidate_labels if label not in selected_labels]
+        signature = (
+            active_self_present,
+            finalized_limit,
+            tuple(candidate_labels),
+            tuple(selected_labels),
+            tuple(dropped_labels),
+        )
+        if signature == self._last_visible_window_signature:
+            return
+        self._last_visible_window_signature = signature
+        self.diagnostics.record_presenter(
+            "visible_window",
+            active_self_present=active_self_present,
+            finalized_limit=finalized_limit,
+            candidate_keys=candidate_labels,
+            selected_keys=selected_labels,
+            dropped_keys=dropped_labels,
+        )
+
+    def _record_deadline(self, entry: _LogicalCaptionEntry) -> None:
+        if self.diagnostics is None:
+            return
+        effective_deadline, visible_deadline, translation_deadline = (
+            self._entry_expiration_components(entry)
+        )
+        self.diagnostics.record_presenter(
+            "deadline_scheduled",
+            entry_key=self._format_entry_key((entry.channel, entry.utterance_id)),
+            channel=entry.channel,
+            visible_since=entry.visible_since,
+            translation_visible_since=entry.translation_visible_since,
+            closed_at=entry.closed_at,
+            visible_deadline=visible_deadline,
+            translation_deadline=translation_deadline,
+            effective_deadline=effective_deadline,
+        )
+
+    def _format_entry_key(self, key: tuple[str, UUID]) -> str:
+        return f"{key[0]}:{key[1]}"
 
 
 def _calibration_from_overlay(
