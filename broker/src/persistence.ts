@@ -138,6 +138,50 @@ export interface OpenRouterEntitlementRecord {
   release_token_expires_at: string | null;
 }
 
+export interface BrokerRequestEventRecord {
+  id: number;
+  endpoint: string;
+  ip: string | null;
+  installation_id: string | null;
+  observed_at: string;
+}
+
+export interface BrokerVelocityCapHookRecord {
+  id: number;
+  subject_type: 'ip' | 'installation_id';
+  subject_value: string;
+  max_requests: number;
+  window_minutes: number;
+  outcome_code:
+    | 'rate_limited'
+    | 'issuance_suspended'
+    | 'trial_unavailable'
+    | 'trial_not_eligible';
+  outcome_class: 'retryable' | 'terminal' | 'security_fail';
+  outcome_subcode: string | null;
+  reason: string | null;
+  active: 0 | 1;
+  created_at: string;
+  expires_at: string | null;
+}
+
+export interface BrokerAbuseSubjectHookRecord {
+  id: number;
+  hook_kind: 'denylist' | 'reputation' | 'revocation';
+  subject_type: 'ip' | 'installation_id' | 'hardware_hash';
+  subject_value: string;
+  outcome_code:
+    | 'issuance_suspended'
+    | 'trial_unavailable'
+    | 'trial_not_eligible';
+  outcome_class: 'retryable' | 'terminal' | 'security_fail';
+  outcome_subcode: string | null;
+  reason: string | null;
+  active: 0 | 1;
+  created_at: string;
+  expires_at: string | null;
+}
+
 export const BROKER_PERSISTENCE_MODEL = {
   database: 'Cloudflare D1',
   tables: {
@@ -240,6 +284,59 @@ export const BROKER_PERSISTENCE_MODEL = {
           verifyBehavior: 'rotate for existing pending_release row',
         },
       },
+    },
+    brokerRequestEvents: {
+      name: 'broker_request_events',
+      purpose: ['per-endpoint rate limits', 'cross-endpoint velocity hooks'],
+      columns: ['id', 'endpoint', 'ip', 'installation_id', 'observed_at'],
+      appendOnly: true,
+      indexed: [
+        'endpoint + ip + observed_at',
+        'endpoint + installation_id + observed_at',
+        'ip + observed_at',
+        'installation_id + observed_at',
+      ],
+    },
+    brokerVelocityCapHooks: {
+      name: 'broker_velocity_cap_hooks',
+      purpose: 'manual cross-endpoint velocity controls with observable outcomes',
+      columns: [
+        'id',
+        'subject_type',
+        'subject_value',
+        'max_requests',
+        'window_minutes',
+        'outcome_code',
+        'outcome_class',
+        'outcome_subcode',
+        'reason',
+        'active',
+        'created_at',
+        'expires_at',
+      ],
+      supportedSubjects: ['ip', 'installation_id'],
+      indexed: ['subject_type + subject_value + active + expires_at'],
+    },
+    brokerAbuseSubjectHooks: {
+      name: 'broker_abuse_subject_hooks',
+      purpose:
+        'denylist, reputation, and fast-revocation controls with observable outcomes',
+      columns: [
+        'id',
+        'hook_kind',
+        'subject_type',
+        'subject_value',
+        'outcome_code',
+        'outcome_class',
+        'outcome_subcode',
+        'reason',
+        'active',
+        'created_at',
+        'expires_at',
+      ],
+      hookKinds: ['denylist', 'reputation', 'revocation'],
+      supportedSubjects: ['ip', 'installation_id', 'hardware_hash'],
+      indexed: ['subject_type + subject_value + hook_kind + active + expires_at'],
     },
   },
 } as const;

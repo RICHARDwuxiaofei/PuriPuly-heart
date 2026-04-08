@@ -1,10 +1,11 @@
 import {
   createDeviceKeyPair,
+  signCanonicalIssueRequest,
   signCanonicalVerifyRequest,
   type DeviceKeyPair,
 } from './ed25519';
 import type { TestBrokerEnv } from './sqlite-d1';
-import { issueChallenge, postVerify } from './trial-api';
+import { issueChallenge, postIssue, postVerify } from './trial-api';
 
 export async function createPendingReleaseSession(options: {
   env: TestBrokerEnv;
@@ -48,5 +49,36 @@ export async function createPendingReleaseSession(options: {
     keyPair,
     releaseToken: payload.release_token,
     releaseTokenExpiresAt: payload.release_token_expires_at,
+  };
+}
+
+export async function activatePendingReleaseSession(options: {
+  env: TestBrokerEnv;
+  installationId: string;
+  appVersion: string;
+  hardwareHash: string;
+  verifySignedAt?: string;
+  issueSignedAt?: string;
+}): Promise<{
+  keyPair: DeviceKeyPair;
+  releaseToken: string;
+  releaseTokenExpiresAt: string;
+  response: Response;
+}> {
+  const pendingRelease = await createPendingReleaseSession(options);
+  const requestBody = await signCanonicalIssueRequest(pendingRelease.keyPair.privateKey, {
+    installation_id: options.installationId,
+    device_public_key: pendingRelease.keyPair.devicePublicKey,
+    release_token: pendingRelease.releaseToken,
+    reason: 'llm_start',
+    budget_usd: 0.07,
+    model: 'google/gemma-4-26b-a4b-it',
+    signed_at: options.issueSignedAt ?? '2026-04-08T06:00:45.000Z',
+  });
+  const response = await postIssue(options.env, requestBody);
+
+  return {
+    ...pendingRelease,
+    response,
   };
 }

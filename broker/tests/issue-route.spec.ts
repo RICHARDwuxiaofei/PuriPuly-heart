@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { signCanonicalIssueRequest } from './test-support/ed25519';
+import { normalizedErrorEnvelope } from './test-support/errors';
 import { createPendingReleaseSession } from './test-support/openrouter-issue';
 import { sha256Base64Url } from './test-support/hash';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
@@ -106,12 +107,25 @@ describe('POST /v1/providers/openrouter/issue route contract', () => {
 
     const response = await postIssue(env, requestBody);
     expect(response.status).toBe(410);
-    await expect(response.json()).resolves.toEqual({
-      error: {
-        code: 'release_token_expired',
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'challenge_expired',
+        class: 'retryable',
+        subcode: 'release_token_expired',
+        retryAfterMs: 0,
         message: 'release_token has expired and must be reissued',
-      },
-    });
+        managedState: {
+          lifecycle: 'pending_release',
+          managed_availability: true,
+        },
+        currentEntitlement: {
+          provider: 'OpenRouter',
+          budget_usd: 0.07,
+          issued_at: null,
+          expires_at: null,
+        },
+      }),
+    );
 
     const entitlement = env.__db
       .prepare(
@@ -137,11 +151,12 @@ describe('POST /v1/providers/openrouter/issue route contract', () => {
     const response = await postIssue(env, 'null');
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'invalid_request',
+        class: 'terminal',
         message: 'request body must be a JSON object',
-      },
-    });
+      }),
+    );
   });
 });

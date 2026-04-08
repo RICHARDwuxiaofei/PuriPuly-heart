@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { normalizedErrorEnvelope } from './test-support/errors';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import { getTrialStatus } from './test-support/trial-api';
 
@@ -16,12 +17,13 @@ describe('GET /v1/trial/status header names', () => {
     });
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'invalid_request',
+        class: 'terminal',
         message: 'X-Puripuly-Timestamp header is required',
-      },
-    });
+      }),
+    );
   });
 
   it('requires the X-Puripuly-Signature header name', async () => {
@@ -36,11 +38,12 @@ describe('GET /v1/trial/status header names', () => {
     });
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'invalid_request',
+        class: 'terminal',
         message: 'X-Puripuly-Signature header is required',
-      },
-    });
+      }),
+    );
   });
 });

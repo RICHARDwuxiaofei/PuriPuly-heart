@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createDeviceKeyPair, signCanonicalVerifyRequest } from './test-support/ed25519';
+import { normalizedErrorEnvelope } from './test-support/errors';
 import { createTestBrokerEnv, insertEntitlement } from './test-support/sqlite-d1';
 import { issueChallenge, postVerify } from './test-support/trial-api';
 
@@ -82,12 +83,14 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
 
     const replayResponse = await postVerify(env, requestBody);
     expect(replayResponse.status).toBe(404);
-    await expect(replayResponse.json()).resolves.toEqual({
-      error: {
-        code: 'challenge_not_found',
+    await expect(replayResponse.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: 'challenge_not_found',
         message: 'no active challenge exists for installation_id',
-      },
-    });
+      }),
+    );
   });
 
   it('rejects expired challenges without consuming stored challenge state', async () => {
@@ -117,12 +120,14 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
 
     const response = await postVerify(env, requestBody);
     expect(response.status).toBe(410);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'challenge_expired',
+        class: 'retryable',
+        retryAfterMs: 0,
         message: 'challenge has expired and must be reissued',
-      },
-    });
+      }),
+    );
 
     const installation = env.__db
       .prepare(
@@ -180,12 +185,13 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
     const response = await postVerify(env, 'null');
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'invalid_request',
+        class: 'terminal',
         message: 'request body must be a JSON object',
-      },
-    });
+      }),
+    );
   });
 
   it.each([
@@ -240,12 +246,13 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
     const response = await postVerify(env, requestBody);
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'invalid_request',
+        class: 'terminal',
         message,
-      },
-    });
+      }),
+    );
 
     const installation = env.__db
       .prepare(
@@ -290,12 +297,13 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
     const response = await postVerify(env, requestBody);
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'invalid_request',
+        class: 'terminal',
         message: 'challenge_expires_at and signed_at must be valid ISO-8601 timestamps',
-      },
-    });
+      }),
+    );
   });
 
   it('rejects impossible ISO-looking signed_at strings instead of normalizing them', async () => {
@@ -324,12 +332,13 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
     const response = await postVerify(env, requestBody);
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'invalid_request',
+        class: 'terminal',
         message: 'challenge_expires_at and signed_at must be valid ISO-8601 timestamps',
-      },
-    });
+      }),
+    );
   });
 
   it('allows only one successful verify when two requests race to consume the same challenge', async () => {
@@ -433,10 +442,12 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
       }),
     );
     await expect(conflictResponse!.json()).resolves.toEqual({
-      error: {
-        code: 'challenge_consumed',
+      ...normalizedErrorEnvelope({
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: 'challenge_consumed',
         message: 'challenge has already been consumed or replaced',
-      },
+      }),
     });
 
     const installation = env.__db

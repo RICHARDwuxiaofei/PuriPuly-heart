@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import app from '../src/index';
 import { createDeviceKeyPair, signCanonicalVerifyRequest } from './test-support/ed25519';
+import { normalizedErrorEnvelope } from './test-support/errors';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import { issueChallenge, postVerify } from './test-support/trial-api';
 
@@ -122,13 +123,14 @@ describe('POST /v1/trial/challenge', () => {
     );
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'invalid_request',
+        class: 'terminal',
         message:
           'challenge request must not include hardware_hash, signed_at, or signature',
-      },
-    });
+      }),
+    );
 
     const installationCount = env.__db
       .prepare('SELECT COUNT(*) AS count FROM installations')
@@ -152,12 +154,13 @@ describe('POST /v1/trial/challenge', () => {
     );
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'invalid_request',
+        class: 'terminal',
         message: 'request body must be a JSON object',
-      },
-    });
+      }),
+    );
   });
 
   it.each([
@@ -197,12 +200,13 @@ describe('POST /v1/trial/challenge', () => {
     );
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'invalid_request',
+        class: 'terminal',
         message,
-      },
-    });
+      }),
+    );
 
     const installationCount = env.__db
       .prepare('SELECT COUNT(*) AS count FROM installations')

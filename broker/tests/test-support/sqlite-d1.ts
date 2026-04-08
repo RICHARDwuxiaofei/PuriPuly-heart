@@ -1,12 +1,13 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
-const FIRST_MIGRATION = new URL(
-  '../../migrations/0000_define_broker_persistent_state.sql',
-  import.meta.url,
-);
+const MIGRATIONS_DIRECTORY = new URL('../../migrations/', import.meta.url);
 
-const MIGRATION_SQL = readFileSync(FIRST_MIGRATION, 'utf8');
+const MIGRATION_SQL = readdirSync(MIGRATIONS_DIRECTORY)
+  .filter((entry: string) => entry.endsWith('.sql'))
+  .sort()
+  .map((entry: string) => readFileSync(new URL(entry, MIGRATIONS_DIRECTORY), 'utf8'))
+  .join('\n\n');
 
 type BindValue = string | number | bigint | null;
 

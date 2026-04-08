@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { signCanonicalIssueRequest } from './test-support/ed25519';
+import { normalizedErrorEnvelope } from './test-support/errors';
 import { createPendingReleaseSession } from './test-support/openrouter-issue';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import { postIssue } from './test-support/trial-api';
@@ -94,11 +95,24 @@ describe('POST /v1/providers/openrouter/issue idempotency', () => {
     const replayResponse = await postIssue(env, requestBody);
 
     expect(replayResponse.status).toBe(410);
-    await expect(replayResponse.json()).resolves.toEqual({
-      error: {
-        code: 'release_token_expired',
+    await expect(replayResponse.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'challenge_expired',
+        class: 'retryable',
+        subcode: 'release_token_expired',
+        retryAfterMs: 0,
         message: 'release_token has expired and must be reissued',
-      },
-    });
+        managedState: {
+          lifecycle: 'active',
+          managed_availability: true,
+        },
+        currentEntitlement: {
+          provider: 'OpenRouter',
+          budget_usd: 0.07,
+          issued_at: '2026-04-08T06:14:45.000Z',
+          expires_at: '2026-10-08T06:14:45.000Z',
+        },
+      }),
+    );
   });
 });

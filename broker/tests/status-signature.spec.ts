@@ -5,6 +5,7 @@ import {
   signCanonicalStatusRequest,
   signNonCanonicalStatusRequest,
 } from './test-support/ed25519';
+import { normalizedErrorEnvelope } from './test-support/errors';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import { getTrialStatus, issueChallenge } from './test-support/trial-api';
 
@@ -80,12 +81,14 @@ describe('GET /v1/trial/status signing contract', () => {
     });
 
     expect(response.status).toBe(401);
-    await expect(response.json()).resolves.toEqual({
-      error: {
-        code: 'signature_invalid',
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: 'signature_mismatch',
         message: 'signature verification failed for the registered device_public_key',
-      },
-    });
+      }),
+    );
   });
 
   it('rejects status headers outside the ±60 second skew window', async () => {
@@ -115,12 +118,14 @@ describe('GET /v1/trial/status signing contract', () => {
     });
 
     expect(response.status).toBe(401);
-    await expect(response.json()).resolves.toEqual({
-      error: {
-        code: 'signature_skew',
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: 'timestamp_skew',
         message: 'X-Puripuly-Timestamp must be within ±60 seconds of broker time',
-      },
-    });
+      }),
+    );
   });
 
   it('requires X-Puripuly-Signature to transport a base64url Ed25519 signature', async () => {
@@ -146,11 +151,12 @@ describe('GET /v1/trial/status signing contract', () => {
     });
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'invalid_request',
+        class: 'terminal',
         message: 'X-Puripuly-Signature must be a base64url-encoded Ed25519 signature',
-      },
-    });
+      }),
+    );
   });
 });

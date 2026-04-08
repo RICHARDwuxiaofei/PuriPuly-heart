@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createDeviceKeyPair, signCanonicalVerifyRequest } from './test-support/ed25519';
+import { normalizedErrorEnvelope } from './test-support/errors';
 import { sha256Base64Url } from './test-support/hash';
 import { createTestBrokerEnv, insertEntitlement } from './test-support/sqlite-d1';
 import { issueChallenge, postVerify } from './test-support/trial-api';
@@ -210,23 +211,25 @@ describe('release-session handshake state', () => {
       const response = await postVerify(env, requestBody);
 
       expect(response.status).toBe(409);
-      await expect(response.json()).resolves.toEqual({
-        error: {
-          code: 'release_not_allowed',
+      await expect(response.json()).resolves.toEqual(
+        normalizedErrorEnvelope({
+          code: 'trial_not_eligible',
+          class: 'terminal',
+          subcode: 'lifecycle_not_eligible',
           message:
             'verify may only mint release_token for lifecycle none or pending_release',
-        },
-        managed_state: {
-          lifecycle,
-          managed_availability: managedAvailability,
-        },
-        current_entitlement: {
-          provider: 'OpenRouter',
-          budget_usd: 0.05,
-          issued_at: issuedAt,
-          expires_at: expiresAt,
-        },
-      });
+          managedState: {
+            lifecycle,
+            managed_availability: managedAvailability,
+          },
+          currentEntitlement: {
+            provider: 'OpenRouter',
+            budget_usd: 0.05,
+            issued_at: issuedAt,
+            expires_at: expiresAt,
+          },
+        }),
+      );
 
       const installation = env.__db
         .prepare(

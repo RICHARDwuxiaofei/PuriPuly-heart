@@ -1,5 +1,6 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 
+import { internalErrorResponse } from './broker-error';
 import {
   BROKER_SERVICE_NAME,
   FOUNDATION_RESPONSE,
@@ -14,14 +15,18 @@ import { handleOpenRouterIssue } from './openrouter-issue';
 
 export const app = new Hono<BrokerEnv>();
 
-app.get('/healthz', (c) => {
+app.onError((_error: Error, c: Context<BrokerEnv>) => {
+  return internalErrorResponse(c);
+});
+
+app.get('/healthz', (c: Context<BrokerEnv>) => {
   return c.json({
     ok: true,
     service: BROKER_SERVICE_NAME,
   });
 });
 
-app.get('/v1/foundation', (c) => {
+app.get('/v1/foundation', (c: Context<BrokerEnv>) => {
   return c.json(FOUNDATION_RESPONSE);
 });
 

@@ -6,6 +6,14 @@ import type {
 } from './persistence';
 import type { BrokerEnv } from './contract';
 import {
+  checkEndpointRateLimit,
+  checkVelocityCapHook,
+  matchSubjectHook,
+  recordRequestEvent,
+  resolveClientIp,
+} from './abuse-controls';
+import { errorResponse as publicErrorResponse } from './broker-error';
+import {
   MANAGED_TRIAL_BUDGET_POLICY,
   MANAGED_TRIAL_POLICY,
   TRIAL_PROVIDER_POLICY,
@@ -103,9 +111,32 @@ export async function handleOpenRouterIssue(
     );
   }
 
+  const now = new Date();
+  const requestContext = {
+    endpoint: 'POST /v1/providers/openrouter/issue',
+    now,
+    ip: resolveClientIp(c),
+    installationId,
+    hardwareHash: null,
+  };
+  const currentEntitlement = await getEntitlement(c.env.BROKER_DB, installationId);
+
+  const subjectHook = await matchSubjectHook(c.env.BROKER_DB, requestContext);
+  if (subjectHook) {
+    const hookEntitlement = await getEntitlement(c.env.BROKER_DB, installationId);
+    return publicErrorResponse(c, subjectHook.status, {
+      code: subjectHook.code,
+      class: subjectHook.class,
+      subcode: subjectHook.subcode,
+      retryAfterMs: subjectHook.retryAfterMs,
+      message: subjectHook.message,
+      entitlement: hookEntitlement,
+    });
+  }
+
   const installation = await getInstallation(c.env.BROKER_DB, installationId);
   if (!installation) {
-    return releaseTokenInvalidResponse(c);
+    return releaseTokenInvalidResponse(c, currentEntitlement);
   }
 
   if (installation.device_public_key !== devicePublicKey) {
@@ -127,7 +158,6 @@ export async function handleOpenRouterIssue(
     );
   }
 
-  const now = new Date();
   if (
     Math.abs(signedAtDate.getTime() - now.getTime()) >
     ISSUE_MAX_CLOCK_SKEW_SECONDS * 1000
@@ -163,9 +193,9 @@ export async function handleOpenRouterIssue(
   }
 
   const releaseTokenHash = await sha256Base64Url(releaseToken);
-  const entitlement = await getEntitlement(c.env.BROKER_DB, installationId);
+  const entitlement = currentEntitlement;
   if (!entitlement || entitlement.release_token_hash !== releaseTokenHash) {
-    return releaseTokenInvalidResponse(c);
+    return releaseTokenInvalidResponse(c, entitlement);
   }
 
   const releaseTokenWindowError = validateReleaseTokenWindow(c, entitlement, now);
@@ -173,12 +203,38 @@ export async function handleOpenRouterIssue(
     return releaseTokenWindowError;
   }
 
+  await recordRequestEvent(c.env.BROKER_DB, requestContext);
+
+  const rateLimitDecision = await checkEndpointRateLimit(c.env.BROKER_DB, requestContext);
+  if (rateLimitDecision) {
+    return publicErrorResponse(c, rateLimitDecision.status, {
+      code: rateLimitDecision.code,
+      class: rateLimitDecision.class,
+      subcode: rateLimitDecision.subcode,
+      retryAfterMs: rateLimitDecision.retryAfterMs,
+      message: rateLimitDecision.message,
+      entitlement,
+    });
+  }
+
+  const velocityCapDecision = await checkVelocityCapHook(c.env.BROKER_DB, requestContext);
+  if (velocityCapDecision) {
+    return publicErrorResponse(c, velocityCapDecision.status, {
+      code: velocityCapDecision.code,
+      class: velocityCapDecision.class,
+      subcode: velocityCapDecision.subcode,
+      retryAfterMs: velocityCapDecision.retryAfterMs,
+      message: velocityCapDecision.message,
+      entitlement,
+    });
+  }
+
   if (entitlement.status === 'active') {
     return issueSuccessResponse(c, entitlement);
   }
 
   if (entitlement.status !== 'pending_release') {
-    return releaseTokenInvalidResponse(c);
+    return releaseTokenInvalidResponse(c, entitlement);
   }
 
   const issuedAt = now.toISOString();
@@ -215,7 +271,7 @@ export async function handleOpenRouterIssue(
       return issueSuccessResponse(c, currentEntitlement);
     }
 
-    return releaseTokenInvalidResponse(c);
+    return releaseTokenInvalidResponse(c, currentEntitlement);
   }
 
   const activeEntitlement = await getEntitlement(c.env.BROKER_DB, installationId);
@@ -316,13 +372,17 @@ function issueSuccessResponse(
   });
 }
 
-function releaseTokenInvalidResponse(c: Context<BrokerEnv>): Response {
-  return errorResponse(
-    c,
-    401,
-    'release_token_invalid',
-    'release_token does not match the active release session for installation_id',
-  );
+function releaseTokenInvalidResponse(
+  c: Context<BrokerEnv>,
+  entitlement: OpenRouterEntitlementRecord | null = null,
+): Response {
+  return publicErrorResponse(c, 401, {
+    code: 'challenge_invalid',
+    class: 'security_fail',
+    subcode: 'release_token_invalid',
+    message: 'release_token does not match the active release session for installation_id',
+    entitlement,
+  });
 }
 
 function validateReleaseTokenWindow(
@@ -331,21 +391,23 @@ function validateReleaseTokenWindow(
   now: Date,
 ): Response | null {
   if (!entitlement.release_token_expires_at) {
-    return releaseTokenInvalidResponse(c);
+    return releaseTokenInvalidResponse(c, entitlement);
   }
 
   const releaseTokenExpiresAt = parseIsoDate(entitlement.release_token_expires_at);
   if (!releaseTokenExpiresAt) {
-    return releaseTokenInvalidResponse(c);
+    return releaseTokenInvalidResponse(c, entitlement);
   }
 
   if (releaseTokenExpiresAt.getTime() < now.getTime()) {
-    return errorResponse(
-      c,
-      410,
-      'release_token_expired',
-      'release_token has expired and must be reissued',
-    );
+    return publicErrorResponse(c, 410, {
+      code: 'challenge_expired',
+      class: 'retryable',
+      subcode: 'release_token_expired',
+      retryAfterMs: 0,
+      message: 'release_token has expired and must be reissued',
+      entitlement,
+    });
   }
 
   return null;
@@ -406,15 +468,56 @@ function errorResponse(
   code: string,
   message: string,
 ): Response {
-  return c.json(
-    {
-      error: {
-        code,
+  const normalized = normalizeLegacyIssueError(code, message);
+
+  return publicErrorResponse(c, status, normalized);
+}
+
+function normalizeLegacyIssueError(
+  code: string,
+  message: string,
+): {
+  code: 'invalid_request' | 'challenge_invalid' | 'trial_not_eligible';
+  class: 'terminal' | 'security_fail';
+  subcode?: string | null;
+  message: string;
+} {
+  switch (code) {
+    case 'invalid_request':
+      return {
+        code: 'invalid_request',
+        class: 'terminal',
         message,
-      },
-    },
-    status,
-  );
+      };
+    case 'signature_skew':
+      return {
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: 'timestamp_skew',
+        message,
+      };
+    case 'signature_invalid':
+      return {
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: 'signature_mismatch',
+        message,
+      };
+    case 'device_public_key_mismatch':
+      return {
+        code: 'trial_not_eligible',
+        class: 'security_fail',
+        subcode: 'installation_binding_mismatch',
+        message,
+      };
+    default:
+      return {
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: code,
+        message,
+      };
+  }
 }
 
 function isBase64Url(value: string, byteLength?: number): boolean {

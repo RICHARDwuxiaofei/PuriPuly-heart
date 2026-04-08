@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import app from '../src/index';
 import { createDeviceKeyPair, signCanonicalVerifyRequest } from './test-support/ed25519';
+import { normalizedErrorEnvelope } from './test-support/errors';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import { issueChallenge, postVerify } from './test-support/trial-api';
 
@@ -38,13 +39,15 @@ describe('device_public_key binding protection', () => {
     );
 
     expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toEqual({
-      error: {
-        code: 'device_public_key_already_registered',
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'trial_not_eligible',
+        class: 'security_fail',
+        subcode: 'device_public_key_registered',
         message:
           'device_public_key is already registered to a different installation_id',
-      },
-    });
+      }),
+    );
 
     const installationCount = env.__db
       .prepare('SELECT COUNT(*) AS count FROM installations')
@@ -81,12 +84,14 @@ describe('device_public_key binding protection', () => {
 
     const response = await postVerify(env, requestBody);
     expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toEqual({
-      error: {
-        code: 'device_public_key_mismatch',
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'trial_not_eligible',
+        class: 'security_fail',
+        subcode: 'installation_binding_mismatch',
         message: 'verify must use the registered device_public_key for installation_id',
-      },
-    });
+      }),
+    );
 
     const installation = env.__db
       .prepare(

@@ -9,6 +9,11 @@ const FIRST_MIGRATION = new URL(
   import.meta.url,
 );
 
+const SECOND_MIGRATION = new URL(
+  '../migrations/0001_add_abuse_hook_state.sql',
+  import.meta.url,
+);
+
 describe('broker persistent state model', () => {
   it('defines the D1 table contract, runtime config keys, and minimal release-session state', async () => {
     const contract = await import('../src/contract');
@@ -184,6 +189,59 @@ describe('broker persistent state model', () => {
             },
           },
         },
+        brokerRequestEvents: {
+          name: 'broker_request_events',
+          purpose: ['per-endpoint rate limits', 'cross-endpoint velocity hooks'],
+          columns: ['id', 'endpoint', 'ip', 'installation_id', 'observed_at'],
+          appendOnly: true,
+          indexed: [
+            'endpoint + ip + observed_at',
+            'endpoint + installation_id + observed_at',
+            'ip + observed_at',
+            'installation_id + observed_at',
+          ],
+        },
+        brokerVelocityCapHooks: {
+          name: 'broker_velocity_cap_hooks',
+          purpose: 'manual cross-endpoint velocity controls with observable outcomes',
+          columns: [
+            'id',
+            'subject_type',
+            'subject_value',
+            'max_requests',
+            'window_minutes',
+            'outcome_code',
+            'outcome_class',
+            'outcome_subcode',
+            'reason',
+            'active',
+            'created_at',
+            'expires_at',
+          ],
+          supportedSubjects: ['ip', 'installation_id'],
+          indexed: ['subject_type + subject_value + active + expires_at'],
+        },
+        brokerAbuseSubjectHooks: {
+          name: 'broker_abuse_subject_hooks',
+          purpose:
+            'denylist, reputation, and fast-revocation controls with observable outcomes',
+          columns: [
+            'id',
+            'hook_kind',
+            'subject_type',
+            'subject_value',
+            'outcome_code',
+            'outcome_class',
+            'outcome_subcode',
+            'reason',
+            'active',
+            'created_at',
+            'expires_at',
+          ],
+          hookKinds: ['denylist', 'reputation', 'revocation'],
+          supportedSubjects: ['ip', 'installation_id', 'hardware_hash'],
+          indexed: ['subject_type + subject_value + hook_kind + active + expires_at'],
+        },
       },
     });
   });
@@ -201,11 +259,15 @@ describe('broker persistent state model', () => {
 
   it('ships a first D1 migration that creates the documented tables and indexes', () => {
     expect(existsSync(FIRST_MIGRATION)).toBe(true);
+    expect(existsSync(SECOND_MIGRATION)).toBe(true);
     if (!existsSync(FIRST_MIGRATION)) {
       return;
     }
 
     const migration = readFileSync(FIRST_MIGRATION, 'utf8');
+    const secondMigration = existsSync(SECOND_MIGRATION)
+      ? readFileSync(SECOND_MIGRATION, 'utf8')
+      : '';
 
     expect(migration).toContain('CREATE TABLE broker_config');
     expect(migration).toContain('CREATE TABLE installations');
@@ -234,5 +296,8 @@ describe('broker persistent state model', () => {
     expect(migration).toContain('CREATE INDEX idx_installations_last_seen_at');
     expect(migration).toContain('CREATE INDEX idx_openrouter_entitlements_status');
     expect(migration).toContain('CREATE INDEX idx_openrouter_entitlements_expires_at');
+    expect(secondMigration).toContain('CREATE TABLE broker_request_events');
+    expect(secondMigration).toContain('CREATE TABLE broker_velocity_cap_hooks');
+    expect(secondMigration).toContain('CREATE TABLE broker_abuse_subject_hooks');
   });
 });

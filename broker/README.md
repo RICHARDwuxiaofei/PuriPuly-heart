@@ -86,13 +86,27 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
   - columns: `key`, `value`, `updated_at`
   - bootstrap rows: `fingerprint_salt`, `abuse_controls`
   - runtime-tunable non-secret operational controls live here as JSON rows so operators do not need code changes for threshold updates
+  - malformed `abuse_controls` payloads fall back to the built-in default layout/thresholds instead of disabling enforcement or surfacing 500s
   - constraints: keys are limited to the supported config rows for this rollout and `value` must be valid JSON
   - `abuse_controls` fixes the settled endpoint/dimension layout:
     - `POST /v1/trial/challenge`: per IP, `10` requests / `15` minutes
     - `POST /v1/trial/challenge/verify`: per `installation_id`, `5` requests / `15` minutes
     - `POST /v1/providers/openrouter/issue`: per `installation_id`, `3` requests / `15` minutes
     - `GET /v1/trial/status`: per `installation_id`, `30` requests / `15` minutes
-    - global daily cap on new active entitlements, stored as a runtime-configurable broker value
+    - global UTC-day cap on new active entitlements, counted by `issued_at` semantics even if an entitlement is later revoked, stored as a runtime-configurable broker value
+- `broker_request_events`
+  - append-only request observations used for per-endpoint rate limiting and cross-endpoint velocity hooks
+  - columns: `id`, `endpoint`, `ip`, `installation_id`, `observed_at`
+  - indexes cover endpoint-scoped and subject-scoped sliding-window lookups
+- `broker_velocity_cap_hooks`
+  - explicit operator-controlled cross-endpoint velocity hooks with observable public outcomes
+  - columns: `id`, `subject_type`, `subject_value`, `max_requests`, `window_minutes`, `outcome_code`, `outcome_class`, `outcome_subcode`, `reason`, `active`, `created_at`, `expires_at`
+  - supported subjects: `ip`, `installation_id`
+- `broker_abuse_subject_hooks`
+  - explicit denylist, reputation, and fast-revocation hooks with observable outcomes
+  - columns: `id`, `hook_kind`, `subject_type`, `subject_value`, `outcome_code`, `outcome_class`, `outcome_subcode`, `reason`, `active`, `created_at`, `expires_at`
+  - supported hook kinds: `denylist`, `reputation`, `revocation`
+  - supported subjects: `ip`, `installation_id`, `hardware_hash`
 - `installations`
   - columns: `installation_id`, `device_public_key`, `hardware_hash`, `hardware_hash_salt_version`, `app_version`, `challenge`, `challenge_expires_at`, `challenge_salt_version`, `created_at`, `last_seen_at`
   - constraints: `installation_id` primary key, `device_public_key` unique, `hardware_hash` indexed, and bounded persisted public text (`installation_id <= 128`, `app_version <= 64`, `hardware_hash <= 128` when present)
@@ -113,3 +127,11 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
 - Retention cleanup deletes from `installations`; the entitlement row is removed by `ON DELETE CASCADE`.
 - `fingerprint_salt` remains one server-managed global salt shared across clients for duplicate detection.
 - Rotation keeps one current salt and one previous salt version. Duplicate matching only uses `hardware_hash` values tagged with the current version. In-flight challenges may complete on the previous version until their existing `challenge_expires_at`, after which stale hashes are refreshed in place on successful verify or cleared when the broker reissues a challenge for `none` / `pending_release` state.
+
+## Public error normalization and abuse outcomes
+
+- Public error `code` values are bounded to: `invalid_request`, `rate_limited`, `challenge_expired`, `challenge_invalid`, `issuance_suspended`, `trial_unavailable`, `trial_not_eligible`, `internal_error`.
+- Public error `class` values are bounded to: `retryable`, `terminal`, `security_fail`.
+- Current subcodes include endpoint rate-limit dimensions (`ip_rate_limited`, `installation_rate_limited`), challenge/release validation details (`release_token_expired`, `signature_mismatch`, `timestamp_skew`), duplicate suppression (`hardware_duplicate`), and issuance suspension (`global_cap_reached`).
+- Abuse-hook rows may store operator metadata, but hook-specific labels do not expand the public subcode vocabulary; public hook responses normalize to bounded existing subcodes or `null`.
+- Error envelopes also carry `retry_after_ms` plus companion `managed_state` / `current_entitlement` fields so clients can distinguish retryable suspension from lifecycle-managed states such as `expired` and `revoked`.

@@ -4,6 +4,7 @@ import {
   signCanonicalIssueRequest,
   signNonCanonicalIssueRequest,
 } from './test-support/ed25519';
+import { normalizedErrorEnvelope } from './test-support/errors';
 import { createPendingReleaseSession } from './test-support/openrouter-issue';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import { postIssue } from './test-support/trial-api';
@@ -76,12 +77,14 @@ describe('POST /v1/providers/openrouter/issue signing contract', () => {
     const response = await postIssue(env, requestBody);
 
     expect(response.status).toBe(401);
-    await expect(response.json()).resolves.toEqual({
-      error: {
-        code: 'signature_invalid',
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: 'signature_mismatch',
         message: 'signature verification failed for the registered device_public_key',
-      },
-    });
+      }),
+    );
   });
 
   it('rejects signatures outside the ±60 second skew window', async () => {
@@ -108,11 +111,13 @@ describe('POST /v1/providers/openrouter/issue signing contract', () => {
     const response = await postIssue(env, requestBody);
 
     expect(response.status).toBe(401);
-    await expect(response.json()).resolves.toEqual({
-      error: {
-        code: 'signature_skew',
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: 'timestamp_skew',
         message: 'signed_at must be within ±60 seconds of broker time',
-      },
-    });
+      }),
+    );
   });
 });

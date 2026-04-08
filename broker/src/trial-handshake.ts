@@ -8,6 +8,22 @@ import type {
 import { BROKER_PUBLIC_INPUT_BOUNDS } from './persistence';
 import type { BrokerEnv } from './contract';
 import {
+  checkDailyIssuanceCap,
+  checkEndpointRateLimit,
+  checkVelocityCapHook,
+  hasActiveHardwareDuplicate,
+  matchSubjectHook,
+  recordRequestEvent,
+  resolveClientIp,
+} from './abuse-controls';
+import { errorResponse as publicErrorResponse } from './broker-error';
+import {
+  normalizeManagedState,
+  normalizeTrialStatusResponse,
+  type ManagedStateResponse,
+  type TrialStatusResponse,
+} from './managed-state';
+import {
   MANAGED_TRIAL_BUDGET_POLICY,
   TRIAL_PROVIDER_POLICY,
 } from './trial-policy';
@@ -54,33 +70,6 @@ interface VerifyRequestBody {
   app_version?: unknown;
   signed_at?: unknown;
   signature?: unknown;
-}
-
-interface ManagedStateResponse {
-  managed_state: {
-    lifecycle:
-      | 'none'
-      | 'pending_release'
-      | 'active'
-      | 'expired'
-      | 'revoked';
-    managed_availability: boolean;
-  };
-  current_entitlement:
-    | {
-        provider: string;
-        budget_usd: number;
-        issued_at: string | null;
-        expires_at: string | null;
-      }
-    | null;
-}
-
-interface TrialStatusResponse extends ManagedStateResponse {
-  onboarding_eligibility: {
-    eligible: boolean;
-    reason: 'eligible' | 'pending_release' | 'active' | 'expired' | 'revoked';
-  };
 }
 
 export async function handleTrialChallenge(
@@ -141,16 +130,74 @@ export async function handleTrialChallenge(
   }
 
   const existingInstallation = await getInstallation(c.env.BROKER_DB, installationId);
+  const entitlement = existingInstallation
+    ? await getEntitlement(c.env.BROKER_DB, installationId)
+    : null;
+  const now = new Date();
+  const trustedInstallationId =
+    existingInstallation && existingInstallation.device_public_key !== devicePublicKey
+      ? null
+      : installationId;
+  const requestContext = {
+    endpoint: 'POST /v1/trial/challenge',
+    now,
+    ip: resolveClientIp(c),
+    installationId: trustedInstallationId,
+    hardwareHash: null,
+  };
+
+  const subjectHook = await matchSubjectHook(c.env.BROKER_DB, requestContext);
+  if (subjectHook) {
+    const hookEntitlement = existingInstallation
+      ? await getEntitlement(c.env.BROKER_DB, installationId)
+      : null;
+    return publicErrorResponse(c, subjectHook.status, {
+      code: subjectHook.code,
+      class: subjectHook.class,
+      subcode: subjectHook.subcode,
+      retryAfterMs: subjectHook.retryAfterMs,
+      message: subjectHook.message,
+      entitlement: hookEntitlement,
+    });
+  }
+
+  await recordRequestEvent(c.env.BROKER_DB, requestContext);
+
+  const rateLimitDecision = await checkEndpointRateLimit(c.env.BROKER_DB, requestContext);
+  if (rateLimitDecision) {
+    return publicErrorResponse(c, rateLimitDecision.status, {
+      code: rateLimitDecision.code,
+      class: rateLimitDecision.class,
+      subcode: rateLimitDecision.subcode,
+      retryAfterMs: rateLimitDecision.retryAfterMs,
+      message: rateLimitDecision.message,
+      entitlement,
+    });
+  }
+
+  const velocityCapDecision = await checkVelocityCapHook(c.env.BROKER_DB, requestContext);
+  if (velocityCapDecision) {
+    return publicErrorResponse(c, velocityCapDecision.status, {
+      code: velocityCapDecision.code,
+      class: velocityCapDecision.class,
+      subcode: velocityCapDecision.subcode,
+      retryAfterMs: velocityCapDecision.retryAfterMs,
+      message: velocityCapDecision.message,
+      entitlement,
+    });
+  }
+
   if (
     existingInstallation &&
     existingInstallation.device_public_key !== devicePublicKey
   ) {
-    return errorResponse(
-      c,
-      409,
-      'device_public_key_mismatch',
-      'installation_id is already bound to a different device_public_key',
-    );
+    return publicErrorResponse(c, 409, {
+      code: 'trial_not_eligible',
+      class: 'security_fail',
+      subcode: 'installation_binding_mismatch',
+      message: 'installation_id is already bound to a different device_public_key',
+      entitlement,
+    });
   }
 
   const installationByPublicKey = await getInstallationByPublicKey(
@@ -161,23 +208,36 @@ export async function handleTrialChallenge(
     installationByPublicKey &&
     installationByPublicKey.installation_id !== installationId
   ) {
-    return errorResponse(
-      c,
-      409,
-      'device_public_key_already_registered',
-      'device_public_key is already registered to a different installation_id',
-    );
+    return publicErrorResponse(c, 409, {
+      code: 'trial_not_eligible',
+      class: 'security_fail',
+      subcode: 'device_public_key_registered',
+      message: 'device_public_key is already registered to a different installation_id',
+      entitlement,
+    });
   }
 
-  const now = new Date();
+  const issuanceCapDecision = await checkDailyIssuanceCap(
+    c.env.BROKER_DB,
+    now,
+    entitlement,
+  );
+  if (issuanceCapDecision) {
+    return publicErrorResponse(c, issuanceCapDecision.status, {
+      code: issuanceCapDecision.code,
+      class: issuanceCapDecision.class,
+      subcode: issuanceCapDecision.subcode,
+      retryAfterMs: issuanceCapDecision.retryAfterMs,
+      message: issuanceCapDecision.message,
+      entitlement,
+    });
+  }
+
   const challenge = randomBase64Url(32);
   const challengeExpiresAt = new Date(
     now.getTime() + TRIAL_CHALLENGE_TTL_SECONDS * 1000,
   ).toISOString();
   const fingerprintSalt = await getFingerprintSaltConfig(c.env.BROKER_DB);
-  const entitlement = existingInstallation
-    ? await getEntitlement(c.env.BROKER_DB, installationId)
-    : null;
   const challengeWriteInput = {
     installationId,
     devicePublicKey,
@@ -229,12 +289,13 @@ export async function handleTrialChallenge(
       );
       if (conflictingInstallation) {
         if (conflictingInstallation.device_public_key !== devicePublicKey) {
-          return errorResponse(
-            c,
-            409,
-            'device_public_key_mismatch',
-            'installation_id is already bound to a different device_public_key',
-          );
+          return publicErrorResponse(c, 409, {
+            code: 'trial_not_eligible',
+            class: 'security_fail',
+            subcode: 'installation_binding_mismatch',
+            message: 'installation_id is already bound to a different device_public_key',
+            entitlement,
+          });
         }
 
         if (
@@ -256,12 +317,13 @@ export async function handleTrialChallenge(
           conflictingPublicKeyInstallation &&
           conflictingPublicKeyInstallation.installation_id !== installationId
         ) {
-          return errorResponse(
-            c,
-            409,
-            'device_public_key_already_registered',
-            'device_public_key is already registered to a different installation_id',
-          );
+          return publicErrorResponse(c, 409, {
+            code: 'trial_not_eligible',
+            class: 'security_fail',
+            subcode: 'device_public_key_registered',
+            message: 'device_public_key is already registered to a different installation_id',
+            entitlement,
+          });
         }
 
         throw error;
@@ -347,6 +409,29 @@ export async function handleTrialChallengeVerify(
     );
   }
 
+  const now = new Date();
+  const requestContext = {
+    endpoint: 'POST /v1/trial/challenge/verify',
+    now,
+    ip: resolveClientIp(c),
+    installationId,
+    hardwareHash,
+  };
+  const currentEntitlement = await getEntitlement(c.env.BROKER_DB, installationId);
+
+  const subjectHook = await matchSubjectHook(c.env.BROKER_DB, requestContext);
+  if (subjectHook) {
+    const hookEntitlement = await getEntitlement(c.env.BROKER_DB, installationId);
+    return publicErrorResponse(c, subjectHook.status, {
+      code: subjectHook.code,
+      class: subjectHook.class,
+      subcode: subjectHook.subcode,
+      retryAfterMs: subjectHook.retryAfterMs,
+      message: subjectHook.message,
+      entitlement: hookEntitlement,
+    });
+  }
+
   const installation = await getInstallation(c.env.BROKER_DB, installationId);
   if (!installation || !installation.challenge || !installation.challenge_expires_at) {
     return errorResponse(
@@ -366,7 +451,6 @@ export async function handleTrialChallengeVerify(
     );
   }
 
-  const now = new Date();
   const signedAtDate = parseIsoDate(signedAt);
   const challengeExpiresDate = parseIsoDate(challengeExpiresAt);
   if (!signedAtDate || !challengeExpiresDate) {
@@ -434,9 +518,69 @@ export async function handleTrialChallengeVerify(
     );
   }
 
-  const entitlement = await getEntitlement(c.env.BROKER_DB, installationId);
+  const entitlement = currentEntitlement;
+
+  await recordRequestEvent(c.env.BROKER_DB, requestContext);
+
+  const rateLimitDecision = await checkEndpointRateLimit(c.env.BROKER_DB, requestContext);
+  if (rateLimitDecision) {
+    return publicErrorResponse(c, rateLimitDecision.status, {
+      code: rateLimitDecision.code,
+      class: rateLimitDecision.class,
+      subcode: rateLimitDecision.subcode,
+      retryAfterMs: rateLimitDecision.retryAfterMs,
+      message: rateLimitDecision.message,
+      entitlement,
+    });
+  }
+
+  const velocityCapDecision = await checkVelocityCapHook(c.env.BROKER_DB, requestContext);
+  if (velocityCapDecision) {
+    return publicErrorResponse(c, velocityCapDecision.status, {
+      code: velocityCapDecision.code,
+      class: velocityCapDecision.class,
+      subcode: velocityCapDecision.subcode,
+      retryAfterMs: velocityCapDecision.retryAfterMs,
+      message: velocityCapDecision.message,
+      entitlement,
+    });
+  }
+
   if (entitlement && entitlement.status !== 'pending_release') {
     return releaseNotAllowedResponse(c, entitlement);
+  }
+
+  const fingerprintSalt = await getFingerprintSaltConfig(c.env.BROKER_DB);
+  const duplicateHardware = await hasActiveHardwareDuplicate(c.env.BROKER_DB, {
+    installationId,
+    hardwareHash,
+    challengeSaltVersion: installation.challenge_salt_version,
+    currentSaltVersion: fingerprintSalt.current.version,
+  });
+  if (duplicateHardware) {
+    return publicErrorResponse(c, 409, {
+      code: 'trial_not_eligible',
+      class: 'terminal',
+      subcode: 'hardware_duplicate',
+      message: 'hardware_hash is already associated with an active entitlement',
+      entitlement,
+    });
+  }
+
+  const issuanceCapDecision = await checkDailyIssuanceCap(
+    c.env.BROKER_DB,
+    now,
+    entitlement,
+  );
+  if (issuanceCapDecision) {
+    return publicErrorResponse(c, issuanceCapDecision.status, {
+      code: issuanceCapDecision.code,
+      class: issuanceCapDecision.class,
+      subcode: issuanceCapDecision.subcode,
+      retryAfterMs: issuanceCapDecision.retryAfterMs,
+      message: issuanceCapDecision.message,
+      entitlement,
+    });
   }
 
   const challengeConsumed = await consumeChallenge(c.env.BROKER_DB, {
@@ -587,17 +731,38 @@ export async function handleTrialStatus(c: Context<BrokerEnv>): Promise<Response
     );
   }
 
-  const installation = await getInstallation(c.env.BROKER_DB, installationId);
-  if (!installation) {
-    return errorResponse(
-      c,
-      404,
-      'installation_not_found',
-      'installation_id is not registered with the broker',
-    );
+  const now = new Date();
+  const requestContext = {
+    endpoint: 'GET /v1/trial/status',
+    now,
+    ip: resolveClientIp(c),
+    installationId,
+    hardwareHash: null,
+  };
+  const currentEntitlement = await getEntitlement(c.env.BROKER_DB, installationId);
+
+  const subjectHook = await matchSubjectHook(c.env.BROKER_DB, requestContext);
+  if (subjectHook && subjectHook.hookKind !== 'revocation') {
+    return publicErrorResponse(c, subjectHook.status, {
+      code: subjectHook.code,
+      class: subjectHook.class,
+      subcode: subjectHook.subcode,
+      retryAfterMs: subjectHook.retryAfterMs,
+      message: subjectHook.message,
+      entitlement: currentEntitlement,
+    });
   }
 
-  const now = new Date();
+  const installation = await getInstallation(c.env.BROKER_DB, installationId);
+  if (!installation) {
+    return publicErrorResponse(c, 409, {
+      code: 'trial_not_eligible',
+      class: 'terminal',
+      subcode: 'installation_not_found',
+      message: 'installation_id is not registered with the broker',
+    });
+  }
+
   if (
     Math.abs(timestampDate.getTime() - now.getTime()) >
     TRIAL_STATUS_MAX_CLOCK_SKEW_SECONDS * 1000
@@ -629,6 +794,32 @@ export async function handleTrialStatus(c: Context<BrokerEnv>): Promise<Response
   }
 
   const entitlement = await getEntitlement(c.env.BROKER_DB, installationId);
+
+  await recordRequestEvent(c.env.BROKER_DB, requestContext);
+
+  const rateLimitDecision = await checkEndpointRateLimit(c.env.BROKER_DB, requestContext);
+  if (rateLimitDecision) {
+    return publicErrorResponse(c, rateLimitDecision.status, {
+      code: rateLimitDecision.code,
+      class: rateLimitDecision.class,
+      subcode: rateLimitDecision.subcode,
+      retryAfterMs: rateLimitDecision.retryAfterMs,
+      message: rateLimitDecision.message,
+      entitlement,
+    });
+  }
+
+  const velocityCapDecision = await checkVelocityCapHook(c.env.BROKER_DB, requestContext);
+  if (velocityCapDecision) {
+    return publicErrorResponse(c, velocityCapDecision.status, {
+      code: velocityCapDecision.code,
+      class: velocityCapDecision.class,
+      subcode: velocityCapDecision.subcode,
+      retryAfterMs: velocityCapDecision.retryAfterMs,
+      message: velocityCapDecision.message,
+      entitlement,
+    });
+  }
 
   return c.json(normalizeTrialStatusResponse(entitlement));
 }
@@ -701,29 +892,23 @@ function errorResponse(
   code: string,
   message: string,
 ): Response {
-  return c.json({
-    error: {
-      code,
-      message,
-    },
-  }, status);
+  const normalized = normalizeLegacyTrialHandshakeError(code, message);
+
+  return publicErrorResponse(c, status, normalized);
 }
 
 function releaseNotAllowedResponse(
   c: Context<BrokerEnv>,
   entitlement: OpenRouterEntitlementRecord,
 ): Response {
-  return c.json(
-    {
-      error: {
-        code: 'release_not_allowed',
-        message:
-          'verify may only mint release_token for lifecycle none or pending_release',
-      },
-      ...normalizeManagedState(entitlement),
-    },
-    409,
-  );
+  return publicErrorResponse(c, 409, {
+    code: 'trial_not_eligible',
+    class: 'terminal',
+    subcode: 'lifecycle_not_eligible',
+    message:
+      'verify may only mint release_token for lifecycle none or pending_release',
+    entitlement,
+  });
 }
 
 function randomBase64Url(byteLength: number): string {
@@ -1137,41 +1322,84 @@ async function getInstallationByPublicKey(
     .first<InstallationRecord>();
 }
 
-function normalizeManagedState(
-  entitlement: OpenRouterEntitlementRecord | null,
-): ManagedStateResponse {
-  const lifecycle = entitlement?.status ?? 'none';
-
-  return {
-    managed_state: {
-      lifecycle,
-      managed_availability:
-        lifecycle === 'none' ||
-        lifecycle === 'pending_release' ||
-        lifecycle === 'active',
-    },
-    current_entitlement: entitlement
-      ? {
-          provider: TRIAL_PROVIDER_POLICY.managedFreeTrial.provider,
-          budget_usd: entitlement.budget_usd,
-          issued_at: entitlement.issued_at,
-          expires_at: entitlement.expires_at,
-        }
-      : null,
-  };
-}
-
-function normalizeTrialStatusResponse(
-  entitlement: OpenRouterEntitlementRecord | null,
-): TrialStatusResponse {
-  const managedState = normalizeManagedState(entitlement);
-  const lifecycle = managedState.managed_state.lifecycle;
-
-  return {
-    ...managedState,
-    onboarding_eligibility: {
-      eligible: lifecycle === 'none' || lifecycle === 'pending_release',
-      reason: lifecycle === 'none' ? 'eligible' : lifecycle,
-    },
-  };
+function normalizeLegacyTrialHandshakeError(
+  code: string,
+  message: string,
+): {
+  code:
+    | 'invalid_request'
+    | 'challenge_expired'
+    | 'challenge_invalid'
+    | 'trial_not_eligible';
+  class: 'retryable' | 'terminal' | 'security_fail';
+  subcode?: string | null;
+  retryAfterMs?: number | null;
+  message: string;
+} {
+  switch (code) {
+    case 'invalid_request':
+      return {
+        code: 'invalid_request',
+        class: 'terminal',
+        message,
+      };
+    case 'challenge_expired':
+      return {
+        code: 'challenge_expired',
+        class: 'retryable',
+        retryAfterMs: 0,
+        message,
+      };
+    case 'signature_skew':
+      return {
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: 'timestamp_skew',
+        message,
+      };
+    case 'signature_invalid':
+      return {
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: 'signature_mismatch',
+        message,
+      };
+    case 'device_public_key_mismatch':
+      return {
+        code: 'trial_not_eligible',
+        class: 'security_fail',
+        subcode: 'installation_binding_mismatch',
+        message,
+      };
+    case 'device_public_key_already_registered':
+      return {
+        code: 'trial_not_eligible',
+        class: 'security_fail',
+        subcode: 'device_public_key_registered',
+        message,
+      };
+    case 'installation_not_found':
+      return {
+        code: 'trial_not_eligible',
+        class: 'terminal',
+        subcode: 'installation_not_found',
+        message,
+      };
+    case 'challenge_not_found':
+    case 'challenge_invalid':
+    case 'challenge_consumed':
+      return {
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: code === 'challenge_invalid' ? null : code,
+        message,
+      };
+    default:
+      return {
+        code: 'trial_not_eligible',
+        class: 'terminal',
+        subcode: code,
+        message,
+      };
+  }
 }

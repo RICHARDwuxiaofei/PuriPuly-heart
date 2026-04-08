@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { signCanonicalIssueRequest } from './test-support/ed25519';
+import { normalizedErrorEnvelope } from './test-support/errors';
 import { createPendingReleaseSession } from './test-support/openrouter-issue';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import { postIssue } from './test-support/trial-api';
@@ -69,12 +70,13 @@ describe('POST /v1/providers/openrouter/issue policy enforcement', () => {
       const response = await postIssue(env, requestBody);
 
       expect(response.status).toBe(400);
-      await expect(response.json()).resolves.toEqual({
-        error: {
+      await expect(response.json()).resolves.toEqual(
+        normalizedErrorEnvelope({
           code: 'invalid_request',
+          class: 'terminal',
           message: testCase.message,
-        },
-      });
+        }),
+      );
 
       const entitlement = env.__db
         .prepare(

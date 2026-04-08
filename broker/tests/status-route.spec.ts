@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { createDeviceKeyPair, signCanonicalStatusRequest } from './test-support/ed25519';
+import { normalizedErrorEnvelope } from './test-support/errors';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import { getTrialStatus } from './test-support/trial-api';
 
@@ -11,12 +12,13 @@ describe('GET /v1/trial/status route contract', () => {
     const response = await getTrialStatus({ env });
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'invalid_request',
+        class: 'terminal',
         message: 'installation_id query parameter is required',
-      },
-    });
+      }),
+    );
   });
 
   it('rejects oversized installation_id query values', async () => {
@@ -32,12 +34,13 @@ describe('GET /v1/trial/status route contract', () => {
     });
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'invalid_request',
+        class: 'terminal',
         message: 'installation_id must be between 1 and 128 characters',
-      },
-    });
+      }),
+    );
   });
 
   it('rejects non-ISO X-Puripuly-Timestamp header values', async () => {
@@ -53,12 +56,13 @@ describe('GET /v1/trial/status route contract', () => {
     });
 
     expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toEqual({
-      error: {
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
         code: 'invalid_request',
+        class: 'terminal',
         message: 'X-Puripuly-Timestamp must be a valid ISO-8601 timestamp',
-      },
-    });
+      }),
+    );
   });
 
   it('returns installation_not_found for an unknown installation_id after validating the signed request format', async () => {
@@ -78,12 +82,14 @@ describe('GET /v1/trial/status route contract', () => {
       },
     });
 
-    expect(response.status).toBe(404);
-    await expect(response.json()).resolves.toEqual({
-      error: {
-        code: 'installation_not_found',
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'trial_not_eligible',
+        class: 'terminal',
+        subcode: 'installation_not_found',
         message: 'installation_id is not registered with the broker',
-      },
-    });
+      }),
+    );
   });
 });
