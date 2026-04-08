@@ -72,3 +72,20 @@ export async function getTrialStatus(options: {
     options.env,
   );
 }
+
+export async function postIssue(
+  env: TestBrokerEnv,
+  body: object | string,
+): Promise<Response> {
+  return app.request(
+    'http://broker.test/v1/providers/openrouter/issue',
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    },
+    env,
+  );
+}

@@ -60,6 +60,23 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
   - onboarding eligibility is broker-side metadata only: `none` => eligible, `pending_release` => eligible continuation, `active` / `expired` / `revoked` => ineligible
   - `expired` and `revoked` are returned as `200` lifecycle data, not public error codes
   - live remaining budget stays upstream in OpenRouter metadata instead of being mirrored into broker status
+- `POST /v1/providers/openrouter/issue`
+  - request: `installation_id`, base64url `device_public_key`, base64url `release_token`, `reason`, `budget_usd`, `model`, `signed_at`, base64url `signature`
+  - activation reason is fixed to `llm_start`
+  - `budget_usd` must match the managed-trial hard limit and `model` must match the pinned managed OpenRouter model
+  - supported timestamp subset for `signed_at`: `YYYY-MM-DDTHH:MM:SS(.mmm)?(Z|±HH:MM)` with a real calendar date/time
+  - Ed25519 signature payload is canonical UTF-8 text joined by newlines in this order:
+    1. `installation_id`
+    2. `device_public_key`
+    3. `release_token`
+    4. `reason`
+    5. `budget_usd`
+    6. `model`
+    7. `signed_at`
+  - enforces signed clock skew within `±60` seconds
+  - consumes the `pending_release` token, upgrades the entitlement to `active`, and reuses the same `active` entitlement for same-session retries
+  - success response returns `openrouter_api_key`, distinct `managed_credential_ref`, normalized `managed_state`, `expires_at`, `budget_usd`, and `model`
+  - live remaining budget and usage stay upstream in OpenRouter metadata and are not mirrored into the issue response
 
 ## Persistence model
 

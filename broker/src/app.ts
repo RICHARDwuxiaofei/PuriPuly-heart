@@ -10,6 +10,7 @@ import {
   handleTrialChallengeVerify,
   handleTrialStatus,
 } from './trial-handshake';
+import { handleOpenRouterIssue } from './openrouter-issue';
 
 export const app = new Hono<BrokerEnv>();
 
@@ -27,5 +28,6 @@ app.get('/v1/foundation', (c) => {
 app.post('/v1/trial/challenge', handleTrialChallenge);
 app.post('/v1/trial/challenge/verify', handleTrialChallengeVerify);
 app.get('/v1/trial/status', handleTrialStatus);
+app.post('/v1/providers/openrouter/issue', handleOpenRouterIssue);
 
 export default app;
