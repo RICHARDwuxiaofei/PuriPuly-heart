@@ -99,9 +99,8 @@ def test_load_from_settings_resizes_long_peer_model_value(
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     assert view._peer_qwen_model_text.content.value == "qwen3-asr-flash-realtime"
-    assert (
-        view._peer_qwen_model_text.content.size
-        == settings_view._setting_action_text_size("qwen3-asr-flash-realtime")
+    assert view._peer_qwen_model_text.content.size == settings_view._setting_action_text_size(
+        "qwen3-asr-flash-realtime"
     )
 
 
