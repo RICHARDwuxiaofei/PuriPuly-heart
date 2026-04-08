@@ -35,7 +35,7 @@ _ACTIVE_SELF_BLOCK_ID = "self:active"
 _CLOSED_TOMBSTONE_LIMIT = 64
 LATE_ARRIVAL_WINDOW_SECONDS = 5.0
 VISIBLE_TTL_SECONDS = 8.0
-SELF_TRANSLATION_TTL_BONUS_SECONDS = 4.0
+SELF_TRANSLATION_MIN_VISIBLE_SECONDS = 4.0
 SleepFn = Callable[[float], Awaitable[None]]
 
 
@@ -55,6 +55,7 @@ class _LogicalCaptionEntry:
     appearance_seq: int | None = None
     ever_publishable: bool = False
     visible_since: float | None = None
+    translation_visible_since: float | None = None
     last_updated_seq: int = 0
     closed_seq: int | None = None
     closed_at: float | None = None
@@ -72,6 +73,7 @@ class _ActiveSelfEntry:
     occupant_key: str
     appearance_seq: int
     visible_since: float
+    translation_visible_since: float | None = None
 
 
 @dataclass(slots=True)
@@ -191,9 +193,21 @@ class OverlayPresenter(OverlaySink):
             ):
                 appearance_seq = self._active_self.appearance_seq
                 visible_since = self._active_self.visible_since
+                translation_visible_since = self._next_translation_visible_since(
+                    previous_text=self._active_self.secondary_text,
+                    next_text=event.secondary_text,
+                    previous_visible_since=self._active_self.translation_visible_since,
+                    now=now,
+                )
             else:
                 appearance_seq = self._next_appearance_seq()
                 visible_since = now
+                translation_visible_since = self._next_translation_visible_since(
+                    previous_text="",
+                    next_text=event.secondary_text,
+                    previous_visible_since=None,
+                    now=now,
+                )
             if (
                 self._active_self is not None
                 and self._active_self.text == event.text
@@ -210,6 +224,7 @@ class OverlayPresenter(OverlaySink):
                 occupant_key=event.occupant_key,
                 appearance_seq=appearance_seq,
                 visible_since=visible_since,
+                translation_visible_since=translation_visible_since,
             )
             return True
 
@@ -258,6 +273,12 @@ class OverlayPresenter(OverlaySink):
                 return False
             if entry.translation_text == event.text and entry.last_updated_seq == event.seq:
                 return False
+            entry.translation_visible_since = self._next_translation_visible_since(
+                previous_text=entry.translation_text,
+                next_text=event.text,
+                previous_visible_since=entry.translation_visible_since,
+                now=now,
+            )
             entry.translation_text = event.text
             entry.last_updated_seq = event.seq
             self._refresh_entry_visibility_and_expiration(key, entry, now=now)
@@ -471,6 +492,23 @@ class OverlayPresenter(OverlaySink):
             entry.appearance_seq = active_entry.appearance_seq
         if entry.visible_since is None:
             entry.visible_since = active_entry.visible_since
+        if entry.translation_visible_since is None:
+            entry.translation_visible_since = active_entry.translation_visible_since
+
+    def _next_translation_visible_since(
+        self,
+        *,
+        previous_text: str,
+        next_text: str,
+        previous_visible_since: float | None,
+        now: float,
+    ) -> float | None:
+        next_clean = next_text.strip()
+        if not next_clean:
+            return None
+        if previous_text.strip() != next_clean:
+            return now
+        return previous_visible_since
 
     def _remember_tombstone(self, key: tuple[str, UUID], closed_seq: int) -> None:
         self._closed_tombstones.pop(key, None)
@@ -529,11 +567,15 @@ class OverlayPresenter(OverlaySink):
         if entry.closed_at is None:
             return None
         if entry.visible_since is None:
-            return entry.closed_at + LATE_ARRIVAL_WINDOW_SECONDS
-        visible_ttl_seconds = VISIBLE_TTL_SECONDS
-        if entry.channel == "self" and entry.translation_text.strip():
-            visible_ttl_seconds += SELF_TRANSLATION_TTL_BONUS_SECONDS
-        return max(entry.closed_at, entry.visible_since + visible_ttl_seconds)
+            deadline = entry.closed_at + LATE_ARRIVAL_WINDOW_SECONDS
+        else:
+            deadline = max(entry.closed_at, entry.visible_since + VISIBLE_TTL_SECONDS)
+        if entry.channel == "self" and entry.translation_visible_since is not None:
+            deadline = max(
+                deadline,
+                entry.translation_visible_since + SELF_TRANSLATION_MIN_VISIBLE_SECONDS,
+            )
+        return deadline
 
     def _remove_entry(
         self,

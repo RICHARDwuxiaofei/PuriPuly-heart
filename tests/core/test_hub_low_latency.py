@@ -609,7 +609,7 @@ class TestResumeEndTimeout:
         await hub.stop()
 
     @pytest.mark.asyncio
-    async def test_resume_confirmed_without_stt_clears_active_secondary_in_same_call(self):
+    async def test_resume_confirmed_without_stt_keeps_active_secondary_in_same_call(self):
         clock = FakeClock(initial_time=10.0)
         overlay_sink = RecordingOverlaySink()
         hub = ClientHub(
@@ -641,10 +641,8 @@ class TestResumeEndTimeout:
 
         assert buffer.resume_confirmed is True
         assert buffer.spec_translation is None
-        assert [event.type for event in overlay_sink.events] == ["self_active_update"]
-        assert overlay_sink.events[0].text == "첫 번째"
-        assert overlay_sink.events[0].secondary_text == ""
-        assert hub._overlay_active_self_secondary_text == ""
+        assert overlay_sink.events == []
+        assert hub._overlay_active_self_secondary_text == "translated live"
 
 
 class TestSpecCommitPaths:

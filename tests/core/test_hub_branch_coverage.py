@@ -474,7 +474,7 @@ async def test_handle_vad_event_forwards_resume_confirming_chunk_before_overlay_
         resume_utterance_id=resumed_utterance_id,
         resume_chunk_count=2,
     )
-    hub._overlay_active_self_text = "hello live"
+    hub._overlay_active_self_text = "stale preview"
     hub._overlay_active_self_secondary_text = "translated live"
 
     task = asyncio.create_task(hub.handle_vad_event(chunk))
@@ -489,7 +489,7 @@ async def test_handle_vad_event_forwards_resume_confirming_chunk_before_overlay_
 
     assert sink.events[-1].type == "self_active_update"
     assert sink.events[-1].text == "hello live"
-    assert sink.events[-1].secondary_text == ""
+    assert sink.events[-1].secondary_text == "translated live"
 
 
 @pytest.mark.asyncio

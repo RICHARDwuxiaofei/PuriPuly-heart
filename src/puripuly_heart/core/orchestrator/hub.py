@@ -610,14 +610,14 @@ class ClientHub:
 
     def _overlay_active_self_secondary(self, buffer: _MergeBuffer) -> str:
         translation = buffer.spec_translation
-        if not isinstance(translation, Translation):
-            return ""
         active_text = self._merge_text(buffer.parts)
         if not active_text:
             return ""
-        if self._soft_reuse_mode(buffer.spec_text, active_text) is None:
-            return ""
-        return translation.text.strip()
+        if isinstance(translation, Translation) and self._soft_reuse_mode(
+            buffer.spec_text, active_text
+        ) is not None:
+            return translation.text.strip()
+        return (self._overlay_active_self_secondary_text or "").strip()
 
     def _active_self_occupant_key(self, buffer: _MergeBuffer) -> str:
         return f"self:{buffer.merge_id}"
@@ -810,6 +810,39 @@ class ClientHub:
         buffer.resume_started_at = None
         self._cancel_resume_end_timeout(buffer)
 
+    def _clear_spec_state(self, buffer: _MergeBuffer, *, reason: str) -> bool:
+        had_spec_state = any(
+            value is not None
+            for value in (
+                buffer.spec_task,
+                buffer.spec_translation,
+                buffer.spec_text,
+                buffer.spec_started_at,
+                buffer.spec_done_at,
+            )
+        )
+        if not had_spec_state:
+            return False
+        if buffer.spec_task is not None and not buffer.spec_task.done():
+            buffer.spec_task.cancel()
+            logger.debug(
+                "[Metric] spec_cancel id=%s reason=%s",
+                str(buffer.merge_id)[:8],
+                reason,
+            )
+        elif buffer.spec_translation is not None:
+            logger.debug(
+                "[Metric] spec_cancel id=%s reason=%s",
+                str(buffer.merge_id)[:8],
+                reason,
+            )
+        buffer.spec_task = None
+        buffer.spec_translation = None
+        buffer.spec_text = None
+        buffer.spec_started_at = None
+        buffer.spec_done_at = None
+        return True
+
     def _maybe_update_buffer_end_time(self, utterance_id: UUID) -> None:
         buffer = self._merge_buffer
         if buffer is None or utterance_id not in buffer.utterance_ids:
@@ -990,32 +1023,7 @@ class ClientHub:
             confirm_ms,
             buffer.resume_chunk_count,
         )
-        cleared_spec_state = any(
-            value is not None
-            for value in (
-                buffer.spec_task,
-                buffer.spec_translation,
-                buffer.spec_text,
-                buffer.spec_started_at,
-                buffer.spec_done_at,
-            )
-        )
-        if buffer.spec_task is not None and not buffer.spec_task.done():
-            buffer.spec_task.cancel()
-            logger.debug(
-                "[Metric] spec_cancel id=%s reason=resume_confirmed",
-                str(buffer.merge_id)[:8],
-            )
-        elif buffer.spec_translation is not None:
-            logger.debug(
-                "[Metric] spec_cancel id=%s reason=resume_confirmed",
-                str(buffer.merge_id)[:8],
-            )
-        buffer.spec_task = None
-        buffer.spec_translation = None
-        buffer.spec_text = None
-        buffer.spec_started_at = None
-        buffer.spec_done_at = None
+        cleared_spec_state = self._clear_spec_state(buffer, reason="resume_confirmed")
         if not cleared_spec_state:
             return None
         return buffer
@@ -1235,25 +1243,7 @@ class ClientHub:
         if self.llm is None or not self.translation_enabled:
             return
 
-        cleared_spec_state = False
-        if buffer.spec_task is not None:
-            if not buffer.spec_task.done():
-                buffer.spec_task.cancel()
-                logger.debug(
-                    "[Metric] spec_cancel id=%s reason=spec_retry", str(buffer.merge_id)[:8]
-                )
-            elif buffer.spec_translation is not None:
-                logger.debug(
-                    "[Metric] spec_cancel id=%s reason=spec_retry", str(buffer.merge_id)[:8]
-                )
-            buffer.spec_task = None
-            buffer.spec_translation = None
-            buffer.spec_text = None
-            buffer.spec_started_at = None
-            buffer.spec_done_at = None
-            cleared_spec_state = True
-        if cleared_spec_state:
-            await self._sync_overlay_active_self(buffer)
+        self._clear_spec_state(buffer, reason="spec_retry")
 
         merged_text = self._merge_text(buffer.parts)
         if not merged_text:

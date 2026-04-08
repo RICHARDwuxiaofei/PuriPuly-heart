@@ -525,7 +525,7 @@ async def test_low_latency_self_spec_translation_re_emits_active_update_with_sec
 
 
 @pytest.mark.asyncio
-async def test_low_latency_self_active_secondary_clears_on_soft_reuse_mismatch_then_recovers() -> None:
+async def test_low_latency_self_active_secondary_stays_sticky_on_soft_reuse_mismatch_then_recovers() -> None:
     sink = RecordingOverlaySink()
     hub = ClientHub(
         stt=None,
@@ -572,7 +572,7 @@ async def test_low_latency_self_active_secondary_clears_on_soft_reuse_mismatch_t
     assert [event.secondary_text for event in active_events] == [
         "",
         "translated one",
-        "",
+        "translated one",
         "translated two",
     ]
     assert [event.text for event in active_events] == [
@@ -585,11 +585,13 @@ async def test_low_latency_self_active_secondary_clears_on_soft_reuse_mismatch_t
 
 
 @pytest.mark.asyncio
-async def test_low_latency_self_active_secondary_clears_when_resume_is_confirmed() -> None:
+async def test_low_latency_self_active_secondary_stays_sticky_through_resume_continuation() -> None:
     sink = RecordingOverlaySink()
     hub = ClientHub(
         stt=None,
-        llm=SequencedTranslateLLMProvider(responses=["translated live"]),
+        llm=SequencedTranslateLLMProvider(
+            responses=["translated live", "translated continued"]
+        ),
         osc=RecordingOscQueue(),
         overlay_sink=sink,
         clock=FakeClock(_now=10.0),
@@ -630,11 +632,32 @@ async def test_low_latency_self_active_secondary_clears_when_resume_is_confirmed
             )
         )
 
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=resumed_utterance_id,
+            transcript=Transcript(
+                utterance_id=resumed_utterance_id,
+                text="again",
+                is_final=True,
+                created_at=12.0,
+            ),
+        )
+    )
+    assert buffer.spec_task is not None
+    await asyncio.gather(buffer.spec_task, return_exceptions=True)
+
     active_events = [event for event in sink.events if event.type == "self_active_update"]
     assert [event.secondary_text for event in active_events] == [
         "",
         "translated live",
-        "",
+        "translated live",
+        "translated continued",
+    ]
+    assert [event.text for event in active_events] == [
+        "hello live",
+        "hello live",
+        "hello live again",
+        "hello live again",
     ]
     assert [event.type for event in sink.events if event.type != "self_active_update"] == []
     assert hub._merge_buffer is buffer
