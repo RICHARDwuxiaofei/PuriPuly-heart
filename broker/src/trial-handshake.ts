@@ -15,6 +15,14 @@ import {
 export const TRIAL_CHALLENGE_TTL_SECONDS = 300;
 export const TRIAL_RELEASE_TOKEN_TTL_SECONDS = 900;
 export const TRIAL_VERIFY_MAX_CLOCK_SKEW_SECONDS = 60;
+export const TRIAL_STATUS_TIMESTAMP_HEADER = 'X-Puripuly-Timestamp';
+export const TRIAL_STATUS_SIGNATURE_HEADER = 'X-Puripuly-Signature';
+export const TRIAL_STATUS_MAX_CLOCK_SKEW_SECONDS =
+  TRIAL_VERIFY_MAX_CLOCK_SKEW_SECONDS;
+export const TRIAL_STATUS_SIGNATURE_PAYLOAD_FIELDS = [
+  'installation_id',
+  'timestamp',
+] as const;
 export const TRIAL_VERIFY_SIGNATURE_PAYLOAD_FIELDS = [
   'installation_id',
   'device_public_key',
@@ -66,6 +74,13 @@ interface ManagedStateResponse {
         expires_at: string | null;
       }
     | null;
+}
+
+interface TrialStatusResponse extends ManagedStateResponse {
+  onboarding_eligibility: {
+    eligible: boolean;
+    reason: 'eligible' | 'pending_release' | 'active' | 'expired' | 'revoked';
+  };
 }
 
 export async function handleTrialChallenge(
@@ -514,6 +529,110 @@ export async function handleTrialChallengeVerify(
   });
 }
 
+export async function handleTrialStatus(c: Context<BrokerEnv>): Promise<Response> {
+  const installationId = nonEmptyString(c.req.query('installation_id'));
+  if (!installationId) {
+    return errorResponse(
+      c,
+      400,
+      'invalid_request',
+      'installation_id query parameter is required',
+    );
+  }
+
+  const installationIdBoundsError = validatePublicInputBounds(
+    'installation_id',
+    installationId,
+  );
+  if (installationIdBoundsError) {
+    return errorResponse(c, 400, 'invalid_request', installationIdBoundsError);
+  }
+
+  const timestamp = nonEmptyString(c.req.header(TRIAL_STATUS_TIMESTAMP_HEADER));
+  if (!timestamp) {
+    return errorResponse(
+      c,
+      400,
+      'invalid_request',
+      `${TRIAL_STATUS_TIMESTAMP_HEADER} header is required`,
+    );
+  }
+
+  const signature = nonEmptyString(c.req.header(TRIAL_STATUS_SIGNATURE_HEADER));
+  if (!signature) {
+    return errorResponse(
+      c,
+      400,
+      'invalid_request',
+      `${TRIAL_STATUS_SIGNATURE_HEADER} header is required`,
+    );
+  }
+
+  const timestampDate = parseIsoDate(timestamp);
+  if (!timestampDate) {
+    return errorResponse(
+      c,
+      400,
+      'invalid_request',
+      `${TRIAL_STATUS_TIMESTAMP_HEADER} must be a valid ISO-8601 timestamp`,
+    );
+  }
+
+  if (!isBase64Url(signature, 64)) {
+    return errorResponse(
+      c,
+      400,
+      'invalid_request',
+      `${TRIAL_STATUS_SIGNATURE_HEADER} must be a base64url-encoded Ed25519 signature`,
+    );
+  }
+
+  const installation = await getInstallation(c.env.BROKER_DB, installationId);
+  if (!installation) {
+    return errorResponse(
+      c,
+      404,
+      'installation_not_found',
+      'installation_id is not registered with the broker',
+    );
+  }
+
+  const now = new Date();
+  if (
+    Math.abs(timestampDate.getTime() - now.getTime()) >
+    TRIAL_STATUS_MAX_CLOCK_SKEW_SECONDS * 1000
+  ) {
+    return errorResponse(
+      c,
+      401,
+      'signature_skew',
+      `${TRIAL_STATUS_TIMESTAMP_HEADER} must be within ±60 seconds of broker time`,
+    );
+  }
+
+  const signatureIsValid = await verifyEd25519Signature({
+    devicePublicKey: installation.device_public_key,
+    signature,
+    payload: buildCanonicalStatusPayload({
+      installation_id: installationId,
+      timestamp,
+    }),
+  });
+
+  if (!signatureIsValid) {
+    return errorResponse(
+      c,
+      401,
+      'signature_invalid',
+      'signature verification failed for the registered device_public_key',
+    );
+  }
+
+  const entitlement = await getEntitlement(c.env.BROKER_DB, installationId);
+
+  return c.json(normalizeTrialStatusResponse(entitlement));
+}
+
 async function readJsonBody<T>(
   c: Context<BrokerEnv>,
 ): Promise<
@@ -693,6 +812,15 @@ function buildCanonicalVerifyPayload(input: {
 }): Uint8Array {
   return new TextEncoder().encode(
     TRIAL_VERIFY_SIGNATURE_PAYLOAD_FIELDS.map((field) => input[field]).join('\n'),
+  );
+}
+
+function buildCanonicalStatusPayload(input: {
+  installation_id: string;
+  timestamp: string;
+}): Uint8Array {
+  return new TextEncoder().encode(
+    TRIAL_STATUS_SIGNATURE_PAYLOAD_FIELDS.map((field) => input[field]).join('\n'),
   );
 }
 
@@ -1030,5 +1158,20 @@ function normalizeManagedState(
           expires_at: entitlement.expires_at,
         }
       : null,
+  };
+}
+
+function normalizeTrialStatusResponse(
+  entitlement: OpenRouterEntitlementRecord | null,
+): TrialStatusResponse {
+  const managedState = normalizeManagedState(entitlement);
+  const lifecycle = managedState.managed_state.lifecycle;
+
+  return {
+    ...managedState,
+    onboarding_eligibility: {
+      eligible: lifecycle === 'none' || lifecycle === 'pending_release',
+      reason: lifecycle === 'none' ? 'eligible' : lifecycle,
+    },
   };
 }

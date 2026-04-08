@@ -8,6 +8,7 @@ import {
 import {
   handleTrialChallenge,
   handleTrialChallengeVerify,
+  handleTrialStatus,
 } from './trial-handshake';
 
 export const app = new Hono<BrokerEnv>();
@@ -25,5 +26,6 @@ app.get('/v1/foundation', (c) => {
 
 app.post('/v1/trial/challenge', handleTrialChallenge);
 app.post('/v1/trial/challenge/verify', handleTrialChallengeVerify);
+app.get('/v1/trial/status', handleTrialStatus);
 
 export default app;

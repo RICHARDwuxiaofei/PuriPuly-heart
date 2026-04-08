@@ -52,3 +52,23 @@ export async function postVerify(
     env,
   );
 }
+
+export async function getTrialStatus(options: {
+  env: TestBrokerEnv;
+  installationId?: string;
+  headers?: Record<string, string>;
+}): Promise<Response> {
+  const url = new URL('http://broker.test/v1/trial/status');
+  if (options.installationId !== undefined) {
+    url.searchParams.set('installation_id', options.installationId);
+  }
+
+  return app.request(
+    url.toString(),
+    {
+      method: 'GET',
+      headers: options.headers,
+    },
+    options.env,
+  );
+}

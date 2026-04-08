@@ -45,6 +45,21 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
   - uses the already registered `device_public_key`; verify does not rebind installation identity
   - successful verify consumes the active challenge, persists `hardware_hash` with the issued challenge salt version, and returns `release_token`, `release_token_expires_at`, normalized `managed_state`, and `current_entitlement`
   - release token TTL: `15` minutes
+- `GET /v1/trial/status`
+  - query: `installation_id`
+  - headers: `X-Puripuly-Timestamp`, `X-Puripuly-Signature`
+  - `installation_id` keeps the same public bound: `1-128` chars
+  - `X-Puripuly-Timestamp` must be a valid ISO-8601 timestamp in the same strict subset used by verify
+  - `X-Puripuly-Signature` must transport a base64url Ed25519 signature
+  - canonical status-signing payload is UTF-8 text joined by newlines in this order:
+    1. `installation_id`
+    2. `timestamp`
+  - enforces signed clock skew within `±60` seconds
+  - status requests are verified against the already registered `device_public_key` for the installation; unknown `installation_id` values return `installation_not_found`
+  - response: normalized `managed_state`, `current_entitlement`, and lifecycle-derived `onboarding_eligibility`
+  - onboarding eligibility is broker-side metadata only: `none` => eligible, `pending_release` => eligible continuation, `active` / `expired` / `revoked` => ineligible
+  - `expired` and `revoked` are returned as `200` lifecycle data, not public error codes
+  - live remaining budget stays upstream in OpenRouter metadata instead of being mirrored into broker status
 
 ## Persistence model
 

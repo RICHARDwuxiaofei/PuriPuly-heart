@@ -15,6 +15,11 @@ export interface SignedVerifyRequestInput {
   signed_at: string;
 }
 
+export interface SignedStatusRequestInput {
+  installation_id: string;
+  timestamp: string;
+}
+
 export async function createDeviceKeyPair(): Promise<DeviceKeyPair> {
   const keyPair = await crypto.subtle.generateKey('Ed25519', true, [
     'sign',
@@ -48,6 +53,26 @@ export async function signNonCanonicalVerifyRequest(
   };
 }
 
+export async function signCanonicalStatusRequest(
+  privateKey: CryptoKey,
+  input: SignedStatusRequestInput,
+): Promise<SignedStatusRequestInput & { signature: string }> {
+  return {
+    ...input,
+    signature: await signPayload(privateKey, canonicalStatusPayload(input)),
+  };
+}
+
+export async function signNonCanonicalStatusRequest(
+  privateKey: CryptoKey,
+  input: SignedStatusRequestInput,
+): Promise<SignedStatusRequestInput & { signature: string }> {
+  return {
+    ...input,
+    signature: await signPayload(privateKey, nonCanonicalStatusPayload(input)),
+  };
+}
+
 function canonicalVerifyPayload(input: SignedVerifyRequestInput): Uint8Array {
   return encoder.encode(
     [
@@ -74,6 +99,14 @@ function nonCanonicalVerifyPayload(input: SignedVerifyRequestInput): Uint8Array 
       input.signed_at,
     ].join('\n'),
   );
+}
+
+function canonicalStatusPayload(input: SignedStatusRequestInput): Uint8Array {
+  return encoder.encode([input.installation_id, input.timestamp].join('\n'));
+}
+
+function nonCanonicalStatusPayload(input: SignedStatusRequestInput): Uint8Array {
+  return encoder.encode([input.timestamp, input.installation_id].join('\n'));
 }
 
 async function signPayload(
