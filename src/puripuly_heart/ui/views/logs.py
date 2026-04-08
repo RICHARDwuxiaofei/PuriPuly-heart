@@ -62,10 +62,15 @@ class LiveLogViewModel:
         self._max_entries = max_entries
         self._cleanup_batch = cleanup_batch
         self._visible_lines: list[str] = []
+        self._cleanup_count = 0
 
     @property
     def visible_lines(self) -> list[str]:
         return self._visible_lines
+
+    @property
+    def cleanup_count(self) -> int:
+        return self._cleanup_count
 
     def append_app_log(self, record: str) -> None:
         self._append(record)
@@ -77,6 +82,7 @@ class LiveLogViewModel:
         self._visible_lines.append(record)
         if len(self._visible_lines) > self._max_entries + self._cleanup_batch:
             del self._visible_lines[: self._cleanup_batch]
+            self._cleanup_count += 1
 
 
 class _LogListProxy:
@@ -107,6 +113,8 @@ class LogsView(ft.Column):
         self._log_buffer = self._model.visible_lines
         self._last_update: float = 0.0
         self._pending_update: bool = False
+        self._rendered_line_count: int = 0
+        self._last_cleanup_count: int = 0
         self.log_list = _LogListProxy(self)
 
         self._build_ui()
@@ -260,12 +268,38 @@ class LogsView(ft.Column):
         if self._log_text is None:
             return
 
-        self._log_text.value = "\n".join(self._log_buffer)
+        cleanup_changed = self._model.cleanup_count != self._last_cleanup_count
+        rendered_ahead = self._rendered_line_count > len(self._log_buffer)
+
+        if cleanup_changed or rendered_ahead:
+            self._rebuild_visible_text()
+        else:
+            new_lines = self._log_buffer[self._rendered_line_count :]
+            self._append_visible_text(new_lines)
+
         self._last_update = time.time()
         self._pending_update = False
 
         if self.page:
             self._log_text.update()
+
+    def _rebuild_visible_text(self) -> None:
+        assert self._log_text is not None
+        self._log_text.value = "\n".join(self._log_buffer)
+        self._rendered_line_count = len(self._log_buffer)
+        self._last_cleanup_count = self._model.cleanup_count
+
+    def _append_visible_text(self, new_lines: list[str]) -> None:
+        assert self._log_text is not None
+        if not new_lines:
+            return
+        addition = "\n".join(new_lines)
+        if self._log_text.value:
+            self._log_text.value = f"{self._log_text.value}\n{addition}"
+        else:
+            self._log_text.value = addition
+        self._rendered_line_count = len(self._log_buffer)
+        self._last_cleanup_count = self._model.cleanup_count
 
     def apply_locale(self) -> None:
         """Refresh UI text when locale changes."""

@@ -147,6 +147,39 @@ async def test_on_nav_change_refreshes_prompt_and_schedules_log_scroll() -> None
     assert scrolled["count"] == 1
 
 
+@pytest.mark.asyncio
+async def test_on_nav_change_applies_pending_prompt_changes_when_leaving_settings() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._current_tab = 1
+    app.view_dashboard = object()
+    app.view_logs = SimpleNamespace(scroll_to_bottom=lambda: asyncio.sleep(0))
+    app.view_about = object()
+    app.view_settings = SimpleNamespace(
+        has_provider_changes=False,
+        has_pending_prompt_changes=True,
+        consume_prompt_apply_settings=lambda: "prompt-settings",
+        refresh_prompt_if_empty=lambda: None,
+    )
+    app.content_area = DummyContent()
+    seen: list[object] = []
+
+    async def fake_apply_settings(settings) -> None:
+        seen.append(settings)
+
+    app.controller = SimpleNamespace(
+        apply_settings=fake_apply_settings,
+        apply_providers=lambda _settings=None: asyncio.sleep(0),
+    )
+
+    app._on_nav_change(0)
+
+    assert app.content_area.content is app.view_dashboard
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert seen == ["prompt-settings"]
+
+
 def test_apply_locale_updates_views_and_page() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
