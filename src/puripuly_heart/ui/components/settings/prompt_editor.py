@@ -14,14 +14,17 @@ class PromptEditor(ft.Column):
     def __init__(
         self,
         on_change: Callable[[str], None] | None = None,
+        on_commit: Callable[[str], None] | None = None,
     ):
         self._on_change = on_change
+        self._on_commit = on_commit
         self._current_provider = "gemini"
 
         self._text_field = ft.TextField(
             multiline=True,
             min_lines=5,
             on_change=self._handle_change,
+            on_blur=self._handle_blur,
             border_radius=12,
             border_color=COLOR_DIVIDER,
             focused_border_color=COLOR_PRIMARY,
@@ -50,18 +53,26 @@ class PromptEditor(ft.Column):
         """Update the current provider."""
         self._current_provider = provider_name
 
-    def load_default_prompt(self) -> None:
+    def load_default_prompt(self, *, emit_change: bool = True) -> None:
         """Load default prompt for current provider."""
         self.value = load_prompt_for_provider(self._current_provider)
-        self._emit_change()
+        if emit_change:
+            self._emit_change()
 
     def load_default_if_empty(self) -> None:
         """Load default prompt only if current value is empty."""
         if not self.value.strip():
-            self.load_default_prompt()
+            self.load_default_prompt(emit_change=False)
+
+    def commit(self) -> None:
+        if self._on_commit:
+            self._on_commit(self.value)
 
     def _handle_change(self, e) -> None:
         self._emit_change()
+
+    def _handle_blur(self, e) -> None:
+        self.commit()
 
     def _emit_change(self) -> None:
         if self._on_change:

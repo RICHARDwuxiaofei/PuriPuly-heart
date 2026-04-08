@@ -1023,8 +1023,11 @@ async def test_prompt_verify_and_emit_helpers(monkeypatch: pytest.MonkeyPatch) -
     view.on_settings_changed = lambda incoming: changed.append(incoming)
 
     view._on_prompt_change("custom prompt")
-    assert settings.system_prompt == "custom prompt"
-    assert settings.system_prompts[view._active_prompt_key()] == "custom prompt"
+    assert settings.system_prompt != "custom prompt"
+    assert view.has_pending_prompt_changes is True
+
+    view._on_prompt_commit("custom prompt")
+    assert changed[-1].system_prompt == "custom prompt"
 
     view._on_reset_prompt(None)
     assert settings.system_prompt == view._prompt_editor.value
@@ -1039,6 +1042,120 @@ async def test_prompt_verify_and_emit_helpers(monkeypatch: pytest.MonkeyPatch) -
     view.on_verify_api_key = fake_verify
     available = await view._verify_key("google", "abc")
     assert available == (True, "abc")
+
+
+def test_prompt_change_only_updates_draft_until_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = AppSettings()
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    original_prompt = settings.system_prompt
+    original_provider_prompt = settings.system_prompts[view._active_prompt_key()]
+
+    view._on_prompt_change("custom prompt")
+
+    pending = view.build_provider_apply_settings()
+
+    assert settings.system_prompt == original_prompt
+    assert settings.system_prompts[view._active_prompt_key()] == original_provider_prompt
+    assert view.has_pending_prompt_changes is True
+    assert pending is not None
+    assert pending.system_prompt == "custom prompt"
+    assert pending.system_prompts[view._active_prompt_key()] == "custom prompt"
+    assert changed == []
+
+
+def test_prompt_commit_emits_once_when_no_provider_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = AppSettings()
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._on_prompt_change("custom prompt")
+    view._on_prompt_commit("custom prompt")
+
+    assert view.has_pending_prompt_changes is False
+    assert changed
+    assert changed[-1].system_prompt == "custom prompt"
+    assert changed[-1].system_prompts[view._active_prompt_key()] == "custom prompt"
+
+
+def test_prompt_commit_noops_when_value_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = AppSettings()
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    current_prompt = view._prompt_editor.value
+    view._on_prompt_commit(current_prompt)
+
+    assert changed == []
+    assert view.has_pending_prompt_changes is False
+
+
+def test_prompt_reverting_to_committed_value_clears_pending_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    original_prompt = view._prompt_editor.value
+
+    view._on_prompt_change("temporary prompt")
+    assert view.has_pending_prompt_changes is True
+
+    view._on_prompt_change(original_prompt)
+    view._on_prompt_commit(original_prompt)
+
+    assert view.has_pending_prompt_changes is False
+    assert changed == []
+
+
+def test_refresh_prompt_if_empty_stages_default_for_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    prompt_key = view._active_prompt_key()
+    view._settings.system_prompt = ""
+    view._settings.system_prompts[prompt_key] = ""
+    view._provider_settings_draft = None
+    view.has_provider_changes = False
+    view.has_pending_prompt_changes = False
+    view._prompt_editor.value = ""
+
+    view.refresh_prompt_if_empty()
+    pending = view.build_provider_apply_settings()
+
+    assert bool(view._prompt_editor.value.strip())
+    assert view.has_pending_prompt_changes is True
+    assert pending is not None
+    assert pending.system_prompt == view._prompt_editor.value
+    assert pending.system_prompts[prompt_key] == view._prompt_editor.value
+
+
+def test_on_text_hover_updates_container_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    updates: list[str] = []
+    text_control = SimpleNamespace(color=settings_view.COLOR_ON_BACKGROUND)
+    container = SimpleNamespace(
+        content=text_control,
+        update=lambda: updates.append(text_control.color),
+    )
+
+    view._on_text_hover(SimpleNamespace(control=container, data="true"))
+
+    assert text_control.color == settings_view.COLOR_PRIMARY
+    assert len(updates) == 1
 
 
 def test_apply_locale_and_refresh_prompt_if_empty(monkeypatch: pytest.MonkeyPatch) -> None:

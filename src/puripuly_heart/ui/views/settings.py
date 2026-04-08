@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import copy
 import contextlib
+import copy
 import logging
 from pathlib import Path
 from typing import Callable
@@ -113,6 +113,7 @@ class SettingsView(ft.Column):
         self._provider_settings_draft: AppSettings | None = None
         self._config_path: Path | None = None
         self.has_provider_changes: bool = False
+        self.has_pending_prompt_changes: bool = False
         self._custom_vocab_draft_terms: dict[str, str] = {}
         self._overlay_state: str = "off"
         self._overlay_failure_reason: str | None = None
@@ -192,12 +193,10 @@ class SettingsView(ft.Column):
         """Handle hover effect on clickable text."""
         container = e.control
         text_control = container.content
-        if e.data == "true":
-            text_control.color = COLOR_PRIMARY
-        else:
-            text_control.color = COLOR_ON_BACKGROUND
-        container.update()
-
+        next_color = COLOR_PRIMARY if e.data == "true" else COLOR_ON_BACKGROUND
+        if text_control.color == next_color:
+            return
+        text_control.color = next_color
         container.update()
 
     def _get_button_style(self, font_family: str) -> ft.ButtonStyle:
@@ -877,7 +876,10 @@ class SettingsView(ft.Column):
         )
 
         # === Row 8: Persona (2x2) - Licenses style ===
-        self._prompt_editor = PromptEditor(on_change=self._on_prompt_change)
+        self._prompt_editor = PromptEditor(
+            on_change=self._on_prompt_change,
+            on_commit=self._on_prompt_commit,
+        )
         self._persona_title = ft.Text(
             t("settings.section.persona"), size=24, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL
         )
@@ -1129,6 +1131,24 @@ class SettingsView(ft.Column):
             self._provider_settings_draft = copy.deepcopy(self._settings)
         return self._provider_settings_draft
 
+    def _stage_prompt_draft(self, value: str) -> None:
+        if not self._settings:
+            return
+        committed_prompt = self._committed_prompt_value()
+        prompt_key = self._active_prompt_key()
+        draft = self._ensure_provider_settings_draft()
+        draft.system_prompt = value
+        draft.system_prompts[prompt_key] = value
+        self.has_pending_prompt_changes = value != committed_prompt
+        if not self.has_pending_prompt_changes and not self.has_provider_changes:
+            self._provider_settings_draft = None
+
+    def _committed_prompt_value(self) -> str:
+        if not self._settings:
+            return ""
+        prompt_key = self._active_prompt_key_for_settings(self._settings)
+        return self._settings.system_prompts.get(prompt_key, self._settings.system_prompt)
+
     def build_provider_apply_settings(self) -> AppSettings | None:
         return self._build_settings_with_provider_draft()
 
@@ -1139,6 +1159,19 @@ class SettingsView(ft.Column):
         self._settings = settings
         self._provider_settings_draft = None
         self.has_provider_changes = False
+        self.has_pending_prompt_changes = False
+        return settings
+
+    def consume_prompt_apply_settings(self) -> AppSettings | None:
+        if not self.has_pending_prompt_changes:
+            return None
+        settings = self._build_settings_with_provider_draft()
+        if settings is None:
+            return None
+        self._settings = settings
+        self.has_pending_prompt_changes = False
+        if not self.has_provider_changes:
+            self._provider_settings_draft = None
         return settings
 
     # --- Load Settings ---
@@ -1154,6 +1187,7 @@ class SettingsView(ft.Column):
         self._provider_settings_draft = None
         self._config_path = config_path
         self.has_provider_changes = False
+        self.has_pending_prompt_changes = False
 
         # UI Language
         self._ui_text.content.value = locale_label(settings.ui.locale)
@@ -1231,7 +1265,7 @@ class SettingsView(ft.Column):
             self._prompt_editor.value = settings.system_prompt
             settings.system_prompts[provider_name] = settings.system_prompt
         else:
-            self._prompt_editor.load_default_prompt()
+            self._prompt_editor.load_default_prompt(emit_change=False)
             settings.system_prompt = self._prompt_editor.value
             settings.system_prompts[provider_name] = settings.system_prompt
 
@@ -1333,7 +1367,9 @@ class SettingsView(ft.Column):
         if peer_enabled and peer_stt == STTProviderName.QWEN_ASR:
             qwen_regions.add(settings.peer_qwen_asr_stt.region or settings.qwen.region)
 
-        self._qwen_region_btn.visible = stt == STTProviderName.QWEN_ASR or llm == LLMProviderName.QWEN
+        self._qwen_region_btn.visible = (
+            stt == STTProviderName.QWEN_ASR or llm == LLMProviderName.QWEN
+        )
         self._alibaba_key_beijing.visible = QwenRegion.BEIJING in qwen_regions
         self._alibaba_key_singapore.visible = QwenRegion.SINGAPORE in qwen_regions
         self._update_peer_provider_visibility()
@@ -1711,7 +1747,7 @@ class SettingsView(ft.Column):
             if next_prompt:
                 self._prompt_editor.value = next_prompt
             else:
-                self._prompt_editor.load_default_prompt()
+                self._prompt_editor.load_default_prompt(emit_change=False)
                 next_prompt = self._prompt_editor.value
                 draft.system_prompts[provider_name] = next_prompt
             draft.system_prompt = next_prompt
@@ -2506,24 +2542,23 @@ class SettingsView(ft.Column):
         self._emit_settings_changed()
 
     def _on_prompt_change(self, value: str) -> None:
-        if not self._settings:
+        self._stage_prompt_draft(value)
+
+    def _on_prompt_commit(self, value: str) -> None:
+        if not self.has_pending_prompt_changes and value == self._committed_prompt_value():
             return
-        prompt_key = self._active_prompt_key()
-        if self._provider_settings_draft is not None:
-            draft = self._ensure_provider_settings_draft()
-            draft.system_prompt = value
-            draft.system_prompts[prompt_key] = value
-        base_prompt_key = self._active_prompt_key_for_settings(self._settings)
-        if self._provider_settings_draft is None or prompt_key == base_prompt_key:
-            self._settings.system_prompt = value
-            self._settings.system_prompts[prompt_key] = value
-            self._emit_settings_changed()
+        self._stage_prompt_draft(value)
+        if self.has_provider_changes:
+            return
+        pending = self.consume_prompt_apply_settings()
+        if pending is None:
+            return
+        self._emit_settings_changed()
 
     def _on_reset_prompt(self, e) -> None:
         """Reset prompt to default for current provider."""
         self._prompt_editor.load_default_prompt()
-        if self._settings:
-            self._on_prompt_change(self._prompt_editor.value)
+        self._on_prompt_commit(self._prompt_editor.value)
 
     def _apply_custom_vocabulary(self) -> None:
         if not self._settings:
@@ -2745,4 +2780,8 @@ class SettingsView(ft.Column):
 
     def refresh_prompt_if_empty(self) -> None:
         """Load default prompt if current is empty."""
+        was_empty = not self._prompt_editor.value.strip()
         self._prompt_editor.load_default_if_empty()
+        if was_empty and self._prompt_editor.value.strip():
+            if self._prompt_editor.value != self._committed_prompt_value():
+                self._stage_prompt_draft(self._prompt_editor.value)

@@ -134,6 +134,26 @@ def test_settings_view_preserves_provider_specific_prompts(monkeypatch) -> None:
     assert pending.system_prompt == "OPENROUTER CUSTOM"
 
 
+def test_prompt_draft_survives_provider_round_trip_until_commit(monkeypatch) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.system_prompts = {
+        "gemini": "GEMINI CUSTOM",
+        "qwen": "QWEN CUSTOM",
+    }
+    settings.system_prompt = "GEMINI CUSTOM"
+
+    view = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_prompt_change("GEMINI DRAFT")
+    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+    view._on_llm_selected(LLMProviderName.GEMINI.value)
+
+    assert view._prompt_editor.value == "GEMINI DRAFT"
+    assert settings.system_prompt == "GEMINI CUSTOM"
+
+
 def test_settings_view_llm_modal_orders_qwen_plus_before_flash(monkeypatch) -> None:
     settings = AppSettings()
     view = _make_settings_view(monkeypatch)

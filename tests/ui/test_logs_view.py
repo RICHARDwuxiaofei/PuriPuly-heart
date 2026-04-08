@@ -58,6 +58,34 @@ class TestLogsView:
         first_text = view.log_list.controls[0].value
         assert "log 500" in first_text
 
+    def test_flush_logs_appends_only_new_lines_when_buffer_only_grows(self):
+        view = LogsView()
+        with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
+            view._model.append_app_log("line 1")
+            view._flush_logs()
+
+            view._model.append_app_log("line 2")
+            view._flush_logs()
+
+        assert view._log_text.value == "line 1\nline 2"
+        assert view._rendered_line_count == 2
+        assert view._last_cleanup_count == 0
+
+    def test_flush_logs_rebuilds_after_cleanup_compaction(self):
+        view = LogsView()
+        with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
+            for i in range(MAX_LOG_ENTRIES):
+                view._model.append_app_log(f"log {i}")
+            view._flush_logs()
+
+            for i in range(MAX_LOG_ENTRIES, MAX_LOG_ENTRIES + CLEANUP_BATCH + 1):
+                view._model.append_app_log(f"log {i}")
+            view._flush_logs()
+
+        assert view._last_cleanup_count == 1
+        assert view._rendered_line_count == len(view._model.visible_lines)
+        assert view._log_text.value.splitlines()[0] == "log 500"
+
     def test_apply_locale_updates_title_and_folder_text(self):
         view = LogsView()
         with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
