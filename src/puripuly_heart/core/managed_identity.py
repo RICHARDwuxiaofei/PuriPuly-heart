@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from puripuly_heart.config.settings import AppSettings
+from puripuly_heart.core.openrouter_credentials import OPENROUTER_MANAGED_API_KEY_SECRET
 from puripuly_heart.core.storage.secrets import SecretStore
 
 MANAGED_DEVICE_PRIVATE_KEY_SECRET = "managed_device_private_key"
@@ -253,6 +254,7 @@ def _replace_managed_identity_bundle(
     previous_installation_id = settings.managed_identity.installation_id
     previous_release_token = settings.managed_identity.release_token
     previous_release_token_expires_at = settings.managed_identity.release_token_expires_at
+    previous_managed_api_key = secret_store.get(OPENROUTER_MANAGED_API_KEY_SECRET)
     previous_private_key = secret_store.get(MANAGED_DEVICE_PRIVATE_KEY_SECRET)
     previous_public_key = secret_store.get(MANAGED_DEVICE_PUBLIC_KEY_SECRET)
     previous_binding_value = secret_store.get(MANAGED_IDENTITY_BINDING_SECRET)
@@ -268,6 +270,7 @@ def _replace_managed_identity_bundle(
     binding_value = _managed_identity_binding_value(installation_id, public_key_value)
 
     try:
+        secret_store.delete(OPENROUTER_MANAGED_API_KEY_SECRET)
         secret_store.set(MANAGED_DEVICE_PRIVATE_KEY_SECRET, private_key_value)
         secret_store.set(MANAGED_DEVICE_PUBLIC_KEY_SECRET, public_key_value)
         secret_store.set(MANAGED_IDENTITY_BINDING_SECRET, binding_value)
@@ -281,6 +284,7 @@ def _replace_managed_identity_bundle(
         settings.managed_identity.release_token_expires_at = previous_release_token_expires_at
         rollback_error = _restore_secret_state(
             secret_store,
+            managed_api_key=previous_managed_api_key,
             private_key=previous_private_key,
             public_key=previous_public_key,
             binding_value=previous_binding_value,
@@ -371,11 +375,13 @@ def _managed_identity_binding_value(installation_id: str, device_public_key: str
 def _restore_secret_state(
     secret_store: SecretStore,
     *,
+    managed_api_key: str | None,
     private_key: str | None,
     public_key: str | None,
     binding_value: str | None,
 ) -> Exception | None:
     try:
+        _restore_secret_value(secret_store, OPENROUTER_MANAGED_API_KEY_SECRET, managed_api_key)
         _restore_secret_value(secret_store, MANAGED_DEVICE_PRIVATE_KEY_SECRET, private_key)
         _restore_secret_value(secret_store, MANAGED_DEVICE_PUBLIC_KEY_SECRET, public_key)
         _restore_secret_value(secret_store, MANAGED_IDENTITY_BINDING_SECRET, binding_value)

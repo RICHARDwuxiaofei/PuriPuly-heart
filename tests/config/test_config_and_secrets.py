@@ -12,6 +12,7 @@ from puripuly_heart.config.settings import (
     AudioSettings,
     GeminiLLMModel,
     LLMProviderName,
+    OpenRouterCredentialSource,
     OpenRouterLLMModel,
     OpenRouterRoutingMode,
     OpenRouterSettings,
@@ -752,6 +753,7 @@ def test_openrouter_settings_roundtrip(tmp_path):
         openrouter=OpenRouterSettings(
             llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
             routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            selected_source=OpenRouterCredentialSource.BYOK,
         ),
     )
     settings.provider.llm = LLMProviderName.OPENROUTER
@@ -762,6 +764,7 @@ def test_openrouter_settings_roundtrip(tmp_path):
     assert loaded.provider.llm == LLMProviderName.OPENROUTER
     assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     assert loaded.openrouter.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.BYOK
 
 
 def test_load_settings_backfills_openrouter_blocks_and_persists(tmp_path):
@@ -778,11 +781,46 @@ def test_load_settings_backfills_openrouter_blocks_and_persists(tmp_path):
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     assert loaded.openrouter.routing_mode == OpenRouterRoutingMode.LATENCY
+    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.NONE
     assert loaded.api_key_verified.openrouter is False
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["openrouter"]["llm_model"] == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value
     assert persisted["openrouter"]["routing_mode"] == OpenRouterRoutingMode.LATENCY.value
+    assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.NONE.value
     assert persisted["api_key_verified"]["openrouter"] is False
+
+
+def test_load_settings_backfills_openrouter_selected_source_to_byok_for_legacy_openrouter_provider(
+    tmp_path,
+):
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["settings_version"] = 9
+    legacy["provider"]["llm"] = LLMProviderName.OPENROUTER.value
+    legacy["openrouter"].pop("selected_source", None)
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.BYOK
+    assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.BYOK.value
+
+
+def test_load_settings_repairs_schema10_openrouter_none_selected_source_to_byok(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["settings_version"] = 10
+    legacy["provider"]["llm"] = LLMProviderName.OPENROUTER.value
+    legacy["openrouter"]["selected_source"] = OpenRouterCredentialSource.NONE.value
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.BYOK
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.BYOK.value
 
 
 def test_from_dict_defaults_invalid_openrouter_routing_mode_to_latency() -> None:

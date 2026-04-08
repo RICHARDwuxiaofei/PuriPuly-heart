@@ -16,6 +16,7 @@ from puripuly_heart.config.settings import (
     AppSettings,
     GeminiLLMModel,
     LLMProviderName,
+    OpenRouterCredentialSource,
     OpenRouterLLMModel,
     OpenRouterRoutingMode,
     QwenLLMModel,
@@ -1111,6 +1112,7 @@ class SettingsView(ft.Column):
         target.gemini.llm_model = source.gemini.llm_model
         target.openrouter.llm_model = source.openrouter.llm_model
         target.openrouter.routing_mode = source.openrouter.routing_mode
+        target.openrouter.selected_source = source.openrouter.selected_source
         target.qwen.llm_model = source.qwen.llm_model
         target.qwen.region = source.qwen.region
         target.system_prompt = source.system_prompt
@@ -1666,6 +1668,7 @@ class SettingsView(ft.Column):
         old_provider = current_settings.provider.llm
         old_gemini_model = current_settings.gemini.llm_model
         old_openrouter_model = current_settings.openrouter.llm_model
+        old_openrouter_selected_source = current_settings.openrouter.selected_source
         old_qwen_model = current_settings.qwen.llm_model
 
         if value == LLMProviderName.GEMINI.value:
@@ -1704,6 +1707,14 @@ class SettingsView(ft.Column):
             openrouter_model = old_openrouter_model
             qwen_model = QwenLLMModel.QWEN_35_FLASH
 
+        if provider == LLMProviderName.OPENROUTER:
+            if old_provider == LLMProviderName.OPENROUTER:
+                openrouter_selected_source = old_openrouter_selected_source
+            else:
+                openrouter_selected_source = OpenRouterCredentialSource.BYOK
+        else:
+            openrouter_selected_source = OpenRouterCredentialSource.NONE
+
         changes: list[str] = []
         if old_provider != provider:
             changes.append(f"provider={old_provider.value}->{provider.value}")
@@ -1712,6 +1723,11 @@ class SettingsView(ft.Column):
         if old_openrouter_model != openrouter_model:
             changes.append(
                 f"openrouter_model={old_openrouter_model.value}->{openrouter_model.value}"
+            )
+        if old_openrouter_selected_source != openrouter_selected_source:
+            changes.append(
+                "openrouter_source="
+                f"{old_openrouter_selected_source.value}->{openrouter_selected_source.value}"
             )
         if old_qwen_model != qwen_model:
             changes.append(f"qwen_model={old_qwen_model.value}->{qwen_model.value}")
@@ -1722,6 +1738,7 @@ class SettingsView(ft.Column):
 
         draft = self._ensure_provider_settings_draft()
         draft.provider.llm = provider
+        draft.openrouter.selected_source = openrouter_selected_source
         if provider == LLMProviderName.QWEN:
             draft.qwen.llm_model = qwen_model
         elif provider == LLMProviderName.OPENROUTER:

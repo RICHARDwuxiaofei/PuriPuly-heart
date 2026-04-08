@@ -16,6 +16,7 @@ from puripuly_heart.config.settings import (
     GeminiSettings,
     LLMProviderName,
     LLMSettings,
+    OpenRouterCredentialSource,
     OpenRouterLLMModel,
     OpenRouterRoutingMode,
     OpenRouterSettings,
@@ -157,6 +158,7 @@ def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
         openrouter=OpenRouterSettings(
             llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
             routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            selected_source=OpenRouterCredentialSource.BYOK,
         ),
     )
     secrets = InMemorySecretStore()
@@ -175,7 +177,10 @@ def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
 
 def test_create_llm_provider_openrouter_uses_env_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "env-or-key")
-    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.OPENROUTER))
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.BYOK),
+    )
     secrets = InMemorySecretStore()
 
     provider = create_llm_provider(settings, secrets=secrets)
@@ -183,6 +188,44 @@ def test_create_llm_provider_openrouter_uses_env_fallback(monkeypatch: pytest.Mo
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, OpenRouterLLMProvider)
     assert provider.inner.api_key == "env-or-key"
+
+
+def test_create_llm_provider_openrouter_uses_selected_managed_key() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.MANAGED),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "byok-key")
+    secrets.set("openrouter_managed_api_key", "managed-key")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, OpenRouterLLMProvider)
+    assert provider.inner.api_key == "managed-key"
+
+
+def test_create_llm_provider_openrouter_does_not_fallback_to_byok_when_managed_selected() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.MANAGED),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "byok-key")
+
+    with pytest.raises(ValueError, match="managed key"):
+        create_llm_provider(settings, secrets=secrets)
+
+
+def test_create_llm_provider_openrouter_rejects_none_selected_source_even_with_keys() -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.OPENROUTER))
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "byok-key")
+    secrets.set("openrouter_managed_api_key", "managed-key")
+
+    with pytest.raises(ValueError, match="selected source"):
+        create_llm_provider(settings, secrets=secrets)
 
 
 def test_create_llm_provider_requires_secret(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -388,7 +431,9 @@ def test_create_peer_stt_backend_uses_peer_local_qwen_provider_and_sample_rate()
     assert backend.stream_label == "peer"
 
 
-def test_resolve_peer_stt_config_inherits_soniox_endpoint_keepalive_and_trailing_silence_until_override() -> None:
+def test_resolve_peer_stt_config_inherits_soniox_endpoint_keepalive_and_trailing_silence_until_override() -> (
+    None
+):
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.SONIOX
     settings.soniox_stt.model = "self-soniox"

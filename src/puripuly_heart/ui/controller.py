@@ -48,6 +48,7 @@ from puripuly_heart.core.local_stt_runtime_installer import (
     RuntimeLocalSTTStatusUpdate,
     ensure_local_stt_installed,
 )
+from puripuly_heart.core.openrouter_credentials import resolve_openrouter_credentials
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.osc.receiver import (
     VRC_OSC_RECEIVER_HOST,
@@ -422,6 +423,11 @@ class GuiController:
             ),
             (
                 settings.openrouter.routing_mode
+                if settings.provider.llm == LLMProviderName.OPENROUTER
+                else None
+            ),
+            (
+                settings.openrouter.selected_source
                 if settings.provider.llm == LLMProviderName.OPENROUTER
                 else None
             ),
@@ -2028,8 +2034,15 @@ class GuiController:
                     key = secrets.get("google_api_key") or "" if secrets is not None else ""
                     llm_valid = await GeminiLLMProvider.verify_api_key(key)
                 elif provider_name == LLMProviderName.OPENROUTER:
-                    key = secrets.get("openrouter_api_key") or "" if secrets is not None else ""
-                    llm_valid = await OpenRouterLLMProvider.verify_api_key(key)
+                    resolution = (
+                        resolve_openrouter_credentials(self.settings, secrets=secrets)
+                        if secrets is not None
+                        else None
+                    )
+                    key = (
+                        resolution.api_key if resolution is not None and resolution.api_key else ""
+                    )
+                    llm_valid = bool(key) and await OpenRouterLLMProvider.verify_api_key(key)
                 elif provider_name == "qwen":
                     llm_valid = await _verify_alibaba_selected()
                 else:

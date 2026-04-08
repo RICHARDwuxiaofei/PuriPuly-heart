@@ -13,6 +13,7 @@ from puripuly_heart.config.settings import (
     AppSettings,
     GeminiLLMModel,
     LLMProviderName,
+    OpenRouterCredentialSource,
     OpenRouterLLMModel,
     OpenRouterRoutingMode,
     QwenLLMModel,
@@ -349,9 +350,31 @@ def test_on_llm_selected_updates_openrouter_model_and_prompt_state(
     assert pending is not None
     assert pending.provider.llm == LLMProviderName.OPENROUTER
     assert pending.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    assert pending.openrouter.selected_source == OpenRouterCredentialSource.BYOK
     assert view._prompt_editor.value == "O"
     assert settings.system_prompt == "G"
     assert view._openrouter_routing_row.visible is True
+
+
+def test_on_llm_selected_switching_away_from_openrouter_clears_selected_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    settings.system_prompts = {"gemini": "G", "openrouter": "O", "qwen": "Q"}
+    settings.system_prompt = "O"
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.provider.llm == LLMProviderName.QWEN
+    assert pending.openrouter.selected_source == OpenRouterCredentialSource.NONE
 
 
 def test_load_from_settings_shows_openrouter_routing_label(monkeypatch: pytest.MonkeyPatch) -> None:
