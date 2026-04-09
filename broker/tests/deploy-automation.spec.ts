@@ -165,7 +165,7 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toContain('BROKER_D1_DATABASE_ID_PRODUCTION');
     expect(workflow).toContain('OPENROUTER_MANAGED_API_KEY_PRODUCTION');
     expect(workflow).toContain('BROKER_CANONICAL_WORKERS_DEV_URL');
-    expect(workflow).toContain('ref: refs/heads/main');
+    expect(workflow).toContain('ref: refs/heads/dev');
     expect(workflow).toContain('render-production-wrangler-config.mjs');
     expect(workflow).toContain('render-fingerprint-bootstrap-sql.mjs');
     expect(workflow).toContain("working-directory: broker");
@@ -174,7 +174,7 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toContain('fingerprint-bootstrap.sql');
     expect(workflow).toMatch(/wrangler types --config/u);
     expect(workflow).toContain('BROKER_CANONICAL_WORKERS_DEV_URL is required');
-    expect(workflow).toContain('refs/heads/main');
+    expect(workflow).toContain('refs/heads/dev');
     expect(workflow).toMatch(
       /wrangler d1 migrations apply\s+puripuly-heart-broker\s+--remote\s+--config/u,
     );

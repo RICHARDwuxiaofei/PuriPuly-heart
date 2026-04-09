@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       confirm_production_deploy:
-        description: Type `deploy puripuly-heart-broker from main` to confirm the canonical production deploy.
+        description: Type `deploy puripuly-heart-broker from dev` to confirm the canonical production deploy.
         required: true
         type: string
 
@@ -32,13 +32,13 @@ jobs:
       - name: Guard production deploy ref and confirmation
         shell: bash
         run: |
-          if [[ "$GITHUB_REF" != 'refs/heads/main' ]]; then
-            echo 'Direct production broker deploys must be launched from refs/heads/main.' >&2
+          if [[ "$GITHUB_REF" != 'refs/heads/dev' ]]; then
+            echo 'Direct production broker deploys must be launched from refs/heads/dev.' >&2
             exit 1
           fi
 
-          if [[ "${{ github.event.inputs.confirm_production_deploy }}" != 'deploy puripuly-heart-broker from main' ]]; then
-            echo 'confirm_production_deploy must exactly match: deploy puripuly-heart-broker from main' >&2
+          if [[ "${{ github.event.inputs.confirm_production_deploy }}" != 'deploy puripuly-heart-broker from dev' ]]; then
+            echo 'confirm_production_deploy must exactly match: deploy puripuly-heart-broker from dev' >&2
             exit 1
           fi
 
@@ -58,7 +58,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: refs/heads/main
+          ref: refs/heads/dev
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

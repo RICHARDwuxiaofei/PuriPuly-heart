@@ -146,7 +146,7 @@ Recommended later expansion:
 ## Open questions still to settle
 
 - [x] first canonical deployment trigger
-  - use manual workflow dispatch for the initial canonical production deploy
+  - use manual workflow dispatch from `dev` for the initial canonical production deploy
   - keep protected-branch / tag-trigger expansion as a later option, not the current path
 
 ## Immediate next step
