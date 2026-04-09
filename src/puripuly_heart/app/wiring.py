@@ -21,6 +21,7 @@ from puripuly_heart.core.openrouter_credentials import (
     require_openrouter_execution_api_key,
     resolve_openrouter_credentials,
 )
+from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.core.storage.secrets import (
     EncryptedFileSecretStore,
     KeyringSecretStore,
@@ -150,12 +151,14 @@ def create_llm_provider(
     secrets: SecretStore,
     managed_release_service: object | None = None,
     managed_delegate_ready: Callable[[], object] | None = None,
+    runtime_logging: SessionRuntimeLoggingService | None = None,
 ) -> LLMProvider:
     if settings.provider.llm == LLMProviderName.GEMINI:
         api_key = require_secret(secrets, key="google_api_key", env_var="GOOGLE_API_KEY")
         base: LLMProvider = GeminiLLMProvider(
             api_key=api_key,
             model=settings.gemini.llm_model.value,
+            runtime_logging=runtime_logging,
         )
     elif settings.provider.llm == LLMProviderName.OPENROUTER:
         resolution = resolve_openrouter_credentials(settings, secrets=secrets)
@@ -172,6 +175,7 @@ def create_llm_provider(
                     api_key=api_key,
                     model=settings.openrouter.llm_model.value,
                     routing_mode=settings.openrouter.routing_mode,
+                    runtime_logging=runtime_logging,
                 ),
                 on_delegate_ready=managed_delegate_ready,
             )
@@ -181,6 +185,7 @@ def create_llm_provider(
                 api_key=api_key,
                 model=settings.openrouter.llm_model.value,
                 routing_mode=settings.openrouter.routing_mode,
+                runtime_logging=runtime_logging,
             )
     elif settings.provider.llm == LLMProviderName.QWEN:
         from puripuly_heart.config.settings import QwenRegion
@@ -208,6 +213,7 @@ def create_llm_provider(
                 api_key=api_key,
                 base_url=async_base_url,
                 model=settings.qwen.llm_model.value,
+                runtime_logging=runtime_logging,
             )
         else:
             # Standard mode: use DashScope SDK
@@ -215,6 +221,7 @@ def create_llm_provider(
                 api_key=api_key,
                 base_url=settings.qwen.get_llm_base_url(),
                 model=settings.qwen.llm_model.value,
+                runtime_logging=runtime_logging,
             )
     else:
         raise ValueError(f"Unsupported LLM provider: {settings.provider.llm}")

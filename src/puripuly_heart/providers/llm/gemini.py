@@ -6,9 +6,52 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import UUID
 
+from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.models import Translation
 
 logger = logging.getLogger(__name__)
+
+
+def _log_detailed_request(
+    *,
+    runtime_logging: SessionRuntimeLoggingService | None,
+    operation: str,
+    text: str,
+    source_language: str,
+    target_language: str,
+    context: str,
+) -> None:
+    message = "[Detailed][LLM] Gemini request [%s][context=%s] %s -> %s: %r" % (
+        operation,
+        "yes" if context else "no",
+        source_language,
+        target_language,
+        text,
+    )
+    if runtime_logging is not None:
+        runtime_logging.emit_detailed(message)
+        return
+    logger.info(message)
+
+
+def _log_detailed_response(
+    *, runtime_logging: SessionRuntimeLoggingService | None, operation: str, text: str
+) -> None:
+    message = "[Detailed][LLM] Gemini response [%s]: %r" % (operation, text)
+    if runtime_logging is not None:
+        runtime_logging.emit_detailed(message)
+        return
+    logger.info(message)
+
+
+def _log_basic_missing_text(
+    *, runtime_logging: SessionRuntimeLoggingService | None, operation: str
+) -> None:
+    message = "[Basic][LLM] Gemini response missing text [%s]" % operation
+    if runtime_logging is not None:
+        runtime_logging.emit_basic(message, level=logging.ERROR)
+        return
+    logger.error(message)
 
 
 class GeminiClient(Protocol):
@@ -39,6 +82,7 @@ class GeminiClient(Protocol):
 class GeminiLLMProvider:
     api_key: str
     model: str = "gemini-3-flash-preview"
+    runtime_logging: SessionRuntimeLoggingService | None = None
     client: GeminiClient | None = None
     _internal_client: GeminiClient | None = field(init=False, default=None, repr=False)
 
@@ -46,7 +90,11 @@ class GeminiLLMProvider:
         if self.client is not None:
             return self.client
         if self._internal_client is None:
-            self._internal_client = GoogleGenaiGeminiClient(api_key=self.api_key, model=self.model)
+            self._internal_client = GoogleGenaiGeminiClient(
+                api_key=self.api_key,
+                model=self.model,
+                runtime_logging=self.runtime_logging,
+            )
         return self._internal_client
 
     async def stream_translate(
@@ -129,6 +177,7 @@ class GeminiLLMProvider:
 class GoogleGenaiGeminiClient:
     api_key: str
     model: str
+    runtime_logging: SessionRuntimeLoggingService | None = None
     _client: Any = field(init=False, default=None, repr=False)
 
     def _get_client(self) -> Any:
@@ -141,6 +190,7 @@ class GoogleGenaiGeminiClient:
     def _build_request(
         self,
         *,
+        operation: str,
         text: str,
         system_prompt: str,
         source_language: str,
@@ -156,14 +206,19 @@ class GoogleGenaiGeminiClient:
             else system_prompt
         )
 
+        _log_detailed_request(
+            runtime_logging=self.runtime_logging,
+            operation=operation,
+            text=text,
+            source_language=source_language,
+            target_language=target_language,
+            context=context,
+        )
+
         if context:
             user_message = f"<context>\n{context}\n</context>\nInput: {text}"
-            logger.info(
-                f"[LLM] Request with context: '{text}' -> {source_language} to {target_language}"
-            )
         else:
             user_message = text
-            logger.info(f"[LLM] Request: '{text}' -> {source_language} to {target_language}")
         return formatted_system_prompt, user_message
 
     async def translate(
@@ -178,6 +233,7 @@ class GoogleGenaiGeminiClient:
         from google.genai import types  # type: ignore
 
         formatted_system_prompt, user_message = self._build_request(
+            operation="translate",
             text=text,
             system_prompt=system_prompt,
             source_language=source_language,
@@ -197,9 +253,13 @@ class GoogleGenaiGeminiClient:
         )
         if getattr(response, "text", None):
             result = str(response.text).strip()
-            logger.info(f"[LLM] Response: '{result}'")
+            _log_detailed_response(
+                runtime_logging=self.runtime_logging,
+                operation="translate",
+                text=result,
+            )
             return result
-        logger.error("[LLM] No text in response")
+        _log_basic_missing_text(runtime_logging=self.runtime_logging, operation="translate")
         raise RuntimeError("Gemini response did not contain text")
 
     async def stream_translate(
@@ -214,6 +274,7 @@ class GoogleGenaiGeminiClient:
         from google.genai import types  # type: ignore
 
         formatted_system_prompt, user_message = self._build_request(
+            operation="stream",
             text=text,
             system_prompt=system_prompt,
             source_language=source_language,
@@ -241,7 +302,7 @@ class GoogleGenaiGeminiClient:
             yield part
 
         if not saw_text:
-            logger.error("[LLM] No text in streaming response")
+            _log_basic_missing_text(runtime_logging=self.runtime_logging, operation="stream")
             raise RuntimeError("Gemini response did not contain text")
 
     async def close(self) -> None:
