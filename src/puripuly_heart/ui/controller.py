@@ -69,6 +69,7 @@ from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
 from puripuly_heart.core.overlay.process import OverlayProcessManager
 from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
+from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
@@ -84,6 +85,7 @@ from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 from puripuly_heart.ui.event_bridge import UIEventBridge
 from puripuly_heart.ui.i18n import get_locale, set_locale, t
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
+from puripuly_heart.ui.views.logs import FletLogHandler
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +193,7 @@ class GuiController:
         default_factory=dict,
     )
     _managed_trial_pending_auth: bool = field(init=False, default=False)
+    _runtime_logging: SessionRuntimeLoggingService | None = field(init=False, default=None)
 
     overlay_state: str = "off"
     failure_reason: str | None = None
@@ -259,10 +262,13 @@ class GuiController:
             if callable(apply_locale):
                 apply_locale()
 
-        # Attach log handler to LogsView for GUI log display
+        runtime_logging = self.runtime_logging
+        runtime_logging.set_mode(SessionLoggingMode.BASIC)
+
+        # Attach realtime sink to LogsView for GUI log display
         logs_view = getattr(self.app, "view_logs", None)
         if logs_view is not None:
-            logs_view.attach_log_handler()
+            runtime_logging.attach_realtime_sink(logs_view)
 
         await self._init_pipeline()
         self._refresh_local_stt_runtime_state()
@@ -307,7 +313,11 @@ class GuiController:
 
         await self.hub.start(auto_flush_osc=True)
 
-        bridge = UIEventBridge(app=self.app, event_queue=self.hub.ui_events)
+        bridge = UIEventBridge(
+            app=self.app,
+            event_queue=self.hub.ui_events,
+            runtime_logging=runtime_logging,
+        )
         self._ui_event_bridge = bridge
         self._bridge_task = asyncio.create_task(bridge.run())
 
@@ -626,6 +636,10 @@ class GuiController:
             self.sender = None
         self.osc = None
         await self._replace_managed_openrouter_release_service(None)
+        if self._runtime_logging is not None:
+            with contextlib.suppress(Exception):
+                self._runtime_logging.close()
+            self._runtime_logging = None
 
     async def set_overlay_enabled(self, enabled: bool) -> None:
         if self.settings is None:
@@ -1798,7 +1812,11 @@ class GuiController:
 
         await self.hub.start(auto_flush_osc=True)
 
-        bridge = UIEventBridge(app=self.app, event_queue=self.hub.ui_events)
+        bridge = UIEventBridge(
+            app=self.app,
+            event_queue=self.hub.ui_events,
+            runtime_logging=self.runtime_logging,
+        )
         self._bridge_task = asyncio.create_task(bridge.run())
 
         if self.overlay_state == "connected" and presenter is not None:
@@ -2158,12 +2176,32 @@ class GuiController:
         self.settings.languages.recent_target_languages = list(target)
         self._save_settings()
 
+    @property
+    def runtime_logging(self) -> SessionRuntimeLoggingService:
+        if self._runtime_logging is None:
+            self._runtime_logging = SessionRuntimeLoggingService(ui_handler_factory=FletLogHandler)
+        logs_view = getattr(self.app, "view_logs", None)
+        if logs_view is not None:
+            self._runtime_logging.attach_realtime_sink(logs_view)
+        return self._runtime_logging
+
+    @property
+    def runtime_logging_mode(self) -> str:
+        return self.runtime_logging.mode.value
+
+    def set_runtime_logging_mode(self, mode: SessionLoggingMode | str) -> None:
+        self.runtime_logging.set_mode(mode)
+
     def _log_error(self, message: str) -> None:
-        logger.error(message)
-        with contextlib.suppress(Exception):
-            logs = getattr(self.app, "view_logs", None)
-            if logs is not None:
-                logs.append_log(f"{t('log.error_prefix')}: {message}")
+        try:
+            self.runtime_logging.emit_basic(message, level=logging.ERROR)
+            return
+        except Exception:
+            logger.error(message)
+            with contextlib.suppress(Exception):
+                logs = getattr(self.app, "view_logs", None)
+                if logs is not None:
+                    logs.append_log(f"{t('log.error_prefix')}: {message}")
 
     def _get_qwen_key_and_base_url(self, secrets) -> tuple[str, str]:
         if self.settings is None:

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from puripuly_heart.app.headless_mic import HeadlessMicRunner
@@ -12,30 +10,7 @@ from puripuly_heart.app.wiring import create_llm_provider, create_secret_store
 from puripuly_heart.config.paths import default_settings_path, default_vad_model_path
 from puripuly_heart.config.settings import AppSettings, load_settings
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
-
-# Configure logging for the entire application
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
-
-# Add file logging (RotatingFileHandler)
-from puripuly_heart.config.paths import user_config_dir
-
-_log_dir = user_config_dir()
-_log_dir.mkdir(parents=True, exist_ok=True)
-_log_file = _log_dir / "puripuly_heart.log"
-_file_handler = RotatingFileHandler(
-    _log_file,
-    maxBytes=5 * 1024 * 1024,  # 5MB
-    backupCount=0,
-    encoding="utf-8",
-)
-_file_handler.setFormatter(
-    logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
-)
-logging.getLogger().addHandler(_file_handler)
+from puripuly_heart.core.runtime_logging import configure_main_logging
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -80,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_main_logging()
     parser = build_parser()
     args = parser.parse_args(argv)
 
