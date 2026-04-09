@@ -105,6 +105,7 @@ pub struct OverlayRuntime {
     ready: bool,
     first_texture_submitted: bool,
     overlay_visible: bool,
+    last_submitted_had_self: bool,
     stopped: bool,
     state: OverlayState,
     redraw_requested: bool,
@@ -131,6 +132,7 @@ impl OverlayRuntime {
             ready: false,
             first_texture_submitted: false,
             overlay_visible: false,
+            last_submitted_had_self: false,
             stopped: false,
             state: OverlayState::default(),
             redraw_requested: false,
@@ -256,6 +258,7 @@ impl OverlayRuntime {
         let blocks = self.caption_blocks();
         log_runtime_info(logger, format_caption_blocks_built_log(&blocks)).await?;
         let has_drawable_text = blocks.iter().any(CaptionBlock::has_drawable_text);
+        let overlay_visible_before = self.overlay_visible;
         let should_show_after_submit = has_drawable_text && !self.overlay_visible;
         if has_drawable_text {
             self.hide_deadline = None;
@@ -274,9 +277,12 @@ impl OverlayRuntime {
                 .render_blocks(blocks)
                 .map_err(|error| RuntimeFailure::Render(error.to_string()))?
         };
+        let visible_block_count = frame.layout().visible_blocks.len();
+        let self_block_count = visible_self_block_count(frame.layout());
+        let fully_transparent = frame.is_fully_transparent();
         log_runtime_info(
             logger,
-            format_frame_rendered_log(frame.layout(), frame.is_fully_transparent()),
+            format_frame_rendered_log(frame.layout(), fully_transparent),
         )
         .await?;
         openvr
@@ -294,6 +300,25 @@ impl OverlayRuntime {
             )
             .await?;
         }
+        if should_log_frame_submitted(
+            visible_block_count,
+            self_block_count,
+            self.last_submitted_had_self,
+        ) {
+            log_runtime_info(
+                logger,
+                format_frame_submitted_log(
+                    frame.layout(),
+                    self.state.snapshot().revision,
+                    fully_transparent,
+                    overlay_visible_before,
+                    self.overlay_visible,
+                    should_show_after_submit,
+                ),
+            )
+            .await?;
+        }
+        self.last_submitted_had_self = self_block_count > 0;
         self.redraw_requested = false;
 
         if !self.first_texture_submitted {
@@ -554,6 +579,42 @@ fn format_frame_rendered_log(layout: &CaptionLayoutResult, fully_transparent: bo
     )
 }
 
+fn visible_self_block_count(layout: &CaptionLayoutResult) -> usize {
+    layout
+        .visible_blocks
+        .iter()
+        .filter(|block| block.channel == Some(CaptionChannel::SelfChannel))
+        .count()
+}
+
+fn should_log_frame_submitted(
+    visible_block_count: usize,
+    self_block_count: usize,
+    last_submitted_had_self: bool,
+) -> bool {
+    self_block_count > 0 || (visible_block_count == 0 && last_submitted_had_self)
+}
+
+fn format_frame_submitted_log(
+    layout: &CaptionLayoutResult,
+    revision: u64,
+    fully_transparent: bool,
+    overlay_visible_before: bool,
+    overlay_visible_after: bool,
+    should_show_after_submit: bool,
+) -> String {
+    format!(
+        "frame_submitted revision={} visible_block_count={} self_block_count={} fully_transparent={} overlay_visible_before={} overlay_visible_after={} should_show_after_submit={}",
+        revision,
+        layout.visible_blocks.len(),
+        visible_self_block_count(layout),
+        fully_transparent,
+        overlay_visible_before,
+        overlay_visible_after,
+        should_show_after_submit,
+    )
+}
+
 async fn log_runtime_info(logger: &OverlayLogger, message: String) -> Result<(), RuntimeFailure> {
     logger
         .info(message)
@@ -808,12 +869,14 @@ impl OverlayRuntime {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_caption_blocks_built_log, format_frame_rendered_log, format_snapshot_received_log,
-        prepare_openvr_runtime, OverlayRuntime, SnapshotApplyOutcome, StartupError,
+        format_caption_blocks_built_log, format_frame_rendered_log, format_frame_submitted_log,
+        format_snapshot_received_log, prepare_openvr_runtime, should_log_frame_submitted,
+        OverlayRuntime, SnapshotApplyOutcome, StartupError,
     };
     use crate::openvr::{OpenVrError, OpenVrStartupPreflightError};
     use crate::renderer::{
-        CaptionBlock, CaptionBlockVariant, CaptionLayoutPolicy, CaptionPresentation,
+        CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
+        CaptionPresentation,
     };
     use crate::state::{
         OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
@@ -1049,6 +1112,41 @@ mod tests {
         assert!(summary.contains("frame_rendered visible_block_count=1 fully_transparent=false"));
         assert!(summary.contains("id=self:1 variant=finalized secondary_present=true"));
         assert!(summary.contains("truncated_secondary=true"));
+    }
+
+    #[test]
+    fn frame_submitted_summary_reports_revision_and_visibility_fields() {
+        let layout = CaptionLayoutPolicy::default().layout_blocks_for_presentation(
+            vec![
+                CaptionBlock::new("self:1", "primary")
+                    .with_channel(CaptionChannel::SelfChannel)
+                    .with_secondary_text("translated", true),
+                CaptionBlock::new("peer:1", "peer")
+                    .with_channel(CaptionChannel::PeerChannel)
+                    .with_secondary_text("", true),
+            ],
+            640,
+            600,
+            &CaptionPresentation::default(),
+        );
+
+        let summary = format_frame_submitted_log(&layout, 7, false, false, true, true);
+
+        assert!(summary.contains("frame_submitted revision=7"));
+        assert!(summary.contains("visible_block_count=2"));
+        assert!(summary.contains("self_block_count=1"));
+        assert!(summary.contains("fully_transparent=false"));
+        assert!(summary.contains("overlay_visible_before=false"));
+        assert!(summary.contains("overlay_visible_after=true"));
+        assert!(summary.contains("should_show_after_submit=true"));
+    }
+
+    #[test]
+    fn frame_submitted_logging_decision_keeps_self_clear_frames() {
+        assert!(should_log_frame_submitted(2, 1, false));
+        assert!(should_log_frame_submitted(0, 0, true));
+        assert!(!should_log_frame_submitted(1, 0, true));
+        assert!(!should_log_frame_submitted(0, 0, false));
     }
 
     #[test]

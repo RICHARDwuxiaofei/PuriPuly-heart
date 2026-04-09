@@ -778,6 +778,24 @@ class OverlayPresenter(OverlaySink):
         effective_deadline, visible_deadline, translation_deadline = (
             self._entry_expiration_components(entry)
         )
+        removal_time = now if now is not None else self.clock.now()
+        extra_fields: dict[str, object] = {}
+        if entry.channel == "self":
+            lifetime_ms = 0.0
+            if entry.visible_since is not None:
+                lifetime_ms = max(0.0, (removal_time - entry.visible_since) * 1000.0)
+            translated_lifetime_ms = 0.0
+            if entry.translation_visible_since is not None:
+                translated_lifetime_ms = max(
+                    0.0,
+                    (removal_time - entry.translation_visible_since) * 1000.0,
+                )
+            extra_fields = {
+                "lifetime_ms": lifetime_ms,
+                "translated_lifetime_ms": translated_lifetime_ms,
+                "had_translation": bool(entry.translation_text.strip()),
+                "ever_visible_with_translation": entry.translation_visible_since is not None,
+            }
         if self.diagnostics is not None:
             self.diagnostics.record_presenter_removal(
                 reason=reason,
@@ -789,10 +807,11 @@ class OverlayPresenter(OverlaySink):
                 visible_since=entry.visible_since,
                 translation_visible_since=entry.translation_visible_since,
                 closed_at=entry.closed_at,
-                now=now if now is not None else self.clock.now(),
+                now=removal_time,
                 visible_deadline=visible_deadline,
                 translation_deadline=translation_deadline,
                 effective_deadline=effective_deadline,
+                **extra_fields,
             )
         seq = tombstone_seq if tombstone_seq is not None else entry.closed_seq
         if seq is not None:

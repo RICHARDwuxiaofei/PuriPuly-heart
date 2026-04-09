@@ -579,6 +579,63 @@ async def test_presenter_records_expired_entry_diagnostic_with_deadlines(
     assert removal_event["translation_deadline"] == pytest.approx(21.0)
     assert removal_event["visible_deadline"] == pytest.approx(18.0)
     assert removal_event["effective_deadline"] == pytest.approx(21.0)
+    assert removal_event["had_translation"] is True
+    assert removal_event["ever_visible_with_translation"] is True
+    assert removal_event["lifetime_ms"] == pytest.approx(11100.0)
+    assert removal_event["translated_lifetime_ms"] == pytest.approx(4100.0)
+
+
+@pytest.mark.asyncio
+async def test_presenter_records_untranslated_self_visibility_duration(
+    tmp_path,
+) -> None:
+    bridge = RecordingPresentationBridge()
+    clock = FakeClock(_now=10.0)
+    diagnostics = OverlayDiagnosticsRecorder(
+        overlay_instance_id="overlay-test",
+        diagnostics_dir=tmp_path,
+    )
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=clock,
+        diagnostics=diagnostics,
+    )
+    adapter = OverlayEventAdapter(clock=clock)
+    utterance_id = uuid4()
+
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=utterance_id,
+                channel="self",
+                text="self original",
+                is_final=True,
+                created_at=10.0,
+            ),
+            source_language="ko",
+            target_language="en",
+        )
+    )
+    await presenter.emit(
+        adapter.utterance_closed(
+            utterance_id=utterance_id,
+            channel="self",
+            created_at=10.1,
+        )
+    )
+
+    clock.advance(8.1)
+    await presenter._publish_if_changed()
+
+    removal_event = diagnostics.presenter_removal_events[-1]
+    assert removal_event["event"] == "entry_removed"
+    assert removal_event["reason"] == "expired"
+    assert removal_event["channel"] == "self"
+    assert removal_event["had_translation"] is False
+    assert removal_event["ever_visible_with_translation"] is False
+    assert removal_event["lifetime_ms"] == pytest.approx(8100.0)
+    assert removal_event["translated_lifetime_ms"] == 0.0
 
 
 @pytest.mark.asyncio
@@ -711,6 +768,10 @@ async def test_presenter_records_peer_displacement_as_removal_diagnostic(tmp_pat
     removal_event = diagnostics.presenter_removal_events[-1]
     assert removal_event["reason"] == "displaced_window"
     assert removal_event["entry_key"] == f"peer:{utterance_ids[0]}"
+    assert "lifetime_ms" not in removal_event
+    assert "translated_lifetime_ms" not in removal_event
+    assert "had_translation" not in removal_event
+    assert "ever_visible_with_translation" not in removal_event
 
 
 @pytest.mark.asyncio
