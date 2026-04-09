@@ -270,7 +270,9 @@ def test_inspect_local_stt_install_state_returns_missing_for_absent_install(tmp_
     assert state == LocalSTTInstallState(status="missing", installed_manifest=None)
 
 
-def test_inspect_local_stt_install_state_returns_invalid_for_broken_manifest(tmp_path: Path) -> None:
+def test_inspect_local_stt_install_state_returns_invalid_for_broken_manifest(
+    tmp_path: Path,
+) -> None:
     manifest = _test_manifest()
     install_dir = tmp_path / manifest.install_dirname
     install_dir.mkdir()
@@ -339,12 +341,37 @@ def test_packaged_local_stt_manifest_matches_modelscope_fallback_contract() -> N
     )
 
     files = {asset.relative_path: asset for asset in manifest.files}
-    assert files["conv_frontend.onnx"].remote_path_for_source("modelscope") == "model_0.6B/conv_frontend.onnx"
-    assert files["encoder.int8.onnx"].remote_path_for_source("modelscope") == "model_0.6B/encoder.int8.onnx"
-    assert files["decoder.int8.onnx"].remote_path_for_source("modelscope") == "model_0.6B/decoder.int8.onnx"
-    assert files["tokenizer/merges.txt"].remote_path_for_source("modelscope") == "tokenizer/merges.txt"
+    assert (
+        files["conv_frontend.onnx"].remote_path_for_source("modelscope")
+        == "model_0.6B/conv_frontend.onnx"
+    )
+    assert (
+        files["encoder.int8.onnx"].remote_path_for_source("modelscope")
+        == "model_0.6B/encoder.int8.onnx"
+    )
+    assert (
+        files["decoder.int8.onnx"].remote_path_for_source("modelscope")
+        == "model_0.6B/decoder.int8.onnx"
+    )
+    assert (
+        files["tokenizer/merges.txt"].remote_path_for_source("modelscope") == "tokenizer/merges.txt"
+    )
     assert (
         files["tokenizer/tokenizer_config.json"].remote_path_for_source("modelscope")
         == "tokenizer/tokenizer_config.json"
     )
-    assert files["tokenizer/vocab.json"].remote_path_for_source("modelscope") == "tokenizer/vocab.json"
+    assert (
+        files["tokenizer/vocab.json"].remote_path_for_source("modelscope") == "tokenizer/vocab.json"
+    )
+
+
+def test_packaged_local_stt_manifest_matches_huggingface_mirror_contract() -> None:
+    manifest = load_local_stt_asset_manifest()
+
+    huggingface = manifest.sources["huggingface"]
+    assert huggingface.repo_id == "csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25"
+    assert huggingface.revision == "2cc50d1abfe4d4f2df8d71f536d108bb40f943d2"
+    assert (
+        huggingface.download_url_template
+        == "https://huggingface.co/csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25/resolve/2cc50d1abfe4d4f2df8d71f536d108bb40f943d2/{path}"
+    )

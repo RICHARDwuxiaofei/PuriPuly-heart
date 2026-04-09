@@ -9,9 +9,9 @@
   "sources": {
     "huggingface": {
       "name": "huggingface",
-      "repo_id": "puripuly-heart/qwen3-asr-0.6b-int8-sherpa",
+      "repo_id": "csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25",
       "revision": "2cc50d1abfe4d4f2df8d71f536d108bb40f943d2",
-      "download_url_template": "https://huggingface.co/puripuly-heart/qwen3-asr-0.6b-int8-sherpa/resolve/2cc50d1abfe4d4f2df8d71f536d108bb40f943d2/{path}"
+      "download_url_template": "https://huggingface.co/csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25/resolve/2cc50d1abfe4d4f2df8d71f536d108bb40f943d2/{path}"
     },
     "modelscope": {
       "name": "modelscope",
