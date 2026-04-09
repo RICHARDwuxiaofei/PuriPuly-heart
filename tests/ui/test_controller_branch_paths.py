@@ -2958,6 +2958,30 @@ async def test_apply_providers_rebuilds_only_llm_for_openrouter_selected_source_
 
 
 @pytest.mark.asyncio
+async def test_apply_providers_clears_local_qwen_pending_enable_after_switch_away(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN
+    controller.hub = DummyHub()
+    controller._local_stt_pending_enable_after_install = True
+    controller._local_stt_runtime_status = "downloading"
+
+    updated = AppSettings()
+    updated.provider.stt = STTProviderName.DEEPGRAM
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", lambda self: asyncio.sleep(0))
+
+    await controller.apply_providers(updated)
+
+    assert controller._local_stt_pending_enable_after_install is False
+
+
+@pytest.mark.asyncio
 async def test_apply_providers_switch_to_managed_blocks_concurrent_toggle_from_using_old_llm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

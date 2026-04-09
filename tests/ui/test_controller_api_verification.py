@@ -72,6 +72,58 @@ class DummyHub:
         self.start_calls.append(auto_flush_osc)
 
 
+async def _start_controller_with_inspected_stt_state(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    provider: STTProviderName,
+    install_state: LocalSTTInstallState,
+    hub_stt: object | None = object(),
+) -> tuple[GuiController, DummyDashboard, list[str], list[str]]:
+    settings = AppSettings()
+    settings.provider.stt = provider
+    dash = DummyDashboard()
+    hub = DummyHub(stt=hub_stt)
+    inspect_calls: list[str] = []
+    install_calls: list[str] = []
+
+    class FakeBridge:
+        def __init__(self, *, app, event_queue) -> None:
+            _ = (app, event_queue)
+
+        async def run(self) -> None:
+            await asyncio.sleep(0)
+
+    async def fake_init_pipeline(self) -> None:
+        self.hub = hub
+
+    async def fake_install(**kwargs):
+        _ = kwargs
+        install_calls.append("install")
+        return object()
+
+    def fake_inspect(*_args, **_kwargs):
+        inspect_calls.append("inspect")
+        return install_state
+
+    monkeypatch.setattr(GuiController, "_load_or_init_settings", lambda self, path: settings)
+    monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+    monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
+    monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
+    monkeypatch.setattr(controller_module, "inspect_local_stt_install_state", fake_inspect)
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(view_dashboard=dash),
+        config_path=Path("settings.json"),
+    )
+
+    await controller.start()
+    await asyncio.sleep(0)
+    return controller, dash, inspect_calls, install_calls
+
+
 def test_local_stt_download_prompt_helpers_removed() -> None:
     assert not hasattr(GuiController, "_show_local_stt_download_prompt")
     assert not hasattr(GuiController, "_on_local_stt_download_action")
@@ -764,108 +816,246 @@ async def test_local_qwen_runtime_install_does_not_auto_enable_after_provider_sw
 
 
 @pytest.mark.asyncio
-async def test_start_inspects_local_stt_without_auto_download_for_non_local_provider(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    settings.provider.stt = STTProviderName.DEEPGRAM
-    dash = DummyDashboard()
-    hub = DummyHub()
-    inspect_calls: list[str] = []
-    install_calls: list[str] = []
-
-    class FakeBridge:
-        def __init__(self, *, app, event_queue) -> None:
-            _ = (app, event_queue)
-
-        async def run(self) -> None:
-            await asyncio.sleep(0)
-
-    async def fake_init_pipeline(self) -> None:
-        self.hub = hub
-
-    async def fake_install(**kwargs):
-        _ = kwargs
-        install_calls.append("install")
-        return object()
-
-    def fake_inspect(*_args, **_kwargs):
-        inspect_calls.append("inspect")
-        return LocalSTTInstallState(status="missing")
-
-    monkeypatch.setattr(GuiController, "_load_or_init_settings", lambda self, path: settings)
-    monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
-    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
-    monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
-    monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
-    monkeypatch.setattr(controller_module, "inspect_local_stt_install_state", fake_inspect)
-    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
-
-    controller = GuiController(
-        page=SimpleNamespace(),
-        app=SimpleNamespace(view_dashboard=dash),
-        config_path=Path("settings.json"),
-    )
-
-    await controller.start()
-    await asyncio.sleep(0)
-
-    assert inspect_calls == ["inspect"]
-    assert install_calls == []
-    assert controller._local_stt_download_task is None
-    assert dash.local_stt_notice_status is None
-    assert dash.local_stt_notice_percent is None
-
-
-@pytest.mark.asyncio
-async def test_start_with_local_qwen_missing_shows_notice_without_auto_download(
+async def test_local_qwen_explicit_disable_during_runtime_install_clears_pending_auto_enable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
     settings.provider.stt = STTProviderName.LOCAL_QWEN
-    dash = DummyDashboard()
-    hub = DummyHub(stt=object())
-    inspect_calls: list[str] = []
-    install_calls: list[str] = []
+    dashboard = DummyDashboard()
+    rebuild_calls: list[str] = []
+    switch_calls: list[bool] = []
+    release = SimpleNamespace(done=False)
 
-    class FakeBridge:
-        def __init__(self, *, app, event_queue) -> None:
-            _ = (app, event_queue)
-
-        async def run(self) -> None:
-            await asyncio.sleep(0)
-
-    async def fake_init_pipeline(self) -> None:
-        self.hub = hub
-
-    async def fake_install(**kwargs):
-        _ = kwargs
-        install_calls.append("install")
-        return object()
-
-    def fake_inspect(*_args, **_kwargs):
-        inspect_calls.append("inspect")
-        return LocalSTTInstallState(status="missing")
-
-    monkeypatch.setattr(GuiController, "_load_or_init_settings", lambda self, path: settings)
-    monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
-    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
-    monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
-    monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
-    monkeypatch.setattr(controller_module, "inspect_local_stt_install_state", fake_inspect)
-    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
-
-    controller = GuiController(
-        page=SimpleNamespace(),
-        app=SimpleNamespace(view_dashboard=dash),
-        config_path=Path("settings.json"),
+    app = SimpleNamespace(
+        view_dashboard=dashboard,
+        _show_snackbar=lambda *_args, **_kwargs: None,
     )
 
-    await controller.start()
+    class DummyWarmupHub:
+        def __init__(self) -> None:
+            self.stt = object()
+            self.peer_stt = None
+            self.promo_calls = 0
+
+        def mark_promo_eligible(self) -> None:
+            self.promo_calls += 1
+
+    async def fake_install(**_kwargs):
+        while not release.done:
+            await asyncio.sleep(0)
+        return object()
+
+    async def fake_rebuild(self):
+        rebuild_calls.append("rebuild")
+
+    async def fake_switch(self):
+        switch_calls.append(self._stt_desired)
+
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild)
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_switch)
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyWarmupHub()
+    controller._local_stt_install_state = LocalSTTInstallState(status="missing")
+
+    await controller.set_stt_enabled(True)
+    await asyncio.sleep(0)
+
+    assert controller._local_stt_pending_enable_after_install is True
+
+    await controller.set_stt_enabled(False)
+
+    assert controller._local_stt_pending_enable_after_install is False
+
+    release.done = True
+    await controller._local_stt_download_task
+
+    assert rebuild_calls == []
+    assert switch_calls == [False]
+    assert dashboard.stt_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_reenable_during_runtime_install_rearms_pending_auto_enable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    dashboard = DummyDashboard()
+    status_messages: list[str] = []
+    rebuild_calls: list[str] = []
+    switch_calls: list[bool] = []
+    install_calls: list[str] = []
+    release = SimpleNamespace(done=False)
+
+    app = SimpleNamespace(
+        view_dashboard=dashboard,
+        _show_snackbar=lambda message, *_args, **_kwargs: status_messages.append(message),
+    )
+
+    class DummyWarmupHub:
+        def __init__(self) -> None:
+            self.stt = object()
+            self.peer_stt = None
+            self.promo_calls = 0
+
+        def mark_promo_eligible(self) -> None:
+            self.promo_calls += 1
+
+    async def fake_install(**_kwargs):
+        install_calls.append("install")
+        while not release.done:
+            await asyncio.sleep(0)
+        return object()
+
+    async def fake_rebuild(self):
+        rebuild_calls.append("rebuild")
+
+    async def fake_switch(self):
+        switch_calls.append(self._stt_desired)
+
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild)
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_switch)
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyWarmupHub()
+    controller._local_stt_install_state = LocalSTTInstallState(status="missing")
+
+    await controller.set_stt_enabled(True)
+    await asyncio.sleep(0)
+    await controller.set_stt_enabled(False)
+    await controller.set_stt_enabled(True)
+
+    assert install_calls == ["install"]
+    assert controller._local_stt_pending_enable_after_install is True
+    assert controller_module.t("local_stt.download_in_progress") in status_messages
+
+    release.done = True
+    await controller._local_stt_download_task
+
+    assert rebuild_calls == ["rebuild"]
+    assert switch_calls == [False, True]
+    assert dashboard.stt_enabled is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("install_state", "expected_notice"),
+    [
+        (LocalSTTInstallState(status="missing"), "missing"),
+        (
+            LocalSTTInstallState(status="invalid", error_message="broken manifest"),
+            "invalid",
+        ),
+        (LocalSTTInstallState(status="ready"), None),
+    ],
+    ids=["missing", "invalid", "ready"],
+)
+async def test_start_with_local_qwen_inspects_runtime_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+    install_state: LocalSTTInstallState,
+    expected_notice: str | None,
+) -> None:
+    (
+        controller,
+        dash,
+        inspect_calls,
+        install_calls,
+    ) = await _start_controller_with_inspected_stt_state(
+        monkeypatch,
+        provider=STTProviderName.LOCAL_QWEN,
+        install_state=install_state,
+        hub_stt=object(),
+    )
 
     assert inspect_calls == ["inspect"]
     assert install_calls == []
     assert controller._local_stt_download_task is None
     assert dash.stt_enabled is False
-    assert dash.local_stt_notice_status == "missing"
+    assert dash.local_stt_notice_status == expected_notice
+    assert dash.local_stt_notice_percent is None
+
+
+@pytest.mark.asyncio
+async def test_set_stt_enabled_local_qwen_download_path_does_not_prepare_managed_translation_or_mutate_selected_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    install_calls: list[str] = []
+    release = SimpleNamespace(done=False)
+    app = SimpleNamespace(
+        view_dashboard=DummyDashboard(),
+        _show_snackbar=lambda *_args, **_kwargs: None,
+    )
+
+    class DummyWarmupHub:
+        def __init__(self) -> None:
+            self.stt = object()
+            self.peer_stt = None
+            self.promo_calls = 0
+
+        def mark_promo_eligible(self) -> None:
+            self.promo_calls += 1
+
+    class DummyManagedReleaseService:
+        def __init__(self) -> None:
+            self.prepare_calls = 0
+
+        async def prepare_for_translation(self):
+            self.prepare_calls += 1
+            raise AssertionError("STT runtime path must not prepare managed translation")
+
+    async def fake_install(**_kwargs):
+        install_calls.append("install")
+        while not release.done:
+            await asyncio.sleep(0)
+        return object()
+
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_ensure_stt_switch", lambda self: asyncio.sleep(0))
+
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyWarmupHub()
+    controller._managed_openrouter_release_service = DummyManagedReleaseService()
+    controller._local_stt_install_state = LocalSTTInstallState(status="missing")
+
+    await controller.set_stt_enabled(True)
+    await asyncio.sleep(0)
+
+    assert install_calls == ["install"]
+    assert controller._managed_openrouter_release_service.prepare_calls == 0
+    assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+
+    release.done = True
+    await controller._local_stt_download_task
+
+
+@pytest.mark.asyncio
+async def test_start_inspects_local_stt_without_auto_download_for_non_local_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        controller,
+        dash,
+        inspect_calls,
+        install_calls,
+    ) = await _start_controller_with_inspected_stt_state(
+        monkeypatch,
+        provider=STTProviderName.DEEPGRAM,
+        install_state=LocalSTTInstallState(status="missing"),
+    )
+
+    assert inspect_calls == ["inspect"]
+    assert install_calls == []
+    assert controller._local_stt_download_task is None
+    assert dash.local_stt_notice_status is None
     assert dash.local_stt_notice_percent is None

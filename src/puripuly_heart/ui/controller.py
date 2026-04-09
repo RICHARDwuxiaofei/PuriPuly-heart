@@ -497,7 +497,6 @@ class GuiController:
 
     async def stop(self) -> None:
         await self._cancel_local_stt_download()
-        self._local_stt_pending_enable_after_install = False
         await self.set_stt_enabled(False)
         await self._configure_vrc_mic_receiver(enabled=False)
         await self._shutdown_overlay_runtime(preserve_failure_reason=True)
@@ -944,6 +943,8 @@ class GuiController:
             self.overlay_state,
         )
         self._stt_desired = bool(enabled)
+        if not enabled:
+            self._reset_local_stt_pending_enable_after_install()
 
         # Log provider info when enabling
         if enabled and self.settings is not None:
@@ -961,6 +962,7 @@ class GuiController:
         ):
             current_status = self._current_local_stt_runtime_status()
             if current_status == "downloading":
+                self._local_stt_pending_enable_after_install = True
                 self._stt_desired = False
                 dash = getattr(self.app, "view_dashboard", None)
                 if dash is not None:
@@ -1040,6 +1042,15 @@ class GuiController:
             return self._local_stt_runtime_status
         return self._local_stt_install_state.status
 
+    def _reset_local_stt_pending_enable_after_install(self) -> None:
+        self._local_stt_pending_enable_after_install = False
+
+    def _clear_local_stt_pending_enable_if_provider_switched_away(self) -> None:
+        if self.settings is None:
+            return
+        if self.settings.provider.stt != STTProviderName.LOCAL_QWEN:
+            self._reset_local_stt_pending_enable_after_install()
+
     def _sync_local_stt_notice(self) -> None:
         dash = getattr(self.app, "view_dashboard", None)
         if dash is None or self.settings is None:
@@ -1104,6 +1115,7 @@ class GuiController:
         )
         self._local_stt_runtime_status = "ready"
         self._local_stt_download_percent = None
+        self._clear_local_stt_pending_enable_if_provider_switched_away()
         self._sync_local_stt_notice()
 
         if (
@@ -1112,7 +1124,7 @@ class GuiController:
             and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
             and self._local_stt_pending_enable_after_install
         ):
-            self._local_stt_pending_enable_after_install = False
+            self._reset_local_stt_pending_enable_after_install()
             await self._rebuild_stt_provider()
             self._stt_desired = True
             dash = getattr(self.app, "view_dashboard", None)
@@ -1177,6 +1189,7 @@ class GuiController:
     async def _cancel_local_stt_download(self) -> None:
         task = self._local_stt_download_task
         cancel_event = self._local_stt_download_cancel_event
+        self._reset_local_stt_pending_enable_after_install()
         if cancel_event is not None:
             cancel_event.set()
         if task is None:
@@ -1294,6 +1307,7 @@ class GuiController:
         self.settings = settings
         self._save_settings()
         self._refresh_local_stt_runtime_state()
+        self._clear_local_stt_pending_enable_if_provider_switched_away()
 
         # low_latency_mode 변경 시 Qwen LLM 프로바이더 재생성 필요
         # (AsyncQwenLLMProvider vs QwenLLMProvider 전환)
@@ -1468,6 +1482,7 @@ class GuiController:
 
         self.settings = next_settings
         self._save_settings()
+        self._clear_local_stt_pending_enable_if_provider_switched_away()
 
         if self.hub is not None:
             self.hub.source_language = next_settings.languages.source_language
