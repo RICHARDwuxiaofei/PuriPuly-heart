@@ -4,15 +4,19 @@ import asyncio
 import inspect
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import InitVar, dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Protocol
 from uuid import UUID
 
 from puripuly_heart.config.settings import AppSettings, OpenRouterCredentialSource
+from puripuly_heart.core.hardware_fingerprint import compute_hardware_hash
 from puripuly_heart.core.llm.provider import LLMProvider
-from puripuly_heart.core.managed_identity import ensure_managed_identity_bundle
+from puripuly_heart.core.managed_identity import (
+    ensure_managed_identity_bundle,
+    regenerate_managed_identity_bundle,
+)
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_MANAGED_API_KEY_SECRET,
     clear_temporary_managed_release_state,
@@ -23,6 +27,11 @@ from puripuly_heart.domain.models import Translation
 
 MANAGED_OPENROUTER_TRIAL_MODEL = "google/gemma-4-26b-a4b-it"
 MANAGED_OPENROUTER_TRIAL_BUDGET_USD = 0.07
+BINDING_MISMATCH_SUBCODES = {
+    "device_public_key_registered",
+    "installation_binding_mismatch",
+}
+HardwareFingerprintProvider = Callable[[], str | Awaitable[str]]
 
 
 def _default_signed_at() -> str:
@@ -53,9 +62,16 @@ class ManagedOpenRouterReleaseResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedOpenRouterFingerprintSalt:
+    version: int
+    salt: str
+
+
+@dataclass(frozen=True, slots=True)
 class ManagedOpenRouterChallengeSuccess:
     challenge: str
     challenge_expires_at: str
+    fingerprint_salt: ManagedOpenRouterFingerprintSalt
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,8 +153,9 @@ class ManagedOpenRouterReleaseService:
     secrets: SecretStore
     client: ManagedOpenRouterReleaseClient
     persist_settings: Callable[[AppSettings], None]
-    hardware_hash_provider: Callable[[], str | Awaitable[str]]
     app_version: str
+    raw_hardware_fingerprint_provider: HardwareFingerprintProvider | None = None
+    hardware_hash_provider: InitVar[HardwareFingerprintProvider | None] = None
     signed_at_provider: Callable[[], str] = _default_signed_at
     monotonic_ms_provider: Callable[[], int] = _default_monotonic_ms
     _prepare_task: asyncio.Task[ManagedOpenRouterReleaseResult] | None = field(
@@ -152,6 +169,14 @@ class ManagedOpenRouterReleaseService:
         repr=False,
     )
     _retry_after_deadline_ms: int | None = field(init=False, default=None, repr=False)
+    _legacy_hardware_hash_provider: HardwareFingerprintProvider | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+
+    def __post_init__(self, hardware_hash_provider: HardwareFingerprintProvider | None) -> None:
+        self._legacy_hardware_hash_provider = hardware_hash_provider
 
     def _start_shared_task(
         self,
@@ -280,7 +305,16 @@ class ManagedOpenRouterReleaseService:
                 message_key=f"managed_release.{challenge_response.reason}",
             )
 
-        hardware_hash = await _resolve_maybe_awaitable(self.hardware_hash_provider())
+        try:
+            hardware_hash = await self._resolve_hardware_hash(
+                fingerprint_salt=challenge_response.fingerprint_salt,
+            )
+        except Exception:
+            self._clear_retry_after()
+            return ManagedOpenRouterReleaseResult(
+                behavior=ManagedOpenRouterReleaseBehavior.STOP,
+                message_key="managed_release.stop",
+            )
         verify_request = bundle.sign_verify_request(
             challenge=challenge_response.challenge,
             challenge_expires_at=challenge_response.challenge_expires_at,
@@ -344,6 +378,25 @@ class ManagedOpenRouterReleaseService:
         self,
         error: ManagedOpenRouterReleaseError,
     ) -> ManagedOpenRouterReleaseResult:
+        if error.error_class == "security_fail" and error.subcode in BINDING_MISMATCH_SUBCODES:
+            try:
+                regenerate_managed_identity_bundle(
+                    self.settings,
+                    self.secrets,
+                    persist_settings=self.persist_settings,
+                )
+            except Exception:
+                self._clear_retry_after()
+                return ManagedOpenRouterReleaseResult(
+                    behavior=ManagedOpenRouterReleaseBehavior.STOP,
+                    message_key="managed_release.stop",
+                )
+            self._clear_retry_after()
+            return ManagedOpenRouterReleaseResult(
+                behavior=ManagedOpenRouterReleaseBehavior.RESTART,
+                message_key="managed_release.restart",
+            )
+
         if (
             error.error_class == "security_fail"
             or error.code
@@ -390,6 +443,29 @@ class ManagedOpenRouterReleaseService:
             message_key="managed_release.retry",
         )
 
+    async def _resolve_hardware_hash(
+        self,
+        *,
+        fingerprint_salt: ManagedOpenRouterFingerprintSalt,
+    ) -> str:
+        if self.raw_hardware_fingerprint_provider is not None:
+            raw_hardware_fingerprint = await _resolve_provider_without_blocking_event_loop(
+                self.raw_hardware_fingerprint_provider
+            )
+            return compute_hardware_hash(
+                fingerprint_salt=fingerprint_salt.salt,
+                raw_fingerprint=raw_hardware_fingerprint,
+            )
+        if self._legacy_hardware_hash_provider is not None:
+            hardware_hash = await _resolve_provider_without_blocking_event_loop(
+                self._legacy_hardware_hash_provider
+            )
+            normalized_hardware_hash = _normalize_optional_text(hardware_hash)
+            if normalized_hardware_hash is None:
+                raise ValueError("hardware_hash_provider must return a non-empty string")
+            return normalized_hardware_hash
+        raise RuntimeError("managed hardware fingerprint provider is not configured")
+
     def _result_for_retry_after_window(self) -> ManagedOpenRouterReleaseResult | None:
         if self._retry_after_deadline_ms is None:
             return None
@@ -421,6 +497,12 @@ class ManagedOpenRouterReleaseService:
             task.cancel()
         if active_tasks:
             await asyncio.gather(*active_tasks, return_exceptions=True)
+
+        close_client = getattr(self.client, "close", None)
+        if callable(close_client):
+            close_result = close_client()
+            if inspect.isawaitable(close_result):
+                await close_result
 
 
 class ManagedOpenRouterDelegateFactory(Protocol):
@@ -536,3 +618,11 @@ async def _resolve_maybe_awaitable(value: str | Awaitable[str]) -> str:
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+async def _resolve_provider_without_blocking_event_loop(
+    provider: HardwareFingerprintProvider,
+) -> str:
+    if inspect.iscoroutinefunction(provider):
+        return await _resolve_maybe_awaitable(provider())
+    return await _resolve_maybe_awaitable(await asyncio.to_thread(provider))

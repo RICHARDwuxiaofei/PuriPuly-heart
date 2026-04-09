@@ -5,7 +5,15 @@ import logging
 import pytest
 
 import puripuly_heart.app.headless_mic as headless_mic
-from puripuly_heart.config.settings import AppSettings, STTProviderName
+from puripuly_heart.config.settings import (
+    AppSettings,
+    LLMProviderName,
+    OpenRouterCredentialSource,
+    OpenRouterSettings,
+    ProviderSettings,
+    STTProviderName,
+)
+from puripuly_heart.core.storage.secrets import InMemorySecretStore
 
 
 @pytest.mark.asyncio
@@ -68,6 +76,43 @@ async def test_headless_mic_runner_handles_keyboard_interrupt(monkeypatch, tmp_p
 
     assert result == 0
     assert sender_ref["instance"].closed is True
+
+
+@pytest.mark.asyncio
+async def test_headless_mic_runner_rejects_managed_openrouter_without_release_service(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.MANAGED),
+    )
+    config_path = tmp_path / "settings.json"
+    vad_path = tmp_path / "vad.onnx"
+    vad_path.write_text("dummy", encoding="utf-8")
+
+    monkeypatch.setattr(
+        headless_mic,
+        "create_secret_store",
+        lambda *_a, **_k: InMemorySecretStore(),
+    )
+    monkeypatch.setattr(
+        headless_mic,
+        "create_stt_backend",
+        lambda *_a, **_k: pytest.fail("STT backend should not initialize"),
+    )
+
+    runner = headless_mic.HeadlessMicRunner(
+        settings=settings,
+        config_path=config_path,
+        vad_model_path=vad_path,
+        use_llm=True,
+    )
+
+    with pytest.raises(
+        headless_mic.HeadlessMicInitializationError, match="managed release service"
+    ):
+        await runner.run()
 
 
 @pytest.mark.asyncio
@@ -257,7 +302,6 @@ async def test_headless_mic_runner_starts_peer_desktop_loop_when_peer_translatio
         async def stop(self):
             return None
 
-
     class FakeSource:
         async def close(self):
             return None
@@ -337,7 +381,6 @@ async def test_headless_mic_runner_isolates_peer_loop_runtime_failures(
 
         async def stop(self):
             return None
-
 
     class FakeSource:
         async def close(self):
@@ -422,7 +465,6 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
 
         async def stop(self):
             return None
-
 
     class FakeSource:
         async def close(self):

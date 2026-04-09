@@ -22,9 +22,14 @@ from puripuly_heart.config.settings import (
 )
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
+from puripuly_heart.core.managed_openrouter_broker_client import (
+    HttpManagedOpenRouterBrokerClient,
+)
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseBehavior,
     ManagedOpenRouterReleaseResult,
+    ManagedOpenRouterReleaseService,
+    UnavailableManagedOpenRouterReleaseClient,
 )
 from puripuly_heart.core.osc.receiver import VrcMicState
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
@@ -3630,6 +3635,40 @@ async def test_rebuild_llm_provider_logs_basic_failure_when_secret_store_setup_f
     assert controller._runtime_logging.basic_messages == [
         (logging.ERROR, "LLM provider not available: boom")
     ]
+
+
+def test_create_managed_openrouter_release_service_uses_http_broker_client_and_raw_fingerprint_provider() -> (
+    None
+):
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.openrouter.broker_base_url = "https://broker.example.test/"
+
+    service = controller._create_managed_openrouter_release_service(secrets=DummySecrets({}))
+
+    assert isinstance(service, ManagedOpenRouterReleaseService)
+    assert isinstance(service.client, HttpManagedOpenRouterBrokerClient)
+    assert service.client.base_url == "https://broker.example.test"
+    assert (
+        service.raw_hardware_fingerprint_provider is controller_module.get_raw_hardware_fingerprint
+    )
+
+
+def test_create_managed_openrouter_release_service_degrades_to_unavailable_client_for_invalid_broker_base_url() -> (
+    None
+):
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.openrouter.broker_base_url = "https://broker.example.test/prefix"
+
+    service = controller._create_managed_openrouter_release_service(secrets=DummySecrets({}))
+
+    assert isinstance(service, ManagedOpenRouterReleaseService)
+    assert isinstance(service.client, UnavailableManagedOpenRouterReleaseClient)
 
 
 @pytest.mark.asyncio

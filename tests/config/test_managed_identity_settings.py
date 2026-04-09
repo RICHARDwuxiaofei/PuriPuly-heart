@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from puripuly_heart.config.settings import (
+    DEFAULT_OPENROUTER_BROKER_BASE_URL,
     SETTINGS_SCHEMA_VERSION,
     AppSettings,
     OpenRouterCredentialSource,
@@ -32,12 +33,22 @@ def test_openrouter_selected_source_round_trip() -> None:
     assert restored.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
 
 
+def test_openrouter_broker_base_url_round_trip() -> None:
+    settings = AppSettings()
+    settings.openrouter.broker_base_url = "https://broker.example.test"
+
+    restored = from_dict(to_dict(settings))
+
+    assert restored.openrouter.broker_base_url == "https://broker.example.test"
+
+
 def test_load_settings_backfills_managed_identity_defaults(tmp_path) -> None:
     path = tmp_path / "settings.json"
     legacy = to_dict(AppSettings())
     legacy["settings_version"] = SETTINGS_SCHEMA_VERSION - 1
     legacy.pop("managed_identity", None)
     legacy["openrouter"].pop("selected_source", None)
+    legacy["openrouter"].pop("broker_base_url", None)
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
@@ -47,6 +58,7 @@ def test_load_settings_backfills_managed_identity_defaults(tmp_path) -> None:
     assert loaded.managed_identity.release_token is None
     assert loaded.managed_identity.release_token_expires_at is None
     assert loaded.openrouter.selected_source == OpenRouterCredentialSource.NONE
+    assert loaded.openrouter.broker_base_url == DEFAULT_OPENROUTER_BROKER_BASE_URL
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["managed_identity"] == {
         "installation_id": "",
@@ -54,3 +66,4 @@ def test_load_settings_backfills_managed_identity_defaults(tmp_path) -> None:
         "release_token_expires_at": None,
     }
     assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.NONE.value
+    assert persisted["openrouter"]["broker_base_url"] == DEFAULT_OPENROUTER_BROKER_BASE_URL

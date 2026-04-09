@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import threading
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -11,6 +14,7 @@ from puripuly_heart.config.settings import AppSettings, OpenRouterCredentialSour
 from puripuly_heart.core.managed_identity import ensure_managed_identity_bundle
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterChallengeSuccess,
+    ManagedOpenRouterFingerprintSalt,
     ManagedOpenRouterIssueSuccess,
     ManagedOpenRouterLLMProvider,
     ManagedOpenRouterPreflightStop,
@@ -75,12 +79,21 @@ class FakeManagedReleaseClient:
         return result
 
 
+@dataclass
+class ClosableFakeManagedReleaseClient(FakeManagedReleaseClient):
+    close_calls: int = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
 def _make_service(
     *,
     client: FakeManagedReleaseClient,
     settings: AppSettings | None = None,
     secrets: InMemorySecretStore | None = None,
     persist_calls: list[tuple[str | None, str | None]] | None = None,
+    raw_hardware_fingerprint_provider: Any | None = None,
 ) -> tuple[ManagedOpenRouterReleaseService, AppSettings, InMemorySecretStore]:
     resolved_settings = settings or AppSettings()
     resolved_settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
@@ -100,12 +113,27 @@ def _make_service(
         secrets=resolved_secrets,
         client=client,
         persist_settings=persist,
-        hardware_hash_provider=lambda: "hardware-hash-test",
         app_version="2.0.0",
+        raw_hardware_fingerprint_provider=(
+            raw_hardware_fingerprint_provider
+            if raw_hardware_fingerprint_provider is not None
+            else (lambda: "raw-hardware-fingerprint-test")
+        ),
         signed_at_provider=lambda: "2026-04-08T06:00:45.000Z",
         monotonic_ms_provider=lambda: 1_000,
     )
     return service, resolved_settings, resolved_secrets
+
+
+def _make_fingerprint_salt() -> ManagedOpenRouterFingerprintSalt:
+    return ManagedOpenRouterFingerprintSalt(version=7, salt="fingerprint-salt-test")
+
+
+def _expected_hardware_hash(*, fingerprint_salt: str, raw_hardware_fingerprint: str) -> str:
+    digest = hashlib.sha256(
+        f"{fingerprint_salt}{raw_hardware_fingerprint}".encode("utf-8")
+    ).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
 @pytest.mark.asyncio
@@ -133,6 +161,7 @@ async def test_prepare_for_translation_runs_challenge_then_verify_and_persists_r
         challenge_result=ManagedOpenRouterChallengeSuccess(
             challenge="challenge-1",
             challenge_expires_at="2026-04-08T06:05:00.000Z",
+            fingerprint_salt=_make_fingerprint_salt(),
         ),
         verify_result=ManagedOpenRouterVerifySuccess(
             release_token="release-token-1",
@@ -150,12 +179,80 @@ async def test_prepare_for_translation_runs_challenge_then_verify_and_persists_r
     assert [name for name, _payload in client.calls] == ["challenge", "verify"]
     verify_payload = client.calls[1][1]
     assert verify_payload["challenge"] == "challenge-1"
-    assert verify_payload["hardware_hash"] == "hardware-hash-test"
+    assert verify_payload["hardware_hash"] == _expected_hardware_hash(
+        fingerprint_salt="fingerprint-salt-test",
+        raw_hardware_fingerprint="raw-hardware-fingerprint-test",
+    )
     assert verify_payload["app_version"] == "2.0.0"
     assert settings.managed_identity.installation_id
     assert settings.managed_identity.release_token == "release-token-1"
     assert settings.managed_identity.release_token_expires_at == "2026-04-08T06:15:00.000Z"
     assert len(persist_calls) >= 2
+
+
+@pytest.mark.asyncio
+async def test_prepare_for_translation_preserves_legacy_hardware_hash_provider_semantics() -> None:
+    client = FakeManagedReleaseClient(
+        challenge_result=ManagedOpenRouterChallengeSuccess(
+            challenge="challenge-1",
+            challenge_expires_at="2026-04-08T06:05:00.000Z",
+            fingerprint_salt=_make_fingerprint_salt(),
+        ),
+        verify_result=ManagedOpenRouterVerifySuccess(
+            release_token="release-token-1",
+            release_token_expires_at="2026-04-08T06:15:00.000Z",
+        ),
+    )
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+
+    service = ManagedOpenRouterReleaseService(
+        settings=settings,
+        secrets=secrets,
+        client=client,
+        persist_settings=lambda _updated: None,
+        app_version="2.0.0",
+        hardware_hash_provider=lambda: "precomputed-hardware-hash-123",
+        signed_at_provider=lambda: "2026-04-08T06:00:45.000Z",
+        monotonic_ms_provider=lambda: 1_000,
+    )
+
+    await service.prepare_for_translation()
+
+    verify_payload = client.calls[1][1]
+    assert verify_payload["hardware_hash"] == "precomputed-hardware-hash-123"
+
+
+@pytest.mark.asyncio
+async def test_prepare_for_translation_collects_sync_raw_hardware_fingerprint_off_thread() -> None:
+    client = FakeManagedReleaseClient(
+        challenge_result=ManagedOpenRouterChallengeSuccess(
+            challenge="challenge-1",
+            challenge_expires_at="2026-04-08T06:05:00.000Z",
+            fingerprint_salt=_make_fingerprint_salt(),
+        ),
+        verify_result=ManagedOpenRouterVerifySuccess(
+            release_token="release-token-1",
+            release_token_expires_at="2026-04-08T06:15:00.000Z",
+        ),
+    )
+    event_loop_thread_id = threading.get_ident()
+    provider_thread_ids: list[int] = []
+
+    def raw_provider() -> str:
+        provider_thread_ids.append(threading.get_ident())
+        return "raw-hardware-fingerprint-test"
+
+    service, _, _ = _make_service(
+        client=client,
+        raw_hardware_fingerprint_provider=raw_provider,
+    )
+
+    await service.prepare_for_translation()
+
+    assert len(provider_thread_ids) == 1
+    assert provider_thread_ids[0] != event_loop_thread_id
 
 
 @pytest.mark.asyncio
@@ -183,6 +280,7 @@ async def test_prepare_for_translation_reuses_single_flight_for_repeated_trans_a
         challenge_result=ManagedOpenRouterChallengeSuccess(
             challenge="challenge-1",
             challenge_expires_at="2026-04-08T06:05:00.000Z",
+            fingerprint_salt=_make_fingerprint_salt(),
         ),
         verify_result=ManagedOpenRouterVerifySuccess(
             release_token="release-token-1",
@@ -210,6 +308,16 @@ async def test_prepare_for_translation_reuses_single_flight_for_repeated_trans_a
 
 
 @pytest.mark.asyncio
+async def test_close_closes_underlying_client_transport_when_available() -> None:
+    client = ClosableFakeManagedReleaseClient()
+    service, _, _ = _make_service(client=client)
+
+    await service.close()
+
+    assert client.close_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_issue_honors_retry_after_without_starting_parallel_retries() -> None:
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
@@ -219,9 +327,9 @@ async def test_issue_honors_retry_after_without_starting_parallel_retries() -> N
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     client = FakeManagedReleaseClient(
         issue_result=ManagedOpenRouterReleaseError(
-            code="issuance_suspended",
+            code="trial_unavailable",
             error_class="retryable",
-            message="new entitlement issuance is temporarily suspended",
+            message="managed OpenRouter release is unavailable",
             retry_after_ms=9_000,
         )
     )
@@ -232,8 +340,8 @@ async def test_issue_honors_retry_after_without_starting_parallel_retries() -> N
         secrets=secrets,
         client=client,
         persist_settings=lambda _updated: None,
-        hardware_hash_provider=lambda: "hardware-hash-test",
         app_version="2.0.0",
+        raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
         signed_at_provider=lambda: "2026-04-08T06:00:45.000Z",
         monotonic_ms_provider=lambda: monotonic_now["value"],
     )
@@ -258,9 +366,9 @@ async def test_prepare_for_translation_honors_retry_after_while_pending_release_
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     client = FakeManagedReleaseClient(
         issue_result=ManagedOpenRouterReleaseError(
-            code="issuance_suspended",
+            code="trial_unavailable",
             error_class="retryable",
-            message="new entitlement issuance is temporarily suspended",
+            message="managed OpenRouter release is unavailable",
             retry_after_ms=9_000,
         )
     )
@@ -269,8 +377,8 @@ async def test_prepare_for_translation_honors_retry_after_while_pending_release_
         secrets=secrets,
         client=client,
         persist_settings=lambda _updated: None,
-        hardware_hash_provider=lambda: "hardware-hash-test",
         app_version="2.0.0",
+        raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
         signed_at_provider=lambda: "2026-04-08T06:00:45.000Z",
         monotonic_ms_provider=lambda: 1_000,
     )
@@ -351,8 +459,8 @@ async def test_issue_restarts_when_identity_bundle_regenerates_before_issue() ->
         secrets=InMemorySecretStore(),
         client=client,
         persist_settings=lambda _updated: None,
-        hardware_hash_provider=lambda: "hardware-hash-test",
         app_version="2.0.0",
+        raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
         signed_at_provider=lambda: "2026-04-08T06:00:45.000Z",
         monotonic_ms_provider=lambda: 1_000,
     )
@@ -370,6 +478,7 @@ async def test_prepare_single_flight_survives_waiter_cancellation() -> None:
         challenge_result=ManagedOpenRouterChallengeSuccess(
             challenge="challenge-1",
             challenge_expires_at="2026-04-08T06:05:00.000Z",
+            fingerprint_salt=_make_fingerprint_salt(),
         ),
         verify_result=ManagedOpenRouterVerifySuccess(
             release_token="release-token-1",
@@ -402,6 +511,7 @@ async def test_close_cancels_in_flight_prepare_task() -> None:
         challenge_result=ManagedOpenRouterChallengeSuccess(
             challenge="challenge-1",
             challenge_expires_at="2026-04-08T06:05:00.000Z",
+            fingerprint_salt=_make_fingerprint_salt(),
         ),
         verify_result=ManagedOpenRouterVerifySuccess(
             release_token="release-token-1",
@@ -417,6 +527,89 @@ async def test_close_cancels_in_flight_prepare_task() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_prepare_for_translation_stops_when_hardware_fingerprint_lookup_fails() -> None:
+    client = FakeManagedReleaseClient(
+        challenge_result=ManagedOpenRouterChallengeSuccess(
+            challenge="challenge-1",
+            challenge_expires_at="2026-04-08T06:05:00.000Z",
+            fingerprint_salt=_make_fingerprint_salt(),
+        )
+    )
+    service, settings, secrets = _make_service(
+        client=client,
+        raw_hardware_fingerprint_provider=lambda: (_ for _ in ()).throw(
+            RuntimeError("fingerprint unavailable")
+        ),
+    )
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.STOP
+    assert result.message_key == "managed_release.stop"
+    assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert settings.managed_identity.release_token is None
+    assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) is None
+    assert [name for name, _payload in client.calls] == ["challenge"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "subcode"),
+    [
+        ("challenge", "device_public_key_registered"),
+        ("verify", "installation_binding_mismatch"),
+    ],
+)
+async def test_prepare_for_translation_regenerates_identity_on_binding_mismatch_security_fail(
+    stage: str,
+    subcode: str,
+) -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    first_bundle = ensure_managed_identity_bundle(
+        settings,
+        secrets,
+        persist_settings=lambda _updated: None,
+    )
+
+    if stage == "challenge":
+        client = FakeManagedReleaseClient(
+            challenge_result=ManagedOpenRouterReleaseError(
+                code="trial_not_eligible",
+                error_class="security_fail",
+                subcode=subcode,
+                message="device_public_key is already registered to a different installation_id",
+            )
+        )
+    else:
+        client = FakeManagedReleaseClient(
+            challenge_result=ManagedOpenRouterChallengeSuccess(
+                challenge="challenge-1",
+                challenge_expires_at="2026-04-08T06:05:00.000Z",
+                fingerprint_salt=_make_fingerprint_salt(),
+            ),
+            verify_result=ManagedOpenRouterReleaseError(
+                code="trial_not_eligible",
+                error_class="security_fail",
+                subcode=subcode,
+                message="verify must use the registered device_public_key for installation_id",
+            ),
+        )
+
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.RESTART
+    assert result.message_key == "managed_release.restart"
+    assert settings.managed_identity.installation_id != first_bundle.installation_id
+    assert settings.managed_identity.release_token is None
+    assert settings.managed_identity.release_token_expires_at is None
+    assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) is None
 
 
 @dataclass

@@ -260,23 +260,29 @@ def test_create_llm_provider_openrouter_uses_selected_managed_key() -> None:
     secrets = InMemorySecretStore()
     secrets.set("openrouter_api_key", "byok-key")
     secrets.set("openrouter_managed_api_key", "managed-key")
+    managed_release_service = object()
 
-    provider = create_llm_provider(settings, secrets=secrets)
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=managed_release_service,
+    )
 
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, OpenRouterLLMProvider)
     assert provider.inner.api_key == "managed-key"
 
 
-def test_create_llm_provider_openrouter_does_not_fallback_to_byok_when_managed_selected() -> None:
+def test_create_llm_provider_openrouter_requires_release_service_for_managed_mode() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
         openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.MANAGED),
     )
     secrets = InMemorySecretStore()
     secrets.set("openrouter_api_key", "byok-key")
+    secrets.set("openrouter_managed_api_key", "managed-key")
 
-    with pytest.raises(ValueError, match="managed key"):
+    with pytest.raises(ValueError, match="managed release service"):
         create_llm_provider(settings, secrets=secrets)
 
 
