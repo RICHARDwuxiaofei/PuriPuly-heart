@@ -80,7 +80,7 @@ jobs:
         working-directory: broker
         run: |
           deploy_dir='.deploy-direct'
-          config_path="$deploy_dir/wrangler.production.jsonc"
+          config_path='wrangler.production.jsonc'
           bootstrap_sql_path="$deploy_dir/fingerprint-bootstrap.sql"
           mkdir -p "$deploy_dir"
           fingerprint_salt="$(python3 - <<'PY'
@@ -123,6 +123,31 @@ jobs:
           puripuly-heart-broker --remote --config
           "${{ steps.render.outputs.config_path }}" --file
           "${{ steps.render.outputs.bootstrap_sql_path }}" --yes
+
+      - name: Verify fingerprint salt bootstrap completed
+        shell: bash
+        working-directory: broker
+        run: |
+          bootstrap_state_json="$(pnpm exec wrangler d1 execute \
+            puripuly-heart-broker --remote --config "${{ steps.render.outputs.config_path }}" \
+            --command "SELECT json_extract(value, '$.current.salt') AS salt FROM broker_config WHERE key = 'fingerprint_salt';" \
+            --json)"
+
+          python3 - <<'PY' "$bootstrap_state_json"
+          import json
+          import sys
+
+          payload = json.loads(sys.argv[1])
+          results = payload[0].get('results', [])
+
+          if len(results) != 1:
+              raise SystemExit('fingerprint_salt bootstrap validation returned an unexpected row count')
+
+          salt = results[0].get('salt')
+
+          if not salt or salt == '__BOOTSTRAP_REQUIRED__':
+              raise SystemExit('fingerprint_salt bootstrap validation failed; placeholder still present')
+          PY
 
       - name: Sync OpenRouter managed key secret
         shell: bash

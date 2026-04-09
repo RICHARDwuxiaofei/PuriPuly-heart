@@ -99,6 +99,8 @@ describe('broker direct deploy automation', () => {
     try {
       expect(renderedSql).not.toContain('__BOOTSTRAP_REQUIRED__');
       expect(renderedSql).toContain(bootstrapSalt);
+      expect(renderedSql).not.toContain('CREATE TEMP TABLE');
+      expect(renderedSql).toContain("json_extract(value, '$.current.salt') = '__BOOTSTRAP' || '_REQUIRED__'");
 
       applyBrokerMigrations(db);
       db.exec(renderedSql);
@@ -120,7 +122,7 @@ describe('broker direct deploy automation', () => {
     }
   });
 
-  it('fails guarded fingerprint bootstrap SQL when the placeholder has already been replaced', () => {
+  it('leaves the fingerprint salt unchanged when the placeholder has already been replaced', () => {
     const tempDir = createTempDir();
     const outputPath = join(tempDir, 'fingerprint-bootstrap.sql');
 
@@ -148,7 +150,20 @@ describe('broker direct deploy automation', () => {
         'fingerprint_salt',
       );
 
-      expect(() => db.exec(renderedSql)).toThrow(/constraint/i);
+      db.exec(renderedSql);
+
+      const row = db
+        .prepare('SELECT value FROM broker_config WHERE key = ?')
+        .get('fingerprint_salt') as { value: string };
+
+      expect(JSON.parse(row.value)).toEqual({
+        current: {
+          version: 1,
+          salt: 'already-bootstrapped',
+        },
+        previous: null,
+        rotated_at: null,
+      });
     } finally {
       db.close();
     }
@@ -170,7 +185,7 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toContain('render-fingerprint-bootstrap-sql.mjs');
     expect(workflow).toContain("working-directory: broker");
     expect(workflow).toContain("deploy_dir='.deploy-direct'");
-    expect(workflow).toContain('wrangler.production.jsonc');
+    expect(workflow).toContain("config_path='wrangler.production.jsonc'");
     expect(workflow).toContain('fingerprint-bootstrap.sql');
     expect(workflow).toMatch(/wrangler types --config/u);
     expect(workflow).toContain('BROKER_CANONICAL_WORKERS_DEV_URL is required');
@@ -181,6 +196,7 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toMatch(
       /wrangler d1 execute\s+puripuly-heart-broker\s+--remote\s+--config/u,
     );
+    expect(workflow).toContain("json_extract(value, '$.current.salt')");
     expect(workflow).toMatch(
       /wrangler secret put OPENROUTER_MANAGED_API_KEY --config/u,
     );
