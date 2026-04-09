@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import PropertyMock, patch
 
 from puripuly_heart.ui.views import logs as logs_module
@@ -17,13 +18,68 @@ from puripuly_heart.ui.views.logs import (
 
 
 class TestLogsView:
-    def test_overlay_child_lines_are_visible_in_merged_live_log_view(self):
+    def test_logs_view_supports_switch_variants_that_require_label_style(self):
+        original_switch = logs_module.ft.Switch
+        captured: dict[str, object] = {}
+
+        def fake_switch(*args, **kwargs):
+            captured["kwargs"] = dict(kwargs)
+            if "label_text_style" in kwargs:
+                raise TypeError(
+                    "Switch.__init__() got an unexpected keyword argument 'label_text_style'"
+                )
+            kwargs.pop("label_style", None)
+            return original_switch(*args, **kwargs)
+
+        with patch.object(logs_module.ft, "Switch", new=fake_switch):
+            view = LogsView()
+
+        assert "label_style" in captured["kwargs"]
+        assert "label_text_style" not in captured["kwargs"]
+        assert view._mode_toggle.label == logs_module.t("logs.mode.toggle")
+
+    def test_logs_view_exposes_detailed_mode_toggle_and_status(self):
+        view = LogsView()
+        seen: list[str] = []
+
+        view.on_mode_change = lambda mode: seen.append(mode)
+
+        assert view.runtime_logging_mode == "basic"
+        assert view._mode_toggle.label == logs_module.t("logs.mode.toggle")
+        assert view._mode_toggle.value is False
+        assert view._mode_status_text.value == logs_module.t(
+            "logs.mode.status",
+            mode=logs_module.t("logs.mode.basic"),
+        )
+
+        with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
+            view._on_mode_toggle(SimpleNamespace(control=SimpleNamespace(value=True)))
+
+        assert view.runtime_logging_mode == "detailed"
+        assert view._mode_toggle.value is True
+        assert view._mode_status_text.value == logs_module.t(
+            "logs.mode.status",
+            mode=logs_module.t("logs.mode.detailed"),
+        )
+        assert seen == ["detailed"]
+
+    def test_logs_view_preserves_existing_lines_when_switching_back_to_basic(self):
         model = LiveLogViewModel()
 
-        model.append_app_log("app line")
-        model.append_overlay_log("[overlay] child line")
+        model.append("[DETAILED] line")
+        model.append("basic line")
 
-        assert model.visible_lines[-2:] == ["app line", "[overlay] child line"]
+        assert model.visible_lines[-2:] == ["[DETAILED] line", "basic line"]
+
+        view = LogsView()
+        with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
+            view.set_runtime_logging_mode("detailed")
+            view.append_log("[DETAILED] before off")
+            view.set_runtime_logging_mode("basic")
+            view.append_log("basic after off")
+            view._flush_logs()
+
+        assert view._log_text.value == "[DETAILED] before off\nbasic after off"
 
     def test_append_log_adds_entry(self):
         """로그 항목이 정상적으로 추가되는지 확인"""
@@ -61,10 +117,10 @@ class TestLogsView:
     def test_flush_logs_appends_only_new_lines_when_buffer_only_grows(self):
         view = LogsView()
         with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
-            view._model.append_app_log("line 1")
+            view._model.append("line 1")
             view._flush_logs()
 
-            view._model.append_app_log("line 2")
+            view._model.append("line 2")
             view._flush_logs()
 
         assert view._log_text.value == "line 1\nline 2"
@@ -75,11 +131,11 @@ class TestLogsView:
         view = LogsView()
         with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
             for i in range(MAX_LOG_ENTRIES):
-                view._model.append_app_log(f"log {i}")
+                view._model.append(f"log {i}")
             view._flush_logs()
 
             for i in range(MAX_LOG_ENTRIES, MAX_LOG_ENTRIES + CLEANUP_BATCH + 1):
-                view._model.append_app_log(f"log {i}")
+                view._model.append(f"log {i}")
             view._flush_logs()
 
         assert view._last_cleanup_count == 1
@@ -89,9 +145,15 @@ class TestLogsView:
     def test_apply_locale_updates_title_and_folder_text(self):
         view = LogsView()
         with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
+            view.set_runtime_logging_mode("detailed")
             view.apply_locale()
         assert view._title_text.value == logs_module.t("logs.title")
-        assert view._folder_button.text == logs_module.t("logs.open_folder")
+        assert view._folder_button.content == logs_module.t("logs.open_folder")
+        assert view._mode_toggle.label == logs_module.t("logs.mode.toggle")
+        assert view._mode_status_text.value == logs_module.t(
+            "logs.mode.status",
+            mode=logs_module.t("logs.mode.detailed"),
+        )
 
     def test_open_log_folder_uses_platform_specific_launcher(self):
         view = LogsView()

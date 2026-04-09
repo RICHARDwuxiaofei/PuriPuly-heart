@@ -124,12 +124,13 @@ class UIEventBridge:
         if event.type == UIEventType.ERROR:
             payload = event.payload
             text = str(payload) if payload is not None else t("error.unknown")
-            if self.runtime_logging is not None:
-                self.runtime_logging.emit_basic(text, level=logging.ERROR)
-            else:
-                logs = getattr(self.app, "view_logs", None)
-                if logs is not None:
-                    logs.append_log(f"{t('log.error_prefix')}: {text}")
+            try:
+                if self.runtime_logging is not None:
+                    self.runtime_logging.emit_basic(text, level=logging.ERROR)
+                else:
+                    logger.error(text)
+            except Exception:
+                logger.error(text)
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 msg_lower = text.lower()

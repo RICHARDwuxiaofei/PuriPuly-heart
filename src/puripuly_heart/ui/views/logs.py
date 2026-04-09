@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 import flet as ft
 
@@ -23,6 +24,8 @@ from puripuly_heart.ui.theme import (
 MAX_LOG_ENTRIES = 4000
 CLEANUP_BATCH = 500
 _UPDATE_INTERVAL = 0.2  # 200ms throttling
+_BASIC_MODE = "basic"
+_DETAILED_MODE = "detailed"
 
 
 def _get_log_dir() -> Path:
@@ -72,13 +75,7 @@ class LiveLogViewModel:
     def cleanup_count(self) -> int:
         return self._cleanup_count
 
-    def append_app_log(self, record: str) -> None:
-        self._append(record)
-
-    def append_overlay_log(self, record: str) -> None:
-        self._append(record)
-
-    def _append(self, record: str) -> None:
+    def append(self, record: str) -> None:
         self._visible_lines.append(record)
         if len(self._visible_lines) > self._max_entries + self._cleanup_batch:
             del self._visible_lines[: self._cleanup_batch]
@@ -102,11 +99,17 @@ class LogsView(ft.Column):
     def __init__(self):
         super().__init__(expand=True, spacing=16)
 
+        self.on_mode_change: Callable[[str], None] | None = None
+
         self._handler: FletLogHandler | None = None
         self._title_text: ft.Text | None = None
+        self._mode_status_text: ft.Text | None = None
+        self._mode_toggle: ft.Switch | None = None
         self._log_text: ft.Text | None = None
         self._log_scroll: ft.Column | None = None
         self._folder_button: ft.TextButton | None = None
+        self._runtime_logging_mode = _BASIC_MODE
+        self._mode_toggle_style_attr = "label_text_style"
 
         # Log buffer and throttling state
         self._model = LiveLogViewModel()
@@ -140,6 +143,8 @@ class LogsView(ft.Column):
 
     def _build_ui(self):
         """Build the logs view UI."""
+        font_family = font_for_language(get_locale())
+
         # Title (styled like About page section headers)
         self._title_text = ft.Text(
             t("logs.title"),
@@ -150,37 +155,44 @@ class LogsView(ft.Column):
 
         # Folder open button (brown, hover -> primary)
         self._folder_button = ft.TextButton(
-            text=t("logs.open_folder"),
+            content=t("logs.open_folder"),
             icon=ft.Icons.FOLDER_OPEN,
-            style=ft.ButtonStyle(
-                color={
-                    ft.ControlState.HOVERED: COLOR_PRIMARY,
-                    ft.ControlState.DEFAULT: COLOR_NEUTRAL,
-                },
-                icon_color={
-                    ft.ControlState.HOVERED: COLOR_PRIMARY,
-                    ft.ControlState.DEFAULT: COLOR_NEUTRAL,
-                },
-                text_style=ft.TextStyle(
-                    size=20,
-                    font_family=font_for_language(get_locale()),
-                ),
-                overlay_color=ft.Colors.TRANSPARENT,
-                animation_duration=0,
-            ),
+            style=self._get_button_style(font_family),
             on_click=self._open_log_folder,
         )
 
-        # Header row
+        self._mode_status_text = ft.Text(
+            self._mode_status_value(),
+            size=18,
+            color=COLOR_NEUTRAL,
+            font_family=font_family,
+        )
+        self._mode_toggle = self._build_mode_toggle(font_family)
+
+        # Header rows
         header = ft.Container(
-            content=ft.Row(
+            content=ft.Column(
                 controls=[
-                    self._title_text,
-                    ft.Container(expand=True),
-                    self._folder_button,
+                    ft.Row(
+                        controls=[
+                            self._title_text,
+                            ft.Container(expand=True),
+                            self._folder_button,
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    ft.Row(
+                        controls=[
+                            self._mode_status_text,
+                            ft.Container(expand=True),
+                            self._mode_toggle,
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
                 ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=8,
             ),
             padding=ft.padding.only(left=16, right=8, top=8, bottom=0),
         )
@@ -241,20 +253,7 @@ class LogsView(ft.Column):
 
     def append_log(self, record: str):
         """Append a log entry with throttled updates."""
-        self._model.append_app_log(record)
-
-        # Throttled update
-        now = time.time()
-        if now - self._last_update >= _UPDATE_INTERVAL:
-            self._flush_logs()
-        else:
-            self._pending_update = True
-
-    def append_app_log(self, record: str) -> None:
-        self.append_log(record)
-
-    def append_overlay_log(self, record: str) -> None:
-        self._model.append_overlay_log(record)
+        self._model.append(record)
 
         # Throttled update
         now = time.time()
@@ -303,14 +302,72 @@ class LogsView(ft.Column):
 
     def apply_locale(self) -> None:
         """Refresh UI text when locale changes."""
+        font_family = font_for_language(get_locale())
         if self._title_text:
             self._title_text.value = t("logs.title")
         if self._folder_button:
-            self._folder_button.text = t("logs.open_folder")
-            self._folder_button.style = self._get_button_style(font_for_language(get_locale()))
+            self._folder_button.content = t("logs.open_folder")
+            self._folder_button.style = self._get_button_style(font_family)
+        if self._mode_toggle:
+            self._mode_toggle.label = t("logs.mode.toggle")
+            setattr(
+                self._mode_toggle,
+                self._mode_toggle_style_attr,
+                ft.TextStyle(size=18, font_family=font_family),
+            )
+        if self._mode_status_text:
+            self._mode_status_text.value = self._mode_status_value()
+            self._mode_status_text.font_family = font_family
         # Only update if added to page
         if self.page:
             self.update()
+
+    @property
+    def runtime_logging_mode(self) -> str:
+        return self._runtime_logging_mode
+
+    def set_runtime_logging_mode(self, mode: str) -> None:
+        self._runtime_logging_mode = self._normalize_mode(mode)
+        if self._mode_toggle is not None:
+            self._mode_toggle.value = self._runtime_logging_mode == _DETAILED_MODE
+        if self._mode_status_text is not None:
+            self._mode_status_text.value = self._mode_status_value()
+        if self.page:
+            self.update()
+
+    def _normalize_mode(self, mode: str) -> str:
+        normalized = str(getattr(mode, "value", mode)).lower()
+        if normalized not in {_BASIC_MODE, _DETAILED_MODE}:
+            raise ValueError(f"Unsupported runtime logging mode: {mode}")
+        return normalized
+
+    def _mode_status_value(self) -> str:
+        return t("logs.mode.status", mode=t(f"logs.mode.{self._runtime_logging_mode}"))
+
+    def _on_mode_toggle(self, e: ft.ControlEvent) -> None:
+        next_mode = _DETAILED_MODE if bool(getattr(e.control, "value", False)) else _BASIC_MODE
+        self.set_runtime_logging_mode(next_mode)
+        if callable(self.on_mode_change):
+            self.on_mode_change(next_mode)
+
+    def _build_mode_toggle(self, font_family: str) -> ft.Switch:
+        style = ft.TextStyle(size=18, font_family=font_family)
+        kwargs = {
+            "label": t("logs.mode.toggle"),
+            "value": False,
+            "active_color": COLOR_PRIMARY,
+            "on_change": self._on_mode_toggle,
+        }
+        try:
+            toggle = ft.Switch(**kwargs, label_style=style)
+            self._mode_toggle_style_attr = "label_style"
+            return toggle
+        except TypeError as exc:
+            if "label_style" not in str(exc):
+                raise
+        toggle = ft.Switch(**kwargs, label_text_style=style)
+        self._mode_toggle_style_attr = "label_text_style"
+        return toggle
 
     async def scroll_to_bottom(self) -> None:
         """Scroll to the latest log entry."""

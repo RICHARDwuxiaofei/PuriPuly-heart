@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 pytest.importorskip("flet")
+import flet as ft
 
 import puripuly_heart.ui.app as app_module
 from puripuly_heart.ui.app import TranslatorApp, _check_and_notify_update
@@ -64,8 +65,60 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
             self.app = app
             self.config_path = config_path
             self.settings = None
+            self.runtime_logging_mode = "detailed"
+
+        def set_runtime_logging_mode(self, mode: str) -> None:
+            self.runtime_logging_mode = mode
+
+    class DummyDashboardView(ft.Container):
+        def __init__(self) -> None:
+            super().__init__()
+            self.on_send_message = None
+            self.on_toggle_translation = None
+            self.on_toggle_stt = None
+            self.on_language_change = None
+
+        def apply_locale(self) -> None:
+            return None
+
+    class DummySettingsView(ft.Container):
+        def __init__(self) -> None:
+            super().__init__()
+            self.on_settings_changed = None
+            self.on_overlay_toggle = None
+            self.on_providers_changed = None
+            self.on_verify_api_key = None
+            self.on_secret_cleared = None
+            self.show_snackbar = None
+
+        def set_overlay_runtime_state(self, *_args, **_kwargs) -> None:
+            return None
+
+        def apply_locale(self) -> None:
+            return None
+
+    class DummyLogsView(ft.Container):
+        def __init__(self) -> None:
+            super().__init__()
+            self.on_mode_change = None
+            self.runtime_logging_mode = "basic"
+
+        def set_runtime_logging_mode(self, mode: str) -> None:
+            self.runtime_logging_mode = mode
+
+        def apply_locale(self) -> None:
+            return None
+
+        async def scroll_to_bottom(self) -> None:
+            return None
 
     monkeypatch.setattr(app_module, "GuiController", DummyController)
+    monkeypatch.setattr(app_module, "DashboardView", DummyDashboardView)
+    monkeypatch.setattr(app_module, "SettingsView", DummySettingsView)
+    monkeypatch.setattr(app_module, "LogsView", DummyLogsView)
+    monkeypatch.setattr(app_module, "AboutView", lambda: ft.Container())
+    monkeypatch.setattr(app_module, "TitleBar", lambda _page: ft.Container())
+    monkeypatch.setattr(app_module, "BottomNavBar", lambda on_change: ft.Container(data=on_change))
     monkeypatch.setattr(app_module, "register_fonts", lambda _page: None)
     monkeypatch.setattr(app_module, "get_app_theme", lambda **_kwargs: "theme")
     monkeypatch.setattr(app_module, "font_for_language", lambda _code: "font")
@@ -84,6 +137,29 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert app.view_dashboard.on_send_message == app._on_manual_submit
     assert app.view_settings.on_verify_api_key == app._on_verify_api_key
     assert app.view_settings.on_overlay_toggle == app._on_overlay_toggle
+    assert app.view_logs.on_mode_change == app._on_runtime_logging_mode_change
+    assert app.view_logs.runtime_logging_mode == "detailed"
+
+
+def test_on_runtime_logging_mode_change_updates_controller_and_logs_view() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    seen: list[str] = []
+
+    def fake_set_mode(mode: str) -> None:
+        seen.append(mode)
+        app.controller.runtime_logging_mode = mode
+
+    app.controller = SimpleNamespace(
+        runtime_logging_mode="basic",
+        set_runtime_logging_mode=fake_set_mode,
+    )
+    app.view_logs = SimpleNamespace(
+        set_runtime_logging_mode=lambda mode: seen.append(f"view:{mode}")
+    )
+
+    app._on_runtime_logging_mode_change("detailed")
+
+    assert seen == ["detailed", "view:detailed"]
 
 
 @pytest.mark.asyncio
@@ -180,7 +256,7 @@ async def test_on_nav_change_applies_pending_prompt_changes_when_leaving_setting
     assert seen == ["prompt-settings"]
 
 
-def test_apply_locale_updates_views_and_page() -> None:
+def test_apply_locale_updates_views_and_page(monkeypatch: pytest.MonkeyPatch) -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
     app.title_bar = SimpleNamespace(set_title=lambda value: setattr(app, "_title", value))
@@ -188,6 +264,9 @@ def test_apply_locale_updates_views_and_page() -> None:
     app.view_dashboard = SimpleNamespace(apply_locale=lambda: view_calls.append("dash"))
     app.view_settings = SimpleNamespace(apply_locale=lambda: view_calls.append("settings"))
     app.view_logs = SimpleNamespace(apply_locale=lambda: view_calls.append("logs"))
+    monkeypatch.setattr(app_module, "get_app_theme", lambda **_kwargs: "theme")
+    monkeypatch.setattr(app_module, "font_for_language", lambda _code: "font")
+    monkeypatch.setattr(app_module, "get_locale", lambda: "en")
 
     app.apply_locale()
 
@@ -381,6 +460,14 @@ async def test_check_and_notify_update_handles_none_and_available(
     monkeypatch.setattr(app_module, "check_for_update", has_update)
     opened_urls: list[str] = []
     monkeypatch.setattr(app_module.webbrowser, "open", lambda url: opened_urls.append(url))
+    monkeypatch.setattr(
+        app_module.ft, "Icon", lambda *args, **kwargs: SimpleNamespace(args=args, kwargs=kwargs)
+    )
+    monkeypatch.setattr(
+        app_module.ft,
+        "TextButton",
+        lambda *args, **kwargs: SimpleNamespace(on_click=kwargs.get("on_click")),
+    )
     await _check_and_notify_update(page)
 
     assert len(page.opened) == 1

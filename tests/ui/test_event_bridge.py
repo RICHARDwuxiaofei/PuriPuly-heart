@@ -13,6 +13,7 @@ pytest.importorskip("flet")
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.events import STTSessionState, UIEvent, UIEventType
 from puripuly_heart.domain.models import OSCMessage, Transcript, Translation
+from puripuly_heart.ui import event_bridge as event_bridge_module
 from puripuly_heart.ui.event_bridge import UIEventBridge
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.views.logs import FletLogHandler
@@ -235,11 +236,53 @@ async def test_event_bridge_ignores_unknown_event_and_keeps_queue_alive() -> Non
     await queue.put(UIEvent(type=UIEventType.ERROR, payload="after unknown"))
     await queue.join()
 
-    assert any("after unknown" in line for line in app.view_logs.lines)
+    assert app.view_dashboard.display_calls[-1] == ("after unknown", None, True)
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_error_without_runtime_logging_uses_standard_logger_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = DummyApp()
+    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    seen: list[str] = []
+    monkeypatch.setattr(event_bridge_module.logger, "error", lambda message: seen.append(message))
+
+    await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload="plain failure"))
+
+    assert seen == ["plain failure"]
+    assert app.view_logs.lines == []
+    assert app.view_dashboard.display_calls[-1] == ("plain failure", None, True)
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_error_with_broken_runtime_logging_uses_standard_logger_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = DummyApp()
+    seen: list[str] = []
+
+    class BrokenRuntimeLogging:
+        def emit_basic(self, _message: str, *, level: int = logging.INFO) -> None:
+            _ = level
+            raise RuntimeError("emit failed")
+
+    monkeypatch.setattr(event_bridge_module.logger, "error", lambda message: seen.append(message))
+    bridge = UIEventBridge(
+        app=app,
+        event_queue=asyncio.Queue(),
+        runtime_logging=BrokenRuntimeLogging(),
+    )
+
+    await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload="broken runtime"))
+
+    assert seen == ["broken runtime"]
+    assert app.view_logs.lines == []
+    assert app.view_dashboard.display_calls[-1] == ("broken runtime", None, True)
 
 
 def test_event_bridge_reports_overlay_state_to_app() -> None:

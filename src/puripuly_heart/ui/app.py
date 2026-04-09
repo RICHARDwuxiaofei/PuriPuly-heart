@@ -50,6 +50,8 @@ class TranslatorApp:
         self.view_settings.on_verify_api_key = self._on_verify_api_key
         self.view_settings.on_secret_cleared = self._on_secret_cleared
         self.view_settings.show_snackbar = self._show_snackbar
+        self.view_logs.on_mode_change = self._on_runtime_logging_mode_change
+        self.view_logs.set_runtime_logging_mode(self.controller.runtime_logging_mode)
 
         calibration_begin = getattr(self.controller, "begin_overlay_calibration", None)
         calibration_change = getattr(self.controller, "set_overlay_calibration_field", None)
@@ -260,6 +262,10 @@ class TranslatorApp:
             await self.controller.apply_settings(settings)
 
         self.page.run_task(_task)
+
+    def _on_runtime_logging_mode_change(self, mode: str) -> None:
+        self.controller.set_runtime_logging_mode(mode)
+        self.view_logs.set_runtime_logging_mode(self.controller.runtime_logging_mode)
 
     def _on_providers_changed(self) -> None:
         async def _task():

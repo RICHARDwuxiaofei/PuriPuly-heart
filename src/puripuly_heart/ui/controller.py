@@ -2201,10 +2201,6 @@ class GuiController:
             return
         except Exception:
             logger.error(message)
-            with contextlib.suppress(Exception):
-                logs = getattr(self.app, "view_logs", None)
-                if logs is not None:
-                    logs.append_log(f"{t('log.error_prefix')}: {message}")
 
     def _get_qwen_key_and_base_url(self, secrets) -> tuple[str, str]:
         if self.settings is None:

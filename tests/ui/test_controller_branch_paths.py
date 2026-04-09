@@ -557,6 +557,30 @@ async def test_verify_api_key_handles_empty_unknown_and_exception(
     assert any("[ERROR]" in line and "bad key" in line for line in logs.logs)
 
 
+def test_log_error_falls_back_to_standard_logger_without_direct_logs_view_append(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logs = DummyLogsView()
+    controller = _make_controller(app=SimpleNamespace(view_logs=logs))
+
+    class BrokenRuntimeLogging:
+        def attach_realtime_sink(self, _sink) -> None:
+            return None
+
+        def emit_basic(self, _message: str, *, level: int = logging.INFO) -> None:
+            _ = level
+            raise RuntimeError("emit failed")
+
+    controller._runtime_logging = BrokenRuntimeLogging()
+    seen: list[str] = []
+    monkeypatch.setattr(controller_module.logger, "error", lambda message: seen.append(message))
+
+    controller._log_error("fallback message")
+
+    assert seen == ["fallback message"]
+    assert logs.logs == []
+
+
 def test_sync_ui_from_settings_updates_dashboard_and_settings_view() -> None:
     settings = AppSettings()
     settings.languages.source_language = "ko"
