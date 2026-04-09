@@ -230,6 +230,7 @@ Installer_output/
 !/scripts/ci/read-project-version.py
 .codex/
 .agent/
+.agents/
 docs/plans/
 docs/superpowers
 .worktrees/
