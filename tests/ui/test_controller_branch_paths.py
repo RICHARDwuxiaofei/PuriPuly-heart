@@ -373,6 +373,7 @@ def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[s
         return sender
 
     def fake_osc(*_args, **_kwargs):
+        created["osc_kwargs"] = dict(_kwargs)
         osc = object()
         created["osc"] = osc
         return osc
@@ -1965,6 +1966,19 @@ async def test_init_pipeline_configures_receiver_after_pipeline_init(
     await controller._init_pipeline()
 
     assert snapshots == [(True, True, True, True)]
+
+
+@pytest.mark.asyncio
+async def test_init_pipeline_passes_runtime_logging_to_smart_osc_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    created = _patch_init_pipeline_dependencies(monkeypatch)
+
+    await controller._init_pipeline()
+
+    assert created["osc_kwargs"]["runtime_logging"] is controller.runtime_logging
 
 
 @pytest.mark.asyncio

@@ -1873,6 +1873,7 @@ class GuiController:
             max_chars=self.settings.osc.chatbox_max_chars,
             cooldown_s=self.settings.osc.cooldown_s,
             ttl_s=self.settings.osc.ttl_s,
+            runtime_logging=self.runtime_logging,
         )
 
         hub = ClientHub(

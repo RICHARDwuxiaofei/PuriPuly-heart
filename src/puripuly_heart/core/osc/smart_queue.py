@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from puripuly_heart.core.clock import Clock
 from puripuly_heart.core.osc.sender import OscSender
+from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.models import OSCMessage
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ class SmartOscQueue:
     max_chars: int = 144
     cooldown_s: float = 1.5
     ttl_s: float = 7.0
+    runtime_logging: SessionRuntimeLoggingService | None = None
     _next_send_at: float = 0.0
     _pending: list[OSCMessage] | None = None
 
@@ -52,14 +54,16 @@ class SmartOscQueue:
         parts = self._split_text(combined_text)
         head = parts[0]
         tail = parts[1:]
+        remaining_parts = len(tail)
 
-        logger.info(f"[OSC] Sending: '{head}'")
+        self._emit_send_attempt(mode="queued", text=head, remaining_parts=remaining_parts)
         try:
             self.sender.send_chatbox(head)
         except OSError as exc:
-            logger.warning(f"[OSC] Send failed: {exc}")
+            self._emit_send_failure(mode="queued", exc=exc)
             return
         self._next_send_at = now + self.cooldown_s
+        self._emit_send_delivered(mode="queued", text=head, remaining_parts=remaining_parts)
 
         self._pending.clear()
         if tail:
@@ -77,13 +81,14 @@ class SmartOscQueue:
         if not text:
             return False
         now = self.clock.now()
-        logger.info(f"[OSC] Sending (immediate): '{text}'")
+        self._emit_send_attempt(mode="immediate", text=text, remaining_parts=0)
         try:
             self.sender.send_chatbox(text)
         except OSError as exc:
-            logger.warning(f"[OSC] Send failed: {exc}")
+            self._emit_send_failure(mode="immediate", exc=exc)
             return False
         self._next_send_at = max(self._next_send_at, now + self.cooldown_s)
+        self._emit_send_delivered(mode="immediate", text=text, remaining_parts=0)
         return True
 
     def _drop_expired(self, now: float) -> None:
@@ -110,4 +115,36 @@ class SmartOscQueue:
         try:
             self.sender.send_typing(is_typing)
         except OSError as exc:
-            logger.warning(f"[OSC] Typing send failed: {exc}")
+            self._emit_basic(
+                f"[Basic][OSC] typing status=failed error={exc}", level=logging.WARNING
+            )
+
+    def _emit_send_attempt(self, *, mode: str, text: str, remaining_parts: int) -> None:
+        self._emit_detailed(
+            f"[Detailed][OSC] send mode={mode} status=attempt chars={len(text)} "
+            f"remaining_parts={remaining_parts} text={text!r}"
+        )
+
+    def _emit_send_delivered(self, *, mode: str, text: str, remaining_parts: int) -> None:
+        self._emit_basic(
+            f"[Basic][OSC] send mode={mode} status=delivered chars={len(text)} "
+            f"remaining_parts={remaining_parts}"
+        )
+
+    def _emit_send_failure(self, *, mode: str, exc: OSError) -> None:
+        self._emit_basic(
+            f"[Basic][OSC] send mode={mode} status=failed error={exc}",
+            level=logging.WARNING,
+        )
+
+    def _emit_basic(self, message: str, *, level: int = logging.INFO) -> None:
+        if self.runtime_logging is not None:
+            self.runtime_logging.emit_basic(message, level=level)
+            return
+        logger.log(level, message)
+
+    def _emit_detailed(self, message: str, *, level: int = logging.INFO) -> None:
+        if self.runtime_logging is not None:
+            self.runtime_logging.emit_detailed(message, level=level)
+            return
+        logger.debug(message)
