@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import logging
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -8,10 +10,12 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.events import STTSessionState, UIEvent, UIEventType
 from puripuly_heart.domain.models import OSCMessage, Transcript, Translation
 from puripuly_heart.ui.event_bridge import UIEventBridge
 from puripuly_heart.ui.i18n import t
+from puripuly_heart.ui.views.logs import FletLogHandler
 
 
 class DummyDashboard:
@@ -167,22 +171,57 @@ async def test_event_bridge_routes_translation_and_osc_history_by_language_mode(
 
 
 @pytest.mark.asyncio
-async def test_event_bridge_handles_error_and_soniox_shutdown_suppression() -> None:
+async def test_event_bridge_handles_error_and_soniox_shutdown_suppression(tmp_path) -> None:
     app = DummyApp()
-    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    root_logger = logging.getLogger(f"test.event_bridge.root.{uuid4()}")
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+    session_logger = logging.getLogger(f"test.event_bridge.session.{uuid4()}")
+    session_logger.handlers.clear()
+    session_logger.propagate = False
+    log_file = tmp_path / "event-bridge.log"
+    stream_handler = logging.StreamHandler(io.StringIO())
+    stream_handler.setFormatter(logging.Formatter("%(message)s"))
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+    runtime_logging = SessionRuntimeLoggingService(
+        root_logger=root_logger,
+        session_logger=session_logger,
+        sinks=SimpleNamespace(
+            stream_handler=stream_handler,
+            file_handler=file_handler,
+            log_file=log_file,
+        ),
+        ui_handler_factory=FletLogHandler,
+    )
+    runtime_logging.attach_realtime_sink(app.view_logs)
+    bridge = UIEventBridge(
+        app=app,
+        event_queue=asyncio.Queue(),
+        runtime_logging=runtime_logging,
+    )
 
-    app.controller.hub.stt.state = STTSessionState.DRAINING
-    await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload="Soniox 400 bad request"))
+    try:
+        app.controller.hub.stt.state = STTSessionState.DRAINING
+        await bridge._handle_event(
+            UIEvent(type=UIEventType.ERROR, payload="Soniox 400 bad request")
+        )
 
-    app.controller.hub.stt.state = STTSessionState.STREAMING
-    await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload="General failure"))
-    await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload=None))
+        app.controller.hub.stt.state = STTSessionState.STREAMING
+        await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload="General failure"))
+        await bridge._handle_event(UIEvent(type=UIEventType.ERROR, payload=None))
 
-    assert len(app.view_logs.lines) == 3
-    assert app.view_dashboard.display_calls[-2:] == [
-        ("General failure", None, True),
-        (t("error.unknown"), None, True),
-    ]
+        assert len(app.view_logs.lines) == 3
+        assert all("[ERROR]" in line for line in app.view_logs.lines)
+        assert app.view_dashboard.display_calls[-2:] == [
+            ("General failure", None, True),
+            (t("error.unknown"), None, True),
+        ]
+    finally:
+        runtime_logging.close()
+        for handler in list(root_logger.handlers):
+            root_logger.removeHandler(handler)
+            handler.close()
 
 
 @pytest.mark.asyncio

@@ -552,7 +552,8 @@ async def test_verify_api_key_handles_empty_unknown_and_exception(
     assert empty == (False, "API Key is empty")
     assert unknown == (False, "Unknown provider: mystery")
     assert errored == (False, "bad key")
-    assert any("bad key" in line for line in logs.logs)
+    assert getattr(controller, "runtime_logging_mode", None) == "basic"
+    assert any("[ERROR]" in line and "bad key" in line for line in logs.logs)
 
 
 def test_sync_ui_from_settings_updates_dashboard_and_settings_view() -> None:
@@ -938,7 +939,7 @@ async def test_rebuild_pipeline_closes_previous_peer_runtime_before_replacement(
     new_hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
 
     class FakeUIEventBridge:
-        def __init__(self, *, app, event_queue) -> None:
+        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
             self.app = app
             self.event_queue = event_queue
 
@@ -986,7 +987,7 @@ async def test_rebuild_pipeline_rebinds_overlay_presenter_to_new_hub(
     new_hub = DummyHub(llm=object(), stt=object())
 
     class FakeUIEventBridge:
-        def __init__(self, *, app, event_queue) -> None:
+        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
             self.app = app
             self.event_queue = event_queue
 
@@ -1039,7 +1040,7 @@ async def test_rebuild_pipeline_refreshes_overlay_dependencies_without_overlay_r
     events: list[tuple[str, object]] = []
 
     class FakeUIEventBridge:
-        def __init__(self, *, app, event_queue) -> None:
+        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
             events.append(("bridge_init", event_queue))
 
         async def run(self) -> None:
@@ -1798,6 +1799,35 @@ async def test_stop_closes_peer_runtime_without_replacing_self_stt(
 
 
 @pytest.mark.asyncio
+async def test_stop_closes_runtime_logging_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    events: list[str] = []
+
+    class FakeRuntimeLogging:
+        def close(self) -> None:
+            events.append("runtime_logging_close")
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_shutdown_overlay_runtime",
+        lambda self, preserve_failure_reason: asyncio.sleep(0),
+    )
+
+    controller._runtime_logging = FakeRuntimeLogging()
+
+    await controller.stop()
+
+    assert events == ["runtime_logging_close"]
+    assert controller._runtime_logging is None
+
+
+@pytest.mark.asyncio
 async def test_apply_settings_updates_vrc_gate_and_reconfigures_receiver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2105,8 +2135,8 @@ async def test_start_initializes_dashboard_and_bridge(
     hub = DummyHub(llm=object(), stt=object())
 
     class FakeBridge:
-        def __init__(self, *, app, event_queue) -> None:
-            bridge_events.append(("init", app, event_queue))
+        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
+            bridge_events.append(("init", app, event_queue, runtime_logging))
 
         async def run(self) -> None:
             bridge_events.append("run")
@@ -2131,20 +2161,25 @@ async def test_start_initializes_dashboard_and_bridge(
     )
     controller = _make_controller(app=app)
 
+    assert callable(getattr(controller, "set_runtime_logging_mode", None))
+    controller.set_runtime_logging_mode("detailed")
+
     await controller.start()
     await asyncio.sleep(0)
 
     assert controller.settings is settings
+    assert getattr(controller, "runtime_logging", None) is not None
+    assert getattr(controller, "runtime_logging_mode", None) == "basic"
     assert sync_calls == ["synced"]
     assert locale_calls == [settings.ui.locale, "apply"]
-    assert logs.attach_calls == 1
+    assert logs.attach_calls == 0
     assert dash.stt_needs_key is False
     assert dash.translation_needs_key is False
     assert dash.stt_enabled is False
     assert dash.translation_enabled is False
     assert hub.translation_enabled is False
     assert hub.start_calls == [True]
-    assert bridge_events[0] == ("init", app, hub.ui_events)
+    assert bridge_events[0] == ("init", app, hub.ui_events, controller.runtime_logging)
     assert "run" in bridge_events
 
 
@@ -2170,7 +2205,7 @@ async def test_start_keeps_managed_openrouter_dashboard_toggle_available_without
     monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
 
     class FakeBridge:
-        def __init__(self, *, app, event_queue) -> None:
+        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
             _ = (app, event_queue)
 
         async def run(self) -> None:
@@ -3445,8 +3480,8 @@ async def test_rebuild_pipeline_restarts_runtime_and_schedules_verify(
             events.append(("new_hub_start", auto_flush_osc))
 
     class FakeBridge:
-        def __init__(self, *, app, event_queue) -> None:
-            events.append(("bridge_init", app, event_queue))
+        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
+            events.append(("bridge_init", app, event_queue, runtime_logging))
 
         async def run(self) -> None:
             events.append("bridge_run")

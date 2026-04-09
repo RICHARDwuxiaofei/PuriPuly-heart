@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.events import STTSessionState, UIEvent, UIEventType
 from puripuly_heart.domain.models import OSCMessage, Transcript, Translation
 from puripuly_heart.ui.i18n import t
@@ -11,9 +12,16 @@ logger = logging.getLogger(__name__)
 
 
 class UIEventBridge:
-    def __init__(self, *, app: object, event_queue: asyncio.Queue[UIEvent]):
+    def __init__(
+        self,
+        *,
+        app: object,
+        event_queue: asyncio.Queue[UIEvent],
+        runtime_logging: SessionRuntimeLoggingService | None = None,
+    ):
         self.app = app
         self.event_queue = event_queue
+        self.runtime_logging = runtime_logging
         self._running = False
 
     def _get_language_codes(self) -> tuple[str | None, str | None]:
@@ -116,9 +124,12 @@ class UIEventBridge:
         if event.type == UIEventType.ERROR:
             payload = event.payload
             text = str(payload) if payload is not None else t("error.unknown")
-            logs = getattr(self.app, "view_logs", None)
-            if logs is not None:
-                logs.append_log(f"{t('log.error_prefix')}: {text}")
+            if self.runtime_logging is not None:
+                self.runtime_logging.emit_basic(text, level=logging.ERROR)
+            else:
+                logs = getattr(self.app, "view_logs", None)
+                if logs is not None:
+                    logs.append_log(f"{t('log.error_prefix')}: {text}")
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 msg_lower = text.lower()
