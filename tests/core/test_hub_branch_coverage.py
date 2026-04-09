@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import logging
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
@@ -9,6 +11,7 @@ import pytest
 
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.orchestrator.hub import ClientHub, ContextEntry, _MergeBuffer
+from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd
 from puripuly_heart.domain.events import (
@@ -100,6 +103,61 @@ class BlockingOverlaySink:
         self.events.append(event)
         self.started.set()
         await self.release.wait()
+
+
+@dataclass(slots=True)
+class RaisingOverlaySink:
+    error: Exception = field(default_factory=lambda: RuntimeError("overlay down"))
+
+    async def emit(self, event: object) -> None:
+        _ = event
+        raise self.error
+
+
+@dataclass(slots=True)
+class RaisingEventSTT:
+    error: Exception = field(default_factory=lambda: RuntimeError("loop boom"))
+
+    async def events(self):
+        if False:
+            yield None
+        raise self.error
+
+
+@dataclass(slots=True)
+class _RuntimeLogSinks:
+    stream_handler: logging.Handler
+    file_handler: logging.Handler
+    log_file: object
+
+
+def _make_runtime_logging_capture() -> tuple[SessionRuntimeLoggingService, io.StringIO]:
+    stream = io.StringIO()
+    stream_handler = logging.StreamHandler(stream)
+    stream_handler.setFormatter(logging.Formatter("%(message)s"))
+
+    root_logger = logging.getLogger(f"test.hub.runtime.root.{uuid4()}")
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+
+    session_logger = logging.getLogger(f"test.hub.runtime.session.{uuid4()}")
+    session_logger.handlers.clear()
+    session_logger.propagate = False
+
+    runtime_logging = SessionRuntimeLoggingService(
+        root_logger=root_logger,
+        session_logger=session_logger,
+        sinks=_RuntimeLogSinks(
+            stream_handler=stream_handler,
+            file_handler=logging.NullHandler(),
+            log_file="runtime.log",
+        ),
+    )
+    return runtime_logging, stream
+
+
+def _runtime_log_messages(stream: io.StringIO) -> list[str]:
+    return [line for line in stream.getvalue().splitlines() if line]
 
 
 @pytest.mark.asyncio
@@ -323,30 +381,165 @@ def test_send_stt_connected_notification_does_not_update_time_on_failed_send() -
     assert hub._last_promo_time is None
 
 
+def test_prepare_llm_request_routes_context_logs_by_runtime_visibility() -> None:
+    basic_runtime_logging, basic_stream = _make_runtime_logging_capture()
+    detailed_runtime_logging, detailed_stream = _make_runtime_logging_capture()
+    detailed_runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+
+    basic_hub = ClientHub(
+        stt=None,
+        llm=StubLLM(),
+        osc=RecordingOscQueue(),
+        clock=FakeClock(_now=10.0),
+        runtime_logging=basic_runtime_logging,
+    )
+    detailed_hub = ClientHub(
+        stt=None,
+        llm=StubLLM(),
+        osc=RecordingOscQueue(),
+        clock=FakeClock(_now=10.0),
+        runtime_logging=detailed_runtime_logging,
+    )
+
+    try:
+        basic_hub._remember_context_entry("안녕", 9.0)
+        detailed_hub._remember_context_entry("안녕", 9.0)
+
+        basic_hub._prepare_llm_request_with_mode("입력")
+        detailed_hub._prepare_llm_request_with_mode("입력")
+
+        basic_messages = _runtime_log_messages(basic_stream)
+        detailed_messages = _runtime_log_messages(detailed_stream)
+
+        assert "[Hub] Context mode: channel=self mode=local" in basic_messages
+        assert "[Hub] Context apply: channel=self text='입력' entries=1" not in basic_messages
+        assert '[Hub] Context[0]: [1s ago] "안녕"' not in basic_messages
+
+        assert "[Hub] Context mode: channel=self mode=local" in detailed_messages
+        assert "[Hub] Context apply: channel=self text='입력' entries=1" in detailed_messages
+        assert '[Hub] Context[0]: [1s ago] "안녕"' in detailed_messages
+    finally:
+        basic_runtime_logging.close()
+        detailed_runtime_logging.close()
+
+
+@pytest.mark.asyncio
+async def test_handle_stt_event_logs_basic_channel_state_breadcrumb() -> None:
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+        runtime_logging=runtime_logging,
+    )
+
+    try:
+        await hub._handle_stt_event(
+            STTSessionStateEvent(state=STTSessionState.STREAMING, channel="peer")
+        )
+
+        event = await hub.ui_events.get()
+        assert event.type == UIEventType.SESSION_STATE_CHANGED
+        assert event.channel == "peer"
+        assert "[Hub] STT state: channel=peer state=STREAMING" in _runtime_log_messages(log_stream)
+    finally:
+        runtime_logging.close()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_osc_emits_payload_preview_only_in_detailed_runtime_logs() -> None:
+    basic_runtime_logging, basic_stream = _make_runtime_logging_capture()
+    detailed_runtime_logging, detailed_stream = _make_runtime_logging_capture()
+    detailed_runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+
+    basic_hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+        runtime_logging=basic_runtime_logging,
+    )
+    detailed_hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+        runtime_logging=detailed_runtime_logging,
+    )
+    utterance_id = uuid4()
+
+    try:
+        await basic_hub._enqueue_osc(
+            utterance_id,
+            transcript_text="hello world from transcript",
+            translation_text="hello world translated",
+        )
+        await detailed_hub._enqueue_osc(
+            utterance_id,
+            transcript_text="hello world from transcript",
+            translation_text="hello world translated",
+        )
+
+        basic_event = await basic_hub.ui_events.get()
+        detailed_event = await detailed_hub.ui_events.get()
+        assert basic_event.type == UIEventType.OSC_SENT
+        assert detailed_event.type == UIEventType.OSC_SENT
+
+        basic_messages = _runtime_log_messages(basic_stream)
+        detailed_messages = _runtime_log_messages(detailed_stream)
+
+        assert not any("OSC enqueue preview" in message for message in basic_messages)
+        assert any(
+            message.startswith("[Hub] OSC enqueue preview:")
+            and "hello world from transcript (hello world translated)" in message
+            for message in detailed_messages
+        )
+    finally:
+        basic_runtime_logging.close()
+        detailed_runtime_logging.close()
+
+
 @pytest.mark.asyncio
 async def test_handle_stt_event_routes_non_low_latency_events() -> None:
-    hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), clock=FakeClock())
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+        runtime_logging=runtime_logging,
+    )
     hub.mark_promo_eligible()
     utterance_id = uuid4()
     partial = Transcript(utterance_id=utterance_id, text="hel", is_final=False, created_at=1.0)
     final = Transcript(utterance_id=utterance_id, text="hello", is_final=True, created_at=2.0)
 
-    await hub._handle_stt_event(STTSessionStateEvent(state=STTSessionState.STREAMING))
-    await hub._handle_stt_event(STTErrorEvent(message="boom"))
-    await hub._handle_stt_event(STTPartialEvent(utterance_id=utterance_id, transcript=partial))
-    await hub._handle_stt_event(STTFinalEvent(utterance_id=utterance_id, transcript=final))
+    try:
+        await hub._handle_stt_event(STTSessionStateEvent(state=STTSessionState.STREAMING))
+        await hub._handle_stt_event(STTErrorEvent(message="boom"))
+        await hub._handle_stt_event(STTPartialEvent(utterance_id=utterance_id, transcript=partial))
+        await hub._handle_stt_event(STTFinalEvent(utterance_id=utterance_id, transcript=final))
 
-    events = [await hub.ui_events.get() for _ in range(5)]
-    assert [event.type for event in events] == [
-        UIEventType.SESSION_STATE_CHANGED,
-        UIEventType.ERROR,
-        UIEventType.TRANSCRIPT_PARTIAL,
-        UIEventType.TRANSCRIPT_FINAL,
-        UIEventType.OSC_SENT,
-    ]
-    assert hub.osc.immediate_messages == ["PuriPuly ON!"]
-    assert len(hub.osc.messages) == 1
-    assert hub.osc.messages[0].text == "hello"
+        events = [await hub.ui_events.get() for _ in range(5)]
+        assert [event.type for event in events] == [
+            UIEventType.SESSION_STATE_CHANGED,
+            UIEventType.ERROR,
+            UIEventType.TRANSCRIPT_PARTIAL,
+            UIEventType.TRANSCRIPT_FINAL,
+            UIEventType.OSC_SENT,
+        ]
+        assert events[1].runtime_log_handled is False
+        assert hub.osc.immediate_messages == ["PuriPuly ON!"]
+        assert len(hub.osc.messages) == 1
+        assert hub.osc.messages[0].text == "hello"
+        assert (
+            "[Hub] Translation skipped (stage=final, channel=self, publish_chatbox=True): "
+            "llm unavailable"
+        ) in _runtime_log_messages(log_stream)
+    finally:
+        runtime_logging.close()
 
 
 @pytest.mark.asyncio
@@ -369,20 +562,30 @@ async def test_handle_stt_event_ignores_partial_in_low_latency_mode() -> None:
 @pytest.mark.asyncio
 async def test_translate_and_enqueue_emits_error_and_fallback_transcript() -> None:
     llm = StubLLM(should_fail=True)
+    runtime_logging, log_stream = _make_runtime_logging_capture()
     hub = ClientHub(
         stt=None,
         llm=llm,
         osc=RecordingOscQueue(),
         clock=FakeClock(),
         fallback_transcript_only=True,
+        runtime_logging=runtime_logging,
     )
     utterance_id = uuid4()
 
-    await hub._translate_and_enqueue(utterance_id, "hello")
+    try:
+        await hub._translate_and_enqueue(utterance_id, "hello")
 
-    events = [await hub.ui_events.get() for _ in range(2)]
-    assert [event.type for event in events] == [UIEventType.ERROR, UIEventType.OSC_SENT]
-    assert hub.osc.messages[0].text == "hello"
+        events = [await hub.ui_events.get() for _ in range(2)]
+        assert [event.type for event in events] == [UIEventType.ERROR, UIEventType.OSC_SENT]
+        assert events[0].runtime_log_handled is True
+        assert hub.osc.messages[0].text == "hello"
+        assert (
+            "[Hub] Translation failed (stage=final, channel=self): llm failed"
+            in _runtime_log_messages(log_stream)
+        )
+    finally:
+        runtime_logging.close()
 
 
 @pytest.mark.asyncio
@@ -403,6 +606,125 @@ async def test_try_commit_after_spec_respects_allow_fallback_flag(
     await hub._try_commit_after_spec(buffer, reason="spec_failed", allow_fallback=True)
 
     assert called == ["spec_failed"]
+
+
+@pytest.mark.asyncio
+async def test_run_spec_translation_logs_spec_failure_only_in_detailed_mode() -> None:
+    basic_runtime_logging, basic_stream = _make_runtime_logging_capture()
+    detailed_runtime_logging, detailed_stream = _make_runtime_logging_capture()
+    detailed_runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+
+    basic_hub = ClientHub(
+        stt=None,
+        llm=StubLLM(should_fail=True),
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+        runtime_logging=basic_runtime_logging,
+        low_latency_mode=True,
+    )
+    detailed_hub = ClientHub(
+        stt=None,
+        llm=StubLLM(should_fail=True),
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+        runtime_logging=detailed_runtime_logging,
+        low_latency_mode=True,
+    )
+    basic_buffer = _MergeBuffer(
+        merge_id=uuid4(), parts=["hello"], spec_text="hello", spec_attempts=1
+    )
+    detailed_buffer = _MergeBuffer(
+        merge_id=uuid4(), parts=["hello"], spec_text="hello", spec_attempts=1
+    )
+    basic_hub._merge_buffer = basic_buffer
+    detailed_hub._merge_buffer = detailed_buffer
+
+    try:
+        await basic_hub._run_spec_translation(basic_buffer.merge_id, "hello", 1)
+        await detailed_hub._run_spec_translation(detailed_buffer.merge_id, "hello", 1)
+
+        assert not any(
+            "[Hub] Translation failed (stage=spec, channel=self): llm failed" in message
+            for message in _runtime_log_messages(basic_stream)
+        )
+        assert any(
+            "[Hub] Translation failed (stage=spec, channel=self): llm failed" in message
+            for message in _runtime_log_messages(detailed_stream)
+        )
+    finally:
+        basic_runtime_logging.close()
+        detailed_runtime_logging.close()
+
+
+@pytest.mark.asyncio
+async def test_handle_stt_event_preserves_runtime_logged_flag_from_stt_errors() -> None:
+    hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), clock=FakeClock())
+
+    await hub._handle_stt_event(
+        STTErrorEvent(message="session failed", channel="peer", runtime_log_handled=True)
+    )
+
+    event = await hub.ui_events.get()
+    assert event.type == UIEventType.ERROR
+    assert event.channel == "peer"
+    assert event.runtime_log_handled is True
+
+
+@pytest.mark.asyncio
+async def test_run_stt_event_loop_without_runtime_logging_preserves_traceback(caplog) -> None:
+    hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), clock=FakeClock())
+
+    with (
+        pytest.raises(RuntimeError, match="loop boom"),
+        caplog.at_level(logging.ERROR, logger="puripuly_heart.core.orchestrator.hub"),
+    ):
+        await hub._run_stt_event_loop(RaisingEventSTT())
+
+    assert "[Hub] STT event loop crashed: loop boom" in caplog.messages
+    assert any(record.exc_info is not None for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_emit_overlay_event_routes_traceback_to_detailed_runtime_logs() -> None:
+    basic_runtime_logging, basic_stream = _make_runtime_logging_capture()
+    detailed_runtime_logging, detailed_stream = _make_runtime_logging_capture()
+    detailed_runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+
+    basic_hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=RaisingOverlaySink(),
+        clock=FakeClock(),
+        runtime_logging=basic_runtime_logging,
+    )
+    detailed_hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=RaisingOverlaySink(),
+        clock=FakeClock(),
+        runtime_logging=detailed_runtime_logging,
+    )
+
+    try:
+        await basic_hub._emit_overlay_event(object())
+        await detailed_hub._emit_overlay_event(object())
+
+        basic_messages = _runtime_log_messages(basic_stream)
+        detailed_messages = _runtime_log_messages(detailed_stream)
+
+        assert "[Hub] Overlay sink emit failed: overlay down" in basic_messages
+        assert not any(
+            "Traceback (most recent call last):" in message for message in basic_messages
+        )
+
+        assert "[Hub] Overlay sink emit failed: overlay down" in detailed_messages
+        assert any("Traceback (most recent call last):" in message for message in detailed_messages)
+        assert any("RuntimeError: overlay down" in message for message in detailed_messages)
+    finally:
+        basic_runtime_logging.close()
+        detailed_runtime_logging.close()
 
 
 @pytest.mark.asyncio

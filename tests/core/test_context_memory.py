@@ -444,7 +444,7 @@ class TestContextInternalPaths:
         )
 
         assert mode == "integrated"
-        assert context == ('- [12s ago] "I am ready"\n' '- [peer, 7s ago] "hello from peer"')
+        assert context == ('- [12s ago] "I am ready"\n- [peer, 7s ago] "hello from peer"')
 
     def test_context_resolver_always_uses_integrated_when_peer_enabled(self):
         self_runtime = ClientHub(
@@ -500,7 +500,7 @@ class TestContextInternalPaths:
 
 
 class TestContextLogging:
-    def test_prepare_llm_request_logs_zero_entries_for_utterance(
+    def test_prepare_llm_request_without_runtime_logging_keeps_basic_context_mode_only(
         self, caplog: pytest.LogCaptureFixture
     ):
         hub = ClientHub(
@@ -513,9 +513,10 @@ class TestContextLogging:
         with caplog.at_level(logging.INFO, logger="puripuly_heart.core.orchestrator.hub"):
             hub._prepare_llm_request("입력")
 
-        assert "[Hub] Context apply: channel=self text='입력' entries=0" in caplog.messages
+        assert "[Hub] Context mode: channel=self mode=local" in caplog.messages
+        assert "[Hub] Context apply: channel=self text='입력' entries=0" not in caplog.messages
 
-    def test_prepare_llm_request_logs_context_entries_for_utterance(
+    def test_prepare_llm_request_without_runtime_logging_suppresses_context_entry_dumps(
         self, caplog: pytest.LogCaptureFixture
     ):
         clock = FakeClock(initial_time=20.0)
@@ -535,8 +536,9 @@ class TestContextLogging:
         with caplog.at_level(logging.INFO, logger="puripuly_heart.core.orchestrator.hub"):
             hub._prepare_llm_request("입력")
 
-        assert "[Hub] Context apply: channel=self text='입력' entries=1" in caplog.messages
-        assert '[Hub] Context[0]: [1s ago] "안녕"' in caplog.messages
+        assert "[Hub] Context mode: channel=self mode=local" in caplog.messages
+        assert "[Hub] Context apply: channel=self text='입력' entries=1" not in caplog.messages
+        assert '[Hub] Context[0]: [1s ago] "안녕"' not in caplog.messages
 
     def test_prepare_llm_request_logs_context_mode_only_when_changed(
         self, caplog: pytest.LogCaptureFixture

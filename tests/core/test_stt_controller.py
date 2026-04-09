@@ -1,17 +1,56 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import logging
 from dataclasses import dataclass
 from uuid import uuid4
 
 import numpy as np
 
 from puripuly_heart.core.clock import FakeClock
+from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.gating import SpeechEnd, SpeechStart
 from puripuly_heart.domain.events import STTFinalEvent, STTSessionState, STTSessionStateEvent
 from tests.helpers.fakes import samples
+
+
+@dataclass(slots=True)
+class _RuntimeLogSinks:
+    stream_handler: logging.Handler
+    file_handler: logging.Handler
+    log_file: object
+
+
+def _make_runtime_logging_capture() -> tuple[SessionRuntimeLoggingService, io.StringIO]:
+    stream = io.StringIO()
+    stream_handler = logging.StreamHandler(stream)
+    stream_handler.setFormatter(logging.Formatter("%(message)s"))
+
+    root_logger = logging.getLogger(f"test.stt.runtime.root.{uuid4()}")
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+
+    session_logger = logging.getLogger(f"test.stt.runtime.session.{uuid4()}")
+    session_logger.handlers.clear()
+    session_logger.propagate = False
+
+    runtime_logging = SessionRuntimeLoggingService(
+        root_logger=root_logger,
+        session_logger=session_logger,
+        sinks=_RuntimeLogSinks(
+            stream_handler=stream_handler,
+            file_handler=logging.NullHandler(),
+            log_file="runtime.log",
+        ),
+    )
+    return runtime_logging, stream
+
+
+def _runtime_log_messages(stream: io.StringIO) -> list[str]:
+    return [line for line in stream.getvalue().splitlines() if line]
 
 
 @dataclass(slots=True)
@@ -199,6 +238,7 @@ async def test_stt_controller_connects_on_speech_start():
 async def test_stt_controller_resets_with_bridging_during_speech():
     """Timer-based reset triggers bridging when speaking at deadline."""
     backend = FakeBackend()
+    runtime_logging, log_stream = _make_runtime_logging_capture()
     stt = ManagedSTTProvider(
         backend=backend,
         sample_rate_hz=16000,
@@ -206,21 +246,28 @@ async def test_stt_controller_resets_with_bridging_during_speech():
         drain_timeout_s=0.05,
         bridging_ms=64,
         finalize_grace_s=0.0,
+        runtime_logging=runtime_logging,
     )
 
-    uid = __import__("uuid").uuid4()
-    stream = stt.events()
-    await stt.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
-    _ = await _next_event(stream)
+    try:
+        uid = __import__("uuid").uuid4()
+        stream = stt.events()
+        await stt.handle_vad_event(SpeechStart(uid, pre_roll=samples(0.0), chunk=samples(1.0)))
+        _ = await _next_event(stream)
 
-    # Wait for timer to fire while still speaking (utterance_id is set)
-    await asyncio.sleep(0.15)
+        # Wait for timer to fire while still speaking (utterance_id is set)
+        await asyncio.sleep(0.15)
 
-    assert len(backend.sessions) == 2
-    assert len(backend.sessions[1].audio) >= 1  # bridging audio
-    assert "on_speech_end" not in backend.sessions[0].calls
+        assert len(backend.sessions) == 2
+        assert len(backend.sessions[1].audio) >= 1  # bridging audio
+        assert "on_speech_end" not in backend.sessions[0].calls
 
-    await stt.close()
+        messages = _runtime_log_messages(log_stream)
+        assert "[STT] Session reset while speaking; bridged to a new session" in messages
+        assert not any("BRIDGING:" in message for message in messages)
+    finally:
+        await stt.close()
+        runtime_logging.close()
 
 
 async def test_stt_controller_resets_on_silence():
@@ -445,6 +492,75 @@ async def test_stt_controller_reconnect_fallback_on_failure():
     await stt.close()
 
 
+async def test_stt_controller_summarizes_retry_connect_in_basic_runtime_logs() -> None:
+    class RetryOnceBackend:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def open_session(self):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ConnectionError("temporary outage")
+            return FakeSession()
+
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    stt = ManagedSTTProvider(
+        backend=RetryOnceBackend(),
+        sample_rate_hz=16000,
+        clock=FakeClock(),
+        connect_attempts=2,
+        connect_retry_base_s=0.001,
+        connect_retry_max_s=0.001,
+        runtime_logging=runtime_logging,
+    )
+
+    try:
+        stream = stt.events()
+        await stt.handle_vad_event(SpeechStart(uuid4(), pre_roll=samples(0.0), chunk=samples(1.0)))
+        await _next_state(stream, STTSessionState.STREAMING)
+
+        messages = _runtime_log_messages(log_stream)
+        assert "[STT] Session connected after 1 retry" in messages
+        assert not any("Opening new session" in message for message in messages)
+        assert not any("Retrying session in" in message for message in messages)
+    finally:
+        await stt.close()
+        runtime_logging.close()
+
+
+async def test_stt_controller_without_runtime_logging_stays_basic_only(caplog) -> None:
+    class RetryOnceBackend:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def open_session(self):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ConnectionError("temporary outage")
+            return FakeSession()
+
+    stt = ManagedSTTProvider(
+        backend=RetryOnceBackend(),
+        sample_rate_hz=16000,
+        clock=FakeClock(),
+        connect_attempts=2,
+        connect_retry_base_s=0.001,
+        connect_retry_max_s=0.001,
+    )
+
+    try:
+        with caplog.at_level(logging.INFO, logger="puripuly_heart.core.stt.controller"):
+            await stt.handle_vad_event(
+                SpeechStart(uuid4(), pre_roll=samples(0.0), chunk=samples(1.0))
+            )
+
+        assert "[STT] Session connected after 1 retry" in caplog.messages
+        assert not any("Opening new session" in message for message in caplog.messages)
+        assert not any("Retrying session in" in message for message in caplog.messages)
+    finally:
+        await stt.close()
+
+
 async def test_managed_stt_provider_peer_channel_produces_final_event():
     provider = ManagedSTTProvider(
         backend=FakeBackend(),
@@ -484,7 +600,9 @@ async def test_managed_stt_provider_skips_empty_audio_send() -> None:
     assert b"" not in session.audio
 
 
-async def test_managed_stt_provider_invokes_terminal_failure_callback_after_consumer_error() -> None:
+async def test_managed_stt_provider_invokes_terminal_failure_callback_after_consumer_error() -> (
+    None
+):
     errors: list[str] = []
     backend = FailingBackend(RuntimeError("closed"))
     stt = ManagedSTTProvider(

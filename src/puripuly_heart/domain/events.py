@@ -61,6 +61,7 @@ class STTErrorEvent:
     message: str
     utterance_id: UUID | None = None
     channel: ChannelId = "self"
+    runtime_log_handled: bool = False
     type: STTEventType = STTEventType.ERROR
 
     def __post_init__(self) -> None:
@@ -97,6 +98,7 @@ class UIEvent:
     payload: object | None = None
     source: str | None = None
     channel: ChannelId | None = None
+    runtime_log_handled: bool = False
 
     def __post_init__(self) -> None:
         resolved_channel = self.channel

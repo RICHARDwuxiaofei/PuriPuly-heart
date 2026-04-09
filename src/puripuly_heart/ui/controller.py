@@ -1704,6 +1704,7 @@ class GuiController:
                 reset_deadline_s=STT_RESET_DEADLINE_S,
                 drain_timeout_s=self.settings.stt.drain_timeout_s,
                 bridging_ms=self.settings.audio.ring_buffer_ms,
+                runtime_logging=self.runtime_logging,
             )
         except Exception as exc:
             self._log_error(f"STT backend not available: {exc}")
@@ -1736,6 +1737,7 @@ class GuiController:
             drain_timeout_s=self.settings.stt.drain_timeout_s,
             bridging_ms=max(1, config.vad_pre_roll_ms),
             on_terminal_failure=on_terminal_failure,
+            runtime_logging=self.runtime_logging,
         )
 
     def _create_peer_audio_source_from_runtime_config(self, config: PeerRuntimeConfig):
@@ -1858,6 +1860,7 @@ class GuiController:
                 reset_deadline_s=STT_RESET_DEADLINE_S,
                 drain_timeout_s=self.settings.stt.drain_timeout_s,
                 bridging_ms=self.settings.audio.ring_buffer_ms,
+                runtime_logging=self.runtime_logging,
             )
         except Exception as exc:
             self._log_error(f"STT backend not available: {exc}")
@@ -1884,6 +1887,7 @@ class GuiController:
             osc=osc,
             peer_stt=None,
             clock=self.clock,
+            runtime_logging=self.runtime_logging,
             source_language=self.settings.languages.source_language,
             target_language=self.settings.languages.target_language,
             peer_source_language=self.settings.languages.peer_source_language,
