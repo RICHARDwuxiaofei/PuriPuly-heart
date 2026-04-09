@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+import traceback
 from dataclasses import dataclass, field
 from typing import Protocol
 from uuid import UUID, uuid4
@@ -24,6 +26,7 @@ from puripuly_heart.core.overlay.sink import (
     OverlaySink,
     OverlayStreamCoalescer,
 )
+from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadEvent
 from puripuly_heart.domain.events import (
     STTErrorEvent,
@@ -75,6 +78,7 @@ class ClientHub:
     overlay_sink: OverlaySink | None = None
     overlay_diagnostics: OverlayDiagnosticsRecorder | None = None
     clock: Clock = SystemClock()
+    runtime_logging: SessionRuntimeLoggingService | None = None
 
     source_language: str = "ko"
     target_language: str = "en"
@@ -208,6 +212,96 @@ class ClientHub:
         self._speech_ended_ids = self.self_runtime.speech_ended_ids
         self._merge_buffer = self.self_runtime.merge_buffer
 
+    @staticmethod
+    def _format_log_message(message: str, *args: object) -> str:
+        return message % args if args else message
+
+    def _emit_basic(
+        self,
+        message: str,
+        *args: object,
+        level: int = logging.INFO,
+        fallback_level: int | None = None,
+    ) -> None:
+        formatted = self._format_log_message(message, *args)
+        if self.runtime_logging is not None:
+            self.runtime_logging.emit_basic(formatted, level=level)
+            return
+        logger.log(level if fallback_level is None else fallback_level, formatted)
+
+    def _emit_detailed(
+        self,
+        message: str,
+        *args: object,
+        level: int = logging.INFO,
+        fallback_level: int | None = None,
+    ) -> None:
+        formatted = self._format_log_message(message, *args)
+        if self.runtime_logging is not None:
+            self.runtime_logging.emit_detailed(formatted, level=level)
+        _ = fallback_level
+
+    def _emit_metric(self, message: str, *args: object) -> None:
+        self._emit_detailed(message, *args, fallback_level=logging.DEBUG)
+
+    def _emit_exception_summary(
+        self,
+        message: str,
+        *args: object,
+        level: int = logging.ERROR,
+    ) -> None:
+        formatted = self._format_log_message(message, *args)
+        if self.runtime_logging is not None:
+            self.runtime_logging.emit_basic(formatted, level=level)
+            detail = "".join(traceback.format_exception(*sys.exc_info())).rstrip()
+            if detail:
+                self.runtime_logging.emit_detailed(detail, level=level)
+            return
+        logger.exception(formatted)
+
+    def _translation_skip_reason(self, runtime: ChannelRuntime) -> str:
+        if self.llm is None:
+            return "llm unavailable"
+        if not self.translation_enabled:
+            return "translation disabled"
+        if runtime.channel == "peer" and not self.peer_translation_enabled:
+            return "peer translation disabled"
+        return "translation disabled"
+
+    def _log_translation_skipped(
+        self,
+        *,
+        stage: str,
+        runtime: ChannelRuntime,
+        publish_chatbox: bool,
+    ) -> None:
+        self._emit_detailed(
+            "[Hub] Translation skipped (stage=%s, channel=%s, publish_chatbox=%s): %s",
+            stage,
+            runtime.channel,
+            publish_chatbox,
+            self._translation_skip_reason(runtime),
+            fallback_level=logging.INFO,
+        )
+
+    def _log_translation_failure(
+        self,
+        *,
+        stage: str,
+        runtime: ChannelRuntime,
+        exc: Exception,
+        detailed: bool = False,
+    ) -> None:
+        emit = self._emit_detailed if detailed else self._emit_basic
+        emit(
+            "[Hub] Translation failed (stage=%s, channel=%s): %s",
+            stage,
+            runtime.channel,
+            exc,
+            level=logging.ERROR,
+            fallback_level=logging.ERROR,
+        )
+
     async def start(self, *, auto_flush_osc: bool = False) -> None:
         if self._running:
             return
@@ -277,7 +371,7 @@ class ClientHub:
         """Clear the translation context history."""
         self.self_runtime.clear_context()
         self.peer_runtime.clear_context()
-        logger.info("[Hub] Context history cleared")
+        self._emit_basic("[Hub] Context history cleared")
 
     def _get_valid_context(self) -> list[ContextEntry]:
         """Get context entries within time window and max entries limit."""
@@ -317,7 +411,7 @@ class ClientHub:
         if last_mode == applied_mode:
             return
         self._last_logged_context_modes[runtime.channel] = applied_mode
-        logger.info("[Hub] Context mode: channel=%s mode=%s", runtime.channel, applied_mode)
+        self._emit_basic("[Hub] Context mode: channel=%s mode=%s", runtime.channel, applied_mode)
 
     def _log_context_application(
         self,
@@ -327,15 +421,21 @@ class ClientHub:
         context: str,
     ) -> None:
         context_lines = context.splitlines() if context else []
-        logger.info(
+        self._emit_detailed(
             "[Hub] Context apply: channel=%s text=%r entries=%s",
             runtime.channel,
             text,
             len(context_lines),
+            fallback_level=logging.INFO,
         )
         for index, line in enumerate(context_lines):
             display_line = line[2:] if line.startswith("- ") else line
-            logger.info("[Hub] Context[%s]: %s", index, display_line)
+            self._emit_detailed(
+                "[Hub] Context[%s]: %s",
+                index,
+                display_line,
+                fallback_level=logging.INFO,
+            )
 
     async def handle_vad_event(self, event: VadEvent) -> None:
         resume_overlay_resync_buffer: _MergeBuffer | None = None
@@ -419,8 +519,12 @@ class ClientHub:
                 await self._handle_stt_event(ev)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("[Hub] STT event loop crashed")
+        except Exception as exc:
+            self._emit_exception_summary(
+                "[Hub] STT event loop crashed: %s",
+                exc,
+                level=logging.ERROR,
+            )
             raise
 
     async def _stop_stt_event_loop(self) -> None:
@@ -442,6 +546,11 @@ class ClientHub:
 
     async def _handle_stt_event(self, event: object) -> None:
         if isinstance(event, STTSessionStateEvent):
+            self._emit_basic(
+                "[Hub] STT state: channel=%s state=%s",
+                event.channel,
+                event.state.name,
+            )
             await self.ui_events.put(
                 UIEvent(
                     type=UIEventType.SESSION_STATE_CHANGED,
@@ -460,6 +569,7 @@ class ClientHub:
                     payload=event.message,
                     source="Peer" if event.channel == "peer" else "Mic",
                     channel=event.channel,
+                    runtime_log_handled=event.runtime_log_handled,
                 )
             )
             return
@@ -470,8 +580,9 @@ class ClientHub:
             self._send_stt_connected_notification()
             if self.low_latency_mode:
                 return
-            logger.debug(
-                f"[Hub] STT Partial: '{event.transcript.text[:50]}...' id={str(event.transcript.utterance_id)[:8]}"
+            self._emit_detailed(
+                f"[Hub] STT Partial: '{event.transcript.text[:50]}...' id={str(event.transcript.utterance_id)[:8]}",
+                fallback_level=logging.DEBUG,
             )
             await self._handle_transcript(event.transcript, is_final=False, source="Mic")
             return
@@ -486,12 +597,10 @@ class ClientHub:
                 return
             await self._handle_transcript(event.transcript, is_final=True, source=source)
             if self.llm is None or not self._translation_enabled_for_runtime(runtime):
-                logger.info(
-                    "[Hub] Skipping translation (llm=%s, self_enabled=%s, peer_enabled=%s, channel=%s)",
-                    self.llm is not None,
-                    self.translation_enabled,
-                    self.peer_translation_enabled,
-                    runtime.channel,
+                self._log_translation_skipped(
+                    stage="final",
+                    runtime=runtime,
+                    publish_chatbox=self._should_publish_to_chatbox(runtime),
                 )
                 if self._should_publish_to_chatbox(runtime):
                     await self._enqueue_osc(
@@ -607,9 +716,13 @@ class ClientHub:
             return
         try:
             await self.overlay_sink.emit(event)  # type: ignore[arg-type]
-        except Exception:
+        except Exception as exc:
             self.last_error_source = "overlay_sink"
-            logger.exception("[Hub] Overlay sink emit failed")
+            self._emit_exception_summary(
+                "[Hub] Overlay sink emit failed: %s",
+                exc,
+                level=logging.ERROR,
+            )
 
     async def _emit_overlay_active_self_event(self, event: object) -> None:
         await self._emit_overlay_event(event)
@@ -662,9 +775,8 @@ class ClientHub:
             source=source,
             reuse_mode=reuse_mode,
         )
-        if (
-            active_text == self._overlay_active_self_text
-            and secondary_text == (self._overlay_active_self_secondary_text or "")
+        if active_text == self._overlay_active_self_text and secondary_text == (
+            self._overlay_active_self_secondary_text or ""
         ):
             return
 
@@ -889,7 +1001,7 @@ class ClientHub:
                     merged = self._merge_with_overlap(existing, text)
                 if merged != existing:
                     buffer.parts[idx] = merged
-                    logger.debug(
+                    self._emit_metric(
                         "[Metric] final_update id=%s index=%s text_len=%s",
                         str(buffer.merge_id)[:8],
                         idx,
@@ -922,13 +1034,13 @@ class ClientHub:
             return False
         if buffer.spec_task is not None and not buffer.spec_task.done():
             buffer.spec_task.cancel()
-            logger.debug(
+            self._emit_metric(
                 "[Metric] spec_cancel id=%s reason=%s",
                 str(buffer.merge_id)[:8],
                 reason,
             )
         elif buffer.spec_translation is not None:
-            logger.debug(
+            self._emit_metric(
                 "[Metric] spec_cancel id=%s reason=%s",
                 str(buffer.merge_id)[:8],
                 reason,
@@ -996,7 +1108,7 @@ class ClientHub:
             return
         if not buffer.awaiting_vad_end:
             return
-        logger.debug(
+        self._emit_metric(
             "[Metric] awaiting_vad_timeout id=%s timeout_s=%s",
             str(merge_id)[:8],
             self.low_latency_awaiting_vad_timeout_s,
@@ -1033,7 +1145,7 @@ class ClientHub:
             return
         if not buffer.resume_confirmed:
             return
-        logger.debug(
+        self._emit_metric(
             "[Metric] resume_end_timeout id=%s vad_id=%s timeout_s=%s",
             str(merge_id)[:8],
             str(utterance_id)[:8],
@@ -1052,7 +1164,7 @@ class ClientHub:
         buffer.finalize_wait_task = asyncio.create_task(
             self._finalize_wait_timeout(buffer.merge_id, buffer.finalize_wait_started_at)
         )
-        logger.debug(
+        self._emit_metric(
             "[Metric] post_end_grace_start id=%s wait_ms=%s",
             str(buffer.merge_id)[:8],
             self.low_latency_finalize_wait_ms,
@@ -1070,7 +1182,7 @@ class ClientHub:
             return
         buffer.finalize_wait_task = None
         buffer.finalize_wait_started_at = None
-        logger.debug(
+        self._emit_metric(
             "[Metric] post_end_grace_timeout id=%s wait_ms=%s",
             str(merge_id)[:8],
             self.low_latency_finalize_wait_ms,
@@ -1093,7 +1205,7 @@ class ClientHub:
         buffer.resume_utterance_id = event.utterance_id
         buffer.resume_chunk_count = 0
         buffer.resume_started_at = self.clock.now()
-        logger.debug(
+        self._emit_metric(
             "[Metric] resume_pending id=%s vad_id=%s",
             str(buffer.merge_id)[:8],
             str(event.utterance_id)[:8],
@@ -1114,7 +1226,7 @@ class ClientHub:
         confirm_ms = 0
         if buffer.resume_started_at is not None:
             confirm_ms = int((self.clock.now() - buffer.resume_started_at) * 1000)
-        logger.debug(
+        self._emit_metric(
             "[Metric] resume_confirmed id=%s confirm_ms=%s chunk_count=%s",
             str(buffer.merge_id)[:8],
             confirm_ms,
@@ -1140,7 +1252,7 @@ class ClientHub:
         false_ms = 0
         if buffer.resume_started_at is not None:
             false_ms = int((self.clock.now() - buffer.resume_started_at) * 1000)
-        logger.debug(
+        self._emit_metric(
             "[Metric] resume_false_start id=%s false_ms=%s chunk_count=%s",
             str(buffer.merge_id)[:8],
             false_ms,
@@ -1174,7 +1286,7 @@ class ClientHub:
             buffer.awaiting_vad_utterance_id = transcript.utterance_id
             self._cancel_finalize_wait(buffer)
             self._start_awaiting_vad_timeout(buffer)
-            logger.debug(
+            self._emit_metric(
                 "[Metric] final_phase id=%s phase=pre_end vad_id=%s",
                 str(buffer.merge_id)[:8],
                 str(transcript.utterance_id)[:8],
@@ -1189,7 +1301,7 @@ class ClientHub:
                 buffer.awaiting_vad_end = False
                 buffer.awaiting_vad_utterance_id = None
             self._restart_post_end_grace(buffer)
-            logger.debug(
+            self._emit_metric(
                 "[Metric] final_phase id=%s phase=post_end vad_id=%s",
                 str(buffer.merge_id)[:8],
                 str(transcript.utterance_id)[:8],
@@ -1206,7 +1318,7 @@ class ClientHub:
             hold_ms = 0
             if buffer.spec_done_at is not None:
                 hold_ms = int((self.clock.now() - buffer.spec_done_at) * 1000)
-            logger.debug(
+            self._emit_metric(
                 "[Metric] commit_blocked id=%s reason=%s hold_ms=%s",
                 str(buffer.merge_id)[:8],
                 reason,
@@ -1217,7 +1329,7 @@ class ClientHub:
             hold_ms = 0
             if buffer.finalize_wait_started_at is not None:
                 hold_ms = int((self.clock.now() - buffer.finalize_wait_started_at) * 1000)
-            logger.debug(
+            self._emit_metric(
                 "[Metric] commit_blocked id=%s reason=await_vad_end hold_ms=%s",
                 str(buffer.merge_id)[:8],
                 hold_ms,
@@ -1227,7 +1339,7 @@ class ClientHub:
             hold_ms = 0
             if buffer.finalize_wait_started_at is not None:
                 hold_ms = int((self.clock.now() - buffer.finalize_wait_started_at) * 1000)
-            logger.debug(
+            self._emit_metric(
                 "[Metric] commit_deferred id=%s reason=post_end_grace hold_ms=%s",
                 str(buffer.merge_id)[:8],
                 hold_ms,
@@ -1266,10 +1378,10 @@ class ClientHub:
         await self._handle_transcript(transcript, is_final=True, source="Mic")
 
         if self.llm is None or not self.translation_enabled:
-            logger.info(
-                "[Hub] Skipping translation (llm=%s, enabled=%s)",
-                self.llm is not None,
-                self.translation_enabled,
+            self._log_translation_skipped(
+                stage="final",
+                runtime=self.self_runtime,
+                publish_chatbox=True,
             )
             await self._enqueue_osc(
                 buffer.merge_id, transcript_text=final_text, translation_text=None
@@ -1283,7 +1395,7 @@ class ClientHub:
         commit_delay_ms = 0
         if buffer.start_time is not None:
             commit_delay_ms = int((self.clock.now() - buffer.start_time) * 1000)
-        logger.debug(
+        self._emit_metric(
             "[Metric] merge_commit id=%s used_spec=%s parts=%s text_len=%s commit_delay_ms=%s reason=%s",
             str(buffer.merge_id)[:8],
             reuse_spec,
@@ -1295,7 +1407,7 @@ class ClientHub:
         if reuse_spec:
             translation = buffer.spec_translation
             if translation is not None:
-                logger.debug(
+                self._emit_metric(
                     "[Metric] spec_reuse id=%s translation_len=%s after_final=%s",
                     str(buffer.merge_id)[:8],
                     len(translation.text),
@@ -1330,7 +1442,7 @@ class ClientHub:
                 return
 
         if buffer.spec_translation is not None and reuse_mode is None:
-            logger.debug(
+            self._emit_metric(
                 "[Metric] spec_cancel id=%s reason=final_mismatch", str(buffer.merge_id)[:8]
             )
 
@@ -1349,7 +1461,7 @@ class ClientHub:
         buffer.spec_attempts += 1
         buffer.spec_text = merged_text
         buffer.spec_started_at = self.clock.now()
-        logger.debug(
+        self._emit_metric(
             "[Metric] spec_start id=%s text_len=%s attempt=%s",
             str(buffer.merge_id)[:8],
             len(merged_text),
@@ -1367,7 +1479,12 @@ class ClientHub:
         except asyncio.CancelledError:
             return
         except Exception as exc:
-            logger.error(f"[Hub] Spec translation failed: {exc}")
+            self._log_translation_failure(
+                stage="spec",
+                runtime=self.self_runtime,
+                exc=exc,
+                detailed=True,
+            )
             buffer = self._merge_buffer
             if buffer is None or buffer.merge_id != merge_id:
                 return
@@ -1389,7 +1506,7 @@ class ClientHub:
             latency_ms = 0
         else:
             latency_ms = int((self.clock.now() - buffer.spec_started_at) * 1000)
-        logger.debug(
+        self._emit_metric(
             "[Metric] spec_done id=%s spec_latency_ms=%s translation_len=%s",
             str(merge_id)[:8],
             latency_ms,
@@ -1407,7 +1524,7 @@ class ClientHub:
             hold_ms = 0
             if buffer.spec_done_at is not None:
                 hold_ms = int((self.clock.now() - buffer.spec_done_at) * 1000)
-            logger.debug(
+            self._emit_metric(
                 "[Metric] commit_blocked id=%s reason=%s hold_ms=%s",
                 str(buffer.merge_id)[:8],
                 reason,
@@ -1418,7 +1535,7 @@ class ClientHub:
             hold_ms = 0
             if buffer.finalize_wait_started_at is not None:
                 hold_ms = int((self.clock.now() - buffer.finalize_wait_started_at) * 1000)
-            logger.debug(
+            self._emit_metric(
                 "[Metric] commit_blocked id=%s reason=await_vad_end hold_ms=%s",
                 str(buffer.merge_id)[:8],
                 hold_ms,
@@ -1428,7 +1545,7 @@ class ClientHub:
             hold_ms = 0
             if buffer.finalize_wait_started_at is not None:
                 hold_ms = int((self.clock.now() - buffer.finalize_wait_started_at) * 1000)
-            logger.debug(
+            self._emit_metric(
                 "[Metric] commit_deferred id=%s reason=post_end_grace hold_ms=%s",
                 str(buffer.merge_id)[:8],
                 hold_ms,
@@ -1657,13 +1774,14 @@ class ClientHub:
                 )
             raise
         except Exception as exc:
-            logger.error(f"[Hub] Translation failed: {exc}")
+            self._log_translation_failure(stage="final", runtime=runtime, exc=exc)
             await self.ui_events.put(
                 UIEvent(
                     type=UIEventType.ERROR,
                     utterance_id=utterance_id,
                     payload=str(exc),
                     source=self._get_source(utterance_id, channel=runtime.channel),
+                    runtime_log_handled=True,
                 )
             )
             if runtime.channel == "self":
@@ -1846,17 +1964,16 @@ class ClientHub:
             merged = translation_text
 
         msg = OSCMessage(utterance_id=utterance_id, text=merged, created_at=self.clock.now())
+        runtime = self._runtime_for_utterance(utterance_id)
 
-        # Calculate and log E2E latency (includes hangover time)
-        start_time = self._utterance_start_times.pop(utterance_id, None)
-        if start_time is not None:
-            processing_latency = self.clock.now() - start_time
-            total_e2e = processing_latency + self.hangover_s
-            logger.info(
-                f"[Hub] OSC enqueue: '{merged[:50]}...' id={str(utterance_id)[:8]} (Latency: {total_e2e:.2f}s)"
-            )
-        else:
-            logger.info(f"[Hub] OSC enqueue: '{merged[:50]}...' id={str(utterance_id)[:8]}")
+        self._emit_detailed(
+            "[Hub] OSC enqueue preview: channel=%s text=%r",
+            runtime.channel,
+            merged,
+            fallback_level=logging.INFO,
+        )
+
+        self._utterance_start_times.pop(utterance_id, None)
 
         self.osc.enqueue(msg)
 

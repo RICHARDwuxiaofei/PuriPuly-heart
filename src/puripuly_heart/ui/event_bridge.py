@@ -126,7 +126,8 @@ class UIEventBridge:
             text = str(payload) if payload is not None else t("error.unknown")
             try:
                 if self.runtime_logging is not None:
-                    self.runtime_logging.emit_basic(text, level=logging.ERROR)
+                    if not event.runtime_log_handled:
+                        self.runtime_logging.emit_basic(text, level=logging.ERROR)
                 else:
                     logger.error(text)
             except Exception:

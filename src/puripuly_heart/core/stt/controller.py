@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 from puripuly_heart.core.audio.format import float32_to_pcm16le_bytes
 from puripuly_heart.core.audio.ring_buffer import RingBufferF32
 from puripuly_heart.core.clock import Clock, SystemClock
+from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.core.stt.backend import (
     STTBackend,
     STTBackendSession,
@@ -43,6 +44,7 @@ class ManagedSTTProvider:
     connect_retry_max_s: float = 6.0
     reconnect_window_s: float = 20.0
     on_terminal_failure: Callable[[Exception], Awaitable[None] | None] | None = None
+    runtime_logging: SessionRuntimeLoggingService | None = None
 
     _state: STTSessionState = STTSessionState.DISCONNECTED
     _active_session: STTBackendSession | None = None
@@ -81,6 +83,43 @@ class ManagedSTTProvider:
     @property
     def state(self) -> STTSessionState:
         return self._state
+
+    @staticmethod
+    def _format_log_message(message: str, *args: object) -> str:
+        return message % args if args else message
+
+    def _emit_basic(
+        self,
+        message: str,
+        *args: object,
+        level: int = logging.INFO,
+        fallback_level: int | None = None,
+    ) -> None:
+        formatted = self._format_log_message(message, *args)
+        if self.runtime_logging is not None:
+            self.runtime_logging.emit_basic(formatted, level=level)
+            return
+        logger.log(level if fallback_level is None else fallback_level, formatted)
+
+    def _emit_detailed(
+        self,
+        message: str,
+        *args: object,
+        level: int = logging.INFO,
+        fallback_level: int | None = None,
+    ) -> None:
+        formatted = self._format_log_message(message, *args)
+        if self.runtime_logging is not None:
+            self.runtime_logging.emit_detailed(formatted, level=level)
+        _ = fallback_level
+
+    def _log_session_connected(self, *, attempts: int) -> None:
+        retries = max(0, attempts - 1)
+        if retries == 0:
+            self._emit_basic("[STT] Session connected")
+            return
+        suffix = "retry" if retries == 1 else "retries"
+        self._emit_basic(f"[STT] Session connected after {retries} {suffix}")
 
     async def close(self) -> None:
         await self._set_state(
@@ -133,7 +172,7 @@ class ManagedSTTProvider:
     async def warmup(self) -> None:
         """Pre-establish STT session for faster first response."""
         if await self._ensure_session():
-            logger.info("[STT] Session pre-warmed")
+            self._emit_detailed("[STT] Session pre-warmed", fallback_level=logging.INFO)
 
     async def _on_speech_start(self, event: SpeechStart) -> None:
         self._active_utterance_id = event.utterance_id
@@ -159,10 +198,11 @@ class ManagedSTTProvider:
 
         # Delegate end-of-speech handling to the backend (silence + finalize etc.)
         if self._active_session is not None:
-            logger.info(
+            self._emit_detailed(
                 "[STT] Speech end handling for id=%s (trailing_silence_ms=%s)",
                 str(event.utterance_id)[:8],
                 event.trailing_silence_ms,
+                fallback_level=logging.INFO,
             )
             await self._active_session.on_speech_end(trailing_silence_ms=event.trailing_silence_ms)
 
@@ -186,65 +226,81 @@ class ManagedSTTProvider:
         last_exc: Exception | None = None
 
         for attempt in range(1, self.connect_attempts + 1):
-            logger.info(
+            self._emit_detailed(
                 "[STT] Opening new session (attempt %s/%s)...",
                 attempt,
                 self.connect_attempts,
+                fallback_level=logging.INFO,
             )
             try:
                 session = await self.backend.open_session()
             except Exception as exc:
                 last_exc = exc
-                logger.warning(
+                self._emit_detailed(
                     "[STT] Failed to open session (attempt %s/%s): %s",
                     attempt,
                     self.connect_attempts,
                     exc,
+                    level=logging.WARNING,
+                    fallback_level=logging.WARNING,
                 )
                 if attempt < self.connect_attempts:
                     delay = min(
                         self.connect_retry_base_s * (2 ** (attempt - 1)),
                         self.connect_retry_max_s,
                     )
-                    logger.info("[STT] Retrying session in %.1fs", delay)
+                    self._emit_detailed(
+                        "[STT] Retrying session in %.1fs",
+                        delay,
+                        fallback_level=logging.INFO,
+                    )
                     await asyncio.sleep(delay)
                     continue
                 break
             else:
                 self._active_session = session
                 self._session_started_at = self.clock.now()
-                self._consumer_task = asyncio.create_task(
-                    self._consume_session_events(session)
-                )
+                self._consumer_task = asyncio.create_task(self._consume_session_events(session))
                 self._schedule_reset_timer()
                 await self._set_state(STTSessionState.STREAMING)
-                logger.info(f"[STT] Session opened (reset_deadline={self.reset_deadline_s}s)")
+                self._log_session_connected(attempts=attempt)
+                self._emit_detailed(
+                    "[STT] Session ready (reset_deadline=%ss)",
+                    self.reset_deadline_s,
+                    fallback_level=logging.INFO,
+                )
                 return True
 
         reason = str(last_exc) if last_exc is not None else "unknown error"
-        logger.error(
+        self._emit_basic(
             "[STT] Failed to open session after %s attempts: %s",
             self.connect_attempts,
             reason,
+            level=logging.ERROR,
+            fallback_level=logging.ERROR,
         )
         await self._set_state(STTSessionState.DISCONNECTED)
         await self._events.put(
             STTErrorEvent(
                 f"Failed to open STT session after {self.connect_attempts} attempts: {reason}",
                 channel=self.channel,
+                runtime_log_handled=True,
             )
         )
         return False
 
     async def _reset_with_bridging(self) -> None:
-        logger.info("[STT] BRIDGING: Resetting session while speaking...")
         old_session = self._active_session
         old_consumer = self._consumer_task
 
         bridging_audio = self._audio_ring.get_last_samples(self._audio_ring.capacity_samples)  # type: ignore[union-attr]
         bridging_ms = len(bridging_audio) / self.sample_rate_hz * 1000
 
-        logger.info(f"[STT] BRIDGING: Opening new session with {bridging_ms:.0f}ms audio buffer")
+        self._emit_detailed(
+            "[STT] Bridging buffered audio: %.0fms",
+            bridging_ms,
+            fallback_level=logging.INFO,
+        )
         new_session = await self.backend.open_session()
         self._active_session = new_session
         self._session_started_at = self.clock.now()
@@ -258,10 +314,13 @@ class ManagedSTTProvider:
         await self._set_state(STTSessionState.STREAMING)
 
         await new_session.send_audio(float32_to_pcm16le_bytes(bridging_audio))
-        logger.info("[STT] BRIDGING: New session ready, bridging audio sent")
+        self._emit_basic("[STT] Session reset while speaking; bridged to a new session")
 
         if old_session and old_consumer:
-            logger.info("[STT] BRIDGING: Starting drain of old session in background")
+            self._emit_detailed(
+                "[STT] Draining replaced session in background",
+                fallback_level=logging.INFO,
+            )
             self._draining.add(
                 asyncio.create_task(
                     self._drain_and_close(old_session, old_consumer, allow_finalize=False)
@@ -278,9 +337,10 @@ class ManagedSTTProvider:
             return
 
         elapsed = self.clock.now() - (self._last_speech_end_time or 0)
-        logger.info(
+        self._emit_detailed(
             f"[STT] RECONNECT: Session limit during silence, "
-            f"last speech {elapsed:.1f}s ago, reconnecting..."
+            f"last speech {elapsed:.1f}s ago, reconnecting...",
+            fallback_level=logging.INFO,
         )
 
         old_session = self._active_session
@@ -290,7 +350,11 @@ class ManagedSTTProvider:
         try:
             new_session = await self.backend.open_session()
         except Exception as e:
-            logger.error(f"[STT] RECONNECT: Failed to open new session: {e}")
+            self._emit_basic(
+                f"[STT] Reconnect failed; closing until next speech: {e}",
+                level=logging.ERROR,
+                fallback_level=logging.ERROR,
+            )
             await self._reset_on_silence()
             return
 
@@ -304,7 +368,7 @@ class ManagedSTTProvider:
         self._schedule_reset_timer()
 
         await self._set_state(STTSessionState.STREAMING)
-        logger.info("[STT] RECONNECT: New session ready")
+        self._emit_basic("[STT] Session reconnected after recent speech")
 
         # Drain old session with finalize (unlike bridging)
         self._draining.add(
@@ -317,7 +381,6 @@ class ManagedSTTProvider:
         if self._active_session is None or self._consumer_task is None:
             return
 
-        logger.info("[STT] SILENCE RESET: Closing session during silence...")
         old_session = self._active_session
         old_consumer = self._consumer_task
         self._active_session = None
@@ -327,7 +390,7 @@ class ManagedSTTProvider:
         await self._set_state(STTSessionState.DRAINING)
         await self._drain_and_close(old_session, old_consumer, allow_finalize=True)
         await self._set_state(STTSessionState.DISCONNECTED)
-        logger.info("[STT] SILENCE RESET: Session closed, will reconnect on next speech")
+        self._emit_basic("[STT] Session closed after silence")
 
     async def _drain_and_close(
         self,
@@ -336,7 +399,10 @@ class ManagedSTTProvider:
         *,
         allow_finalize: bool,
     ) -> None:
-        logger.debug(f"[STT] DRAIN: Starting drain (timeout={self.drain_timeout_s}s)...")
+        self._emit_detailed(
+            f"[STT] DRAIN: Starting drain (timeout={self.drain_timeout_s}s)...",
+            fallback_level=logging.DEBUG,
+        )
         if allow_finalize and self._should_finalize_before_stop():
             await self._finalize_before_stop(session)
         with contextlib.suppress(Exception):
@@ -344,10 +410,15 @@ class ManagedSTTProvider:
 
         try:
             await asyncio.wait_for(consumer_task, timeout=self.drain_timeout_s)
-            logger.debug("[STT] DRAIN: Consumer task completed normally")
+            self._emit_detailed(
+                "[STT] DRAIN: Consumer task completed normally",
+                fallback_level=logging.DEBUG,
+            )
         except asyncio.TimeoutError:
-            logger.warning(
-                f"[STT] DRAIN: Timeout after {self.drain_timeout_s}s, cancelling consumer task"
+            self._emit_detailed(
+                f"[STT] DRAIN: Timeout after {self.drain_timeout_s}s, cancelling consumer task",
+                level=logging.WARNING,
+                fallback_level=logging.WARNING,
             )
             consumer_task.cancel()
             with contextlib.suppress(Exception):
@@ -355,7 +426,7 @@ class ManagedSTTProvider:
 
         with contextlib.suppress(Exception):
             await session.close()
-        logger.debug("[STT] DRAIN: Session closed")
+        self._emit_detailed("[STT] DRAIN: Session closed", fallback_level=logging.DEBUG)
 
     def _should_finalize_before_stop(self) -> bool:
         return self._active_utterance_id is not None or self._pending_final_utterance_id is not None
@@ -441,14 +512,29 @@ class ManagedSTTProvider:
         with contextlib.suppress(Exception):
             await session.close()
 
-        await self._events.put(STTErrorEvent(f"STT session error: {exc}", channel=self.channel))
+        self._emit_basic(
+            "[STT] Session failed: %s",
+            exc,
+            level=logging.ERROR,
+            fallback_level=logging.ERROR,
+        )
+        await self._events.put(
+            STTErrorEvent(
+                f"STT session error: {exc}",
+                channel=self.channel,
+                runtime_log_handled=True,
+            )
+        )
 
     async def _set_state(self, state: STTSessionState) -> None:
         if self._state == state:
             return
         old_state = self._state
         self._state = state
-        logger.info(f"[STT] State: {old_state.name} -> {state.name}")
+        self._emit_detailed(
+            f"[STT] State: {old_state.name} -> {state.name}",
+            fallback_level=logging.INFO,
+        )
         await self._events.put(STTSessionStateEvent(state, channel=self.channel))
 
     def _has_recent_speech(self) -> bool:
@@ -470,7 +556,10 @@ class ManagedSTTProvider:
             await asyncio.sleep(self.reset_deadline_s)
             if self._active_session is None:
                 return
-            logger.info(f"[STT] Timer expired after {self.reset_deadline_s}s")
+            self._emit_detailed(
+                f"[STT] Timer expired after {self.reset_deadline_s}s",
+                fallback_level=logging.INFO,
+            )
             if self._active_utterance_id is not None:
                 # Speaking: reset with bridging
                 await self._reset_with_bridging()

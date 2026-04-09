@@ -226,6 +226,58 @@ async def test_event_bridge_handles_error_and_soniox_shutdown_suppression(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_event_bridge_skips_duplicate_runtime_log_for_already_logged_errors(tmp_path) -> None:
+    app = DummyApp()
+    root_logger = logging.getLogger(f"test.event_bridge.runtime.root.{uuid4()}")
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+    session_logger = logging.getLogger(f"test.event_bridge.runtime.session.{uuid4()}")
+    session_logger.handlers.clear()
+    session_logger.propagate = False
+    log_file = tmp_path / "event-bridge-duplicate.log"
+    stream_handler = logging.StreamHandler(io.StringIO())
+    stream_handler.setFormatter(logging.Formatter("%(message)s"))
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+    runtime_logging = SessionRuntimeLoggingService(
+        root_logger=root_logger,
+        session_logger=session_logger,
+        sinks=SimpleNamespace(
+            stream_handler=stream_handler,
+            file_handler=file_handler,
+            log_file=log_file,
+        ),
+        ui_handler_factory=FletLogHandler,
+    )
+    runtime_logging.attach_realtime_sink(app.view_logs)
+    bridge = UIEventBridge(
+        app=app,
+        event_queue=asyncio.Queue(),
+        runtime_logging=runtime_logging,
+    )
+
+    try:
+        runtime_logging.emit_basic("already logged failure", level=logging.ERROR)
+
+        await bridge._handle_event(
+            UIEvent(
+                type=UIEventType.ERROR,
+                payload="already logged failure",
+                runtime_log_handled=True,
+            )
+        )
+
+        assert len(app.view_logs.lines) == 1
+        assert "already logged failure" in app.view_logs.lines[0]
+        assert app.view_dashboard.display_calls[-1] == ("already logged failure", None, True)
+    finally:
+        runtime_logging.close()
+        for handler in list(root_logger.handlers):
+            root_logger.removeHandler(handler)
+            handler.close()
+
+
+@pytest.mark.asyncio
 async def test_event_bridge_ignores_unknown_event_and_keeps_queue_alive() -> None:
     app = DummyApp()
     queue: asyncio.Queue = asyncio.Queue()
