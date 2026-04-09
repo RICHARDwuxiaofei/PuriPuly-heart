@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -60,6 +61,20 @@ class FakeGeminiClient(GeminiClient):
 
     async def close(self) -> None:
         self.closed = True
+
+
+class SpyRuntimeLogging:
+    def __init__(self, *, detailed_return: bool = False) -> None:
+        self.detailed_return = detailed_return
+        self.detailed_messages: list[tuple[str, int]] = []
+        self.basic_messages: list[tuple[str, int]] = []
+
+    def emit_detailed(self, message: str, *, level: int = logging.INFO) -> bool:
+        self.detailed_messages.append((message, level))
+        return self.detailed_return
+
+    def emit_basic(self, message: str, *, level: int = logging.INFO) -> None:
+        self.basic_messages.append((message, level))
 
 
 @pytest.mark.asyncio
@@ -192,21 +207,29 @@ async def test_gemini_provider_warmup_and_close_uses_client():
 
 
 @pytest.mark.asyncio
-async def test_google_genai_client_formats_prompt_and_context(monkeypatch):
+async def test_google_genai_client_formats_prompt_and_context(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+):
     state = _install_fake_google(monkeypatch, response_text=" OK ")
 
     client = GoogleGenaiGeminiClient(api_key="k", model="m")
-    result = await client.translate(
-        text="hello",
-        system_prompt="Translate {source_language} to {target_language}.",
-        source_language="ko",
-        target_language="en",
-        context="a -> b",
-    )
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.gemini"):
+        result = await client.translate(
+            text="hello",
+            system_prompt="Translate {source_language} to {target_language}.",
+            source_language="ko",
+            target_language="en",
+            context="a -> b",
+        )
 
     assert result == "OK"
     assert state["contents"] == "<context>\na -> b\n</context>\nInput: hello"
     assert state["config"].system_instruction == "Translate ko to en."
+    assert (
+        "[Detailed][LLM] Gemini request [translate][context=yes] ko -> en: 'hello'"
+        in caplog.messages
+    )
+    assert "[Detailed][LLM] Gemini response [translate]: 'OK'" in caplog.messages
 
 
 @pytest.mark.asyncio
@@ -232,14 +255,124 @@ async def test_google_genai_client_stream_translate_emits_incremental_parts(monk
 
 
 @pytest.mark.asyncio
-async def test_google_genai_client_raises_on_empty_response(monkeypatch):
+async def test_google_genai_client_raises_on_empty_response(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+):
     _install_fake_google(monkeypatch, response_text=None)
 
     client = GoogleGenaiGeminiClient(api_key="k", model="m")
-    with pytest.raises(RuntimeError, match="Gemini response did not contain text"):
-        await client.translate(
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.gemini"):
+        with pytest.raises(RuntimeError, match="Gemini response did not contain text"):
+            await client.translate(
+                text="hello",
+                system_prompt="PROMPT",
+                source_language="en",
+                target_language="ko",
+            )
+
+    assert "[Basic][LLM] Gemini response missing text [translate]" in caplog.messages
+
+
+@pytest.mark.asyncio
+async def test_google_genai_client_logs_basic_when_stream_has_no_text(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+):
+    state = _install_fake_google(monkeypatch, response_text="unused")
+    state["stream_parts"] = []
+
+    client = GoogleGenaiGeminiClient(api_key="k", model="m")
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.gemini"):
+        with pytest.raises(RuntimeError, match="Gemini response did not contain text"):
+            async for _chunk in client.stream_translate(
+                text="hello",
+                system_prompt="PROMPT",
+                source_language="en",
+                target_language="ko",
+            ):
+                pass
+
+    assert "[Basic][LLM] Gemini response missing text [stream]" in caplog.messages
+
+
+@pytest.mark.asyncio
+async def test_google_genai_client_uses_runtime_logging_for_translate_chatter(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+):
+    state = _install_fake_google(monkeypatch, response_text=" OK ")
+    runtime_logging = SpyRuntimeLogging(detailed_return=False)
+
+    client = GoogleGenaiGeminiClient(api_key="k", model="m", runtime_logging=runtime_logging)
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.gemini"):
+        result = await client.translate(
             text="hello",
-            system_prompt="PROMPT",
-            source_language="en",
-            target_language="ko",
+            system_prompt="Translate {source_language} to {target_language}.",
+            source_language="ko",
+            target_language="en",
+            context="a -> b",
         )
+
+    assert result == "OK"
+    assert state["contents"] == "<context>\na -> b\n</context>\nInput: hello"
+    assert runtime_logging.detailed_messages == [
+        (
+            "[Detailed][LLM] Gemini request [translate][context=yes] ko -> en: 'hello'",
+            logging.INFO,
+        ),
+        ("[Detailed][LLM] Gemini response [translate]: 'OK'", logging.INFO),
+    ]
+    assert runtime_logging.basic_messages == []
+    assert caplog.messages == []
+
+
+@pytest.mark.asyncio
+async def test_google_genai_client_uses_runtime_logging_for_missing_text_warning(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+):
+    _install_fake_google(monkeypatch, response_text=None)
+    runtime_logging = SpyRuntimeLogging(detailed_return=False)
+
+    client = GoogleGenaiGeminiClient(api_key="k", model="m", runtime_logging=runtime_logging)
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.gemini"):
+        with pytest.raises(RuntimeError, match="Gemini response did not contain text"):
+            await client.translate(
+                text="hello",
+                system_prompt="PROMPT",
+                source_language="en",
+                target_language="ko",
+            )
+
+    assert runtime_logging.detailed_messages == [
+        ("[Detailed][LLM] Gemini request [translate][context=no] en -> ko: 'hello'", logging.INFO)
+    ]
+    assert runtime_logging.basic_messages == [
+        ("[Basic][LLM] Gemini response missing text [translate]", logging.ERROR)
+    ]
+    assert caplog.messages == []
+
+
+@pytest.mark.asyncio
+async def test_google_genai_client_uses_runtime_logging_for_stream_missing_text_warning(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+):
+    state = _install_fake_google(monkeypatch, response_text="unused")
+    state["stream_parts"] = []
+    runtime_logging = SpyRuntimeLogging(detailed_return=False)
+
+    client = GoogleGenaiGeminiClient(api_key="k", model="m", runtime_logging=runtime_logging)
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.gemini"):
+        with pytest.raises(RuntimeError, match="Gemini response did not contain text"):
+            async for _chunk in client.stream_translate(
+                text="hello",
+                system_prompt="PROMPT",
+                source_language="en",
+                target_language="ko",
+            ):
+                pass
+
+    assert runtime_logging.detailed_messages == [
+        ("[Detailed][LLM] Gemini request [stream][context=no] en -> ko: 'hello'", logging.INFO)
+    ]
+    assert runtime_logging.basic_messages == [
+        ("[Basic][LLM] Gemini response missing text [stream]", logging.ERROR)
+    ]
+    assert caplog.messages == []

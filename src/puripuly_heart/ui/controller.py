@@ -1673,6 +1673,7 @@ class GuiController:
                 secrets=secrets,
                 managed_release_service=self._managed_openrouter_release_service,
                 managed_delegate_ready=self._on_managed_trial_delegate_ready,
+                runtime_logging=self.runtime_logging,
             )
 
         # Update hub's LLM provider
@@ -1844,6 +1845,7 @@ class GuiController:
                 secrets=secrets,
                 managed_release_service=self._managed_openrouter_release_service,
                 managed_delegate_ready=self._on_managed_trial_delegate_ready,
+                runtime_logging=self.runtime_logging,
             )
 
         stt = None

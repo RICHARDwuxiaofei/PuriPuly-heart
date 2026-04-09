@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -55,6 +56,20 @@ class FakeQwenClient(QwenClient):
         }
         for part in self.stream_parts or []:
             yield part
+
+
+class SpyRuntimeLogging:
+    def __init__(self, *, detailed_return: bool = False) -> None:
+        self.detailed_return = detailed_return
+        self.detailed_messages: list[tuple[str, int]] = []
+        self.basic_messages: list[tuple[str, int]] = []
+
+    def emit_detailed(self, message: str, *, level: int = logging.INFO) -> bool:
+        self.detailed_messages.append((message, level))
+        return self.detailed_return
+
+    def emit_basic(self, message: str, *, level: int = logging.INFO) -> None:
+        self.basic_messages.append((message, level))
 
 
 @pytest.mark.asyncio
@@ -430,3 +445,209 @@ async def test_qwen_warmup_always_uses_plus_model(monkeypatch):
         "base_url": "https://example/api/v1",
         "model": "qwen3.5-plus",
     }
+
+
+@pytest.mark.asyncio
+async def test_qwen_client_logs_detailed_request_and_response_for_qwen35(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+):
+    class FakeHttpxResponse:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"choices": [{"message": {"content": "OK35"}}]}
+
+    def fake_httpx_post(_url, **_kwargs):
+        return FakeHttpxResponse()
+
+    class DummyGeneration:
+        @staticmethod
+        def call(**_kwargs):
+            raise AssertionError("Generation.call must not be used for qwen3.5 models")
+
+    dummy = type(
+        "DummyDashScope",
+        (),
+        {"api_key": "", "base_http_api_url": "", "Generation": DummyGeneration},
+    )
+    monkeypatch.setitem(sys.modules, "dashscope", dummy)
+    monkeypatch.setattr("httpx.post", fake_httpx_post)
+
+    client = DashScopeQwenClient(
+        api_key="k", model="qwen3.5-plus", base_url="https://example/api/v1"
+    )
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.qwen"):
+        result = await client.translate(
+            text="hello",
+            system_prompt="PROMPT",
+            source_language="ko",
+            target_language="en",
+            context='- "이전 문장"',
+        )
+
+    assert result == "OK35"
+    assert (
+        "[Detailed][LLM] Qwen request [translate][context=yes] ko -> en: 'hello'" in caplog.messages
+    )
+    assert "[Detailed][LLM] Qwen response [translate]: 'OK35'" in caplog.messages
+
+
+@pytest.mark.asyncio
+async def test_qwen_client_logs_basic_request_failure_for_qwen35(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+):
+    class FakeHttpxResponse:
+        status_code = 429
+        text = '{"error":{"message":"quota exceeded"}}'
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"error": {"message": "quota exceeded"}}
+
+    def fake_httpx_post(_url, **_kwargs):
+        return FakeHttpxResponse()
+
+    class DummyGeneration:
+        @staticmethod
+        def call(**_kwargs):
+            raise AssertionError("Generation.call must not be used for qwen3.5 models")
+
+    dummy = type(
+        "DummyDashScope",
+        (),
+        {"api_key": "", "base_http_api_url": "", "Generation": DummyGeneration},
+    )
+    monkeypatch.setitem(sys.modules, "dashscope", dummy)
+    monkeypatch.setattr("httpx.post", fake_httpx_post)
+
+    client = DashScopeQwenClient(
+        api_key="k", model="qwen3.5-plus", base_url="https://example/api/v1"
+    )
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.qwen"):
+        with pytest.raises(RuntimeError, match="quota exceeded"):
+            await client.translate(
+                text="hello",
+                system_prompt="PROMPT",
+                source_language="ko",
+                target_language="en",
+            )
+
+    assert (
+        "[Basic][LLM] Qwen request failed [translate]: status=429 message=quota exceeded"
+        in caplog.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_qwen_client_uses_runtime_logging_for_translate_chatter_for_qwen35(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+):
+    class FakeHttpxResponse:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"choices": [{"message": {"content": "OK35"}}]}
+
+    def fake_httpx_post(_url, **_kwargs):
+        return FakeHttpxResponse()
+
+    class DummyGeneration:
+        @staticmethod
+        def call(**_kwargs):
+            raise AssertionError("Generation.call must not be used for qwen3.5 models")
+
+    dummy = type(
+        "DummyDashScope",
+        (),
+        {"api_key": "", "base_http_api_url": "", "Generation": DummyGeneration},
+    )
+    monkeypatch.setitem(sys.modules, "dashscope", dummy)
+    monkeypatch.setattr("httpx.post", fake_httpx_post)
+    runtime_logging = SpyRuntimeLogging(detailed_return=False)
+
+    client = DashScopeQwenClient(
+        api_key="k",
+        model="qwen3.5-plus",
+        base_url="https://example/api/v1",
+        runtime_logging=runtime_logging,
+    )
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.qwen"):
+        result = await client.translate(
+            text="hello",
+            system_prompt="PROMPT",
+            source_language="ko",
+            target_language="en",
+            context='- "이전 문장"',
+        )
+
+    assert result == "OK35"
+    assert runtime_logging.detailed_messages == [
+        ("[Detailed][LLM] Qwen request [translate][context=yes] ko -> en: 'hello'", logging.INFO),
+        ("[Detailed][LLM] Qwen response [translate]: 'OK35'", logging.INFO),
+    ]
+    assert runtime_logging.basic_messages == []
+    assert caplog.messages == []
+
+
+@pytest.mark.asyncio
+async def test_qwen_client_uses_runtime_logging_for_failure_breadcrumbs_for_qwen35(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+):
+    class FakeHttpxResponse:
+        status_code = 429
+        text = '{"error":{"message":"quota exceeded"}}'
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"error": {"message": "quota exceeded"}}
+
+    def fake_httpx_post(_url, **_kwargs):
+        return FakeHttpxResponse()
+
+    class DummyGeneration:
+        @staticmethod
+        def call(**_kwargs):
+            raise AssertionError("Generation.call must not be used for qwen3.5 models")
+
+    dummy = type(
+        "DummyDashScope",
+        (),
+        {"api_key": "", "base_http_api_url": "", "Generation": DummyGeneration},
+    )
+    monkeypatch.setitem(sys.modules, "dashscope", dummy)
+    monkeypatch.setattr("httpx.post", fake_httpx_post)
+    runtime_logging = SpyRuntimeLogging(detailed_return=False)
+
+    client = DashScopeQwenClient(
+        api_key="k",
+        model="qwen3.5-plus",
+        base_url="https://example/api/v1",
+        runtime_logging=runtime_logging,
+    )
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.qwen"):
+        with pytest.raises(RuntimeError, match="quota exceeded"):
+            await client.translate(
+                text="hello",
+                system_prompt="PROMPT",
+                source_language="ko",
+                target_language="en",
+            )
+
+    assert runtime_logging.detailed_messages == [
+        ("[Detailed][LLM] Qwen request [translate][context=no] ko -> en: 'hello'", logging.INFO)
+    ]
+    assert runtime_logging.basic_messages == [
+        (
+            "[Basic][LLM] Qwen request failed [translate]: status=429 message=quota exceeded",
+            logging.ERROR,
+        )
+    ]
+    assert caplog.messages == []

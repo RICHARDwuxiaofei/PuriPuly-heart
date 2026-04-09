@@ -1107,9 +1107,15 @@ async def test_init_pipeline_passes_chatbox_and_peer_language_settings_to_hub(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
+    llm_create_kwargs: dict[str, object] = {}
 
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
-    monkeypatch.setattr(controller_module, "create_llm_provider", lambda *_a, **_k: "llm")
+
+    def fake_create_llm_provider(*_args, **kwargs):
+        llm_create_kwargs.update(kwargs)
+        return "llm"
+
+    monkeypatch.setattr(controller_module, "create_llm_provider", fake_create_llm_provider)
     monkeypatch.setattr(controller_module, "create_stt_backend", lambda *_a, **_k: "backend")
     monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "stt")
     monkeypatch.setattr(controller_module, "VrchatOscUdpSender", lambda *a, **k: object())
@@ -1139,6 +1145,7 @@ async def test_init_pipeline_passes_chatbox_and_peer_language_settings_to_hub(
     assert captured["chatbox_include_source"] is False
     assert captured["peer_source_language"] == "ja"
     assert captured["peer_target_language"] == "en"
+    assert llm_create_kwargs["runtime_logging"] is controller.runtime_logging
 
 
 @pytest.mark.asyncio
@@ -3395,16 +3402,23 @@ async def test_rebuild_llm_provider_closes_existing_provider_and_updates_dashboa
             close_calls.append("close")
 
     new_llm = object()
+    llm_create_kwargs: dict[str, object] = {}
     controller.hub = DummyHub(llm=FakeLlm())
 
     monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
-    monkeypatch.setattr(controller_module, "create_llm_provider", lambda *_a, **_k: new_llm)
+
+    def fake_create_llm_provider(*_args, **kwargs):
+        llm_create_kwargs.update(kwargs)
+        return new_llm
+
+    monkeypatch.setattr(controller_module, "create_llm_provider", fake_create_llm_provider)
 
     await controller._rebuild_llm_provider()
 
     assert close_calls == ["close"]
     assert controller.hub.llm is new_llm
     assert dash.translation_needs_key is False
+    assert llm_create_kwargs["runtime_logging"] is controller.runtime_logging
 
 
 @pytest.mark.asyncio

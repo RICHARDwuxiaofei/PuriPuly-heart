@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from uuid import uuid4
@@ -60,6 +61,20 @@ class FakeOpenRouterClient(OpenRouterClient):
 
     async def close(self) -> None:
         self.closed = True
+
+
+class SpyRuntimeLogging:
+    def __init__(self, *, detailed_return: bool = False) -> None:
+        self.detailed_return = detailed_return
+        self.detailed_messages: list[tuple[str, int]] = []
+        self.basic_messages: list[tuple[str, int]] = []
+
+    def emit_detailed(self, message: str, *, level: int = logging.INFO) -> bool:
+        self.detailed_messages.append((message, level))
+        return self.detailed_return
+
+    def emit_basic(self, message: str, *, level: int = logging.INFO) -> None:
+        self.basic_messages.append((message, level))
 
 
 class FakeResponse:
@@ -377,3 +392,157 @@ async def test_httpx_openrouter_client_surfaces_stream_error_message(monkeypatch
             target_language="en",
         ):
             pass
+
+
+@pytest.mark.asyncio
+async def test_httpx_openrouter_client_logs_detailed_request_and_response(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_client = FakeAsyncClient()
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+
+    client = HttpxOpenRouterClient(api_key="k", model="m", base_url="https://example")
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.openrouter"):
+        result = await client.translate(
+            text="hello",
+            system_prompt="SYSTEM",
+            source_language="ko",
+            target_language="en",
+            context='- "previous"',
+        )
+
+    assert result == "OK"
+    assert (
+        "[Detailed][LLM] OpenRouter request [translate][context=yes] ko -> en: 'hello'"
+        in caplog.messages
+    )
+    assert "[Detailed][LLM] OpenRouter response [translate]: 'OK'" in caplog.messages
+
+
+@pytest.mark.asyncio
+async def test_httpx_openrouter_client_logs_basic_translate_failure(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    class ErrorResponse(FakeResponse):
+        status_code = 429
+
+        def __init__(self):
+            super().__init__({"error": {"message": "quota exceeded"}})
+
+        def raise_for_status(self):
+            raise RuntimeError("quota exceeded")
+
+    class ErrorAsyncClient(FakeAsyncClient):
+        async def post(self, url, **kwargs):
+            request = {"url": url, **kwargs}
+            self.last_request = request
+            self.requests.append(request)
+            return ErrorResponse()
+
+    fake_client = ErrorAsyncClient()
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+
+    client = HttpxOpenRouterClient(api_key="k", model="m", base_url="https://example")
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.openrouter"):
+        with pytest.raises(RuntimeError, match="quota exceeded"):
+            await client.translate(
+                text="hello",
+                system_prompt="SYSTEM",
+                source_language="ko",
+                target_language="en",
+            )
+
+    assert (
+        "[Basic][LLM] OpenRouter request failed [translate]: status=429 message=quota exceeded"
+        in caplog.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_httpx_openrouter_client_uses_runtime_logging_for_translate_chatter(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_client = FakeAsyncClient()
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+    runtime_logging = SpyRuntimeLogging(detailed_return=False)
+
+    client = HttpxOpenRouterClient(
+        api_key="k",
+        model="m",
+        base_url="https://example",
+        runtime_logging=runtime_logging,
+    )
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.openrouter"):
+        result = await client.translate(
+            text="hello",
+            system_prompt="SYSTEM",
+            source_language="ko",
+            target_language="en",
+            context='- "previous"',
+        )
+
+    assert result == "OK"
+    assert runtime_logging.detailed_messages == [
+        (
+            "[Detailed][LLM] OpenRouter request [translate][context=yes] ko -> en: 'hello'",
+            logging.INFO,
+        ),
+        ("[Detailed][LLM] OpenRouter response [translate]: 'OK'", logging.INFO),
+    ]
+    assert runtime_logging.basic_messages == []
+    assert caplog.messages == []
+
+
+@pytest.mark.asyncio
+async def test_httpx_openrouter_client_uses_runtime_logging_for_failure_breadcrumbs(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    class ErrorResponse(FakeResponse):
+        status_code = 429
+
+        def __init__(self):
+            super().__init__({"error": {"message": "quota exceeded"}})
+
+    class ErrorAsyncClient(FakeAsyncClient):
+        async def post(self, url, **kwargs):
+            request = {"url": url, **kwargs}
+            self.last_request = request
+            self.requests.append(request)
+            return ErrorResponse()
+
+    fake_client = ErrorAsyncClient()
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+    runtime_logging = SpyRuntimeLogging(detailed_return=False)
+
+    client = HttpxOpenRouterClient(
+        api_key="k",
+        model="m",
+        base_url="https://example",
+        runtime_logging=runtime_logging,
+    )
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.openrouter"):
+        with pytest.raises(RuntimeError, match="quota exceeded"):
+            await client.translate(
+                text="hello",
+                system_prompt="SYSTEM",
+                source_language="ko",
+                target_language="en",
+            )
+
+    assert runtime_logging.detailed_messages == [
+        (
+            "[Detailed][LLM] OpenRouter request [translate][context=no] ko -> en: 'hello'",
+            logging.INFO,
+        )
+    ]
+    assert runtime_logging.basic_messages == [
+        (
+            "[Basic][LLM] OpenRouter request failed [translate]: status=429 message=quota exceeded",
+            logging.ERROR,
+        )
+    ]
+    assert caplog.messages == []

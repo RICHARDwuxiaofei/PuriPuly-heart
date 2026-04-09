@@ -77,6 +77,19 @@ def test_create_llm_provider_gemini_uses_selected_model() -> None:
     assert provider.inner.model == "gemini-3.1-flash-lite-preview"
 
 
+def test_create_llm_provider_gemini_passes_runtime_logging() -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.GEMINI))
+    secrets = InMemorySecretStore()
+    secrets.set("google_api_key", "k")
+    runtime_logging = object()
+
+    provider = create_llm_provider(settings, secrets=secrets, runtime_logging=runtime_logging)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, GeminiLLMProvider)
+    assert provider.inner.runtime_logging is runtime_logging
+
+
 def test_create_llm_provider_qwen_uses_secret() -> None:
     settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.QWEN))
     secrets = InMemorySecretStore()
@@ -90,6 +103,19 @@ def test_create_llm_provider_qwen_uses_secret() -> None:
     assert provider.inner.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert provider.inner.model == "qwen3.5-plus"
     assert provider.semaphore._value == 5  # type: ignore[attr-defined]
+
+
+def test_create_llm_provider_qwen_low_latency_passes_runtime_logging() -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.QWEN))
+    secrets = InMemorySecretStore()
+    secrets.set("alibaba_api_key_beijing", "k2")
+    runtime_logging = object()
+
+    provider = create_llm_provider(settings, secrets=secrets, runtime_logging=runtime_logging)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, AsyncQwenLLMProvider)
+    assert provider.inner.runtime_logging is runtime_logging
 
 
 def test_create_llm_provider_qwen_uses_singapore_region() -> None:
@@ -138,6 +164,22 @@ def test_create_llm_provider_qwen_standard_mode_uses_sync_provider() -> None:
     assert provider.inner.model == "qwen3.5-plus"
 
 
+def test_create_llm_provider_qwen_standard_mode_passes_runtime_logging() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.QWEN),
+        stt=STTSettings(low_latency_mode=False),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("alibaba_api_key_beijing", "k2")
+    runtime_logging = object()
+
+    provider = create_llm_provider(settings, secrets=secrets, runtime_logging=runtime_logging)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, QwenLLMProvider)
+    assert provider.inner.runtime_logging is runtime_logging
+
+
 def test_create_llm_provider_qwen_standard_mode_singapore() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.QWEN),
@@ -177,6 +219,22 @@ def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
     assert provider.inner.base_url == "https://openrouter.ai/api/v1"
     assert provider.inner.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
     assert provider.semaphore._value == 4  # type: ignore[attr-defined]
+
+
+def test_create_llm_provider_openrouter_passes_runtime_logging() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.BYOK),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "or-key")
+    runtime_logging = object()
+
+    provider = create_llm_provider(settings, secrets=secrets, runtime_logging=runtime_logging)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, OpenRouterLLMProvider)
+    assert provider.inner.runtime_logging is runtime_logging
 
 
 def test_create_llm_provider_openrouter_uses_env_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -231,16 +289,21 @@ def test_create_llm_provider_openrouter_uses_managed_wrapper_when_release_servic
     )
     secrets = InMemorySecretStore()
     managed_release_service = object()
+    runtime_logging = object()
 
     provider = create_llm_provider(
         settings,
         secrets=secrets,
         managed_release_service=managed_release_service,
+        runtime_logging=runtime_logging,
     )
 
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, ManagedOpenRouterLLMProvider)
     assert provider.inner.release_service is managed_release_service
+    delegate = provider.inner.delegate_factory("delegate-key")
+    assert isinstance(delegate, OpenRouterLLMProvider)
+    assert delegate.runtime_logging is runtime_logging
 
 
 def test_create_llm_provider_openrouter_rejects_none_selected_source_even_with_keys() -> None:

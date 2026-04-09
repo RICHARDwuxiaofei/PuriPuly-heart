@@ -11,10 +11,61 @@ from uuid import UUID
 
 import httpx
 
+from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.models import Translation
 
 logger = logging.getLogger(__name__)
 _QWEN_PROBE_MODEL = "qwen3.5-plus"
+
+
+def _log_detailed_request(
+    *,
+    runtime_logging: SessionRuntimeLoggingService | None,
+    operation: str,
+    text: str,
+    source_language: str,
+    target_language: str,
+    context: str,
+) -> None:
+    message = "[Detailed][LLM] Qwen request [%s][context=%s] %s -> %s: %r" % (
+        operation,
+        "yes" if context else "no",
+        source_language,
+        target_language,
+        text,
+    )
+    if runtime_logging is not None:
+        runtime_logging.emit_detailed(message)
+        return
+    logger.info(message)
+
+
+def _log_detailed_response(
+    *, runtime_logging: SessionRuntimeLoggingService | None, operation: str, text: str
+) -> None:
+    message = "[Detailed][LLM] Qwen response [%s]: %r" % (operation, text)
+    if runtime_logging is not None:
+        runtime_logging.emit_detailed(message)
+        return
+    logger.info(message)
+
+
+def _log_basic_request_failure(
+    *,
+    runtime_logging: SessionRuntimeLoggingService | None,
+    operation: str,
+    status: int,
+    message: str,
+) -> None:
+    rendered = "[Basic][LLM] Qwen request failed [%s]: status=%s message=%s" % (
+        operation,
+        status,
+        message,
+    )
+    if runtime_logging is not None:
+        runtime_logging.emit_basic(rendered, level=logging.ERROR)
+        return
+    logger.error(rendered)
 
 
 def _build_system_prompt(
@@ -153,6 +204,7 @@ class AsyncQwenLLMProvider:
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     model: str = "qwen3.5-plus"
     timeout: float = 30.0
+    runtime_logging: SessionRuntimeLoggingService | None = None
     client: AsyncQwenClient | None = None
     _internal_client: AsyncQwenClient | None = field(init=False, default=None, repr=False)
 
@@ -165,6 +217,7 @@ class AsyncQwenLLMProvider:
                 model=self.model,
                 base_url=self.base_url,
                 timeout=self.timeout,
+                runtime_logging=self.runtime_logging,
             )
         return self._internal_client
 
@@ -258,6 +311,7 @@ class HttpxQwenClient:
     model: str
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     timeout: float = 30.0
+    runtime_logging: SessionRuntimeLoggingService | None = None
     _client: httpx.AsyncClient | None = field(init=False, default=None, repr=False)
     _client_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock, repr=False)
 
@@ -321,12 +375,14 @@ class HttpxQwenClient:
         target_language: str,
         context: str = "",
     ) -> str:
-        if context:
-            logger.info(
-                f"[LLM] Request with context: '{text}' -> {source_language} to {target_language}"
-            )
-        else:
-            logger.info(f"[LLM] Request: '{text}' -> {source_language} to {target_language}")
+        _log_detailed_request(
+            runtime_logging=self.runtime_logging,
+            operation="translate",
+            text=text,
+            source_language=source_language,
+            target_language=target_language,
+            context=context,
+        )
 
         request_body = self._build_request_body(
             text=text,
@@ -345,7 +401,23 @@ class HttpxQwenClient:
             },
             json=request_body,
         )
-        response.raise_for_status()
+        if response.status_code != 200:
+            error_message = ""
+            with contextlib.suppress(Exception):
+                error_message = _extract_error_message(response.json())
+            if not error_message:
+                with contextlib.suppress(Exception):
+                    error_message = response.text[:200]
+            _log_basic_request_failure(
+                runtime_logging=self.runtime_logging,
+                operation="translate",
+                status=response.status_code,
+                message=error_message or "unknown error",
+            )
+            raise RuntimeError(
+                "DashScope compatible-mode request failed "
+                f"(status={response.status_code}, message={error_message or 'unknown error'})"
+            )
 
         data = response.json()
         choices = data.get("choices", [])
@@ -354,7 +426,11 @@ class HttpxQwenClient:
 
         message = choices[0].get("message", {})
         result = _extract_message_content(message.get("content"))
-        logger.info(f"[LLM] Response: '{result}'")
+        _log_detailed_response(
+            runtime_logging=self.runtime_logging,
+            operation="translate",
+            text=result,
+        )
         return result
 
     async def stream_translate(
@@ -366,14 +442,14 @@ class HttpxQwenClient:
         target_language: str,
         context: str = "",
     ) -> AsyncIterator[str]:
-        if context:
-            logger.info(
-                f"[LLM] Streaming request with context: '{text}' -> {source_language} to {target_language}"
-            )
-        else:
-            logger.info(
-                f"[LLM] Streaming request: '{text}' -> {source_language} to {target_language}"
-            )
+        _log_detailed_request(
+            runtime_logging=self.runtime_logging,
+            operation="stream",
+            text=text,
+            source_language=source_language,
+            target_language=target_language,
+            context=context,
+        )
 
         request_body = self._build_request_body(
             text=text,
@@ -400,6 +476,12 @@ class HttpxQwenClient:
                     error_message = _extract_error_message(json.loads(body_text))
                 if not error_message:
                     error_message = body_text[:200]
+                _log_basic_request_failure(
+                    runtime_logging=self.runtime_logging,
+                    operation="stream",
+                    status=response.status_code,
+                    message=error_message or "unknown error",
+                )
                 raise RuntimeError(
                     "DashScope compatible-mode request failed "
                     f"(status={response.status_code}, message={error_message})"
