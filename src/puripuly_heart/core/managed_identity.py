@@ -189,6 +189,19 @@ def ensure_managed_identity_bundle(
     )
 
 
+def regenerate_managed_identity_bundle(
+    settings: AppSettings,
+    secret_store: SecretStore,
+    *,
+    persist_settings: PersistSettings,
+) -> ManagedIdentityBundle:
+    return _replace_managed_identity_bundle(
+        settings,
+        secret_store,
+        persist_settings=persist_settings,
+    )
+
+
 def _bundle_matches_broker(
     bundle: ManagedIdentityBundle,
     *,

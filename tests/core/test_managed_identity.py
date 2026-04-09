@@ -29,6 +29,7 @@ from puripuly_heart.core.managed_identity import (
     canonical_verify_payload,
     decode_base64url,
     ensure_managed_identity_bundle,
+    regenerate_managed_identity_bundle,
 )
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_BYOK_API_KEY_SECRET,
@@ -119,6 +120,28 @@ def test_missing_installation_id_regenerates_bundle_and_clears_release_state() -
     assert store.get(MANAGED_DEVICE_PRIVATE_KEY_SECRET) != private_before
     assert settings.managed_identity.release_token is None
     assert settings.managed_identity.release_token_expires_at is None
+
+
+def test_regenerate_managed_identity_bundle_rotates_bundle_and_clears_managed_release_state() -> (
+    None
+):
+    settings = AppSettings()
+    store = InMemorySecretStore()
+
+    first = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    settings.managed_identity.release_token = "release-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:00:45.000Z"
+    store.set(OPENROUTER_BYOK_API_KEY_SECRET, "byok-key")
+    store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")
+
+    second = regenerate_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+
+    assert second.installation_id != first.installation_id
+    assert second.device_public_key != first.device_public_key
+    assert settings.managed_identity.release_token is None
+    assert settings.managed_identity.release_token_expires_at is None
+    assert store.get(OPENROUTER_BYOK_API_KEY_SECRET) == "byok-key"
+    assert store.get(OPENROUTER_MANAGED_API_KEY_SECRET) is None
 
 
 def test_corrupted_secret_material_regenerates_bundle_and_clears_release_state() -> None:

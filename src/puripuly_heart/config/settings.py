@@ -9,8 +9,9 @@ from typing import Any
 
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 11
+SETTINGS_SCHEMA_VERSION = 12
 MAX_CUSTOM_VOCAB_TERMS = 100
+DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
     "ko": ("아이리", "시나노"),
     "en": ("airi", "shinano"),
@@ -344,6 +345,7 @@ class OpenRouterSettings:
     llm_model: OpenRouterLLMModel = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
     selected_source: OpenRouterCredentialSource = OpenRouterCredentialSource.NONE
+    broker_base_url: str = DEFAULT_OPENROUTER_BROKER_BASE_URL
 
     def validate(self) -> None:
         if not isinstance(self.llm_model, OpenRouterLLMModel):
@@ -352,6 +354,8 @@ class OpenRouterSettings:
             raise ValueError("invalid openrouter routing mode")
         if not isinstance(self.selected_source, OpenRouterCredentialSource):
             raise ValueError("invalid openrouter credential source")
+        if not isinstance(self.broker_base_url, str) or not self.broker_base_url.strip():
+            raise ValueError("invalid openrouter broker base url")
 
 
 @dataclass(slots=True)
@@ -542,6 +546,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "llm_model": settings.openrouter.llm_model.value,
             "routing_mode": settings.openrouter.routing_mode.value,
             "selected_source": settings.openrouter.selected_source.value,
+            "broker_base_url": settings.openrouter.broker_base_url,
         },
         "qwen": {
             "region": settings.qwen.region.value,
@@ -669,6 +674,14 @@ def _parse_openrouter_credential_source(
         except ValueError:
             pass
     return fallback
+
+
+def _parse_openrouter_broker_base_url(value: object) -> str:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized:
+            return normalized
+    return DEFAULT_OPENROUTER_BROKER_BASE_URL
 
 
 def _default_openrouter_credential_source_value(data: dict[str, Any]) -> OpenRouterCredentialSource:
@@ -1003,6 +1016,22 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 11
 
+    if version < 12:
+        openrouter_data = data.get("openrouter")
+        if not isinstance(openrouter_data, dict):
+            openrouter_data = {}
+            data["openrouter"] = openrouter_data
+            changed = True
+
+        normalized_broker_base_url = _parse_openrouter_broker_base_url(
+            openrouter_data.get("broker_base_url")
+        )
+        if openrouter_data.get("broker_base_url") != normalized_broker_base_url:
+            openrouter_data["broker_base_url"] = normalized_broker_base_url
+            changed = True
+
+        version = 12
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -1114,6 +1143,14 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         changed = True
     if "selected_credential_source" in openrouter_data:
         del openrouter_data["selected_credential_source"]
+        changed = True
+
+    raw_openrouter_broker_base_url = openrouter_data.get("broker_base_url")
+    normalized_openrouter_broker_base_url = _parse_openrouter_broker_base_url(
+        raw_openrouter_broker_base_url
+    )
+    if raw_openrouter_broker_base_url != normalized_openrouter_broker_base_url:
+        openrouter_data["broker_base_url"] = normalized_openrouter_broker_base_url
         changed = True
 
     qwen_data = data.get("qwen")
@@ -1388,6 +1425,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             selected_source=_parse_openrouter_credential_source(
                 _get_raw_openrouter_selected_source(openrouter_raw),
                 fallback=_default_openrouter_credential_source_value(data),
+            ),
+            broker_base_url=_parse_openrouter_broker_base_url(
+                openrouter_raw.get("broker_base_url")
             ),
         ),
         qwen=qwen_settings,

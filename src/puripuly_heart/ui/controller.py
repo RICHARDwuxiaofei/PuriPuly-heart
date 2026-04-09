@@ -36,6 +36,7 @@ from puripuly_heart.core.audio.source import (
     resolve_sounddevice_input_device,
 )
 from puripuly_heart.core.clock import SystemClock
+from puripuly_heart.core.hardware_fingerprint import get_raw_hardware_fingerprint
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.local_stt_assets import (
     LocalSTTInstallState,
@@ -48,6 +49,9 @@ from puripuly_heart.core.local_stt_runtime_installer import (
     LocalSTTRuntimeInstallError,
     RuntimeLocalSTTStatusUpdate,
     ensure_local_stt_installed,
+)
+from puripuly_heart.core.managed_openrouter_broker_client import (
+    HttpManagedOpenRouterBrokerClient,
 )
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseBehavior,
@@ -1935,15 +1939,24 @@ class GuiController:
 
         from puripuly_heart import __version__
 
-        def _missing_hardware_hash() -> str:
-            raise RuntimeError("managed hardware fingerprint provider is not configured")
+        try:
+            client = HttpManagedOpenRouterBrokerClient(
+                base_url=self.settings.openrouter.broker_base_url,
+            )
+        except ValueError as exc:
+            logger.warning(
+                "[Managed OpenRouter] Invalid broker base URL %r; using unavailable fallback: %s",
+                self.settings.openrouter.broker_base_url,
+                exc,
+            )
+            client = UnavailableManagedOpenRouterReleaseClient()
 
         return ManagedOpenRouterReleaseService(
             settings=self.settings,
             secrets=secrets,
-            client=UnavailableManagedOpenRouterReleaseClient(),
+            client=client,
             persist_settings=lambda updated: save_settings(self.config_path, updated),
-            hardware_hash_provider=_missing_hardware_hash,
+            raw_hardware_fingerprint_provider=get_raw_hardware_fingerprint,
             app_version=__version__,
         )
 

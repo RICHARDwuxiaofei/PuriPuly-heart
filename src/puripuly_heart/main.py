@@ -6,7 +6,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from puripuly_heart.app.headless_mic import HeadlessMicRunner
+from puripuly_heart.app.headless_mic import HeadlessMicInitializationError, HeadlessMicRunner
 from puripuly_heart.app.headless_stdin import HeadlessStdinRunner
 from puripuly_heart.app.wiring import create_llm_provider, create_secret_store
 from puripuly_heart.config.paths import default_settings_path, default_vad_model_path
@@ -79,6 +79,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _print_initialization_error(component: str, exc: Exception) -> int:
+    print(f"Error: failed to initialize {component}: {exc}", flush=True)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -126,8 +131,7 @@ def main(argv: list[str] | None = None) -> int:
                 secrets = create_secret_store(settings.secrets, config_path=args.config)
                 llm = create_llm_provider(settings, secrets=secrets)
             except Exception as exc:
-                print(f"Error: failed to initialize LLM provider: {exc}", flush=True)
-                return 2
+                return _print_initialization_error("LLM provider", exc)
 
         runner = HeadlessStdinRunner(settings=settings, llm=llm)
         return asyncio.run(runner.run())
@@ -139,7 +143,10 @@ def main(argv: list[str] | None = None) -> int:
             vad_model_path=args.vad_model,
             use_llm=args.use_llm,
         )
-        return asyncio.run(runner.run())
+        try:
+            return asyncio.run(runner.run())
+        except HeadlessMicInitializationError as exc:
+            return _print_initialization_error("headless mic runner", exc)
 
     # Default: run GUI when no command specified (e.g., double-clicking EXE)
     if args.command is None:

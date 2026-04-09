@@ -26,10 +26,12 @@ from puripuly_heart.core.audio.source import (
     resolve_sounddevice_input_device,
 )
 from puripuly_heart.core.clock import SystemClock
+from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.osc.receiver import VrcMicState, VrcOscReceiver
 from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
+from puripuly_heart.core.storage.secrets import SecretStore
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
 from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
@@ -40,6 +42,19 @@ logger = logging.getLogger(__name__)
 
 # Hardcoded STT session reset deadline (not configurable via settings)
 STT_RESET_DEADLINE_S = 180.0
+
+
+class HeadlessMicInitializationError(Exception):
+    pass
+
+
+def _create_headless_llm_provider(*, settings: AppSettings, secrets: SecretStore) -> LLMProvider:
+    try:
+        return create_llm_provider(settings, secrets=secrets)
+    except ValueError as exc:
+        raise HeadlessMicInitializationError(
+            f"Headless mic LLM initialization failed: {exc}"
+        ) from exc
 
 
 @dataclass(slots=True)
@@ -73,7 +88,11 @@ class HeadlessMicRunner:
 
     async def run(self) -> int:
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-        llm = create_llm_provider(self.settings, secrets=secrets) if self.use_llm else None
+        llm = (
+            _create_headless_llm_provider(settings=self.settings, secrets=secrets)
+            if self.use_llm
+            else None
+        )
 
         backend = create_stt_backend(self.settings, secrets=secrets)
         stt = ManagedSTTProvider(

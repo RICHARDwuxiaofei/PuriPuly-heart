@@ -37,6 +37,10 @@ from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 
 SECRETS_PASSPHRASE_ENV = "PURIPULY_HEART_SECRETS_PASSPHRASE"
+MANAGED_OPENROUTER_RELEASE_SERVICE_REQUIRED_ERROR = (
+    "OpenRouter managed mode requires a managed release service; "
+    "CLI/headless paths are not wired for managed OpenRouter mode yet"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +162,12 @@ def create_llm_provider(
             model=settings.gemini.llm_model.value,
         )
     elif settings.provider.llm == LLMProviderName.OPENROUTER:
+        if (
+            settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+            and managed_release_service is None
+        ):
+            raise ValueError(MANAGED_OPENROUTER_RELEASE_SERVICE_REQUIRED_ERROR)
+
         resolution = resolve_openrouter_credentials(settings, secrets=secrets)
         if (
             settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
