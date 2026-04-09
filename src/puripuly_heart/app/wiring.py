@@ -5,6 +5,7 @@ import contextlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from puripuly_heart.config.settings import (
     AppSettings,
@@ -145,6 +146,7 @@ def create_llm_provider(
     *,
     secrets: SecretStore,
     managed_release_service: object | None = None,
+    managed_delegate_ready: Callable[[], object] | None = None,
 ) -> LLMProvider:
     if settings.provider.llm == LLMProviderName.GEMINI:
         api_key = require_secret(secrets, key="google_api_key", env_var="GOOGLE_API_KEY")
@@ -168,6 +170,7 @@ def create_llm_provider(
                     model=settings.openrouter.llm_model.value,
                     routing_mode=settings.openrouter.routing_mode,
                 ),
+                on_delegate_ready=managed_delegate_ready,
             )
         else:
             api_key = require_openrouter_execution_api_key(settings, secrets=secrets)

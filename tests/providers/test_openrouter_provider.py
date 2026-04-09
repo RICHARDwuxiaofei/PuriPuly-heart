@@ -6,12 +6,13 @@ from uuid import uuid4
 
 import pytest
 
+from puripuly_heart.config.settings import OpenRouterRoutingMode
 from puripuly_heart.providers.llm.openrouter import (
     HttpxOpenRouterClient,
     OpenRouterClient,
+    OpenRouterKeyMetadata,
     OpenRouterLLMProvider,
 )
-from puripuly_heart.config.settings import OpenRouterRoutingMode
 
 
 @dataclass
@@ -222,6 +223,49 @@ async def test_openrouter_verify_api_key_uses_key_endpoint(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_openrouter_fetch_key_metadata_uses_key_endpoint(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "data": {
+                    "limit": 0.07,
+                    "limit_remaining": 0.05,
+                    "usage": 0.02,
+                }
+            }
+
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            seen["url"] = url
+            seen["headers"] = kwargs["headers"]
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
+
+    metadata = await OpenRouterLLMProvider.fetch_key_metadata("secret")
+
+    assert metadata == OpenRouterKeyMetadata(limit_usd=0.07, remaining_usd=0.05, usage_usd=0.02)
+    assert seen["url"] == "https://openrouter.ai/api/v1/key"
+    assert seen["headers"]["Authorization"] == "Bearer secret"
+
+
+@pytest.mark.asyncio
 async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_latency_sort(
     monkeypatch,
 ) -> None:
@@ -258,7 +302,9 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_la
 
 
 @pytest.mark.asyncio
-async def test_httpx_openrouter_client_builds_ordered_request_for_parasail_first(monkeypatch) -> None:
+async def test_httpx_openrouter_client_builds_ordered_request_for_parasail_first(
+    monkeypatch,
+) -> None:
     fake_client = FakeAsyncClient()
     monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
 
@@ -281,7 +327,9 @@ async def test_httpx_openrouter_client_builds_ordered_request_for_parasail_first
 
 
 @pytest.mark.asyncio
-async def test_httpx_openrouter_client_stream_translate_builds_streaming_request(monkeypatch) -> None:
+async def test_httpx_openrouter_client_stream_translate_builds_streaming_request(
+    monkeypatch,
+) -> None:
     fake_client = FakeAsyncClient()
     monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
 

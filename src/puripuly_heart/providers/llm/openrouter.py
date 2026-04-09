@@ -153,6 +153,19 @@ class OpenRouterClient(Protocol):
     async def close(self) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class OpenRouterKeyMetadata:
+    limit_usd: float | None
+    remaining_usd: float | None
+    usage_usd: float | None
+
+
+def _optional_number(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
 @dataclass(slots=True)
 class OpenRouterLLMProvider:
     api_key: str
@@ -239,6 +252,32 @@ class OpenRouterLLMProvider:
                 return response.status_code == 200
         except Exception:
             return False
+
+    @staticmethod
+    async def fetch_key_metadata(api_key: str) -> OpenRouterKeyMetadata | None:
+        if not api_key:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    _OPENROUTER_KEY_URL,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except Exception:
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return None
+        return OpenRouterKeyMetadata(
+            limit_usd=_optional_number(data.get("limit")),
+            remaining_usd=_optional_number(data.get("limit_remaining")),
+            usage_usd=_optional_number(data.get("usage")),
+        )
 
 
 @dataclass(slots=True)
