@@ -325,6 +325,7 @@ class GuiController:
     def _stt_provider_applies_custom_vocabulary(self, settings: AppSettings) -> bool:
         return settings.provider.stt in (
             STTProviderName.DEEPGRAM,
+            STTProviderName.LOCAL_QWEN,
             STTProviderName.SONIOX,
         )
 
@@ -351,6 +352,15 @@ class GuiController:
     ) -> tuple[bool, tuple[str, ...]]:
         if not self._stt_provider_applies_custom_vocabulary(settings):
             return False, ()
+        if settings.provider.stt == STTProviderName.LOCAL_QWEN:
+            from puripuly_heart.core.stt.custom_vocab import get_effective_local_qwen_hotwords
+
+            return (
+                settings.stt.custom_vocabulary_enabled,
+                tuple(
+                    get_effective_local_qwen_hotwords(settings, settings.languages.source_language)
+                ),
+            )
         return (
             settings.stt.custom_vocabulary_enabled,
             tuple(get_effective_custom_terms(settings, settings.languages.source_language)),

@@ -770,6 +770,24 @@ def test_stt_runtime_signature_ignores_custom_vocabulary_for_qwen_asr() -> None:
     assert enabled_signature[-1] == ()
 
 
+def test_stt_runtime_signature_uses_capped_custom_vocabulary_for_local_qwen() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": [f"term-{i:02d}" for i in range(20)]}
+    settings.stt.custom_vocabulary_enabled = False
+
+    disabled_signature = controller._build_stt_runtime_signature(settings)
+
+    settings.stt.custom_vocabulary_enabled = True
+    enabled_signature = controller._build_stt_runtime_signature(settings)
+
+    assert disabled_signature != enabled_signature
+    assert enabled_signature[-2] is True
+    assert enabled_signature[-1] == tuple(f"term-{i:02d}" for i in range(12))
+
+
 def test_self_stt_runtime_signature_ignores_overlay_and_peer_desktop_settings() -> None:
     controller = _make_controller(app=SimpleNamespace())
     settings = AppSettings()
@@ -2833,6 +2851,55 @@ async def test_apply_settings_does_not_restart_stt_for_qwen_custom_vocabulary_ch
 
     assert controller._stt_restart_requested is False
     assert replace_calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_restarts_stt_for_local_qwen_custom_vocabulary_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+
+    replace_calls: list[str] = []
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = settings
+    controller.hub = DummyHub()
+    controller.hub.source_language = settings.languages.source_language
+    controller.hub.target_language = settings.languages.target_language
+    controller.hub.system_prompt = settings.system_prompt
+    controller.hub.low_latency_mode = settings.stt.low_latency_mode
+    controller.hub.low_latency_merge_gap_ms = settings.stt.low_latency_merge_gap_ms
+    controller.hub.low_latency_spec_retry_max = settings.stt.low_latency_spec_retry_max
+    controller.hub.hangover_s = 1.1
+    controller._last_stt_runtime_signature = controller._build_stt_runtime_signature(settings)
+    controller._stt_desired = True
+    controller._mic_task = object()
+
+    settings.stt.custom_vocabulary_enabled = True
+    settings.stt.custom_terms = {"ko": ["Puripuly", "VRChat"]}
+
+    async def fake_configure_vrc_mic_receiver(self, *, enabled: bool) -> None:
+        _ = (self, enabled)
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        _ = self
+        replace_calls.append("replace")
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        fake_configure_vrc_mic_receiver,
+    )
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
+
+    await controller.apply_settings(settings)
+
+    assert controller._stt_restart_requested is False
+    assert replace_calls == ["replace"]
 
 
 @pytest.mark.asyncio

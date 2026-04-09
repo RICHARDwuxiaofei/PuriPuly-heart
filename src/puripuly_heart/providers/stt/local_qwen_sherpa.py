@@ -94,6 +94,8 @@ class LocalQwenSherpaSTTBackend(STTBackend):
     feature_dim: int = 128
     provider: str = "cpu"
     stream_label: str | None = None
+    language_hint: str | None = None
+    hotwords: tuple[str, ...] = ()
     _recognizer: object | None = field(init=False, default=None, repr=False)
     _load_lock: asyncio.Lock = field(init=False, repr=False)
     _decode_lock: asyncio.Lock = field(init=False, repr=False)
@@ -134,7 +136,9 @@ class LocalQwenSherpaSTTBackend(STTBackend):
                 feature_dim=self.feature_dim,
                 provider=self.provider,
             )
-        except ImportError as exc:  # pragma: no cover - import path exercised via load error wrapper
+        except (
+            ImportError
+        ) as exc:  # pragma: no cover - import path exercised via load error wrapper
             raise LocalQwenSherpaLoadError("failed to import sherpa_onnx") from exc
         except Exception as exc:
             raise LocalQwenSherpaLoadError(str(exc)) from exc
@@ -160,6 +164,12 @@ class LocalQwenSherpaSTTBackend(STTBackend):
                 to_rate_hz=LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ,
             )
         stream = recognizer.create_stream()
+        set_option = getattr(stream, "set_option", None)
+        if callable(set_option):
+            if self.language_hint:
+                set_option("language", self.language_hint)
+            if self.hotwords:
+                set_option("hotwords", ",".join(self.hotwords))
         stream.accept_waveform(LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ, samples)
         recognizer.decode_stream(stream)
         result = getattr(stream, "result", None)

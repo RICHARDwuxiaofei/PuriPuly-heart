@@ -153,7 +153,9 @@ async def test_local_qwen_backend_emits_final_transcript_on_speech_end(
             "seed": 42,
         },
         "model": {
-            "qwen3_asr": recognizer_state["recognizer_config"].kwargs["model_config"].kwargs["qwen3_asr"],
+            "qwen3_asr": recognizer_state["recognizer_config"]
+            .kwargs["model_config"]
+            .kwargs["qwen3_asr"],
             "num_threads": 3,
             "debug": False,
             "provider": "cpu",
@@ -169,6 +171,53 @@ async def test_local_qwen_backend_emits_final_transcript_on_speech_end(
         },
     }
     assert recognizer_state["decoded"] is recognizer_state["stream"]
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_backend_sets_stream_language_hint_and_hotwords(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recognizer_state: dict[str, object] = {}
+
+    class FakeStream:
+        def __init__(self) -> None:
+            self.options: dict[str, str] = {}
+            self.result = SimpleNamespace(text="hello local qwen")
+
+        def set_option(self, key: str, value: str) -> None:
+            self.options[key] = value
+
+        def accept_waveform(self, sample_rate: int, samples) -> None:
+            _ = (sample_rate, samples)
+
+    class FakeRecognizer:
+        def create_stream(self) -> FakeStream:
+            stream = FakeStream()
+            recognizer_state["stream"] = stream
+            return stream
+
+        def decode_stream(self, stream: FakeStream) -> None:
+            recognizer_state["decoded"] = stream
+
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    _install_fake_sherpa(monkeypatch, recognizer_factory=lambda _config: FakeRecognizer())
+
+    backend = LocalQwenSherpaSTTBackend(
+        model_dir=Path("/models/qwen"),
+        language_hint="Korean",
+        hotwords=("Puripuly", "VRChat"),
+    )
+    session = await backend.open_session()
+    await session.send_audio(b"\x00\x00")
+    await session.on_speech_end()
+
+    stream = recognizer_state["stream"]
+    assert isinstance(stream, FakeStream)
+    assert stream.options == {"language": "Korean", "hotwords": "Puripuly,VRChat"}
 
 
 @pytest.mark.asyncio
@@ -217,7 +266,9 @@ async def test_local_qwen_backend_resamples_8000_input_to_16000_for_recognizer(
     assert accepted_samples.shape == (4,)
     assert accepted_samples[0] == pytest.approx(0.0)
     assert accepted_samples[-1] == pytest.approx(32767 / 32768.0, rel=1e-4)
-    assert recognizer_state["recognizer_config"].kwargs["feat_config"].kwargs["sampling_rate"] == 16000
+    assert (
+        recognizer_state["recognizer_config"].kwargs["feat_config"].kwargs["sampling_rate"] == 16000
+    )
 
 
 @pytest.mark.asyncio

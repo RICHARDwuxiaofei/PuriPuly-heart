@@ -27,7 +27,10 @@ from puripuly_heart.core.storage.secrets import (
     SecretStore,
 )
 from puripuly_heart.core.stt.backend import STTBackend
-from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
+from puripuly_heart.core.stt.custom_vocab import (
+    get_effective_custom_terms,
+    get_effective_local_qwen_hotwords,
+)
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
@@ -226,6 +229,7 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
     effective_terms = get_effective_custom_terms(settings, settings.languages.source_language)
 
     if settings.provider.stt == STTProviderName.LOCAL_QWEN:
+        from puripuly_heart.core.language import get_local_qwen_language_hint
         from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
         from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaSTTBackend
 
@@ -233,6 +237,10 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
             model_dir=default_local_stt_model_dir(),
             sample_rate_hz=settings.audio.internal_sample_rate_hz,
             stream_label="self",
+            language_hint=get_local_qwen_language_hint(settings.languages.source_language),
+            hotwords=tuple(
+                get_effective_local_qwen_hotwords(settings, settings.languages.source_language)
+            ),
         )
 
     if settings.provider.stt == STTProviderName.DEEPGRAM:
@@ -339,7 +347,7 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
             provider=provider,
             source_language=peer_source_language,
             sample_rate_hz=settings.audio.internal_sample_rate_hz,
-            keyterms=keyterms,
+            keyterms=tuple(get_effective_local_qwen_hotwords(settings, peer_source_language)),
         )
 
     raise ValueError(f"Unsupported peer STT provider: {provider}")
@@ -422,6 +430,7 @@ def create_peer_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> S
         )
 
     if resolved.provider == STTProviderName.LOCAL_QWEN:
+        from puripuly_heart.core.language import get_local_qwen_language_hint
         from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
         from puripuly_heart.providers.stt.local_qwen_sherpa import LocalQwenSherpaSTTBackend
 
@@ -429,6 +438,8 @@ def create_peer_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> S
             model_dir=default_local_stt_model_dir(),
             sample_rate_hz=resolved.sample_rate_hz,
             stream_label="peer",
+            language_hint=get_local_qwen_language_hint(resolved.source_language),
+            hotwords=resolved.keyterms,
         )
 
     raise ValueError(f"Unsupported peer STT provider: {resolved.provider}")

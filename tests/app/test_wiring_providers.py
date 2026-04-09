@@ -29,7 +29,10 @@ from puripuly_heart.config.settings import (
     STTProviderName,
     STTSettings,
 )
-from puripuly_heart.core.language import get_deepgram_language, get_qwen_asr_language
+from puripuly_heart.core.language import (
+    get_deepgram_language,
+    get_qwen_asr_language,
+)
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
 from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterLLMProvider
@@ -307,6 +310,23 @@ def test_create_stt_backend_local_qwen_uses_shared_model_path_without_secret() -
     assert backend.stream_label == "self"
 
 
+def test_create_stt_backend_local_qwen_passes_language_hint_and_capped_hotwords() -> None:
+    settings = AppSettings(provider=ProviderSettings(stt=STTProviderName.LOCAL_QWEN))
+    settings.languages.source_language = "ko-KR"
+    settings.stt.custom_vocabulary_enabled = True
+    settings.stt.custom_terms = {
+        "ko": ["Puripuly", "VRChat, Japan", *[f"term-{i:02d}" for i in range(20)]],
+    }
+    secrets = InMemorySecretStore()
+
+    backend = create_stt_backend(settings, secrets=secrets)
+
+    assert isinstance(backend, LocalQwenSherpaSTTBackend)
+    assert getattr(backend, "language_hint", None) == "Korean"
+    assert getattr(backend, "hotwords", ())[:2] == ("Puripuly", "VRChat Japan")
+    assert len(getattr(backend, "hotwords", ())) == 12
+
+
 def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None:
     settings = AppSettings(
         provider=ProviderSettings(stt=STTProviderName.SONIOX),
@@ -451,6 +471,25 @@ def test_create_peer_stt_backend_uses_peer_local_qwen_provider_and_sample_rate()
     assert backend.model_dir == default_local_stt_model_dir()
     assert backend.sample_rate_hz == 44100
     assert backend.stream_label == "peer"
+
+
+def test_create_peer_stt_backend_local_qwen_uses_peer_language_and_capped_hotwords() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    settings.languages.source_language = "ko"
+    settings.languages.peer_source_language = "zh-CN"
+    settings.stt.custom_vocabulary_enabled = True
+    settings.stt.custom_terms = {
+        "zh-CN": ["airi", "shinano", *[f"term-{i:02d}" for i in range(20)]],
+    }
+    secrets = InMemorySecretStore()
+
+    backend = create_peer_stt_backend(settings, secrets=secrets)
+
+    assert isinstance(backend, LocalQwenSherpaSTTBackend)
+    assert getattr(backend, "language_hint", None) == "Chinese"
+    assert getattr(backend, "hotwords", ())[:2] == ("airi", "shinano")
+    assert len(getattr(backend, "hotwords", ())) == 12
 
 
 def test_resolve_peer_stt_config_inherits_soniox_endpoint_keepalive_and_trailing_silence_until_override() -> (

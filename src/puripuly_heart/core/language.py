@@ -121,6 +121,15 @@ _QWEN_ASR_LANGUAGE_MAP: dict[str, str] = {
     "sv": "sv",
 }
 
+_LOCAL_QWEN_LANGUAGE_HINT_MAP: dict[str, str] = {
+    "en": "English",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh": "Chinese",
+    "zh-CN": "Chinese",
+    "zh-TW": "Chinese",
+}
+
 
 def get_qwen_asr_language(code: str) -> str:
     """Get Qwen-ASR compatible language code. Falls back to 'en' if unknown."""
@@ -130,6 +139,15 @@ def get_qwen_asr_language(code: str) -> str:
     # Try base code (e.g., "ko-KR" -> "ko")
     base_code = code.split("-")[0].lower()
     return _QWEN_ASR_LANGUAGE_MAP.get(base_code, "en")
+
+
+def get_local_qwen_language_hint(code: str) -> str | None:
+    """Get a conservative human-readable language hint for local Qwen STT."""
+    normalized = code.strip()
+    if normalized in _LOCAL_QWEN_LANGUAGE_HINT_MAP:
+        return _LOCAL_QWEN_LANGUAGE_HINT_MAP[normalized]
+    base_code = normalized.split("-")[0].lower()
+    return _LOCAL_QWEN_LANGUAGE_HINT_MAP.get(base_code)
 
 
 def get_soniox_language_hints(code: str) -> list[str]:
