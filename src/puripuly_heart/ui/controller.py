@@ -5,6 +5,7 @@ import contextlib
 import logging
 import secrets
 import threading
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -645,12 +646,12 @@ class GuiController:
         if self.settings is None:
             return
 
-        logger.info(
-            "[Overlay] Toggle request: enabled=%s current_state=%s has_bridge=%s has_manager=%s",
-            enabled,
-            self.overlay_state,
-            self._overlay_bridge is not None,
-            self._overlay_manager is not None,
+        self.log_basic(f"[Overlay] Toggle request: enabled={enabled}")
+        self.log_detailed(
+            "[Overlay] Toggle detail: "
+            f"current_state={self.overlay_state} "
+            f"has_bridge={self._overlay_bridge is not None} "
+            f"has_manager={self._overlay_manager is not None}"
         )
         self.settings.ui.overlay_enabled = bool(enabled)
         if not enabled:
@@ -758,8 +759,12 @@ class GuiController:
                 )
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("[Overlay] Failed to start overlay runtime")
+        except Exception as exc:
+            self.log_detailed(
+                "[Overlay] Failed to start overlay runtime",
+                level=logging.ERROR,
+                exception=exc,
+            )
             await self._handle_overlay_start_failure("unknown")
         finally:
             if self._overlay_start_task is current_task:
@@ -802,13 +807,14 @@ class GuiController:
         if self._overlay_lock is None:
             self._overlay_lock = asyncio.Lock()
 
-        logger.info(
-            "[Overlay] Shutdown requested: preserve_failure_reason=%s state=%s has_bridge=%s has_manager=%s presenter_attached=%s",
-            preserve_failure_reason,
-            self.overlay_state,
-            self._overlay_bridge is not None,
-            self._overlay_manager is not None,
-            self._overlay_presenter is not None,
+        self.log_basic("[Overlay] Shutdown requested")
+        self.log_detailed(
+            "[Overlay] Shutdown detail: "
+            f"preserve_failure_reason={preserve_failure_reason} "
+            f"state={self.overlay_state} "
+            f"has_bridge={self._overlay_bridge is not None} "
+            f"has_manager={self._overlay_manager is not None} "
+            f"presenter_attached={self._overlay_presenter is not None}"
         )
         async with self._overlay_lock:
             has_runtime = (
@@ -922,14 +928,15 @@ class GuiController:
 
     def _log_overlay_state_transition(self, previous_state: str, next_state: str) -> None:
         manager = self._overlay_manager
-        logger.info(
-            "[Overlay] State transition: %s -> %s failure_reason=%s presenter_attached=%s bridge_attached=%s manager_state=%s",
-            previous_state,
-            next_state,
-            self.failure_reason,
-            self._overlay_presenter is not None,
-            self._overlay_bridge is not None,
-            manager.state if manager is not None else None,
+        transition_message = f"[Overlay] State transition: {previous_state} -> {next_state}"
+        if self.failure_reason is not None:
+            transition_message = f"{transition_message} failure_reason={self.failure_reason}"
+        self.log_basic(transition_message)
+        self.log_detailed(
+            "[Overlay] State detail: "
+            f"presenter_attached={self._overlay_presenter is not None} "
+            f"bridge_attached={self._overlay_bridge is not None} "
+            f"manager_state={manager.state if manager is not None else None}"
         )
 
     def begin_overlay_calibration(self) -> OverlayCalibration:
@@ -988,18 +995,20 @@ class GuiController:
             try:
                 run_task(self._emit_overlay_calibration_update)
                 return
-            except Exception:
-                logger.warning(
+            except Exception as exc:
+                self.log_detailed(
                     "[Overlay] Failed to schedule calibration update via page.run_task",
-                    exc_info=True,
+                    level=logging.WARNING,
+                    exception=exc,
                 )
                 return
 
         try:
             asyncio.get_running_loop().create_task(self._emit_overlay_calibration_update())
         except RuntimeError:
-            logger.warning(
-                "[Overlay] Skipping calibration update; no running loop and page.run_task unavailable"
+            self.log_detailed(
+                "[Overlay] Skipping calibration update; no running loop and page.run_task unavailable",
+                level=logging.WARNING,
             )
 
     def begin_overlay_calibration_for_test(self) -> None:
@@ -1017,11 +1026,11 @@ class GuiController:
     async def set_translation_enabled(self, enabled: bool) -> None:
         if self.hub is None:
             return
-        logger.info(
-            "[Translation] Toggle request: enabled=%s current_enabled=%s llm_available=%s",
-            enabled,
-            self.hub.translation_enabled,
-            self.hub.llm is not None,
+        self.log_basic(f"[Translation] Toggle request: enabled={enabled}")
+        self.log_detailed(
+            "[Translation] Toggle detail: "
+            f"current_enabled={self.hub.translation_enabled} "
+            f"llm_available={self.hub.llm is not None}"
         )
         if enabled and await self._handle_managed_translation_enable() is False:
             return
@@ -1038,9 +1047,12 @@ class GuiController:
             provider = self.settings.provider.llm.value
             if provider == "qwen":
                 region = self.settings.qwen.region.value
-                logger.info(f"[Translation] Enabled with provider: {provider} (region: {region})")
+                self.log_basic(f"[Translation] Enabled with provider: {provider}")
+                self.log_detailed(
+                    f"[Translation] Provider detail: provider={provider} region={region}"
+                )
             else:
-                logger.info(f"[Translation] Enabled with provider: {provider}")
+                self.log_basic(f"[Translation] Enabled with provider: {provider}")
 
         # Clear context history when toggling translation
         self.hub.clear_context()
@@ -1054,11 +1066,10 @@ class GuiController:
                     await llm.warmup()
 
     async def set_stt_enabled(self, enabled: bool) -> None:
-        logger.info(
-            "[STT] Toggle request: enabled=%s desired_before=%s overlay_state=%s",
-            enabled,
-            self._stt_desired,
-            self.overlay_state,
+        self.log_basic(f"[STT] Toggle request: enabled={enabled}")
+        self.log_detailed(
+            "[STT] Toggle detail: "
+            f"desired_before={self._stt_desired} overlay_state={self.overlay_state}"
         )
         self._stt_desired = bool(enabled)
         if not enabled:
@@ -1069,9 +1080,10 @@ class GuiController:
             provider = self.settings.provider.stt.value
             if provider == "qwen_asr":
                 region = self.settings.qwen.region.value
-                logger.info(f"[STT] Enabled with provider: {provider} (region: {region})")
+                self.log_basic(f"[STT] Enabled with provider: {provider}")
+                self.log_detailed(f"[STT] Provider detail: provider={provider} region={region}")
             else:
-                logger.info(f"[STT] Enabled with provider: {provider}")
+                self.log_basic(f"[STT] Enabled with provider: {provider}")
 
         if (
             enabled
@@ -1331,10 +1343,9 @@ class GuiController:
         await self._stt_switch_task
 
     async def _replace_runtime_stt_provider(self) -> None:
-        logger.info(
-            "[STT] Replacing runtime provider: desired=%s mic_task_active=%s",
-            self._stt_desired,
-            self._mic_task is not None,
+        self.log_detailed(
+            "[STT] Replacing runtime provider detail: "
+            f"desired={self._stt_desired} mic_task_active={self._mic_task is not None}"
         )
         if self._mic_task is not None:
             await self._stop_mic_loop()
@@ -1359,7 +1370,10 @@ class GuiController:
                             await self.hub.stt.close()
                 else:
                     if self.hub is None:
-                        logger.warning("[STT] Enable requested before hub is ready")
+                        self.log_detailed(
+                            "[STT] Enable requested before hub is ready",
+                            level=logging.WARNING,
+                        )
                         break
                     if restart:
                         await self._stop_mic_loop()
@@ -1414,19 +1428,18 @@ class GuiController:
         )
         if source_language_changed or target_language_changed:
             presenter = self._overlay_presenter
-            logger.info(
-                "[Settings] Applying languages: source=%s->%s target=%s->%s overlay_state=%s "
-                "presenter_attached=%s bridge_attached=%s overlay_sink_matches_presenter=%s",
-                prev_source_lang,
-                settings.languages.source_language,
-                prev_target_lang,
-                settings.languages.target_language,
-                self.overlay_state,
-                presenter is not None,
-                self._overlay_bridge is not None,
-                self.hub is not None
-                and presenter is not None
-                and getattr(self.hub, "overlay_sink", None) is presenter,
+            self.log_basic(
+                "[Settings] Applying languages: "
+                f"source={prev_source_lang}->{settings.languages.source_language} "
+                f"target={prev_target_lang}->{settings.languages.target_language}"
+            )
+            self.log_detailed(
+                "[Settings] Language apply detail: "
+                f"overlay_state={self.overlay_state} "
+                f"presenter_attached={presenter is not None} "
+                f"bridge_attached={self._overlay_bridge is not None} "
+                "overlay_sink_matches_presenter="
+                f"{self.hub is not None and presenter is not None and getattr(self.hub, 'overlay_sink', None) is presenter}"
             )
         self.settings = settings
         self._save_settings()
@@ -1440,10 +1453,9 @@ class GuiController:
             and prev_low_latency != settings.stt.low_latency_mode
             and self.settings.provider.llm.value == "qwen"
         ):
-            logger.info(
-                "[Settings] Low latency mode changed: %s -> %s, rebuilding LLM provider",
-                prev_low_latency,
-                settings.stt.low_latency_mode,
+            self.log_detailed(
+                "[Settings] Low latency detail: "
+                f"mode={prev_low_latency}->{settings.stt.low_latency_mode} rebuilding_llm_provider=True"
             )
             await self._rebuild_llm_provider()
 
@@ -1477,7 +1489,7 @@ class GuiController:
         if self._last_vrc_mic_sync_enabled != settings.osc.vrc_mic_intercept:
             if self.vrc_mic_audio_gate is not None:
                 self.vrc_mic_audio_gate.set_enabled(settings.osc.vrc_mic_intercept)
-            logger.info("[Settings] VRC mic sync enabled: %s", settings.osc.vrc_mic_intercept)
+            self.log_detailed(f"[Settings] VRC mic sync enabled: {settings.osc.vrc_mic_intercept}")
             await self._configure_vrc_mic_receiver(enabled=settings.osc.vrc_mic_intercept)
 
         current_self_signature = self._build_self_stt_runtime_signature(settings)
@@ -1494,12 +1506,12 @@ class GuiController:
         self._sync_signature_caches(settings)
 
         if source_language_changed or target_language_changed:
-            logger.info(
-                "[Settings] Runtime impact after language apply: should_restart_stt=%s should_refresh_peer=%s prev_overlay_enabled=%s next_overlay_enabled=%s",
-                should_restart_stt,
-                should_refresh_peer,
-                prev_overlay_enabled,
-                settings.ui.overlay_enabled,
+            self.log_detailed(
+                "[Settings] Language runtime impact: "
+                f"should_restart_stt={should_restart_stt} "
+                f"should_refresh_peer={should_refresh_peer} "
+                f"prev_overlay_enabled={prev_overlay_enabled} "
+                f"next_overlay_enabled={settings.ui.overlay_enabled}"
             )
 
         if should_refresh_peer and self.hub is not None:
@@ -1661,13 +1673,14 @@ class GuiController:
                 await previous_llm.close()
 
         # Create new LLM provider with current settings
-        secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-        new_managed_release_service = self._create_managed_openrouter_release_service(
-            secrets=secrets
-        )
-        await self._replace_managed_openrouter_release_service(new_managed_release_service)
         llm = None
-        with contextlib.suppress(Exception):
+        llm_error: Exception | None = None
+        try:
+            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+            new_managed_release_service = self._create_managed_openrouter_release_service(
+                secrets=secrets
+            )
+            await self._replace_managed_openrouter_release_service(new_managed_release_service)
             llm = create_llm_provider(
                 self.settings,
                 secrets=secrets,
@@ -1675,6 +1688,8 @@ class GuiController:
                 managed_delegate_ready=self._on_managed_trial_delegate_ready,
                 runtime_logging=self.runtime_logging,
             )
+        except Exception as exc:
+            llm_error = exc
 
         # Update hub's LLM provider
         self.hub.llm = llm
@@ -1686,16 +1701,24 @@ class GuiController:
 
         await self._refresh_managed_trial_dashboard_state()
 
-        logger.info("[Settings] LLM provider rebuilt successfully")
+        if llm is None:
+            message = "LLM provider not available"
+            if llm_error is not None:
+                message = f"{message}: {llm_error}"
+            self._log_error(message)
+            return
+
+        self.log_basic("[Settings] LLM provider rebuilt successfully")
 
     async def _rebuild_stt_provider(self) -> None:
         """Rebuild only the STT provider so later enable uses current settings."""
         if self.hub is None or self.settings is None:
             return
 
-        secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
         stt = None
+        stt_error: Exception | None = None
         try:
+            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
             backend = create_stt_backend(self.settings, secrets=secrets)
             stt = ManagedSTTProvider(
                 backend=backend,
@@ -1706,7 +1729,7 @@ class GuiController:
                 bridging_ms=self.settings.audio.ring_buffer_ms,
             )
         except Exception as exc:
-            self._log_error(f"STT backend not available: {exc}")
+            stt_error = exc
 
         await self.hub.replace_stt_provider(stt)
         self._sync_effective_hub_flags(self.settings)
@@ -1717,7 +1740,12 @@ class GuiController:
             if stt is None:
                 dash.set_stt_enabled(False)
 
-        logger.info("[Settings] STT provider replacement completed successfully")
+        if stt is None:
+            assert stt_error is not None
+            self._log_error(f"STT backend not available: {stt_error}")
+            return
+
+        self.log_basic("[Settings] STT provider replacement completed successfully")
 
     def _create_peer_stt_provider_from_runtime_config(
         self,
@@ -1764,10 +1792,8 @@ class GuiController:
         self._sync_effective_hub_flags(self.settings)
 
     async def _rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
-        logger.info(
-            "[Settings] Rebuilding pipeline: rebuild_stt=%s overlay_state=%s",
-            rebuild_stt,
-            self.overlay_state,
+        self.log_detailed(
+            f"[Settings] Rebuilding pipeline detail: rebuild_stt={rebuild_stt} overlay_state={self.overlay_state}"
         )
         _ = rebuild_stt
         restore_stt_enabled = self._stt_desired
@@ -1998,11 +2024,10 @@ class GuiController:
                 try:
                     return resolve_sounddevice_input_device(host_api=host_api, device=device)
                 except Exception as exc:
-                    logger.warning(
-                        "Device resolution failed (host_api=%r, device=%r): %s",
-                        host_api,
-                        device,
-                        exc,
+                    self.log_detailed(
+                        "[STT] Device resolution detail: "
+                        f"host_api={host_api!r} device={device!r} error={exc}",
+                        level=logging.WARNING,
                     )
                     return None
 
@@ -2022,13 +2047,12 @@ class GuiController:
 
             try:
                 source = _open_source(device_idx)
-                logger.info("Microphone opened (device_idx=%s)", device_idx)
+                self.log_detailed(f"[STT] Microphone opened: device_idx={device_idx}")
             except Exception as exc:
-                logger.error(
-                    "Failed to open microphone (host_api=%r, device=%r): %s",
-                    host_api,
-                    device_name,
-                    exc,
+                self.log_detailed(
+                    "[STT] Microphone open detail: "
+                    f"host_api={host_api!r} device={device_name!r} error={exc}",
+                    level=logging.ERROR,
                 )
 
             # 2차 시도: Host API 무시, 마이크 이름만
@@ -2037,17 +2061,25 @@ class GuiController:
                 if fallback_idx != device_idx:
                     try:
                         source = _open_source(fallback_idx)
-                        logger.info("Microphone opened with fallback (device_idx=%s)", fallback_idx)
+                        self.log_detailed(
+                            f"[STT] Microphone opened with fallback: device_idx={fallback_idx}"
+                        )
                     except Exception as exc:
-                        logger.error("Fallback microphone failed: %s", exc)
+                        self.log_detailed(
+                            f"[STT] Fallback microphone detail: error={exc}",
+                            level=logging.ERROR,
+                        )
 
             # 3차 시도: 시스템 기본 장치
             if source is None:
                 try:
                     source = _open_source(None)
-                    logger.info("Microphone opened with system default")
+                    self.log_detailed("[STT] Microphone opened with system default")
                 except Exception as exc:
-                    logger.error("System default microphone failed: %s", exc)
+                    self.log_detailed(
+                        f"[STT] System default microphone detail: error={exc}",
+                        level=logging.ERROR,
+                    )
 
             if source is None:
                 self._log_error("All microphone attempts failed")
@@ -2195,12 +2227,35 @@ class GuiController:
     def set_runtime_logging_mode(self, mode: SessionLoggingMode | str) -> None:
         self.runtime_logging.set_mode(mode)
 
-    def _log_error(self, message: str) -> None:
+    def log_basic(self, message: str, *, level: int = logging.INFO) -> None:
         try:
-            self.runtime_logging.emit_basic(message, level=logging.ERROR)
+            self.runtime_logging.emit_basic(message, level=level)
             return
         except Exception:
-            logger.error(message)
+            logger.log(level, message)
+
+    def log_detailed(
+        self,
+        message: str,
+        *,
+        level: int = logging.INFO,
+        exception: BaseException | None = None,
+    ) -> bool:
+        rendered_message = message
+        exc_info = None
+        if exception is not None:
+            exc_info = (type(exception), exception, exception.__traceback__)
+            rendered_message = (
+                f"{message}\n{''.join(traceback.format_exception(*exc_info)).rstrip()}"
+            )
+        try:
+            return self.runtime_logging.emit_detailed(rendered_message, level=level)
+        except Exception:
+            logger.log(level, message, exc_info=exc_info)
+            return True
+
+    def _log_error(self, message: str) -> None:
+        self.log_basic(message, level=logging.ERROR)
 
     def _get_qwen_key_and_base_url(self, secrets) -> tuple[str, str]:
         if self.settings is None:

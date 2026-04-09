@@ -87,8 +87,8 @@ async def _start_controller_with_inspected_stt_state(
     install_calls: list[str] = []
 
     class FakeBridge:
-        def __init__(self, *, app, event_queue) -> None:
-            _ = (app, event_queue)
+        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
+            _ = (app, event_queue, runtime_logging)
 
         async def run(self) -> None:
             await asyncio.sleep(0)

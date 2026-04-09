@@ -56,6 +56,20 @@ class DummyContent:
         self.update_calls += 1
 
 
+class RuntimeLoggingController:
+    def __init__(self) -> None:
+        self.basic_messages: list[str] = []
+        self.detailed_messages: list[str] = []
+
+    def log_basic(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+        _ = level
+        self.basic_messages.append(message)
+
+    def log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+        _ = level
+        self.detailed_messages.append(message)
+
+
 def test_translator_app_init_builds_layout_and_wires_callbacks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -66,9 +80,19 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
             self.config_path = config_path
             self.settings = None
             self.runtime_logging_mode = "detailed"
+            self.basic_messages: list[str] = []
+            self.detailed_messages: list[str] = []
 
         def set_runtime_logging_mode(self, mode: str) -> None:
             self.runtime_logging_mode = mode
+
+        def log_basic(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+            _ = level
+            self.basic_messages.append(message)
+
+        def log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+            _ = level
+            self.detailed_messages.append(message)
 
     class DummyDashboardView(ft.Container):
         def __init__(self) -> None:
@@ -112,6 +136,12 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
         async def scroll_to_bottom(self) -> None:
             return None
 
+        def log_basic(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+            _ = (message, level)
+
+        def log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+            _ = (message, level)
+
     monkeypatch.setattr(app_module, "GuiController", DummyController)
     monkeypatch.setattr(app_module, "DashboardView", DummyDashboardView)
     monkeypatch.setattr(app_module, "SettingsView", DummySettingsView)
@@ -137,6 +167,8 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert app.view_dashboard.on_send_message == app._on_manual_submit
     assert app.view_settings.on_verify_api_key == app._on_verify_api_key
     assert app.view_settings.on_overlay_toggle == app._on_overlay_toggle
+    assert app.view_settings.runtime_log_basic == app.controller.log_basic
+    assert app.view_settings.runtime_log_detailed == app.controller.log_detailed
     assert app.view_logs.on_mode_change == app._on_runtime_logging_mode_change
     assert app.view_logs.runtime_logging_mode == "detailed"
 
@@ -160,6 +192,41 @@ def test_on_runtime_logging_mode_change_updates_controller_and_logs_view() -> No
     app._on_runtime_logging_mode_change("detailed")
 
     assert seen == ["detailed", "view:detailed"]
+
+
+@pytest.mark.asyncio
+async def test_main_gui_routes_update_check_through_app_log_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = DummyPage()
+    seen: dict[str, object] = {}
+
+    class FakeController:
+        async def start(self) -> None:
+            seen["started"] = True
+
+    class FakeApp:
+        def __init__(self, incoming_page, *, config_path):
+            seen["init"] = (incoming_page, config_path)
+            seen["app"] = self
+            self.page = incoming_page
+            self.controller = FakeController()
+
+        def _log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+            _ = (message, level)
+
+    async def fake_check_and_notify_update(incoming_page, *, log_detailed=None) -> None:
+        seen["check"] = (incoming_page, log_detailed)
+
+    monkeypatch.setattr(app_module, "TranslatorApp", FakeApp)
+    monkeypatch.setattr(app_module, "_check_and_notify_update", fake_check_and_notify_update)
+
+    await app_module.main_gui(page, config_path=Path("settings.json"))
+
+    assert seen["started"] is True
+    assert seen["check"][0] is page
+    assert getattr(seen["check"][1], "__self__", None) is seen["app"]
+    assert getattr(seen["check"][1], "__func__", None) is FakeApp._log_detailed
 
 
 @pytest.mark.asyncio
@@ -345,6 +412,66 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
     ]
 
 
+def test_toggle_handlers_route_basic_and_detailed_runtime_logs() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app.overlay_state = "connected"
+    app.overlay_failure_reason = "runtime_crashed"
+    app.view_dashboard = SimpleNamespace(is_translation_on=False, is_stt_on=True)
+
+    controller = RuntimeLoggingController()
+
+    async def fake_translation(enabled: bool) -> None:
+        _ = enabled
+
+    async def fake_stt(enabled: bool) -> None:
+        _ = enabled
+
+    async def fake_overlay(enabled: bool) -> None:
+        _ = enabled
+
+    controller.set_translation_enabled = fake_translation
+    controller.set_stt_enabled = fake_stt
+    controller.set_overlay_enabled = fake_overlay
+    app.controller = controller
+
+    app._on_translation_toggle(True)
+    app._on_stt_toggle(False)
+    app._on_overlay_toggle(True)
+
+    assert app.controller.basic_messages == [
+        "[Dashboard] Translation toggle requested: enabled=True",
+        "[Dashboard] STT toggle requested: enabled=False",
+        "[Settings] Overlay toggle requested: enabled=True",
+    ]
+    assert app.controller.detailed_messages == [
+        "[Dashboard] Translation toggle detail: dashboard_state=False overlay_state=connected",
+        "[Dashboard] STT toggle detail: dashboard_state=True overlay_state=connected",
+        "[Settings] Overlay toggle detail: overlay_state=connected failure_reason=runtime_crashed",
+    ]
+
+
+def test_on_overlay_state_changed_routes_runtime_logs() -> None:
+    controller = RuntimeLoggingController()
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.controller = controller
+    seen: list[tuple[str, str | None]] = []
+    app.overlay_state = "off"
+    app.view_settings = SimpleNamespace(
+        set_overlay_runtime_state=lambda state, failure_reason=None: seen.append(
+            (state, failure_reason)
+        )
+    )
+
+    app.on_overlay_state_changed(state="failed", failure_reason="runtime_crashed")
+
+    assert controller.basic_messages == ["[Overlay] State changed: off -> failed"]
+    assert controller.detailed_messages == [
+        "[Overlay] State detail: overlay_state=failed failure_reason=runtime_crashed"
+    ]
+    assert seen == [("failed", "runtime_crashed")]
+
+
 @pytest.mark.asyncio
 async def test_on_language_change_updates_settings_and_shows_warning(monkeypatch) -> None:
     app = TranslatorApp.__new__(TranslatorApp)
@@ -481,10 +608,14 @@ async def test_check_and_notify_update_handles_none_and_available(
 @pytest.mark.asyncio
 async def test_check_and_notify_update_swallows_exceptions(monkeypatch: pytest.MonkeyPatch) -> None:
     page = DummyPage()
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.controller = RuntimeLoggingController()
 
     async def raise_error():
         raise RuntimeError("network down")
 
     monkeypatch.setattr(app_module, "check_for_update", raise_error)
-    await _check_and_notify_update(page)
+    await _check_and_notify_update(page, log_detailed=app._log_detailed)
     assert page.opened == []
+    assert app.controller.basic_messages == []
+    assert app.controller.detailed_messages == ["[Update] Check notification failed: network down"]

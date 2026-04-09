@@ -137,6 +137,8 @@ class SettingsView(ft.Column):
         self.on_overlay_calibration_apply: Callable[[], OverlayCalibration] | None = None
         self.on_overlay_calibration_cancel: Callable[[], OverlayCalibration] | None = None
         self.show_snackbar: Callable[[str, str], None] | None = None
+        self.runtime_log_basic: Callable[..., None] | None = None
+        self.runtime_log_detailed: Callable[..., None] | None = None
 
         # State
         self._settings: AppSettings | None = None
@@ -254,6 +256,20 @@ class SettingsView(ft.Column):
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
+
+    def _emit_runtime_basic(self, message: str, *, level: int = logging.INFO) -> None:
+        runtime_log_basic = getattr(self, "runtime_log_basic", None)
+        if runtime_log_basic is not None:
+            runtime_log_basic(message, level=level)
+            return
+        logger.log(level, message)
+
+    def _emit_runtime_detailed(self, message: str, *, level: int = logging.INFO) -> None:
+        runtime_log_detailed = getattr(self, "runtime_log_detailed", None)
+        if runtime_log_detailed is not None:
+            runtime_log_detailed(message, level=level)
+            return
+        logger.log(level, message)
 
     def _build_action_button(self, text: str, on_click) -> ft.TextButton:
         return _make_text_button(
@@ -1311,7 +1327,7 @@ class SettingsView(ft.Column):
         try:
             store = create_secret_store(settings.secrets, config_path=config_path)
         except Exception as exc:
-            logger.warning("Failed to load secrets: %s", exc)
+            self._emit_runtime_basic(f"Failed to load secrets: {exc}", level=logging.WARNING)
             return
 
         self._google_key.value = store.get("google_api_key") or ""
@@ -1455,7 +1471,9 @@ class SettingsView(ft.Column):
         old_provider = current_settings.provider.stt.value
         if old_provider == provider.value:
             return
-        logger.info(f"[Settings] STT provider changed: {old_provider} -> {provider.value}")
+        self._emit_runtime_basic(
+            f"[Settings] STT provider changed: {old_provider} -> {provider.value}"
+        )
         draft = self._ensure_provider_settings_draft()
         draft.provider.stt = provider
         self._update_api_visibility()
@@ -1766,10 +1784,13 @@ class SettingsView(ft.Column):
             )
         if old_qwen_model != qwen_model:
             changes.append(f"qwen_model={old_qwen_model.value}->{qwen_model.value}")
-        if changes:
-            logger.info("[Settings] LLM selection changed: %s", ", ".join(changes))
-        else:
+        if not changes:
             return
+        if old_provider != provider:
+            self._emit_runtime_basic(
+                f"[Settings] LLM provider changed: {old_provider.value} -> {provider.value}"
+            )
+        self._emit_runtime_detailed(f"[Settings] LLM selection changed: {', '.join(changes)}")
 
         draft = self._ensure_provider_settings_draft()
         draft.provider.llm = provider
@@ -1861,7 +1882,9 @@ class SettingsView(ft.Column):
         if old_value == new_value:
             return
 
-        logger.info("[Settings] OpenRouter routing mode changed: %s -> %s", old_value, new_value)
+        self._emit_runtime_detailed(
+            f"[Settings] OpenRouter routing mode changed: {old_value} -> {new_value}"
+        )
         draft = self._ensure_provider_settings_draft()
         draft.openrouter.routing_mode = new_value
         self.has_provider_changes = True
@@ -1891,7 +1914,7 @@ class SettingsView(ft.Column):
         if not self._settings:
             return
         old_locale = self._settings.ui.locale
-        logger.info(f"[Settings] Language changed: {old_locale} -> {value}")
+        self._emit_runtime_basic(f"[Settings] Language changed: {old_locale} -> {value}")
         self._settings.ui.locale = value
 
         # Update text
@@ -1929,7 +1952,7 @@ class SettingsView(ft.Column):
         old_region = current_settings.qwen.region.value
         if old_region == value:
             return
-        logger.info(f"[Settings] Qwen region changed: {old_region} -> {value}")
+        self._emit_runtime_detailed(f"[Settings] Qwen region changed: {old_region} -> {value}")
         draft = self._ensure_provider_settings_draft()
         draft.qwen.region = QwenRegion(value)
         self.has_provider_changes = True
@@ -1978,32 +2001,26 @@ class SettingsView(ft.Column):
         old_desktop_pre_roll = self._settings.desktop_audio.vad_pre_roll_ms
 
         if old_host != new_host:
-            logger.info(f"[Settings] Audio Host changed: {old_host} -> {new_host}")
+            self._emit_runtime_detailed(f"[Settings] Audio Host changed: {old_host} -> {new_host}")
         if old_device != new_device:
-            logger.info(f"[Settings] Microphone changed: {old_device} -> {new_device}")
+            self._emit_runtime_detailed(
+                f"[Settings] Microphone changed: {old_device} -> {new_device}"
+            )
         if old_desktop_output != new_desktop_output:
-            logger.info(
-                "[Settings] Desktop loopback output changed: %s -> %s",
-                old_desktop_output,
-                new_desktop_output,
+            self._emit_runtime_detailed(
+                f"[Settings] Desktop loopback output changed: {old_desktop_output} -> {new_desktop_output}"
             )
         if abs(old_desktop_vad - new_desktop_vad) > 0.001:
-            logger.info(
-                "[Settings] Desktop loopback VAD threshold changed: %.2f -> %.2f",
-                old_desktop_vad,
-                new_desktop_vad,
+            self._emit_runtime_detailed(
+                f"[Settings] Desktop loopback VAD threshold changed: {old_desktop_vad:.2f} -> {new_desktop_vad:.2f}"
             )
         if old_desktop_hangover != new_desktop_hangover:
-            logger.info(
-                "[Settings] Desktop loopback hangover changed: %s -> %s",
-                old_desktop_hangover,
-                new_desktop_hangover,
+            self._emit_runtime_detailed(
+                f"[Settings] Desktop loopback hangover changed: {old_desktop_hangover} -> {new_desktop_hangover}"
             )
         if old_desktop_pre_roll != new_desktop_pre_roll:
-            logger.info(
-                "[Settings] Desktop loopback pre-roll changed: %s -> %s",
-                old_desktop_pre_roll,
-                new_desktop_pre_roll,
+            self._emit_runtime_detailed(
+                f"[Settings] Desktop loopback pre-roll changed: {old_desktop_pre_roll} -> {new_desktop_pre_roll}"
             )
 
         self._settings.audio.input_host_api = new_host
@@ -2416,7 +2433,9 @@ class SettingsView(ft.Column):
         old_vad = self._settings.stt.vad_speech_threshold
 
         if abs(old_vad - new_vad) > 0.001:
-            logger.info(f"[Settings] VAD sensitivity changed: {old_vad:.2f} -> {new_vad:.2f}")
+            self._emit_runtime_detailed(
+                f"[Settings] VAD sensitivity changed: {old_vad:.2f} -> {new_vad:.2f}"
+            )
 
         self._settings.stt.vad_speech_threshold = new_vad
         self._emit_settings_changed()
@@ -2454,7 +2473,7 @@ class SettingsView(ft.Column):
         if not self._settings:
             return
         new_value = value == "on"
-        logger.info(f"[Settings] VRC mic intercept toggled: {new_value}")
+        self._emit_runtime_basic(f"[Settings] VRC mic intercept toggled: {new_value}")
         self._settings.osc.vrc_mic_intercept = new_value
 
         self._vrc_mic_text.content.value = t(
@@ -2487,7 +2506,7 @@ class SettingsView(ft.Column):
         if not self._settings:
             return
         new_value = value == "on"
-        logger.info(f"[Settings] Chatbox include source toggled: {new_value}")
+        self._emit_runtime_basic(f"[Settings] Chatbox include source toggled: {new_value}")
         self._settings.osc.chatbox_include_source = new_value
 
         self._chatbox_source_text.content.value = t(
@@ -2594,7 +2613,9 @@ class SettingsView(ft.Column):
         new_value = value == "on"
         old_value = self._settings.stt.low_latency_mode
         if new_value != old_value:
-            logger.info(f"[Settings] Low latency mode changed: {old_value} -> {new_value}")
+            self._emit_runtime_detailed(
+                f"[Settings] Low latency mode changed: {old_value} -> {new_value}"
+            )
         self._settings.stt.low_latency_mode = new_value
 
         # Update text
@@ -2640,11 +2661,9 @@ class SettingsView(ft.Column):
         self._custom_vocab_draft_terms[source_language] = normalized_text
 
         if unique_count > MAX_CUSTOM_VOCAB_TERMS:
-            logger.info(
-                "[Settings] Custom vocabulary capped: language=%s, requested=%d, applied=%d",
-                source_language,
-                unique_count,
-                MAX_CUSTOM_VOCAB_TERMS,
+            self._emit_runtime_detailed(
+                "[Settings] Custom vocabulary capped: "
+                f"language={source_language}, requested={unique_count}, applied={MAX_CUSTOM_VOCAB_TERMS}"
             )
             if self.show_snackbar:
                 self.show_snackbar(
@@ -2663,10 +2682,8 @@ class SettingsView(ft.Column):
 
         self._settings.stt.custom_terms = updated_terms
         self._settings.stt.custom_vocabulary_enabled = next_enabled
-        logger.info(
-            "[Settings] Custom vocabulary applied: language=%s, terms=%d",
-            source_language,
-            len(parsed_terms),
+        self._emit_runtime_detailed(
+            f"[Settings] Custom vocabulary applied: language={source_language}, terms={len(parsed_terms)}"
         )
         self._emit_settings_changed()
 

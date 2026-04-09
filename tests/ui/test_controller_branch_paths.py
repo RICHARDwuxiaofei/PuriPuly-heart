@@ -123,6 +123,33 @@ class DummyLogsView:
         self.attach_calls += 1
 
 
+class RuntimeLoggingSpy:
+    def __init__(
+        self, *, detailed_enabled: bool = True, basic_error: Exception | None = None
+    ) -> None:
+        self.mode = SimpleNamespace(value="detailed" if detailed_enabled else "basic")
+        self.basic_messages: list[tuple[int, str]] = []
+        self.detailed_messages: list[tuple[int, str]] = []
+        self.basic_error = basic_error
+
+    def emit_basic(self, message: str, *, level: int = logging.INFO) -> None:
+        if self.basic_error is not None:
+            raise self.basic_error
+        self.basic_messages.append((level, message))
+
+    def emit_detailed(self, message: str, *, level: int = logging.INFO) -> bool:
+        if self.mode.value != "detailed":
+            return False
+        self.detailed_messages.append((level, message))
+        return True
+
+    def attach_realtime_sink(self, sink) -> None:
+        _ = sink
+
+    def set_mode(self, mode) -> None:
+        self.mode = SimpleNamespace(value=str(mode))
+
+
 class DummyHub:
     def __init__(
         self,
@@ -572,12 +599,16 @@ def test_log_error_falls_back_to_standard_logger_without_direct_logs_view_append
             raise RuntimeError("emit failed")
 
     controller._runtime_logging = BrokenRuntimeLogging()
-    seen: list[str] = []
-    monkeypatch.setattr(controller_module.logger, "error", lambda message: seen.append(message))
+    seen: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        controller_module.logger,
+        "log",
+        lambda level, message: seen.append((level, message)),
+    )
 
     controller._log_error("fallback message")
 
-    assert seen == ["fallback message"]
+    assert seen == [(logging.ERROR, "fallback message")]
     assert logs.logs == []
 
 
@@ -1706,27 +1737,58 @@ async def test_overlay_runtime_crash_keeps_saved_preferences_without_auto_restar
     assert controller.auto_restart_scheduled is False
 
 
-def test_overlay_runtime_crash_logs_state_transition(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_overlay_runtime_crash_logs_state_transition() -> None:
     controller = _make_controller(app=SimpleNamespace())
+    controller._runtime_logging = RuntimeLoggingSpy()
     controller.overlay_state = "connected"
     controller._overlay_manager = SimpleNamespace(state="failed")
     controller._overlay_presenter = object()  # type: ignore[assignment]
     controller._overlay_bridge = object()  # type: ignore[assignment]
 
-    with caplog.at_level(logging.INFO, logger="puripuly_heart.ui.controller"):
-        controller.on_overlay_runtime_crashed()
+    controller.on_overlay_runtime_crashed()
 
     assert controller.overlay_state == "failed"
-    assert any(
-        "State transition: connected -> failed" in message
-        and "failure_reason=runtime_crashed" in message
-        and "presenter_attached=True" in message
-        and "bridge_attached=True" in message
-        and "manager_state=failed" in message
-        for message in caplog.messages
-    )
+    assert controller._runtime_logging.basic_messages == [
+        (
+            logging.INFO,
+            "[Overlay] State transition: connected -> failed failure_reason=runtime_crashed",
+        )
+    ]
+    assert controller._runtime_logging.detailed_messages == [
+        (
+            logging.INFO,
+            "[Overlay] State detail: presenter_attached=True bridge_attached=True manager_state=failed",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_overlay_start_preserves_traceback_in_detailed_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+
+    async def failing_start(self) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(FakeOverlayBridge, "start", failing_start)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    await controller._run_overlay_start()
+
+    assert controller._runtime_logging.basic_messages == [
+        (logging.INFO, "[Overlay] State transition: off -> failed failure_reason=unknown")
+    ]
+    assert len(controller._runtime_logging.detailed_messages) >= 1
+    level, message = controller._runtime_logging.detailed_messages[0]
+    assert level == logging.ERROR
+    assert "[Overlay] Failed to start overlay runtime" in message
+    assert "Traceback (most recent call last):" in message
+    assert "RuntimeError: boom" in message
 
 
 @pytest.mark.asyncio
@@ -1857,6 +1919,45 @@ async def test_stop_closes_runtime_logging_service(monkeypatch: pytest.MonkeyPat
 
     assert events == ["runtime_logging_close"]
     assert controller._runtime_logging is None
+
+
+def test_log_error_fallback_does_not_append_duplicate_ui_line(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    logs = DummyLogsView()
+    controller = _make_controller(app=SimpleNamespace(view_logs=logs))
+    controller._runtime_logging = RuntimeLoggingSpy(basic_error=RuntimeError("boom"))
+
+    with caplog.at_level(logging.ERROR, logger=controller_module.logger.name):
+        controller._log_error("shared failure")
+
+    assert logs.logs == []
+    assert any("shared failure" in message for message in caplog.messages)
+
+
+def test_overlay_state_transition_routes_snapshot_details_to_detailed_log() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.failure_reason = "runtime_crashed"
+    controller._overlay_presenter = object()
+    controller._overlay_bridge = object()
+    controller._overlay_manager = SimpleNamespace(state="failed")
+
+    controller._log_overlay_state_transition("connected", "failed")
+
+    assert controller._runtime_logging.basic_messages == [
+        (
+            logging.INFO,
+            "[Overlay] State transition: connected -> failed failure_reason=runtime_crashed",
+        )
+    ]
+    assert controller._runtime_logging.detailed_messages == [
+        (
+            logging.INFO,
+            "[Overlay] State detail: presenter_attached=True bridge_attached=True manager_state=failed",
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -2439,28 +2540,35 @@ async def test_set_translation_enabled_returns_when_hub_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_translation_enabled_logs_non_qwen_provider(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_set_translation_enabled_logs_non_qwen_provider() -> None:
     controller = _make_controller(app=SimpleNamespace())
+    controller._runtime_logging = RuntimeLoggingSpy()
     controller.settings = AppSettings()
     controller.settings.provider.llm = LLMProviderName.GEMINI
     controller.hub = DummyHub(llm=object())
 
-    with caplog.at_level("INFO", logger="puripuly_heart.ui.controller"):
-        await controller.set_translation_enabled(True)
+    await controller.set_translation_enabled(True)
 
     assert controller.hub.translation_enabled is True
     assert controller.hub.clear_context_calls == 1
-    assert any("Enabled with provider: gemini" in message for message in caplog.messages)
+    assert controller._runtime_logging.basic_messages == [
+        (logging.INFO, "[Translation] Toggle request: enabled=True"),
+        (logging.INFO, "[Translation] Enabled with provider: gemini"),
+    ]
+    assert controller._runtime_logging.detailed_messages == [
+        (
+            logging.INFO,
+            "[Translation] Toggle detail: current_enabled=True llm_available=True",
+        )
+    ]
 
 
 @pytest.mark.asyncio
 async def test_set_stt_enabled_marks_promo_and_runs_switch(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
+    controller._runtime_logging = RuntimeLoggingSpy()
     controller.settings = AppSettings()
     controller.settings.provider.stt = STTProviderName.DEEPGRAM
     controller.hub = DummyHub()
@@ -2471,13 +2579,21 @@ async def test_set_stt_enabled_marks_promo_and_runs_switch(
 
     monkeypatch.setattr(GuiController, "_ensure_stt_switch", fake_ensure_stt_switch)
 
-    with caplog.at_level("INFO", logger="puripuly_heart.ui.controller"):
-        await controller.set_stt_enabled(True)
+    await controller.set_stt_enabled(True)
 
     assert controller._stt_desired is True
     assert controller.hub.promo_calls == 1
     assert switch_calls == [True]
-    assert any("Enabled with provider: deepgram" in message for message in caplog.messages)
+    assert controller._runtime_logging.basic_messages == [
+        (logging.INFO, "[STT] Toggle request: enabled=True"),
+        (logging.INFO, "[STT] Enabled with provider: deepgram"),
+    ]
+    assert controller._runtime_logging.detailed_messages == [
+        (
+            logging.INFO,
+            "[STT] Toggle detail: desired_before=False overlay_state=off",
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -2533,17 +2649,17 @@ async def test_run_stt_switch_stop_path_closes_backend(
 
 
 @pytest.mark.asyncio
-async def test_run_stt_switch_warns_when_hub_missing(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_run_stt_switch_warns_when_hub_missing() -> None:
     controller = _make_controller(app=SimpleNamespace())
+    controller._runtime_logging = RuntimeLoggingSpy()
     controller._stt_desired = True
     controller.hub = None
 
-    with caplog.at_level("WARNING", logger="puripuly_heart.ui.controller"):
-        await controller._run_stt_switch()
+    await controller._run_stt_switch()
 
-    assert any("Enable requested before hub is ready" in message for message in caplog.messages)
+    assert controller._runtime_logging.detailed_messages == [
+        (logging.WARNING, "[STT] Enable requested before hub is ready")
+    ]
 
 
 @pytest.mark.asyncio
@@ -3460,6 +3576,63 @@ async def test_rebuild_llm_provider_closes_existing_provider_and_updates_dashboa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("factory", "expected_message"),
+    [
+        (lambda *_a, **_k: None, "LLM provider not available"),
+        (
+            lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
+            "LLM provider not available: boom",
+        ),
+    ],
+)
+async def test_rebuild_llm_provider_logs_basic_failure_when_provider_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    factory,
+    expected_message: str,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.hub = DummyHub(llm=object())
+
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "create_llm_provider", factory)
+
+    await controller._rebuild_llm_provider()
+
+    assert controller.hub.llm is None
+    assert dash.translation_needs_key is True
+    assert controller._runtime_logging.basic_messages == [(logging.ERROR, expected_message)]
+
+
+@pytest.mark.asyncio
+async def test_rebuild_llm_provider_logs_basic_failure_when_secret_store_setup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.hub = DummyHub(llm=object())
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    await controller._rebuild_llm_provider()
+
+    assert controller.hub.llm is None
+    assert dash.translation_needs_key is True
+    assert controller._runtime_logging.basic_messages == [
+        (logging.ERROR, "LLM provider not available: boom")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_rebuild_llm_provider_closes_previous_managed_release_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3495,6 +3668,61 @@ async def test_rebuild_llm_provider_closes_previous_managed_release_service(
 
     assert old_service.close_calls == 1
     assert controller._managed_openrouter_release_service is new_service
+
+
+@pytest.mark.asyncio
+async def test_rebuild_stt_provider_logs_only_failure_when_backend_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
+    controller.hub = DummyHub(stt=object())
+
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        controller_module,
+        "create_stt_backend",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    await controller._rebuild_stt_provider()
+
+    assert controller.hub.stt is None
+    assert dash.stt_needs_key is True
+    assert dash.stt_enabled is False
+    assert controller._runtime_logging.basic_messages == [
+        (logging.ERROR, "STT backend not available: boom")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rebuild_stt_provider_logs_basic_failure_when_secret_store_setup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
+    controller.hub = DummyHub(stt=object())
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    await controller._rebuild_stt_provider()
+
+    assert controller.hub.stt is None
+    assert dash.stt_needs_key is True
+    assert dash.stt_enabled is False
+    assert controller._runtime_logging.basic_messages == [
+        (logging.ERROR, "STT backend not available: boom")
+    ]
 
 
 @pytest.mark.asyncio
@@ -3753,6 +3981,31 @@ def test_apply_overlay_calibration_uses_page_run_task_when_available(
     asyncio.run(page.tasks[0]())
 
     assert controller._overlay_bridge.snapshots[-1].calibration.offset_x == 0.25
+
+
+def test_schedule_overlay_calibration_emit_preserves_traceback_in_detailed_log() -> None:
+    class FailingPage:
+        def run_task(self, coro_fn) -> None:
+            _ = coro_fn
+            raise RuntimeError("boom")
+
+    controller = GuiController(
+        page=FailingPage(),
+        app=SimpleNamespace(),
+        config_path=Path("settings.json"),
+    )
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller._overlay_presenter = object()  # type: ignore[assignment]
+
+    controller._schedule_overlay_calibration_emit()
+
+    assert controller._runtime_logging.basic_messages == []
+    assert len(controller._runtime_logging.detailed_messages) == 1
+    level, message = controller._runtime_logging.detailed_messages[0]
+    assert level == logging.WARNING
+    assert "[Overlay] Failed to schedule calibration update via page.run_task" in message
+    assert "Traceback (most recent call last):" in message
+    assert "RuntimeError: boom" in message
 
 
 @pytest.mark.asyncio

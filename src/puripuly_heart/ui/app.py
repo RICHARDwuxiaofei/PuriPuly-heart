@@ -52,6 +52,12 @@ class TranslatorApp:
         self.view_settings.show_snackbar = self._show_snackbar
         self.view_logs.on_mode_change = self._on_runtime_logging_mode_change
         self.view_logs.set_runtime_logging_mode(self.controller.runtime_logging_mode)
+        runtime_log_basic = getattr(self.controller, "log_basic", None)
+        runtime_log_detailed = getattr(self.controller, "log_detailed", None)
+        if callable(runtime_log_basic):
+            self.view_settings.runtime_log_basic = runtime_log_basic
+        if callable(runtime_log_detailed):
+            self.view_settings.runtime_log_detailed = runtime_log_detailed
 
         calibration_begin = getattr(self.controller, "begin_overlay_calibration", None)
         calibration_change = getattr(self.controller, "set_overlay_calibration_field", None)
@@ -181,12 +187,28 @@ class TranslatorApp:
 
         self.page.run_task(_task)
 
+    def _log_basic(self, message: str, *, level: int = logging.INFO) -> None:
+        controller = getattr(self, "controller", None)
+        log_basic = getattr(controller, "log_basic", None)
+        if callable(log_basic):
+            log_basic(message, level=level)
+            return
+        logger.log(level, message)
+
+    def _log_detailed(self, message: str, *, level: int = logging.INFO) -> None:
+        controller = getattr(self, "controller", None)
+        log_detailed = getattr(controller, "log_detailed", None)
+        if callable(log_detailed):
+            log_detailed(message, level=level)
+            return
+        logger.log(level, message)
+
     def _on_translation_toggle(self, enabled: bool) -> None:
-        logger.info(
-            "[Dashboard] Translation toggle requested: enabled=%s dashboard_state=%s overlay_state=%s",
-            enabled,
-            getattr(getattr(self, "view_dashboard", None), "is_translation_on", None),
-            getattr(self, "overlay_state", "unknown"),
+        self._log_basic(f"[Dashboard] Translation toggle requested: enabled={enabled}")
+        self._log_detailed(
+            "[Dashboard] Translation toggle detail: "
+            f"dashboard_state={getattr(getattr(self, 'view_dashboard', None), 'is_translation_on', None)} "
+            f"overlay_state={getattr(self, 'overlay_state', 'unknown')}"
         )
 
         async def _task():
@@ -195,11 +217,11 @@ class TranslatorApp:
         self.page.run_task(_task)
 
     def _on_stt_toggle(self, enabled: bool) -> None:
-        logger.info(
-            "[Dashboard] STT toggle requested: enabled=%s dashboard_state=%s overlay_state=%s",
-            enabled,
-            getattr(getattr(self, "view_dashboard", None), "is_stt_on", None),
-            getattr(self, "overlay_state", "unknown"),
+        self._log_basic(f"[Dashboard] STT toggle requested: enabled={enabled}")
+        self._log_detailed(
+            "[Dashboard] STT toggle detail: "
+            f"dashboard_state={getattr(getattr(self, 'view_dashboard', None), 'is_stt_on', None)} "
+            f"overlay_state={getattr(self, 'overlay_state', 'unknown')}"
         )
 
         async def _task():
@@ -208,11 +230,11 @@ class TranslatorApp:
         self.page.run_task(_task)
 
     def _on_overlay_toggle(self, enabled: bool) -> None:
-        logger.info(
-            "[Settings] Overlay toggle requested: enabled=%s overlay_state=%s failure_reason=%s",
-            enabled,
-            getattr(self, "overlay_state", "unknown"),
-            getattr(self, "overlay_failure_reason", None),
+        self._log_basic(f"[Settings] Overlay toggle requested: enabled={enabled}")
+        self._log_detailed(
+            "[Settings] Overlay toggle detail: "
+            f"overlay_state={getattr(self, 'overlay_state', 'unknown')} "
+            f"failure_reason={getattr(self, 'overlay_failure_reason', None)}"
         )
 
         async def _task():
@@ -226,13 +248,12 @@ class TranslatorApp:
         settings = self.controller.settings
         previous_source_code = settings.languages.source_language
         previous_target_code = settings.languages.target_language
-        logger.info(
-            "[Dashboard] Language change requested: source=%s->%s target=%s->%s overlay_state=%s",
-            previous_source_code,
-            source_code,
-            previous_target_code,
-            target_code,
-            getattr(self, "overlay_state", "unknown"),
+        self._log_basic(
+            "[Dashboard] Language change requested: "
+            f"source={previous_source_code}->{source_code} target={previous_target_code}->{target_code}"
+        )
+        self._log_detailed(
+            f"[Dashboard] Language change detail: overlay_state={getattr(self, 'overlay_state', 'unknown')}"
         )
         settings.languages.source_language = source_code
         settings.languages.target_language = target_code
@@ -330,14 +351,13 @@ class TranslatorApp:
         state: str,
         failure_reason: str | None = None,
     ) -> None:
-        logger.info(
-            "[Overlay] State changed: %s -> %s failure_reason=%s",
-            getattr(self, "overlay_state", "unknown"),
-            state,
-            failure_reason,
-        )
+        previous_state = getattr(self, "overlay_state", "unknown")
+        self._log_basic(f"[Overlay] State changed: {previous_state} -> {state}")
         self.overlay_state = state
         self.overlay_failure_reason = failure_reason
+        self._log_detailed(
+            f"[Overlay] State detail: overlay_state={state} failure_reason={failure_reason}"
+        )
         self.view_settings.set_overlay_runtime_state(state, failure_reason=failure_reason)
 
 
@@ -346,10 +366,10 @@ async def main_gui(page: ft.Page, *, config_path):
     await app.controller.start()
 
     # Check for updates in background
-    await _check_and_notify_update(page)
+    await _check_and_notify_update(page, log_detailed=app._log_detailed)
 
 
-async def _check_and_notify_update(page: ft.Page) -> None:
+async def _check_and_notify_update(page: ft.Page, log_detailed=None) -> None:
     """Check for updates and show notification as a toast."""
     try:
         update_info = await check_for_update()
@@ -404,4 +424,8 @@ async def _check_and_notify_update(page: ft.Page) -> None:
         page.open(snackbar)
 
     except Exception as exc:
-        logger.debug(f"Update check notification failed: {exc}")
+        message = f"[Update] Check notification failed: {exc}"
+        if callable(log_detailed):
+            log_detailed(message)
+            return
+        logger.debug(message)

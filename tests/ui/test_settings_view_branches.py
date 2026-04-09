@@ -179,6 +179,7 @@ def test_load_from_settings_uses_default_prompt_when_all_empty(
 
 def test_load_secrets_failure_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = AppSettings()
+    basic_messages: list[str] = []
 
     monkeypatch.setattr(settings_view.SettingsView, "_populate_host_apis", lambda self: None)
     monkeypatch.setattr(settings_view.SettingsView, "_refresh_microphones", lambda self: None)
@@ -189,11 +190,13 @@ def test_load_secrets_failure_is_ignored(monkeypatch: pytest.MonkeyPatch) -> Non
 
     monkeypatch.setattr(settings_view, "create_secret_store", raise_store)
     view = settings_view.SettingsView()
+    view.runtime_log_basic = lambda message, *, level=logging.INFO: basic_messages.append(message)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     assert view._google_key.value == ""
     assert view._deepgram_key.value == ""
     assert view._soniox_key.value == ""
+    assert basic_messages == ["Failed to load secrets: boom"]
 
 
 def test_restore_api_key_icons_sets_idle_success_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -537,41 +540,47 @@ def test_on_llm_selected_updates_gemini_model(monkeypatch: pytest.MonkeyPatch) -
 
 def test_on_llm_selected_logs_only_changed_fields_for_provider_switch(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.GEMINI
     settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
     settings.qwen.llm_model = QwenLLMModel.QWEN_35_PLUS
+    basic_messages: list[str] = []
+    detailed_messages: list[str] = []
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.runtime_log_basic = lambda message, *, level=logging.INFO: basic_messages.append(message)
+    view.runtime_log_detailed = lambda message, *, level=logging.INFO: detailed_messages.append(
+        message
+    )
 
-    with caplog.at_level(logging.INFO, logger="puripuly_heart.ui.views.settings"):
-        view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
 
-    message = caplog.messages[-1]
-    assert "[Settings] LLM selection changed:" in message
-    assert "provider=gemini->qwen" in message
-    assert "gemini_model=" not in message
-    assert "qwen_model=" not in message
+    assert basic_messages == ["[Settings] LLM provider changed: gemini -> qwen"]
+    assert detailed_messages == ["[Settings] LLM selection changed: provider=gemini->qwen"]
 
 
 def test_on_llm_selected_skips_log_when_selection_is_unchanged(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.QWEN
     settings.qwen.llm_model = QwenLLMModel.QWEN_35_PLUS
+    basic_messages: list[str] = []
+    detailed_messages: list[str] = []
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.runtime_log_basic = lambda message, *, level=logging.INFO: basic_messages.append(message)
+    view.runtime_log_detailed = lambda message, *, level=logging.INFO: detailed_messages.append(
+        message
+    )
 
-    with caplog.at_level(logging.INFO, logger="puripuly_heart.ui.views.settings"):
-        view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
 
-    assert not any("LLM selection changed" in message for message in caplog.messages)
+    assert basic_messages == []
+    assert detailed_messages == []
 
 
 def test_on_ui_and_region_selection_emit_changes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1710,20 +1719,39 @@ def test_custom_vocabulary_caps_to_100_terms_and_shows_snackbar(
 
 def test_custom_vocabulary_blur_logs_applied_state(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     settings = AppSettings()
     settings.languages.source_language = "ko"
+    detailed_messages: list[str] = []
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.runtime_log_detailed = lambda message, *, level=logging.INFO: detailed_messages.append(
+        message
+    )
     view._custom_vocab_terms.value = "Puripuly\nVRChat"
     view._on_custom_vocabulary_terms_change(None)
 
-    with caplog.at_level(logging.INFO, logger="puripuly_heart.ui.views.settings"):
-        view._on_custom_vocabulary_terms_blur(None)
+    view._on_custom_vocabulary_terms_blur(None)
 
-    assert "[Settings] Custom vocabulary applied: language=ko, terms=2" in caplog.messages
+    assert detailed_messages == ["[Settings] Custom vocabulary applied: language=ko, terms=2"]
+
+
+def test_on_qwen_region_selected_uses_detailed_runtime_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    detailed_messages: list[str] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.runtime_log_detailed = lambda message, *, level=logging.INFO: detailed_messages.append(
+        message
+    )
+
+    view._on_qwen_region_selected(QwenRegion.SINGAPORE.value)
+
+    assert detailed_messages == ["[Settings] Qwen region changed: beijing -> singapore"]
 
 
 def test_apply_locale_refreshes_custom_vocabulary_text(
