@@ -12,6 +12,7 @@ from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import COLOR_ON_BACKGROUND, COLOR_PRIMARY
 
 logger = logging.getLogger(__name__)
+_CENTER_ALIGNMENT = ft.alignment.Alignment(0, 0)
 
 
 class AudioSettings(ft.Column):
@@ -112,7 +113,7 @@ class AudioSettings(ft.Column):
         )
         return ft.Container(
             content=text_control,
-            alignment=ft.alignment.center,
+            alignment=_CENTER_ALIGNMENT,
             expand=True,
             on_click=on_click,
             on_hover=self._on_text_hover,

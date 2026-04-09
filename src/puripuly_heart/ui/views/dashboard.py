@@ -8,7 +8,21 @@ from puripuly_heart.ui.components.language_modal import LanguageModal
 from puripuly_heart.ui.components.power_button import PowerButton
 from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import get_locale, language_name, t
-from puripuly_heart.ui.theme import COLOR_TRANS_ON
+from puripuly_heart.ui.theme import (
+    COLOR_DIVIDER,
+    COLOR_NEUTRAL,
+    COLOR_ON_BACKGROUND,
+    COLOR_PRIMARY,
+    COLOR_SURFACE,
+    COLOR_TRANS_ON,
+    get_card_shadow,
+)
+
+
+def _format_usd(value: float | None) -> str:
+    if value is None:
+        return t("dashboard.trial.usage.placeholder")
+    return f"${value:.2f}"
 
 
 class DashboardView(ft.Column):
@@ -34,6 +48,13 @@ class DashboardView(ft.Column):
         self._stt_showing_warning = False
         self._local_stt_notice_status: str | None = None
         self._local_stt_notice_percent: int | None = None
+        self._managed_trial_visible = False
+        self._managed_trial_lifecycle = "pre_release"
+        self._managed_trial_transient_message_key: str | None = None
+        self._managed_trial_transient_message_kwargs: dict[str, object] = {}
+        self._managed_trial_usage_limit_usd: float | None = None
+        self._managed_trial_usage_remaining_usd: float | None = None
+        self._managed_trial_usage_used_usd: float | None = None
 
         # Current language settings
         self._source_lang_code = "ko"
@@ -112,7 +133,89 @@ class DashboardView(ft.Column):
             spacing=16,
             expand=True,
         )
-        self.controls = [create_background_glow_stack(grid_content)]
+
+        self._managed_trial_title = ft.Text(
+            "",
+            size=20,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._managed_trial_source = ft.Container(
+            content=ft.Text("", size=12, color=ft.Colors.WHITE, weight=ft.FontWeight.W_600),
+            bgcolor=COLOR_PRIMARY,
+            border_radius=999,
+            padding=ft.padding.symmetric(horizontal=10, vertical=6),
+        )
+        self._managed_trial_lifecycle_label = ft.Text("", size=13, color=COLOR_NEUTRAL)
+        self._managed_trial_lifecycle_value = ft.Text("", size=14, color=COLOR_ON_BACKGROUND)
+        self._managed_trial_message_label = ft.Text("", size=13, color=COLOR_NEUTRAL)
+        self._managed_trial_message_value = ft.Text("", size=14, color=COLOR_ON_BACKGROUND)
+        self._managed_trial_transient_label = ft.Text("", size=13, color=COLOR_NEUTRAL)
+        self._managed_trial_transient_value = ft.Text("", size=14, color=COLOR_ON_BACKGROUND)
+        self._managed_trial_transient_row = ft.Row(
+            [self._managed_trial_transient_label, self._managed_trial_transient_value],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            visible=False,
+        )
+        self._managed_trial_progress = ft.ProgressBar(
+            value=0,
+            bar_height=8,
+            bgcolor=ft.Colors.with_opacity(0.2, COLOR_DIVIDER),
+            color=COLOR_PRIMARY,
+        )
+        self._managed_trial_used_label = ft.Text("", size=13, color=COLOR_NEUTRAL)
+        self._managed_trial_used_value = ft.Text("", size=14, color=COLOR_ON_BACKGROUND)
+        self._managed_trial_remaining_label = ft.Text("", size=13, color=COLOR_NEUTRAL)
+        self._managed_trial_remaining_value = ft.Text("", size=14, color=COLOR_ON_BACKGROUND)
+        self._managed_trial_card = ft.Container(
+            visible=False,
+            bgcolor=COLOR_SURFACE,
+            border_radius=16,
+            border=ft.border.all(1, ft.Colors.with_opacity(0.4, ft.Colors.WHITE)),
+            shadow=get_card_shadow(),
+            padding=24,
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [self._managed_trial_title, self._managed_trial_source],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    ft.Row(
+                        [self._managed_trial_lifecycle_label, self._managed_trial_lifecycle_value],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    ft.Row(
+                        [self._managed_trial_message_label, self._managed_trial_message_value],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    self._managed_trial_transient_row,
+                    self._managed_trial_progress,
+                    ft.Row(
+                        [
+                            ft.Column(
+                                [
+                                    self._managed_trial_used_label,
+                                    self._managed_trial_used_value,
+                                ],
+                                spacing=4,
+                            ),
+                            ft.Column(
+                                [
+                                    self._managed_trial_remaining_label,
+                                    self._managed_trial_remaining_value,
+                                ],
+                                spacing=4,
+                                horizontal_alignment=ft.CrossAxisAlignment.END,
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                ],
+                spacing=12,
+            ),
+        )
+        self._sync_managed_trial_card()
+        self.controls = [create_background_glow_stack(grid_content), self._managed_trial_card]
 
     def _toggle_stt(self):
         if self.is_stt_on:
@@ -307,6 +410,81 @@ class DashboardView(ft.Column):
         )
         self.display_card.set_notice(notice_text, tone_by_status.get(status))
 
+    def _managed_trial_lifecycle_key(self) -> str:
+        return f"dashboard.trial.lifecycle.{self._managed_trial_lifecycle}"
+
+    def _managed_trial_message_key(self) -> str:
+        message_by_lifecycle = {
+            "pre_release": "dashboard.trial.message.placeholder",
+            "pending_auth": "dashboard.trial.message.pending_auth",
+            "active": "dashboard.trial.message.live_usage",
+            "exhausted": "dashboard.trial.message.exhausted",
+            "unavailable": "dashboard.trial.message.unavailable",
+            "usage-unavailable": "dashboard.trial.message.usage-unavailable",
+        }
+        return message_by_lifecycle.get(
+            self._managed_trial_lifecycle,
+            "dashboard.trial.message.placeholder",
+        )
+
+    def _managed_trial_progress_value(self) -> float:
+        limit = self._managed_trial_usage_limit_usd
+        used = self._managed_trial_usage_used_usd
+        remaining = self._managed_trial_usage_remaining_usd
+        if isinstance(limit, (int, float)) and limit > 0:
+            if isinstance(used, (int, float)):
+                return max(0.0, min(1.0, used / limit))
+            if isinstance(remaining, (int, float)):
+                return max(0.0, min(1.0, 1.0 - (remaining / limit)))
+        return 0.0
+
+    def _sync_managed_trial_card(self) -> None:
+        self._managed_trial_card.visible = self._managed_trial_visible
+        self._managed_trial_title.value = t("provider.gemma4_free_trial")
+        self._managed_trial_source.content.value = t("dashboard.trial.source.managed")
+        self._managed_trial_lifecycle_label.value = t("dashboard.trial.lifecycle_label")
+        self._managed_trial_lifecycle_value.value = t(self._managed_trial_lifecycle_key())
+        self._managed_trial_message_label.value = t("dashboard.trial.message_label")
+        self._managed_trial_message_value.value = t(self._managed_trial_message_key())
+        transient_text = (
+            t(
+                self._managed_trial_transient_message_key,
+                **self._managed_trial_transient_message_kwargs,
+            )
+            if self._managed_trial_transient_message_key
+            else None
+        )
+        self._managed_trial_transient_label.value = t("dashboard.trial.transient_label")
+        self._managed_trial_transient_value.value = transient_text or ""
+        self._managed_trial_transient_row.visible = bool(transient_text)
+        self._managed_trial_progress.value = self._managed_trial_progress_value()
+        self._managed_trial_used_label.value = t("dashboard.trial.used_label")
+        self._managed_trial_used_value.value = _format_usd(self._managed_trial_usage_used_usd)
+        self._managed_trial_remaining_label.value = t("dashboard.trial.remaining_label")
+        self._managed_trial_remaining_value.value = _format_usd(
+            self._managed_trial_usage_remaining_usd
+        )
+
+    def set_managed_trial_state(
+        self,
+        *,
+        visible: bool,
+        lifecycle: str,
+        transient_message_key: str | None = None,
+        transient_message_kwargs: dict[str, object] | None = None,
+        usage_limit_usd: float | None = None,
+        usage_remaining_usd: float | None = None,
+        usage_used_usd: float | None = None,
+    ) -> None:
+        self._managed_trial_visible = bool(visible)
+        self._managed_trial_lifecycle = lifecycle
+        self._managed_trial_transient_message_key = transient_message_key
+        self._managed_trial_transient_message_kwargs = dict(transient_message_kwargs or {})
+        self._managed_trial_usage_limit_usd = usage_limit_usd
+        self._managed_trial_usage_remaining_usd = usage_remaining_usd
+        self._managed_trial_usage_used_usd = usage_used_usd
+        self._sync_managed_trial_card()
+
     def apply_locale(self) -> None:
         self.stt_button.set_label(t("dashboard.stt_label"))
         self.trans_button.set_label(t("dashboard.trans_label"))
@@ -326,6 +504,7 @@ class DashboardView(ft.Column):
             self._local_stt_notice_status,
             percent=self._local_stt_notice_percent,
         )
+        self._sync_managed_trial_card()
 
     def set_recent_languages(self, source: list[str], target: list[str]) -> None:
         """Set recent languages from settings (for persistence)."""

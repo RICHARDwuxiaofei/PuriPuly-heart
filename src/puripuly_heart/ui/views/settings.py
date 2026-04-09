@@ -58,6 +58,35 @@ from puripuly_heart.ui.theme import (
 logger = logging.getLogger(__name__)
 
 _CJK_START = 0x3000
+_CENTER_ALIGNMENT = ft.alignment.Alignment(0, 0)
+_CENTER_RIGHT_ALIGNMENT = ft.alignment.Alignment(1, 0)
+_OPENROUTER_MANAGED_OPTION_VALUE = "openrouter:managed:google/gemma-4-26b-a4b-it"
+
+
+def _make_text_button(label: str, **kwargs) -> ft.TextButton:
+    return ft.TextButton(text=label, **kwargs)
+
+
+def _set_text_button_label(button: ft.TextButton, label: str) -> None:
+    button.text = label
+
+
+def _make_overlay_anchor_dropdown(value: str, on_change) -> ft.Dropdown:
+    return ft.Dropdown(
+        value=value,
+        options=[
+            ft.dropdown.Option(
+                key=anchor,
+                text=t(f"settings.overlay.calibration.anchor.{anchor}"),
+            )
+            for anchor in OVERLAY_CALIBRATION_ANCHORS
+        ],
+        text_size=14,
+        border_radius=10,
+        border_color=COLOR_DIVIDER,
+        focused_border_color=COLOR_PRIMARY,
+        on_change=on_change,
+    )
 
 
 def _load_secret_value(store, key: str, *, legacy_keys: tuple[str, ...] = ()) -> str:
@@ -150,7 +179,7 @@ class SettingsView(ft.Column):
         *,
         size: int = 28,
         text_align: ft.TextAlign = ft.TextAlign.CENTER,
-        alignment=ft.alignment.center,
+        alignment=_CENTER_ALIGNMENT,
         no_wrap: bool = False,
         max_lines: int | None = None,
         overflow: ft.TextOverflow | None = None,
@@ -179,7 +208,7 @@ class SettingsView(ft.Column):
             on_click,
             size=_setting_action_text_size(text),
             text_align=ft.TextAlign.RIGHT,
-            alignment=ft.alignment.center_right,
+            alignment=_CENTER_RIGHT_ALIGNMENT,
             no_wrap=True,
             max_lines=1,
             overflow=ft.TextOverflow.ELLIPSIS,
@@ -227,8 +256,8 @@ class SettingsView(ft.Column):
         )
 
     def _build_action_button(self, text: str, on_click) -> ft.TextButton:
-        return ft.TextButton(
-            text=text,
+        return _make_text_button(
+            text,
             style=self._get_button_style(font_for_language(get_locale())),
             on_click=on_click,
         )
@@ -299,8 +328,8 @@ class SettingsView(ft.Column):
 
         # === Row 2: API Keys (2x1) ===
         # Qwen region selection button (in header)
-        self._qwen_region_btn = ft.TextButton(
-            text=f"{t('settings.qwen_region')} {t('region.beijing')}",
+        self._qwen_region_btn = _make_text_button(
+            f"{t('settings.qwen_region')} {t('region.beijing')}",
             style=ft.ButtonStyle(
                 color={
                     ft.ControlState.HOVERED: COLOR_PRIMARY,
@@ -474,7 +503,7 @@ class SettingsView(ft.Column):
                     self._vad_title,
                     ft.Container(
                         content=self._vad_slider,
-                        alignment=ft.alignment.center,
+                        alignment=_CENTER_ALIGNMENT,
                         expand=True,
                     ),
                 ],
@@ -710,20 +739,9 @@ class SettingsView(ft.Column):
             size=14,
             color=COLOR_NEUTRAL,
         )
-        self._overlay_anchor_dropdown = ft.Dropdown(
-            value=self._overlay_calibration.anchor,
-            options=[
-                ft.dropdown.Option(
-                    key=anchor,
-                    text=t(f"settings.overlay.calibration.anchor.{anchor}"),
-                )
-                for anchor in OVERLAY_CALIBRATION_ANCHORS
-            ],
-            text_size=14,
-            border_radius=10,
-            border_color=COLOR_DIVIDER,
-            focused_border_color=COLOR_PRIMARY,
-            on_change=self._on_overlay_anchor_change,
+        self._overlay_anchor_dropdown = _make_overlay_anchor_dropdown(
+            self._overlay_calibration.anchor,
+            self._on_overlay_anchor_change,
         )
         self._overlay_offset_x_field = self._build_overlay_calibration_field(
             value=self._overlay_calibration.offset_x,
@@ -886,8 +904,8 @@ class SettingsView(ft.Column):
         )
 
         # Reset button (matches Persona title color, hover -> primary)
-        self._reset_prompt_btn = ft.TextButton(
-            text=t("settings.reset_prompt"),
+        self._reset_prompt_btn = _make_text_button(
+            t("settings.reset_prompt"),
             icon=ft.Icons.REFRESH_ROUNDED,
             style=ft.ButtonStyle(
                 color={
@@ -1009,6 +1027,8 @@ class SettingsView(ft.Column):
         if settings.provider.llm == LLMProviderName.GEMINI:
             return settings.gemini.llm_model.value
         if settings.provider.llm == LLMProviderName.OPENROUTER:
+            if settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
+                return _OPENROUTER_MANAGED_OPTION_VALUE
             return settings.openrouter.llm_model.value
         return settings.qwen.llm_model.value
 
@@ -1018,6 +1038,8 @@ class SettingsView(ft.Column):
                 return t("provider.gemini31_flash_lite")
             return t("provider.gemini3_flash")
         if settings.provider.llm == LLMProviderName.OPENROUTER:
+            if settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
+                return t("provider.gemma4_free_trial")
             return t("provider.gemma4_26b_a4b_it")
         if settings.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS:
             return t("provider.qwen35_plus")
@@ -1222,7 +1244,7 @@ class SettingsView(ft.Column):
 
         # Qwen Region
         region_label = t(f"region.{settings.qwen.region.value}")
-        self._qwen_region_btn.text = f"{t('settings.qwen_region')} {region_label}"
+        _set_text_button_label(self._qwen_region_btn, f"{t('settings.qwen_region')} {region_label}")
 
         # Audio Settings
         self._audio_settings.host_api = settings.audio.input_host_api
@@ -1360,7 +1382,10 @@ class SettingsView(ft.Column):
         self._soniox_key.visible = STTProviderName.SONIOX in active_stt_providers
 
         self._google_key.visible = llm == LLMProviderName.GEMINI
-        self._openrouter_key.visible = llm == LLMProviderName.OPENROUTER
+        self._openrouter_key.visible = (
+            llm == LLMProviderName.OPENROUTER
+            and settings.openrouter.selected_source == OpenRouterCredentialSource.BYOK
+        )
         self._openrouter_routing_row.visible = llm == LLMProviderName.OPENROUTER
 
         qwen_regions: set[QwenRegion] = set()
@@ -1619,6 +1644,11 @@ class SettingsView(ft.Column):
             return
         options = [
             OptionItem(
+                value=_OPENROUTER_MANAGED_OPTION_VALUE,
+                label=t("provider.gemma4_free_trial"),
+                description=t("provider.gemma4_free_trial.description", default=""),
+            ),
+            OptionItem(
                 value=GeminiLLMModel.GEMINI_3_FLASH.value,
                 label=t("provider.gemini3_flash"),
                 description=t("provider.gemini3_flash.description", default=""),
@@ -1676,43 +1706,48 @@ class SettingsView(ft.Column):
             gemini_model = GeminiLLMModel.GEMINI_3_FLASH
             openrouter_model = old_openrouter_model
             qwen_model = old_qwen_model
+            openrouter_selected_source = OpenRouterCredentialSource.NONE
         elif value == GeminiLLMModel.GEMINI_3_FLASH.value:
             provider = LLMProviderName.GEMINI
             gemini_model = GeminiLLMModel.GEMINI_3_FLASH
             openrouter_model = old_openrouter_model
             qwen_model = old_qwen_model
+            openrouter_selected_source = OpenRouterCredentialSource.NONE
         elif value == GeminiLLMModel.GEMINI_31_FLASH_LITE.value:
             provider = LLMProviderName.GEMINI
             gemini_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
             openrouter_model = old_openrouter_model
             qwen_model = old_qwen_model
+            openrouter_selected_source = OpenRouterCredentialSource.NONE
         elif value == LLMProviderName.OPENROUTER.value:
             provider = LLMProviderName.OPENROUTER
             gemini_model = old_gemini_model
             openrouter_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
             qwen_model = old_qwen_model
+            openrouter_selected_source = OpenRouterCredentialSource.MANAGED
+        elif value == _OPENROUTER_MANAGED_OPTION_VALUE:
+            provider = LLMProviderName.OPENROUTER
+            gemini_model = old_gemini_model
+            openrouter_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+            qwen_model = old_qwen_model
+            openrouter_selected_source = OpenRouterCredentialSource.MANAGED
         elif value == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value:
             provider = LLMProviderName.OPENROUTER
             gemini_model = old_gemini_model
             openrouter_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
             qwen_model = old_qwen_model
+            openrouter_selected_source = OpenRouterCredentialSource.BYOK
         elif value == QwenLLMModel.QWEN_35_PLUS.value:
             provider = LLMProviderName.QWEN
             gemini_model = old_gemini_model
             openrouter_model = old_openrouter_model
             qwen_model = QwenLLMModel.QWEN_35_PLUS
+            openrouter_selected_source = OpenRouterCredentialSource.NONE
         else:
             provider = LLMProviderName.QWEN
             gemini_model = old_gemini_model
             openrouter_model = old_openrouter_model
             qwen_model = QwenLLMModel.QWEN_35_FLASH
-
-        if provider == LLMProviderName.OPENROUTER:
-            if old_provider == LLMProviderName.OPENROUTER:
-                openrouter_selected_source = old_openrouter_selected_source
-            else:
-                openrouter_selected_source = OpenRouterCredentialSource.BYOK
-        else:
             openrouter_selected_source = OpenRouterCredentialSource.NONE
 
         changes: list[str] = []
@@ -1900,7 +1935,10 @@ class SettingsView(ft.Column):
         self.has_provider_changes = True
 
         # Update text
-        self._qwen_region_btn.text = f"{t('settings.qwen_region')} {t(f'region.{value}')}"
+        _set_text_button_label(
+            self._qwen_region_btn,
+            f"{t('settings.qwen_region')} {t(f'region.{value}')}",
+        )
         if self.page:
             self._qwen_region_btn.update()
 
@@ -2161,22 +2199,29 @@ class SettingsView(ft.Column):
             self._settings and self._settings.ui.integrated_context_enabled
         )
 
-        self._overlay_enabled_button.text = t(
-            "settings.option.on" if overlay_enabled else "settings.option.off"
+        _set_text_button_label(
+            self._overlay_enabled_button,
+            t("settings.option.on" if overlay_enabled else "settings.option.off"),
         )
-        self._peer_translation_button.text = t(
-            "settings.option.on" if peer_translation_enabled else "settings.option.off"
+        _set_text_button_label(
+            self._peer_translation_button,
+            t("settings.option.on" if peer_translation_enabled else "settings.option.off"),
         )
-        self._overlay_translation_button.text = t(
-            "settings.option.on" if overlay_translation_enabled else "settings.option.off"
+        _set_text_button_label(
+            self._overlay_translation_button,
+            t("settings.option.on" if overlay_translation_enabled else "settings.option.off"),
         )
-        self._overlay_peer_original_button.text = t(
-            "settings.option.on" if overlay_peer_original_enabled else "settings.option.off"
+        _set_text_button_label(
+            self._overlay_peer_original_button,
+            t("settings.option.on" if overlay_peer_original_enabled else "settings.option.off"),
         )
-        self._integrated_context_button.text = t(
-            "settings.context.integrated"
-            if integrated_context_enabled
-            else "settings.context.local"
+        _set_text_button_label(
+            self._integrated_context_button,
+            t(
+                "settings.context.integrated"
+                if integrated_context_enabled
+                else "settings.context.local"
+            ),
         )
 
         peer_translation_available = self._overlay_connected()
@@ -2685,7 +2730,7 @@ class SettingsView(ft.Column):
         self._overlay_offset_y_label.value = t("settings.overlay.calibration.offset_y")
         self._overlay_distance_label.value = t("settings.overlay.calibration.distance")
         self._overlay_text_scale_label.value = t("settings.overlay.calibration.text_scale")
-        self._reset_prompt_btn.text = t("settings.reset_prompt")
+        _set_text_button_label(self._reset_prompt_btn, t("settings.reset_prompt"))
         self._custom_vocab_terms.label = None
         self._custom_vocab_terms.helper_text = ""
 
@@ -2714,9 +2759,18 @@ class SettingsView(ft.Column):
         if self._overlay_calibration_reset_button:
             self._overlay_calibration_reset_button.style = self._get_button_style(ui_font)
 
-        self._overlay_calibration_apply_button.text = t("settings.overlay.calibration.apply")
-        self._overlay_calibration_cancel_button.text = t("settings.overlay.calibration.cancel")
-        self._overlay_calibration_reset_button.text = t("settings.overlay.calibration.reset")
+        _set_text_button_label(
+            self._overlay_calibration_apply_button,
+            t("settings.overlay.calibration.apply"),
+        )
+        _set_text_button_label(
+            self._overlay_calibration_cancel_button,
+            t("settings.overlay.calibration.cancel"),
+        )
+        _set_text_button_label(
+            self._overlay_calibration_reset_button,
+            t("settings.overlay.calibration.reset"),
+        )
         self._overlay_anchor_dropdown.options = [
             ft.dropdown.Option(
                 key=anchor,
@@ -2780,7 +2834,10 @@ class SettingsView(ft.Column):
         # Qwen Region label
         if display_settings:
             region_val = display_settings.qwen.region.value
-            self._qwen_region_btn.text = f"{t('settings.qwen_region')} {t(f'region.{region_val}')}"
+            _set_text_button_label(
+                self._qwen_region_btn,
+                f"{t('settings.qwen_region')} {t(f'region.{region_val}')}",
+            )
 
         # Components
         self._deepgram_key.apply_locale()

@@ -53,6 +53,47 @@ def _make_settings_view(monkeypatch: pytest.MonkeyPatch, store: DummySecretStore
     return settings_view.SettingsView(), store
 
 
+def _make_llm_selection_view(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: AppSettings,
+) -> settings_view.SettingsView:
+    monkeypatch.setattr(settings_view.SettingsView, "page", property(lambda self: None))
+    view = settings_view.SettingsView.__new__(settings_view.SettingsView)
+    view._settings = settings
+    view._provider_settings_draft = None
+    view._config_path = Path("settings.json")
+    view.has_provider_changes = False
+    view.has_pending_prompt_changes = False
+    view._llm_text = SimpleNamespace(content=SimpleNamespace(value=""), update=lambda: None)
+    view._openrouter_routing_text = SimpleNamespace(
+        content=SimpleNamespace(value="", size=None),
+        update=lambda: None,
+    )
+    view._openrouter_routing_row = SimpleNamespace(visible=False, update=lambda: None)
+    view._qwen_region_btn = SimpleNamespace(visible=False, update=lambda: None)
+    view._api_keys_column = SimpleNamespace(update=lambda: None)
+    view._deepgram_key = SimpleNamespace(visible=False)
+    view._soniox_key = SimpleNamespace(visible=False)
+    view._google_key = SimpleNamespace(visible=False)
+    view._openrouter_key = SimpleNamespace(visible=False)
+    view._alibaba_key_beijing = SimpleNamespace(visible=False)
+    view._alibaba_key_singapore = SimpleNamespace(visible=False)
+    view._prompt_editor = SimpleNamespace(
+        value=settings.system_prompts.get("gemini", settings.system_prompt),
+        provider=None,
+    )
+    view._prompt_editor.set_provider = lambda provider: setattr(
+        view._prompt_editor, "provider", provider
+    )
+    view._prompt_editor.load_default_prompt = lambda emit_change=False: setattr(
+        view._prompt_editor,
+        "value",
+        "DEFAULT PROMPT",
+    )
+    view._update_peer_provider_visibility = lambda: None
+    return view
+
+
 def test_load_secret_value_prefers_existing_value() -> None:
     store = DummySecretStore({"new_key": "new", "old_key": "old"})
 
@@ -202,15 +243,29 @@ def test_update_api_visibility_tracks_provider_and_region(monkeypatch: pytest.Mo
 def test_update_api_visibility_shows_openrouter_key(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
 
-    view, _ = _make_settings_view(monkeypatch)
-    view._settings = settings
+    view = _make_llm_selection_view(monkeypatch, settings)
     view._update_api_visibility()
 
     assert view._google_key.visible is False
     assert view._alibaba_key_beijing.visible is False
     assert view._alibaba_key_singapore.visible is False
     assert view._openrouter_key.visible is True
+    assert view._openrouter_routing_row.visible is True
+
+
+def test_update_api_visibility_hides_openrouter_key_for_managed_trial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._update_api_visibility()
+
+    assert view._openrouter_key.visible is False
     assert view._openrouter_routing_row.visible is True
 
 
@@ -354,6 +409,48 @@ def test_on_llm_selected_updates_openrouter_model_and_prompt_state(
     assert view._prompt_editor.value == "O"
     assert settings.system_prompt == "G"
     assert view._openrouter_routing_row.visible is True
+
+
+def test_on_llm_selected_updates_managed_openrouter_label_and_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.system_prompts = {
+        "gemini": "G",
+        "openrouter": "O",
+        "qwen": "Q",
+    }
+    settings.system_prompt = "G"
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._on_llm_selected(settings_view._OPENROUTER_MANAGED_OPTION_VALUE)
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.provider.llm == LLMProviderName.OPENROUTER
+    assert pending.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    assert pending.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert view._llm_text.content.value == t("provider.gemma4_free_trial")
+    assert view._openrouter_key.visible is False
+    assert view._prompt_editor.value == "O"
+
+
+def test_on_llm_selected_openrouter_provider_value_defaults_to_managed_trial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._on_llm_selected(LLMProviderName.OPENROUTER.value)
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.provider.llm == LLMProviderName.OPENROUTER
+    assert pending.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert view._llm_text.content.value == t("provider.gemma4_free_trial")
 
 
 def test_on_llm_selected_switching_away_from_openrouter_clears_selected_source(

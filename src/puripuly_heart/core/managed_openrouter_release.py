@@ -445,6 +445,7 @@ class ManagedOpenRouterUserFacingError(RuntimeError):
 class ManagedOpenRouterLLMProvider(LLMProvider):
     release_service: object
     delegate_factory: ManagedOpenRouterDelegateFactory
+    on_delegate_ready: Callable[[], object] | None = None
     _delegate: LLMProvider | None = field(init=False, default=None, repr=False)
     _delegate_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock, repr=False)
 
@@ -465,6 +466,10 @@ class ManagedOpenRouterLLMProvider(LLMProvider):
                     message_kwargs=result.message_kwargs,
                 )
             self._delegate = self.delegate_factory(result.api_key)
+            if self.on_delegate_ready is not None:
+                callback_result = self.on_delegate_ready()
+                if inspect.isawaitable(callback_result):
+                    await callback_result
             return self._delegate
 
     async def stream_translate(

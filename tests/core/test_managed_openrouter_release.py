@@ -486,3 +486,40 @@ async def test_managed_openrouter_provider_issues_on_first_llm_start_only() -> N
     assert service.ensure_calls == ["llm_start"]
     assert created_keys == ["managed-key"]
     assert len(delegate.translate_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_managed_openrouter_provider_notifies_when_delegate_becomes_ready() -> None:
+    service = FakeIssueService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+            pending_issue=False,
+        )
+    )
+    delegate = FakeDelegateProvider()
+    ready_calls: list[str] = []
+    provider = ManagedOpenRouterLLMProvider(
+        release_service=service,
+        delegate_factory=lambda _api_key: delegate,
+        on_delegate_ready=lambda: ready_calls.append("ready"),
+    )
+
+    await provider.translate(
+        utterance_id=uuid4(),
+        text="hello",
+        system_prompt="prompt",
+        source_language="ko",
+        target_language="en",
+    )
+    await provider.translate(
+        utterance_id=uuid4(),
+        text="again",
+        system_prompt="prompt",
+        source_language="ko",
+        target_language="en",
+    )
+
+    assert ready_calls == ["ready"]

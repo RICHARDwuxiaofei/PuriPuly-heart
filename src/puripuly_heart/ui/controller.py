@@ -75,7 +75,7 @@ from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_va
 from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
-from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
+from puripuly_heart.providers.llm.openrouter import OpenRouterKeyMetadata, OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
@@ -185,6 +185,12 @@ class GuiController:
     _overlay_start_task: asyncio.Task[None] | None = None
     _overlay_monitor_task: asyncio.Task[None] | None = None
     _overlay_lock: asyncio.Lock | None = None
+    _managed_trial_transient_message_key: str | None = field(init=False, default=None)
+    _managed_trial_transient_message_kwargs: dict[str, object] = field(
+        init=False,
+        default_factory=dict,
+    )
+    _managed_trial_pending_auth: bool = field(init=False, default=False)
 
     overlay_state: str = "off"
     failure_reason: str | None = None
@@ -297,6 +303,7 @@ class GuiController:
             dash.set_translation_enabled(False)
             dash.set_stt_enabled(False)
             self.hub.translation_enabled = False
+            await self._refresh_managed_trial_dashboard_state()
 
         await self.hub.start(auto_flush_osc=True)
 
@@ -432,6 +439,93 @@ class GuiController:
             and self.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
             and self.hub is not None
             and self.hub.llm is not None
+        )
+
+    def _set_managed_trial_transient_message(
+        self,
+        message_key: str | None,
+        message_kwargs: dict[str, object] | None = None,
+    ) -> None:
+        self._managed_trial_transient_message_key = message_key
+        self._managed_trial_transient_message_kwargs = dict(message_kwargs or {})
+
+    def _schedule_managed_trial_dashboard_refresh(self) -> None:
+        with contextlib.suppress(RuntimeError):
+            asyncio.get_running_loop().create_task(self._refresh_managed_trial_dashboard_state())
+
+    def _on_managed_trial_delegate_ready(self) -> None:
+        self._managed_trial_pending_auth = False
+        self._set_managed_trial_transient_message(None)
+        self._schedule_managed_trial_dashboard_refresh()
+
+    async def _refresh_managed_trial_dashboard_state(self) -> None:
+        dash = getattr(self.app, "view_dashboard", None)
+        setter = getattr(dash, "set_managed_trial_state", None) if dash is not None else None
+        if not callable(setter):
+            return
+        if (
+            self.settings is None
+            or self.settings.provider.llm != LLMProviderName.OPENROUTER
+            or self.settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED
+        ):
+            self._managed_trial_pending_auth = False
+            self._set_managed_trial_transient_message(None)
+            setter(
+                visible=False,
+                lifecycle="pre_release",
+                transient_message_key=None,
+                transient_message_kwargs={},
+                usage_limit_usd=None,
+                usage_remaining_usd=None,
+                usage_used_usd=None,
+            )
+            return
+
+        try:
+            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+            resolution = resolve_openrouter_credentials(self.settings, secrets=secrets)
+        except Exception:
+            resolution = None
+
+        usage_metadata: OpenRouterKeyMetadata | None = None
+        api_key = resolution.api_key if resolution is not None else None
+        if api_key:
+            self._managed_trial_pending_auth = False
+            usage_metadata = await OpenRouterLLMProvider.fetch_key_metadata(api_key)
+
+        usage_metadata_complete = bool(
+            usage_metadata is not None
+            and usage_metadata.limit_usd is not None
+            and usage_metadata.remaining_usd is not None
+            and usage_metadata.usage_usd is not None
+        )
+        usage_snapshot = usage_metadata if usage_metadata_complete else None
+
+        lifecycle = "pre_release"
+        if self._managed_trial_transient_message_key in {
+            "managed_release.not_eligible",
+            "managed_release.unavailable",
+        }:
+            lifecycle = "unavailable"
+        elif api_key:
+            lifecycle = "usage-unavailable"
+            if usage_snapshot is not None:
+                lifecycle = "active"
+            if usage_snapshot is not None and usage_snapshot.remaining_usd <= 0:
+                lifecycle = "exhausted"
+        elif self._managed_trial_pending_auth or self.settings.managed_identity.release_token:
+            lifecycle = "pending_auth"
+
+        setter(
+            visible=True,
+            lifecycle=lifecycle,
+            transient_message_key=self._managed_trial_transient_message_key,
+            transient_message_kwargs=dict(self._managed_trial_transient_message_kwargs),
+            usage_limit_usd=usage_snapshot.limit_usd if usage_snapshot is not None else None,
+            usage_remaining_usd=(
+                usage_snapshot.remaining_usd if usage_snapshot is not None else None
+            ),
+            usage_used_usd=usage_snapshot.usage_usd if usage_snapshot is not None else None,
         )
 
     def _build_llm_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
@@ -1016,10 +1110,16 @@ class GuiController:
 
         result = await service.prepare_for_translation()
         if result.behavior == ManagedOpenRouterReleaseBehavior.READY:
+            self._managed_trial_pending_auth = bool(result.pending_issue and not result.api_key)
+            self._set_managed_trial_transient_message(None)
+            await self._refresh_managed_trial_dashboard_state()
             if self.hub.llm is None:
                 await self._rebuild_llm_provider()
             return True
 
+        self._managed_trial_pending_auth = False
+        self._set_managed_trial_transient_message(result.message_key, dict(result.message_kwargs))
+        await self._refresh_managed_trial_dashboard_state()
         self.hub.translation_enabled = False
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
@@ -1533,6 +1633,7 @@ class GuiController:
                 self.settings,
                 secrets=secrets,
                 managed_release_service=self._managed_openrouter_release_service,
+                managed_delegate_ready=self._on_managed_trial_delegate_ready,
             )
 
         # Update hub's LLM provider
@@ -1542,6 +1643,8 @@ class GuiController:
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
             dash.set_translation_needs_key(llm is None)
+
+        await self._refresh_managed_trial_dashboard_state()
 
         logger.info("[Settings] LLM provider rebuilt successfully")
 
@@ -1697,6 +1800,7 @@ class GuiController:
                 self.settings,
                 secrets=secrets,
                 managed_release_service=self._managed_openrouter_release_service,
+                managed_delegate_ready=self._on_managed_trial_delegate_ready,
             )
 
         stt = None
@@ -2242,3 +2346,5 @@ class GuiController:
             dash.set_stt_enabled(False)
         else:
             dash.set_stt_needs_key(False)
+
+        await self._refresh_managed_trial_dashboard_state()
