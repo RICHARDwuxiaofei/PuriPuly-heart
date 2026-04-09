@@ -16,6 +16,14 @@ This directory establishes the managed-trial broker as a separate deployable ser
 
 Use `pnpm --filter @puripuly-heart/broker run verify:config` to exercise the pinned Wrangler CLI against `broker/wrangler.jsonc` without requiring cloud credentials.
 
+## Direct deploy automation
+
+- `broker/scripts/render-production-wrangler-config.mjs` renders a temporary deploy-time Wrangler config from `broker/wrangler.jsonc`, injects the production D1 `database_id`, and fails if the checked-in worker name stops being the canonical `puripuly-heart-broker`.
+- `broker/deploy/fingerprint-bootstrap.template.sql` plus `broker/scripts/render-fingerprint-bootstrap-sql.mjs` render guarded bootstrap SQL for `wrangler d1 execute --file ... --yes`. The rendered SQL only replaces the migration placeholder and fails before mutating `broker_config` if the placeholder is already gone.
+- `.github/workflows/deploy-broker-direct.yml` is the manual `workflow_dispatch` path for the first canonical deploy. It applies remote D1 migrations, bootstraps the fingerprint salt, syncs `OPENROUTER_MANAGED_API_KEY`, deploys the canonical worker, and runs `broker/tests/deploy-smoke/canonical-production.spec.ts` against the canonical `workers.dev` URL.
+- The workflow expects CI-managed secrets / vars in the `production` GitHub Environment: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `BROKER_D1_DATABASE_ID_PRODUCTION`, `OPENROUTER_MANAGED_API_KEY_PRODUCTION`, and `BROKER_CANONICAL_WORKERS_DEV_URL`.
+- App / public traffic must stay disconnected from the broker until the direct deploy smoke run passes and is explicitly reviewed.
+
 ## Verification environment
 
 Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from a Linux-native workspace (for example, a WSL-internal path or a regular Linux checkout), not from Windows or shared `/mnt/c/...` `node_modules`.

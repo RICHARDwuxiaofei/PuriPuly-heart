@@ -1,0 +1,174 @@
+name: Deploy Broker Direct
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_production_deploy:
+        description: Type `deploy puripuly-heart-broker from main` to confirm the canonical production deploy.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-broker-direct-production
+  cancel-in-progress: false
+
+jobs:
+  deploy-direct:
+    name: Direct deploy canonical broker worker
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      NODE_VERSION: '22'
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      BROKER_D1_DATABASE_ID_PRODUCTION: ${{ secrets.BROKER_D1_DATABASE_ID_PRODUCTION }}
+      OPENROUTER_MANAGED_API_KEY_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_API_KEY_PRODUCTION }}
+      BROKER_CANONICAL_WORKERS_DEV_URL: ${{ vars.BROKER_CANONICAL_WORKERS_DEV_URL }}
+      BROKER_CANONICAL_WORKER_NAME: puripuly-heart-broker
+    steps:
+      - name: Guard production deploy ref and confirmation
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" != 'refs/heads/main' ]]; then
+            echo 'Direct production broker deploys must be launched from refs/heads/main.' >&2
+            exit 1
+          fi
+
+          if [[ "${{ github.event.inputs.confirm_production_deploy }}" != 'deploy puripuly-heart-broker from main' ]]; then
+            echo 'confirm_production_deploy must exactly match: deploy puripuly-heart-broker from main' >&2
+            exit 1
+          fi
+
+          if [[ -z "${BROKER_CANONICAL_WORKERS_DEV_URL//[[:space:]]/}" ]]; then
+            echo 'BROKER_CANONICAL_WORKERS_DEV_URL is required and must not be blank.' >&2
+            exit 1
+          fi
+
+      - name: Validate canonical workers.dev smoke target
+        shell: bash
+        run: |
+          if [[ ! "$BROKER_CANONICAL_WORKERS_DEV_URL" =~ ^https://puripuly-heart-broker\..+\.workers\.dev/?$ ]]; then
+            echo 'BROKER_CANONICAL_WORKERS_DEV_URL must target the canonical puripuly-heart-broker workers.dev hostname.' >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: refs/heads/main
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Render deploy-time broker assets
+        id: render
+        shell: bash
+        working-directory: broker
+        run: |
+          deploy_dir='.deploy-direct'
+          config_path="$deploy_dir/wrangler.production.jsonc"
+          bootstrap_sql_path="$deploy_dir/fingerprint-bootstrap.sql"
+          mkdir -p "$deploy_dir"
+          fingerprint_salt="$(python3 - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
+          echo "::add-mask::$fingerprint_salt"
+
+          node scripts/render-production-wrangler-config.mjs \
+            --database-id "$BROKER_D1_DATABASE_ID_PRODUCTION" \
+            --out "$config_path"
+
+          node scripts/render-fingerprint-bootstrap-sql.mjs \
+            --salt "$fingerprint_salt" \
+            --out "$bootstrap_sql_path"
+
+          {
+            echo "config_path=$config_path"
+            echo "bootstrap_sql_path=$bootstrap_sql_path"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate rendered Wrangler config
+        working-directory: broker
+        run: >-
+          pnpm exec wrangler types --config
+          "${{ steps.render.outputs.config_path }}"
+
+      - name: Apply remote D1 migrations
+        working-directory: broker
+        run: >-
+          pnpm exec wrangler d1 migrations apply
+          puripuly-heart-broker --remote --config
+          "${{ steps.render.outputs.config_path }}"
+
+      - name: Bootstrap fingerprint salt while the migration placeholder is still present
+        working-directory: broker
+        run: >-
+          pnpm exec wrangler d1 execute
+          puripuly-heart-broker --remote --config
+          "${{ steps.render.outputs.config_path }}" --file
+          "${{ steps.render.outputs.bootstrap_sql_path }}" --yes
+
+      - name: Sync OpenRouter managed key secret
+        shell: bash
+        working-directory: broker
+        run: |
+          printf '%s' "$OPENROUTER_MANAGED_API_KEY_PRODUCTION" \
+            | pnpm exec wrangler secret put OPENROUTER_MANAGED_API_KEY --config "${{ steps.render.outputs.config_path }}"
+
+      - name: Deploy canonical broker worker
+        working-directory: broker
+        run: >-
+          pnpm exec wrangler deploy --config
+          "${{ steps.render.outputs.config_path }}"
+
+      - name: Wait for deployed workers.dev healthz
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          healthz_url="${BROKER_CANONICAL_WORKERS_DEV_URL%/}/healthz"
+
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error --max-time 10 "$healthz_url" >/dev/null; then
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          echo "Timed out waiting for deployed broker healthz at $healthz_url" >&2
+          exit 1
+
+      - name: Run deployed broker smoke test
+        timeout-minutes: 10
+        env:
+          BROKER_DEPLOY_SMOKE_BASE_URL: ${{ env.BROKER_CANONICAL_WORKERS_DEV_URL }}
+          BROKER_DEPLOY_CANONICAL_WORKER_NAME: ${{ env.BROKER_CANONICAL_WORKER_NAME }}
+        run: >-
+          pnpm exec vitest run broker/tests/deploy-smoke/canonical-production.spec.ts
+          --reporter=verbose
+
+      - name: Post-smoke boundary reminder
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          Direct broker smoke passed.
+
+          Do not connect app / public traffic to the broker until this run has been reviewed and an explicit cutover is approved.
+          EOF
