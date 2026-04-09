@@ -55,11 +55,15 @@ class _LogicalCaptionEntry:
     occupant_key: str = ""
     appearance_seq: int | None = None
     ever_publishable: bool = False
+    ever_visible: bool = False
     visible_since: float | None = None
     translation_visible_since: float | None = None
     last_updated_seq: int = 0
     closed_seq: int | None = None
     closed_at: float | None = None
+    retained_hidden: bool = False
+    window_evicted_at: float | None = None
+    expiration_revision: int = 0
 
     @property
     def block_id(self) -> str:
@@ -246,6 +250,8 @@ class OverlayPresenter(OverlaySink):
                 return False
             key = self._entry_key(event.channel, event.utterance_id)
             entry = self._entry_for(event.channel, event.utterance_id)
+            if entry.retained_hidden:
+                return False
             if event.seq < entry.last_updated_seq:
                 return False
             consumed_active = False
@@ -278,12 +284,13 @@ class OverlayPresenter(OverlaySink):
                 return False
             if entry.translation_text == event.text and entry.last_updated_seq == event.seq:
                 return False
-            entry.translation_visible_since = self._next_translation_visible_since(
-                previous_text=entry.translation_text,
-                next_text=event.text,
-                previous_visible_since=entry.translation_visible_since,
-                now=now,
-            )
+            if not entry.retained_hidden:
+                entry.translation_visible_since = self._next_translation_visible_since(
+                    previous_text=entry.translation_text,
+                    next_text=event.text,
+                    previous_visible_since=entry.translation_visible_since,
+                    now=now,
+                )
             entry.translation_text = event.text
             entry.last_updated_seq = event.seq
             self._refresh_entry_visibility_and_expiration(key, entry, now=now)
@@ -374,9 +381,29 @@ class OverlayPresenter(OverlaySink):
             await self.bridge.replace_snapshot(self._snapshot)
 
     def _visible_blocks(self) -> list[OverlayPresentationBlock]:
-        self._expire_closed_entries(now=self.clock.now())
-        visible_entry_keys = self._logical_visible_entry_keys()
-        self._prune_displaced_finalized_entries(set(visible_entry_keys))
+        now = self.clock.now()
+        self._expire_closed_entries(now=now)
+        active_self_present = self._active_self is not None and bool(self._active_self.text)
+        finalized_limit = self.visible_window_target_blocks
+        if active_self_present:
+            finalized_limit = max(finalized_limit - 1, 0)
+        visible_entry_keys, protected_key, candidate_keys = self._logical_visible_entry_keys(
+            now=now,
+            finalized_limit=finalized_limit,
+        )
+        self._mark_entries_visible(visible_entry_keys)
+        self._prune_displaced_finalized_entries(
+            set(visible_entry_keys),
+            candidate_keys=candidate_keys,
+        )
+        self._record_visible_window_selection(
+            active_self_present=active_self_present,
+            finalized_limit=finalized_limit,
+            candidate_keys=candidate_keys,
+            selected_keys=visible_entry_keys,
+            protected_selected=([protected_key] if protected_key is not None else []),
+            retained_hidden=self._retained_hidden_labels(),
+        )
         blocks = [
             block
             for key in visible_entry_keys
@@ -399,23 +426,18 @@ class OverlayPresenter(OverlaySink):
         blocks.sort(key=lambda block: (block.appearance_seq, block.occupant_key))
         return blocks
 
-    def _logical_visible_entry_keys(self) -> list[tuple[str, UUID]]:
-        finalized_limit = self.visible_window_target_blocks
-        active_self_present = self._active_self is not None and bool(self._active_self.text)
-        if active_self_present:
-            finalized_limit = max(finalized_limit - 1, 0)
+    def _logical_visible_entry_keys(
+        self,
+        *,
+        now: float,
+        finalized_limit: int,
+    ) -> tuple[list[tuple[str, UUID]], tuple[str, UUID] | None, list[tuple[str, UUID]]]:
         if finalized_limit == 0:
-            self._record_visible_window_selection(
-                active_self_present=active_self_present,
-                finalized_limit=finalized_limit,
-                candidate_keys=[],
-                selected_keys=[],
-            )
-            return []
+            return [], None, []
 
         publishable: list[tuple[int, str, tuple[str, UUID]]] = []
         for key, entry in self._entries.items():
-            if not self._entry_is_publishable(entry):
+            if not self._entry_is_selectable(entry):
                 continue
             self._ensure_entry_visibility_metadata(
                 entry,
@@ -426,14 +448,49 @@ class OverlayPresenter(OverlaySink):
             publishable.append((entry.appearance_seq, entry.occupant_key, key))
 
         publishable.sort(key=lambda item: (item[0], item[1]))
-        selected = [key for _, _, key in publishable[-finalized_limit:]]
-        self._record_visible_window_selection(
-            active_self_present=active_self_present,
-            finalized_limit=finalized_limit,
-            candidate_keys=[key for _, _, key in publishable],
-            selected_keys=selected,
-        )
-        return selected
+        protected_key = self._latest_protected_self_entry_key(publishable, now=now)
+        selected_set: set[tuple[str, UUID]] = set()
+        if protected_key is not None:
+            selected_set.add(protected_key)
+        for _, _, key in reversed(publishable):
+            if len(selected_set) >= finalized_limit:
+                break
+            selected_set.add(key)
+        selected = [key for _, _, key in publishable if key in selected_set]
+        return selected, protected_key, [key for _, _, key in publishable]
+
+    def _latest_protected_self_entry_key(
+        self,
+        publishable: list[tuple[int, str, tuple[str, UUID]]],
+        *,
+        now: float,
+    ) -> tuple[str, UUID] | None:
+        if any(
+            (entry := self._entries.get(key)) is not None and entry.channel == "peer"
+            for _, _, key in publishable
+        ):
+            return None
+        for _, _, key in reversed(publishable):
+            entry = self._entries.get(key)
+            if entry is None or entry.channel != "self":
+                continue
+            if self._self_translation_is_protected(entry, now=now):
+                return key
+        return None
+
+    def _self_translation_is_protected(
+        self,
+        entry: _LogicalCaptionEntry,
+        *,
+        now: float,
+    ) -> bool:
+        if entry.channel != "self":
+            return False
+        if not entry.translation_text.strip():
+            return False
+        if entry.translation_visible_since is None:
+            return False
+        return now < (entry.translation_visible_since + SELF_TRANSLATION_MIN_VISIBLE_SECONDS)
 
     def _build_presentation_block(
         self,
@@ -463,15 +520,26 @@ class OverlayPresenter(OverlaySink):
             secondary_enabled=secondary_enabled,
         )
 
-    def _prune_displaced_finalized_entries(self, visible_entry_keys: set[tuple[str, UUID]]) -> None:
+    def _prune_displaced_finalized_entries(
+        self,
+        visible_entry_keys: set[tuple[str, UUID]],
+        *,
+        candidate_keys: list[tuple[str, UUID]],
+    ) -> None:
         displaced_keys = [
             key
-            for key, entry in self._entries.items()
-            if self._entry_is_publishable(entry) and key not in visible_entry_keys
+            for key in candidate_keys
+            if (entry := self._entries.get(key)) is not None
+            and self._entry_is_selectable(entry)
+            and key not in visible_entry_keys
         ]
         for key in displaced_keys:
             entry = self._entries.get(key)
             if entry is None:
+                continue
+            if entry.channel == "self":
+                if self._should_retain_hidden_self_entry(entry):
+                    self._retain_hidden_entry(key, entry, now=self.clock.now())
                 continue
             self._remove_entry(
                 key,
@@ -484,6 +552,21 @@ class OverlayPresenter(OverlaySink):
         if entry.channel == "peer":
             return bool(entry.translation_text.strip())
         return bool(entry.original_text.strip())
+
+    def _entry_is_selectable(self, entry: _LogicalCaptionEntry) -> bool:
+        return self._entry_is_publishable(entry) and not entry.retained_hidden
+
+    def _mark_entries_visible(self, visible_entry_keys: list[tuple[str, UUID]]) -> None:
+        for key in visible_entry_keys:
+            entry = self._entries.get(key)
+            if entry is not None:
+                entry.ever_visible = True
+
+    def _should_retain_hidden_self_entry(
+        self,
+        entry: _LogicalCaptionEntry,
+    ) -> bool:
+        return entry.ever_visible
 
     def _refresh_entry_visibility_and_expiration(
         self,
@@ -500,7 +583,7 @@ class OverlayPresenter(OverlaySink):
             entry.ever_publishable = True
             if entry.visible_since is None:
                 entry.visible_since = now
-        if entry.closed_seq is not None:
+        if entry.closed_seq is not None or entry.retained_hidden:
             self._schedule_expiration(key, entry)
 
     def _finalized_occupant_key(self, channel: str, utterance_id: UUID) -> str:
@@ -556,24 +639,51 @@ class OverlayPresenter(OverlaySink):
         while len(self._closed_tombstones) > _CLOSED_TOMBSTONE_LIMIT:
             self._closed_tombstones.popitem(last=False)
 
+    def _retain_hidden_entry(
+        self,
+        key: tuple[str, UUID],
+        entry: _LogicalCaptionEntry,
+        *,
+        now: float,
+    ) -> None:
+        if entry.retained_hidden:
+            return
+        entry.retained_hidden = True
+        entry.window_evicted_at = now
+        self._schedule_expiration(key, entry)
+        if self.diagnostics is not None:
+            self.diagnostics.record_presenter(
+                "entry_retained_hidden",
+                entry_key=self._format_entry_key(key),
+                appearance_seq=entry.appearance_seq,
+                channel=entry.channel,
+                primary_len=len(entry.original_text.strip()),
+                secondary_len=len(entry.translation_text.strip()),
+                visible_since=entry.visible_since,
+                translation_visible_since=entry.translation_visible_since,
+                closed_at=entry.closed_at,
+                window_evicted_at=entry.window_evicted_at,
+            )
+
     def _schedule_expiration(
         self,
         key: tuple[str, UUID],
         entry: _LogicalCaptionEntry,
     ) -> None:
         self._cancel_expiration_task(key)
-        if entry.closed_seq is None:
+        if self._entry_expiration_deadline(entry) is None:
             return
+        entry.expiration_revision += 1
         self._record_deadline(entry)
         self._expiration_tasks[key] = asyncio.create_task(
-            self._expire_entry_after_ttl(key, entry.closed_seq)
+            self._expire_entry_after_ttl(key, entry.expiration_revision)
         )
 
-    async def _expire_entry_after_ttl(self, key: tuple[str, UUID], closed_seq: int) -> None:
+    async def _expire_entry_after_ttl(self, key: tuple[str, UUID], expiration_revision: int) -> None:
         try:
             while True:
                 entry = self._entries.get(key)
-                if entry is None or entry.closed_seq != closed_seq:
+                if entry is None or entry.expiration_revision != expiration_revision:
                     return
 
                 deadline = self._entry_expiration_deadline(entry)
@@ -589,6 +699,7 @@ class OverlayPresenter(OverlaySink):
                     reason="expired",
                     now=self.clock.now(),
                     current_task=self._current_task(),
+                    tombstone_seq=entry.last_updated_seq if entry.closed_seq is None else None,
                 )
                 await self._publish_if_changed()
                 return
@@ -607,11 +718,15 @@ class OverlayPresenter(OverlaySink):
         ]
         current_task = self._current_task()
         for key in expired_keys:
+            entry = self._entries.get(key)
+            if entry is None:
+                continue
             self._remove_entry(
                 key,
                 reason="expired",
                 now=now,
                 current_task=current_task,
+                tombstone_seq=entry.last_updated_seq if entry.closed_seq is None else None,
             )
 
     def _entry_expiration_deadline(self, entry: _LogicalCaptionEntry) -> float | None:
@@ -621,7 +736,14 @@ class OverlayPresenter(OverlaySink):
         self,
         entry: _LogicalCaptionEntry,
     ) -> tuple[float | None, float | None, float | None]:
+        hidden_deadline = (
+            entry.window_evicted_at + LATE_ARRIVAL_WINDOW_SECONDS
+            if entry.retained_hidden and entry.window_evicted_at is not None
+            else None
+        )
         if entry.closed_at is None:
+            if hidden_deadline is not None:
+                return hidden_deadline, hidden_deadline, None
             return None, None, None
         if entry.visible_since is None:
             visible_deadline = entry.closed_at + LATE_ARRIVAL_WINDOW_SECONDS
@@ -635,6 +757,8 @@ class OverlayPresenter(OverlaySink):
         effective_deadline = visible_deadline
         if translation_deadline is not None:
             effective_deadline = max(effective_deadline, translation_deadline)
+        if hidden_deadline is not None:
+            effective_deadline = min(effective_deadline, hidden_deadline)
         return effective_deadline, visible_deadline, translation_deadline
 
     def _remove_entry(
@@ -702,18 +826,23 @@ class OverlayPresenter(OverlaySink):
         finalized_limit: int,
         candidate_keys: list[tuple[str, UUID]],
         selected_keys: list[tuple[str, UUID]],
+        protected_selected: list[tuple[str, UUID]],
+        retained_hidden: list[str],
     ) -> None:
         if self.diagnostics is None:
             return
         candidate_labels = [self._format_entry_key(key) for key in candidate_keys]
         selected_labels = [self._format_entry_key(key) for key in selected_keys]
         dropped_labels = [label for label in candidate_labels if label not in selected_labels]
+        protected_labels = [self._format_entry_key(key) for key in protected_selected]
         signature = (
             active_self_present,
             finalized_limit,
             tuple(candidate_labels),
             tuple(selected_labels),
             tuple(dropped_labels),
+            tuple(protected_labels),
+            tuple(retained_hidden),
         )
         if signature == self._last_visible_window_signature:
             return
@@ -725,7 +854,16 @@ class OverlayPresenter(OverlaySink):
             candidate_keys=candidate_labels,
             selected_keys=selected_labels,
             dropped_keys=dropped_labels,
+            protected_selected=protected_labels,
+            retained_hidden=retained_hidden,
         )
+
+    def _retained_hidden_labels(self) -> list[str]:
+        return [
+            self._format_entry_key(key)
+            for key, entry in self._entries.items()
+            if entry.retained_hidden
+        ]
 
     def _record_deadline(self, entry: _LogicalCaptionEntry) -> None:
         if self.diagnostics is None:

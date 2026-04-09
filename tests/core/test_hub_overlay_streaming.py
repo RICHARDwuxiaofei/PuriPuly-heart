@@ -13,9 +13,11 @@ from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.orchestrator import hub as hub_module
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
+from puripuly_heart.core.overlay.presenter import OverlayPresenter
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
 from puripuly_heart.domain.events import STTFinalEvent, STTPartialEvent
 from puripuly_heart.domain.models import Transcript
+from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 from tests.helpers.fakes import RecordingOscQueue
 
 
@@ -25,6 +27,17 @@ class RecordingOverlaySink:
 
     async def emit(self, event: object) -> None:
         self.events.append(event)
+
+
+@dataclass(slots=True)
+class RecordingPresentationBridge:
+    snapshots: list[object] = field(default_factory=list)
+
+    async def replace_snapshot(self, snapshot: object) -> None:
+        self.snapshots.append(snapshot)
+
+    async def broadcast_shutdown(self) -> None:
+        return
 
 
 @dataclass(slots=True)
@@ -257,6 +270,44 @@ async def test_hub_emits_self_translation_to_overlay_after_translation_completio
     ]
     assert translation_events[-1].text == "hello"
     assert translation_events[-1].text != osc.messages[0].text
+
+
+@pytest.mark.asyncio
+async def test_hub_keeps_recently_translated_self_row_visible_until_newer_translation_arrives() -> None:
+    bridge = RecordingPresentationBridge()
+    clock = FakeClock(_now=10.0)
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=clock,
+        visible_window_target_blocks=1,
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=SequencedTranslateLLMProvider(
+            responses=["translated first", "translated second"],
+            delay_s=0.05,
+        ),
+        osc=RecordingOscQueue(),
+        overlay_sink=presenter,
+        clock=clock,
+    )
+
+    first_id = await hub.submit_text("first", source="You")
+    await asyncio.gather(*hub.self_runtime.translation_tasks.values(), return_exceptions=True)
+
+    assert [block.id for block in presenter.snapshot().blocks] == [f"self:{first_id}"]
+    assert presenter.snapshot().blocks[0].secondary_text == "translated first"
+
+    second_id = await hub.submit_text("second", source="You")
+
+    assert [block.id for block in presenter.snapshot().blocks] == [f"self:{first_id}"]
+    assert presenter.snapshot().blocks[0].secondary_text == "translated first"
+
+    await asyncio.gather(*hub.self_runtime.translation_tasks.values(), return_exceptions=True)
+
+    assert [block.id for block in presenter.snapshot().blocks] == [f"self:{second_id}"]
+    assert presenter.snapshot().blocks[0].secondary_text == "translated second"
 
 
 @pytest.mark.asyncio
