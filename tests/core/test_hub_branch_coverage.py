@@ -240,6 +240,13 @@ async def test_replace_stt_provider_running_restarts_event_loop_and_clears_runti
     hub._speech_ended_ids.add(utterance_id)
     hub._translation_history.append(ContextEntry("hello", "ko", "en", 1.0))
     hub._translation_tasks[utterance_id] = asyncio.create_task(asyncio.sleep(60.0))
+    hub._record_latency_stage(
+        channel="self",
+        utterance_id=utterance_id,
+        stage="speech_end",
+        timestamp=1.0,
+        publish_now=False,
+    )
     buffer = _MergeBuffer(merge_id=uuid4(), parts=["hello"], utterance_ids=[utterance_id])
     buffer.spec_task = asyncio.create_task(asyncio.sleep(60.0))
     buffer.finalize_wait_task = asyncio.create_task(asyncio.sleep(60.0))
@@ -260,6 +267,7 @@ async def test_replace_stt_provider_running_restarts_event_loop_and_clears_runti
     assert hub._speech_ended_ids == set()
     assert hub._translation_history == []
     assert hub._merge_buffer is None
+    assert hub._latency_timelines == {}
 
     await new_stt.emit(STTSessionStateEvent(state=STTSessionState.STREAMING))
     await asyncio.sleep(0)
@@ -274,8 +282,16 @@ async def test_replace_stt_provider_none_stops_event_loop_and_clears_runtime_sta
     old_stt = QueueingSTT()
     hub = ClientHub(stt=old_stt, llm=StubLLM(), osc=RecordingOscQueue(), clock=FakeClock())
     await hub.start(auto_flush_osc=False)
+    utterance_id = uuid4()
     hub._translation_history.append(ContextEntry("hello", "ko", "en", 1.0))
-    hub._translation_tasks[uuid4()] = asyncio.create_task(asyncio.sleep(60.0))
+    hub._translation_tasks[utterance_id] = asyncio.create_task(asyncio.sleep(60.0))
+    hub._record_latency_stage(
+        channel="self",
+        utterance_id=utterance_id,
+        stage="speech_end",
+        timestamp=1.0,
+        publish_now=False,
+    )
 
     await hub.replace_stt_provider(None)
 
@@ -284,6 +300,7 @@ async def test_replace_stt_provider_none_stops_event_loop_and_clears_runtime_sta
     assert hub._stt_task is None
     assert hub._translation_tasks == {}
     assert hub._translation_history == []
+    assert hub._latency_timelines == {}
 
     await hub.stop()
 
@@ -313,6 +330,13 @@ async def test_replace_peer_stt_provider_running_restarts_event_loop_and_clears_
         ContextEntry("peer line", "en", "ko", 1.0, channel="peer")
     )
     hub.peer_runtime.translation_tasks[utterance_id] = asyncio.create_task(asyncio.sleep(60.0))
+    hub._record_latency_stage(
+        channel="peer",
+        utterance_id=utterance_id,
+        stage="speech_end",
+        timestamp=2.0,
+        publish_now=False,
+    )
     buffer = _MergeBuffer(merge_id=uuid4(), parts=["peer"], utterance_ids=[utterance_id])
     buffer.spec_task = asyncio.create_task(asyncio.sleep(60.0))
     buffer.finalize_wait_task = asyncio.create_task(asyncio.sleep(60.0))
@@ -334,6 +358,7 @@ async def test_replace_peer_stt_provider_running_restarts_event_loop_and_clears_
     assert hub.peer_runtime.speech_ended_ids == set()
     assert hub.peer_runtime.translation_history == []
     assert hub.peer_runtime.merge_buffer is None
+    assert hub._latency_timelines == {}
 
     await new_stt.emit(STTSessionStateEvent(state=STTSessionState.STREAMING, channel="peer"))
     await asyncio.sleep(0)

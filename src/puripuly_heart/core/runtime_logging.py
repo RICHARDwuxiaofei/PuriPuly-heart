@@ -19,6 +19,90 @@ _MAIN_FILE_HANDLER_NAME = "puripuly_heart.main.file"
 _SESSION_LOGGER_NAME = "puripuly_heart.runtime.session"
 
 
+@dataclass(frozen=True, slots=True)
+class LatencyTracePointContract:
+    name: str
+    timing_semantics: str
+    acceptance_expectation: str
+
+
+LATENCY_TRACE_POINT_CONTRACTS: dict[str, LatencyTracePointContract] = {
+    "speech_end": LatencyTracePointContract(
+        name="speech_end",
+        timing_semantics="Shared latency zero boundary recorded when the hub accepts SpeechEnd for the utterance.",
+        acceptance_expectation="Use the post-VAD SpeechEnd boundary only; do not add hangover_s back into published latency values.",
+    ),
+    "stt_final": LatencyTracePointContract(
+        name="stt_final",
+        timing_semantics="Recorded when the hub accepts the final STT transcript that will feed the final output path.",
+        acceptance_expectation="Emit at most once per output path using the final transcript text that survives to output publication.",
+    ),
+    "llm_request_start": LatencyTracePointContract(
+        name="llm_request_start",
+        timing_semantics="Recorded immediately before the hub calls the translation provider for the output path.",
+        acceptance_expectation="Use the request that contributes to the published output, not cancelled exploratory retries.",
+    ),
+    "llm_first_chunk": LatencyTracePointContract(
+        name="llm_first_chunk",
+        timing_semantics="Recorded when the hub receives the first streaming translation chunk for the output path.",
+        acceptance_expectation="Emit only for streaming paths and only on the first chunk that belongs to the published output.",
+    ),
+    "llm_done": LatencyTracePointContract(
+        name="llm_done",
+        timing_semantics="Recorded when the hub has the completed translation text ready for publication.",
+        acceptance_expectation="Use the completed translation that is about to be published, whether it came from a streaming or non-streaming provider.",
+    ),
+    "self_chatbox_enqueue": LatencyTracePointContract(
+        name="self_chatbox_enqueue",
+        timing_semantics="Recorded when the hub enqueues the final self output into SmartOscQueue.",
+        acceptance_expectation="This is the official self Basic latency end boundary because it is the final self output handoff point owned by the hub.",
+    ),
+    "peer_overlay_first_emit": LatencyTracePointContract(
+        name="peer_overlay_first_emit",
+        timing_semantics="Recorded at the first hub emission of final peer overlay output.",
+        acceptance_expectation="Use the first overlay_sink.emit call that carries the completed peer translation payload for that utterance.",
+    ),
+    "peer_overlay_first_render": LatencyTracePointContract(
+        name="peer_overlay_first_render",
+        timing_semantics="Recorded by the downstream overlay when final peer overlay output first becomes visible.",
+        acceptance_expectation="Emit once per utterance after peer_overlay_first_emit when the downstream overlay first renders the completed peer translation on screen.",
+    ),
+}
+
+
+def format_basic_latency_summary(
+    *,
+    channel: str,
+    speech_end_to_final_output_ms: int,
+    final_output_stage: str,
+    speech_end_to_stt_final_ms: int | None = None,
+    stt_final_to_final_output_ms: int | None = None,
+) -> str:
+    parts = [
+        f"channel={channel}",
+        f"speech_end_to_final_output_ms={speech_end_to_final_output_ms}",
+    ]
+    if speech_end_to_stt_final_ms is not None:
+        parts.append(f"speech_end_to_stt_final_ms={speech_end_to_stt_final_ms}")
+    if stt_final_to_final_output_ms is not None:
+        parts.append(f"stt_final_to_final_output_ms={stt_final_to_final_output_ms}")
+    parts.append(f"final_output_stage={final_output_stage}")
+    return f"[Basic][Latency] {' '.join(parts)}"
+
+
+def format_detailed_latency_trace(
+    *,
+    channel: str,
+    utterance_id: str,
+    stage: str,
+    elapsed_ms: int,
+) -> str:
+    return (
+        f"[Detailed][Latency] channel={channel} utterance_id={utterance_id} "
+        f"stage={stage} elapsed_ms={elapsed_ms}"
+    )
+
+
 class RealtimeLogSink(Protocol):
     def append_log(self, line: str) -> None: ...
 

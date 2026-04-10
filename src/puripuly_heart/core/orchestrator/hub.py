@@ -26,7 +26,11 @@ from puripuly_heart.core.overlay.sink import (
     OverlaySink,
     OverlayStreamCoalescer,
 )
-from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
+from puripuly_heart.core.runtime_logging import (
+    SessionRuntimeLoggingService,
+    format_basic_latency_summary,
+    format_detailed_latency_trace,
+)
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadEvent
 from puripuly_heart.domain.events import (
     STTErrorEvent,
@@ -67,6 +71,25 @@ _SELF_RUNTIME_FIELDS = {
     "_speech_ended_ids": "speech_ended_ids",
     "_merge_buffer": "merge_buffer",
 }
+_LATENCY_TRACE_ORDER = (
+    "speech_end",
+    "stt_final",
+    "llm_request_start",
+    "llm_first_chunk",
+    "llm_done",
+    "self_chatbox_enqueue",
+    "peer_overlay_first_emit",
+    "peer_overlay_first_render",
+)
+_LATENCY_SUMMARY_OUTPUT_STAGES = {"self_chatbox_enqueue", "peer_overlay_first_emit"}
+
+
+@dataclass(slots=True)
+class _LatencyTimeline:
+    channel: ChannelId
+    stage_times: dict[str, float] = field(default_factory=dict)
+    emitted_trace_points: set[str] = field(default_factory=set)
+    basic_summary_emitted: bool = False
 
 
 @dataclass(slots=True)
@@ -136,6 +159,10 @@ class ClientHub:
     _last_overlay_secondary_diagnostic_signature: tuple[object, ...] | None = field(
         init=False,
         default=None,
+    )
+    _latency_timelines: dict[tuple[ChannelId, UUID], _LatencyTimeline] = field(
+        init=False,
+        default_factory=dict,
     )
 
     def __post_init__(self) -> None:
@@ -235,14 +262,198 @@ class ClientHub:
         *args: object,
         level: int = logging.INFO,
         fallback_level: int | None = None,
-    ) -> None:
+    ) -> bool:
         formatted = self._format_log_message(message, *args)
         if self.runtime_logging is not None:
-            self.runtime_logging.emit_detailed(formatted, level=level)
+            return self.runtime_logging.emit_detailed(formatted, level=level)
         _ = fallback_level
+        return False
 
     def _emit_metric(self, message: str, *args: object) -> None:
         self._emit_detailed(message, *args, fallback_level=logging.DEBUG)
+
+    @staticmethod
+    def _latency_key(channel: ChannelId, utterance_id: UUID) -> tuple[ChannelId, UUID]:
+        return channel, utterance_id
+
+    def _get_latency_timeline(
+        self,
+        *,
+        channel: ChannelId,
+        utterance_id: UUID,
+        create: bool = False,
+    ) -> _LatencyTimeline | None:
+        key = self._latency_key(channel, utterance_id)
+        timeline = self._latency_timelines.get(key)
+        if timeline is None and create:
+            timeline = _LatencyTimeline(channel=channel)
+            self._latency_timelines[key] = timeline
+        return timeline
+
+    @staticmethod
+    def _elapsed_latency_ms(start_at: float | None, end_at: float | None) -> int | None:
+        if start_at is None or end_at is None:
+            return None
+        return max(0, int(round((end_at - start_at) * 1000)))
+
+    def _emit_latency_trace_if_ready(
+        self,
+        *,
+        channel: ChannelId,
+        utterance_id: UUID,
+        stage: str,
+    ) -> None:
+        timeline = self._get_latency_timeline(channel=channel, utterance_id=utterance_id)
+        if timeline is None or stage in timeline.emitted_trace_points:
+            return
+        speech_end_at = timeline.stage_times.get("speech_end")
+        stage_at = timeline.stage_times.get(stage)
+        elapsed_ms = self._elapsed_latency_ms(speech_end_at, stage_at)
+        if elapsed_ms is None:
+            return
+        emitted = self._emit_detailed(
+            format_detailed_latency_trace(
+                channel=channel,
+                utterance_id=str(utterance_id)[:8],
+                stage=stage,
+                elapsed_ms=elapsed_ms,
+            )
+        )
+        if emitted:
+            timeline.emitted_trace_points.add(stage)
+
+    def _emit_latency_summary_if_ready(
+        self,
+        *,
+        channel: ChannelId,
+        utterance_id: UUID,
+        final_output_stage: str,
+    ) -> None:
+        timeline = self._get_latency_timeline(channel=channel, utterance_id=utterance_id)
+        if timeline is None or timeline.basic_summary_emitted:
+            return
+        speech_end_at = timeline.stage_times.get("speech_end")
+        final_output_at = timeline.stage_times.get(final_output_stage)
+        speech_end_to_final_output_ms = self._elapsed_latency_ms(speech_end_at, final_output_at)
+        if speech_end_to_final_output_ms is None:
+            return
+
+        stt_final_at = timeline.stage_times.get("stt_final")
+        speech_end_to_stt_final_ms = self._elapsed_latency_ms(speech_end_at, stt_final_at)
+        stt_reference_at = None
+        if speech_end_at is not None and stt_final_at is not None:
+            stt_reference_at = max(speech_end_at, stt_final_at)
+        stt_final_to_final_output_ms = self._elapsed_latency_ms(stt_reference_at, final_output_at)
+
+        self._emit_basic(
+            format_basic_latency_summary(
+                channel=channel,
+                speech_end_to_final_output_ms=speech_end_to_final_output_ms,
+                speech_end_to_stt_final_ms=speech_end_to_stt_final_ms,
+                stt_final_to_final_output_ms=stt_final_to_final_output_ms,
+                final_output_stage=final_output_stage,
+            )
+        )
+        timeline.basic_summary_emitted = True
+
+    def _emit_latency_contract_if_ready(
+        self,
+        *,
+        channel: ChannelId,
+        utterance_id: UUID,
+    ) -> None:
+        for trace_stage in _LATENCY_TRACE_ORDER:
+            self._emit_latency_trace_if_ready(
+                channel=channel,
+                utterance_id=utterance_id,
+                stage=trace_stage,
+            )
+        for output_stage in _LATENCY_SUMMARY_OUTPUT_STAGES:
+            self._emit_latency_summary_if_ready(
+                channel=channel,
+                utterance_id=utterance_id,
+                final_output_stage=output_stage,
+            )
+
+    def _record_latency_stage(
+        self,
+        *,
+        channel: ChannelId,
+        utterance_id: UUID,
+        stage: str,
+        timestamp: float | None = None,
+        overwrite: bool = True,
+        publish_now: bool = True,
+    ) -> None:
+        timeline = self._get_latency_timeline(
+            channel=channel, utterance_id=utterance_id, create=True
+        )
+        assert timeline is not None
+        if not overwrite and stage in timeline.stage_times:
+            return
+        timeline.stage_times[stage] = self.clock.now() if timestamp is None else timestamp
+
+        if not publish_now:
+            return
+
+        self._emit_latency_contract_if_ready(
+            channel=channel,
+            utterance_id=utterance_id,
+        )
+
+    def _inherit_latency_for_output(
+        self,
+        *,
+        channel: ChannelId,
+        output_utterance_id: UUID,
+        source_utterance_ids: list[UUID],
+    ) -> None:
+        output_timeline = self._get_latency_timeline(
+            channel=channel,
+            utterance_id=output_utterance_id,
+            create=True,
+        )
+        assert output_timeline is not None
+        for source_utterance_id in source_utterance_ids:
+            source_timeline = self._get_latency_timeline(
+                channel=channel,
+                utterance_id=source_utterance_id,
+            )
+            if source_timeline is None:
+                continue
+            for stage in ("speech_end", "stt_final"):
+                source_time = source_timeline.stage_times.get(stage)
+                if source_time is None:
+                    continue
+                existing_time = output_timeline.stage_times.get(stage)
+                if existing_time is None:
+                    output_timeline.stage_times[stage] = source_time
+                else:
+                    output_timeline.stage_times[stage] = max(existing_time, source_time)
+        self._emit_latency_contract_if_ready(
+            channel=channel,
+            utterance_id=output_utterance_id,
+        )
+
+    def _clear_latency_timeline(self, *, channel: ChannelId, utterance_id: UUID) -> None:
+        self._latency_timelines.pop(self._latency_key(channel, utterance_id), None)
+
+    def _clear_latency_state(self, *, channel: ChannelId | None = None) -> None:
+        if channel is None:
+            self._latency_timelines.clear()
+            return
+        keys_to_remove = [key for key in self._latency_timelines if key[0] == channel]
+        for key in keys_to_remove:
+            self._latency_timelines.pop(key, None)
+
+    def _clear_runtime_latency_bookkeeping(self, *, channel: ChannelId, utterance_id: UUID) -> None:
+        runtime = self._runtime_for_channel(channel)
+        runtime.utterance_start_times.pop(utterance_id, None)
+        runtime.speech_ended_ids.discard(utterance_id)
+
+    def _finalize_latency_timeline(self, *, channel: ChannelId, utterance_id: UUID) -> None:
+        self._clear_runtime_latency_bookkeeping(channel=channel, utterance_id=utterance_id)
+        self._clear_latency_timeline(channel=channel, utterance_id=utterance_id)
 
     def _emit_exception_summary(
         self,
@@ -340,6 +551,7 @@ class ClientHub:
         await self._stop_stt_task("_stt_task")
         await self.reset_overlay_preview()
         await self.self_runtime.reset_runtime_state()
+        self._clear_latency_state(channel="self")
         self._sync_self_runtime_aliases()
 
         if old_stt is not None:
@@ -354,6 +566,7 @@ class ClientHub:
         old_stt = self.peer_stt
         await self._stop_stt_task("_peer_stt_task")
         await self.peer_runtime.reset_runtime_state()
+        self._clear_latency_state(channel="peer")
 
         if old_stt is not None:
             await old_stt.close()
@@ -450,9 +663,17 @@ class ClientHub:
 
         # Record start time for E2E latency tracking (from speech end)
         if isinstance(event, SpeechEnd):
+            speech_end_at = self.clock.now()
             self.osc.send_typing(True)
-            self._utterance_start_times[event.utterance_id] = self.clock.now()
+            self._utterance_start_times[event.utterance_id] = speech_end_at
             self._speech_ended_ids.add(event.utterance_id)
+            self._record_latency_stage(
+                channel="self",
+                utterance_id=event.utterance_id,
+                stage="speech_end",
+                timestamp=speech_end_at,
+                publish_now=not self.low_latency_mode,
+            )
             if self.low_latency_mode:
                 self._maybe_update_buffer_end_time(event.utterance_id)
                 self._maybe_start_finalize_wait(event.utterance_id)
@@ -468,6 +689,16 @@ class ClientHub:
             await self._sync_overlay_active_self(resume_overlay_resync_buffer)
 
     async def handle_peer_vad_event(self, event: VadEvent) -> None:
+        if isinstance(event, SpeechEnd):
+            speech_end_at = self.clock.now()
+            self.peer_runtime.utterance_start_times[event.utterance_id] = speech_end_at
+            self.peer_runtime.speech_ended_ids.add(event.utterance_id)
+            self._record_latency_stage(
+                channel="peer",
+                utterance_id=event.utterance_id,
+                stage="speech_end",
+                timestamp=speech_end_at,
+            )
         if self.peer_stt is not None:
             await self.peer_stt.handle_vad_event(event)
 
@@ -542,6 +773,7 @@ class ClientHub:
     async def _reset_stt_runtime_state(self) -> None:
         await self.self_runtime.reset_runtime_state()
         await self.peer_runtime.reset_runtime_state()
+        self._clear_latency_state()
         self._sync_self_runtime_aliases()
 
     async def _handle_stt_event(self, event: object) -> None:
@@ -595,6 +827,11 @@ class ClientHub:
             if self.low_latency_mode and runtime.channel == "self":
                 await self._handle_low_latency_final(event.transcript)
                 return
+            self._record_latency_stage(
+                channel=runtime.channel,
+                utterance_id=event.transcript.utterance_id,
+                stage="stt_final",
+            )
             await self._handle_transcript(event.transcript, is_final=True, source=source)
             if self.llm is None or not self._translation_enabled_for_runtime(runtime):
                 self._log_translation_skipped(
@@ -607,6 +844,11 @@ class ClientHub:
                         event.transcript.utterance_id,
                         transcript_text=event.transcript.text,
                         translation_text=None,
+                    )
+                else:
+                    self._finalize_latency_timeline(
+                        channel=runtime.channel,
+                        utterance_id=event.transcript.utterance_id,
                     )
             else:
                 await self._ensure_translation(event.transcript)
@@ -642,7 +884,23 @@ class ClientHub:
         )
         if is_final:
             await self._emit_final_transcript_to_overlay(transcript)
-            if not self._overlay_translation_will_follow(runtime):
+            if runtime.channel == "peer":
+                peer_terminal_work_will_follow = self._peer_terminal_work_will_follow(runtime)
+                if self.overlay_sink is not None and not self._overlay_translation_will_follow(
+                    runtime
+                ):
+                    await self._emit_overlay_utterance_closed(
+                        utterance_id=transcript.utterance_id,
+                        channel=transcript.channel,
+                        is_final=True,
+                        finalize_latency=not peer_terminal_work_will_follow,
+                    )
+                elif not peer_terminal_work_will_follow:
+                    self._finalize_latency_timeline(
+                        channel=transcript.channel,
+                        utterance_id=transcript.utterance_id,
+                    )
+            elif not self._overlay_translation_will_follow(runtime):
                 await self._emit_overlay_utterance_closed(
                     utterance_id=transcript.utterance_id,
                     channel=transcript.channel,
@@ -666,8 +924,11 @@ class ClientHub:
         utterance_id: UUID,
         channel: ChannelId,
         is_final: bool,
+        finalize_latency: bool | None = None,
     ) -> None:
         if self.overlay_sink is None:
+            if finalize_latency is True or (finalize_latency is None and channel == "peer"):
+                self._finalize_latency_timeline(channel=channel, utterance_id=utterance_id)
             return
         await self._emit_overlay_event(
             self.overlay_event_adapter.utterance_closed(
@@ -676,12 +937,21 @@ class ClientHub:
                 is_final=is_final,
             )
         )
+        if finalize_latency is True or (finalize_latency is None and channel == "peer"):
+            self._finalize_latency_timeline(channel=channel, utterance_id=utterance_id)
 
     def _overlay_translation_will_follow(self, runtime: ChannelRuntime) -> bool:
         return (
             self.overlay_sink is not None
             and self.llm is not None
             and self._translation_enabled_for_runtime(runtime)
+        )
+
+    def _peer_terminal_work_will_follow(self, runtime: ChannelRuntime) -> bool:
+        if runtime.channel != "peer":
+            return False
+        return (self.llm is not None and self._translation_enabled_for_runtime(runtime)) or (
+            self._should_publish_to_chatbox(runtime)
         )
 
     async def _emit_translation_to_overlay(
@@ -1019,6 +1289,37 @@ class ClientHub:
         buffer.resume_started_at = None
         self._cancel_resume_end_timeout(buffer)
 
+    def _clear_spec_latency_state(self, buffer: _MergeBuffer) -> None:
+        buffer.spec_latency_stage_times.clear()
+
+    def _record_spec_latency_stage(
+        self,
+        buffer: _MergeBuffer,
+        *,
+        stage: str,
+        timestamp: float | None = None,
+    ) -> None:
+        buffer.spec_latency_stage_times[stage] = (
+            self.clock.now() if timestamp is None else timestamp
+        )
+
+    def _promote_spec_latency_to_output(self, buffer: _MergeBuffer) -> None:
+        if not buffer.spec_latency_stage_times:
+            return
+        for stage in ("llm_request_start", "llm_first_chunk", "llm_done"):
+            timestamp = buffer.spec_latency_stage_times.get(stage)
+            if timestamp is None:
+                continue
+            self._record_latency_stage(
+                channel="self",
+                utterance_id=buffer.merge_id,
+                stage=stage,
+                timestamp=timestamp,
+                publish_now=False,
+            )
+        self._clear_spec_latency_state(buffer)
+        self._emit_latency_contract_if_ready(channel="self", utterance_id=buffer.merge_id)
+
     def _clear_spec_state(self, buffer: _MergeBuffer, *, reason: str) -> bool:
         had_spec_state = any(
             value is not None
@@ -1029,7 +1330,7 @@ class ClientHub:
                 buffer.spec_started_at,
                 buffer.spec_done_at,
             )
-        )
+        ) or bool(buffer.spec_latency_stage_times)
         if not had_spec_state:
             return False
         if buffer.spec_task is not None and not buffer.spec_task.done():
@@ -1045,6 +1346,7 @@ class ClientHub:
                 str(buffer.merge_id)[:8],
                 reason,
             )
+        self._clear_spec_latency_state(buffer)
         buffer.spec_task = None
         buffer.spec_translation = None
         buffer.spec_text = None
@@ -1266,6 +1568,13 @@ class ClientHub:
         if not text:
             return
 
+        self._record_latency_stage(
+            channel="self",
+            utterance_id=transcript.utterance_id,
+            stage="stt_final",
+            publish_now=False,
+        )
+
         now = self.clock.now()
         buffer = self._merge_buffer
         if buffer is None:
@@ -1366,6 +1675,13 @@ class ClientHub:
             self._utterance_start_times[buffer.merge_id] = buffer.last_end_time
         elif buffer.start_time is not None:
             self._utterance_start_times[buffer.merge_id] = buffer.start_time
+        self._inherit_latency_for_output(
+            channel="self",
+            output_utterance_id=buffer.merge_id,
+            source_utterance_ids=buffer.utterance_ids,
+        )
+        for utterance_id in buffer.utterance_ids:
+            self._clear_latency_timeline(channel="self", utterance_id=utterance_id)
 
         transcript = Transcript(
             utterance_id=buffer.merge_id,
@@ -1407,6 +1723,7 @@ class ClientHub:
         if reuse_spec:
             translation = buffer.spec_translation
             if translation is not None:
+                self._promote_spec_latency_to_output(buffer)
                 self._emit_metric(
                     "[Metric] spec_reuse id=%s translation_len=%s after_final=%s",
                     str(buffer.merge_id)[:8],
@@ -1442,6 +1759,7 @@ class ClientHub:
                 return
 
         if buffer.spec_translation is not None and reuse_mode is None:
+            self._clear_spec_latency_state(buffer)
             self._emit_metric(
                 "[Metric] spec_cancel id=%s reason=final_mismatch", str(buffer.merge_id)[:8]
             )
@@ -1474,8 +1792,14 @@ class ClientHub:
     async def _run_spec_translation(self, merge_id: UUID, text: str, attempt: int) -> None:
         if self.llm is None:
             return
+        buffer = self._merge_buffer
+        if buffer is None or buffer.merge_id != merge_id:
+            return
+        if buffer.spec_text != text or buffer.spec_attempts != attempt:
+            return
+        self._record_spec_latency_stage(buffer, stage="llm_request_start")
         try:
-            translation = await self._translate_text(merge_id, text)
+            translation = await self._translate_text(merge_id, text, record_latency=False)
         except asyncio.CancelledError:
             return
         except Exception as exc:
@@ -1490,6 +1814,7 @@ class ClientHub:
                 return
             if buffer.spec_text != text or buffer.spec_attempts != attempt:
                 return
+            self._clear_spec_latency_state(buffer)
             buffer.spec_done_at = self.clock.now()
             await self._try_commit_after_spec(buffer, reason="spec_failed", allow_fallback=True)
             return
@@ -1500,6 +1825,7 @@ class ClientHub:
         if buffer.spec_text != text or buffer.spec_attempts != attempt:
             return
 
+        self._record_spec_latency_stage(buffer, stage="llm_done")
         buffer.spec_translation = translation
         buffer.spec_done_at = self.clock.now()
         if buffer.spec_started_at is None:
@@ -1676,6 +2002,7 @@ class ClientHub:
         text: str,
         *,
         runtime: ChannelRuntime | None = None,
+        record_latency: bool = True,
     ) -> Translation:
         if self.llm is None:
             raise RuntimeError("LLM is not configured")
@@ -1685,6 +2012,12 @@ class ClientHub:
             text,
             runtime=runtime,
         )
+        if record_latency:
+            self._record_latency_stage(
+                channel=runtime.channel,
+                utterance_id=utterance_id,
+                stage="llm_request_start",
+            )
         translation = await self.llm.translate(
             utterance_id=utterance_id,
             text=text,
@@ -1693,6 +2026,12 @@ class ClientHub:
             target_language=self._target_language_for(runtime),
             context=context_str,
         )
+        if record_latency:
+            self._record_latency_stage(
+                channel=runtime.channel,
+                utterance_id=utterance_id,
+                stage="llm_done",
+            )
         return self._normalize_translation(
             translation,
             runtime=runtime,
@@ -1741,6 +2080,11 @@ class ClientHub:
                 now,
                 runtime=runtime,
             )
+            self._record_latency_stage(
+                channel=runtime.channel,
+                utterance_id=utterance_id,
+                stage="llm_request_start",
+            )
 
             if runtime.channel == "peer" and self.overlay_sink is not None:
                 translation = await self._stream_peer_translation_to_overlay(
@@ -1765,13 +2109,21 @@ class ClientHub:
                     runtime=runtime,
                     text=text,
                 )
+                self._record_latency_stage(
+                    channel=runtime.channel,
+                    utterance_id=utterance_id,
+                    stage="llm_done",
+                )
         except asyncio.CancelledError:
             if runtime.channel == "self":
                 await self._emit_overlay_utterance_closed(
                     utterance_id=utterance_id,
                     channel=runtime.channel,
                     is_final=False,
+                    finalize_latency=not self._should_publish_to_chatbox(runtime),
                 )
+            else:
+                self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
             raise
         except Exception as exc:
             self._log_translation_failure(stage="final", runtime=runtime, exc=exc)
@@ -1789,6 +2141,9 @@ class ClientHub:
                     utterance_id=utterance_id,
                     channel=runtime.channel,
                     is_final=False,
+                    finalize_latency=not (
+                        self.fallback_transcript_only and self._should_publish_to_chatbox(runtime)
+                    ),
                 )
             if self.fallback_transcript_only and self._should_publish_to_chatbox(runtime):
                 await self._enqueue_osc(
@@ -1796,6 +2151,8 @@ class ClientHub:
                     transcript_text=text,
                     translation_text=None,
                 )
+            else:
+                self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
             return
 
         bundle = self.get_or_create_bundle(utterance_id, channel=runtime.channel)
@@ -1817,6 +2174,7 @@ class ClientHub:
                 utterance_id=utterance_id,
                 channel=runtime.channel,
                 is_final=True,
+                finalize_latency=not self._should_publish_to_chatbox(runtime),
             )
         if self._should_publish_to_chatbox(runtime):
             await self._enqueue_osc(
@@ -1824,6 +2182,8 @@ class ClientHub:
                 transcript_text=text,
                 translation_text=translation.text,
             )
+        else:
+            self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
 
     async def _stream_peer_translation_to_overlay(
         self,
@@ -1843,6 +2203,7 @@ class ClientHub:
         try:
             src = self._source_language_for(runtime)
             tgt = self._target_language_for(runtime)
+            saw_first_chunk = False
             async for snapshot in self.llm.stream_translate(
                 utterance_id=utterance_id,
                 text=text,
@@ -1852,6 +2213,14 @@ class ClientHub:
                 context=context,
             ):
                 latest_snapshot = snapshot
+                if not saw_first_chunk:
+                    saw_first_chunk = True
+                    self._record_latency_stage(
+                        channel=runtime.channel,
+                        utterance_id=utterance_id,
+                        stage="llm_first_chunk",
+                        overwrite=False,
+                    )
                 await coalescer.push(
                     self.overlay_event_adapter.translation_stream_update(
                         utterance_id=utterance_id,
@@ -1878,6 +2247,17 @@ class ClientHub:
                 runtime=runtime,
                 text=text,
             )
+            self._record_latency_stage(
+                channel=runtime.channel,
+                utterance_id=utterance_id,
+                stage="llm_done",
+            )
+            self._record_latency_stage(
+                channel=runtime.channel,
+                utterance_id=utterance_id,
+                stage="peer_overlay_first_emit",
+                overwrite=False,
+            )
             await self._emit_overlay_event(
                 self.overlay_event_adapter.translation_final(
                     utterance_id=utterance_id,
@@ -1888,32 +2268,29 @@ class ClientHub:
                     applied_context_mode=applied_mode,
                 )
             )
-            await self._emit_overlay_event(
-                self.overlay_event_adapter.utterance_closed(
-                    utterance_id=utterance_id,
-                    channel=runtime.channel,
-                    is_final=True,
-                )
+            await self._emit_overlay_utterance_closed(
+                utterance_id=utterance_id,
+                channel=runtime.channel,
+                is_final=True,
+                finalize_latency=not self._should_publish_to_chatbox(runtime),
             )
             return translation
         except asyncio.CancelledError:
             await coalescer.cancel()
-            await self._emit_overlay_event(
-                self.overlay_event_adapter.utterance_closed(
-                    utterance_id=utterance_id,
-                    channel=runtime.channel,
-                    is_final=False,
-                )
+            await self._emit_overlay_utterance_closed(
+                utterance_id=utterance_id,
+                channel=runtime.channel,
+                is_final=False,
+                finalize_latency=False,
             )
             raise
         except Exception:
             await coalescer.flush(self._emit_overlay_event)
-            await self._emit_overlay_event(
-                self.overlay_event_adapter.utterance_closed(
-                    utterance_id=utterance_id,
-                    channel=runtime.channel,
-                    is_final=False,
-                )
+            await self._emit_overlay_utterance_closed(
+                utterance_id=utterance_id,
+                channel=runtime.channel,
+                is_final=False,
+                finalize_latency=False,
             )
             raise
 
@@ -1972,8 +2349,15 @@ class ClientHub:
             merged,
             fallback_level=logging.INFO,
         )
+        if runtime.channel == "self":
+            self._record_latency_stage(
+                channel=runtime.channel,
+                utterance_id=utterance_id,
+                stage="self_chatbox_enqueue",
+            )
 
-        self._utterance_start_times.pop(utterance_id, None)
+        runtime.utterance_start_times.pop(utterance_id, None)
+        runtime.speech_ended_ids.discard(utterance_id)
 
         self.osc.enqueue(msg)
 
@@ -1988,6 +2372,7 @@ class ClientHub:
                 source=self._get_source(utterance_id),
             )
         )
+        self._clear_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
 
     async def _run_osc_flush_loop(self) -> None:
         try:
