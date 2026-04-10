@@ -448,7 +448,7 @@ async def test_qwen_warmup_always_uses_plus_model(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_qwen_client_logs_detailed_request_and_response_for_qwen35(
+async def test_qwen_client_logs_basic_request_and_response_for_qwen35(
     monkeypatch, caplog: pytest.LogCaptureFixture
 ):
     class FakeHttpxResponse:
@@ -489,10 +489,8 @@ async def test_qwen_client_logs_detailed_request_and_response_for_qwen35(
         )
 
     assert result == "OK35"
-    assert (
-        "[Detailed][LLM] Qwen request [translate][context=yes] ko -> en: 'hello'" in caplog.messages
-    )
-    assert "[Detailed][LLM] Qwen response [translate]: 'OK35'" in caplog.messages
+    assert "[Basic][LLM] Qwen request [translate][context=yes] ko -> en: 'hello'" in caplog.messages
+    assert "[Basic][LLM] Qwen response [translate]: 'OK35'" in caplog.messages
 
 
 @pytest.mark.asyncio
@@ -543,7 +541,7 @@ async def test_qwen_client_logs_basic_request_failure_for_qwen35(
 
 
 @pytest.mark.asyncio
-async def test_qwen_client_uses_runtime_logging_for_translate_chatter_for_qwen35(
+async def test_qwen_client_uses_runtime_logging_for_basic_translate_payloads_for_qwen35(
     monkeypatch, caplog: pytest.LogCaptureFixture
 ):
     class FakeHttpxResponse:
@@ -588,11 +586,11 @@ async def test_qwen_client_uses_runtime_logging_for_translate_chatter_for_qwen35
         )
 
     assert result == "OK35"
-    assert runtime_logging.detailed_messages == [
-        ("[Detailed][LLM] Qwen request [translate][context=yes] ko -> en: 'hello'", logging.INFO),
-        ("[Detailed][LLM] Qwen response [translate]: 'OK35'", logging.INFO),
+    assert runtime_logging.basic_messages == [
+        ("[Basic][LLM] Qwen request [translate][context=yes] ko -> en: 'hello'", logging.INFO),
+        ("[Basic][LLM] Qwen response [translate]: 'OK35'", logging.INFO),
     ]
-    assert runtime_logging.basic_messages == []
+    assert runtime_logging.detailed_messages == []
     assert caplog.messages == []
 
 
@@ -641,13 +639,12 @@ async def test_qwen_client_uses_runtime_logging_for_failure_breadcrumbs_for_qwen
                 target_language="en",
             )
 
-    assert runtime_logging.detailed_messages == [
-        ("[Detailed][LLM] Qwen request [translate][context=no] ko -> en: 'hello'", logging.INFO)
-    ]
+    assert runtime_logging.detailed_messages == []
     assert runtime_logging.basic_messages == [
+        ("[Basic][LLM] Qwen request [translate][context=no] ko -> en: 'hello'", logging.INFO),
         (
             "[Basic][LLM] Qwen request failed [translate]: status=429 message=quota exceeded",
             logging.ERROR,
-        )
+        ),
     ]
     assert caplog.messages == []

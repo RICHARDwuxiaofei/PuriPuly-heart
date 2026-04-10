@@ -437,8 +437,8 @@ def test_prepare_llm_request_routes_context_logs_by_runtime_visibility() -> None
         detailed_messages = _runtime_log_messages(detailed_stream)
 
         assert "[Hub] Context mode: channel=self mode=local" in basic_messages
-        assert "[Hub] Context apply: channel=self text='입력' entries=1" not in basic_messages
-        assert '[Hub] Context[0]: [1s ago] "안녕"' not in basic_messages
+        assert "[Hub] Context apply: channel=self text='입력' entries=1" in basic_messages
+        assert '[Hub] Context[0]: [1s ago] "안녕"' in basic_messages
 
         assert "[Hub] Context mode: channel=self mode=local" in detailed_messages
         assert "[Hub] Context apply: channel=self text='입력' entries=1" in detailed_messages

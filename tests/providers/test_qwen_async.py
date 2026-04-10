@@ -214,7 +214,7 @@ async def test_async_qwen_warmup_always_uses_plus_model(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_httpx_qwen_client_logs_detailed_request_and_response(
+async def test_httpx_qwen_client_logs_basic_request_and_response(
     monkeypatch, caplog: pytest.LogCaptureFixture
 ):
     class FakeResponse:
@@ -245,10 +245,8 @@ async def test_httpx_qwen_client_logs_detailed_request_and_response(
         )
 
     assert result == "OK"
-    assert (
-        "[Detailed][LLM] Qwen request [translate][context=yes] ko -> en: 'hello'" in caplog.messages
-    )
-    assert "[Detailed][LLM] Qwen response [translate]: 'OK'" in caplog.messages
+    assert "[Basic][LLM] Qwen request [translate][context=yes] ko -> en: 'hello'" in caplog.messages
+    assert "[Basic][LLM] Qwen response [translate]: 'OK'" in caplog.messages
 
 
 @pytest.mark.asyncio
@@ -289,7 +287,7 @@ async def test_httpx_qwen_client_logs_basic_request_failure(
 
 
 @pytest.mark.asyncio
-async def test_httpx_qwen_client_uses_runtime_logging_for_translate_chatter(
+async def test_httpx_qwen_client_uses_runtime_logging_for_basic_translate_payloads(
     monkeypatch, caplog: pytest.LogCaptureFixture
 ):
     class FakeResponse:
@@ -323,11 +321,11 @@ async def test_httpx_qwen_client_uses_runtime_logging_for_translate_chatter(
         )
 
     assert result == "OK"
-    assert runtime_logging.detailed_messages == [
-        ("[Detailed][LLM] Qwen request [translate][context=yes] ko -> en: 'hello'", logging.INFO),
-        ("[Detailed][LLM] Qwen response [translate]: 'OK'", logging.INFO),
+    assert runtime_logging.basic_messages == [
+        ("[Basic][LLM] Qwen request [translate][context=yes] ko -> en: 'hello'", logging.INFO),
+        ("[Basic][LLM] Qwen response [translate]: 'OK'", logging.INFO),
     ]
-    assert runtime_logging.basic_messages == []
+    assert runtime_logging.detailed_messages == []
     assert caplog.messages == []
 
 
@@ -365,13 +363,12 @@ async def test_httpx_qwen_client_uses_runtime_logging_for_failure_breadcrumbs(
                 target_language="en",
             )
 
-    assert runtime_logging.detailed_messages == [
-        ("[Detailed][LLM] Qwen request [translate][context=no] ko -> en: 'hello'", logging.INFO)
-    ]
+    assert runtime_logging.detailed_messages == []
     assert runtime_logging.basic_messages == [
+        ("[Basic][LLM] Qwen request [translate][context=no] ko -> en: 'hello'", logging.INFO),
         (
             "[Basic][LLM] Qwen request failed [translate]: status=429 message=quota exceeded",
             logging.ERROR,
-        )
+        ),
     ]
     assert caplog.messages == []
