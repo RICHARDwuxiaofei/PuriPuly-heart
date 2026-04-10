@@ -78,6 +78,8 @@ def require_openrouter_execution_api_key(settings: AppSettings, *, secrets: Secr
 def clear_temporary_managed_release_state(settings: AppSettings) -> None:
     settings.managed_identity.release_token = None
     settings.managed_identity.release_token_expires_at = None
+    settings.managed_identity.verified_hardware_hash = None
+    settings.managed_identity.verified_hardware_hash_salt_version = None
 
 
 def handle_managed_availability(

@@ -92,6 +92,7 @@ class ManagedIdentityBundle:
         *,
         release_token: str,
         reason: str,
+        hardware_hash: str,
         budget_usd: int | float,
         model: str,
         signed_at: str,
@@ -101,6 +102,7 @@ class ManagedIdentityBundle:
             device_public_key=self.device_public_key,
             release_token=release_token,
             reason=reason,
+            hardware_hash=hardware_hash,
             budget_usd=budget_usd,
             model=model,
             signed_at=signed_at,
@@ -110,6 +112,7 @@ class ManagedIdentityBundle:
             "device_public_key": self.device_public_key,
             "release_token": release_token,
             "reason": reason,
+            "hardware_hash": hardware_hash,
             "budget_usd": budget_usd,
             "model": model,
             "signed_at": signed_at,
@@ -148,6 +151,7 @@ def canonical_issue_payload(
     device_public_key: str,
     release_token: str,
     reason: str,
+    hardware_hash: str,
     budget_usd: int | float,
     model: str,
     signed_at: str,
@@ -157,6 +161,7 @@ def canonical_issue_payload(
         device_public_key,
         release_token,
         reason,
+        hardware_hash,
         _canonical_number_string(budget_usd),
         model,
         signed_at,
@@ -267,6 +272,10 @@ def _replace_managed_identity_bundle(
     previous_installation_id = settings.managed_identity.installation_id
     previous_release_token = settings.managed_identity.release_token
     previous_release_token_expires_at = settings.managed_identity.release_token_expires_at
+    previous_verified_hardware_hash = settings.managed_identity.verified_hardware_hash
+    previous_verified_hardware_hash_salt_version = (
+        settings.managed_identity.verified_hardware_hash_salt_version
+    )
     previous_managed_api_key = secret_store.get(OPENROUTER_MANAGED_API_KEY_SECRET)
     previous_private_key = secret_store.get(MANAGED_DEVICE_PRIVATE_KEY_SECRET)
     previous_public_key = secret_store.get(MANAGED_DEVICE_PUBLIC_KEY_SECRET)
@@ -290,11 +299,17 @@ def _replace_managed_identity_bundle(
         settings.managed_identity.installation_id = installation_id
         settings.managed_identity.release_token = None
         settings.managed_identity.release_token_expires_at = None
+        settings.managed_identity.verified_hardware_hash = None
+        settings.managed_identity.verified_hardware_hash_salt_version = None
         persist_settings(settings)
     except Exception as exc:
         settings.managed_identity.installation_id = previous_installation_id
         settings.managed_identity.release_token = previous_release_token
         settings.managed_identity.release_token_expires_at = previous_release_token_expires_at
+        settings.managed_identity.verified_hardware_hash = previous_verified_hardware_hash
+        settings.managed_identity.verified_hardware_hash_salt_version = (
+            previous_verified_hardware_hash_salt_version
+        )
         rollback_error = _restore_secret_state(
             secret_store,
             managed_api_key=previous_managed_api_key,

@@ -7,6 +7,7 @@ from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_BYOK_API_KEY_SECRET,
     OPENROUTER_MANAGED_API_KEY_SECRET,
     OpenRouterManagedRecoveryAction,
+    clear_temporary_managed_release_state,
     handle_managed_availability,
     handle_managed_release_error,
     resolve_openrouter_credentials,
@@ -74,6 +75,21 @@ def test_resolve_openrouter_credentials_requires_explicit_trans_intent_before_ma
     assert resolution.requires_managed_challenge is False
     assert trans_resolution.api_key is None
     assert trans_resolution.requires_managed_challenge is True
+
+
+def test_clear_temporary_managed_release_state_clears_verified_snapshot_fields() -> None:
+    settings = AppSettings()
+    settings.managed_identity.release_token = "release-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:00:45.000Z"
+    settings.managed_identity.verified_hardware_hash = "hardware-hash-1"
+    settings.managed_identity.verified_hardware_hash_salt_version = 7
+
+    clear_temporary_managed_release_state(settings)
+
+    assert settings.managed_identity.release_token is None
+    assert settings.managed_identity.release_token_expires_at is None
+    assert settings.managed_identity.verified_hardware_hash is None
+    assert settings.managed_identity.verified_hardware_hash_salt_version is None
 
 
 @pytest.mark.parametrize(

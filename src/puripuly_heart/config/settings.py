@@ -9,7 +9,7 @@ from typing import Any
 
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 12
+SETTINGS_SCHEMA_VERSION = 13
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
@@ -394,6 +394,8 @@ class ManagedIdentitySettings:
     installation_id: str = ""
     release_token: str | None = None
     release_token_expires_at: str | None = None
+    verified_hardware_hash: str | None = None
+    verified_hardware_hash_salt_version: int | None = None
 
     def validate(self) -> None:
         if not isinstance(self.installation_id, str):
@@ -404,6 +406,15 @@ class ManagedIdentitySettings:
             self.release_token_expires_at, str
         ):
             raise ValueError("managed release_token_expires_at must be a string or None")
+        if self.verified_hardware_hash is not None and not isinstance(
+            self.verified_hardware_hash, str
+        ):
+            raise ValueError("managed verified_hardware_hash must be a string or None")
+        if isinstance(self.verified_hardware_hash_salt_version, bool) or (
+            self.verified_hardware_hash_salt_version is not None
+            and not isinstance(self.verified_hardware_hash_salt_version, int)
+        ):
+            raise ValueError("managed verified_hardware_hash_salt_version must be an int or None")
 
 
 @dataclass(slots=True)
@@ -589,6 +600,10 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "installation_id": settings.managed_identity.installation_id,
             "release_token": settings.managed_identity.release_token,
             "release_token_expires_at": settings.managed_identity.release_token_expires_at,
+            "verified_hardware_hash": settings.managed_identity.verified_hardware_hash,
+            "verified_hardware_hash_salt_version": (
+                settings.managed_identity.verified_hardware_hash_salt_version
+            ),
         },
         "system_prompt": settings.system_prompt,
         "system_prompts": settings.system_prompts,
@@ -1032,6 +1047,22 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 12
 
+    if version < 13:
+        managed_identity_data = data.get("managed_identity")
+        if not isinstance(managed_identity_data, dict):
+            managed_identity_data = {}
+            data["managed_identity"] = managed_identity_data
+            changed = True
+
+        if "verified_hardware_hash" not in managed_identity_data:
+            managed_identity_data["verified_hardware_hash"] = None
+            changed = True
+        if "verified_hardware_hash_salt_version" not in managed_identity_data:
+            managed_identity_data["verified_hardware_hash_salt_version"] = None
+            changed = True
+
+        version = 13
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -1219,6 +1250,30 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     normalized_release_token_expires_at = _parse_optional_str(raw_release_token_expires_at)
     if raw_release_token_expires_at != normalized_release_token_expires_at:
         managed_identity_data["release_token_expires_at"] = normalized_release_token_expires_at
+        changed = True
+
+    raw_verified_hardware_hash = managed_identity_data.get("verified_hardware_hash")
+    normalized_verified_hardware_hash = _parse_optional_str(raw_verified_hardware_hash)
+    if (
+        "verified_hardware_hash" not in managed_identity_data
+        or raw_verified_hardware_hash != normalized_verified_hardware_hash
+    ):
+        managed_identity_data["verified_hardware_hash"] = normalized_verified_hardware_hash
+        changed = True
+
+    raw_verified_hardware_hash_salt_version = managed_identity_data.get(
+        "verified_hardware_hash_salt_version"
+    )
+    normalized_verified_hardware_hash_salt_version = _parse_optional_int(
+        raw_verified_hardware_hash_salt_version
+    )
+    if (
+        "verified_hardware_hash_salt_version" not in managed_identity_data
+        or raw_verified_hardware_hash_salt_version != normalized_verified_hardware_hash_salt_version
+    ):
+        managed_identity_data["verified_hardware_hash_salt_version"] = (
+            normalized_verified_hardware_hash_salt_version
+        )
         changed = True
 
     if data.get("settings_version") != version:
@@ -1475,6 +1530,12 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             release_token=_parse_optional_str(managed_identity_data.get("release_token")),
             release_token_expires_at=_parse_optional_str(
                 managed_identity_data.get("release_token_expires_at")
+            ),
+            verified_hardware_hash=_parse_optional_str(
+                managed_identity_data.get("verified_hardware_hash")
+            ),
+            verified_hardware_hash_salt_version=_parse_optional_int(
+                managed_identity_data.get("verified_hardware_hash_salt_version")
             ),
         ),
         system_prompt=legacy_system_prompt,

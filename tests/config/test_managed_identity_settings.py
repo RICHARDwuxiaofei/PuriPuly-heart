@@ -18,6 +18,8 @@ def test_managed_identity_settings_round_trip() -> None:
     settings.managed_identity.installation_id = "01961ad7-a7c1-7000-8000-0123456789ab"
     settings.managed_identity.release_token = "release-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:00:45.000Z"
+    settings.managed_identity.verified_hardware_hash = "hardware-hash-1"
+    settings.managed_identity.verified_hardware_hash_salt_version = 7
 
     restored = from_dict(to_dict(settings))
 
@@ -57,6 +59,8 @@ def test_load_settings_backfills_managed_identity_defaults(tmp_path) -> None:
     assert loaded.managed_identity.installation_id == ""
     assert loaded.managed_identity.release_token is None
     assert loaded.managed_identity.release_token_expires_at is None
+    assert loaded.managed_identity.verified_hardware_hash is None
+    assert loaded.managed_identity.verified_hardware_hash_salt_version is None
     assert loaded.openrouter.selected_source == OpenRouterCredentialSource.NONE
     assert loaded.openrouter.broker_base_url == DEFAULT_OPENROUTER_BROKER_BASE_URL
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
@@ -64,6 +68,8 @@ def test_load_settings_backfills_managed_identity_defaults(tmp_path) -> None:
         "installation_id": "",
         "release_token": None,
         "release_token_expires_at": None,
+        "verified_hardware_hash": None,
+        "verified_hardware_hash_salt_version": None,
     }
     assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.NONE.value
     assert persisted["openrouter"]["broker_base_url"] == DEFAULT_OPENROUTER_BROKER_BASE_URL

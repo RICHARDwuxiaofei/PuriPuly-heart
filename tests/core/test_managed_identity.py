@@ -78,6 +78,8 @@ def test_ensure_managed_identity_bundle_generates_uuid7_and_keeps_secret_boundar
         "installation_id": bundle.installation_id,
         "release_token": None,
         "release_token_expires_at": None,
+        "verified_hardware_hash": None,
+        "verified_hardware_hash_salt_version": None,
     }
 
 
@@ -112,6 +114,8 @@ def test_missing_installation_id_regenerates_bundle_and_clears_release_state() -
     settings.managed_identity.installation_id = ""
     settings.managed_identity.release_token = "release-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:00:45.000Z"
+    settings.managed_identity.verified_hardware_hash = "hardware-hash-1"
+    settings.managed_identity.verified_hardware_hash_salt_version = 7
 
     second = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
 
@@ -120,6 +124,8 @@ def test_missing_installation_id_regenerates_bundle_and_clears_release_state() -
     assert store.get(MANAGED_DEVICE_PRIVATE_KEY_SECRET) != private_before
     assert settings.managed_identity.release_token is None
     assert settings.managed_identity.release_token_expires_at is None
+    assert settings.managed_identity.verified_hardware_hash is None
+    assert settings.managed_identity.verified_hardware_hash_salt_version is None
 
 
 def test_regenerate_managed_identity_bundle_rotates_bundle_and_clears_managed_release_state() -> (
@@ -131,6 +137,8 @@ def test_regenerate_managed_identity_bundle_rotates_bundle_and_clears_managed_re
     first = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
     settings.managed_identity.release_token = "release-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:00:45.000Z"
+    settings.managed_identity.verified_hardware_hash = "hardware-hash-1"
+    settings.managed_identity.verified_hardware_hash_salt_version = 7
     store.set(OPENROUTER_BYOK_API_KEY_SECRET, "byok-key")
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")
 
@@ -140,6 +148,8 @@ def test_regenerate_managed_identity_bundle_rotates_bundle_and_clears_managed_re
     assert second.device_public_key != first.device_public_key
     assert settings.managed_identity.release_token is None
     assert settings.managed_identity.release_token_expires_at is None
+    assert settings.managed_identity.verified_hardware_hash is None
+    assert settings.managed_identity.verified_hardware_hash_salt_version is None
     assert store.get(OPENROUTER_BYOK_API_KEY_SECRET) == "byok-key"
     assert store.get(OPENROUTER_MANAGED_API_KEY_SECRET) is None
 
@@ -308,12 +318,13 @@ def test_issue_payload_budget_encoding_matches_js_number_stringification(
         device_public_key="device-public-key",
         release_token="release-1",
         reason="llm_start",
+        hardware_hash="hardware-hash",
         budget_usd=budget_usd,
         model="google/gemma-4-26b-a4b-it",
         signed_at="2026-04-08T06:00:45.000Z",
     )
 
-    assert payload.splitlines()[4] == expected_budget_line.encode("utf-8")
+    assert payload.splitlines()[5] == expected_budget_line.encode("utf-8")
 
 
 def test_bundle_signing_matches_canonical_payload_contracts() -> None:
@@ -367,6 +378,7 @@ def test_bundle_signing_matches_canonical_payload_contracts() -> None:
         device_public_key=bundle.device_public_key,
         release_token="release-1",
         reason="llm_start",
+        hardware_hash="hardware-hash",
         budget_usd=1.0,
         model="google/gemma-4-26b-a4b-it",
         signed_at="2026-04-08T06:00:45.000Z",
@@ -378,6 +390,7 @@ def test_bundle_signing_matches_canonical_payload_contracts() -> None:
                 bundle.device_public_key,
                 "release-1",
                 "llm_start",
+                "hardware-hash",
                 "1",
                 "google/gemma-4-26b-a4b-it",
                 "2026-04-08T06:00:45.000Z",
@@ -387,8 +400,10 @@ def test_bundle_signing_matches_canonical_payload_contracts() -> None:
     signed_issue = bundle.sign_issue_request(
         release_token="release-1",
         reason="llm_start",
+        hardware_hash="hardware-hash",
         budget_usd=1.0,
         model="google/gemma-4-26b-a4b-it",
         signed_at="2026-04-08T06:00:45.000Z",
     )
+    assert signed_issue["hardware_hash"] == "hardware-hash"
     public_key.verify(decode_base64url(signed_issue["signature"]), issue_payload)

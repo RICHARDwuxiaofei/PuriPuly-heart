@@ -331,6 +331,10 @@ class ManagedOpenRouterReleaseService:
         self.settings.managed_identity.release_token_expires_at = (
             verify_response.release_token_expires_at
         )
+        self.settings.managed_identity.verified_hardware_hash = hardware_hash
+        self.settings.managed_identity.verified_hardware_hash_salt_version = (
+            challenge_response.fingerprint_salt.version
+        )
         self.persist_settings(self.settings)
         self._clear_retry_after()
         return ManagedOpenRouterReleaseResult(
@@ -351,9 +355,23 @@ class ManagedOpenRouterReleaseService:
                 behavior=ManagedOpenRouterReleaseBehavior.RESTART,
                 message_key="managed_release.restart",
             )
+        verified_hardware_hash = _normalize_optional_text(
+            self.settings.managed_identity.verified_hardware_hash
+        )
+        verified_hardware_hash_salt_version = (
+            self.settings.managed_identity.verified_hardware_hash_salt_version
+        )
+        if verified_hardware_hash is None or verified_hardware_hash_salt_version is None:
+            clear_temporary_managed_release_state(self.settings)
+            self.persist_settings(self.settings)
+            return ManagedOpenRouterReleaseResult(
+                behavior=ManagedOpenRouterReleaseBehavior.RESTART,
+                message_key="managed_release.restart",
+            )
         issue_request = bundle.sign_issue_request(
             release_token=release_token,
             reason="llm_start",
+            hardware_hash=verified_hardware_hash,
             budget_usd=MANAGED_OPENROUTER_TRIAL_BUDGET_USD,
             model=MANAGED_OPENROUTER_TRIAL_MODEL,
             signed_at=self.signed_at_provider(),

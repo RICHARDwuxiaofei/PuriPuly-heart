@@ -136,6 +136,16 @@ def _expected_hardware_hash(*, fingerprint_salt: str, raw_hardware_fingerprint: 
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
+def _set_verified_snapshot(
+    settings: AppSettings,
+    *,
+    hardware_hash: str = "verified-hardware-hash-1",
+    salt_version: int = 7,
+) -> None:
+    settings.managed_identity.verified_hardware_hash = hardware_hash
+    settings.managed_identity.verified_hardware_hash_salt_version = salt_version
+
+
 @pytest.mark.asyncio
 async def test_prepare_for_translation_short_circuits_when_managed_key_exists() -> None:
     settings = AppSettings()
@@ -188,6 +198,43 @@ async def test_prepare_for_translation_runs_challenge_then_verify_and_persists_r
     assert settings.managed_identity.release_token == "release-token-1"
     assert settings.managed_identity.release_token_expires_at == "2026-04-08T06:15:00.000Z"
     assert len(persist_calls) >= 2
+
+
+@pytest.mark.asyncio
+async def test_prepare_for_translation_persists_verified_snapshot_and_issue_reuses_it() -> None:
+    client = FakeManagedReleaseClient(
+        challenge_result=ManagedOpenRouterChallengeSuccess(
+            challenge="challenge-1",
+            challenge_expires_at="2026-04-08T06:05:00.000Z",
+            fingerprint_salt=_make_fingerprint_salt(),
+        ),
+        verify_result=ManagedOpenRouterVerifySuccess(
+            release_token="release-token-1",
+            release_token_expires_at="2026-04-08T06:15:00.000Z",
+        ),
+        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
+    )
+    service, settings, secrets = _make_service(client=client)
+
+    prepare_result = await service.prepare_for_translation()
+
+    expected_hardware_hash = _expected_hardware_hash(
+        fingerprint_salt="fingerprint-salt-test",
+        raw_hardware_fingerprint="raw-hardware-fingerprint-test",
+    )
+    assert prepare_result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert settings.managed_identity.verified_hardware_hash == expected_hardware_hash
+    assert settings.managed_identity.verified_hardware_hash_salt_version == 7
+
+    issue_result = await service.ensure_key_for_llm_start()
+
+    assert issue_result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert issue_result.api_key == "managed-key"
+    assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
+    issue_payload = client.calls[2][1]
+    assert issue_payload["hardware_hash"] == expected_hardware_hash
+    assert settings.managed_identity.verified_hardware_hash is None
+    assert settings.managed_identity.verified_hardware_hash_salt_version is None
 
 
 @pytest.mark.asyncio
@@ -325,6 +372,7 @@ async def test_issue_honors_retry_after_without_starting_parallel_retries() -> N
     ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
     client = FakeManagedReleaseClient(
         issue_result=ManagedOpenRouterReleaseError(
             code="trial_unavailable",
@@ -364,6 +412,7 @@ async def test_prepare_for_translation_honors_retry_after_while_pending_release_
     ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
     client = FakeManagedReleaseClient(
         issue_result=ManagedOpenRouterReleaseError(
             code="trial_unavailable",
@@ -401,6 +450,7 @@ async def test_issue_restart_clears_release_state_without_switching_sources() ->
     ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
     client = FakeManagedReleaseClient(
         issue_result=ManagedOpenRouterReleaseError(
             code="challenge_invalid",
@@ -417,6 +467,8 @@ async def test_issue_restart_clears_release_state_without_switching_sources() ->
     assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert settings.managed_identity.release_token is None
     assert settings.managed_identity.release_token_expires_at is None
+    assert settings.managed_identity.verified_hardware_hash is None
+    assert settings.managed_identity.verified_hardware_hash_salt_version is None
 
 
 @pytest.mark.asyncio
@@ -427,6 +479,7 @@ async def test_issue_release_token_expired_restarts_and_clears_state() -> None:
     ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
     client = FakeManagedReleaseClient(
         issue_result=ManagedOpenRouterReleaseError(
             code="release_token_expired",
@@ -442,6 +495,8 @@ async def test_issue_release_token_expired_restarts_and_clears_state() -> None:
     assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert settings.managed_identity.release_token is None
     assert settings.managed_identity.release_token_expires_at is None
+    assert settings.managed_identity.verified_hardware_hash is None
+    assert settings.managed_identity.verified_hardware_hash_salt_version is None
 
 
 @pytest.mark.asyncio
@@ -451,6 +506,7 @@ async def test_issue_restarts_when_identity_bundle_regenerates_before_issue() ->
     settings.managed_identity.installation_id = "018f1f56-9f2d-7abc-9def-1234567890ab"
     settings.managed_identity.release_token = "release-token-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
     client = FakeManagedReleaseClient(
         issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key")
     )
