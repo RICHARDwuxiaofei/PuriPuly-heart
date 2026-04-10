@@ -136,6 +136,9 @@ $overlayStagedPath = Join-Path $overlayBuildDir "PuriPulyHeartOverlay.exe"
 $overlayBundledDllPath = Join-Path $overlayBuildDir "openvr_api.dll"
 $pyInstallerBuildDir = Join-Path $PWD "build/build"
 $distDir = Join-Path $PWD "dist/PuriPulyHeart"
+$packagedLocalQwenRuntimeDir = Join-Path $distDir "_runtime\local_qwen"
+$packagedOnnxRuntimeDllPath = Join-Path $packagedLocalQwenRuntimeDir "onnxruntime.dll"
+$packagedOnnxRuntimeProvidersSharedDllPath = Join-Path $packagedLocalQwenRuntimeDir "onnxruntime_providers_shared.dll"
 $packagedOverlayDllPath = Join-Path $distDir "openvr_api.dll"
 
 $openVrRuntimeDllPath = $null
@@ -212,6 +215,12 @@ $numpyCoreExtensions = @(Get-ChildItem -Path (Join-Path $distDir "_internal") -F
 if ($numpyCoreExtensions.Count -eq 0) {
     throw "Packaged executable is missing numpy._core._multiarray_umath in $distDir"
 }
+if (-not (Test-Path $packagedOnnxRuntimeDllPath)) {
+    throw "Packaged Local Qwen runtime DLL not found: $packagedOnnxRuntimeDllPath"
+}
+if (-not (Test-Path $packagedOnnxRuntimeProvidersSharedDllPath)) {
+    throw "Packaged Local Qwen runtime providers DLL not found: $packagedOnnxRuntimeProvidersSharedDllPath"
+}
 
 $packagedOverlayPath = Join-Path $PWD "dist/PuriPulyHeart/PuriPulyHeartOverlay.exe"
 Copy-Item -Path $overlayStagedPath -Destination $packagedOverlayPath -Force
@@ -228,6 +237,11 @@ Write-Host "Smoke-testing packaged executable..."
 $versionSmokeTest = Start-Process -FilePath $exePath -ArgumentList @("--version") -Wait -PassThru
 if ($versionSmokeTest.ExitCode -ne 0) {
     throw "Packaged executable version smoke test failed with exit code $($versionSmokeTest.ExitCode)"
+}
+
+$localQwenRuntimeSmokeTest = Start-Process -FilePath $exePath -ArgumentList @("local-qwen-runtime-check") -Wait -PassThru
+if ($localQwenRuntimeSmokeTest.ExitCode -ne 0) {
+    throw "Local Qwen runtime smoke test failed with exit code $($localQwenRuntimeSmokeTest.ExitCode)"
 }
 
 $smokeTest = Start-Process -FilePath $exePath -ArgumentList @("osc-send", "ci-smoke") -Wait -PassThru

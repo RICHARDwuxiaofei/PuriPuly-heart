@@ -8,6 +8,7 @@ from types import ModuleType, SimpleNamespace
 import numpy as np
 import pytest
 
+from puripuly_heart.core.local_qwen_runtime import LocalQwenRuntimeBootstrapError
 from puripuly_heart.core.local_stt_assets import (
     InstalledLocalSTTManifest,
     LocalSTTManifestInvalidError,
@@ -43,6 +44,7 @@ def _install_fake_sherpa(
     *,
     recognizer_factory,
     qwen3_error: Exception | None = None,
+    bootstrap_runtime=None,
 ) -> dict[str, object]:
     factory_calls: dict[str, object] = {}
 
@@ -81,9 +83,70 @@ def _install_fake_sherpa(
     fake_offline_recognizer = ModuleType("sherpa_onnx.offline_recognizer")
     fake_offline_recognizer._Recognizer = recognizer_factory
 
+    if bootstrap_runtime is None:
+
+        def bootstrap_runtime() -> Path:
+            return Path("C:/runtime")
+
+    monkeypatch.setattr(local_qwen_module, "ensure_local_qwen_windows_runtime", bootstrap_runtime)
     monkeypatch.setitem(sys.modules, "sherpa_onnx", fake_sherpa)
     monkeypatch.setitem(sys.modules, "sherpa_onnx.offline_recognizer", fake_offline_recognizer)
     return factory_calls
+
+
+def test_create_local_qwen_sherpa_recognizer_bootstraps_windows_runtime_before_using_sherpa(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+
+    def fake_bootstrap() -> Path:
+        order.append("bootstrap")
+        return Path("C:/runtime")
+
+    class ConfigNode:
+        def __init__(self, **kwargs) -> None:
+            order.append(type(self).__name__)
+            self.kwargs = kwargs
+
+    class FakeOfflineQwen3ASRModelConfig(ConfigNode):
+        pass
+
+    class FakeOfflineModelConfig(ConfigNode):
+        pass
+
+    class FakeFeatureExtractorConfig(ConfigNode):
+        pass
+
+    class FakeOfflineRecognizerConfig(ConfigNode):
+        pass
+
+    class FakeRecognizer:
+        def __init__(self, recognizer_config) -> None:
+            order.append("recognizer")
+            self.recognizer_config = recognizer_config
+
+    fake_sherpa = ModuleType("sherpa_onnx")
+    fake_sherpa.OfflineQwen3ASRModelConfig = FakeOfflineQwen3ASRModelConfig
+    fake_sherpa.OfflineModelConfig = FakeOfflineModelConfig
+    fake_sherpa.FeatureExtractorConfig = FakeFeatureExtractorConfig
+    fake_sherpa.OfflineRecognizerConfig = FakeOfflineRecognizerConfig
+
+    fake_offline_recognizer = ModuleType("sherpa_onnx.offline_recognizer")
+    fake_offline_recognizer._Recognizer = FakeRecognizer
+
+    monkeypatch.setattr(local_qwen_module, "ensure_local_qwen_windows_runtime", fake_bootstrap)
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", fake_sherpa)
+    monkeypatch.setitem(sys.modules, "sherpa_onnx.offline_recognizer", fake_offline_recognizer)
+
+    recognizer = local_qwen_module.create_local_qwen_sherpa_recognizer(
+        model_dir=Path("/models/qwen"),
+        num_threads=3,
+    )
+
+    assert isinstance(recognizer, FakeRecognizer)
+    assert order[0] == "bootstrap"
+    assert order.index("bootstrap") < order.index("FakeOfflineQwen3ASRModelConfig")
+    assert order.index("bootstrap") < order.index("recognizer")
 
 
 @pytest.mark.asyncio
@@ -404,6 +467,57 @@ async def test_local_qwen_backend_wraps_load_failure(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(LocalQwenSherpaLoadError, match="load failed"):
         await backend.open_session()
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_backend_wraps_runtime_bootstrap_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    monkeypatch.setattr(
+        local_qwen_module,
+        "create_local_qwen_sherpa_recognizer",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            LocalQwenRuntimeBootstrapError("runtime bootstrap failed")
+        ),
+    )
+
+    backend = LocalQwenSherpaSTTBackend(model_dir=Path("/models/qwen"))
+
+    with pytest.raises(LocalQwenSherpaLoadError, match="runtime bootstrap failed") as exc_info:
+        await backend.open_session()
+
+    assert isinstance(exc_info.value.__cause__, LocalQwenRuntimeBootstrapError)
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_backend_preserves_missing_onnxruntime_bootstrap_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    _install_fake_sherpa(
+        monkeypatch,
+        recognizer_factory=lambda _config: None,
+        bootstrap_runtime=lambda: (_ for _ in ()).throw(
+            ModuleNotFoundError("No module named 'onnxruntime'")
+        ),
+    )
+
+    backend = LocalQwenSherpaSTTBackend(model_dir=Path("/models/qwen"))
+
+    with pytest.raises(LocalQwenSherpaLoadError, match="onnxruntime") as exc_info:
+        await backend.open_session()
+
+    assert str(exc_info.value) != "failed to import sherpa_onnx"
+    assert isinstance(exc_info.value.__cause__, ModuleNotFoundError)
 
 
 @pytest.mark.asyncio
