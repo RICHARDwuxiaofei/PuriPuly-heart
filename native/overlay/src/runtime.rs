@@ -766,12 +766,6 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
             .await;
     }
 
-    if let Err(error) = perform_startup_preflight() {
-        let startup_error = startup_error_from_preflight(error);
-        emit_startup_failure(&logger, &startup_error).await;
-        return startup_error.exit_code();
-    }
-
     let (mut bridge, snapshot) = match BridgeClient::connect(&manifest).await {
         Ok(result) => result,
         Err(error) => {
@@ -783,6 +777,13 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
     let _ = logger.info("bridge_connected").await;
     let _ = logger.info("bridge_authenticated").await;
     let _ = logger.info(format_snapshot_received_log(&snapshot)).await;
+
+    if let Err(error) = perform_startup_preflight() {
+        let startup_error = startup_error_from_preflight(error);
+        let _ = bridge.close().await;
+        emit_startup_failure(&logger, &startup_error).await;
+        return startup_error.exit_code();
+    }
 
     let (renderer, mut openvr) = match initialize_runtime_resources(&manifest, &logger).await {
         Ok(resources) => resources,
