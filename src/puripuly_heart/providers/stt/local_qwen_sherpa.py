@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from puripuly_heart.core.audio.format import pcm16le_bytes_to_float32, resample_f32_linear
+from puripuly_heart.core.local_qwen_runtime import (
+    LocalQwenRuntimeBootstrapError,
+    ensure_local_qwen_windows_runtime,
+)
 from puripuly_heart.core.local_stt_assets import (
     validate_local_stt_runtime_ready,
 )
@@ -29,6 +33,10 @@ class LocalQwenSherpaLoadError(RuntimeError):
 
 class LocalQwenSherpaInferenceError(RuntimeError):
     """Raised when local sherpa inference fails for an utterance."""
+
+
+class _LocalQwenSherpaImportError(ImportError):
+    """Internal sentinel for sherpa_onnx import failures."""
 
 
 def _log_prefix(stream_label: str | None) -> str:
@@ -53,7 +61,13 @@ def create_local_qwen_sherpa_recognizer(
     feature_dim: int = 128,
     provider: str = "cpu",
 ) -> object:
-    import sherpa_onnx
+    ensure_local_qwen_windows_runtime()
+    try:
+        import sherpa_onnx
+
+        recognizer_module = importlib.import_module("sherpa_onnx.offline_recognizer")
+    except ImportError as exc:
+        raise _LocalQwenSherpaImportError from exc
 
     qwen3_config = sherpa_onnx.OfflineQwen3ASRModelConfig(
         conv_frontend=str(model_dir / "conv_frontend.onnx"),
@@ -81,7 +95,6 @@ def create_local_qwen_sherpa_recognizer(
         model_config=model_config,
         decoding_method="greedy_search",
     )
-    recognizer_module = importlib.import_module("sherpa_onnx.offline_recognizer")
     recognizer_cls = getattr(recognizer_module, "_Recognizer")
     return recognizer_cls(recognizer_config)
 
@@ -136,10 +149,10 @@ class LocalQwenSherpaSTTBackend(STTBackend):
                 feature_dim=self.feature_dim,
                 provider=self.provider,
             )
-        except (
-            ImportError
-        ) as exc:  # pragma: no cover - import path exercised via load error wrapper
-            raise LocalQwenSherpaLoadError("failed to import sherpa_onnx") from exc
+        except LocalQwenRuntimeBootstrapError as exc:
+            raise LocalQwenSherpaLoadError(str(exc)) from exc
+        except _LocalQwenSherpaImportError as exc:
+            raise LocalQwenSherpaLoadError("failed to import sherpa_onnx") from exc.__cause__
         except Exception as exc:
             raise LocalQwenSherpaLoadError(str(exc)) from exc
 

@@ -4,6 +4,8 @@ import re
 import tomllib
 from pathlib import Path
 
+from puripuly_heart.core.local_qwen_runtime import LOCAL_QWEN_PACKAGED_RUNTIME_RELATIVE_DIR
+
 ROOT = Path(__file__).resolve().parents[2]
 PINNED_PYTHON_VERSION = 'PYTHON_VERSION: "3.12.10"'
 PINNED_UV_VERSION = 'UV_VERSION: "0.9.17"'
@@ -150,12 +152,54 @@ def test_shared_windows_build_script_bundles_openvr_runtime_dll_for_overlay() ->
     )
 
 
-def test_build_spec_hiddenimports_only_numpy_core_runtime_extension_for_packaged_cli() -> None:
+def test_build_spec_local_qwen_runtime_dlls() -> None:
+    spec = (ROOT / "build.spec").read_text(encoding="utf-8")
+
+    assert LOCAL_QWEN_PACKAGED_RUNTIME_RELATIVE_DIR.as_posix() == "_runtime/local_qwen"
+    assert (
+        "from puripuly_heart.core.local_qwen_runtime import "
+        "LOCAL_QWEN_PACKAGED_RUNTIME_RELATIVE_DIR" in spec
+    )
+    assert re.search(
+        r'collect_dynamic_libs\(\s*"onnxruntime",\s*'
+        r"destdir=LOCAL_QWEN_PACKAGED_RUNTIME_RELATIVE_DIR\.as_posix\(\)\s*\)",
+        spec,
+    )
+    assert "binaries=runtime_binaries" in spec
+
+
+def test_shared_windows_build_script_checks_packaged_local_qwen_runtime_dir_for_onnx_dlls() -> None:
+    script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
+
+    assert '$packagedLocalQwenRuntimeDir = Join-Path $distDir "_runtime\\local_qwen"' in script
+    assert (
+        '$packagedOnnxRuntimeDllPath = Join-Path $packagedLocalQwenRuntimeDir "onnxruntime.dll"'
+        in script
+    )
+    assert (
+        "$packagedOnnxRuntimeProvidersSharedDllPath = Join-Path "
+        '$packagedLocalQwenRuntimeDir "onnxruntime_providers_shared.dll"' in script
+    )
+    assert "if (-not (Test-Path $packagedOnnxRuntimeDllPath)) {" in script
+    assert "if (-not (Test-Path $packagedOnnxRuntimeProvidersSharedDllPath)) {" in script
+
+
+def test_build_spec_numpy_runtime_guard_narrow() -> None:
     spec = (ROOT / "build.spec").read_text(encoding="utf-8")
 
     assert '"numpy._core._multiarray_umath"' in spec
     assert 'collect_dynamic_libs("numpy")' not in spec
     assert 'collect_submodules("numpy")' not in spec
+
+
+def test_shared_windows_build_script_runs_local_qwen_runtime_check_smoke() -> None:
+    script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
+
+    assert (
+        'Start-Process -FilePath $exePath -ArgumentList @("local-qwen-runtime-check") -Wait -PassThru'
+        in script
+    )
+    assert "Local Qwen runtime smoke test failed" in script
 
 
 def test_shared_setup_action_installs_pinned_uv_and_uses_frozen_sync() -> None:

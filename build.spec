@@ -12,7 +12,7 @@ import os
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 # Add src to path for imports
 src_path = Path("src").resolve()
@@ -26,6 +26,7 @@ if not overlay_staged_path.exists():
     )
 
 from puripuly_heart import __version__
+from puripuly_heart.core.local_qwen_runtime import LOCAL_QWEN_PACKAGED_RUNTIME_RELATIVE_DIR
 
 block_cipher = None
 
@@ -36,6 +37,10 @@ datas = [
     # Prompt templates
     ("prompts", "prompts"),
 ] + collect_data_files("flet_desktop")
+
+runtime_binaries = collect_dynamic_libs(
+    "onnxruntime", destdir=LOCAL_QWEN_PACKAGED_RUNTIME_RELATIVE_DIR.as_posix()
+)
 
 # Hidden imports for dynamic imports
 hiddenimports = [
@@ -62,7 +67,7 @@ hiddenimports = [
 a = Analysis(
     [str(src_path / "puripuly_heart" / "main.py")],
     pathex=[str(src_path)],
-    binaries=[],
+    binaries=runtime_binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
