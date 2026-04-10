@@ -26,6 +26,11 @@ const deploySmokeSpec = new URL(
   './deploy-smoke/canonical-production.spec.ts',
   import.meta.url,
 );
+const brokerReadme = new URL('../README.md', import.meta.url);
+const rolloutChecklist = new URL(
+  '../../docs/plans/2026-04-09-cloudflare-staging-broker-rollout-checklist.md',
+  import.meta.url,
+);
 
 const tempDirs: string[] = [];
 
@@ -169,9 +174,11 @@ describe('broker direct deploy automation', () => {
     }
   });
 
-  it('ships a manual direct-deploy workflow that renders config, applies remote D1 changes, syncs the worker secret, deploys the canonical worker, and runs smoke', () => {
+  it('ships a manual direct-deploy workflow that renders config, applies remote D1 changes, syncs the transitional and child-key management secrets, deploys the canonical worker, and runs smoke', () => {
     const workflow = readFileSync(deployWorkflow, 'utf8');
     const smokeSpec = readFileSync(deploySmokeSpec, 'utf8');
+    const readme = readFileSync(brokerReadme, 'utf8');
+    const checklist = readFileSync(rolloutChecklist, 'utf8');
 
     expect(workflow).toContain('workflow_dispatch:');
     expect(workflow).not.toContain('\npush:');
@@ -179,7 +186,14 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toContain('environment: production');
     expect(workflow).toContain('BROKER_D1_DATABASE_ID_PRODUCTION');
     expect(workflow).toContain('OPENROUTER_MANAGED_API_KEY_PRODUCTION');
+    expect(workflow).toContain('OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION');
+    expect(workflow).toContain('OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION');
+    expect(workflow).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION');
     expect(workflow).toContain('BROKER_CANONICAL_WORKERS_DEV_URL');
+    expect(workflow).toContain(
+      'BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION is required',
+    );
+    expect(workflow).toContain('must differ from the managed allowlisted model');
     expect(workflow).toContain('ref: refs/heads/dev');
     expect(workflow).toContain('render-production-wrangler-config.mjs');
     expect(workflow).toContain('render-fingerprint-bootstrap-sql.mjs');
@@ -200,14 +214,37 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toMatch(
       /wrangler secret put OPENROUTER_MANAGED_API_KEY --config/u,
     );
+    expect(workflow).toMatch(
+      /wrangler secret put OPENROUTER_MANAGEMENT_API_KEY --config/u,
+    );
+    expect(workflow).toMatch(
+      /wrangler secret put OPENROUTER_MANAGED_GUARDRAIL_ID --config/u,
+    );
     expect(workflow).toMatch(/wrangler deploy --config/u);
     expect(workflow).toContain(
       'broker/tests/deploy-smoke/canonical-production.spec.ts',
     );
+    expect(workflow).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL');
     expect(workflow).toContain('curl --fail');
     expect(workflow).toContain('timeout-minutes: 10');
     expect(workflow).toContain('app / public traffic');
+    expect(workflow).toContain('transitional runtime compatibility');
+    expect(workflow).toContain('managed child-key creation and cleanup');
+    expect(workflow).toContain('assign the canonical production guardrail');
     expect(smokeSpec).toContain("process.env.CI === 'true'");
+    expect(smokeSpec).toContain('/api/v1/key');
+    expect(smokeSpec).toContain('/api/v1/chat/completions');
+    expect(smokeSpec).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL');
+    expect(smokeSpec).toContain('reads issued child-key metadata');
+    expect(smokeSpec).toContain('recognizes model-routing failures as guardrail enforcement');
+    expect(readme).toContain('per-installation OpenRouter child key');
+    expect(readme).toContain('not the shared worker secret');
+    expect(readme).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION');
+    expect(readme).toContain('OPENROUTER_MANAGED_API_KEY_PRODUCTION` remains transitional');
+    expect(checklist).toContain('OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION');
+    expect(checklist).toContain('OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION');
+    expect(checklist).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION');
+    expect(checklist).toContain('transitional compatibility only');
   });
 });
 

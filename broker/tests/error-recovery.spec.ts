@@ -86,4 +86,32 @@ describe('broker error recovery boundaries', () => {
       honorRetryAfterMs: false,
     });
   });
+
+  it('keeps internal managed-key failures in retry mode without forcing restart', () => {
+    expect(
+      derivePublicErrorRecovery({
+        code: 'internal_error',
+        class: 'retryable',
+        subcode: 'managed_key_upstream_malformed',
+        retry_after_ms: null,
+      }),
+    ).toEqual({
+      behavior: 'retry',
+      restartOnboarding: false,
+      honorRetryAfterMs: false,
+    });
+
+    expect(
+      derivePublicErrorRecovery({
+        code: 'internal_error',
+        class: 'retryable',
+        subcode: 'managed_key_cleanup_failure',
+        retry_after_ms: null,
+      }),
+    ).toEqual({
+      behavior: 'retry',
+      restartOnboarding: false,
+      honorRetryAfterMs: false,
+    });
+  });
 });

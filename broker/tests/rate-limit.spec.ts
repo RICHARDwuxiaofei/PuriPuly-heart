@@ -7,13 +7,21 @@ import {
   signCanonicalStatusRequest,
   signCanonicalVerifyRequest,
 } from './test-support/ed25519';
-import { createPendingReleaseSession } from './test-support/openrouter-issue';
+import {
+  createPendingReleaseSession,
+  mockOpenRouterManagementApi,
+} from './test-support/openrouter-issue';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import { issueChallenge, getTrialStatus, postIssue, postVerify } from './test-support/trial-api';
-import { updateAbuseControls } from './test-support/abuse-controls';
+import {
+  insertVelocityCapHook,
+  updateAbuseControls,
+} from './test-support/abuse-controls';
+import { normalizedErrorEnvelope } from './test-support/errors';
 
 describe('broker abuse-control rate limiting', () => {
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -150,10 +158,11 @@ describe('broker abuse-control rate limiting', () => {
     });
   });
 
-  it('rate limits issue by installation_id before reusing the active entitlement', async () => {
+  it('prefers active-reissue rejection over issue endpoint rate limits', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
 
+    mockOpenRouterManagementApi();
     const env = createTestBrokerEnv();
     updateAbuseControls(env, (controls) => {
       controls.openrouterIssue.maxRequests = 1;
@@ -169,6 +178,7 @@ describe('broker abuse-control rate limiting', () => {
       installation_id: 'install-rate-limit-issue',
       device_public_key: release.keyPair.devicePublicKey,
       release_token: release.releaseToken,
+      hardware_hash: release.hardwareHash,
       reason: 'llm_start',
       budget_usd: 0.07,
       model: 'google/gemma-4-26b-a4b-it',
@@ -179,26 +189,83 @@ describe('broker abuse-control rate limiting', () => {
 
     const blockedResponse = await postIssue(env, requestBody);
 
-    expect(blockedResponse.status).toBe(429);
-    await expect(blockedResponse.json()).resolves.toEqual({
-      error: {
-        code: 'rate_limited',
-        class: 'retryable',
-        subcode: 'installation_rate_limited',
-        retry_after_ms: 900000,
-        message: 'request rate limit exceeded for POST /v1/providers/openrouter/issue',
-      },
-      managed_state: {
-        lifecycle: 'active',
-        managed_availability: true,
-      },
-      current_entitlement: {
-        provider: 'OpenRouter',
-        budget_usd: 0.07,
-        issued_at: '2026-04-08T06:00:00.000Z',
-        expires_at: '2026-10-08T06:00:00.000Z',
-      },
+    expect(blockedResponse.status).toBe(409);
+    await expect(blockedResponse.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'trial_not_eligible',
+        class: 'terminal',
+        subcode: 'managed_key_unrecoverable',
+        message: 'managed key was already issued and cannot be recovered',
+        managedState: {
+          lifecycle: 'active',
+          managed_availability: true,
+        },
+        currentEntitlement: {
+          provider: 'OpenRouter',
+          budget_usd: 0.07,
+          issued_at: '2026-04-08T06:00:00.000Z',
+          expires_at: '2026-10-08T06:00:00.000Z',
+        },
+      }),
+    );
+  });
+
+  it('prefers hardware snapshot mismatch rejection over velocity-cap exits', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    mockOpenRouterManagementApi();
+    const env = createTestBrokerEnv();
+    const release = await createPendingReleaseSession({
+      env,
+      installationId: 'install-issue-velocity-hardware-mismatch',
+      appVersion: '1.2.3',
+      hardwareHash: 'hardware-hash-verified-velocity',
     });
+    insertVelocityCapHook(env, {
+      subject_type: 'installation_id',
+      subject_value: 'install-issue-velocity-hardware-mismatch',
+      max_requests: 1,
+      window_minutes: 15,
+      outcome_code: 'trial_unavailable',
+      outcome_class: 'retryable',
+      outcome_subcode: 'velocity_capped',
+      reason: 'manual issue velocity hook',
+    });
+
+    const response = await postIssue(
+      env,
+      await signCanonicalIssueRequest(release.keyPair.privateKey, {
+        installation_id: 'install-issue-velocity-hardware-mismatch',
+        device_public_key: release.keyPair.devicePublicKey,
+        release_token: release.releaseToken,
+        hardware_hash: 'hardware-hash-different-velocity',
+        reason: 'llm_start',
+        budget_usd: 0.07,
+        model: 'google/gemma-4-26b-a4b-it',
+        signed_at: '2026-04-08T06:00:45.000Z',
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'trial_not_eligible',
+        class: 'terminal',
+        subcode: 'hardware_duplicate',
+        message: 'hardware_hash no longer matches the verified release session',
+        managedState: {
+          lifecycle: 'pending_release',
+          managed_availability: true,
+        },
+        currentEntitlement: {
+          provider: 'OpenRouter',
+          budget_usd: 0.07,
+          issued_at: null,
+          expires_at: null,
+        },
+      }),
+    );
   });
 
   it('rate limits status by installation_id using the runtime-configured threshold', async () => {
@@ -325,6 +392,7 @@ describe('broker abuse-control rate limiting', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
 
+    mockOpenRouterManagementApi();
     const env = createTestBrokerEnv();
     updateAbuseControls(env, (controls) => {
       controls.openrouterIssue.maxRequests = 1;
@@ -341,6 +409,7 @@ describe('broker abuse-control rate limiting', () => {
       installation_id: 'install-issue-poisoning-target',
       device_public_key: spoofedKeyPair.devicePublicKey,
       release_token: release.releaseToken,
+      hardware_hash: release.hardwareHash,
       reason: 'llm_start',
       budget_usd: 0.07,
       model: 'google/gemma-4-26b-a4b-it',
@@ -353,6 +422,7 @@ describe('broker abuse-control rate limiting', () => {
       installation_id: 'install-issue-poisoning-target',
       device_public_key: release.keyPair.devicePublicKey,
       release_token: release.releaseToken,
+      hardware_hash: release.hardwareHash,
       reason: 'llm_start',
       budget_usd: 0.07,
       model: 'google/gemma-4-26b-a4b-it',

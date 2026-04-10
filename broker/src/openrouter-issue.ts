@@ -14,7 +14,16 @@ import {
   recordRequestEvent,
   resolveClientIp,
 } from './abuse-controls';
-import { errorResponse as publicErrorResponse } from './broker-error';
+import {
+  errorResponse as publicErrorResponse,
+  internalErrorResponseWithEntitlement,
+} from './broker-error';
+import {
+  OpenRouterManagementError,
+  assignManagedGuardrail,
+  cleanupManagedChildKey,
+  createManagedChildKey,
+} from './openrouter-management';
 import {
   MANAGED_TRIAL_BUDGET_POLICY,
   MANAGED_TRIAL_POLICY,
@@ -27,11 +36,13 @@ const ISSUE_SIGNATURE_PAYLOAD_FIELDS = [
   'installation_id',
   'device_public_key',
   'release_token',
+  'hardware_hash',
   'reason',
   'budget_usd',
   'model',
   'signed_at',
 ] as const;
+const ISSUE_SINGLE_FLIGHT_LOCK_PREFIX = '__issue_lock__:';
 
 const STRICT_ISO_8601_TIMESTAMP =
   /^(?<year>\d{4})-(?<month>0[1-9]|1[0-2])-(?<day>0[1-9]|[12]\d|3[01])T(?<hour>[01]\d|2[0-3]):(?<minute>[0-5]\d):(?<second>[0-5]\d)(?:\.(?<millisecond>\d{3}))?(?:(?<utc>Z)|(?<offsetSign>[+-])(?<offsetHour>[01]\d|2[0-3]):(?<offsetMinute>[0-5]\d))$/u;
@@ -40,6 +51,7 @@ interface IssueRequestBody {
   installation_id?: unknown;
   device_public_key?: unknown;
   release_token?: unknown;
+  hardware_hash?: unknown;
   reason?: unknown;
   budget_usd?: unknown;
   model?: unknown;
@@ -58,6 +70,7 @@ export async function handleOpenRouterIssue(
   const installationId = stringValue(body.value.installation_id);
   const devicePublicKey = nonEmptyString(body.value.device_public_key);
   const releaseToken = nonEmptyString(body.value.release_token);
+  const hardwareHash = nonEmptyString(body.value.hardware_hash);
   const reason = nonEmptyString(body.value.reason);
   const model = nonEmptyString(body.value.model);
   const signedAt = nonEmptyString(body.value.signed_at);
@@ -68,6 +81,7 @@ export async function handleOpenRouterIssue(
     !installationId ||
     !devicePublicKey ||
     !releaseToken ||
+    !hardwareHash ||
     !reason ||
     budgetUsd === null ||
     !model ||
@@ -78,7 +92,7 @@ export async function handleOpenRouterIssue(
       c,
       400,
       'invalid_request',
-      'installation_id, device_public_key, release_token, reason, budget_usd, model, signed_at, and signature are required',
+      'installation_id, device_public_key, release_token, hardware_hash, reason, budget_usd, model, signed_at, and signature are required',
     );
   }
 
@@ -88,6 +102,11 @@ export async function handleOpenRouterIssue(
   );
   if (installationIdBoundsError) {
     return errorResponse(c, 400, 'invalid_request', installationIdBoundsError);
+  }
+
+  const hardwareHashBoundsError = validatePublicInput('hardware_hash', hardwareHash);
+  if (hardwareHashBoundsError) {
+    return errorResponse(c, 400, 'invalid_request', hardwareHashBoundsError);
   }
 
   if (!isBase64Url(devicePublicKey, 32) || !isBase64Url(releaseToken, 32) || !isBase64Url(signature, 64)) {
@@ -133,7 +152,7 @@ export async function handleOpenRouterIssue(
     now,
     ip: resolveClientIp(c),
     installationId,
-    hardwareHash: null,
+    hardwareHash,
   };
   const currentEntitlement = await getEntitlement(c.env.BROKER_DB, installationId);
 
@@ -193,6 +212,7 @@ export async function handleOpenRouterIssue(
       installation_id: installationId,
       device_public_key: devicePublicKey,
       release_token: releaseToken,
+      hardware_hash: hardwareHash,
       reason,
       budget_usd: budgetUsd,
       model,
@@ -214,9 +234,29 @@ export async function handleOpenRouterIssue(
     return releaseTokenInvalidResponse(c, entitlement);
   }
 
+  if (entitlement.status === 'active') {
+    return managedKeyUnrecoverableResponse(c, entitlement);
+  }
+
+  if (entitlement.status !== 'pending_release') {
+    return releaseTokenInvalidResponse(c, entitlement);
+  }
+
+  if (!entitlement.release_session_ref || !entitlement.release_token_expires_at) {
+    return releaseTokenInvalidResponse(c, entitlement);
+  }
+
   const releaseTokenWindowError = validateReleaseTokenWindow(c, entitlement, now);
   if (releaseTokenWindowError) {
     return releaseTokenWindowError;
+  }
+
+  if (
+    entitlement.verified_hardware_hash !== hardwareHash ||
+    entitlement.verified_hardware_hash !== installation.hardware_hash ||
+    entitlement.verified_hardware_hash_salt_version !== installation.hardware_hash_salt_version
+  ) {
+    return hardwareSnapshotMismatchResponse(c, entitlement);
   }
 
   await recordRequestEvent(c.env.BROKER_DB, requestContext);
@@ -245,12 +285,18 @@ export async function handleOpenRouterIssue(
     });
   }
 
-  if (entitlement.status === 'active') {
-    return issueSuccessResponse(c, entitlement);
-  }
+  const issueLock = await acquireIssueSingleFlight(c.env.BROKER_DB, {
+    installationId,
+    releaseSessionRef: entitlement.release_session_ref,
+    releaseTokenHash,
+    releaseTokenExpiresAt: entitlement.release_token_expires_at,
+  });
+  if (!issueLock.acquired) {
+    if (issueLock.entitlement?.status === 'active') {
+      return managedKeyUnrecoverableResponse(c, issueLock.entitlement);
+    }
 
-  if (entitlement.status !== 'pending_release') {
-    return releaseTokenInvalidResponse(c, entitlement);
+    return issueInProgressResponse(c, issueLock.entitlement ?? entitlement);
   }
 
   const issuedAt = now.toISOString();
@@ -258,44 +304,55 @@ export async function handleOpenRouterIssue(
     now,
     MANAGED_TRIAL_POLICY.entitlement.issuance.expiry.durationMonths,
   ).toISOString();
-  const managedCredentialRef = randomBase64Url(16);
-  const activationSucceeded = await activatePendingEntitlement(c.env.BROKER_DB, {
-    installationId,
-    releaseTokenHash,
-    releaseTokenExpiresAt: entitlement.release_token_expires_at!,
-    managedCredentialRef,
-    issuedAt,
-    expiresAt,
-  });
 
-  if (!activationSucceeded) {
-    const currentEntitlement = await getEntitlement(c.env.BROKER_DB, installationId);
-    if (
-      currentEntitlement &&
-      currentEntitlement.status === 'active' &&
-      currentEntitlement.release_token_hash === releaseTokenHash
-    ) {
-      const currentReleaseTokenWindowError = validateReleaseTokenWindow(
-        c,
-        currentEntitlement,
-        now,
-      );
-      if (currentReleaseTokenWindowError) {
-        return currentReleaseTokenWindowError;
-      }
+  let childKey: { rawKey: string; hash: string } | null = null;
+  try {
+    childKey = await createManagedChildKey({
+      managementApiKey: c.env.OPENROUTER_MANAGEMENT_API_KEY,
+      installationId,
+      releaseSessionRef: entitlement.release_session_ref,
+      expiresAt,
+    });
+    await assignManagedGuardrail({
+      managementApiKey: c.env.OPENROUTER_MANAGEMENT_API_KEY,
+      guardrailId: c.env.OPENROUTER_MANAGED_GUARDRAIL_ID,
+      keyHash: childKey.hash,
+    });
 
-      return issueSuccessResponse(c, currentEntitlement);
+    const activationSucceeded = await activatePendingEntitlement(c.env.BROKER_DB, {
+      installationId,
+      releaseTokenHash,
+      releaseTokenExpiresAt: entitlement.release_token_expires_at,
+      issueLockValue: issueLock.lockValue,
+      managedCredentialRef: childKey.hash,
+      issuedAt,
+      expiresAt,
+    });
+    if (!activationSucceeded) {
+      throw new Error('entitlement activation failed after managed child key creation');
     }
 
-    return releaseTokenInvalidResponse(c, currentEntitlement);
-  }
+    const activeEntitlement = await getEntitlement(c.env.BROKER_DB, installationId);
+    if (!activeEntitlement) {
+      throw new Error('active entitlement missing after successful issue activation');
+    }
 
-  const activeEntitlement = await getEntitlement(c.env.BROKER_DB, installationId);
-  if (!activeEntitlement) {
-    throw new Error('active entitlement missing after successful issue activation');
-  }
+    return issueSuccessResponse(c, activeEntitlement, childKey.rawKey);
+  } catch (error) {
+    if (childKey) {
+      return handleManagedChildKeyFailure(c, {
+        installationId,
+        releaseSessionRef: entitlement.release_session_ref,
+        childKey,
+      });
+    }
 
-  return issueSuccessResponse(c, activeEntitlement);
+    return handleAmbiguousManagedChildKeyCreateFailure(c, {
+      installationId,
+      releaseSessionRef: entitlement.release_session_ref,
+      error,
+    });
+  }
 }
 
 async function activatePendingEntitlement(
@@ -304,6 +361,7 @@ async function activatePendingEntitlement(
     installationId: string;
     releaseTokenHash: string;
     releaseTokenExpiresAt: string;
+    issueLockValue: string;
     managedCredentialRef: string;
     issuedAt: string;
     expiresAt: string;
@@ -316,24 +374,114 @@ async function activatePendingEntitlement(
               managed_credential_ref = ?,
               issued_at = ?,
               expires_at = ?
-        WHERE installation_id = ?
-          AND status = ?
-          AND release_token_hash = ?
-          AND release_token_expires_at = ?`,
-    )
-    .bind(
-      'active',
-      input.managedCredentialRef,
+         WHERE installation_id = ?
+           AND status = ?
+           AND release_token_hash = ?
+           AND release_token_expires_at = ?
+           AND managed_credential_ref = ?`,
+     )
+     .bind(
+       'active',
+       input.managedCredentialRef,
       input.issuedAt,
       input.expiresAt,
+       input.installationId,
+       'pending_release',
+       input.releaseTokenHash,
+       input.releaseTokenExpiresAt,
+       input.issueLockValue,
+     )
+     .run();
+
+  return (result.meta.changes ?? 0) === 1;
+}
+
+async function acquireIssueSingleFlight(
+  db: D1Database,
+  input: {
+    installationId: string;
+    releaseSessionRef: string;
+    releaseTokenHash: string;
+    releaseTokenExpiresAt: string;
+  },
+): Promise<
+  | {
+      acquired: true;
+      lockValue: string;
+    }
+  | {
+      acquired: false;
+      entitlement: OpenRouterEntitlementRecord | null;
+    }
+> {
+  const lockValue = `${ISSUE_SINGLE_FLIGHT_LOCK_PREFIX}${input.releaseSessionRef}`;
+  const result = await db
+    .prepare(
+      `UPDATE openrouter_entitlements
+          SET managed_credential_ref = ?
+        WHERE installation_id = ?
+          AND status = 'pending_release'
+          AND release_session_ref = ?
+          AND release_token_hash = ?
+          AND release_token_expires_at = ?
+          AND managed_credential_ref IS NULL`,
+    )
+    .bind(
+      lockValue,
       input.installationId,
-      'pending_release',
+      input.releaseSessionRef,
       input.releaseTokenHash,
       input.releaseTokenExpiresAt,
     )
     .run();
 
-  return (result.meta.changes ?? 0) === 1;
+  if ((result.meta.changes ?? 0) === 1) {
+    return {
+      acquired: true,
+      lockValue,
+    };
+  }
+
+  return {
+    acquired: false,
+    entitlement: await getEntitlement(db, input.installationId),
+  };
+}
+
+async function invalidatePendingRelease(
+  db: D1Database,
+  input: {
+    installationId: string;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE openrouter_entitlements
+          SET managed_credential_ref = NULL,
+              release_session_ref = NULL,
+              release_token_hash = NULL,
+              release_token_expires_at = NULL,
+              verified_hardware_hash = COALESCE(
+                verified_hardware_hash,
+                (
+                  SELECT hardware_hash
+                    FROM installations
+                   WHERE installations.installation_id = openrouter_entitlements.installation_id
+                )
+              ),
+              verified_hardware_hash_salt_version = COALESCE(
+                verified_hardware_hash_salt_version,
+                (
+                  SELECT hardware_hash_salt_version
+                    FROM installations
+                   WHERE installations.installation_id = openrouter_entitlements.installation_id
+                )
+              )
+        WHERE installation_id = ?
+          AND status = 'pending_release'`,
+    )
+    .bind(input.installationId)
+    .run();
 }
 
 async function getInstallation(
@@ -359,9 +507,10 @@ async function getEntitlement(
   return db
     .prepare(
       `SELECT installation_id, status, budget_usd, managed_credential_ref, issued_at,
-              expires_at, release_session_ref, release_token_hash, release_token_expires_at
+              expires_at, release_session_ref, release_token_hash, release_token_expires_at,
+              verified_hardware_hash, verified_hardware_hash_salt_version
          FROM openrouter_entitlements
-        WHERE installation_id = ?`,
+         WHERE installation_id = ?`,
     )
     .bind(installationId)
     .first<OpenRouterEntitlementRecord>();
@@ -370,13 +519,14 @@ async function getEntitlement(
 function issueSuccessResponse(
   c: Context<BrokerEnv>,
   entitlement: OpenRouterEntitlementRecord,
+  rawKey: string,
 ): Response {
   if (!entitlement.managed_credential_ref || !entitlement.expires_at) {
     throw new Error('active entitlement missing managed release metadata');
   }
 
   return c.json({
-    openrouter_api_key: c.env.OPENROUTER_MANAGED_API_KEY,
+    openrouter_api_key: rawKey,
     managed_credential_ref: entitlement.managed_credential_ref,
     managed_state: {
       lifecycle: 'active',
@@ -386,6 +536,140 @@ function issueSuccessResponse(
     budget_usd: entitlement.budget_usd,
     model: TRIAL_PROVIDER_POLICY.managedFreeTrial.model,
   });
+}
+
+function managedKeyUnrecoverableResponse(
+  c: Context<BrokerEnv>,
+  entitlement: OpenRouterEntitlementRecord | null,
+): Response {
+  return publicErrorResponse(c, 409, {
+    code: 'trial_not_eligible',
+    class: 'terminal',
+    subcode: 'managed_key_unrecoverable',
+    message: 'managed key was already issued and cannot be recovered',
+    entitlement,
+  });
+}
+
+function issueInProgressResponse(
+  c: Context<BrokerEnv>,
+  entitlement: OpenRouterEntitlementRecord | null,
+): Response {
+  return publicErrorResponse(c, 409, {
+    code: 'internal_error',
+    class: 'retryable',
+    subcode: 'issue_in_progress',
+    message: 'managed key issuance is already in progress for this release session',
+    entitlement,
+  });
+}
+
+function hardwareSnapshotMismatchResponse(
+  c: Context<BrokerEnv>,
+  entitlement: OpenRouterEntitlementRecord | null,
+): Response {
+  return publicErrorResponse(c, 409, {
+    code: 'trial_not_eligible',
+    class: 'terminal',
+    subcode: 'hardware_duplicate',
+    message: 'hardware_hash no longer matches the verified release session',
+    entitlement,
+  });
+}
+
+async function handleManagedChildKeyFailure(
+  c: Context<BrokerEnv>,
+  input: {
+    installationId: string;
+    releaseSessionRef: string;
+    childKey: {
+      rawKey: string;
+      hash: string;
+    };
+  },
+): Promise<Response> {
+  const cleanup = await cleanupManagedChildKey({
+    managementApiKey: c.env.OPENROUTER_MANAGEMENT_API_KEY,
+    keyHash: input.childKey.hash,
+  });
+
+  if (!cleanup.ok) {
+    await invalidatePendingRelease(c.env.BROKER_DB, {
+      installationId: input.installationId,
+    });
+    console.error('managed_child_key_orphan_audit', {
+      installation_id: input.installationId,
+      release_session_ref: input.releaseSessionRef,
+      managed_credential_ref: input.childKey.hash,
+      cleanup_outcome: cleanup.reason,
+      broker_timestamp: new Date().toISOString(),
+    });
+
+    return internalErrorResponseWithEntitlement(
+      c,
+      await getEntitlement(c.env.BROKER_DB, input.installationId),
+    );
+  }
+
+  await invalidatePendingRelease(c.env.BROKER_DB, {
+    installationId: input.installationId,
+  });
+
+  return internalErrorResponseWithEntitlement(
+    c,
+    await getEntitlement(c.env.BROKER_DB, input.installationId),
+  );
+}
+
+async function handleAmbiguousManagedChildKeyCreateFailure(
+  c: Context<BrokerEnv>,
+  input: {
+    installationId: string;
+    releaseSessionRef: string;
+    error: unknown;
+  },
+): Promise<Response> {
+  await invalidatePendingRelease(c.env.BROKER_DB, {
+    installationId: input.installationId,
+  });
+  console.error('managed_child_key_orphan_audit', {
+    installation_id: input.installationId,
+    release_session_ref: input.releaseSessionRef,
+    managed_credential_ref: null,
+    creation_failure: normalizeCreateFailure(input.error),
+    broker_timestamp: new Date().toISOString(),
+  });
+
+  return internalErrorResponseWithEntitlement(
+    c,
+    await getEntitlement(c.env.BROKER_DB, input.installationId),
+  );
+}
+
+function normalizeCreateFailure(error: unknown): {
+  operation: 'create_key';
+  code: 'network_error' | 'upstream_http_error' | 'malformed_upstream';
+  status: number | null;
+  upstreamCode: number | null;
+  message: string;
+} {
+  if (error instanceof OpenRouterManagementError) {
+    return {
+      operation: 'create_key',
+      code: error.code,
+      status: error.status,
+      upstreamCode: error.upstreamCode,
+      message: error.message,
+    };
+  }
+
+  return {
+    operation: 'create_key',
+    code: 'network_error',
+    status: null,
+    upstreamCode: null,
+    message: error instanceof Error ? error.message : 'unknown OpenRouter management error',
+  };
 }
 
 function releaseTokenInvalidResponse(
@@ -605,6 +889,7 @@ function buildCanonicalIssuePayload(input: {
   installation_id: string;
   device_public_key: string;
   release_token: string;
+  hardware_hash: string;
   reason: string;
   budget_usd: number;
   model: string;

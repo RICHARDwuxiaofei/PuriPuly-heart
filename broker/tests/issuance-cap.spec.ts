@@ -17,6 +17,7 @@ import { updateAbuseControls } from './test-support/abuse-controls';
 
 describe('broker daily issuance cap enforcement', () => {
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -180,6 +181,7 @@ describe('broker daily issuance cap enforcement', () => {
         installation_id: 'install-cap-pending',
         device_public_key: pendingRelease.keyPair.devicePublicKey,
         release_token: pendingRelease.releaseToken,
+        hardware_hash: pendingRelease.hardwareHash,
         reason: 'llm_start',
         budget_usd: 0.07,
         model: 'google/gemma-4-26b-a4b-it',

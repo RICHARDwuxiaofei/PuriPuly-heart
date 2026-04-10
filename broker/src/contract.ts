@@ -50,11 +50,19 @@ export const BROKER_RUNTIME_STACK = {
 
 export const REQUIRED_BINDINGS = {
   d1: 'BROKER_DB',
-  secrets: ['OPENROUTER_MANAGED_API_KEY'],
+  // Transitional: the shared-key binding remains required until the runtime
+  // issuance path switches away from OPENROUTER_MANAGED_API_KEY in a later task.
+  secrets: [
+    'OPENROUTER_MANAGED_API_KEY',
+    'OPENROUTER_MANAGEMENT_API_KEY',
+    'OPENROUTER_MANAGED_GUARDRAIL_ID',
+  ],
 } as const;
 
 export interface BrokerBindings {
   BROKER_DB: D1Database;
+  OPENROUTER_MANAGEMENT_API_KEY: string;
+  OPENROUTER_MANAGED_GUARDRAIL_ID: string;
   OPENROUTER_MANAGED_API_KEY: string;
 }
 

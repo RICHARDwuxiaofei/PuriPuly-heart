@@ -295,7 +295,7 @@ export async function checkDailyIssuanceCap(
   };
 }
 
-export async function hasActiveHardwareDuplicate(
+export async function hasConflictingHardwareDuplicate(
   db: D1Database,
   input: {
     installationId: string;
@@ -313,14 +313,12 @@ export async function hasActiveHardwareDuplicate(
 
   const row = await db
     .prepare(
-      `SELECT e.installation_id
-         FROM installations i
-         JOIN openrouter_entitlements e
-           ON e.installation_id = i.installation_id
-        WHERE i.hardware_hash = ?
-          AND i.hardware_hash_salt_version = ?
-          AND e.status = 'active'
-          AND i.installation_id <> ?
+      `SELECT installation_id
+         FROM openrouter_entitlements
+        WHERE verified_hardware_hash = ?
+          AND verified_hardware_hash_salt_version = ?
+          AND status IN ('pending_release', 'active')
+          AND installation_id <> ?
         LIMIT 1`,
     )
     .bind(
@@ -330,7 +328,32 @@ export async function hasActiveHardwareDuplicate(
     )
     .first<{ installation_id: string }>();
 
-  return row !== null;
+  if (row !== null) {
+    return true;
+  }
+
+  const legacyReservedRow = await db
+    .prepare(
+      `SELECT e.installation_id
+         FROM openrouter_entitlements e
+         JOIN installations i
+            ON i.installation_id = e.installation_id
+        WHERE e.status IN ('pending_release', 'active')
+          AND e.verified_hardware_hash IS NULL
+          AND e.verified_hardware_hash_salt_version IS NULL
+          AND i.hardware_hash = ?
+          AND i.hardware_hash_salt_version = ?
+          AND e.installation_id <> ?
+        LIMIT 1`,
+    )
+    .bind(
+      input.hardwareHash,
+      input.challengeSaltVersion,
+      input.installationId,
+    )
+    .first<{ installation_id: string }>();
+
+  return legacyReservedRow !== null;
 }
 
 function getEndpointRateLimitConfig(

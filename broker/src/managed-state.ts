@@ -28,10 +28,30 @@ export interface TrialStatusResponse extends ManagedStateResponse {
   };
 }
 
+export function resolveEffectiveEntitlementLifecycle(
+  entitlement: OpenRouterEntitlementRecord | null,
+  now: Date = new Date(),
+): ManagedStateResponse['managed_state']['lifecycle'] {
+  if (!entitlement) {
+    return 'none';
+  }
+
+  if (entitlement.status !== 'active' || !entitlement.expires_at) {
+    return entitlement.status;
+  }
+
+  const expiresAt = new Date(entitlement.expires_at);
+  if (Number.isNaN(expiresAt.getTime())) {
+    return entitlement.status;
+  }
+
+  return expiresAt.getTime() < now.getTime() ? 'expired' : entitlement.status;
+}
+
 export function normalizeManagedState(
   entitlement: OpenRouterEntitlementRecord | null,
 ): ManagedStateResponse {
-  const lifecycle = entitlement?.status ?? 'none';
+  const lifecycle = resolveEffectiveEntitlementLifecycle(entitlement);
 
   return {
     managed_state: {

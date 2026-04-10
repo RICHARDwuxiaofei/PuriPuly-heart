@@ -101,6 +101,8 @@ class SqliteD1Database {
 
 export interface TestBrokerEnv extends Record<string, unknown> {
   BROKER_DB: D1Database;
+  OPENROUTER_MANAGEMENT_API_KEY: string;
+  OPENROUTER_MANAGED_GUARDRAIL_ID: string;
   OPENROUTER_MANAGED_API_KEY: string;
   __db: DatabaseSync;
 }
@@ -122,6 +124,8 @@ export function createTestBrokerEnv(options: SqliteD1Hooks = {}): TestBrokerEnv 
 
   return {
     BROKER_DB: new SqliteD1Database(db, options) as unknown as D1Database,
+    OPENROUTER_MANAGEMENT_API_KEY: 'test-management-api-key',
+    OPENROUTER_MANAGED_GUARDRAIL_ID: 'test-managed-guardrail-id',
     OPENROUTER_MANAGED_API_KEY: 'test-managed-api-key',
     __db: db,
   };
@@ -139,6 +143,8 @@ export function insertEntitlement(
     release_session_ref?: string | null;
     release_token_hash?: string | null;
     release_token_expires_at?: string | null;
+    verified_hardware_hash?: string | null;
+    verified_hardware_hash_salt_version?: number | null;
   },
 ): void {
   env.__db
@@ -152,8 +158,10 @@ export function insertEntitlement(
           expires_at,
           release_session_ref,
           release_token_hash,
-          release_token_expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          release_token_expires_at,
+          verified_hardware_hash,
+          verified_hardware_hash_salt_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.installation_id,
@@ -165,5 +173,7 @@ export function insertEntitlement(
       input.release_session_ref ?? null,
       input.release_token_hash ?? null,
       input.release_token_expires_at ?? null,
+      input.verified_hardware_hash ?? null,
+      input.verified_hardware_hash_salt_version ?? null,
     );
 }
