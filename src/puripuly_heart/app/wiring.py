@@ -255,9 +255,6 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
             sample_rate_hz=settings.audio.internal_sample_rate_hz,
             stream_label="self",
             language_hint=get_local_qwen_language_hint(settings.languages.source_language),
-            hotwords=tuple(
-                get_effective_local_qwen_hotwords(settings, settings.languages.source_language)
-            ),
         )
 
     if settings.provider.stt == STTProviderName.DEEPGRAM:
@@ -456,7 +453,6 @@ def create_peer_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> S
             sample_rate_hz=resolved.sample_rate_hz,
             stream_label="peer",
             language_hint=get_local_qwen_language_hint(resolved.source_language),
-            hotwords=resolved.keyterms,
         )
 
     raise ValueError(f"Unsupported peer STT provider: {resolved.provider}")

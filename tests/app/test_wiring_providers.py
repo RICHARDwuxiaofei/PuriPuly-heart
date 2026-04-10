@@ -379,7 +379,7 @@ def test_create_stt_backend_local_qwen_uses_shared_model_path_without_secret() -
     assert backend.stream_label == "self"
 
 
-def test_create_stt_backend_local_qwen_passes_language_hint_and_capped_hotwords() -> None:
+def test_create_stt_backend_local_qwen_passes_language_hint_without_hotwords() -> None:
     settings = AppSettings(provider=ProviderSettings(stt=STTProviderName.LOCAL_QWEN))
     settings.languages.source_language = "ko-KR"
     settings.stt.custom_vocabulary_enabled = True
@@ -392,8 +392,7 @@ def test_create_stt_backend_local_qwen_passes_language_hint_and_capped_hotwords(
 
     assert isinstance(backend, LocalQwenSherpaSTTBackend)
     assert getattr(backend, "language_hint", None) == "Korean"
-    assert getattr(backend, "hotwords", ())[:2] == ("Puripuly", "VRChat Japan")
-    assert len(getattr(backend, "hotwords", ())) == 12
+    assert getattr(backend, "hotwords", ()) == ()
 
 
 def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None:
@@ -542,7 +541,7 @@ def test_create_peer_stt_backend_uses_peer_local_qwen_provider_and_sample_rate()
     assert backend.stream_label == "peer"
 
 
-def test_create_peer_stt_backend_local_qwen_uses_peer_language_and_capped_hotwords() -> None:
+def test_create_peer_stt_backend_local_qwen_uses_peer_language_without_hotwords() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
     settings.languages.source_language = "ko"
@@ -557,8 +556,7 @@ def test_create_peer_stt_backend_local_qwen_uses_peer_language_and_capped_hotwor
 
     assert isinstance(backend, LocalQwenSherpaSTTBackend)
     assert getattr(backend, "language_hint", None) == "Chinese"
-    assert getattr(backend, "hotwords", ())[:2] == ("airi", "shinano")
-    assert len(getattr(backend, "hotwords", ())) == 12
+    assert getattr(backend, "hotwords", ()) == ()
 
 
 def test_resolve_peer_stt_config_inherits_soniox_endpoint_keepalive_and_trailing_silence_until_override() -> (
