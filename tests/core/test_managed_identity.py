@@ -327,6 +327,34 @@ def test_issue_payload_budget_encoding_matches_js_number_stringification(
     assert payload.splitlines()[5] == expected_budget_line.encode("utf-8")
 
 
+def test_issue_payload_matches_landed_broker_field_order() -> None:
+    payload = canonical_issue_payload(
+        installation_id="01961ad7-a7c1-7000-8000-0123456789ab",
+        device_public_key="device-public-key",
+        release_token="release-1",
+        hardware_hash="hardware-hash",
+        reason="llm_start",
+        budget_usd=1.0,
+        model="google/gemma-4-26b-a4b-it",
+        signed_at="2026-04-08T06:00:45.000Z",
+    )
+
+    assert payload == (
+        "\n".join(
+            [
+                "01961ad7-a7c1-7000-8000-0123456789ab",
+                "device-public-key",
+                "release-1",
+                "hardware-hash",
+                "llm_start",
+                "1",
+                "google/gemma-4-26b-a4b-it",
+                "2026-04-08T06:00:45.000Z",
+            ]
+        )
+    ).encode("utf-8")
+
+
 def test_bundle_signing_matches_canonical_payload_contracts() -> None:
     settings = AppSettings()
     store = InMemorySecretStore()
@@ -389,8 +417,8 @@ def test_bundle_signing_matches_canonical_payload_contracts() -> None:
                 bundle.installation_id,
                 bundle.device_public_key,
                 "release-1",
-                "llm_start",
                 "hardware-hash",
+                "llm_start",
                 "1",
                 "google/gemma-4-26b-a4b-it",
                 "2026-04-08T06:00:45.000Z",

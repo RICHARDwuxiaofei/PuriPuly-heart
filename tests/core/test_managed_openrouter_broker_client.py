@@ -147,6 +147,7 @@ async def test_issue_parses_success_payload() -> None:
             "installation_id": "install-123",
             "device_public_key": "device-public-key-123",
             "release_token": "release-token-123",
+            "hardware_hash": "hardware-hash-123",
             "reason": "llm_start",
             "budget_usd": 0.07,
             "model": "google/gemma-4-26b-a4b-it",
@@ -175,6 +176,7 @@ async def test_issue_parses_success_payload() -> None:
             "installation_id": "install-123",
             "device_public_key": "device-public-key-123",
             "release_token": "release-token-123",
+            "hardware_hash": "hardware-hash-123",
             "reason": "llm_start",
             "budget_usd": 0.07,
             "model": "google/gemma-4-26b-a4b-it",
@@ -239,6 +241,7 @@ async def test_issue_accepts_missing_or_null_optional_success_fields(
             "installation_id": "install-123",
             "device_public_key": "device-public-key-123",
             "release_token": "release-token-123",
+            "hardware_hash": "hardware-hash-123",
             "reason": "llm_start",
             "budget_usd": 0.07,
             "model": "google/gemma-4-26b-a4b-it",
@@ -286,6 +289,7 @@ async def test_nested_broker_error_envelope_becomes_release_error() -> None:
                 "installation_id": "install-123",
                 "device_public_key": "device-public-key-123",
                 "release_token": "release-token-123",
+                "hardware_hash": "hardware-hash-123",
                 "reason": "llm_start",
                 "budget_usd": 0.07,
                 "model": "google/gemma-4-26b-a4b-it",
@@ -308,14 +312,14 @@ async def test_nested_broker_error_envelope_becomes_release_error() -> None:
 async def test_issue_preserves_managed_key_unrecoverable_subcode() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
-            500,
+            409,
             json={
                 "error": {
-                    "code": "internal_error",
+                    "code": "trial_not_eligible",
                     "class": "terminal",
                     "subcode": "managed_key_unrecoverable",
                     "retry_after_ms": None,
-                    "message": "managed key could not be recovered",
+                    "message": "managed key was already issued and cannot be recovered",
                 }
             },
         )
@@ -328,6 +332,7 @@ async def test_issue_preserves_managed_key_unrecoverable_subcode() -> None:
                 "installation_id": "install-123",
                 "device_public_key": "device-public-key-123",
                 "release_token": "release-token-123",
+                "hardware_hash": "hardware-hash-123",
                 "reason": "llm_start",
                 "budget_usd": 0.07,
                 "model": "google/gemma-4-26b-a4b-it",
@@ -337,27 +342,72 @@ async def test_issue_preserves_managed_key_unrecoverable_subcode() -> None:
         )
 
     assert exc_info.value == ManagedOpenRouterReleaseError(
-        code="internal_error",
+        code="trial_not_eligible",
         error_class="terminal",
         subcode="managed_key_unrecoverable",
         retry_after_ms=None,
-        message="managed key could not be recovered",
+        message="managed key was already issued and cannot be recovered",
     )
     await client.close()
 
 
 @pytest.mark.asyncio
-async def test_issue_preserves_release_token_expired_error_code() -> None:
+async def test_issue_preserves_challenge_expired_release_token_subcode() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
-            401,
+            410,
+            json={
+                "error": {
+                    "code": "challenge_expired",
+                    "class": "retryable",
+                    "subcode": "release_token_expired",
+                    "retry_after_ms": 0,
+                    "message": "release_token has expired and must be reissued",
+                }
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    with pytest.raises(ManagedOpenRouterReleaseError) as exc_info:
+        await client.issue(
+            {
+                "installation_id": "install-123",
+                "device_public_key": "device-public-key-123",
+                "release_token": "release-token-123",
+                "hardware_hash": "hardware-hash-123",
+                "reason": "llm_start",
+                "budget_usd": 0.07,
+                "model": "google/gemma-4-26b-a4b-it",
+                "signed_at": "2026-04-10T06:00:45.000Z",
+                "signature": "signature-123",
+            }
+        )
+
+    assert exc_info.value == ManagedOpenRouterReleaseError(
+        code="challenge_expired",
+        error_class="retryable",
+        subcode="release_token_expired",
+        retry_after_ms=0,
+        message="release_token has expired and must be reissued",
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_issue_legacy_top_level_release_token_expired_becomes_retryable_malformed_error() -> (
+    None
+):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            410,
             json={
                 "error": {
                     "code": "release_token_expired",
                     "class": "retryable",
                     "subcode": None,
                     "retry_after_ms": None,
-                    "message": "release token expired",
+                    "message": "legacy top-level release token expiration code",
                 }
             },
         )
@@ -370,6 +420,7 @@ async def test_issue_preserves_release_token_expired_error_code() -> None:
                 "installation_id": "install-123",
                 "device_public_key": "device-public-key-123",
                 "release_token": "release-token-123",
+                "hardware_hash": "hardware-hash-123",
                 "reason": "llm_start",
                 "budget_usd": 0.07,
                 "model": "google/gemma-4-26b-a4b-it",
@@ -378,13 +429,9 @@ async def test_issue_preserves_release_token_expired_error_code() -> None:
             }
         )
 
-    assert exc_info.value == ManagedOpenRouterReleaseError(
-        code="release_token_expired",
-        error_class="retryable",
-        subcode=None,
-        retry_after_ms=None,
-        message="release token expired",
-    )
+    assert exc_info.value.code == "trial_unavailable"
+    assert exc_info.value.error_class == "retryable"
+    assert "malformed error payload" in exc_info.value.message
     await client.close()
 
 

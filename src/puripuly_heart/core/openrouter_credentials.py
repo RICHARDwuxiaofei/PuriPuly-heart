@@ -105,7 +105,7 @@ def handle_managed_release_error(
     error_code: str,
 ) -> OpenRouterManagedRecoveryResult:
     normalized_error_code = _normalize_required_text(error_code)
-    if normalized_error_code not in {"release_token_expired", "security_fail"}:
+    if normalized_error_code not in {"challenge_expired", "security_fail"}:
         raise ValueError("unsupported managed release error")
     clear_temporary_managed_release_state(settings)
     return OpenRouterManagedRecoveryResult(

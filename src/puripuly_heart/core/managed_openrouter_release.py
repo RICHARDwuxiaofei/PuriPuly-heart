@@ -456,7 +456,6 @@ class ManagedOpenRouterReleaseService:
             or error.code
             in {
                 "challenge_expired",
-                "release_token_expired",
             }
             or error.subcode == "release_token_expired"
         ):

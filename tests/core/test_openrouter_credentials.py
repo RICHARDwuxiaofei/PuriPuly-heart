@@ -125,7 +125,7 @@ def test_handle_managed_availability_stops_flow_without_switching_sources(
 @pytest.mark.parametrize(
     ("selected_source", "error_code"),
     [
-        (OpenRouterCredentialSource.MANAGED, "release_token_expired"),
+        (OpenRouterCredentialSource.MANAGED, "challenge_expired"),
         (OpenRouterCredentialSource.BYOK, "security_fail"),
     ],
 )

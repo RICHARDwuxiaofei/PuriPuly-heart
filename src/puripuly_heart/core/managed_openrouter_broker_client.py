@@ -24,7 +24,6 @@ PUBLIC_ERROR_CODES = frozenset(
         "rate_limited",
         "challenge_expired",
         "challenge_invalid",
-        "release_token_expired",
         "issuance_suspended",
         "trial_unavailable",
         "trial_not_eligible",

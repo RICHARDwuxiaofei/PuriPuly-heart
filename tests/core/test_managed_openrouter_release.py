@@ -516,7 +516,7 @@ async def test_issue_restart_clears_release_state_without_switching_sources() ->
 
 
 @pytest.mark.asyncio
-async def test_issue_release_token_expired_restarts_and_clears_state() -> None:
+async def test_issue_challenge_expired_subcode_restarts_and_clears_state() -> None:
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
@@ -526,9 +526,11 @@ async def test_issue_release_token_expired_restarts_and_clears_state() -> None:
     _set_verified_snapshot(settings)
     client = FakeManagedReleaseClient(
         issue_result=ManagedOpenRouterReleaseError(
-            code="release_token_expired",
+            code="challenge_expired",
             error_class="retryable",
-            message="release token expired",
+            subcode="release_token_expired",
+            retry_after_ms=0,
+            message="release_token has expired and must be reissued",
         )
     )
     service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
@@ -541,6 +543,38 @@ async def test_issue_release_token_expired_restarts_and_clears_state() -> None:
     assert settings.managed_identity.release_token_expires_at is None
     assert settings.managed_identity.verified_hardware_hash is None
     assert settings.managed_identity.verified_hardware_hash_salt_version is None
+
+
+@pytest.mark.asyncio
+async def test_issue_trial_not_eligible_managed_key_unrecoverable_stops_as_not_eligible() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    settings.managed_identity.release_token = "release-token-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
+    client = FakeManagedReleaseClient(
+        issue_result=ManagedOpenRouterReleaseError(
+            code="trial_not_eligible",
+            error_class="terminal",
+            subcode="managed_key_unrecoverable",
+            retry_after_ms=None,
+            message="managed key was already issued and cannot be recovered",
+        )
+    )
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.ensure_key_for_llm_start()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.STOP
+    assert result.message_key == "managed_release.not_eligible"
+    assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert settings.managed_identity.release_token is None
+    assert settings.managed_identity.release_token_expires_at is None
+    assert settings.managed_identity.verified_hardware_hash is None
+    assert settings.managed_identity.verified_hardware_hash_salt_version is None
+    assert [name for name, _payload in client.calls] == ["issue"]
 
 
 @pytest.mark.asyncio
