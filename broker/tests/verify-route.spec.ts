@@ -1,9 +1,16 @@
+import { Buffer } from 'node:buffer';
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createDeviceKeyPair, signCanonicalVerifyRequest } from './test-support/ed25519';
+import {
+  createDeviceKeyPair,
+  signCanonicalIssueRequest,
+  signCanonicalVerifyRequest,
+} from './test-support/ed25519';
 import { normalizedErrorEnvelope } from './test-support/errors';
+import { sha256Base64Url } from './test-support/hash';
 import { createTestBrokerEnv, insertEntitlement } from './test-support/sqlite-d1';
-import { issueChallenge, postVerify } from './test-support/trial-api';
+import { issueChallenge, postIssue, postVerify } from './test-support/trial-api';
 
 const OVERSIZED_INSTALLATION_ID = 'i'.repeat(129);
 const OVERSIZED_APP_VERSION = 'v'.repeat(65);
@@ -178,6 +185,47 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
     expect(payload).not.toHaveProperty('release_session_ref');
     expect(payload).not.toHaveProperty('release_token_hash');
     expect(payload).not.toHaveProperty('managed_credential_ref');
+  });
+
+  it('stores verified_hardware_hash and salt version on pending_release entitlement', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const env = createTestBrokerEnv();
+    const keyPair = await createDeviceKeyPair();
+    const challenge = await issueChallenge({
+      env,
+      installationId: 'install-verify-snapshot',
+      devicePublicKey: keyPair.devicePublicKey,
+      appVersion: '2.0.0',
+    });
+
+    const requestBody = await signCanonicalVerifyRequest(keyPair.privateKey, {
+      installation_id: 'install-verify-snapshot',
+      device_public_key: keyPair.devicePublicKey,
+      challenge: challenge.challenge,
+      challenge_expires_at: challenge.challenge_expires_at,
+      hardware_hash: 'hardware-hash-verify-snapshot',
+      app_version: '2.0.0',
+      signed_at: '2026-04-08T06:00:30.000Z',
+    });
+
+    const response = await postVerify(env, requestBody);
+    expect(response.status).toBe(200);
+
+    const entitlement = env.__db
+      .prepare(
+        `SELECT status, verified_hardware_hash, verified_hardware_hash_salt_version
+           FROM openrouter_entitlements
+          WHERE installation_id = ?`,
+      )
+      .get('install-verify-snapshot') as Record<string, unknown>;
+
+    expect(entitlement).toEqual({
+      status: 'pending_release',
+      verified_hardware_hash: 'hardware-hash-verify-snapshot',
+      verified_hardware_hash_salt_version: 7,
+    });
   });
 
   it('rejects non-object JSON bodies with invalid_request instead of throwing', async () => {
@@ -477,5 +525,107 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
     expect(entitlement.release_session_ref).toBeTypeOf('string');
     expect(entitlement.release_token_hash).toBeTypeOf('string');
     expect(entitlement.release_token_expires_at).toBe('2026-04-08T06:15:00.000Z');
+  });
+
+  it('rejects a stale release token while verify is rotating to a new pending release session', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    let armConsumePause = false;
+    let pausedOnce = false;
+    const consumePaused = createDeferred();
+    const releaseConsume = createDeferred();
+    const env = createTestBrokerEnv({
+      beforeRun: async ({ sql }) => {
+        if (
+          armConsumePause &&
+          !pausedOnce &&
+          sql.includes('UPDATE installations') &&
+          sql.includes('challenge = NULL')
+        ) {
+          pausedOnce = true;
+          consumePaused.resolve();
+          await releaseConsume.promise;
+        }
+      },
+    });
+
+    const keyPair = await createDeviceKeyPair();
+    const challenge = await issueChallenge({
+      env,
+      installationId: 'install-verify-rotates-release-session',
+      devicePublicKey: keyPair.devicePublicKey,
+      appVersion: '1.0.0',
+    });
+
+    const staleReleaseToken = Buffer.alloc(32, 11).toString('base64url');
+    insertEntitlement(env, {
+      installation_id: 'install-verify-rotates-release-session',
+      status: 'pending_release',
+      budget_usd: 0.07,
+      release_session_ref: 'old-release-session',
+      release_token_hash: await sha256Base64Url(staleReleaseToken),
+      release_token_expires_at: '2026-04-08T06:15:00.000Z',
+      verified_hardware_hash: 'hardware-hash-verify-old-session',
+      verified_hardware_hash_salt_version: 7,
+    });
+
+    const nextVerifyRequest = await signCanonicalVerifyRequest(keyPair.privateKey, {
+      installation_id: 'install-verify-rotates-release-session',
+      device_public_key: keyPair.devicePublicKey,
+      challenge: challenge.challenge,
+      challenge_expires_at: challenge.challenge_expires_at,
+      hardware_hash: 'hardware-hash-verify-new-session',
+      app_version: '1.0.1',
+      signed_at: '2026-04-08T06:00:30.000Z',
+    });
+
+    armConsumePause = true;
+    const verifyResponsePromise = postVerify(env, nextVerifyRequest);
+    await consumePaused.promise;
+
+    const entitlementWhileRotating = env.__db
+      .prepare(
+        `SELECT release_session_ref, release_token_hash, release_token_expires_at,
+                verified_hardware_hash, verified_hardware_hash_salt_version
+           FROM openrouter_entitlements
+          WHERE installation_id = ?`,
+      )
+      .get('install-verify-rotates-release-session') as Record<string, unknown>;
+
+    expect(entitlementWhileRotating).toEqual({
+      release_session_ref: null,
+      release_token_hash: null,
+      release_token_expires_at: null,
+      verified_hardware_hash: 'hardware-hash-verify-old-session',
+      verified_hardware_hash_salt_version: 7,
+    });
+
+    const staleIssueRequest = await signCanonicalIssueRequest(keyPair.privateKey, {
+      installation_id: 'install-verify-rotates-release-session',
+      device_public_key: keyPair.devicePublicKey,
+      release_token: staleReleaseToken,
+      hardware_hash: 'hardware-hash-verify-old-session',
+      reason: 'llm_start',
+      budget_usd: 0.07,
+      model: 'google/gemma-4-26b-a4b-it',
+      signed_at: '2026-04-08T06:00:30.000Z',
+    });
+
+    const staleIssueResponse = await postIssue(env, staleIssueRequest);
+
+    expect(staleIssueResponse.status).toBe(401);
+    await expect(staleIssueResponse.json()).resolves.toMatchObject({
+      error: {
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: 'release_token_invalid',
+      },
+    });
+
+    releaseConsume.resolve();
+
+    const verifyResponse = await verifyResponsePromise;
+    expect(verifyResponse.status).toBe(200);
   });
 });

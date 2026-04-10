@@ -1,19 +1,24 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { signCanonicalIssueRequest } from './test-support/ed25519';
-import { createPendingReleaseSession } from './test-support/openrouter-issue';
+import {
+  createPendingReleaseSession,
+  mockOpenRouterManagementApi,
+} from './test-support/openrouter-issue';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import { postIssue } from './test-support/trial-api';
 
 describe('POST /v1/providers/openrouter/issue response payload', () => {
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
-  it('returns the managed OpenRouter key and a distinct managed_credential_ref without leaking release-session fields', async () => {
+  it('returns the child key once without leaking release-session fields or the shared worker secret', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
 
+    const managementApi = mockOpenRouterManagementApi();
     const env = createTestBrokerEnv();
     const release = await createPendingReleaseSession({
       env,
@@ -25,6 +30,7 @@ describe('POST /v1/providers/openrouter/issue response payload', () => {
       installation_id: 'install-issue-response',
       device_public_key: release.keyPair.devicePublicKey,
       release_token: release.releaseToken,
+      hardware_hash: release.hardwareHash,
       reason: 'llm_start',
       budget_usd: 0.07,
       model: 'google/gemma-4-26b-a4b-it',
@@ -36,8 +42,8 @@ describe('POST /v1/providers/openrouter/issue response payload', () => {
 
     const payload = (await response.json()) as Record<string, unknown>;
     expect(payload).toEqual({
-      openrouter_api_key: 'test-managed-api-key',
-      managed_credential_ref: expect.any(String),
+      openrouter_api_key: managementApi.childKey.rawKey,
+      managed_credential_ref: managementApi.childKey.hash,
       managed_state: {
         lifecycle: 'active',
         managed_availability: true,
@@ -47,6 +53,7 @@ describe('POST /v1/providers/openrouter/issue response payload', () => {
       model: 'google/gemma-4-26b-a4b-it',
     });
     expect(payload.openrouter_api_key).not.toBe(payload.managed_credential_ref);
+    expect(payload.openrouter_api_key).not.toBe(env.OPENROUTER_MANAGED_API_KEY);
     expect(payload).not.toHaveProperty('release_token');
     expect(payload).not.toHaveProperty('release_session_ref');
     expect(payload).not.toHaveProperty('release_token_hash');

@@ -226,10 +226,9 @@ async def test_google_genai_client_formats_prompt_and_context(
     assert state["contents"] == "<context>\na -> b\n</context>\nInput: hello"
     assert state["config"].system_instruction == "Translate ko to en."
     assert (
-        "[Detailed][LLM] Gemini request [translate][context=yes] ko -> en: 'hello'"
-        in caplog.messages
+        "[Basic][LLM] Gemini request [translate][context=yes] ko -> en: 'hello'" in caplog.messages
     )
-    assert "[Detailed][LLM] Gemini response [translate]: 'OK'" in caplog.messages
+    assert "[Basic][LLM] Gemini response [translate]: 'OK'" in caplog.messages
 
 
 @pytest.mark.asyncio
@@ -295,7 +294,7 @@ async def test_google_genai_client_logs_basic_when_stream_has_no_text(
 
 
 @pytest.mark.asyncio
-async def test_google_genai_client_uses_runtime_logging_for_translate_chatter(
+async def test_google_genai_client_uses_runtime_logging_for_basic_translate_payloads(
     monkeypatch, caplog: pytest.LogCaptureFixture
 ):
     state = _install_fake_google(monkeypatch, response_text=" OK ")
@@ -313,14 +312,14 @@ async def test_google_genai_client_uses_runtime_logging_for_translate_chatter(
 
     assert result == "OK"
     assert state["contents"] == "<context>\na -> b\n</context>\nInput: hello"
-    assert runtime_logging.detailed_messages == [
+    assert runtime_logging.basic_messages == [
         (
-            "[Detailed][LLM] Gemini request [translate][context=yes] ko -> en: 'hello'",
+            "[Basic][LLM] Gemini request [translate][context=yes] ko -> en: 'hello'",
             logging.INFO,
         ),
-        ("[Detailed][LLM] Gemini response [translate]: 'OK'", logging.INFO),
+        ("[Basic][LLM] Gemini response [translate]: 'OK'", logging.INFO),
     ]
-    assert runtime_logging.basic_messages == []
+    assert runtime_logging.detailed_messages == []
     assert caplog.messages == []
 
 
@@ -341,11 +340,10 @@ async def test_google_genai_client_uses_runtime_logging_for_missing_text_warning
                 target_language="ko",
             )
 
-    assert runtime_logging.detailed_messages == [
-        ("[Detailed][LLM] Gemini request [translate][context=no] en -> ko: 'hello'", logging.INFO)
-    ]
+    assert runtime_logging.detailed_messages == []
     assert runtime_logging.basic_messages == [
-        ("[Basic][LLM] Gemini response missing text [translate]", logging.ERROR)
+        ("[Basic][LLM] Gemini request [translate][context=no] en -> ko: 'hello'", logging.INFO),
+        ("[Basic][LLM] Gemini response missing text [translate]", logging.ERROR),
     ]
     assert caplog.messages == []
 
@@ -369,10 +367,9 @@ async def test_google_genai_client_uses_runtime_logging_for_stream_missing_text_
             ):
                 pass
 
-    assert runtime_logging.detailed_messages == [
-        ("[Detailed][LLM] Gemini request [stream][context=no] en -> ko: 'hello'", logging.INFO)
-    ]
+    assert runtime_logging.detailed_messages == []
     assert runtime_logging.basic_messages == [
-        ("[Basic][LLM] Gemini response missing text [stream]", logging.ERROR)
+        ("[Basic][LLM] Gemini request [stream][context=no] en -> ko: 'hello'", logging.INFO),
+        ("[Basic][LLM] Gemini response missing text [stream]", logging.ERROR),
     ]
     assert caplog.messages == []

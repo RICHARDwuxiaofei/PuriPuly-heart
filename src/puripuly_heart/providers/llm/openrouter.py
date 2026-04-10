@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 
 
-def _log_detailed_request(
+def _log_basic_request(
     *,
     runtime_logging: SessionRuntimeLoggingService | None,
     operation: str,
@@ -28,7 +28,7 @@ def _log_detailed_request(
     target_language: str,
     context: str,
 ) -> None:
-    message = "[Detailed][LLM] OpenRouter request [%s][context=%s] %s -> %s: %r" % (
+    message = "[Basic][LLM] OpenRouter request [%s][context=%s] %s -> %s: %r" % (
         operation,
         "yes" if context else "no",
         source_language,
@@ -36,17 +36,17 @@ def _log_detailed_request(
         text,
     )
     if runtime_logging is not None:
-        runtime_logging.emit_detailed(message)
+        runtime_logging.emit_basic(message)
         return
     logger.info(message)
 
 
-def _log_detailed_response(
+def _log_basic_response(
     *, runtime_logging: SessionRuntimeLoggingService | None, operation: str, text: str
 ) -> None:
-    message = "[Detailed][LLM] OpenRouter response [%s]: %r" % (operation, text)
+    message = "[Basic][LLM] OpenRouter response [%s]: %r" % (operation, text)
     if runtime_logging is not None:
-        runtime_logging.emit_detailed(message)
+        runtime_logging.emit_basic(message)
         return
     logger.info(message)
 
@@ -398,7 +398,7 @@ class HttpxOpenRouterClient:
         target_language: str,
         context: str = "",
     ) -> str:
-        _log_detailed_request(
+        _log_basic_request(
             runtime_logging=self.runtime_logging,
             operation="translate",
             text=text,
@@ -446,7 +446,7 @@ class HttpxOpenRouterClient:
 
         message = choices[0].get("message", {})
         result = _extract_message_content(message.get("content"))
-        _log_detailed_response(
+        _log_basic_response(
             runtime_logging=self.runtime_logging,
             operation="translate",
             text=result,
@@ -462,7 +462,7 @@ class HttpxOpenRouterClient:
         target_language: str,
         context: str = "",
     ) -> AsyncIterator[str]:
-        _log_detailed_request(
+        _log_basic_request(
             runtime_logging=self.runtime_logging,
             operation="stream",
             text=text,

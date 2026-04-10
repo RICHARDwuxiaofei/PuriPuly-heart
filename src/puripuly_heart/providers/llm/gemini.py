@@ -12,7 +12,7 @@ from puripuly_heart.domain.models import Translation
 logger = logging.getLogger(__name__)
 
 
-def _log_detailed_request(
+def _log_basic_request(
     *,
     runtime_logging: SessionRuntimeLoggingService | None,
     operation: str,
@@ -21,7 +21,7 @@ def _log_detailed_request(
     target_language: str,
     context: str,
 ) -> None:
-    message = "[Detailed][LLM] Gemini request [%s][context=%s] %s -> %s: %r" % (
+    message = "[Basic][LLM] Gemini request [%s][context=%s] %s -> %s: %r" % (
         operation,
         "yes" if context else "no",
         source_language,
@@ -29,17 +29,17 @@ def _log_detailed_request(
         text,
     )
     if runtime_logging is not None:
-        runtime_logging.emit_detailed(message)
+        runtime_logging.emit_basic(message)
         return
     logger.info(message)
 
 
-def _log_detailed_response(
+def _log_basic_response(
     *, runtime_logging: SessionRuntimeLoggingService | None, operation: str, text: str
 ) -> None:
-    message = "[Detailed][LLM] Gemini response [%s]: %r" % (operation, text)
+    message = "[Basic][LLM] Gemini response [%s]: %r" % (operation, text)
     if runtime_logging is not None:
-        runtime_logging.emit_detailed(message)
+        runtime_logging.emit_basic(message)
         return
     logger.info(message)
 
@@ -206,7 +206,7 @@ class GoogleGenaiGeminiClient:
             else system_prompt
         )
 
-        _log_detailed_request(
+        _log_basic_request(
             runtime_logging=self.runtime_logging,
             operation=operation,
             text=text,
@@ -253,7 +253,7 @@ class GoogleGenaiGeminiClient:
         )
         if getattr(response, "text", None):
             result = str(response.text).strip()
-            _log_detailed_response(
+            _log_basic_response(
                 runtime_logging=self.runtime_logging,
                 operation="translate",
                 text=result,

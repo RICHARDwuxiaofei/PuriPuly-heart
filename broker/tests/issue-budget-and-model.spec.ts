@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { signCanonicalIssueRequest } from './test-support/ed25519';
 import { normalizedErrorEnvelope } from './test-support/errors';
-import { createPendingReleaseSession } from './test-support/openrouter-issue';
+import {
+  createPendingReleaseSession,
+  mockOpenRouterManagementApi,
+} from './test-support/openrouter-issue';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import { postIssue } from './test-support/trial-api';
 
@@ -18,6 +21,7 @@ interface PolicyViolationCase {
 
 describe('POST /v1/providers/openrouter/issue policy enforcement', () => {
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -49,6 +53,7 @@ describe('POST /v1/providers/openrouter/issue policy enforcement', () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
 
+      mockOpenRouterManagementApi();
       const env = createTestBrokerEnv();
       const release = await createPendingReleaseSession({
         env,
@@ -60,6 +65,7 @@ describe('POST /v1/providers/openrouter/issue policy enforcement', () => {
         installation_id: `install-issue-policy-${testCase.name}`,
         device_public_key: release.keyPair.devicePublicKey,
         release_token: release.releaseToken,
+        hardware_hash: release.hardwareHash,
         reason: 'llm_start',
         budget_usd: 0.07,
         model: 'google/gemma-4-26b-a4b-it',

@@ -3,10 +3,15 @@ import { Buffer } from 'node:buffer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import app from '../src/index';
-import { createDeviceKeyPair, signCanonicalVerifyRequest } from './test-support/ed25519';
+import {
+  createDeviceKeyPair,
+  signCanonicalIssueRequest,
+  signCanonicalVerifyRequest,
+} from './test-support/ed25519';
 import { normalizedErrorEnvelope } from './test-support/errors';
+import { createPendingReleaseSession } from './test-support/openrouter-issue';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
-import { issueChallenge, postVerify } from './test-support/trial-api';
+import { issueChallenge, postIssue, postVerify } from './test-support/trial-api';
 
 const DEVICE_PUBLIC_KEY = Buffer.alloc(32, 7).toString('base64url');
 
@@ -277,6 +282,175 @@ describe('POST /v1/trial/challenge', () => {
       challenge_expires_at: '2026-04-08T06:06:00.000Z',
       challenge_salt_version: 7,
     });
+  });
+
+  it('clears stale pending release session tokens and issue locks while preserving the verified hardware snapshot when reissuing a challenge', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const env = createTestBrokerEnv();
+    const keyPair = await createDeviceKeyPair();
+    const firstChallenge = await issueChallenge({
+      env,
+      installationId: 'install-reissue-clears-release-session',
+      devicePublicKey: keyPair.devicePublicKey,
+      appVersion: '1.2.3',
+    });
+    const verifyRequest = await signCanonicalVerifyRequest(keyPair.privateKey, {
+      installation_id: 'install-reissue-clears-release-session',
+      device_public_key: keyPair.devicePublicKey,
+      challenge: firstChallenge.challenge,
+      challenge_expires_at: firstChallenge.challenge_expires_at,
+      hardware_hash: 'hardware-hash-before-release-session-reissue',
+      app_version: '1.2.3',
+      signed_at: '2026-04-08T06:00:30.000Z',
+    });
+
+    const verifyResponse = await postVerify(env, verifyRequest);
+    expect(verifyResponse.status).toBe(200);
+
+    env.__db
+      .prepare(
+        `UPDATE openrouter_entitlements
+            SET managed_credential_ref = ?
+          WHERE installation_id = ?`,
+      )
+      .run('__issue_lock__:stale-release-session-lock', 'install-reissue-clears-release-session');
+
+    vi.setSystemTime(new Date('2026-04-08T06:01:00Z'));
+
+    const response = await app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-reissue-clears-release-session',
+          device_public_key: keyPair.devicePublicKey,
+          app_version: '1.2.4',
+        }),
+      },
+      env,
+    );
+
+    expect(response.status).toBe(200);
+
+    const entitlement = env.__db
+      .prepare(
+        `SELECT status, release_session_ref, release_token_hash, release_token_expires_at,
+                managed_credential_ref, verified_hardware_hash, verified_hardware_hash_salt_version
+           FROM openrouter_entitlements
+           WHERE installation_id = ?`,
+      )
+      .get('install-reissue-clears-release-session') as Record<string, unknown>;
+
+    expect(entitlement).toEqual({
+      status: 'pending_release',
+      release_session_ref: null,
+      release_token_hash: null,
+      release_token_expires_at: null,
+      managed_credential_ref: null,
+      verified_hardware_hash: 'hardware-hash-before-release-session-reissue',
+      verified_hardware_hash_salt_version: 7,
+    });
+  });
+
+  it('rejects stale release tokens while challenge rotation is still in flight', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    let armChallengeUpdatePause = false;
+    let pausedOnce = false;
+    const challengeUpdatePaused = createDeferred();
+    const releaseChallengeUpdate = createDeferred();
+    const env = createTestBrokerEnv({
+      beforeRun: async ({ sql }) => {
+        if (
+          armChallengeUpdatePause &&
+          !pausedOnce &&
+          sql.includes('UPDATE installations') &&
+          sql.includes('challenge = ?')
+        ) {
+          pausedOnce = true;
+          challengeUpdatePaused.resolve();
+          await releaseChallengeUpdate.promise;
+        }
+      },
+    });
+
+    const release = await createPendingReleaseSession({
+      env,
+      installationId: 'install-reissue-invalidates-stale-token',
+      appVersion: '1.2.3',
+      hardwareHash: 'hardware-hash-before-reissue-race',
+    });
+
+    vi.setSystemTime(new Date('2026-04-08T06:01:00Z'));
+    armChallengeUpdatePause = true;
+
+    const reissueResponsePromise = app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-reissue-invalidates-stale-token',
+          device_public_key: release.keyPair.devicePublicKey,
+          app_version: '1.2.4',
+        }),
+      },
+      env,
+    );
+
+    await challengeUpdatePaused.promise;
+
+    const entitlementWhileRotating = env.__db
+      .prepare(
+        `SELECT release_session_ref, release_token_hash, release_token_expires_at,
+                verified_hardware_hash, verified_hardware_hash_salt_version
+           FROM openrouter_entitlements
+          WHERE installation_id = ?`,
+      )
+      .get('install-reissue-invalidates-stale-token') as Record<string, unknown>;
+
+    expect(entitlementWhileRotating).toEqual({
+      release_session_ref: null,
+      release_token_hash: null,
+      release_token_expires_at: null,
+      verified_hardware_hash: 'hardware-hash-before-reissue-race',
+      verified_hardware_hash_salt_version: 7,
+    });
+
+    const staleIssueRequest = await signCanonicalIssueRequest(release.keyPair.privateKey, {
+      installation_id: 'install-reissue-invalidates-stale-token',
+      device_public_key: release.keyPair.devicePublicKey,
+      release_token: release.releaseToken,
+      hardware_hash: 'hardware-hash-before-reissue-race',
+      reason: 'llm_start',
+      budget_usd: 0.07,
+      model: 'google/gemma-4-26b-a4b-it',
+      signed_at: '2026-04-08T06:01:00.000Z',
+    });
+
+    const staleIssueResponse = await postIssue(env, staleIssueRequest);
+
+    expect(staleIssueResponse.status).toBe(401);
+    await expect(staleIssueResponse.json()).resolves.toMatchObject({
+      error: {
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: 'release_token_invalid',
+      },
+    });
+
+    releaseChallengeUpdate.resolve();
+
+    const reissueResponse = await reissueResponsePromise;
+    expect(reissueResponse.status).toBe(200);
   });
 
   it('handles first-time same-binding challenge races without surfacing a 500 and keeps one installation row', async () => {

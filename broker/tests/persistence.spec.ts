@@ -175,6 +175,8 @@ describe('broker persistent state model', () => {
             'release_session_ref',
             'release_token_hash',
             'release_token_expires_at',
+            'verified_hardware_hash',
+            'verified_hardware_hash_salt_version',
           ],
           unique: ['managed_credential_ref'],
           indexed: ['status', 'expires_at'],
@@ -276,6 +278,7 @@ describe('broker persistent state model', () => {
       '0000_define_broker_persistent_state.sql',
       '0001_add_abuse_hook_state.sql',
       '0001_harden_installation_public_inputs.sql',
+      '0002_add_entitlement_verified_hardware_snapshot.sql',
     ]);
     expect(existsSync(FIRST_BROKER_MIGRATION)).toBe(true);
     expect(existsSync(LATEST_BROKER_MIGRATION)).toBe(true);
@@ -286,6 +289,9 @@ describe('broker persistent state model', () => {
     const migration = readFileSync(FIRST_BROKER_MIGRATION, 'utf8');
     const abuseHooksMigration = readBrokerMigrationSql(
       '0001_add_abuse_hook_state.sql',
+    );
+    const hardeningMigration = readBrokerMigrationSql(
+      '0001_harden_installation_public_inputs.sql',
     );
     const latestMigration = readFileSync(LATEST_BROKER_MIGRATION, 'utf8');
 
@@ -310,6 +316,8 @@ describe('broker persistent state model', () => {
     expect(migration).toContain('release_session_ref TEXT');
     expect(migration).toContain('release_token_hash TEXT');
     expect(migration).toContain('release_token_expires_at TEXT');
+    expect(migration).not.toContain('verified_hardware_hash TEXT');
+    expect(migration).not.toContain('verified_hardware_hash_salt_version INTEGER');
     expect(migration).toContain('CREATE INDEX idx_installations_hardware_hash');
     expect(migration).toContain('CREATE INDEX idx_installations_hardware_hash_salt_version');
     expect(migration).toContain('CREATE INDEX idx_installations_challenge_expires_at');
@@ -319,14 +327,17 @@ describe('broker persistent state model', () => {
     expect(abuseHooksMigration).toContain('CREATE TABLE broker_request_events');
     expect(abuseHooksMigration).toContain('CREATE TABLE broker_velocity_cap_hooks');
     expect(abuseHooksMigration).toContain('CREATE TABLE broker_abuse_subject_hooks');
-    expect(latestMigration).toContain('PRAGMA defer_foreign_keys = on');
-    expect(latestMigration).toContain('CREATE TABLE installations_hardened');
-    expect(latestMigration).toContain('CREATE TABLE openrouter_entitlements_hardened');
-    expect(latestMigration).toContain('INSERT INTO installations_hardened');
-    expect(latestMigration).toContain('INSERT INTO openrouter_entitlements_hardened');
-    expect(latestMigration).toContain('DROP TABLE openrouter_entitlements;');
-    expect(latestMigration).toContain('ALTER TABLE installations_hardened RENAME TO installations');
-    expect(latestMigration).toContain('PRAGMA foreign_key_check');
+    expect(hardeningMigration).toContain('PRAGMA defer_foreign_keys = on');
+    expect(hardeningMigration).toContain('CREATE TABLE installations_hardened');
+    expect(hardeningMigration).toContain('CREATE TABLE openrouter_entitlements_hardened');
+    expect(hardeningMigration).toContain('INSERT INTO installations_hardened');
+    expect(hardeningMigration).toContain('INSERT INTO openrouter_entitlements_hardened');
+    expect(hardeningMigration).toContain('DROP TABLE openrouter_entitlements;');
+    expect(hardeningMigration).toContain('ALTER TABLE installations_hardened RENAME TO installations');
+    expect(hardeningMigration).toContain('PRAGMA foreign_key_check');
+    expect(latestMigration).toContain('ALTER TABLE openrouter_entitlements');
+    expect(latestMigration).toContain('verified_hardware_hash TEXT');
+    expect(latestMigration).toContain('verified_hardware_hash_salt_version INTEGER');
     expect(latestMigration).not.toContain('legacy_installation_id_mapping');
     expect(latestMigration).not.toContain('legacy-invalid-app-version');
   });

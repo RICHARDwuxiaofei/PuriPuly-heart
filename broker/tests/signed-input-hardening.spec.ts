@@ -10,7 +10,10 @@ import {
   signCanonicalVerifyRequest,
 } from './test-support/ed25519';
 import { normalizedErrorEnvelope } from './test-support/errors';
-import { createPendingReleaseSession } from './test-support/openrouter-issue';
+import {
+  createPendingReleaseSession,
+  mockOpenRouterManagementApi,
+} from './test-support/openrouter-issue';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import {
   getTrialStatus,
@@ -49,6 +52,7 @@ function invalidRequestEnvelope(message: string): Record<string, unknown> {
 
 describe('broker signed input hardening', () => {
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -231,6 +235,7 @@ describe('broker signed input hardening', () => {
         installation_id: 'i'.repeat(129),
         device_public_key: release.keyPair.devicePublicKey,
         release_token: release.releaseToken,
+        hardware_hash: release.hardwareHash,
         reason: 'llm_start',
         budget_usd: 0.07,
         model: 'google/gemma-4-26b-a4b-it',
@@ -277,6 +282,7 @@ describe('broker signed input hardening', () => {
         installation_id: 'install-issue\ncontrol',
         device_public_key: release.keyPair.devicePublicKey,
         release_token: release.releaseToken,
+        hardware_hash: release.hardwareHash,
         reason: 'llm_start',
         budget_usd: 0.07,
         model: 'google/gemma-4-26b-a4b-it',
@@ -323,6 +329,7 @@ describe('broker signed input hardening', () => {
         installation_id: '   ',
         device_public_key: release.keyPair.devicePublicKey,
         release_token: release.releaseToken,
+        hardware_hash: release.hardwareHash,
         reason: 'llm_start',
         budget_usd: 0.07,
         model: 'google/gemma-4-26b-a4b-it',
@@ -337,6 +344,94 @@ describe('broker signed input hardening', () => {
           'installation_id must not be blank or whitespace-only',
         ),
       );
+    });
+
+    it('rejects control characters or newlines in hardware_hash before release-token lookup', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+      const env = createTestBrokerEnv();
+      const release = await createPendingReleaseSession({
+        env,
+        installationId: 'install-issue-signed-input-hardening-hardware-control',
+        appVersion: '1.2.3',
+        hardwareHash: 'hardware-hash-issue-signed-input-hardening-hardware-control',
+      });
+      const requestBody = await signCanonicalIssueRequest(release.keyPair.privateKey, {
+        installation_id: 'install-issue-signed-input-hardening-hardware-control',
+        device_public_key: release.keyPair.devicePublicKey,
+        release_token: release.releaseToken,
+        hardware_hash: 'hardware-hash\rcontrol',
+        reason: 'llm_start',
+        budget_usd: 0.07,
+        model: 'google/gemma-4-26b-a4b-it',
+        signed_at: '2026-04-08T06:00:45.000Z',
+      });
+
+      const response = await postIssue(env, requestBody);
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual(
+        invalidRequestEnvelope(
+          'hardware_hash must not contain control characters or newlines',
+        ),
+      );
+    });
+
+    it('rejects issue when the installation hardware snapshot becomes stale after verify', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+      const managementApi = mockOpenRouterManagementApi();
+      const env = createTestBrokerEnv();
+      const release = await createPendingReleaseSession({
+        env,
+        installationId: 'install-issue-stale-snapshot',
+        appVersion: '1.2.3',
+        hardwareHash: 'hardware-hash-issue-stale-snapshot',
+      });
+
+      env.__db
+        .prepare(
+          `UPDATE installations
+              SET hardware_hash_salt_version = ?
+            WHERE installation_id = ?`,
+        )
+        .run(8, 'install-issue-stale-snapshot');
+
+      const requestBody = await signCanonicalIssueRequest(release.keyPair.privateKey, {
+        installation_id: 'install-issue-stale-snapshot',
+        device_public_key: release.keyPair.devicePublicKey,
+        release_token: release.releaseToken,
+        hardware_hash: release.hardwareHash,
+        reason: 'llm_start',
+        budget_usd: 0.07,
+        model: 'google/gemma-4-26b-a4b-it',
+        signed_at: '2026-04-08T06:00:45.000Z',
+      });
+
+      const response = await postIssue(env, requestBody);
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual(
+        normalizedErrorEnvelope({
+          code: 'trial_not_eligible',
+          class: 'terminal',
+          subcode: 'hardware_duplicate',
+          message: 'hardware_hash no longer matches the verified release session',
+          managedState: {
+            lifecycle: 'pending_release',
+            managed_availability: true,
+          },
+          currentEntitlement: {
+            provider: 'OpenRouter',
+            budget_usd: 0.07,
+            issued_at: null,
+            expires_at: null,
+          },
+        }),
+      );
+      expect(managementApi.fetchMock).not.toHaveBeenCalled();
     });
   });
 

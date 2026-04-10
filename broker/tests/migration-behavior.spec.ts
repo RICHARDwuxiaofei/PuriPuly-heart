@@ -462,6 +462,79 @@ describe('broker migration behavior', () => {
     });
   });
 
+  it('adds verified entitlement snapshot columns through a forward migration for already-migrated databases', () => {
+    const db = new DatabaseSync(':memory:');
+
+    try {
+      applyBrokerMigrations(db, {
+        through: '0001_harden_installation_public_inputs.sql',
+      });
+
+      db.prepare(
+        `INSERT INTO installations (
+          installation_id,
+          device_public_key,
+          app_version
+        ) VALUES (?, ?, ?)`,
+      ).run('already-migrated-installation', 'already-migrated-device-key', '1.0.0');
+      db.prepare(
+        `INSERT INTO openrouter_entitlements (
+          installation_id,
+          status,
+          budget_usd,
+          managed_credential_ref,
+          issued_at,
+          expires_at,
+          release_session_ref,
+          release_token_hash,
+          release_token_expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        'already-migrated-installation',
+        'active',
+        0.07,
+        'managed-credential-already-migrated',
+        '2026-04-08T06:00:00.000Z',
+        '2026-10-08T06:00:00.000Z',
+        null,
+        null,
+        null,
+      );
+
+      applyBrokerMigrations(db, {
+        after: '0001_harden_installation_public_inputs.sql',
+      });
+
+      const columns = db
+        .prepare("SELECT name FROM pragma_table_info('openrouter_entitlements') ORDER BY cid")
+        .all() as Array<{ name: string }>;
+
+      expect(columns.map((column) => column.name)).toContain('verified_hardware_hash');
+      expect(columns.map((column) => column.name)).toContain(
+        'verified_hardware_hash_salt_version',
+      );
+
+      const upgradedRow = db
+        .prepare(
+          `SELECT installation_id, status, managed_credential_ref,
+                  verified_hardware_hash, verified_hardware_hash_salt_version
+             FROM openrouter_entitlements
+            WHERE installation_id = ?`,
+        )
+        .get('already-migrated-installation') as Record<string, unknown>;
+
+      expect(upgradedRow).toEqual({
+        installation_id: 'already-migrated-installation',
+        status: 'active',
+        managed_credential_ref: 'managed-credential-already-migrated',
+        verified_hardware_hash: null,
+        verified_hardware_hash_salt_version: null,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   it('fails hardening migration when existing installations already contain newly invalid public input', () => {
     withLegacyDatabase((db) => {
       db.prepare(

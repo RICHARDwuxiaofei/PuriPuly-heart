@@ -39,7 +39,7 @@ What it does **not** mean:
   - it also hardcodes `name: "puripuly-heart-broker"`, so direct deploy work targets the canonical worker name unless a deploy-time config overrides it
 - The broker requires these runtime bindings:
   - D1 binding: `BROKER_DB`
-  - Worker secret: `OPENROUTER_MANAGED_API_KEY`
+  - Worker secrets: `OPENROUTER_MANAGED_API_KEY` (transitional compatibility only), `OPENROUTER_MANAGEMENT_API_KEY`, `OPENROUTER_MANAGED_GUARDRAIL_ID`
 - Current broker deploy command:
   - `pnpm --filter @puripuly-heart/broker run deploy`
 - Broker `pnpm` / `vitest` / `wrangler` verification should run from a Linux-native workspace.
@@ -76,13 +76,18 @@ What it does **not** mean:
 - [ ] production D1 database created with the intended rollout location settings (`apac` for the current single-region assumption)
 - [ ] production D1 `database_id` captured
 - [ ] production bootstrap plan defined for replacing `fingerprint_salt` placeholder before challenge / verify traffic
-- [ ] production OpenRouter managed key prepared
+- [ ] production OpenRouter managed key prepared (`OPENROUTER_MANAGED_API_KEY_PRODUCTION`, transitional compatibility only)
+- [ ] production OpenRouter management key prepared (`OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION`)
+- [ ] production OpenRouter managed guardrail id prepared (`OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION`)
 - [ ] GitHub Environment `production` created if CI automation is used
 - [ ] GitHub secret `CLOUDFLARE_API_TOKEN` registered
 - [ ] GitHub secret `CLOUDFLARE_ACCOUNT_ID` registered if the workflow needs it
 - [ ] GitHub secret `BROKER_D1_DATABASE_ID_PRODUCTION` registered
-- [ ] GitHub secret `OPENROUTER_MANAGED_API_KEY_PRODUCTION` registered
+- [ ] GitHub secret `OPENROUTER_MANAGED_API_KEY_PRODUCTION` registered (transitional compatibility only)
+- [ ] GitHub secret `OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION` registered
+- [ ] GitHub secret `OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION` registered
 - [ ] GitHub Environment variable `BROKER_CANONICAL_WORKERS_DEV_URL` registered
+- [ ] GitHub Environment variable `BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION` registered
 
 ## Automation scope we intend to build
 
@@ -139,6 +144,11 @@ Recommended failure-path smoke coverage:
 - [ ] status request with unknown installation rejection
 - [ ] issue request without a valid release token rejection
 
+Canonical production smoke now also verifies:
+
+- [x] issued child-key metadata reflects the managed limit / expiry contract
+- [x] a known disallowed model is rejected after guardrail assignment
+
 Recommended later expansion:
 
 - [ ] app-to-broker smoke test for one real managed onboarding path
@@ -161,6 +171,9 @@ Repo-side direct-production automation now exists:
 The remaining rollout work is operational, not repo-side automation:
 
 1. register the production Environment secrets / variable
+   - `OPENROUTER_MANAGED_API_KEY_PRODUCTION` remains transitional compatibility only
+   - `OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION` and `OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION` are required for child-key issuance
+   - `BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION` must be set to a model blocked by the configured guardrail
 2. create or confirm the production D1 database and capture its `database_id`
 3. review the manual workflow inputs / guards
 4. run the first canonical deployment and smoke

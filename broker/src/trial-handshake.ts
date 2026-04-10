@@ -12,7 +12,7 @@ import {
   checkDailyIssuanceCap,
   checkEndpointRateLimit,
   checkVelocityCapHook,
-  hasActiveHardwareDuplicate,
+  hasConflictingHardwareDuplicate,
   matchSubjectHook,
   recordRequestEvent,
   resolveClientIp,
@@ -258,6 +258,10 @@ export async function handleTrialChallenge(
   let responseChallengeExpiresAt = challengeExpiresAt;
 
   if (existingInstallation) {
+    if (entitlement?.status === 'pending_release') {
+      await clearPendingReleaseSessionTokenState(c.env.BROKER_DB, installationId);
+    }
+
     const updateSucceeded = await updateChallengeForInstallation(c.env.BROKER_DB, {
       ...challengeWriteInput,
       clearHardwareHash:
@@ -564,7 +568,7 @@ export async function handleTrialChallengeVerify(
   }
 
   const fingerprintSalt = await getFingerprintSaltConfig(c.env.BROKER_DB);
-  const duplicateHardware = await hasActiveHardwareDuplicate(c.env.BROKER_DB, {
+  const duplicateHardware = await hasConflictingHardwareDuplicate(c.env.BROKER_DB, {
     installationId,
     hardwareHash,
     challengeSaltVersion: installation.challenge_salt_version,
@@ -575,7 +579,7 @@ export async function handleTrialChallengeVerify(
       code: 'trial_not_eligible',
       class: 'terminal',
       subcode: 'hardware_duplicate',
-      message: 'hardware_hash is already associated with an active entitlement',
+      message: 'hardware_hash is already reserved by another entitlement',
       entitlement,
     });
   }
@@ -594,6 +598,10 @@ export async function handleTrialChallengeVerify(
       message: issuanceCapDecision.message,
       entitlement,
     });
+  }
+
+  if (entitlement?.status === 'pending_release') {
+    await clearPendingReleaseSessionTokenState(c.env.BROKER_DB, installationId);
   }
 
   const challengeConsumed = await consumeChallenge(c.env.BROKER_DB, {
@@ -628,7 +636,9 @@ export async function handleTrialChallengeVerify(
       `UPDATE openrouter_entitlements
           SET release_session_ref = ?,
               release_token_hash = ?,
-              release_token_expires_at = ?
+              release_token_expires_at = ?,
+              verified_hardware_hash = ?,
+              verified_hardware_hash_salt_version = ?
         WHERE installation_id = ?
           AND status = ?`,
     )
@@ -636,6 +646,8 @@ export async function handleTrialChallengeVerify(
         releaseSessionRef,
         releaseTokenHash,
         releaseTokenExpiresAt,
+        hardwareHash,
+        installation.challenge_salt_version,
         installationId,
         'pending_release',
       )
@@ -660,8 +672,10 @@ export async function handleTrialChallengeVerify(
           expires_at,
           release_session_ref,
           release_token_hash,
-          release_token_expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          release_token_expires_at,
+          verified_hardware_hash,
+          verified_hardware_hash_salt_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         installationId,
@@ -673,6 +687,8 @@ export async function handleTrialChallengeVerify(
         releaseSessionRef,
         releaseTokenHash,
         releaseTokenExpiresAt,
+        hardwareHash,
+        installation.challenge_salt_version,
       )
       .run();
   }
@@ -1145,6 +1161,40 @@ async function updateChallengeForInstallation(
   return (updateResult.meta.changes ?? 0) === 1;
 }
 
+async function clearPendingReleaseSessionTokenState(
+  db: D1Database,
+  installationId: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE openrouter_entitlements
+          SET release_session_ref = NULL,
+              release_token_hash = NULL,
+              release_token_expires_at = NULL,
+              managed_credential_ref = NULL,
+              verified_hardware_hash = COALESCE(
+                verified_hardware_hash,
+                (
+                  SELECT hardware_hash
+                    FROM installations
+                   WHERE installations.installation_id = openrouter_entitlements.installation_id
+                )
+              ),
+              verified_hardware_hash_salt_version = COALESCE(
+                verified_hardware_hash_salt_version,
+                (
+                  SELECT hardware_hash_salt_version
+                    FROM installations
+                   WHERE installations.installation_id = openrouter_entitlements.installation_id
+                )
+              )
+        WHERE installation_id = ?
+          AND status = 'pending_release'`,
+    )
+    .bind(installationId)
+    .run();
+}
+
 async function resolveExistingInstallationChallengeReissue(
   db: D1Database,
   input: {
@@ -1182,6 +1232,10 @@ async function resolveExistingInstallationChallengeReissue(
   }
 
   const latestEntitlement = await getEntitlement(db, input.installationId);
+  if (latestEntitlement?.status === 'pending_release') {
+    await clearPendingReleaseSessionTokenState(db, input.installationId);
+  }
+
   const retriedUpdateSucceeded = await updateChallengeForInstallation(db, {
     ...input,
     clearHardwareHash:
@@ -1300,9 +1354,10 @@ async function getEntitlement(
   return db
     .prepare(
       `SELECT installation_id, status, budget_usd, managed_credential_ref, issued_at,
-              expires_at, release_session_ref, release_token_hash, release_token_expires_at
+              expires_at, release_session_ref, release_token_hash, release_token_expires_at,
+              verified_hardware_hash, verified_hardware_hash_salt_version
          FROM openrouter_entitlements
-        WHERE installation_id = ?`,
+         WHERE installation_id = ?`,
     )
     .bind(installationId)
     .first<OpenRouterEntitlementRecord>();

@@ -24,6 +24,7 @@ export interface SignedIssueRequestInput {
   installation_id: string;
   device_public_key: string;
   release_token: string;
+  hardware_hash: string;
   reason: string;
   budget_usd: number;
   model: string;
@@ -145,6 +146,7 @@ function canonicalIssuePayload(input: SignedIssueRequestInput): Uint8Array {
       input.installation_id,
       input.device_public_key,
       input.release_token,
+      input.hardware_hash,
       input.reason,
       String(input.budget_usd),
       input.model,
@@ -159,6 +161,7 @@ function nonCanonicalIssuePayload(input: SignedIssueRequestInput): Uint8Array {
       input.release_token,
       input.installation_id,
       input.device_public_key,
+      input.hardware_hash,
       input.reason,
       String(input.budget_usd),
       input.model,

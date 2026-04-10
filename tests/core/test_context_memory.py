@@ -500,7 +500,7 @@ class TestContextInternalPaths:
 
 
 class TestContextLogging:
-    def test_prepare_llm_request_without_runtime_logging_keeps_basic_context_mode_only(
+    def test_prepare_llm_request_without_runtime_logging_includes_context_apply_summary(
         self, caplog: pytest.LogCaptureFixture
     ):
         hub = ClientHub(
@@ -514,9 +514,9 @@ class TestContextLogging:
             hub._prepare_llm_request("입력")
 
         assert "[Hub] Context mode: channel=self mode=local" in caplog.messages
-        assert "[Hub] Context apply: channel=self text='입력' entries=0" not in caplog.messages
+        assert "[Hub] Context apply: channel=self text='입력' entries=0" in caplog.messages
 
-    def test_prepare_llm_request_without_runtime_logging_suppresses_context_entry_dumps(
+    def test_prepare_llm_request_without_runtime_logging_includes_context_entries(
         self, caplog: pytest.LogCaptureFixture
     ):
         clock = FakeClock(initial_time=20.0)
@@ -537,8 +537,8 @@ class TestContextLogging:
             hub._prepare_llm_request("입력")
 
         assert "[Hub] Context mode: channel=self mode=local" in caplog.messages
-        assert "[Hub] Context apply: channel=self text='입력' entries=1" not in caplog.messages
-        assert '[Hub] Context[0]: [1s ago] "안녕"' not in caplog.messages
+        assert "[Hub] Context apply: channel=self text='입력' entries=1" in caplog.messages
+        assert '[Hub] Context[0]: [1s ago] "안녕"' in caplog.messages
 
     def test_prepare_llm_request_logs_context_mode_only_when_changed(
         self, caplog: pytest.LogCaptureFixture

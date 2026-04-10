@@ -145,6 +145,8 @@ export interface OpenRouterEntitlementRecord {
   release_session_ref: string | null;
   release_token_hash: string | null;
   release_token_expires_at: string | null;
+  verified_hardware_hash: string | null;
+  verified_hardware_hash_salt_version: number | null;
 }
 
 export interface BrokerRequestEventRecord {
@@ -266,6 +268,8 @@ export const BROKER_PERSISTENCE_MODEL = {
         'release_session_ref',
         'release_token_hash',
         'release_token_expires_at',
+        'verified_hardware_hash',
+        'verified_hardware_hash_salt_version',
       ],
       unique: ['managed_credential_ref'],
       indexed: ['status', 'expires_at'],

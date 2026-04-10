@@ -634,20 +634,18 @@ class ClientHub:
         context: str,
     ) -> None:
         context_lines = context.splitlines() if context else []
-        self._emit_detailed(
+        self._emit_basic(
             "[Hub] Context apply: channel=%s text=%r entries=%s",
             runtime.channel,
             text,
             len(context_lines),
-            fallback_level=logging.INFO,
         )
         for index, line in enumerate(context_lines):
             display_line = line[2:] if line.startswith("- ") else line
-            self._emit_detailed(
+            self._emit_basic(
                 "[Hub] Context[%s]: %s",
                 index,
                 display_line,
-                fallback_level=logging.INFO,
             )
 
     async def handle_vad_event(self, event: VadEvent) -> None:
