@@ -309,11 +309,38 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_la
     body = fake_client.last_request["json"]
     assert body["model"] == "google/gemma-4-26b-a4b-it"
     assert body["reasoning"] == {"effort": "none"}
-    assert body["provider"] == {"sort": "latency", "allow_fallbacks": True}
+    assert body["provider"] == {
+        "sort": "latency",
+        "allow_fallbacks": True,
+        "ignore": ["venice"],
+    }
     assert body["messages"][0] == {"role": "system", "content": "SYSTEM"}
     assert body["messages"][1]["role"] == "user"
     assert "<context>" in body["messages"][1]["content"]
     assert "Input: hello" in body["messages"][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_httpx_openrouter_client_latency_routing_ignores_venice_provider(
+    monkeypatch,
+) -> None:
+    fake_client = FakeAsyncClient()
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+
+    client = HttpxOpenRouterClient(
+        api_key="test-key",
+        model="google/gemma-4-26b-a4b-it",
+        base_url="https://example",
+    )
+    await client.translate(
+        text="hello",
+        system_prompt="SYSTEM",
+        source_language="ko-KR",
+        target_language="en",
+    )
+
+    body = fake_client.last_request["json"]
+    assert body["provider"]["ignore"] == ["venice"]
 
 
 @pytest.mark.asyncio
@@ -368,7 +395,11 @@ async def test_httpx_openrouter_client_stream_translate_builds_streaming_request
     assert request["headers"]["Authorization"] == "Bearer k"
     assert request["json"]["stream"] is True
     assert request["json"]["reasoning"] == {"effort": "none"}
-    assert request["json"]["provider"] == {"sort": "latency", "allow_fallbacks": True}
+    assert request["json"]["provider"] == {
+        "sort": "latency",
+        "allow_fallbacks": True,
+        "ignore": ["venice"],
+    }
 
 
 @pytest.mark.asyncio
