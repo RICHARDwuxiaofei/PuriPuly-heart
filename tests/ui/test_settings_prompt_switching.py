@@ -178,6 +178,7 @@ def test_settings_view_llm_modal_orders_qwen_plus_before_flash(monkeypatch) -> N
     options = captured["options"]
     values = [option.value for option in options]
     assert values == [
+        settings_view._OPENROUTER_MANAGED_OPTION_VALUE,
         GeminiLLMModel.GEMINI_3_FLASH.value,
         GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
         OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,

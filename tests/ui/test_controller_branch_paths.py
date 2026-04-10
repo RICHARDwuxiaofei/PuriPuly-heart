@@ -707,7 +707,9 @@ async def test_set_translation_enabled_warms_supported_provider(
 
 
 @pytest.mark.asyncio
-async def test_set_translation_enabled_runs_managed_release_prepare_before_enabling() -> None:
+async def test_set_translation_enabled_runs_managed_release_prepare_before_enabling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     dash = DummyDashboard()
     controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
     controller.settings = AppSettings()
@@ -721,6 +723,20 @@ async def test_set_translation_enabled_runs_managed_release_prepare_before_enabl
             pending_issue=True,
             local_key_available=False,
         )
+    )
+
+    async def fail_fetch_key_metadata(_api_key: str):
+        raise AssertionError("fetch_key_metadata should not run without a managed key")
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fail_fetch_key_metadata),
     )
 
     await controller.set_translation_enabled(True)
@@ -2392,6 +2408,20 @@ async def test_start_keeps_managed_openrouter_dashboard_toggle_available_without
     monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
     monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
     monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+
+    async def fail_fetch_key_metadata(_api_key: str):
+        raise AssertionError("fetch_key_metadata should not run without a managed key")
+
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fail_fetch_key_metadata),
+    )
 
     class FakeBridge:
         def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
