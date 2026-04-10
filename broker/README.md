@@ -20,8 +20,10 @@ Use `pnpm --filter @puripuly-heart/broker run verify:config` to exercise the pin
 
 - `broker/scripts/render-production-wrangler-config.mjs` renders a temporary deploy-time Wrangler config from `broker/wrangler.jsonc`, injects the production D1 `database_id`, and fails if the checked-in worker name stops being the canonical `puripuly-heart-broker`.
 - `broker/deploy/fingerprint-bootstrap.template.sql` plus `broker/scripts/render-fingerprint-bootstrap-sql.mjs` render guarded bootstrap SQL for `wrangler d1 execute --file ... --yes`. The rendered SQL only replaces the migration placeholder and fails before mutating `broker_config` if the placeholder is already gone.
-- `.github/workflows/deploy-broker-direct.yml` is the manual `workflow_dispatch` path for the first canonical deploy. It applies remote D1 migrations, bootstraps the fingerprint salt, syncs `OPENROUTER_MANAGED_API_KEY`, deploys the canonical worker, and runs `broker/tests/deploy-smoke/canonical-production.spec.ts` against the canonical `workers.dev` URL.
-- The workflow expects CI-managed secrets / vars in the `production` GitHub Environment: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `BROKER_D1_DATABASE_ID_PRODUCTION`, `OPENROUTER_MANAGED_API_KEY_PRODUCTION`, and `BROKER_CANONICAL_WORKERS_DEV_URL`.
+- `.github/workflows/deploy-broker-direct.yml` is the manual `workflow_dispatch` path for the first canonical deploy. It applies remote D1 migrations, bootstraps the fingerprint salt, syncs the OpenRouter worker secrets needed for managed child-key issuance, deploys the canonical worker, and runs `broker/tests/deploy-smoke/canonical-production.spec.ts` against the canonical `workers.dev` URL.
+- `OPENROUTER_MANAGED_API_KEY_PRODUCTION` remains transitional runtime compatibility only; `OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION` drives managed child-key creation / cleanup and `OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION` assigns the production guardrail to each issued key.
+- The deploy smoke now verifies issued child-key metadata through `https://openrouter.ai/api/v1/key` and probes `https://openrouter.ai/api/v1/chat/completions` with `BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION` to confirm guardrail enforcement.
+- The workflow expects CI-managed secrets / vars in the `production` GitHub Environment: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `BROKER_D1_DATABASE_ID_PRODUCTION`, `OPENROUTER_MANAGED_API_KEY_PRODUCTION`, `OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION`, `OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION`, `BROKER_CANONICAL_WORKERS_DEV_URL`, and `BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION`.
 - App / public traffic must stay disconnected from the broker until the direct deploy smoke run passes and is explicitly reviewed.
 
 ## Verification environment
@@ -72,8 +74,8 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
   - `expired` and `revoked` are returned as `200` lifecycle data, not public error codes
   - live remaining budget stays upstream in OpenRouter metadata instead of being mirrored into broker status
 - `POST /v1/providers/openrouter/issue`
-  - request: `installation_id`, base64url `device_public_key`, base64url `release_token`, `reason`, `budget_usd`, `model`, `signed_at`, base64url `signature`
-  - `installation_id` keeps the same public bound: `1-128` chars and must not be blank or whitespace-only, and must not contain embedded control characters or newline separators
+  - request: `installation_id`, base64url `device_public_key`, base64url `release_token`, `hardware_hash`, `reason`, `budget_usd`, `model`, `signed_at`, base64url `signature`
+  - `installation_id` and `hardware_hash` keep the same public bound: `1-128` chars and must not be blank or whitespace-only, and must not contain embedded control characters or newline separators
   - activation reason is fixed to `llm_start`
   - `budget_usd` must match the managed-trial hard limit and `model` must match the pinned managed OpenRouter model
   - supported timestamp subset for `signed_at`: `YYYY-MM-DDTHH:MM:SS(.mmm)?(Z|±HH:MM)` with a real calendar date/time
@@ -81,13 +83,16 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
     1. `installation_id`
     2. `device_public_key`
     3. `release_token`
-    4. `reason`
-    5. `budget_usd`
-    6. `model`
-    7. `signed_at`
+    4. `hardware_hash`
+    5. `reason`
+    6. `budget_usd`
+    7. `model`
+    8. `signed_at`
   - enforces signed clock skew within `±60` seconds
-  - consumes the `pending_release` token, upgrades the entitlement to `active`, and reuses the same `active` entitlement for same-session retries
+  - consumes the `pending_release` token, upgrades the entitlement to `active`, and returns terminal `managed_key_unrecoverable` for same-session retries after activation because the issued child key cannot be recovered
   - success response returns `openrouter_api_key`, distinct `managed_credential_ref`, normalized `managed_state`, `expires_at`, `budget_usd`, and `model`
+  - `openrouter_api_key` is a newly created per-installation OpenRouter child key, not the shared worker secret
+  - the child key is created with the managed-trial limit (`0.07` USD), a six-month expiry anchored to `issued_at`, and the configured managed guardrail before the broker returns it
   - live remaining budget and usage stay upstream in OpenRouter metadata and are not mirrored into the issue response
 
 ## Persistence model
@@ -95,7 +100,7 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
 `broker/src/persistence.ts` and `broker/migrations/*.sql` define the D1-backed state contract and its upgrade path.
 
 - `0001_harden_installation_public_inputs.sql` rebuilds `installations` (and the dependent `openrouter_entitlements` table) under deferred foreign-key checks so already-initialized clean schemas pick up the hardened public-input constraints.
-- The follow-up migration copies existing rows unchanged and assumes stored data already satisfies the tightened contract; invalid historical rows are not auto-corrected or remapped.
+- `0002_add_entitlement_verified_hardware_snapshot.sql` adds `verified_hardware_hash` and `verified_hardware_hash_salt_version` to `openrouter_entitlements` for the verified release-session hardware snapshot consumed by `/v1/providers/openrouter/issue`.
 
 - `broker_config`
   - columns: `key`, `value`, `updated_at`
@@ -128,11 +133,11 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
   - update rules: each challenge overwrites `challenge`, `challenge_expires_at`, `challenge_salt_version`, and `app_version`; it clears stored `hardware_hash` / `hardware_hash_salt_version` only when lifecycle is `none` or `pending_release`, and preserves fingerprint state for `active`, `expired`, and `revoked`; verify clears the challenge fields; `hardware_hash` stays `NULL` until verify succeeds
 - `openrouter_entitlements`
   - zero or one row per installation, keyed by `installation_id` when present
-  - columns: `installation_id`, `status`, `budget_usd`, `managed_credential_ref`, `issued_at`, `expires_at`, plus minimal release-session columns `release_session_ref`, `release_token_hash`, `release_token_expires_at`
+  - columns: `installation_id`, `status`, `budget_usd`, `managed_credential_ref`, `issued_at`, `expires_at`, minimal release-session columns `release_session_ref`, `release_token_hash`, `release_token_expires_at`, `verified_hardware_hash`, `verified_hardware_hash_salt_version`
   - constraints: `managed_credential_ref` unique, `status` indexed, `expires_at` indexed
   - `release_token_hash` is protected by a partial unique index when non-`NULL`
   - stored `status` values are `pending_release`, `active`, `expired`, and `revoked`; `none` is represented by the absence of a row
-  - update rules: entitlement status and credential metadata are updated in place; append-only entitlement history is intentionally out of scope for the initial rollout
+  - update rules: entitlement status, release-session fields, verified hardware snapshot, and credential metadata are updated in place; append-only entitlement history is intentionally out of scope for the initial rollout
   - remaining live budget stays upstream in OpenRouter metadata instead of being mirrored into broker storage; the release token remains installation-bound, one-time, and `15` minutes TTL
 
 ## Retention and salt rotation

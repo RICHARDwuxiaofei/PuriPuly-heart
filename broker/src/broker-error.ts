@@ -59,10 +59,18 @@ export function errorResponse(
 }
 
 export function internalErrorResponse(c: Context<BrokerEnv>): Response {
+  return internalErrorResponseWithEntitlement(c, null);
+}
+
+export function internalErrorResponseWithEntitlement(
+  c: Context<BrokerEnv>,
+  entitlement: OpenRouterEntitlementRecord | null,
+): Response {
   return errorResponse(c, 500, {
     code: 'internal_error',
     class: 'retryable',
     message: 'broker encountered an unexpected internal error',
+    entitlement,
   });
 }
 

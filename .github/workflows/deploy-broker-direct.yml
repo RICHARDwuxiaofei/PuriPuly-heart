@@ -26,7 +26,10 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       BROKER_D1_DATABASE_ID_PRODUCTION: ${{ secrets.BROKER_D1_DATABASE_ID_PRODUCTION }}
       OPENROUTER_MANAGED_API_KEY_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_API_KEY_PRODUCTION }}
+      OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION: ${{ secrets.OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION }}
+      OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION }}
       BROKER_CANONICAL_WORKERS_DEV_URL: ${{ vars.BROKER_CANONICAL_WORKERS_DEV_URL }}
+      BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION: ${{ vars.BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION }}
       BROKER_CANONICAL_WORKER_NAME: puripuly-heart-broker
     steps:
       - name: Guard production deploy ref and confirmation
@@ -44,6 +47,16 @@ jobs:
 
           if [[ -z "${BROKER_CANONICAL_WORKERS_DEV_URL//[[:space:]]/}" ]]; then
             echo 'BROKER_CANONICAL_WORKERS_DEV_URL is required and must not be blank.' >&2
+            exit 1
+          fi
+
+          if [[ -z "${BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION//[[:space:]]/}" ]]; then
+            echo 'BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION is required and must not be blank.' >&2
+            exit 1
+          fi
+
+          if [[ "$BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION" == 'google/gemma-4-26b-a4b-it' ]]; then
+            echo 'BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION must differ from the managed allowlisted model.' >&2
             exit 1
           fi
 
@@ -149,12 +162,20 @@ jobs:
               raise SystemExit('fingerprint_salt bootstrap validation failed; placeholder still present')
           PY
 
-      - name: Sync OpenRouter managed key secret
+      - name: Sync OpenRouter worker secrets for managed child-key issuance
         shell: bash
         working-directory: broker
         run: |
+          # OPENROUTER_MANAGED_API_KEY_PRODUCTION remains for transitional runtime compatibility
+          # until the legacy binding is removed from the worker contract.
           printf '%s' "$OPENROUTER_MANAGED_API_KEY_PRODUCTION" \
             | pnpm exec wrangler secret put OPENROUTER_MANAGED_API_KEY --config "${{ steps.render.outputs.config_path }}"
+          # OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION is required for managed child-key creation and cleanup.
+          printf '%s' "$OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION" \
+            | pnpm exec wrangler secret put OPENROUTER_MANAGEMENT_API_KEY --config "${{ steps.render.outputs.config_path }}"
+          # OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION must assign the canonical production guardrail to every issued child key.
+          printf '%s' "$OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION" \
+            | pnpm exec wrangler secret put OPENROUTER_MANAGED_GUARDRAIL_ID --config "${{ steps.render.outputs.config_path }}"
 
       - name: Deploy canonical broker worker
         working-directory: broker
@@ -184,6 +205,7 @@ jobs:
         env:
           BROKER_DEPLOY_SMOKE_BASE_URL: ${{ env.BROKER_CANONICAL_WORKERS_DEV_URL }}
           BROKER_DEPLOY_CANONICAL_WORKER_NAME: ${{ env.BROKER_CANONICAL_WORKER_NAME }}
+          BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL: ${{ env.BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION }}
         run: >-
           pnpm exec vitest run broker/tests/deploy-smoke/canonical-production.spec.ts
           --reporter=verbose
@@ -194,6 +216,8 @@ jobs:
         run: |
           cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
           Direct broker smoke passed.
+
+          Verified issued child-key metadata plus disallowed-model guardrail enforcement.
 
           Do not connect app / public traffic to the broker until this run has been reviewed and an explicit cutover is approved.
           EOF
