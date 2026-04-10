@@ -18,6 +18,12 @@ from puripuly_heart.ui.views.logs import (
 
 
 class TestLogsView:
+    def test_logs_view_folder_button_uses_text_api(self):
+        view = LogsView()
+
+        assert view._folder_button.text == logs_module.t("logs.open_folder")
+        assert view._folder_button.content is None
+
     def test_logs_view_supports_switch_variants_that_require_label_style(self):
         original_switch = logs_module.ft.Switch
         captured: dict[str, object] = {}
@@ -148,7 +154,8 @@ class TestLogsView:
             view.set_runtime_logging_mode("detailed")
             view.apply_locale()
         assert view._title_text.value == logs_module.t("logs.title")
-        assert view._folder_button.content == logs_module.t("logs.open_folder")
+        assert view._folder_button.text == logs_module.t("logs.open_folder")
+        assert view._folder_button.content is None
         assert view._mode_toggle.label == logs_module.t("logs.mode.toggle")
         assert view._mode_status_text.value == logs_module.t(
             "logs.mode.status",

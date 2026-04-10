@@ -155,7 +155,7 @@ class LogsView(ft.Column):
 
         # Folder open button (brown, hover -> primary)
         self._folder_button = ft.TextButton(
-            content=t("logs.open_folder"),
+            text=t("logs.open_folder"),
             icon=ft.Icons.FOLDER_OPEN,
             style=self._get_button_style(font_family),
             on_click=self._open_log_folder,
@@ -306,7 +306,7 @@ class LogsView(ft.Column):
         if self._title_text:
             self._title_text.value = t("logs.title")
         if self._folder_button:
-            self._folder_button.content = t("logs.open_folder")
+            self._folder_button.text = t("logs.open_folder")
             self._folder_button.style = self._get_button_style(font_family)
         if self._mode_toggle:
             self._mode_toggle.label = t("logs.mode.toggle")
