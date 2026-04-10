@@ -50,6 +50,7 @@ class _MergeBuffer:
     spec_attempts: int = 0
     spec_started_at: float | None = None
     spec_done_at: float | None = None
+    spec_latency_stage_times: dict[str, float] = field(default_factory=dict)
     resume_pending: bool = False
     resume_confirmed: bool = False
     resume_utterance_id: UUID | None = None

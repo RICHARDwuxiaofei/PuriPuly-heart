@@ -10,8 +10,13 @@ import numpy as np
 import pytest
 
 from puripuly_heart.core.orchestrator.hub import ClientHub, _MergeBuffer
+from puripuly_heart.core.runtime_logging import SessionLoggingMode
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
 from puripuly_heart.domain.models import Transcript, Translation
+from tests.core.test_hub_branch_coverage import (
+    _make_runtime_logging_capture,
+    _runtime_log_messages,
+)
 
 # ── Mock classes ──────────────────────────────────────────────────────────────
 
@@ -56,6 +61,42 @@ class FakeLLMProvider:
         )
         await asyncio.sleep(self.delay_s)
         return Translation(utterance_id=utterance_id, text=self.response_text)
+
+    async def close(self) -> None:
+        pass
+
+
+@dataclass
+class ClockedTranslateLLMProvider:
+    clock: FakeClock
+    responses: list[tuple[float, str]]
+    calls: list[dict] = field(default_factory=list)
+
+    async def translate(
+        self,
+        *,
+        utterance_id,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ):
+        self.calls.append(
+            {
+                "utterance_id": utterance_id,
+                "text": text,
+                "system_prompt": system_prompt,
+                "source_language": source_language,
+                "target_language": target_language,
+                "context": context,
+            }
+        )
+        if not self.responses:
+            raise AssertionError("no translate response configured")
+        delay_s, response_text = self.responses.pop(0)
+        self.clock.advance(delay_s)
+        return Translation(utterance_id=utterance_id, text=response_text)
 
     async def close(self) -> None:
         pass
@@ -124,6 +165,419 @@ class TestSpeechEndedTracking:
         assert hub.peer_runtime.translation_history == []
 
         await hub.stop()
+
+
+class TestRuntimeLatencyLogging:
+    @pytest.mark.asyncio
+    async def test_basic_latency_summary_uses_speech_end_boundary_without_hangover(self):
+        runtime_logging, log_stream = _make_runtime_logging_capture()
+        clock = FakeClock(initial_time=10.0)
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=0,
+            hangover_s=9.9,
+            runtime_logging=runtime_logging,
+        )
+        utterance_id = uuid4()
+
+        try:
+            await hub.handle_vad_event(SpeechEnd(utterance_id))
+            clock.advance(0.25)
+
+            await hub._handle_low_latency_final(
+                Transcript(
+                    utterance_id=utterance_id,
+                    text="official latency",
+                    is_final=True,
+                    created_at=clock.now(),
+                )
+            )
+
+            messages = _runtime_log_messages(log_stream)
+            latency_message = next(message for message in messages if "[Basic][Latency]" in message)
+
+            assert "channel=self" in latency_message
+            assert "speech_end_to_final_output_ms=250" in latency_message
+            assert "final_output_stage=self_chatbox_enqueue" in latency_message
+            assert "hangover" not in latency_message
+        finally:
+            runtime_logging.close()
+            await hub.stop()
+
+    @pytest.mark.asyncio
+    async def test_detailed_latency_traces_emit_only_in_detailed_mode(self):
+        basic_runtime_logging, basic_stream = _make_runtime_logging_capture()
+        detailed_runtime_logging, detailed_stream = _make_runtime_logging_capture()
+        detailed_runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+
+        basic_clock = FakeClock(initial_time=10.0)
+        detailed_clock = FakeClock(initial_time=20.0)
+        basic_hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=basic_clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=0,
+            runtime_logging=basic_runtime_logging,
+        )
+        detailed_hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=detailed_clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=0,
+            runtime_logging=detailed_runtime_logging,
+        )
+
+        try:
+            basic_utterance_id = uuid4()
+            await basic_hub.handle_vad_event(SpeechEnd(basic_utterance_id))
+            basic_clock.advance(0.05)
+            await basic_hub._handle_low_latency_final(
+                Transcript(
+                    utterance_id=basic_utterance_id,
+                    text="basic only",
+                    is_final=True,
+                    created_at=basic_clock.now(),
+                )
+            )
+
+            detailed_utterance_id = uuid4()
+            await detailed_hub.handle_vad_event(SpeechEnd(detailed_utterance_id))
+            detailed_clock.advance(0.05)
+            await detailed_hub._handle_low_latency_final(
+                Transcript(
+                    utterance_id=detailed_utterance_id,
+                    text="detailed trace",
+                    is_final=True,
+                    created_at=detailed_clock.now(),
+                )
+            )
+
+            basic_messages = _runtime_log_messages(basic_stream)
+            detailed_messages = _runtime_log_messages(detailed_stream)
+
+            assert not any("[Detailed][Latency]" in message for message in basic_messages)
+            assert any(
+                "[Detailed][Latency]" in message and "stage=speech_end" in message
+                for message in detailed_messages
+            )
+            assert any(
+                "[Detailed][Latency]" in message and "stage=stt_final" in message
+                for message in detailed_messages
+            )
+            assert any(
+                "[Detailed][Latency]" in message and "stage=self_chatbox_enqueue" in message
+                for message in detailed_messages
+            )
+        finally:
+            basic_runtime_logging.close()
+            detailed_runtime_logging.close()
+            await basic_hub.stop()
+            await detailed_hub.stop()
+
+    @pytest.mark.asyncio
+    async def test_detailed_latency_trace_survives_basic_to_detailed_mode_switch_mid_utterance(
+        self,
+    ):
+        runtime_logging, log_stream = _make_runtime_logging_capture()
+        clock = FakeClock(initial_time=10.0)
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=0,
+            runtime_logging=runtime_logging,
+        )
+        utterance_id = uuid4()
+
+        try:
+            await hub.handle_vad_event(SpeechEnd(utterance_id))
+            runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+            clock.advance(0.05)
+
+            await hub._handle_low_latency_final(
+                Transcript(
+                    utterance_id=utterance_id,
+                    text="mode switch",
+                    is_final=True,
+                    created_at=clock.now(),
+                )
+            )
+
+            messages = _runtime_log_messages(log_stream)
+            assert any(
+                "[Detailed][Latency]" in message and "stage=speech_end" in message
+                for message in messages
+            )
+            assert any(
+                "[Detailed][Latency]" in message and "stage=stt_final" in message
+                for message in messages
+            )
+        finally:
+            runtime_logging.close()
+            await hub.stop()
+
+    @pytest.mark.asyncio
+    async def test_low_latency_reused_spec_translation_logs_llm_stages_on_output_path(self):
+        runtime_logging, log_stream = _make_runtime_logging_capture()
+        runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+        clock = FakeClock(initial_time=10.0)
+        llm = FakeLLMProvider(response_text="translated", delay_s=0.0)
+        osc = FakeOscQueue()
+        hub = ClientHub(
+            stt=None,
+            llm=llm,
+            osc=osc,
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=0,
+            runtime_logging=runtime_logging,
+        )
+        utterance_id = uuid4()
+
+        try:
+            await hub.handle_vad_event(SpeechEnd(utterance_id))
+            clock.advance(0.05)
+            await hub._handle_low_latency_final(
+                Transcript(
+                    utterance_id=utterance_id,
+                    text="hello live",
+                    is_final=True,
+                    created_at=clock.now(),
+                )
+            )
+
+            spec_task = hub._merge_buffer.spec_task if hub._merge_buffer is not None else None
+            assert spec_task is not None
+            await asyncio.gather(spec_task, return_exceptions=True)
+
+            assert len(llm.calls) == 1
+            output_utterance_id = osc.messages[0].utterance_id
+            output_messages = [
+                message
+                for message in _runtime_log_messages(log_stream)
+                if "[Detailed][Latency]" in message
+                and f"utterance_id={str(output_utterance_id)[:8]}" in message
+            ]
+
+            assert any("stage=llm_request_start" in message for message in output_messages)
+            assert any("stage=llm_done" in message for message in output_messages)
+        finally:
+            runtime_logging.close()
+            await hub.stop()
+
+    @pytest.mark.asyncio
+    async def test_low_latency_self_output_path_uses_merge_id_for_detailed_traces(self):
+        runtime_logging, log_stream = _make_runtime_logging_capture()
+        runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+        clock = FakeClock(initial_time=10.0)
+        osc = FakeOscQueue()
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=osc,
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=0,
+            runtime_logging=runtime_logging,
+        )
+        source_utterance_id = uuid4()
+
+        try:
+            await hub.handle_vad_event(SpeechEnd(source_utterance_id))
+            clock.advance(0.05)
+            await hub._handle_low_latency_final(
+                Transcript(
+                    utterance_id=source_utterance_id,
+                    text="merge path",
+                    is_final=True,
+                    created_at=clock.now(),
+                )
+            )
+
+            output_utterance_id = osc.messages[0].utterance_id
+            messages = _runtime_log_messages(log_stream)
+            output_messages = [
+                message
+                for message in messages
+                if "[Detailed][Latency]" in message
+                and f"utterance_id={str(output_utterance_id)[:8]}" in message
+            ]
+            source_messages = [
+                message
+                for message in messages
+                if "[Detailed][Latency]" in message
+                and f"utterance_id={str(source_utterance_id)[:8]}" in message
+            ]
+
+            assert any("stage=speech_end" in message for message in output_messages)
+            assert any("stage=stt_final" in message for message in output_messages)
+            assert any("stage=self_chatbox_enqueue" in message for message in output_messages)
+            assert source_messages == []
+        finally:
+            runtime_logging.close()
+            await hub.stop()
+
+    @pytest.mark.asyncio
+    async def test_low_latency_final_mismatch_uses_final_request_for_official_llm_traces(self):
+        runtime_logging, log_stream = _make_runtime_logging_capture()
+        runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+        clock = FakeClock(initial_time=10.0)
+        llm = ClockedTranslateLLMProvider(
+            clock=clock,
+            responses=[(0.10, "spec translated"), (0.30, "final translated")],
+        )
+        osc = FakeOscQueue()
+        hub = ClientHub(
+            stt=None,
+            llm=llm,
+            osc=osc,
+            clock=clock,
+            low_latency_mode=True,
+            runtime_logging=runtime_logging,
+        )
+        source_utterance_id = uuid4()
+        merge_id = uuid4()
+        buffer = _MergeBuffer(
+            merge_id=merge_id,
+            parts=["final output"],
+            utterance_ids=[source_utterance_id],
+            start_time=10.0,
+            last_end_time=10.0,
+            spec_text="spec output",
+            spec_attempts=1,
+        )
+        hub._merge_buffer = buffer
+        hub._utterance_start_times[source_utterance_id] = 10.0
+
+        try:
+            hub._record_latency_stage(
+                channel="self",
+                utterance_id=source_utterance_id,
+                stage="speech_end",
+                timestamp=10.0,
+                publish_now=False,
+            )
+            hub._record_latency_stage(
+                channel="self",
+                utterance_id=source_utterance_id,
+                stage="stt_final",
+                timestamp=10.05,
+                publish_now=False,
+            )
+
+            await hub._run_spec_translation(merge_id, "spec output", 1)
+            await hub._commit_merge(buffer, reason="spec_done")
+
+            output_messages = [
+                message
+                for message in _runtime_log_messages(log_stream)
+                if "[Detailed][Latency]" in message
+                and f"utterance_id={str(merge_id)[:8]}" in message
+            ]
+
+            assert any("stage=llm_request_start" in message for message in output_messages)
+            assert any("stage=llm_done" in message for message in output_messages)
+            assert any(
+                "stage=llm_request_start" in message and "elapsed_ms=100" in message
+                for message in output_messages
+            )
+            assert any(
+                "stage=llm_done" in message and "elapsed_ms=400" in message
+                for message in output_messages
+            )
+            assert not any(
+                "stage=llm_request_start" in message and "elapsed_ms=50" in message
+                for message in output_messages
+            )
+            assert not any(
+                "stage=llm_done" in message and "elapsed_ms=100" in message
+                for message in output_messages
+            )
+        finally:
+            runtime_logging.close()
+            await hub.stop()
+
+    @pytest.mark.asyncio
+    async def test_low_latency_spec_cancel_drops_exploratory_llm_traces(self):
+        runtime_logging, log_stream = _make_runtime_logging_capture()
+        runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+        clock = FakeClock(initial_time=10.0)
+        llm = ClockedTranslateLLMProvider(
+            clock=clock,
+            responses=[(0.10, "spec translated")],
+        )
+        osc = FakeOscQueue()
+        hub = ClientHub(
+            stt=None,
+            llm=llm,
+            osc=osc,
+            clock=clock,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=0,
+            runtime_logging=runtime_logging,
+        )
+        source_utterance_id = uuid4()
+        merge_id = uuid4()
+        buffer = _MergeBuffer(
+            merge_id=merge_id,
+            parts=["final output"],
+            utterance_ids=[source_utterance_id],
+            start_time=10.0,
+            last_end_time=10.0,
+            spec_text="spec output",
+            spec_attempts=1,
+        )
+        hub._merge_buffer = buffer
+        hub._utterance_start_times[source_utterance_id] = 10.0
+
+        try:
+            hub._record_latency_stage(
+                channel="self",
+                utterance_id=source_utterance_id,
+                stage="speech_end",
+                timestamp=10.0,
+                publish_now=False,
+            )
+            hub._record_latency_stage(
+                channel="self",
+                utterance_id=source_utterance_id,
+                stage="stt_final",
+                timestamp=10.05,
+                publish_now=False,
+            )
+
+            await hub._run_spec_translation(merge_id, "spec output", 1)
+            assert hub._clear_spec_state(buffer, reason="spec_retry") is True
+            hub.llm = None
+            hub.translation_enabled = False
+
+            await hub._commit_merge(buffer, reason="final_no_llm")
+
+            output_messages = [
+                message
+                for message in _runtime_log_messages(log_stream)
+                if "[Detailed][Latency]" in message
+                and f"utterance_id={str(merge_id)[:8]}" in message
+            ]
+
+            assert any("stage=speech_end" in message for message in output_messages)
+            assert any("stage=stt_final" in message for message in output_messages)
+            assert any("stage=self_chatbox_enqueue" in message for message in output_messages)
+            assert not any("stage=llm_request_start" in message for message in output_messages)
+            assert not any("stage=llm_done" in message for message in output_messages)
+        finally:
+            runtime_logging.close()
+            await hub.stop()
 
     @pytest.mark.asyncio
     async def test_speech_end_before_stt_final_uses_post_end_phase(self):
