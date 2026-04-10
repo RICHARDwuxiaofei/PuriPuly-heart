@@ -12,6 +12,7 @@ from websockets.asyncio.server import Server, ServerConnection
 from websockets.exceptions import ConnectionClosed
 
 from .diagnostics import OverlayDiagnosticsRecorder
+from .manifest import normalize_overlay_logging_mode
 from .protocol import OverlayPresentationSnapshot
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ class OverlayBridge:
     port: int = 0
     overlay_instance_id: str | None = None
     diagnostics: OverlayDiagnosticsRecorder | None = None
+    runtime_logging_mode: str | None = None
 
     url: str = field(init=False, default="")
     messages: asyncio.Queue[dict[str, Any]] = field(
@@ -108,6 +110,10 @@ class OverlayBridge:
     async def broadcast_shutdown(self) -> None:
         await self._broadcast_json({"type": "shutdown"})
 
+    async def broadcast_runtime_control(self, *, logging_mode: str) -> None:
+        self.runtime_logging_mode = normalize_overlay_logging_mode(logging_mode)
+        await self._broadcast_json(self._runtime_control_payload())
+
     def snapshot(self) -> OverlayPresentationSnapshot:
         return self._snapshot
 
@@ -135,6 +141,8 @@ class OverlayBridge:
                         }
                     )
                 )
+                if self.runtime_logging_mode is not None:
+                    await connection.send(json.dumps(self._runtime_control_payload()))
                 self._authenticated_connections.add(connection)
                 authenticated = True
                 logger.info(
@@ -271,3 +279,11 @@ class OverlayBridge:
                 self.messages.get_nowait()
             except asyncio.QueueEmpty:
                 return
+
+    def _runtime_control_payload(self) -> dict[str, Any]:
+        return {
+            "type": "runtime_control",
+            "payload": {
+                "logging_mode": normalize_overlay_logging_mode(self.runtime_logging_mode or "basic")
+            },
+        }

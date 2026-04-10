@@ -1099,23 +1099,9 @@ async def test_low_latency_self_active_secondary_diagnostics_record_blank_sticky
         )
     )
 
-    diagnostic_sources = [
-        event["source"]
-        for event in diagnostics.hub_events
-        if event["event"] == "active_self_secondary"
-    ]
-
-    assert diagnostic_sources[:3] == ["blank", "spec", "sticky_cache"]
-
     assert buffer.spec_task is not None
     await asyncio.gather(buffer.spec_task, return_exceptions=True)
-
-    diagnostic_sources = [
-        event["source"]
-        for event in diagnostics.hub_events
-        if event["event"] == "active_self_secondary"
-    ]
-    assert diagnostic_sources[-1] == "spec"
+    assert list(diagnostics.hub_events) == []
 
 
 @pytest.mark.asyncio

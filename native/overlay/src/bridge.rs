@@ -5,6 +5,7 @@ use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
+use crate::logging::OverlayLoggingMode;
 use crate::manifest::OverlayManifest;
 use crate::state::OverlayPresentationSnapshot;
 
@@ -13,11 +14,17 @@ pub enum OverlayBridgeEvent {
     Shutdown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayRuntimeControl {
+    pub logging_mode: OverlayLoggingMode,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BridgeIncoming {
     Snapshot(OverlayPresentationSnapshot),
     Heartbeat,
     Event(OverlayBridgeEvent),
+    Control(OverlayRuntimeControl),
 }
 
 #[derive(Debug, Error)]
@@ -124,6 +131,22 @@ impl BridgeClient {
             "heartbeat" => Ok(BridgeIncoming::Heartbeat),
             "auth_error" => Err(BridgeError::Auth("bridge rejected session token".into())),
             "shutdown" => Ok(BridgeIncoming::Event(OverlayBridgeEvent::Shutdown)),
+            "runtime_control" => {
+                let payload = map.get("payload").cloned().ok_or_else(|| {
+                    BridgeError::Protocol("runtime_control payload missing".into())
+                })?;
+                let payload_map = payload.as_object().ok_or_else(|| {
+                    BridgeError::Protocol("runtime_control payload must be an object".into())
+                })?;
+                let logging_mode = payload_map.get("logging_mode").cloned().ok_or_else(|| {
+                    BridgeError::Protocol("runtime_control logging_mode missing".into())
+                })?;
+                let logging_mode = serde_json::from_value(logging_mode)
+                    .map_err(|error| BridgeError::Protocol(error.to_string()))?;
+                Ok(BridgeIncoming::Control(OverlayRuntimeControl {
+                    logging_mode,
+                }))
+            }
             _ => Err(BridgeError::Protocol(format!(
                 "unsupported bridge payload type: {event_type}"
             ))),

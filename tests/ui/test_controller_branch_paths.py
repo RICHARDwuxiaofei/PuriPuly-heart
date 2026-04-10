@@ -279,6 +279,7 @@ class FakeOverlayBridge:
         self.stopped = False
         self.snapshots: list[object] = []
         self.shutdown_calls = 0
+        self.runtime_control_messages: list[str] = []
         self.__class__.instances.append(self)
 
     async def start(self) -> None:
@@ -293,6 +294,9 @@ class FakeOverlayBridge:
 
     async def broadcast_shutdown(self) -> None:
         self.shutdown_calls += 1
+
+    async def broadcast_runtime_control(self, *, logging_mode: str) -> None:
+        self.runtime_control_messages.append(logging_mode)
 
     def snapshot(self):
         return self.current_snapshot
@@ -2332,6 +2336,40 @@ async def test_start_initializes_dashboard_and_bridge(
     assert hub.start_calls == [True]
     assert bridge_events[0] == ("init", app, hub.ui_events, controller.runtime_logging)
     assert "run" in bridge_events
+
+
+@pytest.mark.asyncio
+async def test_set_runtime_logging_mode_updates_overlay_runtime_contract() -> None:
+    class FakePage:
+        def __init__(self) -> None:
+            self.tasks: list[object] = []
+
+        def run_task(self, coro_fn) -> None:
+            self.tasks.append(coro_fn)
+
+    class OverlayManagerSpy:
+        def __init__(self) -> None:
+            self.modes: list[str] = []
+
+        def set_logging_mode(self, mode: str) -> None:
+            self.modes.append(mode)
+
+    page = FakePage()
+    controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
+    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=False)
+    controller._overlay_bridge = FakeOverlayBridge(session_token="token")
+    manager = OverlayManagerSpy()
+    controller._overlay_manager = manager  # type: ignore[assignment]
+
+    controller.set_runtime_logging_mode("detailed")
+
+    assert controller.runtime_logging_mode == "detailed"
+    assert manager.modes == ["detailed"]
+    assert len(page.tasks) == 1
+
+    await page.tasks[0]()
+
+    assert controller._overlay_bridge.runtime_control_messages == ["detailed"]
 
 
 @pytest.mark.asyncio

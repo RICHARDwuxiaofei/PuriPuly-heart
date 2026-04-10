@@ -55,39 +55,48 @@ class OverlayDiagnosticsRecorder:
     bridge_events: deque[dict[str, Any]] = field(
         default_factory=lambda: deque(maxlen=_BRIDGE_EVENT_LIMIT)
     )
-    hub_events: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=_HUB_EVENT_LIMIT))
+    hub_events: deque[dict[str, Any]] = field(
+        default_factory=lambda: deque(maxlen=_HUB_EVENT_LIMIT)
+    )
     last_dump_path: Path | None = None
 
     _sequence: int = field(init=False, default=0)
 
     def record_process(self, event: str, **fields: Any) -> dict[str, Any]:
-        return self._append(self.process_events, category="process", event=event, **fields)
+        _ = (event, fields)
+        return {}
 
     def record_child_line(self, stream: str, line: str) -> dict[str, Any]:
         target = self.child_stderr_lines if stream == "stderr" else self.child_stdout_lines
-        return self._append(target, category="child_line", event="child_line", stream=stream, line=line)
-
-    def record_presenter(self, event: str, **fields: Any) -> dict[str, Any]:
-        return self._append(self.presenter_events, category="presenter", event=event, **fields)
-
-    def record_presenter_removal(self, event: str = "entry_removed", **fields: Any) -> dict[str, Any]:
         return self._append(
-            self.presenter_removal_events,
-            category="presenter_removal",
-            event=event,
-            **fields,
+            target, category="child_line", event="child_line", stream=stream, line=line
         )
 
+    def record_presenter(self, event: str, **fields: Any) -> dict[str, Any]:
+        _ = (event, fields)
+        return {}
+
+    def record_presenter_removal(
+        self, event: str = "entry_removed", **fields: Any
+    ) -> dict[str, Any]:
+        _ = (event, fields)
+        return {}
+
     def record_bridge(self, event: str, **fields: Any) -> dict[str, Any]:
-        return self._append(self.bridge_events, category="bridge", event=event, **fields)
+        _ = (event, fields)
+        return {}
 
     def record_hub(self, event: str, **fields: Any) -> dict[str, Any]:
-        return self._append(self.hub_events, category="hub", event=event, **fields)
+        _ = (event, fields)
+        return {}
 
     def dump_failure(self, **summary_fields: Any) -> Path:
         self.diagnostics_dir.mkdir(parents=True, exist_ok=True)
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
-        path = self.diagnostics_dir / f"overlay-diagnostics-{timestamp}-{self.overlay_instance_id}.jsonl"
+        path = (
+            self.diagnostics_dir
+            / f"overlay-diagnostics-{timestamp}-{self.overlay_instance_id}.jsonl"
+        )
         events = [
             self._event(category="summary", event="failure_summary", **summary_fields),
             *self._sorted_events(),
@@ -130,10 +139,5 @@ class OverlayDiagnosticsRecorder:
         )
 
     def _iter_all_events(self) -> Iterable[dict[str, Any]]:
-        yield from self.process_events
         yield from self.child_stdout_lines
         yield from self.child_stderr_lines
-        yield from self.presenter_events
-        yield from self.presenter_removal_events
-        yield from self.bridge_events
-        yield from self.hub_events

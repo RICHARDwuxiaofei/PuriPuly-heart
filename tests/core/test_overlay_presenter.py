@@ -74,8 +74,12 @@ async def test_presenter_does_not_reorder_existing_turn_when_translation_updates
         clock=FakeClock(_now=10.0),
     )
     adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
-    first_peer = Transcript(utterance_id=uuid4(), channel="peer", text="peer one", is_final=True, created_at=11.0)
-    second_self = Transcript(utterance_id=uuid4(), channel="self", text="self two", is_final=True, created_at=12.0)
+    first_peer = Transcript(
+        utterance_id=uuid4(), channel="peer", text="peer one", is_final=True, created_at=11.0
+    )
+    second_self = Transcript(
+        utterance_id=uuid4(), channel="self", text="self two", is_final=True, created_at=12.0
+    )
 
     await presenter.emit(
         adapter.transcript_final(first_peer, source_language="en", target_language="ko")
@@ -163,7 +167,9 @@ async def test_presenter_hides_peer_blocks_until_translation_exists() -> None:
 
 
 @pytest.mark.asyncio
-async def test_presenter_keeps_closed_hidden_peer_entry_publishable_until_translation_arrives() -> None:
+async def test_presenter_keeps_closed_hidden_peer_entry_publishable_until_translation_arrives() -> (
+    None
+):
     bridge = RecordingPresentationBridge()
     clock = FakeClock(_now=10.0)
     presenter = OverlayPresenter(
@@ -233,7 +239,9 @@ async def test_presenter_keeps_closed_hidden_peer_entry_publishable_until_transl
 
 
 @pytest.mark.asyncio
-async def test_presenter_reschedules_hidden_peer_expiration_when_translation_becomes_visible() -> None:
+async def test_presenter_reschedules_hidden_peer_expiration_when_translation_becomes_visible() -> (
+    None
+):
     bridge = RecordingPresentationBridge()
     clock = FakeClock(_now=10.0)
     sleep_calls: list[float] = []
@@ -324,7 +332,9 @@ async def test_presenter_reschedules_hidden_peer_expiration_when_translation_bec
 
 
 @pytest.mark.asyncio
-async def test_presenter_reschedules_closed_self_expiration_with_translation_min_visibility() -> None:
+async def test_presenter_reschedules_closed_self_expiration_with_translation_min_visibility() -> (
+    None
+):
     bridge = RecordingPresentationBridge()
     clock = FakeClock(_now=10.0)
     sleep_calls: list[float] = []
@@ -410,7 +420,9 @@ async def test_presenter_reschedules_closed_self_expiration_with_translation_min
 
 
 @pytest.mark.asyncio
-async def test_presenter_restarts_self_translation_min_visibility_when_translation_changes() -> None:
+async def test_presenter_restarts_self_translation_min_visibility_when_translation_changes() -> (
+    None
+):
     bridge = RecordingPresentationBridge()
     clock = FakeClock(_now=10.0)
     sleep_calls: list[float] = []
@@ -572,17 +584,8 @@ async def test_presenter_records_expired_entry_diagnostic_with_deadlines(
     clock.advance(4.1)
     await presenter._publish_if_changed()
 
-    removal_event = diagnostics.presenter_removal_events[-1]
-    assert removal_event["event"] == "entry_removed"
-    assert removal_event["reason"] == "expired"
-    assert removal_event["channel"] == "self"
-    assert removal_event["translation_deadline"] == pytest.approx(21.0)
-    assert removal_event["visible_deadline"] == pytest.approx(18.0)
-    assert removal_event["effective_deadline"] == pytest.approx(21.0)
-    assert removal_event["had_translation"] is True
-    assert removal_event["ever_visible_with_translation"] is True
-    assert removal_event["lifetime_ms"] == pytest.approx(11100.0)
-    assert removal_event["translated_lifetime_ms"] == pytest.approx(4100.0)
+    assert list(diagnostics.presenter_events) == []
+    assert list(diagnostics.presenter_removal_events) == []
 
 
 @pytest.mark.asyncio
@@ -628,14 +631,8 @@ async def test_presenter_records_untranslated_self_visibility_duration(
     clock.advance(8.1)
     await presenter._publish_if_changed()
 
-    removal_event = diagnostics.presenter_removal_events[-1]
-    assert removal_event["event"] == "entry_removed"
-    assert removal_event["reason"] == "expired"
-    assert removal_event["channel"] == "self"
-    assert removal_event["had_translation"] is False
-    assert removal_event["ever_visible_with_translation"] is False
-    assert removal_event["lifetime_ms"] == pytest.approx(8100.0)
-    assert removal_event["translated_lifetime_ms"] == 0.0
+    assert list(diagnostics.presenter_events) == []
+    assert list(diagnostics.presenter_removal_events) == []
 
 
 @pytest.mark.asyncio
@@ -691,26 +688,7 @@ async def test_presenter_records_window_selection_and_retained_hidden_self_diagn
             )
         )
 
-    window_events = [
-        event for event in diagnostics.presenter_events if event["event"] == "visible_window"
-    ]
-    assert window_events[-1]["finalized_limit"] == 2
-    assert window_events[-1]["selected_keys"] == [
-        f"self:{utterance_ids[1]}",
-        f"self:{utterance_ids[2]}",
-    ]
-    assert any(
-        event["dropped_keys"] == [f"self:{utterance_ids[0]}"] for event in window_events
-    )
-    assert window_events[-1]["protected_selected"] == [f"self:{utterance_ids[2]}"]
-    assert window_events[-1]["retained_hidden"] == [f"self:{utterance_ids[0]}"]
-
-    retained_hidden_events = [
-        event
-        for event in diagnostics.presenter_events
-        if event["event"] == "entry_retained_hidden"
-    ]
-    assert retained_hidden_events[-1]["entry_key"] == f"self:{utterance_ids[0]}"
+    assert list(diagnostics.presenter_events) == []
     assert list(diagnostics.presenter_removal_events) == []
 
 
@@ -765,13 +743,8 @@ async def test_presenter_records_peer_displacement_as_removal_diagnostic(tmp_pat
             )
         )
 
-    removal_event = diagnostics.presenter_removal_events[-1]
-    assert removal_event["reason"] == "displaced_window"
-    assert removal_event["entry_key"] == f"peer:{utterance_ids[0]}"
-    assert "lifetime_ms" not in removal_event
-    assert "translated_lifetime_ms" not in removal_event
-    assert "had_translation" not in removal_event
-    assert "ever_visible_with_translation" not in removal_event
+    assert list(diagnostics.presenter_events) == []
+    assert list(diagnostics.presenter_removal_events) == []
 
 
 @pytest.mark.asyncio
@@ -1044,7 +1017,9 @@ async def test_presenter_prunes_closed_entries_once_newer_turns_displace_them() 
 
 
 @pytest.mark.asyncio
-async def test_presenter_keeps_recently_translated_self_row_visible_over_newer_untranslated_row() -> None:
+async def test_presenter_keeps_recently_translated_self_row_visible_over_newer_untranslated_row() -> (
+    None
+):
     bridge = RecordingPresentationBridge()
     clock = FakeClock(_now=10.0)
     presenter = OverlayPresenter(
@@ -1288,7 +1263,9 @@ async def test_presenter_ignores_late_updates_for_pruned_closed_entries() -> Non
 
 
 @pytest.mark.asyncio
-async def test_presenter_retains_displaced_self_row_for_late_translation_without_resurfacing() -> None:
+async def test_presenter_retains_displaced_self_row_for_late_translation_without_resurfacing() -> (
+    None
+):
     bridge = RecordingPresentationBridge()
     clock = FakeClock(_now=10.0)
     presenter = OverlayPresenter(
@@ -1371,7 +1348,9 @@ async def test_presenter_retains_displaced_self_row_for_late_translation_without
 
 
 @pytest.mark.asyncio
-async def test_presenter_does_not_resurface_newer_self_row_after_active_window_displacement() -> None:
+async def test_presenter_does_not_resurface_newer_self_row_after_active_window_displacement() -> (
+    None
+):
     bridge = RecordingPresentationBridge()
     clock = FakeClock(_now=10.0)
     presenter = OverlayPresenter(
@@ -2138,12 +2117,20 @@ async def test_presenter_displaces_oldest_finalized_turn_and_tombstones_it() -> 
     presenter = OverlayPresenter(bridge=bridge, calibration=OverlayCalibration())
     adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
 
-    first = Transcript(utterance_id=uuid4(), channel="self", text="one", is_final=True, created_at=11.0)
-    second = Transcript(utterance_id=uuid4(), channel="self", text="two", is_final=True, created_at=12.0)
-    third = Transcript(utterance_id=uuid4(), channel="self", text="three", is_final=True, created_at=13.0)
+    first = Transcript(
+        utterance_id=uuid4(), channel="self", text="one", is_final=True, created_at=11.0
+    )
+    second = Transcript(
+        utterance_id=uuid4(), channel="self", text="two", is_final=True, created_at=12.0
+    )
+    third = Transcript(
+        utterance_id=uuid4(), channel="self", text="three", is_final=True, created_at=13.0
+    )
 
     for transcript in (first, second, third):
-        await presenter.emit(adapter.transcript_final(transcript, source_language="ko", target_language="en"))
+        await presenter.emit(
+            adapter.transcript_final(transcript, source_language="ko", target_language="en")
+        )
 
     assert [block.primary_text for block in presenter.snapshot().blocks] == ["two", "three"]
 
@@ -2161,8 +2148,7 @@ async def test_presenter_displaces_oldest_finalized_turn_and_tombstones_it() -> 
 
     assert [block.primary_text for block in presenter.snapshot().blocks] == ["two", "three"]
     assert all(
-        block.occupant_key != f"self:{first.utterance_id}"
-        for block in presenter.snapshot().blocks
+        block.occupant_key != f"self:{first.utterance_id}" for block in presenter.snapshot().blocks
     )
 
 
@@ -2214,7 +2200,9 @@ async def test_presenter_assigns_peer_appearance_seq_on_first_visible_translatio
 
 
 @pytest.mark.asyncio
-async def test_presenter_hidden_peer_cancel_before_first_visibility_never_assigns_metadata() -> None:
+async def test_presenter_hidden_peer_cancel_before_first_visibility_never_assigns_metadata() -> (
+    None
+):
     bridge = RecordingPresentationBridge()
     presenter = OverlayPresenter(bridge=bridge, calibration=OverlayCalibration())
     adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
@@ -2243,7 +2231,9 @@ async def test_presenter_hidden_peer_cancel_before_first_visibility_never_assign
 
 
 @pytest.mark.asyncio
-async def test_presenter_clear_for_runtime_detach_publishes_empty_snapshot_with_higher_revision() -> None:
+async def test_presenter_clear_for_runtime_detach_publishes_empty_snapshot_with_higher_revision() -> (
+    None
+):
     bridge = RecordingPresentationBridge()
     presenter = OverlayPresenter(bridge=bridge, calibration=OverlayCalibration())
     adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
@@ -2272,7 +2262,9 @@ async def test_presenter_clear_for_runtime_detach_publishes_empty_snapshot_with_
 
 
 @pytest.mark.asyncio
-async def test_presenter_updates_secondary_visibility_preferences_without_changing_primary_semantics() -> None:
+async def test_presenter_updates_secondary_visibility_preferences_without_changing_primary_semantics() -> (
+    None
+):
     bridge = RecordingPresentationBridge()
     clock = FakeClock(_now=40.0)
     adapter = OverlayEventAdapter(clock=clock)

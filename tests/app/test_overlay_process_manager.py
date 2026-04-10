@@ -389,7 +389,7 @@ def test_default_overlay_process_runner_bundles_openvr_runtime_dll_next_to_overl
 
 
 @pytest.mark.asyncio
-async def test_overlay_process_manager_logs_tagged_overlay_child_lines(
+async def test_overlay_process_manager_logs_tagged_overlay_child_lines_in_detailed_mode(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -413,6 +413,7 @@ async def test_overlay_process_manager_logs_tagged_overlay_child_lines(
     manager = OverlayProcessManager(
         process_runner=DefaultOverlayProcessRunner(executable_path=script_path),
         startup_timeout_ms=500,
+        logging_mode="detailed",
     )
 
     try:
@@ -421,6 +422,48 @@ async def test_overlay_process_manager_logs_tagged_overlay_child_lines(
 
         assert manager.state == "connected"
         assert any("[overlay][INFO] child line" in message for message in caplog.messages)
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_basic_mode_hides_info_passthrough_but_keeps_warning_and_stderr(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script_path = tmp_path / "overlay_stub_basic_logs.py"
+    script_path.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import sys",
+                "import time",
+                "assert sys.argv[1] == '--config'",
+                'print("[overlay][INFO] hidden info", flush=True)',
+                'print("[overlay][WARN] visible warning", flush=True)',
+                'print("stderr-visible", file=sys.stderr, flush=True)',
+                'print(\'{"type": "overlay_ready"}\', flush=True)',
+                "time.sleep(5)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+    manager = OverlayProcessManager(
+        process_runner=DefaultOverlayProcessRunner(executable_path=script_path),
+        startup_timeout_ms=500,
+        logging_mode="basic",
+    )
+
+    try:
+        with caplog.at_level("INFO", logger="puripuly_heart.core.overlay.process"):
+            await manager.start()
+
+        assert manager.state == "connected"
+        assert not any("hidden info" in message for message in caplog.messages)
+        assert any("visible warning" in message for message in caplog.messages)
+        assert any("stderr-visible" in message for message in caplog.messages)
     finally:
         await manager.stop()
 
@@ -502,11 +545,13 @@ async def test_overlay_process_manager_writes_runtime_crash_dump_with_recent_chi
                 "#!/usr/bin/env python3",
                 "import sys",
                 "assert sys.argv[1] == '--config'",
+                'print("[overlay][WARN] warning-line-0", flush=True)',
+                'print("[overlay][WARN] warning-line-1", flush=True)',
                 "for index in range(105):",
-                '    print(f\"stdout-line-{index}\", flush=True)',
+                '    print(f"stdout-line-{index}", flush=True)',
                 "for index in range(3):",
-                '    print(f\"stderr-line-{index}\", file=sys.stderr, flush=True)',
-                'print(\'{\"type\": \"overlay_ready\"}\', flush=True)',
+                '    print(f"stderr-line-{index}", file=sys.stderr, flush=True)',
+                'print(\'{"type": "overlay_ready"}\', flush=True)',
                 "raise SystemExit(1)",
             ]
         ),
@@ -531,7 +576,9 @@ async def test_overlay_process_manager_writes_runtime_crash_dump_with_recent_chi
 
     dump_files = sorted(tmp_path.glob("overlay-diagnostics-*.jsonl"))
     assert len(dump_files) == 1
-    dump_rows = [json.loads(line) for line in dump_files[0].read_text(encoding="utf-8").splitlines()]
+    dump_rows = [
+        json.loads(line) for line in dump_files[0].read_text(encoding="utf-8").splitlines()
+    ]
 
     summary = dump_rows[0]
     assert summary["event"] == "failure_summary"
@@ -542,9 +589,10 @@ async def test_overlay_process_manager_writes_runtime_crash_dump_with_recent_chi
 
     stdout_rows = [row for row in dump_rows if row.get("stream") == "stdout"]
     stderr_rows = [row for row in dump_rows if row.get("stream") == "stderr"]
-    assert len(stdout_rows) == 100
-    assert "stdout-line-0" not in {row["line"] for row in stdout_rows}
-    assert "stdout-line-104" in {row["line"] for row in stdout_rows}
+    assert {row["line"] for row in stdout_rows} == {
+        "[overlay][WARN] warning-line-0",
+        "[overlay][WARN] warning-line-1",
+    }
     assert {row["line"] for row in stderr_rows} == {
         "stderr-line-0",
         "stderr-line-1",
