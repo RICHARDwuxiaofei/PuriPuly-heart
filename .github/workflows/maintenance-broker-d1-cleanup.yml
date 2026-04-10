@@ -130,7 +130,8 @@ jobs:
           Path(".maintenance-inspect.sql").write_text(sql.strip() + "\n", encoding="utf-8")
           PY
 
-          pnpm exec wrangler d1 execute puripuly-heart-broker --remote --config wrangler.production.jsonc --file .maintenance-inspect.sql --json > .maintenance-inspect.json
+          inspect_sql="$(tr '\n' ' ' < .maintenance-inspect.sql)"
+          pnpm exec wrangler d1 execute puripuly-heart-broker --remote --config wrangler.production.jsonc --command "$inspect_sql" --json > .maintenance-inspect.json
           cat .maintenance-inspect.json
 
       - name: Delete matching broker rows
@@ -191,5 +192,6 @@ jobs:
         shell: bash
         working-directory: broker
         run: |
-          pnpm exec wrangler d1 execute puripuly-heart-broker --remote --config wrangler.production.jsonc --file .maintenance-inspect.sql --json > .maintenance-post-delete.json
+          inspect_sql="$(tr '\n' ' ' < .maintenance-inspect.sql)"
+          pnpm exec wrangler d1 execute puripuly-heart-broker --remote --config wrangler.production.jsonc --command "$inspect_sql" --json > .maintenance-post-delete.json
           cat .maintenance-post-delete.json
