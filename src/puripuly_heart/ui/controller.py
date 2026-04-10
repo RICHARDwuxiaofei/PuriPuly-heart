@@ -314,7 +314,7 @@ class GuiController:
             dash.set_translation_enabled(False)
             dash.set_stt_enabled(False)
             self.hub.translation_enabled = False
-            await self._refresh_managed_trial_dashboard_state()
+            await self._refresh_managed_trial_usage_state()
 
         await self.hub.start(auto_flush_osc=True)
 
@@ -474,20 +474,35 @@ class GuiController:
         self._managed_trial_transient_message_key = message_key
         self._managed_trial_transient_message_kwargs = dict(message_kwargs or {})
 
-    def _schedule_managed_trial_dashboard_refresh(self) -> None:
+    def _managed_trial_remaining_percent(
+        self, usage_metadata: OpenRouterKeyMetadata | None
+    ) -> int | None:
+        if usage_metadata is None:
+            return None
+        if usage_metadata.limit_usd is None or usage_metadata.remaining_usd is None:
+            return None
+        if usage_metadata.limit_usd <= 0:
+            return None
+        return max(
+            0, min(100, round((usage_metadata.remaining_usd / usage_metadata.limit_usd) * 100))
+        )
+
+    def _schedule_managed_trial_usage_refresh(self) -> None:
         with contextlib.suppress(RuntimeError):
-            asyncio.get_running_loop().create_task(self._refresh_managed_trial_dashboard_state())
+            asyncio.get_running_loop().create_task(self._refresh_managed_trial_usage_state())
 
     def _on_managed_trial_delegate_ready(self) -> None:
         self._managed_trial_pending_auth = False
         self._set_managed_trial_transient_message(None)
-        self._schedule_managed_trial_dashboard_refresh()
+        self._schedule_managed_trial_usage_refresh()
 
-    async def _refresh_managed_trial_dashboard_state(self) -> None:
-        dash = getattr(self.app, "view_dashboard", None)
-        setter = getattr(dash, "set_managed_trial_state", None) if dash is not None else None
-        if not callable(setter):
-            return
+    async def _refresh_managed_trial_usage_state(self) -> None:
+        view_settings = getattr(self.app, "view_settings", None)
+        setter = (
+            getattr(view_settings, "set_managed_trial_usage_state", None)
+            if view_settings is not None
+            else None
+        )
         if (
             self.settings is None
             or self.settings.provider.llm != LLMProviderName.OPENROUTER
@@ -495,15 +510,11 @@ class GuiController:
         ):
             self._managed_trial_pending_auth = False
             self._set_managed_trial_transient_message(None)
-            setter(
-                visible=False,
-                lifecycle="pre_release",
-                transient_message_key=None,
-                transient_message_kwargs={},
-                usage_limit_usd=None,
-                usage_remaining_usd=None,
-                usage_used_usd=None,
-            )
+            if callable(setter):
+                setter(visible=False, remaining_percent=None)
+            return
+
+        if not callable(setter):
             return
 
         try:
@@ -518,39 +529,9 @@ class GuiController:
             self._managed_trial_pending_auth = False
             usage_metadata = await OpenRouterLLMProvider.fetch_key_metadata(api_key)
 
-        usage_metadata_complete = bool(
-            usage_metadata is not None
-            and usage_metadata.limit_usd is not None
-            and usage_metadata.remaining_usd is not None
-            and usage_metadata.usage_usd is not None
-        )
-        usage_snapshot = usage_metadata if usage_metadata_complete else None
-
-        lifecycle = "pre_release"
-        if self._managed_trial_transient_message_key in {
-            "managed_release.not_eligible",
-            "managed_release.unavailable",
-        }:
-            lifecycle = "unavailable"
-        elif api_key:
-            lifecycle = "usage-unavailable"
-            if usage_snapshot is not None:
-                lifecycle = "active"
-            if usage_snapshot is not None and usage_snapshot.remaining_usd <= 0:
-                lifecycle = "exhausted"
-        elif self._managed_trial_pending_auth or self.settings.managed_identity.release_token:
-            lifecycle = "pending_auth"
-
         setter(
             visible=True,
-            lifecycle=lifecycle,
-            transient_message_key=self._managed_trial_transient_message_key,
-            transient_message_kwargs=dict(self._managed_trial_transient_message_kwargs),
-            usage_limit_usd=usage_snapshot.limit_usd if usage_snapshot is not None else None,
-            usage_remaining_usd=(
-                usage_snapshot.remaining_usd if usage_snapshot is not None else None
-            ),
-            usage_used_usd=usage_snapshot.usage_usd if usage_snapshot is not None else None,
+            remaining_percent=self._managed_trial_remaining_percent(usage_metadata),
         )
 
     def _build_llm_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
@@ -1155,14 +1136,14 @@ class GuiController:
         if result.behavior == ManagedOpenRouterReleaseBehavior.READY:
             self._managed_trial_pending_auth = bool(result.pending_issue and not result.api_key)
             self._set_managed_trial_transient_message(None)
-            await self._refresh_managed_trial_dashboard_state()
+            await self._refresh_managed_trial_usage_state()
             if self.hub.llm is None:
                 await self._rebuild_llm_provider()
             return True
 
         self._managed_trial_pending_auth = False
         self._set_managed_trial_transient_message(result.message_key, dict(result.message_kwargs))
-        await self._refresh_managed_trial_dashboard_state()
+        await self._refresh_managed_trial_usage_state()
         self.hub.translation_enabled = False
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
@@ -1704,7 +1685,7 @@ class GuiController:
         if dash is not None:
             dash.set_translation_needs_key(llm is None)
 
-        await self._refresh_managed_trial_dashboard_state()
+        await self._refresh_managed_trial_usage_state()
 
         if llm is None:
             message = "LLM provider not available"
@@ -2521,4 +2502,4 @@ class GuiController:
         else:
             dash.set_stt_needs_key(False)
 
-        await self._refresh_managed_trial_dashboard_state()
+        await self._refresh_managed_trial_usage_state()

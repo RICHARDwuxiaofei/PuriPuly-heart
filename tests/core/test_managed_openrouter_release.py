@@ -87,6 +87,19 @@ class ClosableFakeManagedReleaseClient(FakeManagedReleaseClient):
         self.close_calls += 1
 
 
+class FailingManagedKeySecretStore(InMemorySecretStore):
+    def __init__(self, *, fail_on_key: str = OPENROUTER_MANAGED_API_KEY_SECRET) -> None:
+        super().__init__()
+        self.fail_on_key = fail_on_key
+        self.set_attempts: list[tuple[str, str]] = []
+
+    def set(self, key: str, value: str) -> None:
+        self.set_attempts.append((key, value))
+        super().set(key, value)
+        if key == self.fail_on_key:
+            raise RuntimeError("managed key persistence failed")
+
+
 def _make_service(
     *,
     client: FakeManagedReleaseClient,
@@ -235,6 +248,37 @@ async def test_prepare_for_translation_persists_verified_snapshot_and_issue_reus
     assert issue_payload["hardware_hash"] == expected_hardware_hash
     assert settings.managed_identity.verified_hardware_hash is None
     assert settings.managed_identity.verified_hardware_hash_salt_version is None
+
+
+@pytest.mark.asyncio
+async def test_prepare_for_translation_restarts_when_legacy_release_token_lacks_verified_snapshot() -> (
+    None
+):
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    settings.managed_identity.release_token = "release-token-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    client = FakeManagedReleaseClient()
+    persist_calls: list[tuple[str | None, str | None]] = []
+    service, _, _ = _make_service(
+        client=client,
+        settings=settings,
+        secrets=secrets,
+        persist_calls=persist_calls,
+    )
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.RESTART
+    assert result.message_key == "managed_release.restart"
+    assert settings.managed_identity.release_token is None
+    assert settings.managed_identity.release_token_expires_at is None
+    assert settings.managed_identity.verified_hardware_hash is None
+    assert settings.managed_identity.verified_hardware_hash_salt_version is None
+    assert persist_calls[-1][1] is None
+    assert client.calls == []
 
 
 @pytest.mark.asyncio
@@ -525,6 +569,92 @@ async def test_issue_restarts_when_identity_bundle_regenerates_before_issue() ->
 
     assert result.behavior == ManagedOpenRouterReleaseBehavior.RESTART
     assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_issue_stops_cleanly_when_managed_key_persistence_fails_after_successful_issue() -> (
+    None
+):
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = FailingManagedKeySecretStore()
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    secrets.set_attempts.clear()
+    settings.managed_identity.release_token = "release-token-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
+    client = FakeManagedReleaseClient(
+        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key")
+    )
+    persist_calls: list[tuple[str | None, str | None]] = []
+    service, _, _ = _make_service(
+        client=client,
+        settings=settings,
+        secrets=secrets,
+        persist_calls=persist_calls,
+    )
+
+    result = await service.ensure_key_for_llm_start()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.STOP
+    assert result.message_key == "managed_release.stop"
+    assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) is None
+    assert secrets.set_attempts == [(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")]
+    assert settings.managed_identity.release_token is None
+    assert settings.managed_identity.release_token_expires_at is None
+    assert settings.managed_identity.verified_hardware_hash is None
+    assert settings.managed_identity.verified_hardware_hash_salt_version is None
+    assert persist_calls[-1][1] is None
+    assert [name for name, _payload in client.calls] == ["issue"]
+
+
+@pytest.mark.asyncio
+async def test_issue_stops_and_restores_pending_release_state_when_cleanup_persist_fails() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = FailingManagedKeySecretStore()
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    secrets.set_attempts.clear()
+    settings.managed_identity.release_token = "release-token-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
+    client = FakeManagedReleaseClient(
+        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key")
+    )
+    persist_calls: list[tuple[str | None, str | None]] = []
+
+    def persist_and_fail(updated: AppSettings) -> None:
+        persist_calls.append(
+            (
+                updated.managed_identity.release_token,
+                updated.managed_identity.verified_hardware_hash,
+            )
+        )
+        raise RuntimeError("settings persistence failed")
+
+    service = ManagedOpenRouterReleaseService(
+        settings=settings,
+        secrets=secrets,
+        client=client,
+        persist_settings=persist_and_fail,
+        app_version="2.0.0",
+        raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
+        signed_at_provider=lambda: "2026-04-08T06:00:45.000Z",
+        monotonic_ms_provider=lambda: 1_000,
+    )
+
+    result = await service.ensure_key_for_llm_start()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.STOP
+    assert result.message_key == "managed_release.stop"
+    assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) is None
+    assert secrets.set_attempts == [(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")]
+    assert persist_calls == [(None, None)]
+    assert settings.managed_identity.release_token == "release-token-1"
+    assert settings.managed_identity.release_token_expires_at == "2026-04-08T06:15:00.000Z"
+    assert settings.managed_identity.verified_hardware_hash == "verified-hardware-hash-1"
+    assert settings.managed_identity.verified_hardware_hash_salt_version == 7
+    assert [name for name, _payload in client.calls] == ["issue"]
 
 
 @pytest.mark.asyncio

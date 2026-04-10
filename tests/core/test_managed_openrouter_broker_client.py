@@ -215,7 +215,7 @@ async def test_issue_parses_success_payload() -> None:
         },
     ],
 )
-async def test_issue_rejects_missing_or_null_required_success_fields(
+async def test_issue_accepts_missing_or_null_optional_success_fields(
     payload: dict[str, object],
 ) -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -234,23 +234,26 @@ async def test_issue_rejects_missing_or_null_required_success_fields(
 
     client, _transport = _build_client(handler)
 
-    with pytest.raises(ManagedOpenRouterReleaseError) as exc_info:
-        await client.issue(
-            {
-                "installation_id": "install-123",
-                "device_public_key": "device-public-key-123",
-                "release_token": "release-token-123",
-                "reason": "llm_start",
-                "budget_usd": 0.07,
-                "model": "google/gemma-4-26b-a4b-it",
-                "signed_at": "2026-04-10T06:00:45.000Z",
-                "signature": "signature-123",
-            }
-        )
+    result = await client.issue(
+        {
+            "installation_id": "install-123",
+            "device_public_key": "device-public-key-123",
+            "release_token": "release-token-123",
+            "reason": "llm_start",
+            "budget_usd": 0.07,
+            "model": "google/gemma-4-26b-a4b-it",
+            "signed_at": "2026-04-10T06:00:45.000Z",
+            "signature": "signature-123",
+        }
+    )
 
-    assert exc_info.value.code == "trial_unavailable"
-    assert exc_info.value.error_class == "retryable"
-    assert "malformed payload" in exc_info.value.message
+    assert result == ManagedOpenRouterIssueSuccess(
+        openrouter_api_key="managed-openrouter-api-key",
+        managed_credential_ref=(
+            payload.get("managed_credential_ref") if "managed_credential_ref" in payload else None
+        ),
+        expires_at=payload.get("expires_at") if "expires_at" in payload else None,
+    )
     await client.close()
 
 
@@ -297,6 +300,90 @@ async def test_nested_broker_error_envelope_becomes_release_error() -> None:
         subcode="broker_backoff",
         retry_after_ms=9000,
         message="broker is temporarily unavailable",
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_issue_preserves_managed_key_unrecoverable_subcode() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500,
+            json={
+                "error": {
+                    "code": "internal_error",
+                    "class": "terminal",
+                    "subcode": "managed_key_unrecoverable",
+                    "retry_after_ms": None,
+                    "message": "managed key could not be recovered",
+                }
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    with pytest.raises(ManagedOpenRouterReleaseError) as exc_info:
+        await client.issue(
+            {
+                "installation_id": "install-123",
+                "device_public_key": "device-public-key-123",
+                "release_token": "release-token-123",
+                "reason": "llm_start",
+                "budget_usd": 0.07,
+                "model": "google/gemma-4-26b-a4b-it",
+                "signed_at": "2026-04-10T06:00:45.000Z",
+                "signature": "signature-123",
+            }
+        )
+
+    assert exc_info.value == ManagedOpenRouterReleaseError(
+        code="internal_error",
+        error_class="terminal",
+        subcode="managed_key_unrecoverable",
+        retry_after_ms=None,
+        message="managed key could not be recovered",
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_issue_preserves_release_token_expired_error_code() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            json={
+                "error": {
+                    "code": "release_token_expired",
+                    "class": "retryable",
+                    "subcode": None,
+                    "retry_after_ms": None,
+                    "message": "release token expired",
+                }
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    with pytest.raises(ManagedOpenRouterReleaseError) as exc_info:
+        await client.issue(
+            {
+                "installation_id": "install-123",
+                "device_public_key": "device-public-key-123",
+                "release_token": "release-token-123",
+                "reason": "llm_start",
+                "budget_usd": 0.07,
+                "model": "google/gemma-4-26b-a4b-it",
+                "signed_at": "2026-04-10T06:00:45.000Z",
+                "signature": "signature-123",
+            }
+        )
+
+    assert exc_info.value == ManagedOpenRouterReleaseError(
+        code="release_token_expired",
+        error_class="retryable",
+        subcode=None,
+        retry_after_ms=None,
+        message="release token expired",
     )
     await client.close()
 

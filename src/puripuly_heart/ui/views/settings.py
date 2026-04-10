@@ -26,6 +26,7 @@ from puripuly_heart.config.settings import (
 from puripuly_heart.core.language import get_all_language_options, get_stt_compatibility_warning
 from puripuly_heart.ui.components.glow import GLOW_CARD, create_glow_stack
 from puripuly_heart.ui.components.language_modal import LanguageModal
+from puripuly_heart.ui.components.managed_trial_usage_bar import ManagedTrialUsageBar
 from puripuly_heart.ui.components.settings import (
     ApiKeyField,
     AudioSettings,
@@ -152,6 +153,8 @@ class SettingsView(ft.Column):
         self._overlay_calibration = OverlayCalibration()
         self._overlay_calibration_draft = self._overlay_calibration.copy()
         self._overlay_calibration_session_active = False
+        self._managed_trial_usage_visible = False
+        self._managed_trial_usage_remaining_percent: int | None = None
 
         # Build UI components
         self._build_ui()
@@ -403,6 +406,7 @@ class SettingsView(ft.Column):
                 self.show_snackbar(msg, bg) if self.show_snackbar else None
             ),
         )
+        self._managed_trial_usage_bar = ManagedTrialUsageBar()
         self._alibaba_key_beijing = ApiKeyField(
             "settings.alibaba_api_key_beijing",
             "alibaba_api_key_beijing",
@@ -430,6 +434,7 @@ class SettingsView(ft.Column):
                 self._deepgram_key,
                 self._soniox_key,
                 self._google_key,
+                self._managed_trial_usage_bar,
                 self._openrouter_key,
                 self._alibaba_key_beijing,
                 self._alibaba_key_singapore,
@@ -1140,6 +1145,26 @@ class SettingsView(ft.Column):
             return self._inherit_label()
         return settings.peer_soniox_stt.model
 
+    @property
+    def managed_trial_usage_state(self) -> dict[str, object]:
+        return {
+            "visible": self._managed_trial_usage_visible,
+            "remaining_percent": self._managed_trial_usage_remaining_percent,
+        }
+
+    def set_managed_trial_usage_state(
+        self, *, visible: bool, remaining_percent: int | None = None
+    ) -> None:
+        self._managed_trial_usage_visible = bool(visible)
+        if self._managed_trial_usage_visible and remaining_percent is not None:
+            self._managed_trial_usage_remaining_percent = max(0, min(100, int(remaining_percent)))
+        else:
+            self._managed_trial_usage_remaining_percent = None
+        self._sync_managed_trial_usage_bar()
+        if self.page:
+            with contextlib.suppress(Exception):
+                self._managed_trial_usage_bar.update()
+
     def _copy_provider_draft_fields(self, source: AppSettings, target: AppSettings) -> None:
         target.provider.stt = source.provider.stt
         target.provider.peer_stt = source.provider.peer_stt
@@ -1153,6 +1178,16 @@ class SettingsView(ft.Column):
         target.openrouter.selected_source = source.openrouter.selected_source
         target.qwen.llm_model = source.qwen.llm_model
         target.qwen.region = source.qwen.region
+        if source.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
+            target.managed_identity.verified_hardware_hash = (
+                source.managed_identity.verified_hardware_hash
+            )
+            target.managed_identity.verified_hardware_hash_salt_version = (
+                source.managed_identity.verified_hardware_hash_salt_version
+            )
+        else:
+            target.managed_identity.verified_hardware_hash = None
+            target.managed_identity.verified_hardware_hash_salt_version = None
         target.system_prompt = source.system_prompt
         target.system_prompts = copy.deepcopy(source.system_prompts)
 
@@ -1380,6 +1415,20 @@ class SettingsView(ft.Column):
                 field._last_verified_hash = ""
 
     # --- Visibility Updates ---
+    def _sync_managed_trial_usage_bar(self) -> None:
+        settings = self._build_settings_with_provider_draft()
+        managed_selected = bool(
+            settings is not None
+            and settings.provider.llm == LLMProviderName.OPENROUTER
+            and settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+        )
+        self._managed_trial_usage_bar.visible = managed_selected
+        self._managed_trial_usage_bar.set_percent(
+            self._managed_trial_usage_remaining_percent
+            if managed_selected and self._managed_trial_usage_visible
+            else None
+        )
+
     def _update_api_visibility(self) -> None:
         """Update API key field visibility based on selected providers."""
         settings = self._build_settings_with_provider_draft()
@@ -1398,6 +1447,7 @@ class SettingsView(ft.Column):
         self._soniox_key.visible = STTProviderName.SONIOX in active_stt_providers
 
         self._google_key.visible = llm == LLMProviderName.GEMINI
+        self._sync_managed_trial_usage_bar()
         self._openrouter_key.visible = (
             llm == LLMProviderName.OPENROUTER
             and settings.openrouter.selected_source == OpenRouterCredentialSource.BYOK
@@ -2860,6 +2910,7 @@ class SettingsView(ft.Column):
         self._deepgram_key.apply_locale()
         self._soniox_key.apply_locale()
         self._google_key.apply_locale()
+        self._managed_trial_usage_bar.apply_locale()
         self._openrouter_key.apply_locale()
         self._alibaba_key_beijing.apply_locale()
         self._alibaba_key_singapore.apply_locale()

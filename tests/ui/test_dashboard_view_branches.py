@@ -190,62 +190,12 @@ def test_dashboard_public_setters_update_components(monkeypatch: pytest.MonkeyPa
     assert view._recent_source_langs == ["a", "b", "c", "d", "e", "f"]
 
 
-def test_dashboard_managed_trial_card_renders_placeholder_and_live_usage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_dashboard_does_not_build_managed_trial_card(monkeypatch: pytest.MonkeyPatch) -> None:
     view = _make_dashboard(monkeypatch)
 
-    view.set_managed_trial_state(visible=True, lifecycle="pre_release")
-
-    assert view._managed_trial_card.visible is True
-    assert view._managed_trial_title.value == dashboard_module.t("provider.gemma4_free_trial")
-    assert view._managed_trial_lifecycle_value.value == dashboard_module.t(
-        "dashboard.trial.lifecycle.pre_release"
-    )
-    assert view._managed_trial_message_value.value == dashboard_module.t(
-        "dashboard.trial.message.placeholder"
-    )
-    assert view._managed_trial_progress.value == 0
-
-    view.set_managed_trial_state(
-        visible=True,
-        lifecycle="active",
-        usage_limit_usd=0.07,
-        usage_remaining_usd=0.05,
-        usage_used_usd=0.02,
-    )
-
-    assert view._managed_trial_lifecycle_value.value == dashboard_module.t(
-        "dashboard.trial.lifecycle.active"
-    )
-    assert view._managed_trial_message_value.value == dashboard_module.t(
-        "dashboard.trial.message.live_usage"
-    )
-    assert view._managed_trial_progress.value == pytest.approx(0.02 / 0.07)
-    assert view._managed_trial_used_value.value == "$0.02"
-    assert view._managed_trial_remaining_value.value == "$0.05"
-
-
-def test_dashboard_managed_trial_card_renders_usage_unavailable_state(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    view = _make_dashboard(monkeypatch)
-
-    view.set_managed_trial_state(visible=True, lifecycle="usage-unavailable")
-
-    assert view._managed_trial_lifecycle_value.value == dashboard_module.t(
-        "dashboard.trial.lifecycle.usage-unavailable"
-    )
-    assert view._managed_trial_message_value.value == dashboard_module.t(
-        "dashboard.trial.message.usage-unavailable"
-    )
-    assert view._managed_trial_progress.value == 0
-    assert view._managed_trial_used_value.value == dashboard_module.t(
-        "dashboard.trial.usage.placeholder"
-    )
-    assert view._managed_trial_remaining_value.value == dashboard_module.t(
-        "dashboard.trial.usage.placeholder"
-    )
+    assert len(view.controls) == 1
+    assert not hasattr(view, "_managed_trial_card")
+    assert not hasattr(view, "set_managed_trial_state")
 
 
 def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.MonkeyPatch) -> None:

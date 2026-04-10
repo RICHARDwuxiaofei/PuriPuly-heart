@@ -64,12 +64,20 @@ def _make_llm_selection_view(
     view._config_path = Path("settings.json")
     view.has_provider_changes = False
     view.has_pending_prompt_changes = False
+    view._managed_trial_usage_visible = False
+    view._managed_trial_usage_remaining_percent = None
     view._llm_text = SimpleNamespace(content=SimpleNamespace(value=""), update=lambda: None)
     view._openrouter_routing_text = SimpleNamespace(
         content=SimpleNamespace(value="", size=None),
         update=lambda: None,
     )
     view._openrouter_routing_row = SimpleNamespace(visible=False, update=lambda: None)
+    view._managed_trial_usage_bar = SimpleNamespace(
+        visible=False, percent=None, update=lambda: None
+    )
+    view._managed_trial_usage_bar.set_percent = lambda percent: setattr(
+        view._managed_trial_usage_bar, "percent", percent
+    )
     view._qwen_region_btn = SimpleNamespace(visible=False, update=lambda: None)
     view._api_keys_column = SimpleNamespace(update=lambda: None)
     view._deepgram_key = SimpleNamespace(visible=False)
@@ -269,7 +277,52 @@ def test_update_api_visibility_hides_openrouter_key_for_managed_trial(
     view._update_api_visibility()
 
     assert view._openrouter_key.visible is False
+    assert view._managed_trial_usage_bar.visible is True
     assert view._openrouter_routing_row.visible is True
+
+
+def test_load_from_settings_shows_managed_usage_bar_in_api_keys_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._managed_trial_usage_bar in view._api_keys_column.controls
+    assert view._managed_trial_usage_bar.visible is True
+    assert view._openrouter_key.visible is False
+
+
+def test_set_managed_trial_usage_state_tracks_visible_and_remaining_percent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view.set_managed_trial_usage_state(visible=True, remaining_percent=71)
+
+    assert view.managed_trial_usage_state == {
+        "visible": True,
+        "remaining_percent": 71,
+    }
+    assert view._managed_trial_usage_bar.visible is True
+    assert view._managed_trial_usage_bar.percent == 71
+
+    view.set_managed_trial_usage_state(visible=False, remaining_percent=12)
+
+    assert view.managed_trial_usage_state == {
+        "visible": False,
+        "remaining_percent": None,
+    }
+    assert view._managed_trial_usage_bar.visible is True
+    assert view._managed_trial_usage_bar.percent is None
 
 
 def test_update_api_visibility_hides_openrouter_routing_for_non_openrouter(
@@ -454,6 +507,51 @@ def test_on_llm_selected_openrouter_provider_value_defaults_to_managed_trial(
     assert pending.provider.llm == LLMProviderName.OPENROUTER
     assert pending.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert view._llm_text.content.value == t("provider.gemma4_free_trial")
+
+
+def test_on_llm_selected_leaving_managed_mode_clears_verified_hardware_hash_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.managed_identity.verified_hardware_hash = "hardware-hash"
+    settings.managed_identity.verified_hardware_hash_salt_version = 7
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_llm_selected(OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value)
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.openrouter.selected_source == OpenRouterCredentialSource.BYOK
+    assert pending.managed_identity.verified_hardware_hash is None
+    assert pending.managed_identity.verified_hardware_hash_salt_version is None
+
+
+def test_on_llm_selected_round_trips_back_to_managed_without_dropping_verified_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.managed_identity.verified_hardware_hash = "hardware-hash"
+    settings.managed_identity.verified_hardware_hash_salt_version = 7
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_llm_selected(OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value)
+    view._on_llm_selected(settings_view._OPENROUTER_MANAGED_OPTION_VALUE)
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert pending.managed_identity.verified_hardware_hash == "hardware-hash"
+    assert pending.managed_identity.verified_hardware_hash_salt_version == 7
 
 
 def test_on_llm_selected_switching_away_from_openrouter_clears_selected_source(

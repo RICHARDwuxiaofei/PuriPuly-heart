@@ -73,6 +73,7 @@ class DummyDashboard:
         self.languages: tuple[str, str] | None = None
         self.recent_languages: tuple[list[str], list[str]] | None = None
         self.managed_trial_state: dict[str, object] | None = None
+        self.managed_trial_calls: list[dict[str, object]] = []
         self.is_translation_on: bool = True
         self.on_recent_languages_change = None
 
@@ -99,12 +100,14 @@ class DummyDashboard:
         self.recent_languages = (source, target)
 
     def set_managed_trial_state(self, **state: object) -> None:
+        self.managed_trial_calls.append(dict(state))
         self.managed_trial_state = dict(state)
 
 
 class DummySettingsView:
     def __init__(self) -> None:
         self.calls: list[tuple[AppSettings, Path, bool]] = []
+        self.managed_trial_usage_state: dict[str, object] | None = None
 
     def load_from_settings(
         self,
@@ -114,6 +117,14 @@ class DummySettingsView:
         preserve_custom_vocab_draft: bool = False,
     ) -> None:
         self.calls.append((settings, config_path, preserve_custom_vocab_draft))
+
+    def set_managed_trial_usage_state(
+        self, *, visible: bool, remaining_percent: int | None = None
+    ) -> None:
+        self.managed_trial_usage_state = {
+            "visible": visible,
+            "remaining_percent": remaining_percent,
+        }
 
 
 class DummyLogsView:
@@ -711,7 +722,10 @@ async def test_set_translation_enabled_runs_managed_release_prepare_before_enabl
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dash = DummyDashboard()
-    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
     controller.settings = AppSettings()
     controller.settings.provider.llm = LLMProviderName.OPENROUTER
     controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
@@ -744,18 +758,25 @@ async def test_set_translation_enabled_runs_managed_release_prepare_before_enabl
     assert controller._managed_openrouter_release_service.prepare_calls == 1
     assert controller.hub.translation_enabled is True
     assert controller.hub.clear_context_calls == 1
-    assert dash.managed_trial_state is not None
-    assert dash.managed_trial_state["lifecycle"] == "pending_auth"
+    assert settings_view.managed_trial_usage_state == {
+        "visible": True,
+        "remaining_percent": None,
+    }
+    assert dash.managed_trial_calls == []
 
 
 @pytest.mark.asyncio
-async def test_set_translation_enabled_keeps_managed_translation_disabled_on_retry_result() -> None:
+async def test_set_translation_enabled_keeps_managed_translation_disabled_on_retry_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     snackbar_calls: list[tuple[str, str]] = []
     dash = DummyDashboard()
+    settings_view = DummySettingsView()
     controller = _make_controller(
         app=SimpleNamespace(
             _show_snackbar=lambda message, color: snackbar_calls.append((message, color)),
             view_dashboard=dash,
+            view_settings=settings_view,
         )
     )
     controller.settings = AppSettings()
@@ -771,6 +792,20 @@ async def test_set_translation_enabled_keeps_managed_translation_disabled_on_ret
         )
     )
 
+    async def fail_fetch_key_metadata(_api_key: str):
+        raise AssertionError("fetch_key_metadata should not run without a managed key")
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fail_fetch_key_metadata),
+    )
+
     await controller.set_translation_enabled(True)
 
     assert controller._managed_openrouter_release_service.prepare_calls == 1
@@ -779,8 +814,11 @@ async def test_set_translation_enabled_keeps_managed_translation_disabled_on_ret
     assert snackbar_calls == [
         (t("managed_release.retry_after_ms", retry_after_ms=5000), ft.Colors.ORANGE_700)
     ]
-    assert dash.managed_trial_state is not None
-    assert dash.managed_trial_state["transient_message_key"] == "managed_release.retry_after_ms"
+    assert settings_view.managed_trial_usage_state == {
+        "visible": True,
+        "remaining_percent": None,
+    }
+    assert dash.managed_trial_calls == []
 
 
 def test_verified_key_and_runtime_signature_depend_on_region_and_settings() -> None:
@@ -2399,6 +2437,7 @@ async def test_start_keeps_managed_openrouter_dashboard_toggle_available_without
 
     dash = DummyDashboard()
     logs = DummyLogsView()
+    settings_view = DummySettingsView()
     hub = DummyHub(llm=object(), stt=object())
 
     async def fake_init_pipeline(self) -> None:
@@ -2432,24 +2471,31 @@ async def test_start_keeps_managed_openrouter_dashboard_toggle_available_without
 
     monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
 
-    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash, view_logs=logs))
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_logs=logs, view_settings=settings_view)
+    )
 
     await controller.start()
     await asyncio.sleep(0)
 
     assert dash.translation_needs_key is False
     assert dash.translation_enabled is False
-    assert dash.managed_trial_state is not None
-    assert dash.managed_trial_state["visible"] is True
-    assert dash.managed_trial_state["lifecycle"] == "pre_release"
+    assert settings_view.managed_trial_usage_state == {
+        "visible": True,
+        "remaining_percent": None,
+    }
+    assert dash.managed_trial_calls == []
 
 
 @pytest.mark.asyncio
-async def test_refresh_managed_trial_dashboard_state_uses_live_openrouter_usage(
+async def test_refresh_managed_trial_usage_state_uses_settings_view_live_openrouter_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dash = DummyDashboard()
-    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
     controller.settings = AppSettings()
     controller.settings.provider.llm = LLMProviderName.OPENROUTER
     controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
@@ -2479,25 +2525,71 @@ async def test_refresh_managed_trial_dashboard_state_uses_live_openrouter_usage(
         staticmethod(fake_fetch_key_metadata),
     )
 
-    await controller._refresh_managed_trial_dashboard_state()
+    await controller._refresh_managed_trial_usage_state()
 
-    assert dash.managed_trial_state == {
+    assert settings_view.managed_trial_usage_state == {
         "visible": True,
-        "lifecycle": "active",
-        "transient_message_key": None,
-        "transient_message_kwargs": {},
-        "usage_limit_usd": 0.07,
-        "usage_remaining_usd": 0.05,
-        "usage_used_usd": 0.02,
+        "remaining_percent": 71,
     }
+    assert dash.managed_trial_calls == []
 
 
 @pytest.mark.asyncio
-async def test_refresh_managed_trial_dashboard_state_marks_usage_unavailable_when_metadata_missing(
+async def test_refresh_managed_trial_usage_state_computes_remaining_percent_without_usage_usd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dash = DummyDashboard()
-    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+
+    class DummySecretsForTrial:
+        def get(self, key: str) -> str | None:
+            if key == "openrouter_managed_api_key":
+                return "managed-key"
+            return None
+
+    async def fake_fetch_key_metadata(_api_key: str):
+        return controller_module.OpenRouterKeyMetadata(
+            limit_usd=0.07,
+            remaining_usd=0.05,
+            usage_usd=None,
+        )
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecretsForTrial(),
+    )
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fake_fetch_key_metadata),
+    )
+
+    await controller._refresh_managed_trial_usage_state()
+
+    assert settings_view.managed_trial_usage_state == {
+        "visible": True,
+        "remaining_percent": 71,
+    }
+    assert dash.managed_trial_calls == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_managed_trial_usage_state_marks_usage_unavailable_when_metadata_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
     controller.settings = AppSettings()
     controller.settings.provider.llm = LLMProviderName.OPENROUTER
     controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
@@ -2532,26 +2624,25 @@ async def test_refresh_managed_trial_dashboard_state_marks_usage_unavailable_whe
         staticmethod(fake_fetch_key_metadata),
     )
 
-    await controller._refresh_managed_trial_dashboard_state()
-    await controller._refresh_managed_trial_dashboard_state()
+    await controller._refresh_managed_trial_usage_state()
+    await controller._refresh_managed_trial_usage_state()
 
-    assert dash.managed_trial_state == {
+    assert settings_view.managed_trial_usage_state == {
         "visible": True,
-        "lifecycle": "usage-unavailable",
-        "transient_message_key": None,
-        "transient_message_kwargs": {},
-        "usage_limit_usd": None,
-        "usage_remaining_usd": None,
-        "usage_used_usd": None,
+        "remaining_percent": None,
     }
+    assert dash.managed_trial_calls == []
 
 
 @pytest.mark.asyncio
-async def test_refresh_managed_trial_dashboard_state_marks_usage_unavailable_when_metadata_is_incomplete(
+async def test_refresh_managed_trial_usage_state_marks_usage_unavailable_when_limit_or_remaining_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dash = DummyDashboard()
-    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
     controller.settings = AppSettings()
     controller.settings.provider.llm = LLMProviderName.OPENROUTER
     controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
@@ -2571,8 +2662,8 @@ async def test_refresh_managed_trial_dashboard_state_marks_usage_unavailable_whe
         ),
         controller_module.OpenRouterKeyMetadata(
             limit_usd=0.07,
-            remaining_usd=0.0,
-            usage_usd=None,
+            remaining_usd=None,
+            usage_usd=0.02,
         ),
     ]
 
@@ -2590,18 +2681,14 @@ async def test_refresh_managed_trial_dashboard_state_marks_usage_unavailable_whe
         staticmethod(fake_fetch_key_metadata),
     )
 
-    await controller._refresh_managed_trial_dashboard_state()
-    await controller._refresh_managed_trial_dashboard_state()
+    await controller._refresh_managed_trial_usage_state()
+    await controller._refresh_managed_trial_usage_state()
 
-    assert dash.managed_trial_state == {
+    assert settings_view.managed_trial_usage_state == {
         "visible": True,
-        "lifecycle": "usage-unavailable",
-        "transient_message_key": None,
-        "transient_message_kwargs": {},
-        "usage_limit_usd": None,
-        "usage_remaining_usd": None,
-        "usage_used_usd": None,
+        "remaining_percent": None,
     }
+    assert dash.managed_trial_calls == []
 
 
 @pytest.mark.asyncio

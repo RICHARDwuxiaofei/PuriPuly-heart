@@ -281,6 +281,13 @@ class ManagedOpenRouterReleaseService:
         if retry_result is not None:
             return retry_result
         if _normalize_optional_text(self.settings.managed_identity.release_token) is not None:
+            if self._verified_snapshot() is None:
+                clear_temporary_managed_release_state(self.settings)
+                self.persist_settings(self.settings)
+                return ManagedOpenRouterReleaseResult(
+                    behavior=ManagedOpenRouterReleaseBehavior.RESTART,
+                    message_key="managed_release.restart",
+                )
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.READY,
                 message_key="managed_release.ready",
@@ -355,19 +362,15 @@ class ManagedOpenRouterReleaseService:
                 behavior=ManagedOpenRouterReleaseBehavior.RESTART,
                 message_key="managed_release.restart",
             )
-        verified_hardware_hash = _normalize_optional_text(
-            self.settings.managed_identity.verified_hardware_hash
-        )
-        verified_hardware_hash_salt_version = (
-            self.settings.managed_identity.verified_hardware_hash_salt_version
-        )
-        if verified_hardware_hash is None or verified_hardware_hash_salt_version is None:
+        verified_snapshot = self._verified_snapshot()
+        if verified_snapshot is None:
             clear_temporary_managed_release_state(self.settings)
             self.persist_settings(self.settings)
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.RESTART,
                 message_key="managed_release.restart",
             )
+        verified_hardware_hash, _verified_hardware_hash_salt_version = verified_snapshot
         issue_request = bundle.sign_issue_request(
             release_token=release_token,
             reason="llm_start",
@@ -381,7 +384,40 @@ class ManagedOpenRouterReleaseService:
         except ManagedOpenRouterReleaseError as exc:
             return self._handle_release_error(exc)
 
-        self.secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, issue_response.openrouter_api_key)
+        try:
+            self.secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, issue_response.openrouter_api_key)
+        except Exception:
+            previous_release_token = self.settings.managed_identity.release_token
+            previous_release_token_expires_at = (
+                self.settings.managed_identity.release_token_expires_at
+            )
+            previous_verified_hardware_hash = self.settings.managed_identity.verified_hardware_hash
+            previous_verified_hardware_hash_salt_version = (
+                self.settings.managed_identity.verified_hardware_hash_salt_version
+            )
+            try:
+                self.secrets.delete(OPENROUTER_MANAGED_API_KEY_SECRET)
+            except Exception:
+                pass
+            clear_temporary_managed_release_state(self.settings)
+            try:
+                self.persist_settings(self.settings)
+            except Exception:
+                self.settings.managed_identity.release_token = previous_release_token
+                self.settings.managed_identity.release_token_expires_at = (
+                    previous_release_token_expires_at
+                )
+                self.settings.managed_identity.verified_hardware_hash = (
+                    previous_verified_hardware_hash
+                )
+                self.settings.managed_identity.verified_hardware_hash_salt_version = (
+                    previous_verified_hardware_hash_salt_version
+                )
+            self._clear_retry_after()
+            return ManagedOpenRouterReleaseResult(
+                behavior=ManagedOpenRouterReleaseBehavior.STOP,
+                message_key="managed_release.stop",
+            )
         clear_temporary_managed_release_state(self.settings)
         self.persist_settings(self.settings)
         self._clear_retry_after()
@@ -483,6 +519,17 @@ class ManagedOpenRouterReleaseService:
                 raise ValueError("hardware_hash_provider must return a non-empty string")
             return normalized_hardware_hash
         raise RuntimeError("managed hardware fingerprint provider is not configured")
+
+    def _verified_snapshot(self) -> tuple[str, int] | None:
+        verified_hardware_hash = _normalize_optional_text(
+            self.settings.managed_identity.verified_hardware_hash
+        )
+        verified_hardware_hash_salt_version = (
+            self.settings.managed_identity.verified_hardware_hash_salt_version
+        )
+        if verified_hardware_hash is None or verified_hardware_hash_salt_version is None:
+            return None
+        return verified_hardware_hash, verified_hardware_hash_salt_version
 
     def _result_for_retry_after_window(self) -> ManagedOpenRouterReleaseResult | None:
         if self._retry_after_deadline_ms is None:

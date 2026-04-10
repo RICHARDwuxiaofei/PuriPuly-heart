@@ -24,6 +24,7 @@ PUBLIC_ERROR_CODES = frozenset(
         "rate_limited",
         "challenge_expired",
         "challenge_invalid",
+        "release_token_expired",
         "issuance_suspended",
         "trial_unavailable",
         "trial_not_eligible",
@@ -94,8 +95,8 @@ class HttpManagedOpenRouterBrokerClient:
         try:
             return ManagedOpenRouterIssueSuccess(
                 openrouter_api_key=_require_text(payload, "openrouter_api_key"),
-                managed_credential_ref=_require_text(payload, "managed_credential_ref"),
-                expires_at=_require_text(payload, "expires_at"),
+                managed_credential_ref=_require_optional_text(payload, "managed_credential_ref"),
+                expires_at=_require_optional_text(payload, "expires_at"),
             )
         except ValueError as exc:
             raise _retryable_error("issue", f"broker returned malformed payload: {exc}") from exc

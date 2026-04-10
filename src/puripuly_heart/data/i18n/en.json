@@ -63,6 +63,8 @@
   "settings.openrouter_routing.parasail_first.description": "Prefer Parasail first, then fall back to Novita",
   "settings.openrouter_routing.novita_first": "Novita First",
   "settings.openrouter_routing.novita_first.description": "Prefer Novita first, then fall back to Parasail",
+  "settings.managed_trial_usage.remaining_placeholder": "--% remaining",
+  "settings.managed_trial_usage.remaining": "{percent}% remaining",
   "settings.prompt_for": "Prompt for: {provider}",
   "settings.system_prompt": "System Prompt",
   "settings.reset_prompt": "Reset Prompt",
