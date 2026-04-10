@@ -691,17 +691,23 @@ class GuiController:
             presenter = self._overlay_presenter
             overlay_instance_id = f"overlay-{secrets.token_hex(8)}"
             diagnostics = OverlayDiagnosticsRecorder(overlay_instance_id=overlay_instance_id)
+
+            def runtime_log_detailed(message: str, *, level: int = logging.INFO) -> bool:
+                return self.log_detailed(message, level=level)
+
             if presenter is None:
                 presenter = OverlayPresenter(
                     calibration=self.overlay_calibration.copy(),
                     clock=self.clock,
                     diagnostics=diagnostics,
+                    runtime_log_detailed=runtime_log_detailed,
                     show_translation=self.settings.ui.show_overlay_translation,
                     show_peer_original=self.settings.ui.show_overlay_peer_original,
                 )
                 self._overlay_presenter = presenter
             else:
                 presenter.diagnostics = diagnostics
+                presenter.runtime_log_detailed = runtime_log_detailed
             bridge = OverlayBridge(
                 session_token=secrets.token_urlsafe(16),
                 initial_snapshot=presenter.snapshot(),

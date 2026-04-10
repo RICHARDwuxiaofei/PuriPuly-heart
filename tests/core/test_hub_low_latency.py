@@ -201,8 +201,10 @@ class TestRuntimeLatencyLogging:
             latency_message = next(message for message in messages if "[Basic][Latency]" in message)
 
             assert "channel=self" in latency_message
-            assert "speech_end_to_final_output_ms=250" in latency_message
+            assert "e2e_ms=250" in latency_message
             assert "final_output_stage=self_chatbox_enqueue" in latency_message
+            assert "speech_end_to_stt_final_ms=" not in latency_message
+            assert "stt_final_to_final_output_ms=" not in latency_message
             assert "hangover" not in latency_message
         finally:
             runtime_logging.close()
@@ -264,6 +266,7 @@ class TestRuntimeLatencyLogging:
             detailed_messages = _runtime_log_messages(detailed_stream)
 
             assert not any("[Detailed][Latency]" in message for message in basic_messages)
+            assert not any("[Detailed][LatencyBreakdown]" in message for message in basic_messages)
             assert any(
                 "[Detailed][Latency]" in message and "stage=speech_end" in message
                 for message in detailed_messages
@@ -274,6 +277,14 @@ class TestRuntimeLatencyLogging:
             )
             assert any(
                 "[Detailed][Latency]" in message and "stage=self_chatbox_enqueue" in message
+                for message in detailed_messages
+            )
+            assert any(
+                "[Detailed][LatencyBreakdown]" in message
+                and "channel=self" in message
+                and "speech_end_to_stt_final_ms=50" in message
+                and "stt_final_to_final_output_ms=0" in message
+                and "final_output_stage=self_chatbox_enqueue" in message
                 for message in detailed_messages
             )
         finally:

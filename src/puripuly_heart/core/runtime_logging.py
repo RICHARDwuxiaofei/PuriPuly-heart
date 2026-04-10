@@ -73,19 +73,13 @@ LATENCY_TRACE_POINT_CONTRACTS: dict[str, LatencyTracePointContract] = {
 def format_basic_latency_summary(
     *,
     channel: str,
-    speech_end_to_final_output_ms: int,
+    e2e_ms: int,
     final_output_stage: str,
-    speech_end_to_stt_final_ms: int | None = None,
-    stt_final_to_final_output_ms: int | None = None,
 ) -> str:
     parts = [
         f"channel={channel}",
-        f"speech_end_to_final_output_ms={speech_end_to_final_output_ms}",
+        f"e2e_ms={e2e_ms}",
     ]
-    if speech_end_to_stt_final_ms is not None:
-        parts.append(f"speech_end_to_stt_final_ms={speech_end_to_stt_final_ms}")
-    if stt_final_to_final_output_ms is not None:
-        parts.append(f"stt_final_to_final_output_ms={stt_final_to_final_output_ms}")
     parts.append(f"final_output_stage={final_output_stage}")
     return f"[Basic][Latency] {' '.join(parts)}"
 
@@ -101,6 +95,26 @@ def format_detailed_latency_trace(
         f"[Detailed][Latency] channel={channel} utterance_id={utterance_id} "
         f"stage={stage} elapsed_ms={elapsed_ms}"
     )
+
+
+def format_detailed_latency_breakdown(
+    *,
+    channel: str,
+    e2e_ms: int,
+    final_output_stage: str,
+    speech_end_to_stt_final_ms: int | None = None,
+    stt_final_to_final_output_ms: int | None = None,
+) -> str:
+    parts = [
+        f"channel={channel}",
+        f"e2e_ms={e2e_ms}",
+    ]
+    if speech_end_to_stt_final_ms is not None:
+        parts.append(f"speech_end_to_stt_final_ms={speech_end_to_stt_final_ms}")
+    if stt_final_to_final_output_ms is not None:
+        parts.append(f"stt_final_to_final_output_ms={stt_final_to_final_output_ms}")
+    parts.append(f"final_output_stage={final_output_stage}")
+    return f"[Detailed][LatencyBreakdown] {' '.join(parts)}"
 
 
 class RealtimeLogSink(Protocol):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -17,8 +18,13 @@ from puripuly_heart.core.overlay.sink import (
     SelfTranscriptFinal,
     TranslationFinal,
 )
+from puripuly_heart.core.runtime_logging import SessionLoggingMode
 from puripuly_heart.domain.models import Transcript
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
+from tests.core.test_hub_branch_coverage import (
+    _make_runtime_logging_capture,
+    _runtime_log_messages,
+)
 
 
 @dataclass(slots=True)
@@ -2340,3 +2346,69 @@ async def test_presenter_updates_secondary_visibility_preferences_without_changi
     assert peer_block.primary_text == "peer translation"
     assert peer_block.secondary_text == "peer original"
     assert peer_block.secondary_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_presenter_snapshot_publish_logs_only_to_detailed_runtime_logging() -> None:
+    basic_runtime_logging, basic_stream = _make_runtime_logging_capture()
+    detailed_runtime_logging, detailed_stream = _make_runtime_logging_capture()
+    detailed_runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+
+    def basic_runtime_log_detailed(message: str, *, level: int = logging.INFO) -> bool:
+        return basic_runtime_logging.emit_detailed(message, level=level)
+
+    def detailed_runtime_log_detailed(message: str, *, level: int = logging.INFO) -> bool:
+        return detailed_runtime_logging.emit_detailed(message, level=level)
+
+    basic_presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        clock=FakeClock(_now=10.0),
+        runtime_log_detailed=basic_runtime_log_detailed,
+    )
+    detailed_presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        clock=FakeClock(_now=10.0),
+        runtime_log_detailed=detailed_runtime_log_detailed,
+    )
+    basic_adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    detailed_adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+
+    try:
+        await basic_presenter.emit(
+            basic_adapter.transcript_final(
+                Transcript(
+                    utterance_id=uuid4(),
+                    channel="self",
+                    text="hello basic",
+                    is_final=True,
+                    created_at=11.0,
+                ),
+                source_language="ko",
+                target_language="en",
+            )
+        )
+        await detailed_presenter.emit(
+            detailed_adapter.transcript_final(
+                Transcript(
+                    utterance_id=uuid4(),
+                    channel="self",
+                    text="hello detailed",
+                    is_final=True,
+                    created_at=11.0,
+                ),
+                source_language="ko",
+                target_language="en",
+            )
+        )
+
+        assert not any(
+            "[OverlayPresenter] Snapshot publish" in message
+            for message in _runtime_log_messages(basic_stream)
+        )
+        assert any(
+            "[OverlayPresenter] Snapshot publish" in message
+            for message in _runtime_log_messages(detailed_stream)
+        )
+    finally:
+        basic_runtime_logging.close()
+        detailed_runtime_logging.close()

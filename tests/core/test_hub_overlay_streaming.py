@@ -328,9 +328,10 @@ async def test_peer_overlay_first_emit_latency_summary_and_detailed_trace() -> N
         )
 
         assert "channel=peer" in basic_latency_message
-        assert "speech_end_to_final_output_ms=180" in basic_latency_message
+        assert "e2e_ms=180" in basic_latency_message
         assert "final_output_stage=peer_overlay_first_emit" in basic_latency_message
         assert not any("[Detailed][Latency]" in message for message in basic_messages)
+        assert not any("[Detailed][LatencyBreakdown]" in message for message in basic_messages)
 
         for stage in (
             "speech_end",
@@ -344,6 +345,14 @@ async def test_peer_overlay_first_emit_latency_summary_and_detailed_trace() -> N
                 "[Detailed][Latency]" in message and f"stage={stage}" in message
                 for message in detailed_messages
             )
+        assert any(
+            "[Detailed][LatencyBreakdown]" in message
+            and "channel=peer" in message
+            and "speech_end_to_stt_final_ms=30" in message
+            and "stt_final_to_final_output_ms=150" in message
+            and "final_output_stage=peer_overlay_first_emit" in message
+            for message in detailed_messages
+        )
     finally:
         basic_runtime_logging.close()
         detailed_runtime_logging.close()

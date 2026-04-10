@@ -29,8 +29,6 @@ from .sink import (
     UtteranceClosed,
 )
 
-logger = logging.getLogger(__name__)
-
 VISIBLE_WINDOW_TARGET_BLOCKS = 2
 _ACTIVE_SELF_BLOCK_ID = "self:active"
 _CLOSED_TOMBSTONE_LIMIT = 64
@@ -44,6 +42,10 @@ class OverlayPresentationTransport(Protocol):
     async def replace_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None: ...
 
     async def broadcast_shutdown(self) -> None: ...
+
+
+class RuntimeDetailedLogger(Protocol):
+    def __call__(self, message: str, *, level: int = logging.INFO) -> bool: ...
 
 
 @dataclass(slots=True)
@@ -86,6 +88,7 @@ class OverlayPresenter(OverlaySink):
     calibration: OverlayCalibration
     bridge: OverlayPresentationTransport | None = None
     diagnostics: OverlayDiagnosticsRecorder | None = None
+    runtime_log_detailed: RuntimeDetailedLogger | None = None
     clock: Clock = field(default_factory=SystemClock)
     sleep: SleepFn = asyncio.sleep
     visible_window_target_blocks: int = VISIBLE_WINDOW_TARGET_BLOCKS
@@ -116,6 +119,14 @@ class OverlayPresenter(OverlaySink):
             calibration=_calibration_from_overlay(self.calibration),
             blocks=[],
         )
+
+    def _emit_detailed(self, message: str, *, level: int = logging.INFO) -> bool:
+        if self.runtime_log_detailed is None:
+            return False
+        try:
+            return self.runtime_log_detailed(message, level=level)
+        except Exception:
+            return False
 
     def attach_bridge(self, bridge: OverlayPresentationTransport) -> None:
         self.bridge = bridge
@@ -346,20 +357,23 @@ class OverlayPresenter(OverlaySink):
             calibration=next_calibration,
             blocks=next_blocks,
         )
-        logger.info(
-            "[OverlayPresenter] Snapshot publish: revision=%s block_count=%s bridge_attached=%s blocks=%s",
-            self._snapshot.revision,
-            len(next_blocks),
-            self.bridge is not None,
-            [
-                {
-                    "id": block.id,
-                    "variant": block.block_variant,
-                    "primary_len": len(block.primary_text),
-                    "secondary_len": len(block.secondary_text),
-                }
-                for block in next_blocks
-            ],
+        blocks_summary = [
+            {
+                "id": block.id,
+                "variant": block.block_variant,
+                "primary_len": len(block.primary_text),
+                "secondary_len": len(block.secondary_text),
+            }
+            for block in next_blocks
+        ]
+        self._emit_detailed(
+            "[OverlayPresenter] Snapshot publish: revision=%s block_count=%s bridge_attached=%s blocks=%s"
+            % (
+                self._snapshot.revision,
+                len(next_blocks),
+                self.bridge is not None,
+                blocks_summary,
+            ),
         )
         if self.diagnostics is not None:
             self.diagnostics.record_presenter(
@@ -367,15 +381,7 @@ class OverlayPresenter(OverlaySink):
                 revision=self._snapshot.revision,
                 block_count=len(next_blocks),
                 bridge_attached=self.bridge is not None,
-                blocks=[
-                    {
-                        "id": block.id,
-                        "variant": block.block_variant,
-                        "primary_len": len(block.primary_text),
-                        "secondary_len": len(block.secondary_text),
-                    }
-                    for block in next_blocks
-                ],
+                blocks=blocks_summary,
             )
         if self.bridge is not None:
             await self.bridge.replace_snapshot(self._snapshot)
@@ -679,7 +685,9 @@ class OverlayPresenter(OverlaySink):
             self._expire_entry_after_ttl(key, entry.expiration_revision)
         )
 
-    async def _expire_entry_after_ttl(self, key: tuple[str, UUID], expiration_revision: int) -> None:
+    async def _expire_entry_after_ttl(
+        self, key: tuple[str, UUID], expiration_revision: int
+    ) -> None:
         try:
             while True:
                 entry = self._entries.get(key)

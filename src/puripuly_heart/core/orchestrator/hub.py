@@ -29,6 +29,7 @@ from puripuly_heart.core.overlay.sink import (
 from puripuly_heart.core.runtime_logging import (
     SessionRuntimeLoggingService,
     format_basic_latency_summary,
+    format_detailed_latency_breakdown,
     format_detailed_latency_trace,
 )
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadEvent
@@ -348,7 +349,14 @@ class ClientHub:
         self._emit_basic(
             format_basic_latency_summary(
                 channel=channel,
-                speech_end_to_final_output_ms=speech_end_to_final_output_ms,
+                e2e_ms=speech_end_to_final_output_ms,
+                final_output_stage=final_output_stage,
+            )
+        )
+        self._emit_detailed(
+            format_detailed_latency_breakdown(
+                channel=channel,
+                e2e_ms=speech_end_to_final_output_ms,
                 speech_end_to_stt_final_ms=speech_end_to_stt_final_ms,
                 stt_final_to_final_output_ms=stt_final_to_final_output_ms,
                 final_output_stage=final_output_stage,
