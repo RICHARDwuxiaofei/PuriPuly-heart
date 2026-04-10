@@ -1124,20 +1124,51 @@ mod tests {
     }
 
     #[test]
-    fn runtime_detects_peer_overlay_first_render_blocks_from_caption_blocks() {
-        let pending = HashSet::from([String::from("peer:newer")]);
+    fn runtime_only_detects_peer_first_render_for_canonical_pending_peer_block_ids() {
+        let pending = HashSet::from([
+            String::from("peer:11111111-1111-1111-1111-111111111111"),
+            String::from("peer:22222222-2222-2222-2222-222222222222"),
+            String::from("peer:missing"),
+        ]);
         let blocks = vec![
             CaptionBlock::new("self:older", "older")
                 .with_channel(CaptionChannel::SelfChannel)
                 .with_variant(CaptionBlockVariant::Finalized),
-            CaptionBlock::new("peer:newer", "newer")
+            CaptionBlock::new("peer:not-pending", "not pending")
                 .with_channel(CaptionChannel::PeerChannel)
                 .with_variant(CaptionBlockVariant::Finalized),
+            CaptionBlock::new("peer:active", "active")
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_variant(CaptionBlockVariant::ActiveSelf),
+            CaptionBlock::new("peer:blank", "")
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_variant(CaptionBlockVariant::Finalized),
+            CaptionBlock::new(
+                "peer:11111111-1111-1111-1111-111111111111",
+                "translated",
+            )
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_variant(CaptionBlockVariant::Finalized),
+            CaptionBlock::new(
+                "peer:22222222-2222-2222-2222-222222222222",
+                "newer",
+            )
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_variant(CaptionBlockVariant::Finalized),
+            CaptionBlock::new(
+                "peer:33333333-3333-3333-3333-333333333333/render-primary",
+                "synthetic suffix form",
+            )
+            .with_channel(CaptionChannel::PeerChannel)
+            .with_variant(CaptionBlockVariant::Finalized),
         ];
 
         assert_eq!(
             peer_overlay_first_render_block_ids_from_caption_blocks(&blocks, &pending),
-            vec!["peer:newer".to_string()]
+            vec![
+                "peer:11111111-1111-1111-1111-111111111111".to_string(),
+                "peer:22222222-2222-2222-2222-222222222222".to_string(),
+            ]
         );
     }
 
