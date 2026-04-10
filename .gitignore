@@ -228,6 +228,9 @@ Installer_output/
 /scripts/ci/*
 !/scripts/ci/build-release-artifacts.ps1
 !/scripts/ci/read-project-version.py
+!/scripts/installer/
+/scripts/installer/*
+!/scripts/installer/install-local-stt-model.ps1
 .codex/
 .agent/
 .agents/
