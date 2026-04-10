@@ -24,50 +24,33 @@ class TestLogsView:
         assert view._folder_button.text == logs_module.t("logs.open_folder")
         assert view._folder_button.content is None
 
-    def test_logs_view_supports_switch_variants_that_require_label_style(self):
-        original_switch = logs_module.ft.Switch
-        captured: dict[str, object] = {}
+    def test_logs_view_exposes_mode_button_with_current_mode_label_and_icon(self):
+        view = LogsView()
 
-        def fake_switch(*args, **kwargs):
-            captured["kwargs"] = dict(kwargs)
-            if "label_text_style" in kwargs:
-                raise TypeError(
-                    "Switch.__init__() got an unexpected keyword argument 'label_text_style'"
-                )
-            kwargs.pop("label_style", None)
-            return original_switch(*args, **kwargs)
+        assert view.runtime_logging_mode == "basic"
+        assert view._mode_button.text == logs_module.t("logs.mode.basic")
+        assert view._mode_button.icon == logs_module.ft.Icons.ARTICLE
+        assert view._mode_button.content is None
 
-        with patch.object(logs_module.ft, "Switch", new=fake_switch):
-            view = LogsView()
-
-        assert "label_style" in captured["kwargs"]
-        assert "label_text_style" not in captured["kwargs"]
-        assert view._mode_toggle.label == logs_module.t("logs.mode.toggle")
-
-    def test_logs_view_exposes_detailed_mode_toggle_and_status(self):
+    def test_logs_view_mode_button_toggles_mode_and_notifies_listener(self):
         view = LogsView()
         seen: list[str] = []
 
         view.on_mode_change = lambda mode: seen.append(mode)
 
-        assert view.runtime_logging_mode == "basic"
-        assert view._mode_toggle.label == logs_module.t("logs.mode.toggle")
-        assert view._mode_toggle.value is False
-        assert view._mode_status_text.value == logs_module.t(
-            "logs.mode.status",
-            mode=logs_module.t("logs.mode.basic"),
-        )
-
         with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
-            view._on_mode_toggle(SimpleNamespace(control=SimpleNamespace(value=True)))
+            view._on_mode_button_click(SimpleNamespace())
 
         assert view.runtime_logging_mode == "detailed"
-        assert view._mode_toggle.value is True
-        assert view._mode_status_text.value == logs_module.t(
-            "logs.mode.status",
-            mode=logs_module.t("logs.mode.detailed"),
-        )
+        assert view._mode_button.text == logs_module.t("logs.mode.detailed")
         assert seen == ["detailed"]
+
+        with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
+            view._on_mode_button_click(SimpleNamespace())
+
+        assert view.runtime_logging_mode == "basic"
+        assert view._mode_button.text == logs_module.t("logs.mode.basic")
+        assert seen == ["detailed", "basic"]
 
     def test_logs_view_preserves_existing_lines_when_switching_back_to_basic(self):
         model = LiveLogViewModel()
@@ -156,11 +139,8 @@ class TestLogsView:
         assert view._title_text.value == logs_module.t("logs.title")
         assert view._folder_button.text == logs_module.t("logs.open_folder")
         assert view._folder_button.content is None
-        assert view._mode_toggle.label == logs_module.t("logs.mode.toggle")
-        assert view._mode_status_text.value == logs_module.t(
-            "logs.mode.status",
-            mode=logs_module.t("logs.mode.detailed"),
-        )
+        assert view._mode_button.text == logs_module.t("logs.mode.detailed")
+        assert view._mode_button.icon == logs_module.ft.Icons.ARTICLE
 
     def test_open_log_folder_uses_platform_specific_launcher(self):
         view = LogsView()
