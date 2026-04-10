@@ -726,6 +726,7 @@ class GuiController:
                 initial_snapshot=presenter.snapshot(),
                 overlay_instance_id=overlay_instance_id,
                 diagnostics=diagnostics,
+                runtime_logging_mode=self.runtime_logging_mode,
             )
             await bridge.start()
             presenter.attach_bridge(bridge)
@@ -741,7 +742,7 @@ class GuiController:
                 locale=self.settings.ui.locale,
                 startup_timeout_ms=OVERLAY_STARTUP_TIMEOUT_MS,
                 overlay_instance_id=overlay_instance_id,
-                diagnostics_enabled=True,
+                logging_mode=self.runtime_logging_mode,
                 diagnostics=diagnostics,
             )
             self._overlay_manager = manager
@@ -2243,6 +2244,45 @@ class GuiController:
 
     def set_runtime_logging_mode(self, mode: SessionLoggingMode | str) -> None:
         self.runtime_logging.set_mode(mode)
+        normalized_mode = self.runtime_logging.mode.value
+        manager = self._overlay_manager
+        if manager is not None:
+            set_logging_mode = getattr(manager, "set_logging_mode", None)
+            if callable(set_logging_mode):
+                set_logging_mode(normalized_mode)
+        self._schedule_overlay_runtime_logging_mode_update()
+
+    async def _emit_overlay_runtime_logging_mode_update(self) -> None:
+        bridge = self._overlay_bridge
+        if bridge is None:
+            return
+        await bridge.broadcast_runtime_control(logging_mode=self.runtime_logging_mode)
+
+    def _schedule_overlay_runtime_logging_mode_update(self) -> None:
+        bridge = self._overlay_bridge
+        if bridge is None:
+            return
+
+        run_task = getattr(self.page, "run_task", None)
+        if callable(run_task):
+            try:
+                run_task(self._emit_overlay_runtime_logging_mode_update)
+                return
+            except Exception as exc:
+                self.log_detailed(
+                    "[Overlay] Failed to schedule logging mode update via page.run_task",
+                    level=logging.WARNING,
+                    exception=exc,
+                )
+                return
+
+        try:
+            asyncio.get_running_loop().create_task(self._emit_overlay_runtime_logging_mode_update())
+        except RuntimeError:
+            self.log_detailed(
+                "[Overlay] Skipping logging mode update; no running loop and page.run_task unavailable",
+                level=logging.WARNING,
+            )
 
     def log_basic(self, message: str, *, level: int = logging.INFO) -> None:
         try:

@@ -17,7 +17,11 @@ from uuid import uuid4
 from puripuly_heart import __version__
 
 from .diagnostics import OverlayDiagnosticsRecorder, default_overlay_diagnostics_dir
-from .manifest import OVERLAY_CONTRACT_VERSION, OverlayLaunchManifest
+from .manifest import (
+    OVERLAY_CONTRACT_VERSION,
+    OverlayLaunchManifest,
+    normalize_overlay_logging_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +48,7 @@ class OverlayManagedProcess(Protocol):
     async def next_event(self) -> dict[str, object]: ...
     async def wait(self) -> int | None: ...
     async def terminate(self) -> None: ...
+    def set_logging_mode(self, mode: str) -> None: ...
 
 
 class OverlayProcessRunner(Protocol):
@@ -62,6 +67,7 @@ class _AsyncioOverlayProcess:
     _events: asyncio.Queue[dict[str, object]] = field(default_factory=asyncio.Queue)
     _reader_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     _diagnostics: OverlayDiagnosticsRecorder | None = None
+    _logging_mode: str = field(init=False, default="basic")
 
     def __post_init__(self) -> None:
         self._start_reader(self.process.stdout, "stdout")
@@ -75,6 +81,9 @@ class _AsyncioOverlayProcess:
     ) -> None:
         self._diagnostics = diagnostics
         self.overlay_instance_id = overlay_instance_id
+
+    def set_logging_mode(self, mode: str) -> None:
+        self._logging_mode = normalize_overlay_logging_mode(mode)
 
     async def next_event(self) -> dict[str, object]:
         return await self._events.get()
@@ -102,12 +111,16 @@ class _AsyncioOverlayProcess:
                 if not raw_line:
                     return
                 line = raw_line.decode("utf-8", errors="replace").strip()
-                if line and self._diagnostics is not None:
-                    self._diagnostics.record_child_line(stream_name, line)
                 event = self._parse_event_line(line)
                 if event is not None:
                     await self._events.put(event)
                     continue
+                if (
+                    line
+                    and self._diagnostics is not None
+                    and self._should_capture_failure_line(line, stream_name)
+                ):
+                    self._diagnostics.record_child_line(stream_name, line)
                 self._log_passthrough_line(line, stream_name)
         except asyncio.CancelledError:
             raise
@@ -138,7 +151,11 @@ class _AsyncioOverlayProcess:
         if "[WARN]" in line:
             logger.warning(line)
             return
-        logger.info(line)
+        if self._logging_mode == "detailed":
+            logger.info(line)
+
+    def _should_capture_failure_line(self, line: str, stream_name: str) -> bool:
+        return stream_name == "stderr" or "[WARN]" in line or "[ERROR]" in line
 
     async def _finish_readers(self) -> None:
         tasks = self._reader_tasks
@@ -182,10 +199,13 @@ class DefaultOverlayProcessRunner:
         executable_path: Path,
         manifest_path: Path,
     ) -> OverlayManagedProcess:
+        command: tuple[str, ...]
+        if executable_path.suffix.lower() == ".py":
+            command = (str(sys.executable), str(executable_path), "--config", str(manifest_path))
+        else:
+            command = (str(executable_path), "--config", str(manifest_path))
         process = await asyncio.create_subprocess_exec(
-            str(executable_path),
-            "--config",
-            str(manifest_path),
+            *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -329,7 +349,7 @@ class OverlayProcessManager:
     locale: str = "en"
     log_dir: str = "logs"
     log_level: str = "INFO"
-    diagnostics_enabled: bool = False
+    logging_mode: str = "basic"
     overlay_instance_id: str = field(default_factory=lambda: f"overlay-{uuid4()}")
     diagnostics_dir: Path = field(default_factory=default_overlay_diagnostics_dir)
     diagnostics: OverlayDiagnosticsRecorder | None = None
@@ -348,11 +368,20 @@ class OverlayProcessManager:
     _failure_dumped: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
+        self.logging_mode = normalize_overlay_logging_mode(self.logging_mode)
         if self.diagnostics is None:
             self.diagnostics = OverlayDiagnosticsRecorder(
                 overlay_instance_id=self.overlay_instance_id,
                 diagnostics_dir=self.diagnostics_dir,
             )
+
+    def set_logging_mode(self, mode: str) -> None:
+        self.logging_mode = normalize_overlay_logging_mode(mode)
+        process = self._process
+        if process is not None:
+            set_logging_mode = getattr(process, "set_logging_mode", None)
+            if callable(set_logging_mode):
+                set_logging_mode(self.logging_mode)
 
     async def start(self) -> None:
         if self.state in {"starting", "connected"}:
@@ -370,13 +399,15 @@ class OverlayProcessManager:
         try:
             executable_path = self.process_runner.prepare(manifest)
             self._executable_path = executable_path
-            self._executable_mtime = executable_path.stat().st_mtime if executable_path.exists() else None
+            self._executable_mtime = (
+                executable_path.stat().st_mtime if executable_path.exists() else None
+            )
             self._record_process(
                 "spawn_requested",
                 pid=os.getpid(),
                 executable_path=executable_path,
                 executable_mtime=self._executable_mtime,
-                diagnostics_enabled=self.diagnostics_enabled,
+                logging_mode=self.logging_mode,
             )
             self._manifest_path = self._write_manifest(manifest)
             self._record_process("manifest_written", manifest_path=self._manifest_path)
@@ -424,7 +455,7 @@ class OverlayProcessManager:
             log_dir=self.log_dir,
             log_level=self.log_level,
             locale=self.locale,
-            diagnostics_enabled=self.diagnostics_enabled,
+            logging_mode=self.logging_mode,
         )
 
     def _write_manifest(self, manifest: OverlayLaunchManifest) -> Path:
@@ -631,12 +662,20 @@ class OverlayProcessManager:
         self.failure_reason = failure_reason
         self.restart_scheduled = False
         self._current_phase = "failed"
-        stdout_count = len(self.diagnostics.child_stdout_lines) if self.diagnostics is not None else 0
-        stderr_count = len(self.diagnostics.child_stderr_lines) if self.diagnostics is not None else 0
+        stdout_count = (
+            len(self.diagnostics.child_stdout_lines) if self.diagnostics is not None else 0
+        )
+        stderr_count = (
+            len(self.diagnostics.child_stderr_lines) if self.diagnostics is not None else 0
+        )
         self._record_process(
             "failure",
             failure_reason=failure_reason,
-            phase="connected" if self._last_transition in {"overlay_ready", "bridge_ready"} else "startup",
+            phase=(
+                "connected"
+                if self._last_transition in {"overlay_ready", "bridge_ready"}
+                else "startup"
+            ),
             exit_code=self._last_exit_code,
             stdout_count=stdout_count,
             stderr_count=stderr_count,
@@ -644,7 +683,11 @@ class OverlayProcessManager:
         logger.error(
             "[OverlayProcess] Failure: overlay_instance_id=%s phase=%s failure_reason=%s exit_code=%s last_transition=%s stdout_lines=%s stderr_lines=%s",
             self.overlay_instance_id,
-            "connected" if self._last_transition in {"overlay_ready", "bridge_ready"} else "startup",
+            (
+                "connected"
+                if self._last_transition in {"overlay_ready", "bridge_ready"}
+                else "startup"
+            ),
             failure_reason,
             self._last_exit_code,
             self._last_transition,
@@ -655,7 +698,11 @@ class OverlayProcessManager:
         if self.diagnostics is not None and not self._failure_dumped:
             self.diagnostics.dump_failure(
                 failure_reason=failure_reason,
-                phase="connected" if self._last_transition in {"overlay_ready", "bridge_ready"} else "startup",
+                phase=(
+                    "connected"
+                    if self._last_transition in {"overlay_ready", "bridge_ready"}
+                    else "startup"
+                ),
                 exit_code=self._last_exit_code,
                 manager_state=self.state,
                 last_transition=self._last_transition,
@@ -687,6 +734,9 @@ class OverlayProcessManager:
         attach = getattr(process, "attach_diagnostics", None)
         if callable(attach) and self.diagnostics is not None:
             attach(self.diagnostics, overlay_instance_id=self.overlay_instance_id)
+        set_logging_mode = getattr(process, "set_logging_mode", None)
+        if callable(set_logging_mode):
+            set_logging_mode(self.logging_mode)
 
     def _record_process(self, event: str, **fields: object) -> None:
         if self.diagnostics is not None:

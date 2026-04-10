@@ -1,19 +1,40 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::RwLock;
 use tokio::io::{self, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 type LogStream = std::pin::Pin<Box<dyn AsyncWrite + Send>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayLoggingMode {
+    #[default]
+    Basic,
+    Detailed,
+}
+
+impl OverlayLoggingMode {
+    fn allows_info(self) -> bool {
+        matches!(self, Self::Detailed)
+    }
+}
+
 pub struct OverlayLogger {
     stdout: Mutex<LogStream>,
     stderr: Mutex<LogStream>,
+    mode: RwLock<OverlayLoggingMode>,
 }
 
 impl OverlayLogger {
-    pub async fn open(_log_dir: impl AsRef<std::path::Path>) -> io::Result<Self> {
+    pub async fn open(
+        _log_dir: impl AsRef<std::path::Path>,
+        mode: OverlayLoggingMode,
+    ) -> io::Result<Self> {
         Ok(Self::from_streams(
             Box::pin(tokio::io::stdout()),
             Box::pin(tokio::io::stderr()),
+            mode,
         ))
     }
 
@@ -39,14 +60,27 @@ impl OverlayLogger {
             .await
     }
 
-    fn from_streams(stdout: LogStream, stderr: LogStream) -> Self {
+    pub fn set_mode(&self, mode: OverlayLoggingMode) {
+        if let Ok(mut current) = self.mode.write() {
+            *current = mode;
+        }
+    }
+
+    fn from_streams(stdout: LogStream, stderr: LogStream, mode: OverlayLoggingMode) -> Self {
         Self {
             stdout: Mutex::new(stdout),
             stderr: Mutex::new(stderr),
+            mode: RwLock::new(mode),
         }
     }
 
     async fn log_line(&self, level: &str, message: &str) -> io::Result<()> {
+        if level == "INFO" {
+            let mode = self.mode.read().map(|guard| *guard).unwrap_or_default();
+            if !mode.allows_info() {
+                return Ok(());
+            }
+        }
         self.write_stream_line(level != "ERROR", &format!("[overlay][{level}] {message}"))
             .await
     }
@@ -125,7 +159,9 @@ mod tests {
         let log_dir = unique_log_dir("no-file");
         let log_path = log_dir.join("puripuly_heart_overlay.log");
 
-        let logger = OverlayLogger::open(&log_dir).await.unwrap();
+        let logger = OverlayLogger::open(&log_dir, OverlayLoggingMode::Detailed)
+            .await
+            .unwrap();
         logger.info("hello").await.unwrap();
 
         assert!(!log_path.exists());
@@ -135,8 +171,11 @@ mod tests {
     async fn overlay_logger_routes_info_and_error_lines_to_streams_only() {
         let stdout = RecordingSink::new();
         let stderr = RecordingSink::new();
-        let logger =
-            OverlayLogger::from_streams(Box::pin(stdout.clone()), Box::pin(stderr.clone()));
+        let logger = OverlayLogger::from_streams(
+            Box::pin(stdout.clone()),
+            Box::pin(stderr.clone()),
+            OverlayLoggingMode::Detailed,
+        );
 
         logger.info("child line").await.unwrap();
         logger.error("bad line").await.unwrap();
@@ -149,5 +188,46 @@ mod tests {
             String::from_utf8(stderr.bytes()).unwrap(),
             "[overlay][ERROR] bad line\n"
         );
+    }
+
+    #[tokio::test]
+    async fn overlay_logger_suppresses_info_lines_in_basic_mode() {
+        let stdout = RecordingSink::new();
+        let stderr = RecordingSink::new();
+        let logger = OverlayLogger::from_streams(
+            Box::pin(stdout.clone()),
+            Box::pin(stderr.clone()),
+            OverlayLoggingMode::Basic,
+        );
+
+        logger.info("hidden").await.unwrap();
+        logger.warn("visible").await.unwrap();
+
+        assert_eq!(
+            String::from_utf8(stdout.bytes()).unwrap(),
+            "[overlay][WARN] visible\n"
+        );
+        assert_eq!(String::from_utf8(stderr.bytes()).unwrap(), "");
+    }
+
+    #[tokio::test]
+    async fn overlay_logger_applies_runtime_mode_updates() {
+        let stdout = RecordingSink::new();
+        let stderr = RecordingSink::new();
+        let logger = OverlayLogger::from_streams(
+            Box::pin(stdout.clone()),
+            Box::pin(stderr.clone()),
+            OverlayLoggingMode::Basic,
+        );
+
+        logger.info("hidden").await.unwrap();
+        logger.set_mode(OverlayLoggingMode::Detailed);
+        logger.info("visible").await.unwrap();
+
+        assert_eq!(
+            String::from_utf8(stdout.bytes()).unwrap(),
+            "[overlay][INFO] visible\n"
+        );
+        assert_eq!(String::from_utf8(stderr.bytes()).unwrap(), "");
     }
 }

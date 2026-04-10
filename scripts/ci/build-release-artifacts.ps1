@@ -130,8 +130,9 @@ if (-not [string]::IsNullOrWhiteSpace($cmakeCommandDirectory)) {
 $env:CMAKE = $cmakeCommand
 
 $overlayManifestPath = Join-Path $PWD "native/overlay/Cargo.toml"
+$overlayTargetDir = Join-Path $PWD "target"
 $overlayBuildDir = Join-Path $PWD "build/overlay"
-$overlayReleasePath = Join-Path $PWD "native/overlay/target/release/PuriPulyHeartOverlay.exe"
+$overlayReleasePath = Join-Path $overlayTargetDir "release/PuriPulyHeartOverlay.exe"
 $overlayStagedPath = Join-Path $overlayBuildDir "PuriPulyHeartOverlay.exe"
 $overlayBundledDllPath = Join-Path $overlayBuildDir "openvr_api.dll"
 $pyInstallerBuildDir = Join-Path $PWD "build/build"
@@ -172,7 +173,7 @@ Invoke-External -FilePath $cargoCommand -ArgumentList @(
     "--bin",
     "PuriPulyHeartOverlay",
     "--target-dir",
-    (Join-Path $PWD "native/overlay/target")
+    $overlayTargetDir
 )
 
 if (-not (Test-Path $overlayReleasePath)) {

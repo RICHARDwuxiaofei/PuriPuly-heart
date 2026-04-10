@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -110,6 +111,9 @@ pub struct OverlayRuntime {
     state: OverlayState,
     redraw_requested: bool,
     hide_deadline: Option<Instant>,
+    pending_peer_first_emit_logs: Vec<String>,
+    pending_peer_first_render_ids: HashSet<String>,
+    seen_peer_overlay_ids: HashSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +132,8 @@ pub enum SnapshotApplyOutcome {
 
 impl OverlayRuntime {
     pub fn new(snapshot: OverlayPresentationSnapshot) -> Self {
+        let seeded_peer_ids = peer_overlay_first_emit_block_ids_from_snapshot(&snapshot);
+        let seen_peer_overlay_ids = seeded_peer_ids.iter().cloned().collect::<HashSet<_>>();
         let mut runtime = Self {
             ready: false,
             first_texture_submitted: false,
@@ -137,6 +143,9 @@ impl OverlayRuntime {
             state: OverlayState::default(),
             redraw_requested: false,
             hide_deadline: None,
+            pending_peer_first_emit_logs: seeded_peer_ids.clone(),
+            pending_peer_first_render_ids: seeded_peer_ids.into_iter().collect(),
+            seen_peer_overlay_ids,
         };
         if runtime.state.seed_snapshot(&snapshot) {
             runtime.redraw_requested = true;
@@ -176,6 +185,13 @@ impl OverlayRuntime {
                 incoming_revision: snapshot.revision,
                 current_revision,
             };
+        }
+
+        for block_id in peer_overlay_first_emit_block_ids_from_snapshot(&snapshot) {
+            if self.seen_peer_overlay_ids.insert(block_id.clone()) {
+                self.pending_peer_first_emit_logs.push(block_id.clone());
+                self.pending_peer_first_render_ids.insert(block_id);
+            }
         }
 
         let visual_changed = self.state.apply_snapshot(&snapshot);
@@ -256,8 +272,14 @@ impl OverlayRuntime {
             .apply_calibration(self.state.calibration())
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
         let blocks = self.caption_blocks();
+        self.emit_pending_peer_overlay_first_emit_hooks(logger)
+            .await?;
         log_runtime_info(logger, format_caption_blocks_built_log(&blocks)).await?;
         let has_drawable_text = blocks.iter().any(CaptionBlock::has_drawable_text);
+        let peer_overlay_first_render_ids = peer_overlay_first_render_block_ids_from_caption_blocks(
+            &blocks,
+            &self.pending_peer_first_render_ids,
+        );
         let overlay_visible_before = self.overlay_visible;
         let should_show_after_submit = has_drawable_text && !self.overlay_visible;
         if has_drawable_text {
@@ -300,6 +322,8 @@ impl OverlayRuntime {
             )
             .await?;
         }
+        self.emit_peer_overlay_first_render_hooks(logger, peer_overlay_first_render_ids)
+            .await?;
         if should_log_frame_submitted(
             visible_block_count,
             self_block_count,
@@ -369,6 +393,10 @@ impl OverlayRuntime {
     ) -> Result<bool, RuntimeFailure> {
         match message {
             Ok(BridgeIncoming::Heartbeat) => Ok(true),
+            Ok(BridgeIncoming::Control(control)) => {
+                logger.set_mode(control.logging_mode);
+                Ok(true)
+            }
             Ok(BridgeIncoming::Snapshot(snapshot)) => {
                 log_runtime_info(logger, format_snapshot_received_log(&snapshot)).await?;
                 let outcome = self.apply_snapshot(snapshot);
@@ -435,6 +463,76 @@ impl OverlayRuntime {
             .iter()
             .any(CaptionBlock::has_drawable_text)
     }
+
+    async fn emit_pending_peer_overlay_first_emit_hooks(
+        &mut self,
+        logger: &OverlayLogger,
+    ) -> Result<(), RuntimeFailure> {
+        let block_ids = std::mem::take(&mut self.pending_peer_first_emit_logs);
+        for block_id in block_ids {
+            log_runtime_info(
+                logger,
+                format_peer_overlay_stage_log("peer_overlay_first_emit", &block_id),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn emit_peer_overlay_first_render_hooks(
+        &mut self,
+        logger: &OverlayLogger,
+        rendered_ids: Vec<String>,
+    ) -> Result<(), RuntimeFailure> {
+        for block_id in rendered_ids {
+            self.pending_peer_first_render_ids.remove(&block_id);
+            log_runtime_info(
+                logger,
+                format_peer_overlay_stage_log("peer_overlay_first_render", &block_id),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+fn peer_overlay_first_emit_block_ids_from_snapshot(
+    snapshot: &OverlayPresentationSnapshot,
+) -> Vec<String> {
+    snapshot
+        .blocks
+        .iter()
+        .filter(|block| {
+            block.channel == "peer"
+                && block.block_variant == OverlayPresentationBlockVariant::Finalized
+                && !block.primary_text.trim().is_empty()
+        })
+        .map(|block| block.id.clone())
+        .collect()
+}
+
+fn peer_overlay_first_render_block_ids_from_caption_blocks(
+    blocks: &[CaptionBlock],
+    pending: &HashSet<String>,
+) -> Vec<String> {
+    blocks
+        .iter()
+        .filter(|block| {
+            pending.contains(&block.id)
+                && block.channel == Some(CaptionChannel::PeerChannel)
+                && block.block_variant == CaptionBlockVariant::Finalized
+                && block.has_drawable_text()
+        })
+        .map(|block| block.id.clone())
+        .collect()
+}
+
+fn format_peer_overlay_stage_log(stage: &str, block_id: &str) -> String {
+    let utterance_id = block_id.strip_prefix("peer:").unwrap_or(block_id);
+    format!(
+        "latency_trace stage={} utterance_id={} block_id={}",
+        stage, utterance_id, block_id
+    )
 }
 
 fn log_runtime_secondary_state(enabled: bool, text: &str) -> String {
@@ -644,7 +742,7 @@ fn startup_error_from_preflight(error: OpenVrStartupPreflightError) -> StartupEr
 }
 
 pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
-    let logger = match OverlayLogger::open(&manifest.log_dir).await {
+    let logger = match OverlayLogger::open(&manifest.log_dir, manifest.logging_mode).await {
         Ok(logger) => logger,
         Err(error) => {
             eprintln!("[overlay][ERROR] failed to initialize logging: {error}");
@@ -870,19 +968,20 @@ impl OverlayRuntime {
 mod tests {
     use super::{
         format_caption_blocks_built_log, format_frame_rendered_log, format_frame_submitted_log,
-        format_snapshot_received_log, prepare_openvr_runtime, should_log_frame_submitted,
-        OverlayRuntime, SnapshotApplyOutcome, StartupError,
+        format_snapshot_received_log, peer_overlay_first_emit_block_ids_from_snapshot,
+        peer_overlay_first_render_block_ids_from_caption_blocks, prepare_openvr_runtime,
+        should_log_frame_submitted, OverlayRuntime, SnapshotApplyOutcome, StartupError,
     };
     use crate::openvr::{OpenVrError, OpenVrStartupPreflightError};
     use crate::renderer::{
-        CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
-        CaptionPresentation,
+        CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy, CaptionPresentation,
     };
     use crate::state::{
         OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
         OverlayPresentationSnapshot,
     };
     use std::cell::Cell;
+    use std::collections::HashSet;
 
     fn block(
         id: &str,
@@ -1003,6 +1102,41 @@ mod tests {
                 .map(|block| (block.id.as_str(), block.primary_text.as_str()))
                 .collect::<Vec<_>>(),
             vec![("self:older", "older"), ("peer:newer", "newer"),]
+        );
+    }
+
+    #[test]
+    fn runtime_detects_peer_overlay_first_emit_blocks_from_snapshot() {
+        let snapshot = OverlayPresentationSnapshot {
+            revision: 4,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![
+                slot_block("self:older", "self:older", 1, "self", "older"),
+                slot_block("peer:newer", "peer:newer", 2, "peer", "newer"),
+            ],
+        };
+
+        assert_eq!(
+            peer_overlay_first_emit_block_ids_from_snapshot(&snapshot),
+            vec!["peer:newer".to_string()]
+        );
+    }
+
+    #[test]
+    fn runtime_detects_peer_overlay_first_render_blocks_from_caption_blocks() {
+        let pending = HashSet::from([String::from("peer:newer")]);
+        let blocks = vec![
+            CaptionBlock::new("self:older", "older")
+                .with_channel(CaptionChannel::SelfChannel)
+                .with_variant(CaptionBlockVariant::Finalized),
+            CaptionBlock::new("peer:newer", "newer")
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_variant(CaptionBlockVariant::Finalized),
+        ];
+
+        assert_eq!(
+            peer_overlay_first_render_block_ids_from_caption_blocks(&blocks, &pending),
+            vec!["peer:newer".to_string()]
         );
     }
 

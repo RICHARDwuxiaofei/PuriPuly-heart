@@ -9,7 +9,7 @@ use puripuly_heart_overlay::logging::OverlayLogger;
 use puripuly_heart_overlay::{
     run_with_manifest, submit_texture, validate_manifest, BridgeClient, CaptionBlock,
     CaptionChannel, CaptionRenderer, FakeOpenVr, OpenVrError, OverlayBridgeEvent,
-    OverlayFrameSubmitter, OverlayManifest, OverlayPresentationBlock,
+    OverlayFrameSubmitter, OverlayLoggingMode, OverlayManifest, OverlayPresentationBlock,
     OverlayPresentationBlockVariant, OverlayPresentationCalibration, OverlayPresentationSnapshot,
     OverlayRuntime, RenderedFrame, RuntimeFailure, StartupError, EXPECTED_CONTRACT_VERSION,
 };
@@ -29,7 +29,7 @@ fn test_manifest() -> OverlayManifest {
             .to_string(),
         log_level: "INFO".into(),
         locale: "en".into(),
-        diagnostics_enabled: false,
+        logging_mode: OverlayLoggingMode::Basic,
     }
 }
 
@@ -101,6 +101,19 @@ fn slot_block(
         primary_text: primary_text.to_string(),
         secondary_text: secondary_text.to_string(),
         secondary_enabled,
+    }
+}
+
+fn active_self_block(id: &str, primary_text: &str) -> OverlayPresentationBlock {
+    OverlayPresentationBlock {
+        id: id.to_string(),
+        occupant_key: id.to_string(),
+        appearance_seq: 1,
+        channel: "self".to_string(),
+        block_variant: OverlayPresentationBlockVariant::ActiveSelf,
+        primary_text: primary_text.to_string(),
+        secondary_text: String::new(),
+        secondary_enabled: true,
     }
 }
 
@@ -203,7 +216,9 @@ async fn connect_test_bridge() -> (
 }
 
 async fn test_logger(name: &str) -> OverlayLogger {
-    OverlayLogger::open(unique_log_dir(name)).await.unwrap()
+    OverlayLogger::open(unique_log_dir(name), OverlayLoggingMode::Detailed)
+        .await
+        .unwrap()
 }
 
 #[test]
@@ -1066,6 +1081,63 @@ async fn bridge_client_authenticates_and_receives_initial_snapshot() {
     assert!(snapshot.blocks.is_empty());
 }
 
+#[tokio::test]
+async fn bridge_client_receives_runtime_logging_mode_updates() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+
+        let auth = ws.next().await.unwrap().unwrap();
+        let Message::Text(auth_text) = auth else {
+            panic!("expected auth text frame");
+        };
+        let auth_payload: serde_json::Value = serde_json::from_str(&auth_text).unwrap();
+        assert_eq!(auth_payload["type"], "auth");
+
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": {
+                    "revision": 0,
+                    "calibration": OverlayPresentationCalibration::default(),
+                    "blocks": [],
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        ws.send(Message::Text(
+            json!({
+                "type": "runtime_control",
+                "payload": {"logging_mode": "detailed"},
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    });
+
+    let mut manifest = test_manifest();
+    manifest.bridge_url = format!("ws://{}", address);
+
+    let (mut client, snapshot) = BridgeClient::connect(&manifest).await.unwrap();
+    assert!(snapshot.blocks.is_empty());
+
+    let message = client.next_message().await.unwrap();
+
+    assert!(matches!(
+        message,
+        puripuly_heart_overlay::BridgeIncoming::Control(control)
+            if control.logging_mode == OverlayLoggingMode::Detailed
+    ));
+    server.await.unwrap();
+}
+
 #[test]
 fn runtime_disconnect_failure_reason_is_stable() {
     assert_eq!(
@@ -1096,7 +1168,7 @@ fn check_startup_contract_reports_current_contract_version() {
 
     assert!(output.status.success());
     let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(payload["contract_version"], 4);
+    assert_eq!(payload["contract_version"], EXPECTED_CONTRACT_VERSION);
 }
 
 #[test]
