@@ -224,6 +224,7 @@ __marimo__/
 Installer_output/
 .references/
 /scripts/*
+!/scripts/bench_*.py
 !/scripts/ci/
 /scripts/ci/*
 !/scripts/ci/build-release-artifacts.ps1
