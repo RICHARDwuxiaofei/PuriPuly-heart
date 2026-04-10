@@ -124,3 +124,15 @@ def test_display_card_notice_uses_primary_display_slot_and_restores_after_clear(
 
     assert card._display_primary.value == "STT 다운로드 중 63%"
     assert card._display_primary.color == original_color
+
+
+def test_display_card_display_text_is_always_selectable() -> None:
+    card = DisplayCard(on_submit=lambda _text: None)
+
+    card.set_display("primary")
+    card.set_display_translation("secondary")
+    card.set_status("connected")
+    card.set_notice("warning", tone="warning")
+
+    assert card._display_primary.selectable is True
+    assert card._display_secondary.selectable is True
