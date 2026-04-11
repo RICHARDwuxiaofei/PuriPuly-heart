@@ -28,6 +28,8 @@
   "dashboard.trial.message.usage-unavailable": "Live usage could not be loaded from OpenRouter.",
   "dashboard.source_language": "Source Language",
   "dashboard.target_language": "Target Language",
+  "dashboard.language.self": "Self",
+  "dashboard.language.peer": "Peer",
   "dashboard.preset_format": "{source} \u2192 {target}",
   "language_modal.recent": "Recent",
   "language_modal.all_languages": "All Languages",

@@ -52,6 +52,8 @@ class DashboardView(ft.Column):
         # Current language settings
         self._source_lang_code = "ko"
         self._target_lang_code = "en"
+        self._peer_source_lang_code = ""
+        self._peer_target_lang_code = ""
 
         # Recent languages (max 3 each)
         self._recent_source_langs: list[str] = []
@@ -103,14 +105,18 @@ class DashboardView(ft.Column):
         # Right-side information stack
         self.display_card = DisplayCard(on_submit=self._on_submit)
         self.language_card = LanguageCard(
-            on_source_click=self._open_source_dialog,
-            on_target_click=self._open_target_dialog,
-            on_swap_click=self._swap_languages,
+            on_self_source_click=self._open_source_dialog,
+            on_self_target_click=self._open_target_dialog,
+            on_self_swap_click=self._swap_languages,
+            on_peer_source_click=self._open_peer_source_dialog,
+            on_peer_target_click=self._open_peer_target_dialog,
+            on_peer_swap_click=self._swap_peer_languages,
         )
-        self.language_card.set_languages(
-            language_name(self._source_lang_code),
-            language_name(self._target_lang_code),
+        self.language_card.set_row_labels(
+            t("dashboard.language.self"),
+            t("dashboard.language.peer"),
         )
+        self._refresh_language_card()
         self._update_input_font()
 
         top_controls = ft.Row(
@@ -342,25 +348,51 @@ class DashboardView(ft.Column):
         )
         modal.open(current=self._target_lang_code, recent=self._recent_target_langs)
 
+    def _open_peer_source_dialog(self):
+        modal = LanguageModal(
+            page=self.page,
+            languages=self._LANG_OPTIONS,
+            on_select=self._on_peer_source_select,
+        )
+        modal.open(
+            current=self._effective_peer_source_lang_code(), recent=self._recent_source_langs
+        )
+
+    def _open_peer_target_dialog(self):
+        modal = LanguageModal(
+            page=self.page,
+            languages=self._LANG_OPTIONS,
+            on_select=self._on_peer_target_select,
+        )
+        modal.open(
+            current=self._effective_peer_target_lang_code(), recent=self._recent_target_langs
+        )
+
     def _on_source_select(self, lang_code: str):
         """Handle source language selection."""
         self._source_lang_code = lang_code
         self._add_to_recent(lang_code, is_source=True)
         self._update_input_font()
-        self.language_card.set_languages(
-            language_name(self._source_lang_code),
-            language_name(self._target_lang_code),
-        )
+        self._refresh_language_card()
         self._notify_language_change()
 
     def _on_target_select(self, lang_code: str):
         """Handle target language selection."""
         self._target_lang_code = lang_code
         self._add_to_recent(lang_code, is_source=False)
-        self.language_card.set_languages(
-            language_name(self._source_lang_code),
-            language_name(self._target_lang_code),
-        )
+        self._refresh_language_card()
+        self._notify_language_change()
+
+    def _on_peer_source_select(self, lang_code: str):
+        self._peer_source_lang_code = "" if lang_code == self._source_lang_code else lang_code
+        self._add_to_recent(lang_code, is_source=True)
+        self._refresh_language_card()
+        self._notify_language_change()
+
+    def _on_peer_target_select(self, lang_code: str):
+        self._peer_target_lang_code = "" if lang_code == self._target_lang_code else lang_code
+        self._add_to_recent(lang_code, is_source=False)
+        self._refresh_language_card()
         self._notify_language_change()
 
     def _swap_languages(self):
@@ -370,10 +402,15 @@ class DashboardView(ft.Column):
             self._source_lang_code,
         )
         self._update_input_font()
-        self.language_card.set_languages(
-            language_name(self._source_lang_code),
-            language_name(self._target_lang_code),
-        )
+        self._refresh_language_card()
+        self._notify_language_change()
+
+    def _swap_peer_languages(self):
+        current_peer_source = self._effective_peer_source_lang_code()
+        current_peer_target = self._effective_peer_target_lang_code()
+        self._peer_source_lang_code = current_peer_target
+        self._peer_target_lang_code = current_peer_source
+        self._refresh_language_card()
         self._notify_language_change()
 
     def _add_to_recent(self, lang_code: str, is_source: bool) -> None:
@@ -389,20 +426,44 @@ class DashboardView(ft.Column):
 
     def _notify_language_change(self):
         if self.on_language_change:
-            self.on_language_change(self._source_lang_code, self._target_lang_code)
+            self.on_language_change(
+                self._source_lang_code,
+                self._target_lang_code,
+                self._peer_source_lang_code,
+                self._peer_target_lang_code,
+            )
+
+    def _effective_peer_source_lang_code(self) -> str:
+        return self._peer_source_lang_code or self._source_lang_code
+
+    def _effective_peer_target_lang_code(self) -> str:
+        return self._peer_target_lang_code or self._target_lang_code
+
+    def _refresh_language_card(self) -> None:
+        self.language_card.set_languages(
+            language_name(self._source_lang_code),
+            language_name(self._target_lang_code),
+            language_name(self._effective_peer_source_lang_code()),
+            language_name(self._effective_peer_target_lang_code()),
+        )
 
     def set_status(self, status: str) -> None:
         self.is_connected = status == "connected"
         self.display_card.set_status(status, font_family=self._ui_font())
 
-    def set_languages_from_codes(self, source_code: str, target_code: str) -> None:
+    def set_languages_from_codes(
+        self,
+        source_code: str,
+        target_code: str,
+        peer_source_code: str = "",
+        peer_target_code: str = "",
+    ) -> None:
         self._source_lang_code = source_code
         self._target_lang_code = target_code
+        self._peer_source_lang_code = peer_source_code
+        self._peer_target_lang_code = peer_target_code
         self._update_input_font()
-        self.language_card.set_languages(
-            language_name(self._source_lang_code),
-            language_name(self._target_lang_code),
-        )
+        self._refresh_language_card()
 
     def set_translation_enabled(self, enabled: bool) -> None:
         self.is_translation_on = bool(enabled)
@@ -482,10 +543,11 @@ class DashboardView(ft.Column):
             display_font_family=self._ui_font(),
             input_font_family=font_for_language(self._source_lang_code),
         )
-        self.language_card.set_languages(
-            language_name(self._source_lang_code),
-            language_name(self._target_lang_code),
+        self.language_card.set_row_labels(
+            t("dashboard.language.self"),
+            t("dashboard.language.peer"),
         )
+        self._refresh_language_card()
         if self._stt_showing_warning:
             self.set_display_text(t("dashboard.warn_stt_key"))
         elif self._translation_showing_warning:
