@@ -21,7 +21,7 @@ from puripuly_heart.config.settings import (
     STTProviderName,
 )
 from puripuly_heart.ui import i18n as i18n_module
-from puripuly_heart.ui.i18n import t
+from puripuly_heart.ui.i18n import language_name, provider_label, t
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 from puripuly_heart.ui.views import settings as settings_view
 
@@ -90,6 +90,8 @@ def _make_llm_selection_view(
         value=settings.system_prompts.get("gemini", settings.system_prompt),
         provider=None,
     )
+    view._prompt_for_text = SimpleNamespace(value="")
+    view._custom_vocab_helper_text = SimpleNamespace(value="")
     view._prompt_editor.set_provider = lambda provider: setattr(
         view._prompt_editor, "provider", provider
     )
@@ -515,6 +517,36 @@ def test_on_llm_selected_openrouter_provider_value_defaults_to_managed_trial(
     assert pending.provider.llm == LLMProviderName.OPENROUTER
     assert pending.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert view._llm_text.content.value == t("provider.gemma4_free_trial")
+
+
+def test_on_llm_selected_updates_prompt_helper_copy_live_when_mounted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.system_prompts = {"gemini": "G", "qwen": "Q"}
+    settings.system_prompt = "G"
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    monkeypatch.setattr(settings_view.SettingsView, "page", property(lambda self: object()))
+    prompt_copy_updates: list[str] = []
+    view._prompt_for_text = SimpleNamespace(
+        value="stale",
+        update=lambda: prompt_copy_updates.append(view._prompt_for_text.value),
+    )
+
+    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+
+    assert view._prompt_for_text.value == t(
+        "settings.prompt_for",
+        provider=provider_label(LLMProviderName.QWEN.value),
+    )
+    assert prompt_copy_updates == [
+        t(
+            "settings.prompt_for",
+            provider=provider_label(LLMProviderName.QWEN.value),
+        )
+    ]
 
 
 def test_on_llm_selected_leaving_managed_mode_clears_verified_hardware_hash_fields(
@@ -1638,6 +1670,19 @@ def test_custom_vocabulary_info_icon_is_in_card_header(
     assert view._custom_vocab_info_icon.tooltip == t("settings.custom_vocabulary_tooltip")
 
 
+def test_prompt_tab_uses_shared_full_width_cards(monkeypatch: pytest.MonkeyPatch) -> None:
+    from puripuly_heart.ui.components.shared_card_wrapper import SharedCardWrapper
+
+    view, _ = _make_settings_view(monkeypatch)
+
+    prompt_cards = _subtab_controls(view, "prompt")
+
+    assert len(prompt_cards) == 2
+    assert all(isinstance(card, SharedCardWrapper) for card in prompt_cards)
+    assert all(card.height is None for card in prompt_cards)
+    assert all(card.expand is False for card in prompt_cards)
+
+
 def test_custom_vocabulary_switching_source_language_updates_editor_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1653,6 +1698,9 @@ def test_custom_vocabulary_switching_source_language_updates_editor_payload(
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     assert view._custom_vocab_terms.value == "Avatar\nOSC"
+    assert view._custom_vocab_helper_text.value == (
+        f"One term per line for {language_name('en')}. Changes save when you leave this field."
+    )
 
 
 def test_custom_vocabulary_preserves_unsaved_drafts_across_source_language_reload(

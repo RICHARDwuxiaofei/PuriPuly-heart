@@ -77,7 +77,7 @@
     "settings.custom_vocabulary_enabled": "启用语音识别提示",
     "settings.custom_vocabulary_terms": "词条",
     "settings.custom_vocabulary_tooltip": "请添加像恋人名字这样经常会说但难以识别的词。",
-    "settings.custom_vocabulary_helper": "为 {language} 每行输入一个词条。草稿修改只有在点击应用后才会保存。",
+    "settings.custom_vocabulary_helper": "为 {language} 每行输入一个词条。离开输入框时会立即保存。",
     "settings.custom_vocabulary_provider_note": "Deepgram 和 Soniox 会直接应用这些词条。Qwen ASR 在 Phase 1 只会保存，不会实际下发到服务端。",
     "settings.custom_vocabulary_apply": "应用",
     "settings.custom_vocabulary_clear": "清空",

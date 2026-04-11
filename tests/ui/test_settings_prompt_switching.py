@@ -15,7 +15,8 @@ from puripuly_heart.config.settings import (
     QwenLLMModel,
     STTProviderName,
 )
-from puripuly_heart.ui.i18n import t
+from puripuly_heart.ui import i18n as i18n_module
+from puripuly_heart.ui.i18n import language_name, provider_label, t
 from puripuly_heart.ui.views import settings as settings_view
 
 
@@ -53,11 +54,19 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     assert view._prompt_editor.value == load_prompt_for_provider("gemini")
+    assert view._prompt_for_text.value == t(
+        "settings.prompt_for",
+        provider=provider_label(LLMProviderName.GEMINI.value),
+    )
 
     view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
     pending = view.build_provider_apply_settings()
 
     assert view._prompt_editor.value == load_prompt_for_provider("qwen")
+    assert view._prompt_for_text.value == t(
+        "settings.prompt_for",
+        provider=provider_label(LLMProviderName.QWEN.value),
+    )
     assert settings.provider.llm == LLMProviderName.GEMINI
     assert pending is not None
     assert pending.provider.llm == LLMProviderName.QWEN
@@ -67,6 +76,10 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
     pending = view.build_provider_apply_settings()
 
     assert view._prompt_editor.value == load_prompt_for_provider("gemini")
+    assert view._prompt_for_text.value == t(
+        "settings.prompt_for",
+        provider=provider_label(LLMProviderName.GEMINI.value),
+    )
     assert settings.provider.llm == LLMProviderName.GEMINI
     assert pending is not None
     assert pending.provider.llm == LLMProviderName.GEMINI
@@ -75,9 +88,40 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
     pending = view.build_provider_apply_settings()
 
     assert view._prompt_editor.value == load_prompt_for_provider("openrouter")
+    assert view._prompt_for_text.value == t(
+        "settings.prompt_for",
+        provider=provider_label(LLMProviderName.OPENROUTER.value),
+    )
     assert settings.provider.llm == LLMProviderName.GEMINI
     assert pending is not None
     assert pending.provider.llm == LLMProviderName.OPENROUTER
+
+
+def test_prompt_tab_labels_and_helper_copy_render_from_i18n(monkeypatch) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.QWEN
+    settings.languages.source_language = "en"
+
+    view = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale("ko")
+        view.apply_locale()
+
+        assert view._persona_title.value == t("settings.section.persona")
+        assert view._custom_vocab_title.value == t("settings.section.custom_vocabulary")
+        assert view._prompt_for_text.value == t(
+            "settings.prompt_for",
+            provider=provider_label(LLMProviderName.QWEN.value),
+        )
+        assert view._custom_vocab_helper_text.value == t(
+            "settings.custom_vocabulary_helper",
+            language=language_name("en"),
+        )
+    finally:
+        i18n_module.set_locale(previous_locale)
 
 
 def test_settings_view_shows_qwen_model_label(monkeypatch) -> None:

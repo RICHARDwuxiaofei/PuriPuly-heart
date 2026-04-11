@@ -34,6 +34,7 @@ from puripuly_heart.ui.components.settings import (
     PromptEditor,
     SettingsModal,
 )
+from puripuly_heart.ui.components.shared_card_wrapper import SharedCardWrapper
 from puripuly_heart.ui.components.subtab_shell import TextSubtab, TextSubtabShell
 from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import (
@@ -947,6 +948,11 @@ class SettingsView(ft.Column):
         self._persona_title = ft.Text(
             t("settings.section.persona"), size=24, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL
         )
+        self._prompt_for_text = ft.Text(
+            self._prompt_provider_copy(),
+            size=16,
+            color=COLOR_NEUTRAL,
+        )
 
         # Reset button (matches Persona title color, hover -> primary)
         self._reset_prompt_btn = _make_text_button(
@@ -984,15 +990,19 @@ class SettingsView(ft.Column):
             width=float("inf"),
         )
 
-        persona_card = self._wrap_card(
+        persona_card = SharedCardWrapper(
             ft.Column(
                 [
                     persona_header,
+                    ft.Container(height=8),
+                    self._prompt_for_text,
                     ft.Container(height=16),
                     prompt_container,
                 ],
                 spacing=0,
             ),
+            height=None,
+            expand=False,
         )
 
         # === Row 9: Custom Vocabulary (2x1) ===
@@ -1017,6 +1027,11 @@ class SettingsView(ft.Column):
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
+        self._custom_vocab_helper_text = ft.Text(
+            self._custom_vocabulary_helper_copy(),
+            size=16,
+            color=COLOR_NEUTRAL,
+        )
         self._custom_vocab_terms = ft.TextField(
             multiline=True,
             min_lines=5,
@@ -1029,15 +1044,18 @@ class SettingsView(ft.Column):
             on_change=self._on_custom_vocabulary_terms_change,
             on_blur=self._on_custom_vocabulary_terms_blur,
         )
-        row7 = self._wrap_card(
+        row7 = SharedCardWrapper(
             ft.Column(
                 [
                     custom_vocab_header,
+                    ft.Container(height=8),
+                    self._custom_vocab_helper_text,
                     ft.Container(height=16),
                     self._custom_vocab_terms,
                 ],
                 spacing=0,
             ),
+            height=None,
             expand=False,
         )
 
@@ -1113,6 +1131,26 @@ class SettingsView(ft.Column):
         if not self._settings:
             return "en"
         return self._settings.languages.source_language
+
+    def _prompt_provider_copy(self) -> str:
+        return t(
+            "settings.prompt_for",
+            provider=provider_label(self._active_prompt_key()),
+        )
+
+    def _custom_vocabulary_helper_copy(self) -> str:
+        return t(
+            "settings.custom_vocabulary_helper",
+            language=language_name(self._current_source_language()),
+        )
+
+    def _sync_prompt_tab_copy(self) -> None:
+        self._prompt_for_text.value = self._prompt_provider_copy()
+        self._custom_vocab_helper_text.value = self._custom_vocabulary_helper_copy()
+        if self.page:
+            for control in (self._prompt_for_text, self._custom_vocab_helper_text):
+                with contextlib.suppress(Exception):
+                    control.update()
 
     def _set_custom_vocabulary_draft_from_settings(self, *, preserve_existing: bool) -> None:
         if not self._settings:
@@ -1368,6 +1406,7 @@ class SettingsView(ft.Column):
         self._set_custom_vocabulary_draft_from_settings(
             preserve_existing=preserve_custom_vocab_draft
         )
+        self._sync_prompt_tab_copy()
         self._custom_vocab_terms.helper_text = ""
         self._sync_overlay_controls()
         self._sync_overlay_calibration_controls()
@@ -1895,6 +1934,7 @@ class SettingsView(ft.Column):
                 next_prompt = self._prompt_editor.value
                 draft.system_prompts[provider_name] = next_prompt
             draft.system_prompt = next_prompt
+        self._sync_prompt_tab_copy()
 
         if self.page:
             self._qwen_region_btn.update()
@@ -2824,6 +2864,7 @@ class SettingsView(ft.Column):
         self._overlay_distance_label.value = t("settings.overlay.calibration.distance")
         self._overlay_text_scale_label.value = t("settings.overlay.calibration.text_scale")
         _set_text_button_label(self._reset_prompt_btn, t("settings.reset_prompt"))
+        self._sync_prompt_tab_copy()
         self._custom_vocab_terms.label = None
         self._custom_vocab_terms.helper_text = ""
 

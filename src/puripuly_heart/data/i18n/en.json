@@ -77,7 +77,7 @@
   "settings.custom_vocabulary_enabled": "Enable speech recognition hints",
   "settings.custom_vocabulary_terms": "Terms",
   "settings.custom_vocabulary_tooltip": "Add words that are hard to recognize but you say often, like your partner's name.",
-  "settings.custom_vocabulary_helper": "One term per line for {language}. Draft changes apply only after clicking Apply.",
+  "settings.custom_vocabulary_helper": "One term per line for {language}. Changes save when you leave this field.",
   "settings.custom_vocabulary_provider_note": "Deepgram and Soniox apply these terms directly. Qwen ASR stores them but does not apply them in Phase 1.",
   "settings.custom_vocabulary_apply": "Apply",
   "settings.custom_vocabulary_clear": "Clear",
