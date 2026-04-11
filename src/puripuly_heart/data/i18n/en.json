@@ -273,6 +273,8 @@
   "settings.chatbox_include_source": "Include Original",
   "settings.chatbox_source.on": "Original + Translation",
   "settings.chatbox_source.off": "Translation Only",
+  "settings.section.peer_stt": "Peer Speech Recognition",
+  "settings.dashboard_language_redirect": "Change self and peer language pairs from the Dashboard language card.",
   "settings.peer_language": "Peer Language",
   "settings.peer_language.source": "Source",
   "settings.peer_language.target": "Target",

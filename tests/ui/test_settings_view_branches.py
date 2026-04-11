@@ -189,17 +189,21 @@ def test_setting_action_text_size_shrinks_for_long_values() -> None:
     assert settings_view._setting_action_text_size("qwen3-asr-flash-realtime") == 16
 
 
-def test_peer_setting_values_use_single_line_action_style(
+def test_peer_language_card_removed_from_general_tab(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
-    text = view._peer_target_text.content
+    titles = _general_tab_card_titles(view)
+    general_labels: list[str] = []
+    for row in _subtab_controls(view, "general"):
+        general_labels.extend(_control_labels(row))
 
-    assert text.text_align == ft.TextAlign.RIGHT
-    assert text._get_attr("nowrap") is True
-    assert text.max_lines == 1
-    assert text.overflow == ft.TextOverflow.ELLIPSIS
-    assert text.size == settings_view._setting_action_text_size(text.value)
+    assert t("settings.peer_language") not in titles
+    assert t("settings.section.peer_stt") in titles
+    assert t("settings.peer_language.source") not in general_labels
+    assert t("settings.peer_language.target") not in general_labels
+    assert not hasattr(view, "_peer_source_text")
+    assert not hasattr(view, "_peer_target_text")
 
 
 def test_load_from_settings_resizes_long_peer_model_value(
@@ -1220,6 +1224,18 @@ def test_general_tab_excludes_prompt_and_overlay_controls(
     assert t("settings.overlay.calibration") not in general_labels
 
 
+def test_dashboard_language_redirect_copy_is_rendered_in_general_tab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    peer_stt_card = _general_tab_card(view, t("settings.section.peer_stt"))
+    peer_stt_labels = _control_labels(peer_stt_card)
+
+    assert view._dashboard_language_redirect_text.value == t("settings.dashboard_language_redirect")
+    assert t("settings.dashboard_language_redirect") in peer_stt_labels
+    assert isinstance(view._dashboard_language_redirect_text, ft.Text)
+
+
 def test_general_tab_audio_card_excludes_desktop_vad_hangover_and_pre_roll_controls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1638,6 +1654,55 @@ def test_apply_locale_refreshes_peer_labels_and_inherit_texts(
     assert view._peer_qwen_region_text.content.value == expected_inherit_label
     assert view._peer_qwen_model_text.content.value == expected_inherit_label
     assert view._peer_soniox_model_text.content.value == expected_inherit_label
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_title", "expected_redirect"),
+    [
+        (
+            "en",
+            "Peer Speech Recognition",
+            "Change self and peer language pairs from the Dashboard language card.",
+        ),
+        (
+            "ko",
+            "상대 음성 인식",
+            "셀프와 상대 언어 조합은 대시보드 언어 카드에서 바꿔주세요.",
+        ),
+        (
+            "zh-CN",
+            "对方语音识别",
+            "请在仪表板的语言卡片中修改自己与对方的语言组合。",
+        ),
+    ],
+)
+def test_peer_language_migration_copy_renders_from_i18n(
+    monkeypatch: pytest.MonkeyPatch,
+    locale: str,
+    expected_title: str,
+    expected_redirect: str,
+) -> None:
+    old_locale = i18n_module.get_locale()
+    try:
+        settings = AppSettings()
+        settings.ui.locale = locale
+        view, _ = _make_settings_view(monkeypatch)
+        view.load_from_settings(settings, config_path=Path("settings.json"))
+
+        i18n_module.set_locale(locale)
+        view.apply_locale()
+
+        assert view._peer_provider_title.value == expected_title
+        assert view._dashboard_language_redirect_text.value == expected_redirect
+
+        if locale != "en":
+            assert view._peer_provider_title.value != "Peer Speech Recognition"
+            assert (
+                view._dashboard_language_redirect_text.value
+                != "Change self and peer language pairs from the Dashboard language card."
+            )
+    finally:
+        i18n_module.set_locale(old_locale)
 
 
 def test_settings_view_does_not_create_peer_deepgram_model_controls(

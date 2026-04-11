@@ -273,6 +273,8 @@
     "settings.chatbox_include_source": "包含原文",
     "settings.chatbox_source.on": "原文 + 翻译",
     "settings.chatbox_source.off": "仅翻译",
+    "settings.section.peer_stt": "对方语音识别",
+    "settings.dashboard_language_redirect": "请在仪表板的语言卡片中修改自己与对方的语言组合。",
     "settings.peer_language": "对方翻译语言",
     "settings.peer_language.source": "原文",
     "settings.peer_language.target": "翻译",

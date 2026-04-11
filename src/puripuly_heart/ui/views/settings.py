@@ -23,9 +23,8 @@ from puripuly_heart.config.settings import (
     QwenRegion,
     STTProviderName,
 )
-from puripuly_heart.core.language import get_all_language_options, get_stt_compatibility_warning
+from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.ui.components.glow import GLOW_CARD, create_glow_stack
-from puripuly_heart.ui.components.language_modal import LanguageModal
 from puripuly_heart.ui.components.managed_trial_usage_bar import ManagedTrialUsageBar
 from puripuly_heart.ui.components.settings import (
     ApiKeyField,
@@ -677,30 +676,17 @@ class SettingsView(ft.Column):
                 expand=True,
             )
         )
-        # === Peer language card ===
-        self._peer_lang_title = ft.Text(
-            t("settings.peer_language"),
+        # === Peer STT card ===
+        self._peer_provider_title = ft.Text(
+            t("settings.section.peer_stt"),
             size=24,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
-        self._peer_source_text = self._build_setting_action_text(
-            t("settings.peer_language.follow"),
-            self._on_peer_source_click,
-        )
-        self._peer_target_text = self._build_setting_action_text(
-            t("settings.peer_language.follow"),
-            self._on_peer_target_click,
-        )
-        self._peer_source_label = ft.Text(
-            t("settings.peer_language.source"),
+        self._dashboard_language_redirect_text = ft.Text(
+            t("settings.dashboard_language_redirect"),
             size=16,
-            color=COLOR_ON_BACKGROUND,
-        )
-        self._peer_target_label = ft.Text(
-            t("settings.peer_language.target"),
-            size=16,
-            color=COLOR_ON_BACKGROUND,
+            color=COLOR_NEUTRAL,
         )
         self._peer_stt_text = self._build_setting_action_text(
             provider_label(STTProviderName.DEEPGRAM.value),
@@ -738,22 +724,16 @@ class SettingsView(ft.Column):
             size=16,
             color=COLOR_ON_BACKGROUND,
         )
-        peer_lang_card = self._wrap_card(
+        peer_stt_card = self._wrap_card(
             ft.Column(
                 [
-                    self._peer_lang_title,
+                    self._peer_provider_title,
+                    ft.Container(height=8),
+                    self._dashboard_language_redirect_text,
                     ft.Container(height=12),
                     self._build_setting_action_row(
                         self._peer_stt_label,
                         self._peer_stt_text,
-                    ),
-                    self._build_setting_action_row(
-                        self._peer_source_label,
-                        self._peer_source_text,
-                    ),
-                    self._build_setting_action_row(
-                        self._peer_target_label,
-                        self._peer_target_text,
                     ),
                     self._build_setting_action_row(
                         self._peer_qwen_region_label,
@@ -774,11 +754,11 @@ class SettingsView(ft.Column):
         )
         row_chatbox_source = ft.Container(
             content=ft.Row(
-                [vrc_mic_card, chatbox_source_card, peer_lang_card],
+                [vrc_mic_card, chatbox_source_card, peer_stt_card],
                 spacing=16,
                 expand=True,
             ),
-            height=320,
+            height=280,
         )
 
         self._overlay_title = ft.Text(
@@ -1464,15 +1444,6 @@ class SettingsView(ft.Column):
             if settings.osc.chatbox_include_source
             else "settings.chatbox_source.off"
         )
-        self._set_setting_action_text(
-            self._peer_source_text,
-            self._peer_lang_display(settings.languages.peer_source_language),
-        )
-        self._set_setting_action_text(
-            self._peer_target_text,
-            self._peer_lang_display(settings.languages.peer_target_language),
-        )
-
         # Prompt
         provider_name = self._active_prompt_key()
         self._prompt_editor.set_provider(provider_name)
@@ -2755,70 +2726,6 @@ class SettingsView(ft.Column):
             self._chatbox_source_text.update()
         self._emit_settings_changed()
 
-    def _peer_lang_display(self, code: str) -> str:
-        """Return display text for peer language, showing 'follow' if empty."""
-        if not code:
-            return t("settings.peer_language.follow")
-        return language_name(code)
-
-    def _on_peer_source_click(self, e) -> None:
-        if not self.page or not self._settings:
-            return
-        modal = LanguageModal(
-            page=self.page,
-            languages=get_all_language_options(),
-            on_select=self._on_peer_source_selected,
-        )
-        current = (
-            self._settings.languages.peer_source_language
-            or self._settings.languages.source_language
-        )
-        modal.open(current=current, recent=self._settings.languages.recent_source_languages)
-
-    def _on_peer_source_selected(self, lang_code: str) -> None:
-        if not self._settings:
-            return
-        if lang_code == self._settings.languages.source_language:
-            self._settings.languages.peer_source_language = ""
-        else:
-            self._settings.languages.peer_source_language = lang_code
-        self._set_setting_action_text(
-            self._peer_source_text,
-            self._peer_lang_display(self._settings.languages.peer_source_language),
-        )
-        if self.page:
-            self._peer_source_text.update()
-        self._emit_settings_changed()
-
-    def _on_peer_target_click(self, e) -> None:
-        if not self.page or not self._settings:
-            return
-        modal = LanguageModal(
-            page=self.page,
-            languages=get_all_language_options(),
-            on_select=self._on_peer_target_selected,
-        )
-        current = (
-            self._settings.languages.peer_target_language
-            or self._settings.languages.target_language
-        )
-        modal.open(current=current, recent=self._settings.languages.recent_target_languages)
-
-    def _on_peer_target_selected(self, lang_code: str) -> None:
-        if not self._settings:
-            return
-        if lang_code == self._settings.languages.target_language:
-            self._settings.languages.peer_target_language = ""
-        else:
-            self._settings.languages.peer_target_language = lang_code
-        self._set_setting_action_text(
-            self._peer_target_text,
-            self._peer_lang_display(self._settings.languages.peer_target_language),
-        )
-        if self.page:
-            self._peer_target_text.update()
-        self._emit_settings_changed()
-
     def _on_low_latency_click(self, e) -> None:
         """Open low latency mode selection modal."""
         if not self.page:
@@ -2976,10 +2883,9 @@ class SettingsView(ft.Column):
         self._custom_vocab_info_icon.tooltip = t("settings.custom_vocabulary_tooltip")
         self._vrc_mic_title.value = t("settings.vrc_mic_intercept")
         self._chatbox_source_title.value = t("settings.chatbox_include_source")
-        self._peer_lang_title.value = t("settings.peer_language")
+        self._peer_provider_title.value = t("settings.section.peer_stt")
+        self._dashboard_language_redirect_text.value = t("settings.dashboard_language_redirect")
         self._peer_stt_label.value = t("settings.peer_stt_provider")
-        self._peer_source_label.value = t("settings.peer_language.source")
-        self._peer_target_label.value = t("settings.peer_language.target")
         self._peer_qwen_region_label.value = t("settings.peer_qwen_region")
         self._peer_qwen_model_label.value = t("settings.peer_qwen_model")
         self._peer_soniox_model_label.value = t("settings.peer_soniox_model")
@@ -3072,14 +2978,6 @@ class SettingsView(ft.Column):
                 "settings.chatbox_source.on"
                 if display_settings.osc.chatbox_include_source
                 else "settings.chatbox_source.off"
-            )
-            self._set_setting_action_text(
-                self._peer_source_text,
-                self._peer_lang_display(display_settings.languages.peer_source_language),
-            )
-            self._set_setting_action_text(
-                self._peer_target_text,
-                self._peer_lang_display(display_settings.languages.peer_target_language),
             )
             self._set_setting_action_text(
                 self._peer_qwen_region_text,
