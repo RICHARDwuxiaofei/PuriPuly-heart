@@ -56,22 +56,6 @@ class AudioSettings(ft.Column):
             self._on_desktop_output_click,
         )
 
-        self._desktop_vad_field = self._build_numeric_field(
-            label=t("settings.desktop_audio.vad_speech_threshold"),
-            value=f"{self._current_desktop_vad_threshold:.2f}",
-            on_change_end=self._on_desktop_vad_threshold_change,
-        )
-        self._desktop_hangover_field = self._build_numeric_field(
-            label=t("settings.desktop_audio.vad_hangover_ms"),
-            value=str(self._current_desktop_hangover_ms),
-            on_change_end=self._on_desktop_hangover_change,
-        )
-        self._desktop_pre_roll_field = self._build_numeric_field(
-            label=t("settings.desktop_audio.vad_pre_roll_ms"),
-            value=str(self._current_desktop_pre_roll_ms),
-            on_change_end=self._on_desktop_pre_roll_change,
-        )
-
         super().__init__(
             controls=[
                 self._host_api_label,
@@ -82,15 +66,6 @@ class AudioSettings(ft.Column):
                 ft.Container(height=12),
                 self._desktop_output_label,
                 self._desktop_output_text,
-                ft.Container(height=12),
-                ft.Row(
-                    controls=[
-                        self._desktop_vad_field,
-                        self._desktop_hangover_field,
-                        self._desktop_pre_roll_field,
-                    ],
-                    spacing=8,
-                ),
             ],
             spacing=8,
             expand=True,
@@ -185,9 +160,11 @@ class AudioSettings(ft.Column):
     @desktop_vad_threshold.setter
     def desktop_vad_threshold(self, val: float) -> None:
         self._current_desktop_vad_threshold = float(val)
-        self._desktop_vad_field.value = f"{self._current_desktop_vad_threshold:.2f}"
-        if self._desktop_vad_field.page:
-            self._desktop_vad_field.update()
+        field = getattr(self, "_desktop_vad_field", None)
+        if field is not None:
+            field.value = f"{self._current_desktop_vad_threshold:.2f}"
+            if field.page:
+                field.update()
 
     @property
     def desktop_hangover_ms(self) -> int:
@@ -196,9 +173,11 @@ class AudioSettings(ft.Column):
     @desktop_hangover_ms.setter
     def desktop_hangover_ms(self, val: int) -> None:
         self._current_desktop_hangover_ms = int(val)
-        self._desktop_hangover_field.value = str(self._current_desktop_hangover_ms)
-        if self._desktop_hangover_field.page:
-            self._desktop_hangover_field.update()
+        field = getattr(self, "_desktop_hangover_field", None)
+        if field is not None:
+            field.value = str(self._current_desktop_hangover_ms)
+            if field.page:
+                field.update()
 
     @property
     def desktop_pre_roll_ms(self) -> int:
@@ -207,9 +186,11 @@ class AudioSettings(ft.Column):
     @desktop_pre_roll_ms.setter
     def desktop_pre_roll_ms(self, val: int) -> None:
         self._current_desktop_pre_roll_ms = int(val)
-        self._desktop_pre_roll_field.value = str(self._current_desktop_pre_roll_ms)
-        if self._desktop_pre_roll_field.page:
-            self._desktop_pre_roll_field.update()
+        field = getattr(self, "_desktop_pre_roll_field", None)
+        if field is not None:
+            field.value = str(self._current_desktop_pre_roll_ms)
+            if field.page:
+                field.update()
 
     def _get_host_api_options(self) -> list[OptionItem]:
         """Get available host API options."""
@@ -407,9 +388,6 @@ class AudioSettings(ft.Column):
         self._host_api_label.value = t("settings.audio_host_api")
         self._microphone_label.value = t("settings.microphone")
         self._desktop_output_label.value = t("settings.desktop_audio.output_device")
-        self._desktop_vad_field.label = t("settings.desktop_audio.vad_speech_threshold")
-        self._desktop_hangover_field.label = t("settings.desktop_audio.vad_hangover_ms")
-        self._desktop_pre_roll_field.label = t("settings.desktop_audio.vad_pre_roll_ms")
 
         # Update display if showing default
         if self._host_api_text.content.value == old_default:
