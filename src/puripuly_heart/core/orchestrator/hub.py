@@ -157,7 +157,11 @@ class ClientHub:
     _overlay_active_self_secondary_text: str | None = field(init=False, default=None)
     overlay_stream_coalesce_ms: int = 300
     last_error_source: str | None = None
-    _last_overlay_secondary_diagnostic_signature: tuple[object, ...] | None = field(
+    _last_overlay_secondary_runtime_signature: tuple[object, ...] | None = field(
+        init=False,
+        default=None,
+    )
+    _last_overlay_secondary_diagnostics_signature: tuple[object, ...] | None = field(
         init=False,
         default=None,
     )
@@ -1194,11 +1198,6 @@ class ClientHub:
         source: str,
         reuse_mode: str | None,
     ) -> None:
-        if self.overlay_diagnostics is None:
-            return
-        spec_translation_len = 0
-        if isinstance(buffer.spec_translation, Translation):
-            spec_translation_len = len(buffer.spec_translation.text.strip())
         signature = (
             buffer.merge_id,
             active_text,
@@ -1208,9 +1207,22 @@ class ClientHub:
             buffer.resume_pending,
             buffer.resume_confirmed,
         )
-        if signature == self._last_overlay_secondary_diagnostic_signature:
+        self._maybe_emit_active_self_secondary_runtime_log(
+            buffer=buffer,
+            active_text=active_text,
+            secondary_text=secondary_text,
+            source=source,
+            reuse_mode=reuse_mode,
+            signature=signature,
+        )
+        if self.overlay_diagnostics is None:
             return
-        self._last_overlay_secondary_diagnostic_signature = signature
+        if signature == self._last_overlay_secondary_diagnostics_signature:
+            return
+        self._last_overlay_secondary_diagnostics_signature = signature
+        spec_translation_len = 0
+        if isinstance(buffer.spec_translation, Translation):
+            spec_translation_len = len(buffer.spec_translation.text.strip())
         self.overlay_diagnostics.record_hub(
             "active_self_secondary",
             merge_id=str(buffer.merge_id),
@@ -1223,6 +1235,54 @@ class ClientHub:
             reuse_mode=reuse_mode,
             resume_pending=buffer.resume_pending,
             resume_confirmed=buffer.resume_confirmed,
+        )
+
+    def _maybe_emit_active_self_secondary_runtime_log(
+        self,
+        *,
+        buffer: _MergeBuffer,
+        active_text: str,
+        secondary_text: str,
+        source: str,
+        reuse_mode: str | None,
+        signature: tuple[object, ...],
+    ) -> None:
+        if signature == self._last_overlay_secondary_runtime_signature:
+            return
+        spec_translation_len = 0
+        if isinstance(buffer.spec_translation, Translation):
+            spec_translation_len = len(buffer.spec_translation.text.strip())
+        emitted = self._emit_detailed(
+            "[Hub] active_self_secondary merge_id=%s source=%s active_len=%s secondary_len=%s spec_text_len=%s spec_translation_len=%s cached_secondary_len=%s reuse_mode=%s resume_pending=%s resume_confirmed=%s",
+            str(buffer.merge_id)[:8],
+            source,
+            len(active_text),
+            len(secondary_text),
+            len((buffer.spec_text or "").strip()),
+            spec_translation_len,
+            len((self._overlay_active_self_secondary_text or "").strip()),
+            reuse_mode,
+            buffer.resume_pending,
+            buffer.resume_confirmed,
+            fallback_level=logging.INFO,
+        )
+        if emitted:
+            self._last_overlay_secondary_runtime_signature = signature
+
+    def _should_blank_stale_active_secondary_before_finalizing(
+        self,
+        *,
+        final_text: str,
+        reuse_mode: str | None,
+    ) -> bool:
+        # Presenter promotion preserves active secondary text for the same occupant.
+        # Blank the active row first when speculative reuse is unsafe so stale
+        # secondary text cannot be promoted into the finalized row.
+        return (
+            reuse_mode is None
+            and self.overlay_sink is not None
+            and self._overlay_active_self_text == final_text
+            and (self._overlay_active_self_secondary_text or "").strip() != ""
         )
 
     def _record_overlay_emit(
@@ -1674,6 +1734,23 @@ class ClientHub:
             await self.reset_overlay_preview()
             return
 
+        reuse_mode = None
+        if buffer.spec_translation is not None:
+            reuse_mode = self._soft_reuse_mode(buffer.spec_text, final_text)
+
+        if self._should_blank_stale_active_secondary_before_finalizing(
+            final_text=final_text,
+            reuse_mode=reuse_mode,
+        ):
+            await self._emit_overlay_active_self_event(
+                self.overlay_event_adapter.self_active_update(
+                    text=final_text,
+                    secondary_text="",
+                    occupant_key=self._active_self_occupant_key(buffer),
+                    created_at=self.clock.now(),
+                )
+            )
+
         if buffer.spec_task is not None and not buffer.spec_task.done():
             buffer.spec_task.cancel()
 
@@ -1710,9 +1787,6 @@ class ClientHub:
             )
             return
 
-        reuse_mode = None
-        if buffer.spec_translation is not None:
-            reuse_mode = self._soft_reuse_mode(buffer.spec_text, final_text)
         reuse_spec = reuse_mode is not None
         commit_delay_ms = 0
         if buffer.start_time is not None:

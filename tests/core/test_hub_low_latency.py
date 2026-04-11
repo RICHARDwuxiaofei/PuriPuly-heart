@@ -1169,6 +1169,53 @@ class TestSpecCommitPaths:
         assert overlay_sink.events[-1].is_final is True
 
     @pytest.mark.asyncio
+    async def test_commit_merge_clears_stale_active_secondary_before_finalizing_mismatch(self):
+        clock = FakeClock(initial_time=10.0)
+        osc = FakeOscQueue()
+        overlay_sink = RecordingOverlaySink()
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(response_text="nuevo", delay_s=0.0),
+            osc=osc,
+            overlay_sink=overlay_sink,
+            clock=clock,
+            low_latency_mode=True,
+        )
+        source_utterance_id = uuid4()
+        merge_id = uuid4()
+        buffer = _MergeBuffer(
+            merge_id=merge_id,
+            parts=["hello live"],
+            utterance_ids=[source_utterance_id],
+            start_time=clock.now(),
+            last_end_time=clock.now(),
+            spec_text="hello live",
+            spec_translation=Translation(utterance_id=merge_id, text="translated live"),
+        )
+        hub._merge_buffer = buffer
+        hub._utterance_start_times[source_utterance_id] = clock.now()
+
+        await hub._sync_overlay_active_self(buffer, created_at=clock.now())
+        buffer.spec_text = "goodbye live"
+
+        await hub._commit_merge(buffer, reason="spec_done")
+
+        assert [event.type for event in overlay_sink.events] == [
+            "self_active_update",
+            "self_active_update",
+            "self_transcript_final",
+            "translation_final",
+            "utterance_closed",
+        ]
+        assert overlay_sink.events[0].text == "hello live"
+        assert overlay_sink.events[0].secondary_text == "translated live"
+        assert overlay_sink.events[1].text == "hello live"
+        assert overlay_sink.events[1].secondary_text == ""
+        assert overlay_sink.events[1].occupant_key == overlay_sink.events[0].occupant_key
+        assert overlay_sink.events[2].utterance_id == merge_id
+        assert overlay_sink.events[3].text == "nuevo"
+
+    @pytest.mark.asyncio
     async def test_commit_merge_reuses_spec_translation_for_soft_boundary_difference(self):
         clock = FakeClock(initial_time=10.0)
         llm = FakeLLMProvider()

@@ -283,6 +283,14 @@ class OverlayPresenter(OverlaySink):
             entry.last_updated_seq = event.seq
             if active_self_metadata is not None:
                 self._inherit_active_self_visibility_metadata(entry, active_self_metadata)
+                if (
+                    not entry.translation_text.strip()
+                    and active_self_metadata.secondary_text.strip()
+                ):
+                    entry.translation_text = active_self_metadata.secondary_text
+                    entry.translation_visible_since = (
+                        active_self_metadata.translation_visible_since or now
+                    )
             self._refresh_entry_visibility_and_expiration(key, entry, now=now)
             return True
 

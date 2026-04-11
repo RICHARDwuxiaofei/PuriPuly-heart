@@ -64,8 +64,8 @@ LATENCY_TRACE_POINT_CONTRACTS: dict[str, LatencyTracePointContract] = {
     ),
     "peer_overlay_first_render": LatencyTracePointContract(
         name="peer_overlay_first_render",
-        timing_semantics="Recorded by the downstream overlay when final peer overlay output first becomes visible.",
-        acceptance_expectation="Emit once per utterance after peer_overlay_first_emit when the downstream overlay first renders the completed peer translation on screen.",
+        timing_semantics="Recorded by the local overlay when the first local visible peer translation-bearing overlay output for the utterance appears on this client.",
+        acceptance_expectation="Emit once per utterance after peer_overlay_first_emit at the first local visible peer translation-bearing overlay output for that utterance; do not wait for lifecycle completion, cleanup, or any hub terminal summary stage.",
     ),
 }
 

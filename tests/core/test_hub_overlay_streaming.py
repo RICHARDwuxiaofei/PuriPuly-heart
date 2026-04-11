@@ -11,7 +11,7 @@ import pytest
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.orchestrator import hub as hub_module
-from puripuly_heart.core.orchestrator.hub import ClientHub
+from puripuly_heart.core.orchestrator.hub import ClientHub, _MergeBuffer
 from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
 from puripuly_heart.core.runtime_logging import (
@@ -353,6 +353,10 @@ async def test_peer_overlay_first_emit_latency_summary_and_detailed_trace() -> N
             and "final_output_stage=peer_overlay_first_emit" in message
             for message in detailed_messages
         )
+        assert not any(
+            "[Detailed][Latency]" in message and "stage=peer_overlay_first_render" in message
+            for message in detailed_messages
+        )
     finally:
         basic_runtime_logging.close()
         detailed_runtime_logging.close()
@@ -598,9 +602,12 @@ def test_peer_overlay_first_render_latency_contract_is_explicit() -> None:
 
     assert "final peer overlay output" in first_emit.timing_semantics
     assert "overlay_sink.emit" in first_emit.acceptance_expectation
-    assert "downstream overlay" in first_render.timing_semantics
+    assert "first local visible peer translation-bearing overlay output" in (
+        first_render.timing_semantics
+    )
     assert "after peer_overlay_first_emit" in first_render.acceptance_expectation
     assert "once per utterance" in first_render.acceptance_expectation
+    assert "do not wait for lifecycle completion" in first_render.acceptance_expectation
 
 
 @pytest.mark.asyncio
@@ -1111,6 +1118,119 @@ async def test_low_latency_self_active_secondary_diagnostics_record_blank_sticky
     assert buffer.spec_task is not None
     await asyncio.gather(buffer.spec_task, return_exceptions=True)
     assert list(diagnostics.hub_events) == []
+
+
+@pytest.mark.asyncio
+async def test_self_overlay_secondary_decision_logs_only_to_detailed_runtime_log() -> None:
+    basic_runtime_logging, basic_stream = _make_runtime_logging_capture()
+    detailed_runtime_logging, detailed_stream = _make_runtime_logging_capture()
+    detailed_runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+
+    # Contract under test: runtime detailed logging must emit the
+    # active_self_secondary token even when overlay_diagnostics is absent.
+    basic_hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=RecordingOverlaySink(),
+        overlay_diagnostics=None,
+        runtime_logging=basic_runtime_logging,
+        clock=FakeClock(_now=10.0),
+        low_latency_mode=True,
+    )
+    detailed_hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=RecordingOverlaySink(),
+        overlay_diagnostics=None,
+        runtime_logging=detailed_runtime_logging,
+        clock=FakeClock(_now=20.0),
+        low_latency_mode=True,
+    )
+
+    basic_buffer = _MergeBuffer(
+        merge_id=uuid4(),
+        parts=["hello live"],
+        utterance_ids=[uuid4()],
+    )
+    detailed_buffer = _MergeBuffer(
+        merge_id=uuid4(),
+        parts=["hello live"],
+        utterance_ids=[uuid4()],
+    )
+    basic_hub._merge_buffer = basic_buffer
+    detailed_hub._merge_buffer = detailed_buffer
+    basic_hub._overlay_active_self_secondary_text = "translated live"
+    detailed_hub._overlay_active_self_secondary_text = "translated live"
+
+    try:
+        assert basic_hub.overlay_diagnostics is None
+        assert detailed_hub.overlay_diagnostics is None
+
+        await basic_hub._sync_overlay_active_self(basic_buffer, created_at=basic_hub.clock.now())
+        await detailed_hub._sync_overlay_active_self(
+            detailed_buffer,
+            created_at=detailed_hub.clock.now(),
+        )
+
+        basic_messages = _runtime_log_messages(basic_stream)
+        detailed_messages = _runtime_log_messages(detailed_stream)
+        basic_decision_messages = [
+            message for message in basic_messages if "active_self_secondary" in message
+        ]
+        detailed_decision_messages = [
+            message for message in detailed_messages if "active_self_secondary" in message
+        ]
+
+        assert basic_decision_messages == []
+        assert detailed_decision_messages != [], (
+            "expected runtime detailed logging to emit active_self_secondary "
+            "without overlay_diagnostics"
+        )
+    finally:
+        basic_runtime_logging.close()
+        detailed_runtime_logging.close()
+        await basic_hub.stop()
+        await detailed_hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_self_overlay_secondary_decision_emits_after_basic_to_detailed_mode_switch() -> None:
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=RecordingOverlaySink(),
+        overlay_diagnostics=None,
+        runtime_logging=runtime_logging,
+        clock=FakeClock(_now=10.0),
+        low_latency_mode=True,
+    )
+    buffer = _MergeBuffer(
+        merge_id=uuid4(),
+        parts=["hello live"],
+        utterance_ids=[uuid4()],
+    )
+    hub._merge_buffer = buffer
+    hub._overlay_active_self_secondary_text = "translated live"
+
+    try:
+        await hub._sync_overlay_active_self(buffer, created_at=hub.clock.now())
+        assert not any(
+            "active_self_secondary" in message for message in _runtime_log_messages(log_stream)
+        )
+
+        runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+        await hub._sync_overlay_active_self(buffer, created_at=hub.clock.now())
+
+        assert any(
+            "active_self_secondary" in message for message in _runtime_log_messages(log_stream)
+        )
+    finally:
+        runtime_logging.close()
+        await hub.stop()
 
 
 @pytest.mark.asyncio
