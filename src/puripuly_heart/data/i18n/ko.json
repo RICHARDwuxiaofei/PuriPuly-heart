@@ -28,6 +28,8 @@
   "dashboard.trial.message.usage-unavailable": "OpenRouter에서 실시간 사용량을 불러오지 못했어요.",
   "dashboard.source_language": "원문 언어",
   "dashboard.target_language": "대상 언어",
+  "dashboard.language.self": "셀프",
+  "dashboard.language.peer": "상대",
   "dashboard.preset_format": "{source} \u2192 {target}",
   "language_modal.recent": "최근",
   "language_modal.all_languages": "모든 언어",

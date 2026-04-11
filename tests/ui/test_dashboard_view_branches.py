@@ -54,14 +54,35 @@ class FakeDisplayCard:
 
 
 class FakeLanguageCard:
-    def __init__(self, on_source_click, on_target_click, on_swap_click):
-        self.on_source_click = on_source_click
-        self.on_target_click = on_target_click
-        self.on_swap_click = on_swap_click
-        self.languages: list[tuple[str, str]] = []
+    def __init__(
+        self,
+        on_self_source_click,
+        on_self_target_click,
+        on_self_swap_click,
+        on_peer_source_click,
+        on_peer_target_click,
+        on_peer_swap_click,
+    ):
+        self.on_self_source_click = on_self_source_click
+        self.on_self_target_click = on_self_target_click
+        self.on_self_swap_click = on_self_swap_click
+        self.on_peer_source_click = on_peer_source_click
+        self.on_peer_target_click = on_peer_target_click
+        self.on_peer_swap_click = on_peer_swap_click
+        self.languages: list[tuple[str, str, str, str]] = []
+        self.row_labels: list[tuple[str, str]] = []
 
-    def set_languages(self, source: str, target: str) -> None:
-        self.languages.append((source, target))
+    def set_languages(
+        self,
+        self_source: str,
+        self_target: str,
+        peer_source: str,
+        peer_target: str,
+    ) -> None:
+        self.languages.append((self_source, self_target, peer_source, peer_target))
+
+    def set_row_labels(self, self_label: str, peer_label: str) -> None:
+        self.row_labels.append((self_label, peer_label))
 
 
 class FakeLanguageModal:
@@ -147,9 +168,11 @@ def test_dashboard_translation_toggle_controls_power_state(monkeypatch: pytest.M
 def test_dashboard_submit_and_language_selection_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     view = _make_dashboard(monkeypatch)
     sends: list[tuple[str, str]] = []
-    lang_changes: list[tuple[str, str]] = []
+    lang_changes: list[tuple[str, str, str, str]] = []
     view.on_send_message = lambda source, text: sends.append((source, text))
-    view.on_language_change = lambda src, tgt: lang_changes.append((src, tgt))
+    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: lang_changes.append(
+        (src, tgt, peer_src, peer_tgt)
+    )
 
     view._on_submit("hello")
     view._on_source_select("ja")
@@ -159,8 +182,8 @@ def test_dashboard_submit_and_language_selection_paths(monkeypatch: pytest.Monke
     assert sends == [("You", "hello")]
     assert view._recent_source_langs == ["ja"]
     assert view._recent_target_langs == ["fr"]
-    assert lang_changes[-1] == ("fr", "ja")
-    assert view.language_card.languages[-1] == ("name-fr", "name-ja")
+    assert lang_changes[-1] == ("fr", "ja", "", "")
+    assert view.language_card.languages[-1] == ("name-fr", "name-ja", "name-fr", "name-ja")
 
 
 def test_dashboard_recent_languages_caps_and_notifies(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,6 +223,7 @@ def test_dashboard_public_setters_update_components(monkeypatch: pytest.MonkeyPa
         dashboard_module.t("dashboard.local_stt_notice_missing"),
         "warning",
     )
+    assert view.language_card.languages[-1] == ("name-ko", "name-en", "name-ko", "name-en")
     assert view.trans_button.states[-1] == (False, True)
     assert view.stt_button.states[-1] == (False, True)
     assert view._recent_source_langs == ["a", "b", "c", "d", "e", "f"]
@@ -274,6 +298,116 @@ def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.Monkey
     warning_texts = [text for text, _is_error, _font in view.display_card.display_calls]
     assert dashboard_module.t("dashboard.warn_stt_key") in warning_texts
     assert dashboard_module.t("dashboard.warn_llm_key") in warning_texts
+
+
+def test_dashboard_peer_source_selection_restores_follow_self_blank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    changes: list[tuple[str, str, str, str]] = []
+    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: changes.append(
+        (src, tgt, peer_src, peer_tgt)
+    )
+    view.set_languages_from_codes("ko", "en", "ja", "fr")
+
+    view._on_peer_source_select("ko")
+
+    assert view._peer_source_lang_code == ""
+    assert view._peer_target_lang_code == "fr"
+    assert view._recent_source_langs == ["ko"]
+    assert changes[-1] == ("ko", "en", "", "fr")
+    assert view.language_card.languages[-1] == ("name-ko", "name-en", "name-ko", "name-fr")
+
+
+def test_dashboard_peer_target_selection_restores_follow_self_blank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    changes: list[tuple[str, str, str, str]] = []
+    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: changes.append(
+        (src, tgt, peer_src, peer_tgt)
+    )
+    view.set_languages_from_codes("ko", "en", "ja", "fr")
+
+    view._on_peer_target_select("en")
+
+    assert view._peer_source_lang_code == "ja"
+    assert view._peer_target_lang_code == ""
+    assert view._recent_target_langs == ["en"]
+    assert changes[-1] == ("ko", "en", "ja", "")
+    assert view.language_card.languages[-1] == ("name-ko", "name-en", "name-ja", "name-en")
+
+
+def test_dashboard_self_source_change_preserves_explicit_peer_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    changes: list[tuple[str, str, str, str]] = []
+    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: changes.append(
+        (src, tgt, peer_src, peer_tgt)
+    )
+    view.set_languages_from_codes("ko", "en", "ja", "fr")
+
+    view._on_source_select("ja")
+    view._on_source_select("de")
+
+    assert view._peer_source_lang_code == "ja"
+    assert view._peer_target_lang_code == "fr"
+    assert changes[-2] == ("ja", "en", "ja", "fr")
+    assert changes[-1] == ("de", "en", "ja", "fr")
+    assert view.language_card.languages[-1] == ("name-de", "name-en", "name-ja", "name-fr")
+
+
+def test_dashboard_peer_language_edits_share_controller_update_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    changes: list[tuple[str, str, str, str]] = []
+    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: changes.append(
+        (src, tgt, peer_src, peer_tgt)
+    )
+
+    view._on_peer_source_select("ja")
+    view._on_peer_target_select("fr")
+
+    assert changes == [("ko", "en", "ja", ""), ("ko", "en", "ja", "fr")]
+
+
+def test_dashboard_peer_swap_exchanges_source_and_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    changes: list[tuple[str, str, str, str]] = []
+    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: changes.append(
+        (src, tgt, peer_src, peer_tgt)
+    )
+    view.set_languages_from_codes("ko", "en", "ja", "fr")
+
+    view._swap_peer_languages()
+
+    assert view._peer_source_lang_code == "fr"
+    assert view._peer_target_lang_code == "ja"
+    assert changes[-1] == ("ko", "en", "fr", "ja")
+    assert view.language_card.languages[-1] == ("name-ko", "name-en", "name-fr", "name-ja")
+
+
+def test_dashboard_self_and_peer_language_row_labels_render_from_i18n(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dashboard_module, "t", lambda key, **_kwargs: f"i18n:{key}")
+    view = _make_dashboard(monkeypatch)
+
+    assert view.language_card.row_labels[0] == (
+        "i18n:dashboard.language.self",
+        "i18n:dashboard.language.peer",
+    )
+
+    view.apply_locale()
+
+    assert view.language_card.row_labels[-1] == (
+        "i18n:dashboard.language.self",
+        "i18n:dashboard.language.peer",
+    )
 
 
 def test_dashboard_local_stt_notice_can_change_and_clear_without_touching_display(

@@ -242,25 +242,36 @@ class TranslatorApp:
 
         self.page.run_task(_task)
 
-    def _on_language_change(self, source_code: str, target_code: str) -> None:
+    def _on_language_change(
+        self,
+        source_code: str,
+        target_code: str,
+        peer_source_code: str = "",
+        peer_target_code: str = "",
+    ) -> None:
         if self.controller.settings is None:
             return
         settings = self.controller.settings
         previous_source_code = settings.languages.source_language
         previous_target_code = settings.languages.target_language
+        previous_peer_source_code = getattr(settings.languages, "peer_source_language", "")
+        previous_peer_target_code = getattr(settings.languages, "peer_target_language", "")
         self._log_basic(
             "[Dashboard] Language change requested: "
-            f"source={previous_source_code}->{source_code} target={previous_target_code}->{target_code}"
+            f"source={previous_source_code}->{source_code} "
+            f"target={previous_target_code}->{target_code} "
+            f"peer_source={previous_peer_source_code}->{peer_source_code} "
+            f"peer_target={previous_peer_target_code}->{peer_target_code}"
         )
         self._log_detailed(
             f"[Dashboard] Language change detail: overlay_state={getattr(self, 'overlay_state', 'unknown')}"
         )
-        settings.languages.source_language = source_code
-        settings.languages.target_language = target_code
 
         # Check STT provider compatibility and show warning if needed
-        stt_provider = settings.provider.stt.value
-        warning = get_stt_compatibility_warning(source_code, stt_provider)
+        warning = None
+        if source_code != previous_source_code:
+            stt_provider = settings.provider.stt.value
+            warning = get_stt_compatibility_warning(source_code, stt_provider)
         if warning:
             self.page.open(
                 ft.SnackBar(
@@ -274,7 +285,12 @@ class TranslatorApp:
             )
 
         async def _task():
-            await self.controller.apply_settings(settings)
+            await self.controller.on_dashboard_language_change(
+                source_code=source_code,
+                target_code=target_code,
+                peer_source_code=peer_source_code,
+                peer_target_code=peer_target_code,
+            )
 
         self.page.run_task(_task)
 

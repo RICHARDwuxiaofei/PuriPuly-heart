@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import logging
 import secrets
 import threading
@@ -1394,6 +1395,24 @@ class GuiController:
         except Exception as exc:
             self._log_error(f"Submit failed: {exc}")
 
+    async def on_dashboard_language_change(
+        self,
+        *,
+        source_code: str,
+        target_code: str,
+        peer_source_code: str = "",
+        peer_target_code: str = "",
+    ) -> None:
+        if self.settings is None:
+            return
+
+        updated = copy.deepcopy(self.settings)
+        updated.languages.source_language = source_code
+        updated.languages.target_language = target_code
+        updated.languages.peer_source_language = peer_source_code
+        updated.languages.peer_target_language = peer_target_code
+        await self.apply_settings(updated)
+
     async def apply_settings(self, settings: AppSettings) -> None:
         prev_locale = get_locale()
         prev_overlay_enabled = (
@@ -2192,7 +2211,10 @@ class GuiController:
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 dash.set_languages_from_codes(
-                    settings.languages.source_language, settings.languages.target_language
+                    settings.languages.source_language,
+                    settings.languages.target_language,
+                    settings.languages.peer_source_language,
+                    settings.languages.peer_target_language,
                 )
                 # Load recent languages from settings
                 dash.set_recent_languages(

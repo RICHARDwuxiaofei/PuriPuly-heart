@@ -480,25 +480,30 @@ async def test_on_language_change_updates_settings_and_shows_warning(monkeypatch
         languages=SimpleNamespace(source_language="ko", target_language="en"),
         provider=SimpleNamespace(stt=SimpleNamespace(value="deepgram")),
     )
-    seen: list[object] = []
+    seen: list[tuple[str, str, str, str]] = []
 
-    async def fake_apply_settings(updated) -> None:
-        seen.append(updated)
+    async def fake_on_dashboard_language_change(
+        *, source_code: str, target_code: str, peer_source_code: str, peer_target_code: str
+    ) -> None:
+        seen.append((source_code, target_code, peer_source_code, peer_target_code))
 
     warning = SimpleNamespace(key="dashboard.warn_stt_key", language_code="ko")
     monkeypatch.setattr(
         app_module, "get_stt_compatibility_warning", lambda *_args, **_kwargs: warning
     )
-    app.controller = SimpleNamespace(settings=settings, apply_settings=fake_apply_settings)
+    app.controller = SimpleNamespace(
+        settings=settings,
+        on_dashboard_language_change=fake_on_dashboard_language_change,
+    )
 
-    app._on_language_change("ja", "fr")
+    app._on_language_change("ja", "fr", "", "it")
 
-    assert settings.languages.source_language == "ja"
-    assert settings.languages.target_language == "fr"
+    assert settings.languages.source_language == "ko"
+    assert settings.languages.target_language == "en"
     assert len(app.page.opened) == 1
     assert len(app.page.tasks) == 1
     await app.page.tasks[0]()
-    assert seen == [settings]
+    assert seen == [("ja", "fr", "", "it")]
 
 
 @pytest.mark.asyncio

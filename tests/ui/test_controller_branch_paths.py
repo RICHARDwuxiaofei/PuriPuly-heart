@@ -93,8 +93,14 @@ class DummyDashboard:
         self.local_stt_notice_status = status
         self.local_stt_notice_percent = percent
 
-    def set_languages_from_codes(self, source: str, target: str) -> None:
-        self.languages = (source, target)
+    def set_languages_from_codes(
+        self,
+        source: str,
+        target: str,
+        peer_source: str = "",
+        peer_target: str = "",
+    ) -> None:
+        self.languages = (source, target, peer_source, peer_target)
 
     def set_recent_languages(self, source: list[str], target: list[str]) -> None:
         self.recent_languages = (source, target)
@@ -648,7 +654,7 @@ def test_sync_ui_from_settings_updates_dashboard_and_settings_view() -> None:
 
     controller._sync_ui_from_settings()
 
-    assert dash.languages == ("ko", "en")
+    assert dash.languages == ("ko", "en", "", "")
     assert dash.recent_languages == (["ko", "ja"], ["en", "zh"])
     assert dash.on_recent_languages_change is not None
     assert settings_view.calls == [(settings, Path("settings.json"), False)]
@@ -3398,6 +3404,115 @@ async def test_apply_providers_replaces_runtime_self_stt_once_when_enabled(
 
     assert controller.settings is updated
     assert calls == ["replace"]
+
+
+@pytest.mark.asyncio
+async def test_on_dashboard_language_change_routes_self_and_peer_updates_through_shared_controller_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.languages.peer_source_language = "zh-CN"
+    controller.settings.languages.peer_target_language = "ja"
+    captured: list[AppSettings] = []
+
+    async def fake_apply_settings(self, settings: AppSettings) -> None:
+        captured.append(settings)
+
+    monkeypatch.setattr(GuiController, "apply_settings", fake_apply_settings)
+
+    await controller.on_dashboard_language_change(
+        source_code="fr",
+        target_code="de",
+        peer_source_code="",
+        peer_target_code="it",
+    )
+
+    assert controller.settings.languages.source_language == "ko"
+    assert controller.settings.languages.target_language == "en"
+    assert controller.settings.languages.peer_source_language == "zh-CN"
+    assert controller.settings.languages.peer_target_language == "ja"
+    assert len(captured) == 1
+    assert captured[0].languages.source_language == "fr"
+    assert captured[0].languages.target_language == "de"
+    assert captured[0].languages.peer_source_language == ""
+    assert captured[0].languages.peer_target_language == "it"
+
+
+@pytest.mark.asyncio
+async def test_on_dashboard_language_change_preserves_explicit_peer_override_when_self_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.languages.peer_source_language = "ja"
+    controller.settings.languages.peer_target_language = "fr"
+    captured: list[AppSettings] = []
+
+    async def fake_apply_settings(self, settings: AppSettings) -> None:
+        captured.append(settings)
+
+    monkeypatch.setattr(GuiController, "apply_settings", fake_apply_settings)
+
+    await controller.on_dashboard_language_change(
+        source_code="ja",
+        target_code="en",
+        peer_source_code="ja",
+        peer_target_code="fr",
+    )
+
+    assert len(captured) == 1
+    assert captured[0].languages.source_language == "ja"
+    assert captured[0].languages.target_language == "en"
+    assert captured[0].languages.peer_source_language == "ja"
+    assert captured[0].languages.peer_target_language == "fr"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_peer_language_change_refreshes_peer_translation_pipeline_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        controller.settings
+    )
+    controller._last_peer_translation_enabled = controller.settings.ui.peer_translation_enabled
+    refreshed: list[str] = []
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        refreshed.append("peer")
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        raise AssertionError("self STT runtime should not restart for peer-only change")
+
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
+
+    await controller.on_dashboard_language_change(
+        source_code="ko",
+        target_code="en",
+        peer_source_code="ja",
+        peer_target_code="fr",
+    )
+
+    assert refreshed == ["peer"]
+    assert controller.hub.peer_source_language == "ja"
+    assert controller.hub.peer_target_language == "fr"
 
 
 @pytest.mark.asyncio
