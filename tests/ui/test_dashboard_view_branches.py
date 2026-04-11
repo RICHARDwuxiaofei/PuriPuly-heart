@@ -4,6 +4,10 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.ui.overlay_peer_contract import (
+    OverlayPeerConsumerContract,
+    OverlayPeerToggleContract,
+)
 from puripuly_heart.ui.views import dashboard as dashboard_module
 
 
@@ -13,10 +17,24 @@ class FakePowerButton:
         self.kwargs = dict(kwargs)
         self.label = label
         self.on_click = on_click
-        self.states: list[tuple[bool, bool]] = []
+        self.states: list[dict[str, object]] = []
 
-    def set_state(self, is_on: bool, needs_key: bool = False):
-        self.states.append((is_on, needs_key))
+    def set_state(
+        self,
+        is_on: bool,
+        needs_key: bool = False,
+        *,
+        status_text: str | None = None,
+        helper_text: str | None = None,
+    ):
+        self.states.append(
+            {
+                "is_on": is_on,
+                "needs_key": needs_key,
+                "status_text": status_text,
+                "helper_text": helper_text,
+            }
+        )
 
     def set_label(self, label: str) -> None:
         self.label = label
@@ -124,6 +142,43 @@ def _make_dashboard(monkeypatch: pytest.MonkeyPatch):
     return view
 
 
+def _make_overlay_peer_contract(
+    *,
+    overlay_intent_enabled: bool,
+    overlay_state: str,
+    overlay_status_text: str,
+    peer_intent_enabled: bool,
+    peer_effective_enabled: bool,
+    peer_status_text: str,
+    peer_helper_text: str = "",
+) -> OverlayPeerConsumerContract:
+    return OverlayPeerConsumerContract(
+        overlay=OverlayPeerToggleContract(
+            intent_enabled=overlay_intent_enabled,
+            effective_enabled=overlay_state == "connected",
+            action_enabled=True,
+            state=(
+                "on"
+                if overlay_state == "connected"
+                else ("off" if not overlay_intent_enabled else "warning")
+            ),
+            status_text=overlay_status_text,
+        ),
+        peer=OverlayPeerToggleContract(
+            intent_enabled=peer_intent_enabled,
+            effective_enabled=peer_effective_enabled,
+            action_enabled=True,
+            state=(
+                "on"
+                if peer_effective_enabled
+                else ("off" if not peer_intent_enabled else "warning")
+            ),
+            status_text=peer_status_text,
+            helper_text=peer_helper_text,
+        ),
+    )
+
+
 def test_dashboard_stt_toggle_warning_and_enable_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     view = _make_dashboard(monkeypatch)
     seen: list[bool] = []
@@ -224,8 +279,18 @@ def test_dashboard_public_setters_update_components(monkeypatch: pytest.MonkeyPa
         "warning",
     )
     assert view.language_card.languages[-1] == ("name-ko", "name-en", "name-ko", "name-en")
-    assert view.trans_button.states[-1] == (False, True)
-    assert view.stt_button.states[-1] == (False, True)
+    assert view.trans_button.states[-1] == {
+        "is_on": False,
+        "needs_key": True,
+        "status_text": dashboard_module.t("settings.option.off"),
+        "helper_text": dashboard_module.t("dashboard.warn_llm_key"),
+    }
+    assert view.stt_button.states[-1] == {
+        "is_on": False,
+        "needs_key": True,
+        "status_text": dashboard_module.t("settings.option.off"),
+        "helper_text": dashboard_module.t("dashboard.warn_stt_key"),
+    }
     assert view._recent_source_langs == ["a", "b", "c", "d", "e", "f"]
 
 
@@ -298,6 +363,75 @@ def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.Monkey
     warning_texts = [text for text, _is_error, _font in view.display_card.display_calls]
     assert dashboard_module.t("dashboard.warn_stt_key") in warning_texts
     assert dashboard_module.t("dashboard.warn_llm_key") in warning_texts
+
+
+def test_dashboard_overlay_peer_buttons_render_consumer_contract_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    contract = _make_overlay_peer_contract(
+        overlay_intent_enabled=True,
+        overlay_state="failed",
+        overlay_status_text="Overlay failed",
+        peer_intent_enabled=True,
+        peer_effective_enabled=False,
+        peer_status_text="Peer waiting",
+        peer_helper_text="Overlay is starting",
+    )
+
+    view.set_overlay_peer_contract(contract)
+
+    assert view.overlay_button.states[-1] == {
+        "is_on": False,
+        "needs_key": True,
+        "status_text": "Overlay failed",
+        "helper_text": "",
+    }
+    assert view.peer_button.states[-1] == {
+        "is_on": False,
+        "needs_key": True,
+        "status_text": "Peer waiting",
+        "helper_text": "Overlay is starting",
+    }
+
+
+def test_dashboard_overlay_and_peer_buttons_toggle_live_from_contract_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    peer_toggles: list[bool] = []
+    overlay_toggles: list[bool] = []
+    view.on_toggle_peer_translation = lambda enabled: peer_toggles.append(enabled)
+    view.on_toggle_overlay = lambda enabled: overlay_toggles.append(enabled)
+
+    view.set_overlay_peer_contract(
+        _make_overlay_peer_contract(
+            overlay_intent_enabled=False,
+            overlay_state="off",
+            overlay_status_text="Overlay off",
+            peer_intent_enabled=False,
+            peer_effective_enabled=False,
+            peer_status_text="Peer off",
+        )
+    )
+    view.peer_button.on_click()
+    view.overlay_button.on_click()
+
+    view.set_overlay_peer_contract(
+        _make_overlay_peer_contract(
+            overlay_intent_enabled=True,
+            overlay_state="connected",
+            overlay_status_text="Overlay on",
+            peer_intent_enabled=True,
+            peer_effective_enabled=True,
+            peer_status_text="Peer on",
+        )
+    )
+    view.peer_button.on_click()
+    view.overlay_button.on_click()
+
+    assert peer_toggles == [True, False]
+    assert overlay_toggles == [True, False]
 
 
 def test_dashboard_peer_source_selection_restores_follow_self_blank(
@@ -408,6 +542,21 @@ def test_dashboard_self_and_peer_language_row_labels_render_from_i18n(
         "i18n:dashboard.language.self",
         "i18n:dashboard.language.peer",
     )
+
+
+def test_dashboard_peer_and_overlay_button_labels_render_from_i18n(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dashboard_module, "t", lambda key, **_kwargs: f"i18n:{key}")
+    view = _make_dashboard(monkeypatch)
+
+    assert view.peer_button.label == "i18n:dashboard.peer_label"
+    assert view.overlay_button.label == "i18n:dashboard.overlay_label"
+
+    view.apply_locale()
+
+    assert view.peer_button.label == "i18n:dashboard.peer_label"
+    assert view.overlay_button.label == "i18n:dashboard.overlay_label"
 
 
 def test_dashboard_local_stt_notice_can_change_and_clear_without_touching_display(

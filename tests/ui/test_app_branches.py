@@ -100,6 +100,8 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
             self.on_send_message = None
             self.on_toggle_translation = None
             self.on_toggle_stt = None
+            self.on_toggle_overlay = None
+            self.on_toggle_peer_translation = None
             self.on_language_change = None
             self.overlay_peer_contract = None
 
@@ -174,6 +176,8 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert page.window.height == 780
     assert page.added
     assert app.view_dashboard.on_send_message == app._on_manual_submit
+    assert app.view_dashboard.on_toggle_overlay == app._on_overlay_toggle
+    assert app.view_dashboard.on_toggle_peer_translation == app._on_peer_translation_toggle
     assert app.view_settings.on_verify_api_key == app._on_verify_api_key
     assert app.view_settings.on_overlay_toggle == app._on_overlay_toggle
     assert app.view_settings.on_peer_translation_toggle == app._on_peer_translation_toggle
@@ -350,6 +354,24 @@ def test_apply_locale_updates_views_and_page(monkeypatch: pytest.MonkeyPatch) ->
     assert app.page.title == app_module.t("app.title")
     assert view_calls == ["dash", "settings", "logs"]
     assert app.page.updated == 1
+
+
+def test_refresh_overlay_peer_contract_ignores_missing_controller() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.view_dashboard = SimpleNamespace(
+        set_overlay_peer_contract=lambda contract: (_ for _ in ()).throw(
+            AssertionError(f"unexpected dashboard contract: {contract}")
+        )
+    )
+    app.view_settings = SimpleNamespace(
+        set_overlay_peer_contract=lambda contract: (_ for _ in ()).throw(
+            AssertionError(f"unexpected settings contract: {contract}")
+        )
+    )
+
+    app.refresh_overlay_peer_contract()
+
+    assert getattr(app, "overlay_peer_contract", None) is None
 
 
 def test_on_overlay_state_changed_updates_settings_view_runtime_state() -> None:

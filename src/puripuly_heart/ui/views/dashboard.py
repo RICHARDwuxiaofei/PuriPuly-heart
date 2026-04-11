@@ -65,6 +65,8 @@ class DashboardView(ft.Column):
         self.on_send_message = None
         self.on_toggle_translation = None
         self.on_toggle_stt = None
+        self.on_toggle_overlay = None
+        self.on_toggle_peer_translation = None
         self.on_language_change = None
         self.on_recent_languages_change = None  # For persistence
 
@@ -82,7 +84,7 @@ class DashboardView(ft.Column):
         self.peer_button = PowerButton(
             label=t("dashboard.peer_label"),
             icon=ft.Icons.RECORD_VOICE_OVER,
-            on_click=self._noop_control_slot,
+            on_click=self._toggle_peer_translation,
             icon_size=80,
             label_size=32,
             color_on=COLOR_WARNING,
@@ -98,11 +100,14 @@ class DashboardView(ft.Column):
         self.overlay_button = PowerButton(
             label=t("dashboard.overlay_label"),
             icon=ft.Icons.VISIBILITY,
-            on_click=self._noop_control_slot,
+            on_click=self._toggle_overlay,
             icon_size=80,
             label_size=32,
             color_on=COLOR_TERTIARY,
         )
+        self._sync_stt_button_state()
+        self._sync_translation_button_state()
+        self._sync_overlay_peer_buttons()
 
         # Right-side information stack
         self.display_card = DisplayCard(on_submit=self._on_submit)
@@ -269,6 +274,62 @@ class DashboardView(ft.Column):
     def _noop_control_slot(self) -> None:
         return None
 
+    def _toggle_overlay(self) -> None:
+        enabled = True
+        if self._overlay_peer_contract is not None:
+            enabled = not self._overlay_peer_contract.overlay.intent_enabled
+        if self.on_toggle_overlay:
+            self.on_toggle_overlay(enabled)
+
+    def _toggle_peer_translation(self) -> None:
+        enabled = True
+        if self._overlay_peer_contract is not None:
+            enabled = not self._overlay_peer_contract.peer.intent_enabled
+        if self.on_toggle_peer_translation:
+            self.on_toggle_peer_translation(enabled)
+
+    def _toggle_status_copy(self, is_on: bool) -> str:
+        return t("settings.option.on" if is_on else "settings.option.off")
+
+    def _sync_stt_button_state(self) -> None:
+        helper_text = t("dashboard.warn_stt_key") if self._stt_showing_warning else ""
+        self.stt_button.set_state(
+            self.is_stt_on,
+            needs_key=self._stt_showing_warning,
+            status_text=self._toggle_status_copy(self.is_stt_on),
+            helper_text=helper_text,
+        )
+
+    def _sync_translation_button_state(self) -> None:
+        helper_text = t("dashboard.warn_llm_key") if self._translation_showing_warning else ""
+        self.trans_button.set_state(
+            self.is_translation_on,
+            needs_key=self._translation_showing_warning,
+            status_text=self._toggle_status_copy(self.is_translation_on),
+            helper_text=helper_text,
+        )
+
+    def _sync_overlay_peer_buttons(self) -> None:
+        contract = self._overlay_peer_contract
+        if contract is None:
+            off_text = self._toggle_status_copy(False)
+            self.peer_button.set_state(False, status_text=off_text, helper_text="")
+            self.overlay_button.set_state(False, status_text=off_text, helper_text="")
+            return
+
+        self.peer_button.set_state(
+            contract.peer.state == "on",
+            needs_key=contract.peer.state == "warning",
+            status_text=contract.peer.status_text,
+            helper_text=contract.peer.helper_text,
+        )
+        self.overlay_button.set_state(
+            contract.overlay.state == "on",
+            needs_key=contract.overlay.state == "warning",
+            status_text=contract.overlay.status_text,
+            helper_text=contract.overlay.helper_text,
+        )
+
     @property
     def managed_trial_state(self) -> dict[str, object]:
         return {
@@ -294,17 +355,16 @@ class DashboardView(ft.Column):
         if self.is_stt_on:
             self.is_stt_on = False
             self._stt_showing_warning = False
-            self.stt_button.set_state(False, needs_key=False)
         elif self._stt_showing_warning:
             self._stt_showing_warning = False
-            self.stt_button.set_state(False, needs_key=False)
         elif self.stt_needs_key:
             self._stt_showing_warning = True
-            self.stt_button.set_state(False, needs_key=True)
             self.set_display_text(t("dashboard.warn_stt_key"))
         else:
             self.is_stt_on = True
-            self.stt_button.set_state(True)
+            self._stt_showing_warning = False
+
+        self._sync_stt_button_state()
 
         if self.on_toggle_stt:
             self.on_toggle_stt(self.is_stt_on)
@@ -313,17 +373,16 @@ class DashboardView(ft.Column):
         if self.is_translation_on:
             self.is_translation_on = False
             self._translation_showing_warning = False
-            self.trans_button.set_state(False, needs_key=False)
         elif self._translation_showing_warning:
             self._translation_showing_warning = False
-            self.trans_button.set_state(False, needs_key=False)
         elif self.translation_needs_key:
             self._translation_showing_warning = True
-            self.trans_button.set_state(False, needs_key=True)
             self.set_display_text(t("dashboard.warn_llm_key"))
         else:
             self.is_translation_on = True
-            self.trans_button.set_state(True)
+            self._translation_showing_warning = False
+
+        self._sync_translation_button_state()
 
         self.is_power_on = self.is_translation_on
         if self.on_toggle_translation:
@@ -469,32 +528,31 @@ class DashboardView(ft.Column):
 
     def set_translation_enabled(self, enabled: bool) -> None:
         self.is_translation_on = bool(enabled)
-        self.trans_button.set_state(self.is_translation_on)
+        if self.is_translation_on:
+            self._translation_showing_warning = False
+        self._sync_translation_button_state()
 
     def set_stt_enabled(self, enabled: bool) -> None:
         self.is_stt_on = bool(enabled)
-        self.stt_button.set_state(self.is_stt_on)
+        if self.is_stt_on:
+            self._stt_showing_warning = False
+        self._sync_stt_button_state()
 
     def set_overlay_peer_contract(self, contract: OverlayPeerConsumerContract) -> None:
         self._overlay_peer_contract = contract
-        self.peer_button.set_state(
-            contract.peer.state == "on",
-            needs_key=contract.peer.state == "warning",
-        )
-        self.overlay_button.set_state(
-            contract.overlay.state == "on",
-            needs_key=contract.overlay.state == "warning",
-        )
+        self._sync_overlay_peer_buttons()
 
     def set_translation_needs_key(self, needs_key: bool, *, update_ui: bool = True) -> None:
         self.translation_needs_key = bool(needs_key)
-        if update_ui and needs_key and not self.is_translation_on:
-            self.trans_button.set_state(False, needs_key=True)
+        if update_ui and not self.is_translation_on:
+            self._translation_showing_warning = bool(needs_key)
+            self._sync_translation_button_state()
 
     def set_stt_needs_key(self, needs_key: bool, *, update_ui: bool = True) -> None:
         self.stt_needs_key = bool(needs_key)
-        if update_ui and needs_key and not self.is_stt_on:
-            self.stt_button.set_state(False, needs_key=True)
+        if update_ui and not self.is_stt_on:
+            self._stt_showing_warning = bool(needs_key)
+            self._sync_stt_button_state()
 
     def set_display_text(
         self,
@@ -552,6 +610,9 @@ class DashboardView(ft.Column):
         self.peer_button.set_label(t("dashboard.peer_label"))
         self.trans_button.set_label(t("dashboard.trans_label"))
         self.overlay_button.set_label(t("dashboard.overlay_label"))
+        self._sync_stt_button_state()
+        self._sync_translation_button_state()
+        self._sync_overlay_peer_buttons()
         self.display_card.apply_locale(
             display_font_family=self._ui_font(),
             input_font_family=font_for_language(self._source_lang_code),
