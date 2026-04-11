@@ -95,6 +95,7 @@
   "settings.default_option": "자동 선택",
   "settings.option.on": "켜기",
   "settings.option.off": "끄기",
+  "settings.overlay.display_options": "표시 옵션",
   "settings.overlay.enabled": "오버레이",
   "settings.overlay.show_translation": "번역 표시",
   "settings.overlay.show_peer_original": "상대 원문 표시",
