@@ -1172,6 +1172,35 @@ def test_overlay_stopping_contract_drives_integrated_context_hint(
     assert view._integrated_context_button.disabled is True
 
 
+@pytest.mark.parametrize(
+    ("locale", "expected_hint"),
+    [
+        ("en", "Turn on peer translation from Dashboard first."),
+        ("ko", "먼저 대시보드에서 상대 번역을 켜주세요."),
+        ("zh-CN", "请先在仪表板打开对方翻译。"),
+    ],
+)
+def test_integrated_context_peer_disabled_hint_redirects_to_dashboard(
+    monkeypatch: pytest.MonkeyPatch,
+    locale: str,
+    expected_hint: str,
+) -> None:
+    old_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale(locale)
+        settings = AppSettings()
+        settings.ui.locale = locale
+
+        view, _ = _make_settings_view(monkeypatch)
+        view.load_from_settings(settings, config_path=Path("settings.json"))
+        view.set_overlay_runtime_state("connected")
+
+        assert view._integrated_context_hint.value == expected_hint
+        assert view._integrated_context_button.disabled is True
+    finally:
+        i18n_module.set_locale(old_locale)
+
+
 def test_peer_qwen_region_control_is_visible_before_peer_translation_is_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

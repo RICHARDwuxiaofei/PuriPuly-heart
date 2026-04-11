@@ -112,7 +112,7 @@
     "settings.peer_translation.warning.overlay_failed": "已保存为开启，但叠加层当前不可用：{reason}",
     "settings.peer_translation.warning.runtime_unavailable": "已保存为开启，但对方翻译当前不可用。",
     "settings.integrated_context.disabled.overlay_required": "整合上下文需要已连接的叠加层。",
-    "settings.integrated_context.disabled.peer_translation_required": "请先开启对方翻译。",
+    "settings.integrated_context.disabled.peer_translation_required": "请先在仪表板打开对方翻译。",
     "settings.overlay.status.off": "叠加层已关闭",
     "settings.overlay.status.starting": "叠加层正在启动",
     "settings.overlay.status.connected": "叠加层已连接",

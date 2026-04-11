@@ -112,7 +112,7 @@
   "settings.peer_translation.warning.overlay_failed": "켜짐으로 저장됐지만 오버레이를 사용할 수 없어요: {reason}",
   "settings.peer_translation.warning.runtime_unavailable": "켜짐으로 저장됐지만 지금은 상대 번역을 사용할 수 없어요.",
   "settings.integrated_context.disabled.overlay_required": "통합 문맥은 연결된 오버레이가 필요해요.",
-  "settings.integrated_context.disabled.peer_translation_required": "먼저 상대 번역을 켜주세요.",
+  "settings.integrated_context.disabled.peer_translation_required": "먼저 대시보드에서 상대 번역을 켜주세요.",
   "settings.overlay.status.off": "오버레이가 꺼져 있어요",
   "settings.overlay.status.starting": "오버레이를 시작하는 중이에요",
   "settings.overlay.status.connected": "오버레이가 연결됐어요",

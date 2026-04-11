@@ -112,7 +112,7 @@
   "settings.peer_translation.warning.overlay_failed": "Saved as on, but the overlay is unavailable: {reason}",
   "settings.peer_translation.warning.runtime_unavailable": "Saved as on, but peer translation is unavailable right now.",
   "settings.integrated_context.disabled.overlay_required": "Integrated context requires a connected overlay.",
-  "settings.integrated_context.disabled.peer_translation_required": "Enable peer translation first.",
+  "settings.integrated_context.disabled.peer_translation_required": "Turn on peer translation from Dashboard first.",
   "settings.overlay.status.off": "Overlay is off",
   "settings.overlay.status.starting": "Overlay is starting",
   "settings.overlay.status.connected": "Overlay is connected",
