@@ -17,6 +17,7 @@ from puripuly_heart.config.settings import (
 )
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.views import settings as settings_view
+from tests.helpers.flet_page import attach_dummy_page
 
 
 class DummySecretStore:
@@ -158,7 +159,7 @@ def test_settings_view_llm_modal_orders_qwen_plus_before_flash(monkeypatch) -> N
     settings = AppSettings()
     view = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.page = object()
+    attach_dummy_page(monkeypatch, view)
 
     captured: dict[str, object] = {}
 

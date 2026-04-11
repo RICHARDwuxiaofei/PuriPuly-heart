@@ -5,6 +5,7 @@ import pytest
 pytest.importorskip("flet")
 
 from puripuly_heart.ui.views import dashboard as dashboard_module
+from tests.helpers.flet_page import attach_dummy_page
 
 
 class FakePowerButton:
@@ -200,7 +201,7 @@ def test_dashboard_does_not_build_managed_trial_card(monkeypatch: pytest.MonkeyP
 
 def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     view = _make_dashboard(monkeypatch)
-    view.page = object()
+    attach_dummy_page(monkeypatch, view)
     view._stt_showing_warning = True
     view._open_source_dialog()
     view._open_target_dialog()

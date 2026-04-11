@@ -8,6 +8,7 @@ pytest.importorskip("flet")
 
 from puripuly_heart.ui.components.settings import api_key_field as api_key_field_module
 from puripuly_heart.ui.views import settings as settings_view
+from tests.helpers.flet_page import DummyPage, attach_dummy_page
 
 
 def test_api_key_field_uses_legacy_icon_name_api(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,3 +112,47 @@ def test_make_overlay_anchor_dropdown_uses_legacy_on_change(
     assert seen["on_change"] is on_change
     assert "on_select" not in seen
     assert len(seen["options"]) == len(settings_view.OVERLAY_CALIBRATION_ANCHORS)
+
+
+class _RaisingPageControl:
+    @property
+    def page(self):
+        raise RuntimeError("not attached")
+
+
+def test_attach_dummy_page_replaces_unreadable_page_property(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _RaisingPageControl()
+
+    page = attach_dummy_page(monkeypatch, control)
+
+    assert control.page is page
+    assert bool(control.page) is True
+
+
+def test_attach_dummy_page_only_changes_target_control_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _RaisingPageControl()
+    other_control = _RaisingPageControl()
+
+    page = attach_dummy_page(monkeypatch, control)
+
+    assert control.page is page
+    with pytest.raises(RuntimeError, match="not attached"):
+        _ = other_control.page
+
+
+def test_attach_dummy_page_uses_explicit_dummy_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    control = _RaisingPageControl()
+    page = DummyPage()
+
+    returned = attach_dummy_page(monkeypatch, control, page)
+    returned.open("dialog")
+    returned.close("dialog")
+
+    assert returned is page
+    assert control.page is page
+    assert page.opened == ["dialog"]
+    assert page.closed == ["dialog"]

@@ -24,6 +24,7 @@ from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 from puripuly_heart.ui.views import settings as settings_view
+from tests.helpers.flet_page import attach_dummy_page
 
 
 class DummySecretStore:
@@ -822,7 +823,7 @@ def test_peer_qwen_region_override_can_be_cleared_back_to_inherited_none(
     settings.peer_qwen_asr_stt.region = QwenRegion.BEIJING
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.page = object()
+    attach_dummy_page(monkeypatch, view)
 
     region_updates: list[str] = []
     api_key_updates: list[str] = []
@@ -857,7 +858,7 @@ def test_peer_soniox_model_override_can_be_cleared_back_to_inherited_none(
     settings.peer_soniox_stt.model = "stt-rt-v4"
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.page = object()
+    attach_dummy_page(monkeypatch, view)
 
     model_updates: list[str] = []
     monkeypatch.setattr(
@@ -922,7 +923,7 @@ def test_on_peer_stt_selected_refreshes_api_visibility_and_redraws_immediately(
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.page = object()
+    attach_dummy_page(monkeypatch, view)
 
     api_key_updates: list[str] = []
     monkeypatch.setattr(
@@ -958,7 +959,7 @@ def test_on_peer_translation_selected_refreshes_api_visibility_when_enabled(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
     view.set_overlay_runtime_state("connected")
-    view.page = object()
+    attach_dummy_page(monkeypatch, view)
 
     api_key_updates: list[str] = []
     monkeypatch.setattr(
@@ -985,7 +986,7 @@ def test_on_overlay_selected_refreshes_api_visibility_when_disabled(
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.page = object()
+    attach_dummy_page(monkeypatch, view)
 
     api_key_updates: list[str] = []
     monkeypatch.setattr(
@@ -1495,7 +1496,7 @@ def test_on_vrc_mic_click_opens_modal_with_current_selection(
     settings.osc.vrc_mic_intercept = True
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.page = object()
+    attach_dummy_page(monkeypatch, view)
 
     captured: dict[str, object] = {}
 
@@ -1531,7 +1532,7 @@ def test_on_vrc_mic_selected_updates_setting_label_and_emits_change(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
     view.on_settings_changed = lambda incoming: changed.append(incoming)
-    view.page = object()
+    attach_dummy_page(monkeypatch, view)
     monkeypatch.setattr(type(view._vrc_mic_text), "update", lambda self: None)
 
     view._on_vrc_mic_selected("on")
