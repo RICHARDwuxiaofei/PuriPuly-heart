@@ -43,6 +43,8 @@ class TranslatorApp:
         self.view_dashboard.on_send_message = self._on_manual_submit
         self.view_dashboard.on_toggle_translation = self._on_translation_toggle
         self.view_dashboard.on_toggle_stt = self._on_stt_toggle
+        self.view_dashboard.on_toggle_overlay = self._on_overlay_toggle
+        self.view_dashboard.on_toggle_peer_translation = self._on_peer_translation_toggle
         self.view_dashboard.on_language_change = self._on_language_change
 
         self.view_settings.on_settings_changed = self._on_settings_changed
@@ -185,7 +187,8 @@ class TranslatorApp:
         self.page.update()
 
     def refresh_overlay_peer_contract(self) -> None:
-        build_contract = getattr(self.controller, "build_overlay_peer_consumer_contract", None)
+        controller = getattr(self, "controller", None)
+        build_contract = getattr(controller, "build_overlay_peer_consumer_contract", None)
         if not callable(build_contract):
             return
         contract = build_contract()
