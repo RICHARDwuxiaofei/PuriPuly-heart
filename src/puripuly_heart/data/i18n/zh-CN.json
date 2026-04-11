@@ -63,7 +63,7 @@
     "settings.openrouter_routing.parasail_first.description": "优先使用 Parasail，失败后再回退到 Novita",
     "settings.openrouter_routing.novita_first": "Novita 优先",
     "settings.openrouter_routing.novita_first.description": "优先使用 Novita，失败后再回退到 Parasail",
-    "settings.managed_trial_usage.remaining_placeholder": "剩余 --%",
+    "settings.managed_trial_usage.remaining_placeholder": "查询中",
     "settings.managed_trial_usage.remaining": "剩余 {percent}%",
     "settings.prompt_for": "提示词用于：{provider}",
     "settings.system_prompt": "系统提示词",
