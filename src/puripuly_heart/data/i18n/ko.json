@@ -83,7 +83,7 @@
   "settings.custom_vocabulary_enabled": "음성 인식 힌트 사용",
   "settings.custom_vocabulary_terms": "단어 목록",
   "settings.custom_vocabulary_tooltip": "자주 부르지만 인식이 어려운 단어를 넣어주세요. 예를 들어 과몰입 이름처럼요.",
-  "settings.custom_vocabulary_helper": "{language}용 단어를 한 줄에 하나씩 입력하세요. 초안 변경은 적용 버튼을 눌러야 저장돼요.",
+  "settings.custom_vocabulary_helper": "{language}용 단어를 한 줄에 하나씩 입력하세요. 입력칸을 벗어나면 바로 저장돼요.",
   "settings.custom_vocabulary_provider_note": "Deepgram과 Soniox는 이 단어를 바로 적용해요. Qwen ASR은 Phase 1에서 저장만 하고 서버에는 적용하지 않아요.",
   "settings.custom_vocabulary_apply": "적용",
   "settings.custom_vocabulary_clear": "지우기",
