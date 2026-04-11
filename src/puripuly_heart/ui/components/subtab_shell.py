@@ -34,10 +34,8 @@ class _ScrollBody(ft.Column):
             visible=False,
         )
         self.tab_key = tab_key
-        self.last_restore_offset = 0.0
 
     def restore_scroll(self, offset: float) -> None:
-        self.last_restore_offset = offset
         if self.page is None:
             return
         with contextlib.suppress(Exception):
@@ -57,9 +55,15 @@ class TextSubtabShell(ft.Column):
         if not tabs:
             raise ValueError("TextSubtabShell requires at least one tab")
 
+        keys = tuple(tab.key for tab in tabs)
+        if len(set(keys)) != len(keys):
+            raise ValueError("TextSubtabShell requires unique tab keys")
+
         self._font_family = font_family
         self._on_tab_change = on_tab_change
-        self.tab_order = tuple(tab.key for tab in tabs)
+        self.tab_order = keys
+        if initial_key is not None and initial_key not in self.tab_order:
+            raise ValueError(f"Unknown initial tab key: {initial_key}")
         self.active_key = initial_key or self.tab_order[0]
         self.scroll_offsets = {tab.key: 0.0 for tab in tabs}
 

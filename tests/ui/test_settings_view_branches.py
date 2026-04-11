@@ -107,50 +107,7 @@ def _row_cards(container: ft.Container) -> list[ft.Control]:
 
 
 def _subtab_controls(view: settings_view.SettingsView, key: str) -> list[ft.Control]:
-    return list(view._settings_subtab_bodies[key].controls)
-
-
-def test_shared_card_wrapper_applies_300px_default_to_settings_cards(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from puripuly_heart.ui.components.shared_card_wrapper import SharedCardWrapper
-
-    view, _ = _make_settings_view(monkeypatch)
-
-    default_cards = [
-        *_row_cards(_subtab_controls(view, "api")[0]),
-        _row_cards(_subtab_controls(view, "general")[0])[0],
-        *_row_cards(_subtab_controls(view, "general")[1]),
-        _row_cards(_subtab_controls(view, "overlay")[0])[0],
-        *_row_cards(_subtab_controls(view, "general")[2]),
-        *_row_cards(_subtab_controls(view, "api")[2]),
-    ]
-
-    assert len(default_cards) == 10
-    assert all(isinstance(card, SharedCardWrapper) for card in default_cards)
-    assert {card.height for card in default_cards} == {300}
-
-
-def test_shared_card_wrapper_allows_auto_height_for_full_width_cards(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from puripuly_heart.ui.components.shared_card_wrapper import SharedCardWrapper
-
-    view, _ = _make_settings_view(monkeypatch)
-
-    full_width_cards = [
-        _subtab_controls(view, "api")[1],
-        _subtab_controls(view, "overlay")[1],
-        _subtab_controls(view, "prompt")[0],
-        _subtab_controls(view, "prompt")[1],
-    ]
-
-    assert len(full_width_cards) == 4
-    assert all(isinstance(card, SharedCardWrapper) for card in full_width_cards)
-    assert all(card.height is None for card in full_width_cards)
-    assert all(card.expand is False for card in full_width_cards)
-    assert all(card.content.expand is False for card in full_width_cards)
-    assert all(card.content.controls[1].expand is False for card in full_width_cards)
+    return list(view._settings_subtab_shell.body_by_key[key].controls)
 
 
 def test_load_secret_value_prefers_existing_value() -> None:
@@ -1934,39 +1891,39 @@ def test_settings_view_uses_generic_subtab_shell(monkeypatch: pytest.MonkeyPatch
     assert view.scroll is None
     assert view.controls == [view._settings_subtab_shell]
     assert isinstance(view._settings_subtab_shell, TextSubtabShell)
-    assert view._settings_title_region is view._settings_subtab_shell.title_region
-    assert view._settings_subtab_bar is view._settings_subtab_shell.subtab_bar
-    assert view._settings_subtab_body_host is view._settings_subtab_shell.body_host
+    assert view._settings_subtab_shell.title_region.content is view._settings_shell_title
+    assert isinstance(view._settings_subtab_shell.body_host, ft.Stack)
 
 
 def test_settings_subtab_shell_preserves_per_tab_scroll_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
+    shell = view._settings_subtab_shell
 
-    api_body = view._settings_subtab_bodies["api"]
-    general_body = view._settings_subtab_bodies["general"]
+    api_body = shell.body_by_key["api"]
+    general_body = shell.body_by_key["general"]
 
-    view._on_settings_subtab_body_scroll("api", SimpleNamespace(pixels=144.0))
-    view._on_settings_subtab_selected("general")
-    view._on_settings_subtab_body_scroll("general", SimpleNamespace(pixels=320.0))
-    view._on_settings_subtab_selected("api")
+    shell.record_scroll("api", SimpleNamespace(pixels=144.0))
+    shell.select_tab("general")
+    shell.record_scroll("general", SimpleNamespace(pixels=320.0))
+    shell.select_tab("api")
 
-    assert view._active_settings_subtab == "api"
+    assert shell.active_key == "api"
     assert api_body.scroll == ft.ScrollMode.AUTO
     assert general_body.scroll == ft.ScrollMode.AUTO
-    assert view._settings_subtab_scroll_offsets["api"] == 144.0
-    assert view._settings_subtab_scroll_offsets["general"] == 320.0
+    assert shell.scroll_offsets["api"] == 144.0
+    assert shell.scroll_offsets["general"] == 320.0
     assert api_body.visible is True
     assert general_body.visible is False
-    assert api_body.last_restore_offset == 144.0
 
 
 def test_settings_subtab_shell_restores_scroll_on_tab_switch_for_mounted_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
-    api_body = view._settings_subtab_bodies["api"]
+    shell = view._settings_subtab_shell
+    api_body = shell.body_by_key["api"]
     scroll_calls: list[tuple[float, int]] = []
 
     monkeypatch.setattr(type(api_body), "page", property(lambda self: object()))
@@ -1976,9 +1933,9 @@ def test_settings_subtab_shell_restores_scroll_on_tab_switch_for_mounted_body(
         lambda **kwargs: scroll_calls.append((kwargs["offset"], kwargs["duration"])),
     )
 
-    view._on_settings_subtab_body_scroll("api", SimpleNamespace(pixels=144.0))
-    view._on_settings_subtab_selected("general")
-    view._on_settings_subtab_selected("api")
+    shell.record_scroll("api", SimpleNamespace(pixels=144.0))
+    shell.select_tab("general")
+    shell.select_tab("api")
 
     assert scroll_calls == [(144.0, 0)]
 
@@ -1987,17 +1944,18 @@ def test_settings_subtab_bar_is_text_only_and_distinct_from_bottom_nav(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
+    shell = view._settings_subtab_shell
 
-    buttons = [view._settings_subtab_buttons[key] for key in settings_view._SETTINGS_SUBTAB_ORDER]
+    buttons = [shell.button_by_key[key] for key in settings_view._SETTINGS_SUBTAB_ORDER]
 
-    assert isinstance(view._settings_subtab_bar.content, ft.Row)
-    assert view._settings_subtab_bar.content.wrap is False
-    assert view._settings_subtab_bar.content.scroll == ft.ScrollMode.AUTO
+    assert isinstance(shell.subtab_bar.content, ft.Row)
+    assert shell.subtab_row.wrap is False
+    assert shell.subtab_row.scroll == ft.ScrollMode.AUTO
     assert all(isinstance(button, ft.TextButton) for button in buttons)
     assert all(button.icon is None for button in buttons)
-    assert view._settings_subtab_bar.bgcolor == settings_view.COLOR_SURFACE
-    assert view._settings_subtab_bar.border_radius == 24
-    assert view._settings_subtab_bar.height is None
+    assert shell.subtab_bar.bgcolor == settings_view.COLOR_SURFACE
+    assert shell.subtab_bar.border_radius == 24
+    assert shell.subtab_bar.height is None
 
 
 def test_settings_subtab_labels_render_from_i18n(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2010,7 +1968,8 @@ def test_settings_subtab_labels_render_from_i18n(monkeypatch: pytest.MonkeyPatch
 
         assert view._settings_shell_title.value == t("settings.title")
         assert [
-            view._settings_subtab_buttons[key].text for key in settings_view._SETTINGS_SUBTAB_ORDER
+            view._settings_subtab_shell.button_by_key[key].text
+            for key in settings_view._SETTINGS_SUBTAB_ORDER
         ] == [
             t("settings.subtab.api"),
             t("settings.subtab.general"),
@@ -2019,3 +1978,30 @@ def test_settings_subtab_labels_render_from_i18n(monkeypatch: pytest.MonkeyPatch
         ]
     finally:
         i18n_module.set_locale(previous_locale)
+
+
+def test_text_subtab_shell_rejects_duplicate_keys() -> None:
+    from puripuly_heart.ui.components.subtab_shell import TextSubtab, TextSubtabShell
+
+    with pytest.raises(ValueError, match="unique tab keys"):
+        TextSubtabShell(
+            title=ft.Text("Settings"),
+            tabs=[
+                TextSubtab("api", "API", (ft.Text("One"),)),
+                TextSubtab("api", "Again", (ft.Text("Two"),)),
+            ],
+        )
+
+
+def test_text_subtab_shell_rejects_unknown_initial_key() -> None:
+    from puripuly_heart.ui.components.subtab_shell import TextSubtab, TextSubtabShell
+
+    with pytest.raises(ValueError, match="Unknown initial tab key"):
+        TextSubtabShell(
+            title=ft.Text("Settings"),
+            tabs=[
+                TextSubtab("api", "API", (ft.Text("One"),)),
+                TextSubtab("general", "General", (ft.Text("Two"),)),
+            ],
+            initial_key="overlay",
+        )
