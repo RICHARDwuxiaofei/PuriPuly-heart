@@ -122,6 +122,10 @@ def _layout_cards(control: ft.Control) -> list[ft.Control]:
     return []
 
 
+def _prompt_tab_cards(view: settings_view.SettingsView) -> list[ft.Control]:
+    return list(_subtab_controls(view, "prompt"))
+
+
 def _wrapped_card_column(card: ft.Control) -> ft.Control:
     return card.content.controls[1].content.content
 
@@ -131,8 +135,14 @@ def _card_title(card: ft.Control) -> str | None:
     controls = getattr(column, "controls", None)
     if not controls:
         return None
-    title = controls[0]
-    return title.value if isinstance(title, ft.Text) else None
+    title = column.controls[0]
+    if isinstance(title, ft.Text):
+        return title.value
+    if isinstance(title, ft.Row):
+        for child in title.controls:
+            if isinstance(child, ft.Text) and child.value:
+                return child.value
+    return None
 
 
 def _general_tab_card_titles(view: settings_view.SettingsView) -> list[str]:
@@ -153,6 +163,14 @@ def _api_tab_card_titles(view: settings_view.SettingsView) -> list[str]:
     return titles
 
 
+def _prompt_tab_card_titles(view: settings_view.SettingsView) -> list[str]:
+    titles: list[str] = []
+    for card in _prompt_tab_cards(view):
+        if (title := _card_title(card)) is not None:
+            titles.append(title)
+    return titles
+
+
 def _general_tab_card(view: settings_view.SettingsView, title: str) -> ft.Control:
     for row in _subtab_controls(view, "general"):
         for card in _layout_cards(row):
@@ -167,6 +185,13 @@ def _api_tab_card(view: settings_view.SettingsView, title: str) -> ft.Control:
             if _card_title(card) == title:
                 return card
     raise AssertionError(f"API tab card not found: {title}")
+
+
+def _prompt_tab_card(view: settings_view.SettingsView, title: str) -> ft.Control:
+    for card in _prompt_tab_cards(view):
+        if _card_title(card) == title:
+            return card
+    raise AssertionError(f"prompt tab card not found: {title}")
 
 
 def _iter_control_tree(control: ft.Control):
@@ -1419,6 +1444,26 @@ def test_general_tab_excludes_prompt_and_overlay_controls(
     assert t("settings.overlay.calibration") not in general_labels
 
 
+def test_integrated_context_prompt_tab_uses_dedicated_full_width_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    prompt_titles = _prompt_tab_card_titles(view)
+    prompt_cards = _prompt_tab_cards(view)
+    prompt_card = _prompt_tab_card(view, t("settings.integrated_context"))
+
+    assert prompt_titles == [
+        t("settings.section.persona"),
+        t("settings.integrated_context"),
+        t("settings.section.custom_vocabulary"),
+    ]
+    assert prompt_cards[1] is view._integrated_context_prompt_card
+    assert prompt_card is view._integrated_context_prompt_card
+    assert _tree_contains_control(prompt_card, view._integrated_context_button)
+    assert _tree_contains_control(prompt_card, view._integrated_context_hint)
+
+
 def test_dashboard_language_redirect_copy_is_rendered_in_api_tab(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2122,10 +2167,56 @@ def test_prompt_tab_uses_shared_full_width_cards(monkeypatch: pytest.MonkeyPatch
 
     prompt_cards = _subtab_controls(view, "prompt")
 
-    assert len(prompt_cards) == 2
+    assert len(prompt_cards) == 3
     assert all(isinstance(card, SharedCardWrapper) for card in prompt_cards)
     assert all(card.height is None for card in prompt_cards)
     assert all(card.expand is False for card in prompt_cards)
+
+
+def test_integrated_context_controls_are_removed_from_overlay_tab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    overlay_labels: list[str] = []
+    for control in _subtab_controls(view, "overlay"):
+        overlay_labels.extend(_control_labels(control))
+
+    assert t("settings.integrated_context") not in overlay_labels
+    assert not any(
+        _tree_contains_control(control, view._integrated_context_button)
+        or _tree_contains_control(control, view._integrated_context_hint)
+        for control in _subtab_controls(view, "overlay")
+    )
+
+
+def test_integrated_context_prompt_card_labels_render_from_i18n(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.ui.locale = "ko"
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    old_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale("ko")
+        view.apply_locale()
+
+        prompt_card = _prompt_tab_card(view, t("settings.integrated_context"))
+        prompt_labels = _control_labels(prompt_card)
+
+        assert view._integrated_context_label.value == t("settings.integrated_context")
+        assert view._integrated_context_button.text == t("settings.context.local")
+        assert view._integrated_context_hint.value == t(
+            "settings.integrated_context.disabled.overlay_required"
+        )
+        assert t("settings.integrated_context") in prompt_labels
+        assert t("settings.context.local") in prompt_labels
+        assert t("settings.integrated_context.disabled.overlay_required") in prompt_labels
+    finally:
+        i18n_module.set_locale(old_locale)
 
 
 def test_custom_vocabulary_switching_source_language_updates_editor_payload(
