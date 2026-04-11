@@ -13,6 +13,11 @@ logger = logging.getLogger(__name__)
 from puripuly_heart.core.clock import Clock, SystemClock
 from puripuly_heart.core.language import get_llm_language_name
 from puripuly_heart.core.llm.provider import LLMProvider
+from puripuly_heart.core.managed_openrouter_release import (
+    ManagedOpenRouterReleaseDiagnostics,
+    ManagedOpenRouterUserFacingError,
+    format_managed_openrouter_diagnostics,
+)
 from puripuly_heart.core.orchestrator.channel_runtime import (
     ChannelRuntime,
     ContextEntry,
@@ -516,14 +521,27 @@ class ClientHub:
         detailed: bool = False,
     ) -> None:
         emit = self._emit_detailed if detailed else self._emit_basic
+        message = str(exc)
+        diagnostics = self._managed_openrouter_diagnostics(exc)
+        diagnostics_text = format_managed_openrouter_diagnostics(diagnostics)
+        if diagnostics_text:
+            message = f"{message} [{diagnostics_text}]"
         emit(
             "[Hub] Translation failed (stage=%s, channel=%s): %s",
             stage,
             runtime.channel,
-            exc,
+            message,
             level=logging.ERROR,
             fallback_level=logging.ERROR,
         )
+
+    def _managed_openrouter_diagnostics(
+        self, exc: Exception
+    ) -> ManagedOpenRouterReleaseDiagnostics | None:
+        diagnostics = getattr(exc, "diagnostics", None)
+        if isinstance(diagnostics, ManagedOpenRouterReleaseDiagnostics):
+            return diagnostics
+        return None
 
     async def start(self, *, auto_flush_osc: bool = False) -> None:
         if self._running:
@@ -2207,11 +2225,12 @@ class ClientHub:
             raise
         except Exception as exc:
             self._log_translation_failure(stage="final", runtime=runtime, exc=exc)
+            payload: object = exc if isinstance(exc, ManagedOpenRouterUserFacingError) else str(exc)
             await self.ui_events.put(
                 UIEvent(
                     type=UIEventType.ERROR,
                     utterance_id=utterance_id,
-                    payload=str(exc),
+                    payload=payload,
                     source=self._get_source(utterance_id, channel=runtime.channel),
                     runtime_log_handled=True,
                 )

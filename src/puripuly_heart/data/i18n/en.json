@@ -3,6 +3,7 @@
   "dashboard.stt_label": "STT",
   "dashboard.trans_label": "TRANS",
   "dashboard.ready": "Ready to translate...",
+  "dashboard.managed_auth_pending": "Authenticating...",
   "dashboard.warn_stt_key": "Please enter an STT API key",
   "dashboard.warn_llm_key": "Please enter an LLM API key",
   "dashboard.trial.source.managed": "Managed",

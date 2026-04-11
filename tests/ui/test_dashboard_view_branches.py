@@ -173,6 +173,7 @@ def test_dashboard_public_setters_update_components(monkeypatch: pytest.MonkeyPa
     view.set_translation_needs_key(True, update_ui=True)
     view.set_stt_needs_key(True, update_ui=True)
     view.set_local_stt_notice("missing")
+    view.set_managed_auth_pending(True)
     view.set_display_text("src", language_code="ko")
     view.set_display_translation_text("dst", language_code="en")
     view.set_recent_languages(["a", "b", "c", "d", "e", "f", "g"], ["x", "y", "z"])
@@ -182,12 +183,42 @@ def test_dashboard_public_setters_update_components(monkeypatch: pytest.MonkeyPa
     assert view.display_card.display_calls[-1] == ("src", False, "font-ko")
     assert view.display_card.translation_calls[-1] == ("dst", "font-en")
     assert view.display_card.notice_calls[-1] == (
-        dashboard_module.t("dashboard.local_stt_notice_missing"),
-        "warning",
+        dashboard_module.t("dashboard.managed_auth_pending"),
+        "info",
     )
     assert view.trans_button.states[-1] == (False, True)
     assert view.stt_button.states[-1] == (False, True)
     assert view._recent_source_langs == ["a", "b", "c", "d", "e", "f"]
+
+
+def test_dashboard_managed_auth_pending_restores_local_stt_notice_when_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+
+    view.set_local_stt_notice("missing")
+    view.set_managed_auth_pending(True)
+    view.set_managed_auth_pending(False)
+
+    assert view.display_card.notice_calls == [
+        (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
+        (dashboard_module.t("dashboard.managed_auth_pending"), "info"),
+        (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
+    ]
+
+
+def test_dashboard_apply_locale_reapplies_managed_auth_pending_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+
+    view.set_managed_auth_pending(True)
+    view.apply_locale()
+
+    assert view.display_card.notice_calls == [
+        (dashboard_module.t("dashboard.managed_auth_pending"), "info"),
+        (dashboard_module.t("dashboard.managed_auth_pending"), "info"),
+    ]
 
 
 def test_dashboard_does_not_build_managed_trial_card(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,7 +231,7 @@ def test_dashboard_does_not_build_managed_trial_card(monkeypatch: pytest.MonkeyP
 
 def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     view = _make_dashboard(monkeypatch)
-    view.page = object()
+    monkeypatch.setattr(dashboard_module.DashboardView, "page", property(lambda self: object()))
     view._stt_showing_warning = True
     view._open_source_dialog()
     view._open_target_dialog()

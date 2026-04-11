@@ -299,6 +299,7 @@ async def test_nested_broker_error_envelope_becomes_release_error() -> None:
         )
 
     assert exc_info.value == ManagedOpenRouterReleaseError(
+        operation="issue",
         code="trial_unavailable",
         error_class="retryable",
         subcode="broker_backoff",
@@ -342,6 +343,7 @@ async def test_issue_preserves_managed_key_unrecoverable_subcode() -> None:
         )
 
     assert exc_info.value == ManagedOpenRouterReleaseError(
+        operation="issue",
         code="trial_not_eligible",
         error_class="terminal",
         subcode="managed_key_unrecoverable",
@@ -385,6 +387,7 @@ async def test_issue_preserves_challenge_expired_release_token_subcode() -> None
         )
 
     assert exc_info.value == ManagedOpenRouterReleaseError(
+        operation="issue",
         code="challenge_expired",
         error_class="retryable",
         subcode="release_token_expired",

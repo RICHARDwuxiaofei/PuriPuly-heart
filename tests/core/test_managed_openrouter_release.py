@@ -19,9 +19,11 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterLLMProvider,
     ManagedOpenRouterPreflightStop,
     ManagedOpenRouterReleaseBehavior,
+    ManagedOpenRouterReleaseDiagnostics,
     ManagedOpenRouterReleaseError,
     ManagedOpenRouterReleaseResult,
     ManagedOpenRouterReleaseService,
+    ManagedOpenRouterUserFacingError,
     ManagedOpenRouterVerifySuccess,
 )
 from puripuly_heart.core.openrouter_credentials import OPENROUTER_MANAGED_API_KEY_SECRET
@@ -443,8 +445,24 @@ async def test_issue_honors_retry_after_without_starting_parallel_retries() -> N
 
     assert first.behavior == ManagedOpenRouterReleaseBehavior.RETRY
     assert first.retry_after_ms == 9_000
+    assert first.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="issue",
+        code="trial_unavailable",
+        error_class="retryable",
+        subcode=None,
+        retry_after_ms=9_000,
+        message="managed OpenRouter release is unavailable",
+    )
     assert second.behavior == ManagedOpenRouterReleaseBehavior.RETRY
     assert second.retry_after_ms == 9_000
+    assert second.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="issue",
+        code="trial_unavailable",
+        error_class="retryable",
+        subcode=None,
+        retry_after_ms=9_000,
+        message="managed OpenRouter release is unavailable",
+    )
     assert [name for name, _payload in client.calls] == ["issue"]
 
 
@@ -481,8 +499,24 @@ async def test_prepare_for_translation_honors_retry_after_while_pending_release_
 
     assert issue_result.behavior == ManagedOpenRouterReleaseBehavior.RETRY
     assert issue_result.retry_after_ms == 9_000
+    assert issue_result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="issue",
+        code="trial_unavailable",
+        error_class="retryable",
+        subcode=None,
+        retry_after_ms=9_000,
+        message="managed OpenRouter release is unavailable",
+    )
     assert prepare_result.behavior == ManagedOpenRouterReleaseBehavior.RETRY
     assert prepare_result.retry_after_ms == 9_000
+    assert prepare_result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="issue",
+        code="trial_unavailable",
+        error_class="retryable",
+        subcode=None,
+        retry_after_ms=9_000,
+        message="managed OpenRouter release is unavailable",
+    )
     assert [name for name, _payload in client.calls] == ["issue"]
 
 
@@ -569,6 +603,14 @@ async def test_issue_trial_not_eligible_managed_key_unrecoverable_stops_as_not_e
 
     assert result.behavior == ManagedOpenRouterReleaseBehavior.STOP
     assert result.message_key == "managed_release.not_eligible"
+    assert result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="issue",
+        code="trial_not_eligible",
+        error_class="terminal",
+        subcode="managed_key_unrecoverable",
+        retry_after_ms=None,
+        message="managed key was already issued and cannot be recovered",
+    )
     assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert settings.managed_identity.release_token is None
     assert settings.managed_identity.release_token_expires_at is None
@@ -847,6 +889,14 @@ class FakeIssueService:
 
 
 @dataclass
+class RaisingIssueService:
+    exc: Exception
+
+    async def ensure_key_for_llm_start(self) -> ManagedOpenRouterReleaseResult:
+        raise self.exc
+
+
+@dataclass
 class FakeDelegateProvider:
     translate_calls: list[dict[str, object]]
 
@@ -936,3 +986,61 @@ async def test_managed_openrouter_provider_notifies_when_delegate_becomes_ready(
     )
 
     assert ready_calls == ["ready"]
+
+
+@pytest.mark.asyncio
+async def test_managed_openrouter_provider_preserves_diagnostics_in_user_facing_error() -> None:
+    diagnostics = ManagedOpenRouterReleaseDiagnostics(
+        operation="issue",
+        code="trial_unavailable",
+        error_class="retryable",
+        subcode="broker_backoff",
+        retry_after_ms=9_000,
+        message="broker is temporarily unavailable",
+    )
+    service = FakeIssueService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.RETRY,
+            message_key="managed_release.retry_after_ms",
+            message_kwargs={"retry_after_ms": 9_000},
+            retry_after_ms=9_000,
+            diagnostics=diagnostics,
+        )
+    )
+    provider = ManagedOpenRouterLLMProvider(
+        release_service=service,
+        delegate_factory=lambda _api_key: FakeDelegateProvider(),
+    )
+
+    with pytest.raises(ManagedOpenRouterUserFacingError) as exc_info:
+        await provider.translate(
+            utterance_id=uuid4(),
+            text="hello",
+            system_prompt="prompt",
+            source_language="ko",
+            target_language="en",
+        )
+
+    assert exc_info.value.diagnostics == diagnostics
+
+
+@pytest.mark.asyncio
+async def test_managed_openrouter_provider_wraps_unexpected_issue_start_error_as_user_facing_error() -> (
+    None
+):
+    provider = ManagedOpenRouterLLMProvider(
+        release_service=RaisingIssueService(RuntimeError("issue boom")),
+        delegate_factory=lambda _api_key: FakeDelegateProvider(),
+    )
+
+    with pytest.raises(ManagedOpenRouterUserFacingError) as exc_info:
+        await provider.translate(
+            utterance_id=uuid4(),
+            text="hello",
+            system_prompt="prompt",
+            source_language="ko",
+            target_language="en",
+        )
+
+    assert exc_info.value.message_key == "managed_release.retry"
+    assert exc_info.value.diagnostics == ManagedOpenRouterReleaseDiagnostics(message="issue boom")

@@ -4,6 +4,7 @@ import asyncio
 import logging
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Callable
 from uuid import uuid4
 
 import flet as ft
@@ -27,6 +28,7 @@ from puripuly_heart.core.managed_openrouter_broker_client import (
 )
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseBehavior,
+    ManagedOpenRouterReleaseDiagnostics,
     ManagedOpenRouterReleaseResult,
     ManagedOpenRouterReleaseService,
     UnavailableManagedOpenRouterReleaseClient,
@@ -74,6 +76,8 @@ class DummyDashboard:
         self.recent_languages: tuple[list[str], list[str]] | None = None
         self.managed_trial_state: dict[str, object] | None = None
         self.managed_trial_calls: list[dict[str, object]] = []
+        self.managed_auth_pending: bool | None = None
+        self.managed_auth_pending_calls: list[bool] = []
         self.is_translation_on: bool = True
         self.on_recent_languages_change = None
 
@@ -102,6 +106,10 @@ class DummyDashboard:
     def set_managed_trial_state(self, **state: object) -> None:
         self.managed_trial_calls.append(dict(state))
         self.managed_trial_state = dict(state)
+
+    def set_managed_auth_pending(self, pending: bool) -> None:
+        self.managed_auth_pending = bool(pending)
+        self.managed_auth_pending_calls.append(self.managed_auth_pending)
 
 
 class DummySettingsView:
@@ -275,6 +283,40 @@ class DummyManagedReleaseService:
 
     async def close(self) -> None:
         self.close_calls += 1
+
+
+class InspectingManagedReleaseService(DummyManagedReleaseService):
+    def __init__(
+        self,
+        result: ManagedOpenRouterReleaseResult,
+        *,
+        on_prepare: Callable[[], object] | None = None,
+    ) -> None:
+        super().__init__(result)
+        self.on_prepare = on_prepare
+
+    async def prepare_for_translation(self) -> ManagedOpenRouterReleaseResult:
+        self.prepare_calls += 1
+        if self.on_prepare is not None:
+            prepare_result = self.on_prepare()
+            if asyncio.iscoroutine(prepare_result):
+                await prepare_result
+        return self.result
+
+
+class FailingManagedReleaseService(DummyManagedReleaseService):
+    def __init__(self, exc: Exception) -> None:
+        super().__init__(
+            ManagedOpenRouterReleaseResult(
+                behavior=ManagedOpenRouterReleaseBehavior.RETRY,
+                message_key="managed_release.retry",
+            )
+        )
+        self.exc = exc
+
+    async def prepare_for_translation(self) -> ManagedOpenRouterReleaseResult:
+        self.prepare_calls += 1
+        raise self.exc
 
 
 class FakeOverlayBridge:
@@ -730,13 +772,15 @@ async def test_set_translation_enabled_runs_managed_release_prepare_before_enabl
     controller.settings.provider.llm = LLMProviderName.OPENROUTER
     controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     controller.hub = DummyHub(llm=object())
-    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+    observed_pending: list[bool | None] = []
+    controller._managed_openrouter_release_service = InspectingManagedReleaseService(
         ManagedOpenRouterReleaseResult(
             behavior=ManagedOpenRouterReleaseBehavior.READY,
             message_key="managed_release.ready",
             pending_issue=True,
             local_key_available=False,
-        )
+        ),
+        on_prepare=lambda: observed_pending.append(dash.managed_auth_pending),
     )
 
     async def fail_fetch_key_metadata(_api_key: str):
@@ -758,6 +802,9 @@ async def test_set_translation_enabled_runs_managed_release_prepare_before_enabl
     assert controller._managed_openrouter_release_service.prepare_calls == 1
     assert controller.hub.translation_enabled is True
     assert controller.hub.clear_context_calls == 1
+    assert observed_pending == [True]
+    assert dash.managed_auth_pending is True
+    assert dash.managed_auth_pending_calls == [True, True]
     assert settings_view.managed_trial_usage_state == {
         "visible": True,
         "remaining_percent": None,
@@ -783,11 +830,20 @@ async def test_set_translation_enabled_keeps_managed_translation_disabled_on_ret
     controller.settings.provider.llm = LLMProviderName.OPENROUTER
     controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     controller.hub = DummyHub(llm=object())
+    controller._runtime_logging = RuntimeLoggingSpy()
     controller._managed_openrouter_release_service = DummyManagedReleaseService(
         ManagedOpenRouterReleaseResult(
             behavior=ManagedOpenRouterReleaseBehavior.RETRY,
             message_key="managed_release.retry_after_ms",
             message_kwargs={"retry_after_ms": 5000},
+            diagnostics=ManagedOpenRouterReleaseDiagnostics(
+                operation="issue",
+                code="trial_unavailable",
+                error_class="retryable",
+                subcode="broker_backoff",
+                retry_after_ms=5000,
+                message="broker is temporarily unavailable",
+            ),
             retry_after_ms=5000,
         )
     )
@@ -811,14 +867,136 @@ async def test_set_translation_enabled_keeps_managed_translation_disabled_on_ret
     assert controller._managed_openrouter_release_service.prepare_calls == 1
     assert controller.hub.translation_enabled is False
     assert controller.hub.clear_context_calls == 0
+    assert dash.managed_auth_pending is False
+    assert dash.managed_auth_pending_calls == [True, False]
     assert snackbar_calls == [
         (t("managed_release.retry_after_ms", retry_after_ms=5000), ft.Colors.ORANGE_700)
     ]
+    assert (
+        logging.ERROR,
+        "[ManagedAuth] operation=issue code=trial_unavailable class=retryable subcode=broker_backoff retry_after_ms=5000 message=broker is temporarily unavailable",
+    ) in controller._runtime_logging.basic_messages
     assert settings_view.managed_trial_usage_state == {
         "visible": True,
         "remaining_percent": None,
     }
     assert dash.managed_trial_calls == []
+
+
+def test_on_managed_trial_delegate_ready_clears_dashboard_pending_notice() -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+
+    controller._managed_trial_pending_auth = True
+    controller._sync_managed_auth_dashboard_notice()
+
+    controller._on_managed_trial_delegate_ready()
+
+    assert controller._managed_trial_pending_auth is False
+    assert dash.managed_auth_pending is False
+    assert dash.managed_auth_pending_calls == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_false_clears_dashboard_managed_auth_pending() -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+
+    controller._managed_trial_pending_auth = True
+    controller._sync_managed_auth_dashboard_notice()
+
+    await controller.set_translation_enabled(False)
+
+    assert controller._managed_trial_pending_auth is False
+    assert dash.managed_auth_pending is False
+    assert dash.managed_auth_pending_calls == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_clears_dashboard_pending_notice_when_switching_away_from_managed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+
+    controller._managed_trial_pending_auth = True
+    controller._sync_managed_auth_dashboard_notice()
+
+    next_settings = AppSettings()
+    next_settings.provider.llm = LLMProviderName.GEMINI
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", lambda self: asyncio.sleep(0))
+
+    await controller.apply_providers(next_settings)
+
+    assert controller._managed_trial_pending_auth is False
+    assert dash.managed_auth_pending is False
+    assert dash.managed_auth_pending_calls == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_clears_dashboard_pending_notice_when_prepare_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = FailingManagedReleaseService(
+        RuntimeError("boom")
+    )
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await controller.set_translation_enabled(True)
+
+    assert controller._managed_trial_pending_auth is False
+    assert dash.managed_auth_pending is False
+    assert dash.managed_auth_pending_calls == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_resyncs_dashboard_pending_notice_when_staying_on_managed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+
+    controller._managed_trial_pending_auth = True
+    controller._sync_managed_auth_dashboard_notice()
+
+    next_settings = AppSettings()
+    next_settings.provider.llm = LLMProviderName.OPENROUTER
+    next_settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", lambda self: asyncio.sleep(0))
+
+    await controller.apply_providers(next_settings)
+
+    assert controller._managed_trial_pending_auth is True
+    assert dash.managed_auth_pending is True
+    assert dash.managed_auth_pending_calls == [True, True]
 
 
 def test_verified_key_and_runtime_signature_depend_on_region_and_settings() -> None:
