@@ -23,6 +23,7 @@ from puripuly_heart.config.settings import (
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.i18n import language_name, provider_label, t
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
+from puripuly_heart.ui.overlay_peer_contract import build_overlay_peer_consumer_contract
 from puripuly_heart.ui.views import settings as settings_view
 
 
@@ -480,7 +481,27 @@ def test_on_overlay_selected_uses_dedicated_overlay_toggle_callback(
 
     assert overlay_calls == [True]
     assert settings_calls == []
-    assert settings.ui.overlay_enabled is True
+    assert settings.ui.overlay_enabled is False
+
+
+def test_on_peer_translation_selected_uses_dedicated_peer_toggle_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    peer_calls: list[bool] = []
+    settings_calls: list[AppSettings] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.set_overlay_runtime_state("connected")
+    view.on_peer_translation_toggle = lambda enabled: peer_calls.append(enabled)
+    view.on_settings_changed = lambda incoming: settings_calls.append(incoming)
+
+    view._on_peer_translation_selected("on")
+
+    assert peer_calls == [True]
+    assert settings_calls == []
+    assert settings.ui.peer_translation_enabled is False
 
 
 def test_on_llm_selected_updates_model_and_prompt_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -899,6 +920,107 @@ def test_overlay_controls_gate_peer_translation_until_overlay_is_connected(
     assert view._peer_translation_hint.value == ""
 
 
+@pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
+def test_overlay_and_peer_status_messages_render_from_i18n(
+    monkeypatch: pytest.MonkeyPatch,
+    locale: str,
+) -> None:
+    old_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale(locale)
+        settings = AppSettings()
+        settings.ui.locale = locale
+        settings.ui.overlay_enabled = True
+        settings.ui.peer_translation_enabled = True
+
+        view, _ = _make_settings_view(monkeypatch)
+        view.load_from_settings(settings, config_path=Path("settings.json"))
+        view.set_overlay_peer_contract(
+            build_overlay_peer_consumer_contract(
+                overlay_intent_enabled=True,
+                overlay_state="failed",
+                overlay_failure_reason="runtime_crashed",
+                peer_intent_enabled=True,
+                peer_effective_enabled=False,
+            )
+        )
+
+        assert view._overlay_status_text.value == t(
+            "settings.overlay.status.failed_with_reason",
+            status=t("settings.overlay.status.failed"),
+            reason=t("settings.overlay.failure.runtime_crashed"),
+        )
+        assert view._peer_translation_status_text.value == t(
+            "settings.peer_translation.status.warning"
+        )
+        assert view._peer_translation_hint.value == t(
+            "settings.peer_translation.warning.overlay_failed",
+            reason=t("settings.overlay.failure.runtime_crashed"),
+        )
+        assert view._peer_translation_button.disabled is False
+    finally:
+        i18n_module.set_locale(old_locale)
+
+
+def test_runtime_unavailable_contract_drives_integrated_context_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.ui.overlay_enabled = True
+    settings.ui.peer_translation_enabled = True
+    settings.ui.integrated_context_enabled = True
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.set_overlay_peer_contract(
+        build_overlay_peer_consumer_contract(
+            overlay_intent_enabled=True,
+            overlay_state="connected",
+            overlay_failure_reason=None,
+            peer_intent_enabled=True,
+            peer_effective_enabled=False,
+            peer_warning_reason="runtime_unavailable",
+        )
+    )
+
+    assert view._peer_translation_hint.value == t(
+        "settings.peer_translation.warning.runtime_unavailable"
+    )
+    assert view._integrated_context_hint.value == t(
+        "settings.peer_translation.warning.runtime_unavailable"
+    )
+    assert view._integrated_context_button.disabled is True
+
+
+def test_overlay_stopping_contract_drives_integrated_context_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.ui.overlay_enabled = True
+    settings.ui.peer_translation_enabled = True
+    settings.ui.integrated_context_enabled = True
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.set_overlay_peer_contract(
+        build_overlay_peer_consumer_contract(
+            overlay_intent_enabled=True,
+            overlay_state="stopping",
+            overlay_failure_reason=None,
+            peer_intent_enabled=True,
+            peer_effective_enabled=False,
+        )
+    )
+
+    assert view._peer_translation_hint.value == t(
+        "settings.peer_translation.warning.overlay_stopping"
+    )
+    assert view._integrated_context_hint.value == t(
+        "settings.peer_translation.warning.overlay_stopping"
+    )
+    assert view._peer_translation_status_text.value == t("settings.peer_translation.status.warning")
+
+
 def test_peer_qwen_region_control_is_visible_before_peer_translation_is_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1309,6 +1431,8 @@ def test_overlay_failure_reason_keys_are_localized(locale: str) -> None:
     assert bundle["settings.overlay.failure.hmd_not_found"]
     assert bundle["settings.overlay.show_translation"]
     assert bundle["settings.overlay.show_peer_original"]
+    assert bundle["settings.peer_translation.status.warning"]
+    assert bundle["settings.peer_translation.warning.overlay_failed"]
 
 
 def test_overlay_calibration_controls_are_localized(

@@ -9,6 +9,7 @@ from puripuly_heart.ui.components.managed_trial_usage_bar import ManagedTrialUsa
 from puripuly_heart.ui.components.power_button import PowerButton
 from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import get_locale, language_name, t
+from puripuly_heart.ui.overlay_peer_contract import OverlayPeerConsumerContract
 from puripuly_heart.ui.theme import (
     COLOR_DIVIDER,
     COLOR_NEUTRAL_DARK,
@@ -48,6 +49,7 @@ class DashboardView(ft.Column):
         self._local_stt_notice_percent: int | None = None
         self._managed_trial_visible = False
         self._managed_trial_remaining_percent: int | None = None
+        self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
 
         # Current language settings
         self._source_lang_code = "ko"
@@ -472,6 +474,17 @@ class DashboardView(ft.Column):
     def set_stt_enabled(self, enabled: bool) -> None:
         self.is_stt_on = bool(enabled)
         self.stt_button.set_state(self.is_stt_on)
+
+    def set_overlay_peer_contract(self, contract: OverlayPeerConsumerContract) -> None:
+        self._overlay_peer_contract = contract
+        self.peer_button.set_state(
+            contract.peer.state == "on",
+            needs_key=contract.peer.state == "warning",
+        )
+        self.overlay_button.set_state(
+            contract.overlay.state == "on",
+            needs_key=contract.overlay.state == "warning",
+        )
 
     def set_translation_needs_key(self, needs_key: bool, *, update_ui: bool = True) -> None:
         self.translation_needs_key = bool(needs_key)

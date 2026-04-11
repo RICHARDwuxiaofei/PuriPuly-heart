@@ -48,6 +48,7 @@ from puripuly_heart.ui.overlay_calibration import (
     OVERLAY_CALIBRATION_ANCHORS,
     OverlayCalibration,
 )
+from puripuly_heart.ui.overlay_peer_contract import OverlayPeerConsumerContract
 from puripuly_heart.ui.theme import (
     COLOR_DIVIDER,
     COLOR_NEUTRAL,
@@ -130,6 +131,7 @@ class SettingsView(ft.Column):
         # Callbacks (assigned by App)
         self.on_settings_changed: Callable[[AppSettings], None] | None = None
         self.on_overlay_toggle: Callable[[bool], None] | None = None
+        self.on_peer_translation_toggle: Callable[[bool], None] | None = None
         self.on_providers_changed: Callable[[], None] | None = None
         self.on_verify_api_key: Callable[[str, str], object] | None = None
         self.on_secret_cleared: Callable[[str], None] | None = None  # key name
@@ -157,6 +159,7 @@ class SettingsView(ft.Column):
         self._overlay_calibration_session_active = False
         self._managed_trial_usage_visible = False
         self._managed_trial_usage_remaining_percent: int | None = None
+        self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
 
         # Build UI components
         self._build_ui()
@@ -812,6 +815,11 @@ class SettingsView(ft.Column):
             t("settings.context.local"),
             self._on_integrated_context_click,
         )
+        self._peer_translation_status_text = ft.Text(
+            "",
+            size=14,
+            color=COLOR_NEUTRAL,
+        )
         self._peer_translation_hint = ft.Text("", size=13, color=COLOR_NEUTRAL)
         self._integrated_context_hint = ft.Text("", size=13, color=COLOR_NEUTRAL)
         self._overlay_status_text = ft.Text(
@@ -895,6 +903,7 @@ class SettingsView(ft.Column):
                         self._peer_translation_label,
                         self._peer_translation_button,
                     ),
+                    self._peer_translation_status_text,
                     self._peer_translation_hint,
                     self._build_setting_action_row(
                         self._overlay_translation_label,
@@ -1464,6 +1473,7 @@ class SettingsView(ft.Column):
         )
         self._sync_prompt_tab_copy()
         self._custom_vocab_terms.helper_text = ""
+        self._overlay_peer_contract = None
         self._sync_overlay_controls()
         self._sync_overlay_calibration_controls()
 
@@ -2327,36 +2337,52 @@ class SettingsView(ft.Column):
         if self.page:
             self.update()
 
-    def _overlay_connected(self) -> bool:
-        return self._overlay_state == "connected"
+    def set_overlay_peer_contract(self, contract: OverlayPeerConsumerContract) -> None:
+        self._overlay_peer_contract = contract
+        if self._settings is not None:
+            self._update_api_visibility()
+            if self.page:
+                self._api_keys_column.update()
+        self._sync_overlay_controls()
 
-    def _compose_overlay_status_text(self) -> str:
-        state_label = t(
-            f"settings.overlay.status.{self._overlay_state}", default=self._overlay_state
-        )
+    def _fallback_overlay_status_text(self) -> str:
+        status = t(f"settings.overlay.status.{self._overlay_state}", default=self._overlay_state)
         if self._overlay_state == "failed" and self._overlay_failure_reason:
-            reason_label = t(
-                f"settings.overlay.failure.{self._overlay_failure_reason}",
-                default=self._overlay_failure_reason,
-            )
             return t(
                 "settings.overlay.status.failed_with_reason",
-                status=state_label,
-                reason=reason_label,
-                default=f"{state_label}: {reason_label}",
+                status=status,
+                reason=t(
+                    f"settings.overlay.failure.{self._overlay_failure_reason}",
+                    default=self._overlay_failure_reason,
+                ),
+                default=status,
             )
-        return state_label
+        return status
+
+    def _fallback_peer_status_text(self, *, peer_translation_enabled: bool) -> str:
+        if not peer_translation_enabled:
+            return t("settings.peer_translation.status.off")
+        if self._overlay_state == "connected":
+            return t("settings.peer_translation.status.on")
+        return t("settings.peer_translation.status.warning")
 
     def _sync_overlay_controls(self) -> None:
-        overlay_enabled = bool(self._settings and self._settings.ui.overlay_enabled)
+        contract = self._overlay_peer_contract
+        overlay_enabled = (
+            contract.overlay.intent_enabled
+            if contract is not None
+            else bool(self._settings and self._settings.ui.overlay_enabled)
+        )
         overlay_translation_enabled = bool(
             self._settings and self._settings.ui.show_overlay_translation
         )
         overlay_peer_original_enabled = bool(
             self._settings and self._settings.ui.show_overlay_peer_original
         )
-        peer_translation_enabled = bool(
-            self._settings and self._settings.ui.peer_translation_enabled
+        peer_translation_enabled = (
+            contract.peer.intent_enabled
+            if contract is not None
+            else bool(self._settings and self._settings.ui.peer_translation_enabled)
         )
         integrated_context_enabled = bool(
             self._settings and self._settings.ui.integrated_context_enabled
@@ -2387,23 +2413,47 @@ class SettingsView(ft.Column):
             ),
         )
 
-        peer_translation_available = self._overlay_connected()
-        integrated_context_available = peer_translation_available and peer_translation_enabled
+        peer_translation_action_enabled = (
+            contract.peer.action_enabled
+            if contract is not None
+            else self._overlay_state == "connected"
+        )
+        peer_translation_effective = (
+            contract.peer.effective_enabled
+            if contract is not None
+            else bool(peer_translation_enabled and self._overlay_state == "connected")
+        )
+        integrated_context_available = peer_translation_effective and peer_translation_enabled
 
         self._overlay_enabled_button.disabled = self._settings is None
         self._overlay_translation_button.disabled = self._settings is None
         self._overlay_peer_original_button.disabled = self._settings is None
-        self._peer_translation_button.disabled = not peer_translation_available
+        self._peer_translation_button.disabled = not peer_translation_action_enabled
         self._integrated_context_button.disabled = not integrated_context_available
 
+        self._peer_translation_status_text.value = (
+            contract.peer.status_text
+            if contract is not None
+            else self._fallback_peer_status_text(
+                peer_translation_enabled=peer_translation_enabled,
+            )
+        )
         self._peer_translation_hint.value = (
-            ""
-            if peer_translation_available
-            else t("settings.peer_translation.disabled.overlay_required")
+            contract.peer.helper_text
+            if contract is not None
+            else (
+                ""
+                if self._overlay_state == "connected"
+                else t("settings.peer_translation.disabled.overlay_required")
+            )
         )
         if integrated_context_available:
             self._integrated_context_hint.value = ""
-        elif not peer_translation_available:
+        elif contract is not None and contract.peer.intent_enabled:
+            self._integrated_context_hint.value = contract.peer.helper_text or t(
+                "settings.integrated_context.disabled.peer_translation_required"
+            )
+        elif self._overlay_state != "connected":
             self._integrated_context_hint.value = t(
                 "settings.integrated_context.disabled.overlay_required"
             )
@@ -2412,7 +2462,11 @@ class SettingsView(ft.Column):
                 "settings.integrated_context.disabled.peer_translation_required"
             )
 
-        self._overlay_status_text.value = self._compose_overlay_status_text()
+        self._overlay_status_text.value = (
+            contract.overlay.status_text
+            if contract is not None
+            else self._fallback_overlay_status_text()
+        )
 
         if self.page:
             self.update()
@@ -2456,16 +2510,17 @@ class SettingsView(ft.Column):
         if not self._settings:
             return
         enabled = value == "on"
+        if self.on_overlay_toggle is not None:
+            self.on_overlay_toggle(enabled)
+            return
         self._settings.ui.overlay_enabled = enabled
         if not enabled:
             self._settings.ui.peer_translation_enabled = False
+        self._overlay_peer_contract = None
         self._sync_overlay_controls()
         self._update_api_visibility()
         if self.page:
             self._api_keys_column.update()
-        if self.on_overlay_toggle is not None:
-            self.on_overlay_toggle(enabled)
-            return
         self._emit_settings_changed()
 
     def _on_peer_translation_click(self, e) -> None:
@@ -2488,10 +2543,14 @@ class SettingsView(ft.Column):
         if not self._settings:
             return
         enabled = value == "on"
+        if self.on_peer_translation_toggle is not None:
+            self.on_peer_translation_toggle(enabled)
+            return
         self._settings.ui.peer_translation_enabled = enabled
         if enabled and not self._settings.ui.integrated_context_bootstrapped:
             self._settings.ui.integrated_context_enabled = True
             self._settings.ui.integrated_context_bootstrapped = True
+        self._overlay_peer_contract = None
         self._sync_overlay_controls()
         self._update_api_visibility()
         if self.page:

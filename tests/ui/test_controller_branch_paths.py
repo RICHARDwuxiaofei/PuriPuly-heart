@@ -1051,6 +1051,41 @@ async def test_apply_settings_routes_peer_activation_toggles_through_peer_runtim
 
 
 @pytest.mark.asyncio
+async def test_set_peer_translation_enabled_routes_through_controller_runtime_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refresh_calls: list[str] = []
+    controller = _make_controller(
+        app=SimpleNamespace(refresh_overlay_peer_contract=lambda: refresh_calls.append("refresh"))
+    )
+    controller.settings = AppSettings()
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+
+    async def fake_begin_overlay_start(self: GuiController) -> None:
+        self.overlay_state = "starting"
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_begin_overlay_start", fake_begin_overlay_start)
+    monkeypatch.setattr(
+        GuiController, "_refresh_overlay_runtime_dependencies", lambda self: asyncio.sleep(0)
+    )
+
+    await controller.set_peer_translation_enabled(True)
+
+    assert controller.settings.ui.overlay_enabled is True
+    assert controller.settings.ui.peer_translation_enabled is True
+    assert controller.settings.ui.integrated_context_enabled is True
+    assert controller.settings.ui.integrated_context_bootstrapped is True
+    assert controller.overlay_state == "starting"
+    assert refresh_calls == ["refresh", "refresh"]
+
+    contract = controller.build_overlay_peer_consumer_contract()
+    assert contract is not None
+    assert contract.peer.state == "warning"
+    assert contract.peer.helper_text == t("settings.peer_translation.warning.overlay_starting")
+
+
+@pytest.mark.asyncio
 async def test_rebuild_pipeline_closes_previous_peer_runtime_before_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1462,6 +1497,57 @@ async def test_overlay_toggle_starts_and_stops_overlay_runtime(
     assert controller.hub.reset_overlay_preview_calls == 1
     assert bridge.stopped is True
     assert manager.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_successful_overlay_start_refreshes_consumers_after_peer_runtime_becomes_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    contracts = []
+    app = SimpleNamespace()
+    controller = _make_controller(app=app)
+
+    def refresh_overlay_peer_contract() -> None:
+        contract = controller.build_overlay_peer_consumer_contract()
+        if contract is not None:
+            contracts.append(contract)
+
+    def on_overlay_state_changed(*, state: str, failure_reason: str | None = None) -> None:
+        app.overlay_state = state
+        app.overlay_failure_reason = failure_reason
+        refresh_overlay_peer_contract()
+
+    app.refresh_overlay_peer_contract = refresh_overlay_peer_contract
+    app.on_overlay_state_changed = on_overlay_state_changed
+    controller._ui_event_bridge = SimpleNamespace(
+        report_overlay_state=lambda state, failure_reason=None: on_overlay_state_changed(
+            state=state,
+            failure_reason=failure_reason,
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub(peer_stt=None)
+
+    async def fake_refresh_peer_stt_runtime(self: GuiController) -> None:
+        self.hub.peer_stt = object()
+
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    assert len(contracts) >= 2
+    assert any(contract.peer.warning_reason == "runtime_unavailable" for contract in contracts)
+    assert contracts[-1].peer.state == "on"
+    assert contracts[-1].peer.helper_text == ""
 
 
 @pytest.mark.asyncio
@@ -3586,6 +3672,46 @@ async def test_apply_providers_refreshes_only_peer_runtime_for_peer_provider_dra
     await controller.apply_providers(updated)
 
     assert calls == ["peer"]
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_republishes_overlay_peer_contract_after_peer_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = SimpleNamespace()
+    controller = _make_controller(app=app)
+    controller.settings = AppSettings()
+    controller.settings.ui.overlay_enabled = True
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub(peer_stt=None)
+    controller.overlay_state = "connected"
+    contracts = []
+
+    def refresh_overlay_peer_contract() -> None:
+        contract = controller.build_overlay_peer_consumer_contract()
+        if contract is not None:
+            contracts.append(contract)
+
+    app.refresh_overlay_peer_contract = refresh_overlay_peer_contract
+
+    updated = AppSettings()
+    updated.ui.overlay_enabled = True
+    updated.ui.peer_translation_enabled = True
+    updated.provider.peer_stt = STTProviderName.SONIOX
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        assert self.hub is not None
+        self.hub.peer_stt = object()
+
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+
+    await controller.apply_providers(updated)
+
+    assert contracts
+    assert contracts[-1].peer.state == "on"
+    assert contracts[-1].peer.warning_reason is None
 
 
 @pytest.mark.asyncio

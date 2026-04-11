@@ -101,6 +101,10 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
             self.on_toggle_translation = None
             self.on_toggle_stt = None
             self.on_language_change = None
+            self.overlay_peer_contract = None
+
+        def set_overlay_peer_contract(self, contract) -> None:
+            self.overlay_peer_contract = contract
 
         def apply_locale(self) -> None:
             return None
@@ -110,13 +114,18 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
             super().__init__()
             self.on_settings_changed = None
             self.on_overlay_toggle = None
+            self.on_peer_translation_toggle = None
             self.on_providers_changed = None
             self.on_verify_api_key = None
             self.on_secret_cleared = None
             self.show_snackbar = None
+            self.overlay_peer_contract = None
 
         def set_overlay_runtime_state(self, *_args, **_kwargs) -> None:
             return None
+
+        def set_overlay_peer_contract(self, contract) -> None:
+            self.overlay_peer_contract = contract
 
         def apply_locale(self) -> None:
             return None
@@ -167,6 +176,7 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert app.view_dashboard.on_send_message == app._on_manual_submit
     assert app.view_settings.on_verify_api_key == app._on_verify_api_key
     assert app.view_settings.on_overlay_toggle == app._on_overlay_toggle
+    assert app.view_settings.on_peer_translation_toggle == app._on_peer_translation_toggle
     assert app.view_settings.runtime_log_basic == app.controller.log_basic
     assert app.view_settings.runtime_log_detailed == app.controller.log_detailed
     assert app.view_logs.on_mode_change == app._on_runtime_logging_mode_change
@@ -344,11 +354,18 @@ def test_apply_locale_updates_views_and_page(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_on_overlay_state_changed_updates_settings_view_runtime_state() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
+    contract = object()
     seen: list[tuple[str, str | None]] = []
+    refreshed: list[object] = []
+    app.controller = SimpleNamespace(build_overlay_peer_consumer_contract=lambda: contract)
+    app.view_dashboard = SimpleNamespace(
+        set_overlay_peer_contract=lambda incoming: refreshed.append(("dashboard", incoming))
+    )
     app.view_settings = SimpleNamespace(
         set_overlay_runtime_state=lambda state, failure_reason=None: seen.append(
             (state, failure_reason)
-        )
+        ),
+        set_overlay_peer_contract=lambda incoming: refreshed.append(("settings", incoming)),
     )
 
     app.on_overlay_state_changed(state="failed", failure_reason="runtime_crashed")
@@ -356,6 +373,7 @@ def test_on_overlay_state_changed_updates_settings_view_runtime_state() -> None:
     assert app.overlay_state == "failed"
     assert app.overlay_failure_reason == "runtime_crashed"
     assert seen == [("failed", "runtime_crashed")]
+    assert refreshed == [("settings", contract), ("dashboard", contract)]
 
 
 @pytest.mark.asyncio
@@ -376,6 +394,9 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
     async def fake_overlay(enabled: bool) -> None:
         seen.append(("overlay", enabled))
 
+    async def fake_peer(enabled: bool) -> None:
+        seen.append(("peer", enabled))
+
     async def fake_apply_settings(settings) -> None:
         seen.append(("apply_settings", settings))
 
@@ -387,6 +408,7 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
         set_translation_enabled=fake_translation,
         set_stt_enabled=fake_stt,
         set_overlay_enabled=fake_overlay,
+        set_peer_translation_enabled=fake_peer,
         apply_settings=fake_apply_settings,
         apply_providers=fake_apply_providers,
     )
@@ -395,10 +417,11 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
     app._on_translation_toggle(True)
     app._on_stt_toggle(False)
     app._on_overlay_toggle(True)
+    app._on_peer_translation_toggle(True)
     app._on_settings_changed("settings")
     app._on_providers_changed()
 
-    assert len(app.page.tasks) == 6
+    assert len(app.page.tasks) == 7
     for task_fn in app.page.tasks:
         await task_fn()
 
@@ -407,6 +430,7 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
         ("translation", True),
         ("stt", False),
         ("overlay", True),
+        ("peer", True),
         ("apply_settings", "settings"),
         ("apply_providers", True),
     ]
