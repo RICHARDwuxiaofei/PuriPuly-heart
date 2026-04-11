@@ -78,7 +78,7 @@
   "settings.openrouter_routing.parasail_first.description": "Parasail을 먼저 쓰고, 실패하면 Novita로 넘어가요",
   "settings.openrouter_routing.novita_first": "Novita 우선",
   "settings.openrouter_routing.novita_first.description": "Novita를 먼저 쓰고, 실패하면 Parasail로 넘어가요",
-  "settings.managed_trial_usage.remaining_placeholder": "--% 남음",
+  "settings.managed_trial_usage.remaining_placeholder": "확인 중",
   "settings.managed_trial_usage.remaining": "{percent}% 남음",
   "settings.prompt_for": "프롬프트: {provider}",
   "settings.system_prompt": "시스템 프롬프트",

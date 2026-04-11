@@ -1971,6 +1971,74 @@ async def test_presenter_inherits_active_self_translation_visibility_when_promot
 
 
 @pytest.mark.asyncio
+async def test_presenter_promotes_active_self_secondary_into_finalized_row_without_blank_snapshot() -> (
+    None
+):
+    bridge = RecordingPresentationBridge()
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=FakeClock(_now=10.0),
+    )
+    utterance_id = uuid4()
+
+    await presenter.emit(
+        SelfActiveUpdate(
+            event_id="self-active",
+            seq=1,
+            utterance_id=None,
+            channel="self",
+            created_at=10.0,
+            text="live self",
+            secondary_text="translated live",
+            occupant_key=f"self:{utterance_id}",
+        )
+    )
+    await presenter.emit(
+        SelfTranscriptFinal(
+            event_id="self-final",
+            seq=2,
+            utterance_id=utterance_id,
+            channel="self",
+            created_at=11.0,
+            text="live self",
+            source_language="ko",
+            target_language="en",
+            is_final=True,
+        )
+    )
+    await presenter.emit(
+        TranslationFinal(
+            event_id="self-translation-final",
+            seq=3,
+            utterance_id=utterance_id,
+            channel="self",
+            created_at=12.0,
+            text="translated live",
+            source_language="ko",
+            target_language="en",
+            is_final=True,
+            applied_context_mode=None,
+        )
+    )
+
+    finalized_snapshots = [
+        snapshot
+        for snapshot in bridge.snapshots
+        if snapshot.blocks
+        and snapshot.blocks[-1].occupant_key == f"self:{utterance_id}"
+        and snapshot.blocks[-1].block_variant == "finalized"
+    ]
+
+    assert finalized_snapshots != []
+    assert all(snapshot.blocks[-1].primary_text == "live self" for snapshot in finalized_snapshots)
+    assert all(
+        snapshot.blocks[-1].secondary_text == "translated live" for snapshot in finalized_snapshots
+    )
+    assert all(snapshot.blocks[-1].secondary_enabled is True for snapshot in finalized_snapshots)
+
+
+@pytest.mark.asyncio
 async def test_presenter_clears_active_self_secondary_text_on_empty_update() -> None:
     bridge = RecordingPresentationBridge()
     presenter = OverlayPresenter(bridge=bridge, calibration=OverlayCalibration())
