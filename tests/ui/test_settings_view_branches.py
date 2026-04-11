@@ -102,6 +102,57 @@ def _make_llm_selection_view(
     return view
 
 
+def _row_cards(container: ft.Container) -> list[ft.Control]:
+    return list(container.content.controls)
+
+
+def _subtab_controls(view: settings_view.SettingsView, key: str) -> list[ft.Control]:
+    return list(view._settings_subtab_bodies[key].controls)
+
+
+def test_shared_card_wrapper_applies_300px_default_to_settings_cards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.ui.components.shared_card_wrapper import SharedCardWrapper
+
+    view, _ = _make_settings_view(monkeypatch)
+
+    default_cards = [
+        *_row_cards(_subtab_controls(view, "api")[0]),
+        _row_cards(_subtab_controls(view, "general")[0])[0],
+        *_row_cards(_subtab_controls(view, "general")[1]),
+        _row_cards(_subtab_controls(view, "overlay")[0])[0],
+        *_row_cards(_subtab_controls(view, "general")[2]),
+        *_row_cards(_subtab_controls(view, "api")[2]),
+    ]
+
+    assert len(default_cards) == 10
+    assert all(isinstance(card, SharedCardWrapper) for card in default_cards)
+    assert {card.height for card in default_cards} == {300}
+
+
+def test_shared_card_wrapper_allows_auto_height_for_full_width_cards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.ui.components.shared_card_wrapper import SharedCardWrapper
+
+    view, _ = _make_settings_view(monkeypatch)
+
+    full_width_cards = [
+        _subtab_controls(view, "api")[1],
+        _subtab_controls(view, "overlay")[1],
+        _subtab_controls(view, "prompt")[0],
+        _subtab_controls(view, "prompt")[1],
+    ]
+
+    assert len(full_width_cards) == 4
+    assert all(isinstance(card, SharedCardWrapper) for card in full_width_cards)
+    assert all(card.height is None for card in full_width_cards)
+    assert all(card.expand is False for card in full_width_cards)
+    assert all(card.content.expand is False for card in full_width_cards)
+    assert all(card.content.controls[1].expand is False for card in full_width_cards)
+
+
 def test_load_secret_value_prefers_existing_value() -> None:
     store = DummySecretStore({"new_key": "new", "old_key": "old"})
 
@@ -1208,20 +1259,21 @@ def test_overlay_calibration_section_uses_dedicated_row_card(
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
 
-    assert len(view.controls) == 10
+    overlay_controls = _subtab_controls(view, "overlay")
+    api_controls = _subtab_controls(view, "api")
 
-    row5 = view.controls[4]
+    row5 = overlay_controls[0]
     overlay_column = row5.content.controls[1].content.controls[1].content.content
     assert view._overlay_calibration_title not in overlay_column.controls
 
-    row6 = view.controls[6]
+    row6 = overlay_controls[1]
     calibration_column = row6.content.controls[1].content.content
     assert calibration_column.controls[0] is view._overlay_calibration_title
     assert view._overlay_calibration_apply_button in calibration_column.controls[-1].controls
     assert view._overlay_calibration_cancel_button in calibration_column.controls[-1].controls
     assert view._overlay_calibration_reset_button in calibration_column.controls[-1].controls
 
-    row7 = view.controls[7]
+    row7 = api_controls[2]
     assert row7 is view._openrouter_routing_row
     assert row7.content.controls[0] is view._openrouter_routing_card
     assert row7.content.controls[1] is view._openrouter_routing_empty_card
@@ -1235,7 +1287,7 @@ def test_translation_card_no_longer_contains_openrouter_routing_row(
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
 
-    row1 = view.controls[0]
+    row1 = _subtab_controls(view, "api")[0]
     translation_column = row1.content.controls[1].content.controls[1].content.content
 
     assert view._openrouter_routing_row not in translation_column.controls
@@ -1619,7 +1671,7 @@ def test_custom_vocabulary_info_icon_is_in_card_header(
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
 
-    row7 = view.controls[-1]
+    row7 = _subtab_controls(view, "prompt")[-1]
     custom_vocab_column = row7.content.controls[1].content.content
     header = custom_vocab_column.controls[0]
 
@@ -1872,3 +1924,98 @@ def test_apply_locale_refreshes_custom_vocabulary_text(
     assert view._custom_vocab_terms.label is None
     assert view._custom_vocab_terms.helper_text == ""
     assert view._custom_vocab_info_icon.tooltip == t("settings.custom_vocabulary_tooltip")
+
+
+def test_settings_view_uses_generic_subtab_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    from puripuly_heart.ui.components.subtab_shell import TextSubtabShell
+
+    view, _ = _make_settings_view(monkeypatch)
+
+    assert view.scroll is None
+    assert view.controls == [view._settings_subtab_shell]
+    assert isinstance(view._settings_subtab_shell, TextSubtabShell)
+    assert view._settings_title_region is view._settings_subtab_shell.title_region
+    assert view._settings_subtab_bar is view._settings_subtab_shell.subtab_bar
+    assert view._settings_subtab_body_host is view._settings_subtab_shell.body_host
+
+
+def test_settings_subtab_shell_preserves_per_tab_scroll_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    api_body = view._settings_subtab_bodies["api"]
+    general_body = view._settings_subtab_bodies["general"]
+
+    view._on_settings_subtab_body_scroll("api", SimpleNamespace(pixels=144.0))
+    view._on_settings_subtab_selected("general")
+    view._on_settings_subtab_body_scroll("general", SimpleNamespace(pixels=320.0))
+    view._on_settings_subtab_selected("api")
+
+    assert view._active_settings_subtab == "api"
+    assert api_body.scroll == ft.ScrollMode.AUTO
+    assert general_body.scroll == ft.ScrollMode.AUTO
+    assert view._settings_subtab_scroll_offsets["api"] == 144.0
+    assert view._settings_subtab_scroll_offsets["general"] == 320.0
+    assert api_body.visible is True
+    assert general_body.visible is False
+    assert api_body.last_restore_offset == 144.0
+
+
+def test_settings_subtab_shell_restores_scroll_on_tab_switch_for_mounted_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    api_body = view._settings_subtab_bodies["api"]
+    scroll_calls: list[tuple[float, int]] = []
+
+    monkeypatch.setattr(type(api_body), "page", property(lambda self: object()))
+    monkeypatch.setattr(
+        api_body,
+        "scroll_to",
+        lambda **kwargs: scroll_calls.append((kwargs["offset"], kwargs["duration"])),
+    )
+
+    view._on_settings_subtab_body_scroll("api", SimpleNamespace(pixels=144.0))
+    view._on_settings_subtab_selected("general")
+    view._on_settings_subtab_selected("api")
+
+    assert scroll_calls == [(144.0, 0)]
+
+
+def test_settings_subtab_bar_is_text_only_and_distinct_from_bottom_nav(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    buttons = [view._settings_subtab_buttons[key] for key in settings_view._SETTINGS_SUBTAB_ORDER]
+
+    assert isinstance(view._settings_subtab_bar.content, ft.Row)
+    assert view._settings_subtab_bar.content.wrap is False
+    assert view._settings_subtab_bar.content.scroll == ft.ScrollMode.AUTO
+    assert all(isinstance(button, ft.TextButton) for button in buttons)
+    assert all(button.icon is None for button in buttons)
+    assert view._settings_subtab_bar.bgcolor == settings_view.COLOR_SURFACE
+    assert view._settings_subtab_bar.border_radius == 24
+    assert view._settings_subtab_bar.height is None
+
+
+def test_settings_subtab_labels_render_from_i18n(monkeypatch: pytest.MonkeyPatch) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    previous_locale = i18n_module.get_locale()
+
+    try:
+        i18n_module.set_locale("ko")
+        view.apply_locale()
+
+        assert view._settings_shell_title.value == t("settings.title")
+        assert [
+            view._settings_subtab_buttons[key].text for key in settings_view._SETTINGS_SUBTAB_ORDER
+        ] == [
+            t("settings.subtab.api"),
+            t("settings.subtab.general"),
+            t("settings.subtab.prompt"),
+            t("settings.subtab.overlay"),
+        ]
+    finally:
+        i18n_module.set_locale(previous_locale)

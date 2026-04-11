@@ -24,7 +24,6 @@ from puripuly_heart.config.settings import (
     STTProviderName,
 )
 from puripuly_heart.core.language import get_all_language_options, get_stt_compatibility_warning
-from puripuly_heart.ui.components.glow import GLOW_CARD, create_glow_stack
 from puripuly_heart.ui.components.language_modal import LanguageModal
 from puripuly_heart.ui.components.managed_trial_usage_bar import ManagedTrialUsageBar
 from puripuly_heart.ui.components.settings import (
@@ -34,6 +33,8 @@ from puripuly_heart.ui.components.settings import (
     PromptEditor,
     SettingsModal,
 )
+from puripuly_heart.ui.components.shared_card_wrapper import SharedCardWrapper
+from puripuly_heart.ui.components.subtab_shell import TextSubtab, TextSubtabShell
 from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import (
     available_locales,
@@ -52,8 +53,9 @@ from puripuly_heart.ui.theme import (
     COLOR_NEUTRAL,
     COLOR_ON_BACKGROUND,
     COLOR_PRIMARY,
-    COLOR_SURFACE,
-    get_card_shadow,
+)
+from puripuly_heart.ui.theme import (
+    COLOR_SURFACE as THEME_COLOR_SURFACE,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,8 @@ _CJK_START = 0x3000
 _CENTER_ALIGNMENT = ft.alignment.Alignment(0, 0)
 _CENTER_RIGHT_ALIGNMENT = ft.alignment.Alignment(1, 0)
 _OPENROUTER_MANAGED_OPTION_VALUE = "openrouter:managed:google/gemma-4-26b-a4b-it"
+_SETTINGS_SUBTAB_ORDER = ("api", "general", "prompt", "overlay")
+COLOR_SURFACE = THEME_COLOR_SURFACE
 
 
 def _make_text_button(label: str, **kwargs) -> ft.TextButton:
@@ -123,7 +127,7 @@ class SettingsView(ft.Column):
     """Settings view with Bento grid layout."""
 
     def __init__(self):
-        super().__init__(expand=True, scroll=ft.ScrollMode.AUTO, spacing=16)
+        super().__init__(expand=True, spacing=16)
 
         # Callbacks (assigned by App)
         self.on_settings_changed: Callable[[AppSettings], None] | None = None
@@ -155,25 +159,24 @@ class SettingsView(ft.Column):
         self._overlay_calibration_session_active = False
         self._managed_trial_usage_visible = False
         self._managed_trial_usage_remaining_percent: int | None = None
+        self._active_settings_subtab = _SETTINGS_SUBTAB_ORDER[0]
+        self._settings_subtab_scroll_offsets = {key: 0.0 for key in _SETTINGS_SUBTAB_ORDER}
 
         # Build UI components
         self._build_ui()
 
     # --- Card Wrapper (About page pattern) ---
-    def _wrap_card(self, content: ft.Control, *, expand: bool = True) -> ft.Control:
-        """Wrap content in a styled Bento card with glow effect."""
-        content_with_glow = create_glow_stack(
-            ft.Container(content=content, expand=True, padding=24),
-            config=GLOW_CARD,
-        )
-        return ft.Container(
-            content=content_with_glow,
-            bgcolor=COLOR_SURFACE,
-            border_radius=16,
-            border=ft.border.all(1, ft.Colors.with_opacity(0.4, ft.Colors.WHITE)),
+    def _wrap_card(
+        self,
+        content: ft.Control,
+        *,
+        expand: bool | None = None,
+        height: float | int | None = SharedCardWrapper.DEFAULT_HEIGHT,
+    ) -> SharedCardWrapper:
+        return SharedCardWrapper(
+            content,
             expand=expand,
-            clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            shadow=get_card_shadow(),
+            height=height,
         )
 
     # --- Clickable Text Builders ---
@@ -252,6 +255,49 @@ class SettingsView(ft.Column):
             overlay_color=ft.Colors.TRANSPARENT,
             animation_duration=0,
         )
+
+    def _settings_subtab_label(self, key: str) -> str:
+        return t(f"settings.subtab.{key}")
+
+    def _sync_active_settings_subtab(self, key: str | None = None) -> None:
+        self._active_settings_subtab = (
+            self._settings_subtab_shell.active_key if key is None else key
+        )
+
+    def _bind_settings_subtab_shell_aliases(self) -> None:
+        self._settings_title_region = self._settings_subtab_shell.title_region
+        self._settings_subtab_bar = self._settings_subtab_shell.subtab_bar
+        self._settings_subtab_buttons = self._settings_subtab_shell.button_by_key
+        self._settings_subtab_bodies = self._settings_subtab_shell.body_by_key
+        self._settings_subtab_body_host = self._settings_subtab_shell.body_host
+        self._settings_subtab_scroll_offsets = self._settings_subtab_shell.scroll_offsets
+        self._sync_active_settings_subtab()
+
+    def _build_settings_subtab_shell(
+        self, tab_rows: dict[str, list[ft.Control]]
+    ) -> TextSubtabShell:
+        self._settings_shell_title = ft.Text(
+            t("settings.title"),
+            size=32,
+            weight=ft.FontWeight.W_700,
+            color=COLOR_ON_BACKGROUND,
+        )
+        return TextSubtabShell(
+            title=self._settings_shell_title,
+            tabs=[
+                TextSubtab(key, self._settings_subtab_label(key), tuple(tab_rows[key]))
+                for key in _SETTINGS_SUBTAB_ORDER
+            ],
+            font_family=font_for_language(get_locale()),
+            initial_key=self._active_settings_subtab,
+            on_tab_change=self._sync_active_settings_subtab,
+        )
+
+    def _on_settings_subtab_selected(self, key: str) -> None:
+        self._settings_subtab_shell.select_tab(key)
+
+    def _on_settings_subtab_body_scroll(self, key: str, e) -> None:
+        self._settings_subtab_shell.record_scroll(key, e)
 
     def _build_setting_action_row(self, label: ft.Text, action: ft.Control) -> ft.Row:
         return ft.Row(
@@ -342,7 +388,6 @@ class SettingsView(ft.Column):
 
         row1 = ft.Container(
             content=ft.Row([stt_card, trans_card], spacing=16, expand=True),
-            height=280,
         )
 
         # === Row 2: API Keys (2x1) ===
@@ -457,7 +502,8 @@ class SettingsView(ft.Column):
         )
 
         api_card = self._wrap_card(
-            ft.Column([api_header, ft.Container(height=16), self._api_keys_column], spacing=0)
+            ft.Column([api_header, ft.Container(height=16), self._api_keys_column], spacing=0),
+            height=None,
         )
         row2 = api_card
 
@@ -483,7 +529,6 @@ class SettingsView(ft.Column):
 
         row3 = ft.Container(
             content=ft.Row([ui_card, audio_card], spacing=16, expand=True),
-            height=420,
         )
 
         # === Row 4: Low Latency (1x1) + VAD (1x1) ===
@@ -535,7 +580,6 @@ class SettingsView(ft.Column):
 
         row4 = ft.Container(
             content=ft.Row([low_latency_card, vad_card], spacing=16, expand=True),
-            height=280,
         )
 
         # === Row 5: VRChat Mic Sync (1x1) + Overlay (1x1) ===
@@ -668,7 +712,6 @@ class SettingsView(ft.Column):
         )
         row_chatbox_source = ft.Container(
             content=ft.Row([chatbox_source_card, peer_lang_card], spacing=16, expand=True),
-            height=280,
         )
 
         self._overlay_title = ft.Text(
@@ -828,7 +871,6 @@ class SettingsView(ft.Column):
         )
         row5 = ft.Container(
             content=ft.Row([vrc_mic_card, overlay_card], spacing=16, expand=True),
-            height=380,
         )
 
         # === Row 6: Overlay Calibration (2x1) ===
@@ -884,6 +926,7 @@ class SettingsView(ft.Column):
                 spacing=6,
             ),
             expand=False,
+            height=None,
         )
 
         # === Row 7: OpenRouter Routing (1x1 + 1x1) ===
@@ -911,7 +954,6 @@ class SettingsView(ft.Column):
                 spacing=16,
                 expand=True,
             ),
-            height=280,
             visible=False,
         )
 
@@ -969,6 +1011,7 @@ class SettingsView(ft.Column):
                 ],
                 spacing=0,
             ),
+            height=None,
         )
 
         # === Row 9: Custom Vocabulary (2x1) ===
@@ -1015,20 +1058,19 @@ class SettingsView(ft.Column):
                 spacing=0,
             ),
             expand=False,
+            height=None,
         )
 
-        self.controls = [
-            row1,
-            row2,
-            row3,
-            row4,
-            row5,
-            row_chatbox_source,
-            overlay_calibration_card,
-            self._openrouter_routing_row,
-            persona_card,
-            row7,
-        ]
+        self._settings_subtab_shell = self._build_settings_subtab_shell(
+            {
+                "api": [row1, row2, self._openrouter_routing_row],
+                "general": [row3, row4, row_chatbox_source],
+                "prompt": [persona_card, row7],
+                "overlay": [row5, overlay_calibration_card],
+            }
+        )
+        self._bind_settings_subtab_shell_aliases()
+        self.controls = [self._settings_subtab_shell]
 
     def _populate_host_apis(self) -> None:
         """Legacy hook for tests; host APIs are handled by AudioSettings."""
@@ -2764,6 +2806,11 @@ class SettingsView(ft.Column):
     # --- Locale ---
     def apply_locale(self) -> None:
         """Update all labels when locale changes."""
+        self._settings_shell_title.value = t("settings.title")
+        self._settings_subtab_shell.set_font_family(font_for_language(get_locale()))
+        for key in _SETTINGS_SUBTAB_ORDER:
+            self._settings_subtab_shell.set_tab_label(key, self._settings_subtab_label(key))
+
         # Section titles
         self._stt_title.value = t("settings.section.stt")
         self._trans_title.value = t("settings.section.translation")
