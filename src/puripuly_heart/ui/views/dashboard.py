@@ -2,17 +2,29 @@ import flet as ft
 
 from puripuly_heart.core.language import get_all_language_options
 from puripuly_heart.ui.components.display_card import DisplayCard
-from puripuly_heart.ui.components.glow import create_background_glow_stack
+from puripuly_heart.ui.components.glow import create_background_glow_stack, create_glow_stack
 from puripuly_heart.ui.components.language_card import LanguageCard
 from puripuly_heart.ui.components.language_modal import LanguageModal
+from puripuly_heart.ui.components.managed_trial_usage_bar import ManagedTrialUsageBar
 from puripuly_heart.ui.components.power_button import PowerButton
 from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import get_locale, language_name, t
-from puripuly_heart.ui.theme import COLOR_TRANS_ON
+from puripuly_heart.ui.theme import (
+    COLOR_DIVIDER,
+    COLOR_NEUTRAL_DARK,
+    COLOR_ON_BACKGROUND,
+    COLOR_PRIMARY,
+    COLOR_SECONDARY,
+    COLOR_SURFACE,
+    COLOR_TERTIARY,
+    COLOR_TRANS_ON,
+    COLOR_WARNING,
+    get_card_shadow,
+)
 
 
 class DashboardView(ft.Column):
-    """Main dashboard with 2x2 asymmetric grid layout."""
+    """Main dashboard with widened K-2 shell layout."""
 
     _LANG_OPTIONS = get_all_language_options()
 
@@ -34,6 +46,8 @@ class DashboardView(ft.Column):
         self._stt_showing_warning = False
         self._local_stt_notice_status: str | None = None
         self._local_stt_notice_percent: int | None = None
+        self._managed_trial_visible = False
+        self._managed_trial_remaining_percent: int | None = None
 
         # Current language settings
         self._source_lang_code = "ko"
@@ -53,29 +67,41 @@ class DashboardView(ft.Column):
         self._build_ui()
 
     def _build_ui(self):
-        # A: STT button (top-left) - larger icon
+        # Left-side control grid
         self.stt_button = PowerButton(
             label=t("dashboard.stt_label"),
             icon=ft.Icons.MIC,
             on_click=self._toggle_stt,
-            icon_size=96,
-            label_size=36,
+            icon_size=80,
+            label_size=32,
         )
-
-        # B: Display card (top-right)
-        self.display_card = DisplayCard(on_submit=self._on_submit)
-
-        # C: TRANS button (bottom-left) - slightly smaller
+        self.peer_button = PowerButton(
+            label=t("dashboard.peer_label"),
+            icon=ft.Icons.RECORD_VOICE_OVER,
+            on_click=self._noop_control_slot,
+            icon_size=80,
+            label_size=32,
+            color_on=COLOR_WARNING,
+        )
         self.trans_button = PowerButton(
             label=t("dashboard.trans_label"),
             icon=ft.Icons.TRANSLATE,
             on_click=self._toggle_translation,
-            icon_size=64,
-            label_size=28,
+            icon_size=80,
+            label_size=32,
             color_on=COLOR_TRANS_ON,
         )
+        self.overlay_button = PowerButton(
+            label=t("dashboard.overlay_label"),
+            icon=ft.Icons.VISIBILITY,
+            on_click=self._noop_control_slot,
+            icon_size=80,
+            label_size=32,
+            color_on=COLOR_TERTIARY,
+        )
 
-        # D: Language card (bottom-right)
+        # Right-side information stack
+        self.display_card = DisplayCard(on_submit=self._on_submit)
         self.language_card = LanguageCard(
             on_source_click=self._open_source_dialog,
             on_target_click=self._open_target_dialog,
@@ -87,32 +113,174 @@ class DashboardView(ft.Column):
         )
         self._update_input_font()
 
-        # 2x2 Grid layout (35:65 ratio)
-        top_row = ft.Row(
+        top_controls = ft.Row(
             [
-                ft.Container(content=self.stt_button, expand=35),
-                ft.Container(content=self.display_card, expand=65),
+                ft.Container(content=self.stt_button, expand=True),
+                ft.Container(content=self.peer_button, expand=True),
+            ],
+            spacing=16,
+            expand=True,
+        )
+        bottom_controls = ft.Row(
+            [
+                ft.Container(content=self.trans_button, expand=True),
+                ft.Container(content=self.overlay_button, expand=True),
             ],
             spacing=16,
             expand=True,
         )
 
-        bottom_row = ft.Row(
+        control_grid = ft.Column([top_controls, bottom_controls], spacing=16, expand=True)
+        info_stack = ft.Column([self.display_card, self.language_card], spacing=16, expand=True)
+
+        main_surface = ft.Row(
             [
-                ft.Container(content=self.trans_button, expand=35),
-                ft.Container(content=self.language_card, expand=65),
+                ft.Container(content=control_grid, expand=40),
+                ft.Container(content=info_stack, expand=60),
             ],
             spacing=16,
             expand=True,
         )
 
-        # Wrap grid in background glow for atmospheric warmth
-        grid_content = ft.Column(
-            [top_row, bottom_row],
+        self._managed_trial_card = self._build_managed_trial_card()
+        shell_content = ft.Column(
+            [main_surface, self._managed_trial_card],
             spacing=16,
             expand=True,
         )
-        self.controls = [create_background_glow_stack(grid_content)]
+        self.controls = [create_background_glow_stack(shell_content)]
+        self._sync_managed_trial_card(update_ui=False)
+
+    def _build_managed_trial_card(self) -> ft.Container:
+        self._managed_trial_badge = ft.Text(
+            t("dashboard.trial.source.managed"),
+            size=14,
+            weight=ft.FontWeight.BOLD,
+            color=ft.Colors.WHITE,
+        )
+        self._managed_trial_status_label = ft.Text(
+            t("dashboard.trial.lifecycle_label"),
+            size=13,
+            color=COLOR_SECONDARY,
+        )
+        self._managed_trial_status_value = ft.Text(
+            "",
+            size=20,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL_DARK,
+        )
+        self._managed_trial_message_label = ft.Text(
+            t("dashboard.trial.message_label"),
+            size=13,
+            color=COLOR_SECONDARY,
+        )
+        self._managed_trial_message_value = ft.Text(
+            "",
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._managed_trial_usage_bar = ManagedTrialUsageBar()
+
+        info_column = ft.Column(
+            [
+                ft.Container(
+                    content=self._managed_trial_badge,
+                    bgcolor=COLOR_PRIMARY,
+                    border_radius=999,
+                    padding=ft.padding.symmetric(horizontal=12, vertical=8),
+                ),
+                ft.Row(
+                    [
+                        ft.Column(
+                            [self._managed_trial_status_label, self._managed_trial_status_value],
+                            spacing=6,
+                            expand=True,
+                        ),
+                        ft.Column(
+                            [self._managed_trial_message_label, self._managed_trial_message_value],
+                            spacing=6,
+                            expand=True,
+                        ),
+                    ],
+                    spacing=24,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                ),
+            ],
+            spacing=18,
+            expand=True,
+        )
+
+        content = ft.Row(
+            [
+                info_column,
+                ft.Container(content=self._managed_trial_usage_bar, alignment=ft.alignment.center),
+            ],
+            spacing=24,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+        return ft.Container(
+            content=create_glow_stack(
+                ft.Container(content=content, padding=24, alignment=ft.alignment.center_left)
+            ),
+            bgcolor=COLOR_SURFACE,
+            border_radius=16,
+            border=ft.border.all(1, ft.Colors.with_opacity(0.4, COLOR_DIVIDER)),
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+            shadow=get_card_shadow(),
+            visible=False,
+        )
+
+    def _managed_trial_lifecycle_key(self) -> str:
+        if self._managed_trial_remaining_percent is None:
+            return "dashboard.trial.lifecycle.pre_release"
+        if self._managed_trial_remaining_percent == 0:
+            return "dashboard.trial.lifecycle.exhausted"
+        return "dashboard.trial.lifecycle.active"
+
+    def _managed_trial_message_key(self) -> str:
+        if self._managed_trial_remaining_percent is None:
+            return "dashboard.trial.message.placeholder"
+        if self._managed_trial_remaining_percent == 0:
+            return "dashboard.trial.message.exhausted"
+        return "dashboard.trial.message.live_usage"
+
+    def _sync_managed_trial_card(self, *, update_ui: bool = True) -> None:
+        self._managed_trial_badge.value = t("dashboard.trial.source.managed")
+        self._managed_trial_status_label.value = t("dashboard.trial.lifecycle_label")
+        self._managed_trial_message_label.value = t("dashboard.trial.message_label")
+        self._managed_trial_status_value.value = t(self._managed_trial_lifecycle_key())
+        self._managed_trial_message_value.value = t(self._managed_trial_message_key())
+        self._managed_trial_usage_bar.set_percent(
+            self._managed_trial_remaining_percent if self._managed_trial_visible else None
+        )
+        self._managed_trial_card.visible = self._managed_trial_visible
+        if update_ui and self.page is not None:
+            self._managed_trial_card.update()
+
+    def _noop_control_slot(self) -> None:
+        return None
+
+    @property
+    def managed_trial_state(self) -> dict[str, object]:
+        return {
+            "visible": self._managed_trial_visible,
+            "remaining_percent": self._managed_trial_remaining_percent,
+        }
+
+    def set_managed_trial_state(
+        self,
+        *,
+        visible: bool,
+        remaining_percent: int | None = None,
+        **_extra: object,
+    ) -> None:
+        self._managed_trial_visible = bool(visible)
+        if self._managed_trial_visible and remaining_percent is not None:
+            self._managed_trial_remaining_percent = max(0, min(100, int(remaining_percent)))
+        else:
+            self._managed_trial_remaining_percent = None
+        self._sync_managed_trial_card()
 
     def _toggle_stt(self):
         if self.is_stt_on:
@@ -216,7 +384,6 @@ class DashboardView(ft.Column):
         recent.insert(0, lang_code)
         if len(recent) > 6:
             recent.pop()
-        # Notify for persistence
         if self.on_recent_languages_change:
             self.on_recent_languages_change(self._recent_source_langs, self._recent_target_langs)
 
@@ -224,7 +391,6 @@ class DashboardView(ft.Column):
         if self.on_language_change:
             self.on_language_change(self._source_lang_code, self._target_lang_code)
 
-    # Public API methods
     def set_status(self, status: str) -> None:
         self.is_connected = status == "connected"
         self.display_card.set_status(status, font_family=self._ui_font())
@@ -309,7 +475,9 @@ class DashboardView(ft.Column):
 
     def apply_locale(self) -> None:
         self.stt_button.set_label(t("dashboard.stt_label"))
+        self.peer_button.set_label(t("dashboard.peer_label"))
         self.trans_button.set_label(t("dashboard.trans_label"))
+        self.overlay_button.set_label(t("dashboard.overlay_label"))
         self.display_card.apply_locale(
             display_font_family=self._ui_font(),
             input_font_family=font_for_language(self._source_lang_code),
@@ -326,12 +494,13 @@ class DashboardView(ft.Column):
             self._local_stt_notice_status,
             percent=self._local_stt_notice_percent,
         )
+        self._managed_trial_usage_bar.apply_locale()
+        self._sync_managed_trial_card(update_ui=False)
 
     def set_recent_languages(self, source: list[str], target: list[str]) -> None:
         """Set recent languages from settings (for persistence)."""
         self._recent_source_langs = list(source)
         self._recent_target_langs = list(target)
-        # Keep only the last 6 unique languages
         self._recent_source_langs = self._recent_source_langs[:6]
         self._recent_target_langs = self._recent_target_langs[:6]
 

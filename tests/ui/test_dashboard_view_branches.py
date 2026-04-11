@@ -9,7 +9,8 @@ from puripuly_heart.ui.views import dashboard as dashboard_module
 
 class FakePowerButton:
     def __init__(self, label, icon, on_click, **kwargs):
-        _ = (icon, kwargs)
+        self.icon = icon
+        self.kwargs = dict(kwargs)
         self.label = label
         self.on_click = on_click
         self.states: list[tuple[bool, bool]] = []
@@ -74,12 +75,26 @@ class FakeLanguageModal:
         self.__class__.opened.append((current, list(recent)))
 
 
+class FakeManagedTrialUsageBar:
+    def __init__(self, percent: int | None = None) -> None:
+        self.percent = percent
+        self.locale_calls = 0
+
+    def set_percent(self, percent: int | None) -> None:
+        self.percent = percent
+
+    def apply_locale(self) -> None:
+        self.locale_calls += 1
+
+
 def _make_dashboard(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(dashboard_module, "PowerButton", FakePowerButton)
     monkeypatch.setattr(dashboard_module, "DisplayCard", FakeDisplayCard)
     monkeypatch.setattr(dashboard_module, "LanguageCard", FakeLanguageCard)
     monkeypatch.setattr(dashboard_module, "LanguageModal", FakeLanguageModal)
+    monkeypatch.setattr(dashboard_module, "ManagedTrialUsageBar", FakeManagedTrialUsageBar)
     monkeypatch.setattr(dashboard_module, "create_background_glow_stack", lambda content: content)
+    monkeypatch.setattr(dashboard_module, "create_glow_stack", lambda content, **_kwargs: content)
     monkeypatch.setattr(dashboard_module, "font_for_language", lambda code: f"font-{code}")
     monkeypatch.setattr(dashboard_module, "language_name", lambda code: f"name-{code}")
     monkeypatch.setattr(dashboard_module, "get_locale", lambda: "en")
@@ -190,12 +205,53 @@ def test_dashboard_public_setters_update_components(monkeypatch: pytest.MonkeyPa
     assert view._recent_source_langs == ["a", "b", "c", "d", "e", "f"]
 
 
-def test_dashboard_does_not_build_managed_trial_card(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dashboard_builds_k2_shell_and_managed_trial_row(monkeypatch: pytest.MonkeyPatch) -> None:
     view = _make_dashboard(monkeypatch)
 
-    assert len(view.controls) == 1
-    assert not hasattr(view, "_managed_trial_card")
-    assert not hasattr(view, "set_managed_trial_state")
+    shell = view.controls[0]
+    assert len(shell.controls) == 2
+
+    main_surface, managed_trial_card = shell.controls
+    assert len(main_surface.controls) == 2
+
+    left_region, right_region = main_surface.controls
+    assert left_region.expand == 40
+    assert right_region.expand == 60
+
+    left_grid = left_region.content
+    top_controls = [slot.content.label for slot in left_grid.controls[0].controls]
+    bottom_controls = [slot.content.label for slot in left_grid.controls[1].controls]
+
+    assert top_controls == ["STT", "PEER"]
+    assert bottom_controls == ["TRANS", "OVERLAY"]
+    assert view.stt_button.kwargs["icon_size"] == 80
+    assert view.peer_button.kwargs["icon_size"] == 80
+    assert view.trans_button.kwargs["icon_size"] == 80
+    assert view.overlay_button.kwargs["icon_size"] == 80
+    assert view.stt_button.kwargs["label_size"] == 32
+    assert view.peer_button.kwargs["label_size"] == 32
+    assert view.trans_button.kwargs["label_size"] == 32
+    assert view.overlay_button.kwargs["label_size"] == 32
+    assert right_region.content.controls == [view.display_card, view.language_card]
+    assert managed_trial_card.visible is False
+
+
+def test_dashboard_managed_trial_row_can_be_shown_without_runtime_wiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    shell = view.controls[0]
+    managed_trial_card = shell.controls[1]
+
+    view.set_managed_trial_state(visible=True, remaining_percent=71)
+
+    assert view.managed_trial_state == {"visible": True, "remaining_percent": 71}
+    assert managed_trial_card.visible is True
+
+    view.set_managed_trial_state(visible=False, remaining_percent=12)
+
+    assert view.managed_trial_state == {"visible": False, "remaining_percent": None}
+    assert managed_trial_card.visible is False
 
 
 def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -211,8 +267,10 @@ def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.Monkey
 
     assert FakeLanguageModal.opened[0][0] == "ko"
     assert FakeLanguageModal.opened[1][0] == "en"
-    assert view.stt_button.label == dashboard_module.t("dashboard.stt_label")
-    assert view.trans_button.label == dashboard_module.t("dashboard.trans_label")
+    assert view.stt_button.label == "STT"
+    assert view.peer_button.label == "PEER"
+    assert view.trans_button.label == "TRANS"
+    assert view.overlay_button.label == "OVERLAY"
     warning_texts = [text for text, _is_error, _font in view.display_card.display_calls]
     assert dashboard_module.t("dashboard.warn_stt_key") in warning_texts
     assert dashboard_module.t("dashboard.warn_llm_key") in warning_texts
