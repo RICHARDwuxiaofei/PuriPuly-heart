@@ -1670,6 +1670,56 @@ def test_overlay_calibration_controls_are_localized(
     assert view._overlay_calibration_reset_button.text == t("settings.overlay.calibration.reset")
 
 
+@pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
+def test_overlay_apply_save_labels_render_from_i18n(
+    monkeypatch: pytest.MonkeyPatch,
+    locale: str,
+) -> None:
+    settings = AppSettings()
+    settings.ui.locale = locale
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    old_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale(locale)
+        view._overlay_display_options_title.value = "stale"
+        view._overlay_translation_label.value = "stale"
+        view._overlay_peer_original_label.value = "stale"
+        view._overlay_calibration_title.value = "stale"
+        view._overlay_calibration_apply_button.text = "stale"
+        view._overlay_calibration_cancel_button.text = "stale"
+        view._overlay_calibration_reset_button.text = "stale"
+
+        view.apply_locale()
+
+        display_card = _overlay_tab_card(view, t("settings.overlay.display_options"))
+        calibration_card = _overlay_tab_card(view, t("settings.overlay.calibration"))
+        display_labels = _control_labels(display_card)
+        calibration_labels = _control_labels(calibration_card)
+
+        assert view._overlay_display_options_title.value == t("settings.overlay.display_options")
+        assert view._overlay_translation_label.value == t("settings.overlay.show_translation")
+        assert view._overlay_peer_original_label.value == t("settings.overlay.show_peer_original")
+        assert view._overlay_calibration_title.value == t("settings.overlay.calibration")
+        assert view._overlay_calibration_apply_button.text == t(
+            "settings.overlay.calibration.apply"
+        )
+        assert view._overlay_calibration_cancel_button.text == t(
+            "settings.overlay.calibration.cancel"
+        )
+        assert view._overlay_calibration_reset_button.text == t(
+            "settings.overlay.calibration.reset"
+        )
+        assert t("settings.overlay.show_translation") in display_labels
+        assert t("settings.overlay.show_peer_original") in display_labels
+        assert t("settings.overlay.calibration.apply") in calibration_labels
+        assert t("settings.overlay.calibration.cancel") in calibration_labels
+        assert t("settings.overlay.calibration.reset") in calibration_labels
+    finally:
+        i18n_module.set_locale(old_locale)
+
+
 def test_overlay_display_options_card_contains_visibility_controls_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
