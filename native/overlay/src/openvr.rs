@@ -257,6 +257,7 @@ impl OverlayFrameSubmitter for OpenVrOverlay {
 enum OpenVrBackend {
     #[cfg(windows)]
     Windows(WindowsOpenVrOverlay),
+    #[cfg(not(windows))]
     Test(FakeOpenVr),
 }
 
@@ -318,6 +319,7 @@ impl OpenVrBackend {
         match self {
             #[cfg(windows)]
             Self::Windows(openvr) => openvr.submit_frame(frame),
+            #[cfg(not(windows))]
             Self::Test(openvr) => submit_texture(openvr, frame),
         }
     }
@@ -329,6 +331,7 @@ impl OpenVrBackend {
         match self {
             #[cfg(windows)]
             Self::Windows(openvr) => openvr.apply_calibration(calibration),
+            #[cfg(not(windows))]
             Self::Test(_) => Ok(()),
         }
     }
@@ -337,6 +340,7 @@ impl OpenVrBackend {
         match self {
             #[cfg(windows)]
             Self::Windows(openvr) => openvr.set_overlay_visible(visible),
+            #[cfg(not(windows))]
             Self::Test(openvr) => openvr.set_overlay_visible(visible),
         }
     }
@@ -345,6 +349,7 @@ impl OpenVrBackend {
         match self {
             #[cfg(windows)]
             Self::Windows(openvr) => openvr.display_refresh_rate_hz(),
+            #[cfg(not(windows))]
             Self::Test(_) => None,
         }
     }
