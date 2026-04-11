@@ -1768,6 +1768,122 @@ def test_overlay_display_options_card_contains_visibility_controls_only(
     assert t("settings.overlay.show_peer_original") in display_labels
 
 
+def test_legacy_vr_overlay_shell_removed_from_settings_subtabs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    prompt_titles = _prompt_tab_card_titles(view)
+    overlay_titles = _overlay_tab_card_titles(view)
+    prompt_labels: list[str] = []
+    overlay_labels: list[str] = []
+    for control in _subtab_controls(view, "prompt"):
+        prompt_labels.extend(_control_labels(control))
+    for control in _subtab_controls(view, "overlay"):
+        overlay_labels.extend(_control_labels(control))
+
+    assert prompt_titles == [
+        t("settings.section.persona"),
+        t("settings.integrated_context"),
+        t("settings.section.custom_vocabulary"),
+    ]
+    assert overlay_titles == [
+        t("settings.overlay.display_options"),
+        t("settings.overlay.calibration"),
+    ]
+    assert t("settings.section.overlay") not in prompt_labels
+    assert t("settings.section.overlay") not in overlay_labels
+    assert t("settings.overlay.enabled") not in prompt_labels
+    assert t("settings.overlay.enabled") not in overlay_labels
+    assert t("settings.peer_translation") not in prompt_labels
+    assert t("settings.peer_translation") not in overlay_labels
+
+
+def test_migrated_overlay_copy_cleanup_keeps_prompt_and_overlay_context_separate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    prompt_card = _prompt_tab_card(view, t("settings.integrated_context"))
+    display_card = _overlay_tab_card(view, t("settings.overlay.display_options"))
+    calibration_card = _overlay_tab_card(view, t("settings.overlay.calibration"))
+    prompt_labels = _control_labels(prompt_card)
+    display_labels = _control_labels(display_card)
+    calibration_labels = _control_labels(calibration_card)
+
+    assert t("settings.integrated_context") in prompt_labels
+    assert t("settings.integrated_context") not in display_labels
+    assert t("settings.integrated_context") not in calibration_labels
+    assert t("settings.overlay.show_translation") not in prompt_labels
+    assert t("settings.overlay.show_peer_original") not in prompt_labels
+    assert t("settings.overlay.show_translation") in display_labels
+    assert t("settings.overlay.show_peer_original") in display_labels
+    assert t("settings.overlay.calibration") not in prompt_labels
+    assert t("settings.overlay.calibration") not in display_labels
+    assert t("settings.overlay.calibration") in calibration_labels
+
+
+def test_legacy_overlay_cleanup_copy_renders_from_i18n(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_locale = i18n_module.get_locale()
+
+    try:
+        for locale in ("en", "ko", "zh-CN"):
+            settings = AppSettings()
+            settings.ui.locale = locale
+
+            view, _ = _make_settings_view(monkeypatch)
+            view.load_from_settings(settings, config_path=Path("settings.json"))
+
+            i18n_module.set_locale(locale)
+            view._integrated_context_label.value = "stale"
+            view._integrated_context_button.text = "stale"
+            view._integrated_context_hint.value = "stale"
+            view._overlay_display_options_title.value = "stale"
+            view._overlay_translation_label.value = "stale"
+            view._overlay_peer_original_label.value = "stale"
+            view._overlay_calibration_title.value = "stale"
+
+            view.apply_locale()
+
+            prompt_card = _prompt_tab_card(view, t("settings.integrated_context"))
+            display_card = _overlay_tab_card(view, t("settings.overlay.display_options"))
+            calibration_card = _overlay_tab_card(view, t("settings.overlay.calibration"))
+            prompt_labels = _control_labels(prompt_card)
+            display_labels = _control_labels(display_card)
+            calibration_labels = _control_labels(calibration_card)
+
+            assert view._integrated_context_label.value == t("settings.integrated_context")
+            assert view._integrated_context_button.text == t("settings.context.local")
+            assert view._integrated_context_hint.value == t(
+                "settings.integrated_context.disabled.overlay_required"
+            )
+            assert view._overlay_display_options_title.value == t(
+                "settings.overlay.display_options"
+            )
+            assert view._overlay_translation_label.value == t("settings.overlay.show_translation")
+            assert view._overlay_peer_original_label.value == t(
+                "settings.overlay.show_peer_original"
+            )
+            assert view._overlay_calibration_title.value == t("settings.overlay.calibration")
+            assert t("settings.integrated_context") in prompt_labels
+            assert t("settings.context.local") in prompt_labels
+            assert t("settings.integrated_context.disabled.overlay_required") in prompt_labels
+            assert t("settings.overlay.display_options") in display_labels
+            assert t("settings.overlay.show_translation") in display_labels
+            assert t("settings.overlay.show_peer_original") in display_labels
+            assert t("settings.overlay.calibration") in calibration_labels
+            assert t("settings.section.overlay") not in prompt_labels
+            assert t("settings.section.overlay") not in display_labels
+            assert t("settings.overlay.enabled") not in prompt_labels
+            assert t("settings.overlay.enabled") not in display_labels
+            assert t("settings.peer_translation") not in prompt_labels
+            assert t("settings.peer_translation") not in display_labels
+    finally:
+        i18n_module.set_locale(previous_locale)
+
+
 def test_overlay_calibration_controls_follow_local_apply_cancel_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
