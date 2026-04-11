@@ -95,6 +95,7 @@
   "settings.default_option": "Auto",
   "settings.option.on": "On",
   "settings.option.off": "Off",
+  "settings.overlay.display_options": "Display Options",
   "settings.overlay.enabled": "Overlay",
   "settings.overlay.show_translation": "Show Translation",
   "settings.overlay.show_peer_original": "Show Peer Original",

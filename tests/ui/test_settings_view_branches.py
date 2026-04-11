@@ -126,6 +126,19 @@ def _prompt_tab_cards(view: settings_view.SettingsView) -> list[ft.Control]:
     return list(_subtab_controls(view, "prompt"))
 
 
+def _overlay_tab_cards(view: settings_view.SettingsView) -> list[ft.Control]:
+    cards: list[ft.Control] = []
+    for control in _subtab_controls(view, "overlay"):
+        for card in _layout_cards(control):
+            try:
+                title = _card_title(card)
+            except Exception:
+                continue
+            if title is not None:
+                cards.append(card)
+    return cards
+
+
 def _wrapped_card_column(card: ft.Control) -> ft.Control:
     return card.content.controls[1].content.content
 
@@ -192,6 +205,21 @@ def _prompt_tab_card(view: settings_view.SettingsView, title: str) -> ft.Control
         if _card_title(card) == title:
             return card
     raise AssertionError(f"prompt tab card not found: {title}")
+
+
+def _overlay_tab_card_titles(view: settings_view.SettingsView) -> list[str]:
+    titles: list[str] = []
+    for card in _overlay_tab_cards(view):
+        if (title := _card_title(card)) is not None:
+            titles.append(title)
+    return titles
+
+
+def _overlay_tab_card(view: settings_view.SettingsView, title: str) -> ft.Control:
+    for card in _overlay_tab_cards(view):
+        if _card_title(card) == title:
+            return card
+    raise AssertionError(f"overlay tab card not found: {title}")
 
 
 def _iter_control_tree(control: ft.Control):
@@ -527,43 +555,24 @@ def test_on_peer_stt_selected_updates_provider_and_pipeline_flags(
     assert changed == []
 
 
-def test_on_overlay_selected_uses_dedicated_overlay_toggle_callback(
+def test_settings_view_omits_legacy_overlay_peer_toggle_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = AppSettings()
-    overlay_calls: list[bool] = []
-    settings_calls: list[AppSettings] = []
-
     view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.on_overlay_toggle = lambda enabled: overlay_calls.append(enabled)
-    view.on_settings_changed = lambda incoming: settings_calls.append(incoming)
 
-    view._on_overlay_selected("on")
-
-    assert overlay_calls == [True]
-    assert settings_calls == []
-    assert settings.ui.overlay_enabled is False
-
-
-def test_on_peer_translation_selected_uses_dedicated_peer_toggle_callback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    peer_calls: list[bool] = []
-    settings_calls: list[AppSettings] = []
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.set_overlay_runtime_state("connected")
-    view.on_peer_translation_toggle = lambda enabled: peer_calls.append(enabled)
-    view.on_settings_changed = lambda incoming: settings_calls.append(incoming)
-
-    view._on_peer_translation_selected("on")
-
-    assert peer_calls == [True]
-    assert settings_calls == []
-    assert settings.ui.peer_translation_enabled is False
+    assert not hasattr(view, "on_overlay_toggle")
+    assert not hasattr(view, "on_peer_translation_toggle")
+    assert not hasattr(view, "_overlay_enabled_label")
+    assert not hasattr(view, "_overlay_enabled_button")
+    assert not hasattr(view, "_peer_translation_label")
+    assert not hasattr(view, "_peer_translation_button")
+    assert not hasattr(view, "_peer_translation_status_text")
+    assert not hasattr(view, "_peer_translation_hint")
+    assert not hasattr(view, "_overlay_status_text")
+    assert not hasattr(settings_view.SettingsView, "_on_overlay_click")
+    assert not hasattr(settings_view.SettingsView, "_on_overlay_selected")
+    assert not hasattr(settings_view.SettingsView, "_on_peer_translation_click")
+    assert not hasattr(settings_view.SettingsView, "_on_peer_translation_selected")
 
 
 def test_on_llm_selected_updates_model_and_prompt_state(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -964,26 +973,36 @@ def test_audio_vad_and_low_latency_handlers_update_state(
     assert view._low_latency_text.content.value == t("toggle.on")
 
 
-def test_overlay_controls_gate_peer_translation_until_overlay_is_connected(
+def test_overlay_controls_gate_integrated_context_until_peer_translation_is_effective(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.ui.peer_translation_enabled = True
+    settings.ui.integrated_context_enabled = True
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    assert view._peer_translation_button.disabled is True
-    assert view._peer_translation_hint.value == t(
-        "settings.peer_translation.disabled.overlay_required"
+    assert view._integrated_context_button.disabled is True
+    assert view._integrated_context_hint.value == t(
+        "settings.integrated_context.disabled.overlay_required"
     )
 
-    view.set_overlay_runtime_state("connected")
+    view.set_overlay_peer_contract(
+        build_overlay_peer_consumer_contract(
+            overlay_intent_enabled=True,
+            overlay_state="connected",
+            overlay_failure_reason=None,
+            peer_intent_enabled=True,
+            peer_effective_enabled=True,
+        )
+    )
 
-    assert view._peer_translation_button.disabled is False
-    assert view._peer_translation_hint.value == ""
+    assert view._integrated_context_button.disabled is False
+    assert view._integrated_context_hint.value == ""
 
 
 @pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
-def test_overlay_and_peer_status_messages_render_from_i18n(
+def test_overlay_failure_contract_drives_integrated_context_copy_from_i18n(
     monkeypatch: pytest.MonkeyPatch,
     locale: str,
 ) -> None:
@@ -1007,19 +1026,11 @@ def test_overlay_and_peer_status_messages_render_from_i18n(
             )
         )
 
-        assert view._overlay_status_text.value == t(
-            "settings.overlay.status.failed_with_reason",
-            status=t("settings.overlay.status.failed"),
-            reason=t("settings.overlay.failure.runtime_crashed"),
-        )
-        assert view._peer_translation_status_text.value == t(
-            "settings.peer_translation.status.warning"
-        )
-        assert view._peer_translation_hint.value == t(
+        assert view._integrated_context_hint.value == t(
             "settings.peer_translation.warning.overlay_failed",
             reason=t("settings.overlay.failure.runtime_crashed"),
         )
-        assert view._peer_translation_button.disabled is False
+        assert view._integrated_context_button.disabled is True
     finally:
         i18n_module.set_locale(old_locale)
 
@@ -1045,9 +1056,6 @@ def test_runtime_unavailable_contract_drives_integrated_context_hint(
         )
     )
 
-    assert view._peer_translation_hint.value == t(
-        "settings.peer_translation.warning.runtime_unavailable"
-    )
     assert view._integrated_context_hint.value == t(
         "settings.peer_translation.warning.runtime_unavailable"
     )
@@ -1074,13 +1082,10 @@ def test_overlay_stopping_contract_drives_integrated_context_hint(
         )
     )
 
-    assert view._peer_translation_hint.value == t(
-        "settings.peer_translation.warning.overlay_stopping"
-    )
     assert view._integrated_context_hint.value == t(
         "settings.peer_translation.warning.overlay_stopping"
     )
-    assert view._peer_translation_status_text.value == t("settings.peer_translation.status.warning")
+    assert view._integrated_context_button.disabled is True
 
 
 def test_peer_qwen_region_control_is_visible_before_peer_translation_is_enabled(
@@ -1267,61 +1272,6 @@ def test_on_peer_stt_selected_refreshes_api_visibility_and_redraws_immediately(
     assert api_key_updates == ["peer_stt_text", "api_keys_column"]
 
 
-def test_on_peer_translation_selected_refreshes_api_visibility_when_enabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    settings.provider.stt = STTProviderName.LOCAL_QWEN
-    settings.provider.peer_stt = STTProviderName.SONIOX
-    settings.ui.peer_translation_enabled = False
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.set_overlay_runtime_state("connected")
-    view.page = object()
-
-    api_key_updates: list[str] = []
-    monkeypatch.setattr(
-        type(view._api_keys_column),
-        "update",
-        lambda self: api_key_updates.append("api_keys_column"),
-    )
-
-    view._on_peer_translation_selected("on")
-
-    assert settings.ui.peer_translation_enabled is True
-    assert view._soniox_key.visible is True
-    assert api_key_updates == ["api_keys_column"]
-
-
-def test_on_overlay_selected_refreshes_api_visibility_when_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    settings.provider.stt = STTProviderName.LOCAL_QWEN
-    settings.provider.peer_stt = STTProviderName.DEEPGRAM
-    settings.ui.overlay_enabled = True
-    settings.ui.peer_translation_enabled = True
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.page = object()
-
-    api_key_updates: list[str] = []
-    monkeypatch.setattr(
-        type(view._api_keys_column),
-        "update",
-        lambda self: api_key_updates.append("api_keys_column"),
-    )
-
-    view._on_overlay_selected("off")
-
-    assert settings.ui.overlay_enabled is False
-    assert settings.ui.peer_translation_enabled is False
-    assert view._deepgram_key.visible is True
-    assert api_key_updates == ["api_keys_column"]
-
-
 def test_peer_provider_labels_are_backed_by_i18n(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = AppSettings()
     view, _ = _make_settings_view(monkeypatch)
@@ -1347,46 +1297,6 @@ def test_overlay_display_toggles_update_persistent_settings(
     assert settings.ui.show_overlay_translation is False
     assert settings.ui.show_overlay_peer_original is False
     assert settings_calls == [settings, settings]
-
-
-def test_first_peer_translation_enable_bootstraps_integrated_context_once(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    settings.ui.integrated_context_enabled = False
-    settings.ui.integrated_context_bootstrapped = False
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.set_overlay_runtime_state("connected")
-
-    view._on_peer_translation_selected("on")
-
-    assert settings.ui.peer_translation_enabled is True
-    assert settings.ui.integrated_context_enabled is True
-    assert settings.ui.integrated_context_bootstrapped is True
-
-
-def test_peer_translation_toggle_restores_saved_integrated_context_preference(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.set_overlay_runtime_state("connected")
-
-    view._on_peer_translation_selected("on")
-    view._on_integrated_context_selected("off")
-    assert settings.ui.integrated_context_enabled is False
-
-    view._on_peer_translation_selected("off")
-    assert view._integrated_context_button.disabled is True
-
-    view._on_peer_translation_selected("on")
-
-    assert settings.ui.peer_translation_enabled is True
-    assert settings.ui.integrated_context_enabled is False
 
 
 def test_audio_change_updates_desktop_loopback_controls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1599,6 +1509,25 @@ def test_overlay_calibration_controls_are_localized(
     assert view._overlay_calibration_reset_button.text == t("settings.overlay.calibration.reset")
 
 
+def test_overlay_display_options_card_contains_visibility_controls_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    overlay_titles = _overlay_tab_card_titles(view)
+    display_card = _overlay_tab_card(view, t("settings.overlay.display_options"))
+    display_labels = _control_labels(display_card)
+
+    assert overlay_titles == [
+        t("settings.overlay.display_options"),
+        t("settings.overlay.calibration"),
+    ]
+    assert t("settings.overlay.enabled") not in display_labels
+    assert t("settings.peer_translation") not in display_labels
+    assert t("settings.overlay.show_translation") in display_labels
+    assert t("settings.overlay.show_peer_original") in display_labels
+
+
 def test_overlay_calibration_controls_follow_local_apply_cancel_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1689,15 +1618,17 @@ def test_overlay_calibration_section_uses_dedicated_row_card(
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
 
-    overlay_controls = _subtab_controls(view, "overlay")
+    overlay_cards = _overlay_tab_cards(view)
     api_controls = _subtab_controls(view, "api")
 
-    row5 = overlay_controls[0]
-    overlay_column = row5.content.controls[1].content.controls[1].content.content
-    assert view._overlay_calibration_title not in overlay_column.controls
+    assert overlay_cards == [view._overlay_display_options_card, view._overlay_calibration_card]
+    assert isinstance(view._overlay_display_options_card, settings_view.SharedCardWrapper)
+    assert isinstance(view._overlay_calibration_card, settings_view.SharedCardWrapper)
 
-    row6 = overlay_controls[1]
-    calibration_column = row6.content.controls[1].content.content
+    display_column = _wrapped_card_column(view._overlay_display_options_card)
+    assert view._overlay_calibration_title not in display_column.controls
+
+    calibration_column = _wrapped_card_column(view._overlay_calibration_card)
     assert calibration_column.controls[0] is view._overlay_calibration_title
     assert view._overlay_calibration_apply_button in calibration_column.controls[-1].controls
     assert view._overlay_calibration_cancel_button in calibration_column.controls[-1].controls
@@ -1721,6 +1652,35 @@ def test_translation_card_no_longer_contains_openrouter_routing_row(
     translation_column = translation_card.content.controls[1].content.content
 
     assert view._openrouter_routing_row not in translation_column.controls
+
+
+@pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
+def test_overlay_tab_labels_and_headings_render_from_i18n(
+    monkeypatch: pytest.MonkeyPatch,
+    locale: str,
+) -> None:
+    settings = AppSettings()
+    settings.ui.locale = locale
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    old_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale(locale)
+        view.apply_locale()
+
+        overlay_labels: list[str] = []
+        for card in _overlay_tab_cards(view):
+            overlay_labels.extend(_control_labels(card))
+
+        assert view._overlay_display_options_title.value == t("settings.overlay.display_options")
+        assert view._overlay_calibration_title.value == t("settings.overlay.calibration")
+        assert view._overlay_translation_label.value == t("settings.overlay.show_translation")
+        assert view._overlay_peer_original_label.value == t("settings.overlay.show_peer_original")
+        assert t("settings.overlay.display_options") in overlay_labels
+        assert t("settings.overlay.calibration") in overlay_labels
+    finally:
+        i18n_module.set_locale(old_locale)
 
 
 @pytest.mark.asyncio

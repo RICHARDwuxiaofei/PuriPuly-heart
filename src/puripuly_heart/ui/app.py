@@ -48,8 +48,6 @@ class TranslatorApp:
         self.view_dashboard.on_language_change = self._on_language_change
 
         self.view_settings.on_settings_changed = self._on_settings_changed
-        self.view_settings.on_overlay_toggle = self._on_overlay_toggle
-        self.view_settings.on_peer_translation_toggle = self._on_peer_translation_toggle
         self.view_settings.on_providers_changed = self._on_providers_changed
         self.view_settings.on_verify_api_key = self._on_verify_api_key
         self.view_settings.on_secret_cleared = self._on_secret_cleared
@@ -253,9 +251,9 @@ class TranslatorApp:
         self.page.run_task(_task)
 
     def _on_overlay_toggle(self, enabled: bool) -> None:
-        self._log_basic(f"[Settings] Overlay toggle requested: enabled={enabled}")
+        self._log_basic(f"[Dashboard] Overlay toggle requested: enabled={enabled}")
         self._log_detailed(
-            "[Settings] Overlay toggle detail: "
+            "[Dashboard] Overlay toggle detail: "
             f"overlay_state={getattr(self, 'overlay_state', 'unknown')} "
             f"failure_reason={getattr(self, 'overlay_failure_reason', None)}"
         )
@@ -266,9 +264,9 @@ class TranslatorApp:
         self.page.run_task(_task)
 
     def _on_peer_translation_toggle(self, enabled: bool) -> None:
-        self._log_basic(f"[Settings] Peer toggle requested: enabled={enabled}")
+        self._log_basic(f"[Dashboard] Peer toggle requested: enabled={enabled}")
         self._log_detailed(
-            "[Settings] Peer toggle detail: "
+            "[Dashboard] Peer toggle detail: "
             f"overlay_state={getattr(self, 'overlay_state', 'unknown')} "
             f"failure_reason={getattr(self, 'overlay_failure_reason', None)}"
         )

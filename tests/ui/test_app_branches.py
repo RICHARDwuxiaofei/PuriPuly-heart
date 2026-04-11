@@ -115,8 +115,6 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
         def __init__(self) -> None:
             super().__init__()
             self.on_settings_changed = None
-            self.on_overlay_toggle = None
-            self.on_peer_translation_toggle = None
             self.on_providers_changed = None
             self.on_verify_api_key = None
             self.on_secret_cleared = None
@@ -179,8 +177,8 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert app.view_dashboard.on_toggle_overlay == app._on_overlay_toggle
     assert app.view_dashboard.on_toggle_peer_translation == app._on_peer_translation_toggle
     assert app.view_settings.on_verify_api_key == app._on_verify_api_key
-    assert app.view_settings.on_overlay_toggle == app._on_overlay_toggle
-    assert app.view_settings.on_peer_translation_toggle == app._on_peer_translation_toggle
+    assert not hasattr(app.view_settings, "on_overlay_toggle")
+    assert not hasattr(app.view_settings, "on_peer_translation_toggle")
     assert app.view_settings.runtime_log_basic == app.controller.log_basic
     assert app.view_settings.runtime_log_detailed == app.controller.log_detailed
     assert app.view_logs.on_mode_change == app._on_runtime_logging_mode_change
@@ -488,12 +486,12 @@ def test_toggle_handlers_route_basic_and_detailed_runtime_logs() -> None:
     assert app.controller.basic_messages == [
         "[Dashboard] Translation toggle requested: enabled=True",
         "[Dashboard] STT toggle requested: enabled=False",
-        "[Settings] Overlay toggle requested: enabled=True",
+        "[Dashboard] Overlay toggle requested: enabled=True",
     ]
     assert app.controller.detailed_messages == [
         "[Dashboard] Translation toggle detail: dashboard_state=False overlay_state=connected",
         "[Dashboard] STT toggle detail: dashboard_state=True overlay_state=connected",
-        "[Settings] Overlay toggle detail: overlay_state=connected failure_reason=runtime_crashed",
+        "[Dashboard] Overlay toggle detail: overlay_state=connected failure_reason=runtime_crashed",
     ]
 
 
