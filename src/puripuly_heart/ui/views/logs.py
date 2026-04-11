@@ -1,5 +1,6 @@
 """System logs view with real-time log display and folder access."""
 
+import asyncio
 import inspect
 import logging
 import subprocess
@@ -48,7 +49,11 @@ class FletLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
-            self.logs_view.append_log(msg)
+            append_log_threadsafe = getattr(self.logs_view, "append_log_threadsafe", None)
+            if callable(append_log_threadsafe):
+                append_log_threadsafe(msg)
+            else:
+                self.logs_view.append_log(msg)
         except Exception:
             pass
 
@@ -247,6 +252,56 @@ class LogsView(ft.Column):
             self._flush_logs()
         else:
             self._pending_update = True
+
+    def append_log_threadsafe(self, record: str) -> None:
+        """Append a log entry from any thread without mutating Flet state off-loop."""
+        page = self.page
+        loop = getattr(page, "loop", None) if page is not None else None
+        if loop is None:
+            self.append_log(record)
+            return
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is loop:
+            self.append_log(record)
+            return
+
+        if self._schedule_log_append(record):
+            return
+        self._buffer_pending_log(record)
+
+    def _schedule_log_append(self, record: str) -> bool:
+        page = self.page
+        loop = getattr(page, "loop", None) if page is not None else None
+        if loop is None:
+            return False
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is loop:
+            return False
+
+        coroutine = self._append_log_on_page_loop(record)
+        try:
+            asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except RuntimeError:
+            coroutine.close()
+            return False
+        return True
+
+    async def _append_log_on_page_loop(self, record: str) -> None:
+        self.append_log(record)
+
+    def _buffer_pending_log(self, record: str) -> None:
+        self._model.append(record)
+        self._pending_update = True
 
     def _flush_logs(self):
         """Flush pending logs to the UI."""
