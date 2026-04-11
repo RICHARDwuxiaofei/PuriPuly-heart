@@ -91,6 +91,10 @@ from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 from puripuly_heart.ui.event_bridge import UIEventBridge
 from puripuly_heart.ui.i18n import get_locale, set_locale, t
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
+from puripuly_heart.ui.overlay_peer_contract import (
+    OverlayPeerConsumerContract,
+    build_overlay_peer_consumer_contract,
+)
 from puripuly_heart.ui.views.logs import FletLogHandler
 
 logger = logging.getLogger(__name__)
@@ -250,12 +254,30 @@ class GuiController:
             resolved_settings
         )
 
+    def build_overlay_peer_consumer_contract(self) -> OverlayPeerConsumerContract | None:
+        if self.settings is None:
+            return None
+        return build_overlay_peer_consumer_contract(
+            overlay_intent_enabled=bool(self.settings.ui.overlay_enabled),
+            overlay_state=self.overlay_state,
+            overlay_failure_reason=self.failure_reason,
+            peer_intent_enabled=bool(self.settings.ui.peer_translation_enabled),
+            peer_effective_enabled=self._effective_peer_translation_enabled_for(self.settings),
+        )
+
+    def _refresh_overlay_peer_consumers(self) -> None:
+        refresh_contract = getattr(self.app, "refresh_overlay_peer_contract", None)
+        if callable(refresh_contract):
+            with contextlib.suppress(Exception):
+                refresh_contract()
+
     async def _refresh_overlay_runtime_dependencies(self) -> None:
         if self.settings is None or self.hub is None:
             return
 
         await self._refresh_peer_stt_runtime()
         self._sync_effective_hub_flags(self.settings)
+        self._refresh_overlay_peer_consumers()
 
     async def start(self) -> None:
         self.settings = self._load_or_init_settings(self.config_path)
@@ -644,12 +666,43 @@ class GuiController:
             self.settings.ui.peer_translation_enabled = False
             self._last_peer_translation_enabled = False
         self._save_settings()
+        self._refresh_overlay_peer_consumers()
 
         if enabled:
             await self._begin_overlay_start()
             return
 
         await self._shutdown_overlay_runtime(preserve_failure_reason=True)
+
+    async def set_peer_translation_enabled(self, enabled: bool) -> None:
+        if self.settings is None:
+            return
+
+        enabled = bool(enabled)
+        self.log_basic(f"[Peer] Toggle request: enabled={enabled}")
+        self.log_detailed(
+            "[Peer] Toggle detail: "
+            f"overlay_enabled={self.settings.ui.overlay_enabled} "
+            f"overlay_state={self.overlay_state} "
+            f"peer_stt_available={self.hub is not None and getattr(self.hub, 'peer_stt', None) is not None}"
+        )
+
+        if enabled and not self.settings.ui.overlay_enabled:
+            self.settings.ui.overlay_enabled = True
+        self.settings.ui.peer_translation_enabled = enabled
+        self._last_peer_translation_enabled = enabled
+        if enabled and not self.settings.ui.integrated_context_bootstrapped:
+            self.settings.ui.integrated_context_enabled = True
+            self.settings.ui.integrated_context_bootstrapped = True
+        self._save_settings()
+        self._refresh_overlay_peer_consumers()
+
+        if enabled and self.overlay_state not in {"starting", "connected"}:
+            await self._begin_overlay_start()
+        else:
+            await self._refresh_overlay_runtime_dependencies()
+        self._sync_effective_hub_flags(self.settings)
+        self._refresh_overlay_peer_consumers()
 
     def on_overlay_start_failed(self, failure_reason: str | None) -> None:
         previous_state = self.overlay_state
@@ -1551,6 +1604,8 @@ class GuiController:
                 except Exception as exc:
                     self._log_error(f"Failed to apply locale: {exc}")
 
+        self._refresh_overlay_peer_consumers()
+
     async def verify_api_key(self, provider: str, key: str) -> tuple[bool, str]:
         """Verify API key using the respective provider's static check. Returns (success, error_msg)."""
         if not key:
@@ -1654,6 +1709,7 @@ class GuiController:
         if should_refresh_peer:
             await self._refresh_peer_stt_runtime()
             self._sync_effective_hub_flags(next_settings)
+            self._refresh_overlay_peer_consumers()
 
         if should_refresh_self_stt:
             if self._stt_desired:
@@ -2229,6 +2285,8 @@ class GuiController:
             if view_settings is not None:
                 view_settings.load_from_settings(settings, config_path=self.config_path)
                 view_settings.set_overlay_calibration(self.overlay_calibration)
+
+        self._refresh_overlay_peer_consumers()
 
     def _on_recent_languages_change(self, source: list[str], target: list[str]) -> None:
         """Callback when recent languages change in dashboard."""

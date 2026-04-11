@@ -35,6 +35,7 @@ class TranslatorApp:
         self.controller = GuiController(page=page, app=self, config_path=config_path)
         self.overlay_state = "off"
         self.overlay_failure_reason: str | None = None
+        self.overlay_peer_contract = None
         self._setup_page()
         self._build_layout()
 
@@ -46,6 +47,7 @@ class TranslatorApp:
 
         self.view_settings.on_settings_changed = self._on_settings_changed
         self.view_settings.on_overlay_toggle = self._on_overlay_toggle
+        self.view_settings.on_peer_translation_toggle = self._on_peer_translation_toggle
         self.view_settings.on_providers_changed = self._on_providers_changed
         self.view_settings.on_verify_api_key = self._on_verify_api_key
         self.view_settings.on_secret_cleared = self._on_secret_cleared
@@ -178,8 +180,26 @@ class TranslatorApp:
         self.title_bar.set_title(t("app.title"))
         self.view_dashboard.apply_locale()
         self.view_settings.apply_locale()
+        self.refresh_overlay_peer_contract()
         self.view_logs.apply_locale()
         self.page.update()
+
+    def refresh_overlay_peer_contract(self) -> None:
+        build_contract = getattr(self.controller, "build_overlay_peer_consumer_contract", None)
+        if not callable(build_contract):
+            return
+        contract = build_contract()
+        self.overlay_peer_contract = contract
+        if contract is None:
+            return
+        view_settings = getattr(self, "view_settings", None)
+        set_settings_contract = getattr(view_settings, "set_overlay_peer_contract", None)
+        if callable(set_settings_contract):
+            set_settings_contract(contract)
+        view_dashboard = getattr(self, "view_dashboard", None)
+        set_dashboard_contract = getattr(view_dashboard, "set_overlay_peer_contract", None)
+        if callable(set_dashboard_contract):
+            set_dashboard_contract(contract)
 
     def _on_manual_submit(self, _source: str, text: str) -> None:
         async def _task():
@@ -239,6 +259,19 @@ class TranslatorApp:
 
         async def _task():
             await self.controller.set_overlay_enabled(enabled)
+
+        self.page.run_task(_task)
+
+    def _on_peer_translation_toggle(self, enabled: bool) -> None:
+        self._log_basic(f"[Settings] Peer toggle requested: enabled={enabled}")
+        self._log_detailed(
+            "[Settings] Peer toggle detail: "
+            f"overlay_state={getattr(self, 'overlay_state', 'unknown')} "
+            f"failure_reason={getattr(self, 'overlay_failure_reason', None)}"
+        )
+
+        async def _task():
+            await self.controller.set_peer_translation_enabled(enabled)
 
         self.page.run_task(_task)
 
@@ -375,6 +408,7 @@ class TranslatorApp:
             f"[Overlay] State detail: overlay_state={state} failure_reason={failure_reason}"
         )
         self.view_settings.set_overlay_runtime_state(state, failure_reason=failure_reason)
+        self.refresh_overlay_peer_contract()
 
 
 async def main_gui(page: ft.Page, *, config_path):
