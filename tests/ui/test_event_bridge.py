@@ -6,10 +6,15 @@ import logging
 from types import SimpleNamespace
 from uuid import uuid4
 
+import flet as ft
 import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.core.managed_openrouter_release import (
+    ManagedOpenRouterReleaseDiagnostics,
+    ManagedOpenRouterUserFacingError,
+)
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.events import STTSessionState, UIEvent, UIEventType
 from puripuly_heart.domain.models import OSCMessage, Transcript, Translation
@@ -62,6 +67,8 @@ class DummyApp:
     def __init__(self) -> None:
         self.view_dashboard = DummyDashboard()
         self.view_logs = DummyLogs()
+        self.snackbar_calls: list[tuple[str, object]] = []
+        self.clear_managed_auth_pending_calls = 0
         self.history: list[tuple[str, str, bool, str | None]] = []
         self.overlay_state = "off"
         self.overlay_failure_reason: str | None = None
@@ -73,7 +80,17 @@ class DummyApp:
                 translation_enabled=False,
                 stt=SimpleNamespace(state=STTSessionState.STREAMING),
             ),
+            managed_auth_pending=False,
+            clear_managed_auth_pending_state=lambda: self._record_clear_managed_auth_pending(),
         )
+
+    def _record_clear_managed_auth_pending(self) -> None:
+        self.clear_managed_auth_pending_calls += 1
+        self.controller.managed_auth_pending = False
+
+    def _show_snackbar(self, message: str, bgcolor, duration: int = 4000) -> None:
+        _ = duration
+        self.snackbar_calls.append((message, bgcolor))
 
     def add_history_entry(
         self,
@@ -335,6 +352,52 @@ async def test_event_bridge_error_with_broken_runtime_logging_uses_standard_logg
     assert seen == ["broken runtime"]
     assert app.view_logs.lines == []
     assert app.view_dashboard.display_calls[-1] == ("broken runtime", None, True)
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_routes_managed_auth_error_to_snackbar_without_dashboard_clobber() -> (
+    None
+):
+    app = DummyApp()
+    app.controller.managed_auth_pending = True
+    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    payload = ManagedOpenRouterUserFacingError(
+        message_key="managed_release.retry_after_ms",
+        message_kwargs={"retry_after_ms": 9000},
+        diagnostics=ManagedOpenRouterReleaseDiagnostics(
+            operation="issue",
+            code="trial_unavailable",
+            error_class="retryable",
+            subcode="broker_backoff",
+            retry_after_ms=9000,
+            message="broker is temporarily unavailable",
+        ),
+    )
+
+    await bridge._handle_event(
+        UIEvent(type=UIEventType.ERROR, payload=payload, runtime_log_handled=True)
+    )
+
+    assert app.snackbar_calls == [
+        (str(payload), ft.Colors.ORANGE_700),
+    ]
+    assert app.clear_managed_auth_pending_calls == 1
+    assert app.view_dashboard.display_calls == []
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_keeps_general_error_display_when_managed_auth_is_pending() -> None:
+    app = DummyApp()
+    app.controller.managed_auth_pending = True
+    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+
+    await bridge._handle_event(
+        UIEvent(type=UIEventType.ERROR, payload="managed auth boom", runtime_log_handled=True)
+    )
+
+    assert app.snackbar_calls == []
+    assert app.clear_managed_auth_pending_calls == 0
+    assert app.view_dashboard.display_calls == [("managed auth boom", None, True)]
 
 
 def test_event_bridge_reports_overlay_state_to_app() -> None:

@@ -50,10 +50,42 @@ class ManagedOpenRouterReleaseBehavior(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedOpenRouterReleaseDiagnostics:
+    operation: str | None = None
+    code: str | None = None
+    error_class: str | None = None
+    subcode: str | None = None
+    retry_after_ms: int | None = None
+    message: str | None = None
+
+
+def format_managed_openrouter_diagnostics(
+    diagnostics: ManagedOpenRouterReleaseDiagnostics | None,
+) -> str:
+    if diagnostics is None:
+        return ""
+    parts: list[str] = []
+    if diagnostics.operation is not None:
+        parts.append(f"operation={diagnostics.operation}")
+    if diagnostics.code is not None:
+        parts.append(f"code={diagnostics.code}")
+    if diagnostics.error_class is not None:
+        parts.append(f"class={diagnostics.error_class}")
+    if diagnostics.subcode is not None:
+        parts.append(f"subcode={diagnostics.subcode}")
+    if diagnostics.retry_after_ms is not None:
+        parts.append(f"retry_after_ms={diagnostics.retry_after_ms}")
+    if diagnostics.message is not None:
+        parts.append(f"message={diagnostics.message}")
+    return " ".join(parts)
+
+
+@dataclass(frozen=True, slots=True)
 class ManagedOpenRouterReleaseResult:
     behavior: ManagedOpenRouterReleaseBehavior
     message_key: str
     message_kwargs: Mapping[str, object] = field(default_factory=dict)
+    diagnostics: ManagedOpenRouterReleaseDiagnostics | None = None
     retry_after_ms: int | None = None
     api_key: str | None = None
     local_key_available: bool = False
@@ -97,11 +129,22 @@ class ManagedOpenRouterReleaseError(Exception):
     code: str
     error_class: str
     message: str
+    operation: str | None = None
     subcode: str | None = None
     retry_after_ms: int | None = None
 
     def __str__(self) -> str:
         return self.message or self.code
+
+    def to_diagnostics(self) -> ManagedOpenRouterReleaseDiagnostics:
+        return ManagedOpenRouterReleaseDiagnostics(
+            operation=self.operation,
+            code=self.code,
+            error_class=self.error_class,
+            subcode=self.subcode,
+            retry_after_ms=self.retry_after_ms,
+            message=self.message,
+        )
 
 
 class ManagedOpenRouterReleaseClient(Protocol):
@@ -169,6 +212,11 @@ class ManagedOpenRouterReleaseService:
         repr=False,
     )
     _retry_after_deadline_ms: int | None = field(init=False, default=None, repr=False)
+    _retry_after_diagnostics: ManagedOpenRouterReleaseDiagnostics | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     _legacy_hardware_hash_provider: HardwareFingerprintProvider | None = field(
         init=False,
         default=None,
@@ -301,7 +349,7 @@ class ManagedOpenRouterReleaseService:
                 app_version=self.app_version,
             )
         except ManagedOpenRouterReleaseError as exc:
-            return self._handle_release_error(exc)
+            return self._handle_release_error(exc, operation="challenge")
 
         if isinstance(challenge_response, ManagedOpenRouterPreflightStop):
             self._clear_retry_after()
@@ -332,7 +380,7 @@ class ManagedOpenRouterReleaseService:
         try:
             verify_response = await self.client.verify(verify_request)
         except ManagedOpenRouterReleaseError as exc:
-            return self._handle_release_error(exc)
+            return self._handle_release_error(exc, operation="verify")
 
         self.settings.managed_identity.release_token = verify_response.release_token
         self.settings.managed_identity.release_token_expires_at = (
@@ -382,7 +430,7 @@ class ManagedOpenRouterReleaseService:
         try:
             issue_response = await self.client.issue(issue_request)
         except ManagedOpenRouterReleaseError as exc:
-            return self._handle_release_error(exc)
+            return self._handle_release_error(exc, operation="issue")
 
         try:
             self.secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, issue_response.openrouter_api_key)
@@ -431,7 +479,12 @@ class ManagedOpenRouterReleaseService:
     def _handle_release_error(
         self,
         error: ManagedOpenRouterReleaseError,
+        *,
+        operation: str | None = None,
     ) -> ManagedOpenRouterReleaseResult:
+        diagnostics = error.to_diagnostics()
+        if diagnostics.operation is None and operation is not None:
+            diagnostics = replace(diagnostics, operation=operation)
         if error.error_class == "security_fail" and error.subcode in BINDING_MISMATCH_SUBCODES:
             try:
                 regenerate_managed_identity_bundle(
@@ -444,11 +497,13 @@ class ManagedOpenRouterReleaseService:
                 return ManagedOpenRouterReleaseResult(
                     behavior=ManagedOpenRouterReleaseBehavior.STOP,
                     message_key="managed_release.stop",
+                    diagnostics=diagnostics,
                 )
             self._clear_retry_after()
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.RESTART,
                 message_key="managed_release.restart",
+                diagnostics=diagnostics,
             )
 
         if (
@@ -465,6 +520,7 @@ class ManagedOpenRouterReleaseService:
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.RESTART,
                 message_key="managed_release.restart",
+                diagnostics=diagnostics,
             )
 
         if error.error_class == "terminal":
@@ -478,15 +534,18 @@ class ManagedOpenRouterReleaseService:
                     if error.code == "trial_not_eligible"
                     else "managed_release.stop"
                 ),
+                diagnostics=diagnostics,
             )
 
         retry_after_ms = _normalize_retry_after_ms(error.retry_after_ms)
         if retry_after_ms is not None:
             self._retry_after_deadline_ms = self.monotonic_ms_provider() + retry_after_ms
+            self._retry_after_diagnostics = diagnostics
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.RETRY,
                 message_key="managed_release.retry_after_ms",
                 message_kwargs={"retry_after_ms": retry_after_ms},
+                diagnostics=replace(diagnostics, retry_after_ms=retry_after_ms),
                 retry_after_ms=retry_after_ms,
             )
 
@@ -494,6 +553,7 @@ class ManagedOpenRouterReleaseService:
         return ManagedOpenRouterReleaseResult(
             behavior=ManagedOpenRouterReleaseBehavior.RETRY,
             message_key="managed_release.retry",
+            diagnostics=diagnostics,
         )
 
     async def _resolve_hardware_hash(
@@ -538,15 +598,20 @@ class ManagedOpenRouterReleaseService:
             self._clear_retry_after()
             return None
         remaining_ms = self._retry_after_deadline_ms - now_ms
+        diagnostics = self._retry_after_diagnostics
+        if diagnostics is not None:
+            diagnostics = replace(diagnostics, retry_after_ms=remaining_ms)
         return ManagedOpenRouterReleaseResult(
             behavior=ManagedOpenRouterReleaseBehavior.RETRY,
             message_key="managed_release.retry_after_ms",
             message_kwargs={"retry_after_ms": remaining_ms},
+            diagnostics=diagnostics,
             retry_after_ms=remaining_ms,
         )
 
     def _clear_retry_after(self) -> None:
         self._retry_after_deadline_ms = None
+        self._retry_after_diagnostics = None
 
     async def close(self) -> None:
         prepare_task = self._prepare_task
@@ -577,6 +642,7 @@ class ManagedOpenRouterDelegateFactory(Protocol):
 class ManagedOpenRouterUserFacingError(RuntimeError):
     message_key: str
     message_kwargs: Mapping[str, object] = field(default_factory=dict)
+    diagnostics: ManagedOpenRouterReleaseDiagnostics | None = None
 
     def __str__(self) -> str:
         from puripuly_heart.ui.i18n import t
@@ -603,15 +669,35 @@ class ManagedOpenRouterLLMProvider(LLMProvider):
             if self._delegate is not None:
                 return self._delegate
             ensure_key = getattr(self.release_service, "ensure_key_for_llm_start")
-            result = await ensure_key()
+            try:
+                result = await ensure_key()
+            except ManagedOpenRouterUserFacingError:
+                raise
+            except Exception as exc:
+                raise ManagedOpenRouterUserFacingError(
+                    message_key="managed_release.retry",
+                    diagnostics=ManagedOpenRouterReleaseDiagnostics(message=str(exc)),
+                ) from exc
             if not isinstance(result, ManagedOpenRouterReleaseResult):
-                raise RuntimeError("managed release service returned an unsupported result")
+                raise ManagedOpenRouterUserFacingError(
+                    message_key="managed_release.retry",
+                    diagnostics=ManagedOpenRouterReleaseDiagnostics(
+                        message="managed release service returned an unsupported result"
+                    ),
+                )
             if result.behavior != ManagedOpenRouterReleaseBehavior.READY or not result.api_key:
                 raise ManagedOpenRouterUserFacingError(
                     message_key=result.message_key or "managed_release.restart",
                     message_kwargs=result.message_kwargs,
+                    diagnostics=result.diagnostics,
                 )
-            self._delegate = self.delegate_factory(result.api_key)
+            try:
+                self._delegate = self.delegate_factory(result.api_key)
+            except Exception as exc:
+                raise ManagedOpenRouterUserFacingError(
+                    message_key="managed_release.retry",
+                    diagnostics=ManagedOpenRouterReleaseDiagnostics(message=str(exc)),
+                ) from exc
             if self.on_delegate_ready is not None:
                 callback_result = self.on_delegate_ready()
                 if inspect.isawaitable(callback_result):

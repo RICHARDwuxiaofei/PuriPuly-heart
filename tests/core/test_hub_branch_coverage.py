@@ -10,6 +10,10 @@ import numpy as np
 import pytest
 
 from puripuly_heart.core.clock import FakeClock
+from puripuly_heart.core.managed_openrouter_release import (
+    ManagedOpenRouterReleaseDiagnostics,
+    ManagedOpenRouterUserFacingError,
+)
 from puripuly_heart.core.orchestrator.hub import ClientHub, ContextEntry, _MergeBuffer
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
@@ -47,6 +51,32 @@ class StubLLM:
         if self.should_fail:
             raise RuntimeError("llm failed")
         return Translation(utterance_id=utterance_id, text=f"T:{text}")
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@dataclass(slots=True)
+class ManagedAuthFailingLLM:
+    diagnostics: ManagedOpenRouterReleaseDiagnostics
+    closed: bool = False
+
+    async def translate(
+        self,
+        *,
+        utterance_id: UUID,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ) -> Translation:
+        _ = (utterance_id, text, system_prompt, source_language, target_language, context)
+        raise ManagedOpenRouterUserFacingError(
+            message_key="managed_release.retry_after_ms",
+            message_kwargs={"retry_after_ms": 9000},
+            diagnostics=self.diagnostics,
+        )
 
     async def close(self) -> None:
         self.closed = True
@@ -608,6 +638,45 @@ async def test_translate_and_enqueue_emits_error_and_fallback_transcript() -> No
         assert (
             "[Hub] Translation failed (stage=final, channel=self): llm failed"
             in _runtime_log_messages(log_stream)
+        )
+    finally:
+        runtime_logging.close()
+
+
+@pytest.mark.asyncio
+async def test_translate_and_enqueue_logs_managed_auth_diagnostics() -> None:
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    hub = ClientHub(
+        stt=None,
+        llm=ManagedAuthFailingLLM(
+            diagnostics=ManagedOpenRouterReleaseDiagnostics(
+                operation="issue",
+                code="trial_unavailable",
+                error_class="retryable",
+                subcode="broker_backoff",
+                retry_after_ms=9000,
+                message="broker is temporarily unavailable",
+            )
+        ),
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+        fallback_transcript_only=True,
+        runtime_logging=runtime_logging,
+    )
+    utterance_id = uuid4()
+
+    try:
+        await hub._translate_and_enqueue(utterance_id, "hello")
+
+        events = [await hub.ui_events.get() for _ in range(2)]
+        assert [event.type for event in events] == [UIEventType.ERROR, UIEventType.OSC_SENT]
+        assert events[0].runtime_log_handled is True
+        assert isinstance(events[0].payload, ManagedOpenRouterUserFacingError)
+        messages = _runtime_log_messages(log_stream)
+        assert any(
+            "operation=issue code=trial_unavailable class=retryable subcode=broker_backoff retry_after_ms=9000"
+            in message
+            for message in messages
         )
     finally:
         runtime_logging.close()

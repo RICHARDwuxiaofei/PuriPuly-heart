@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
+import flet as ft
+
+from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterUserFacingError
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.events import STTSessionState, UIEvent, UIEventType
 from puripuly_heart.domain.models import OSCMessage, Transcript, Translation
@@ -124,6 +128,7 @@ class UIEventBridge:
         if event.type == UIEventType.ERROR:
             payload = event.payload
             text = str(payload) if payload is not None else t("error.unknown")
+            controller = getattr(self.app, "controller", None)
             try:
                 if self.runtime_logging is not None:
                     if not event.runtime_log_handled:
@@ -132,6 +137,20 @@ class UIEventBridge:
                     logger.error(text)
             except Exception:
                 logger.error(text)
+            if isinstance(payload, ManagedOpenRouterUserFacingError):
+                clear_pending = (
+                    getattr(controller, "clear_managed_auth_pending_state", None)
+                    if controller is not None
+                    else None
+                )
+                if callable(clear_pending):
+                    with contextlib.suppress(Exception):
+                        clear_pending()
+                show_snackbar = getattr(self.app, "_show_snackbar", None)
+                if callable(show_snackbar):
+                    with contextlib.suppress(Exception):
+                        show_snackbar(text, ft.Colors.ORANGE_700)
+                        return
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 msg_lower = text.lower()

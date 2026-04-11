@@ -5,6 +5,7 @@
     "dashboard.trans_label": "翻译",
     "dashboard.overlay_label": "OVERLAY",
     "dashboard.ready": "准备翻译...",
+    "dashboard.managed_auth_pending": "正在认证...",
     "dashboard.warn_stt_key": "请输入语音识别(STT) API密钥",
     "dashboard.warn_llm_key": "请输入大语言模型(LLM) API密钥",
     "dashboard.trial.source.managed": "托管",

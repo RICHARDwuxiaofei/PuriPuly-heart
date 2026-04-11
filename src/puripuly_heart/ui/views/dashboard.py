@@ -45,6 +45,7 @@ class DashboardView(ft.Column):
         # Warning state for UI feedback
         self._translation_showing_warning = False
         self._stt_showing_warning = False
+        self._managed_auth_pending = False
         self._local_stt_notice_status: str | None = None
         self._local_stt_notice_percent: int | None = None
         self._managed_trial_visible = False
@@ -575,12 +576,20 @@ class DashboardView(ft.Column):
         font_family = font_for_language(language_code) if language_code else self._ui_font()
         self.display_card.set_display_translation(text, font_family=font_family)
 
+    def set_managed_auth_pending(self, pending: bool) -> None:
+        self._managed_auth_pending = bool(pending)
+        self._sync_notice()
+
     def set_local_stt_notice(self, status: str | None, percent: int | None = None) -> None:
         self._local_stt_notice_status = status
         self._local_stt_notice_percent = percent if status == "downloading" else None
+
+        self._sync_notice()
+
+    def _current_local_stt_notice(self) -> tuple[str | None, str | None]:
+        status = self._local_stt_notice_status
         if status is None:
-            self.display_card.set_notice(None, None)
-            return
+            return None, None
 
         notice_key_by_status = {
             "missing": "dashboard.local_stt_notice_missing",
@@ -596,14 +605,23 @@ class DashboardView(ft.Column):
         }
         notice_key = notice_key_by_status.get(status)
         if notice_key is None:
-            self.display_card.set_notice(None, None)
-            return
+            return None, None
         notice_text = (
-            t("dashboard.local_stt_notice_downloading_progress", percent=percent)
-            if status == "downloading" and percent is not None
+            t(
+                "dashboard.local_stt_notice_downloading_progress",
+                percent=self._local_stt_notice_percent,
+            )
+            if status == "downloading" and self._local_stt_notice_percent is not None
             else t(notice_key)
         )
-        self.display_card.set_notice(notice_text, tone_by_status.get(status))
+        return notice_text, tone_by_status.get(status)
+
+    def _sync_notice(self) -> None:
+        if self._managed_auth_pending:
+            self.display_card.set_notice(t("dashboard.managed_auth_pending"), "info")
+            return
+        notice_text, tone = self._current_local_stt_notice()
+        self.display_card.set_notice(notice_text, tone)
 
     def apply_locale(self) -> None:
         self.stt_button.set_label(t("dashboard.stt_label"))
@@ -626,10 +644,7 @@ class DashboardView(ft.Column):
             self.set_display_text(t("dashboard.warn_stt_key"))
         elif self._translation_showing_warning:
             self.set_display_text(t("dashboard.warn_llm_key"))
-        self.set_local_stt_notice(
-            self._local_stt_notice_status,
-            percent=self._local_stt_notice_percent,
-        )
+        self._sync_notice()
         self._managed_trial_usage_bar.apply_locale()
         self._sync_managed_trial_card(update_ui=False)
 

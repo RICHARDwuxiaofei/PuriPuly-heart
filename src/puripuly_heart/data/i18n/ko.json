@@ -5,6 +5,7 @@
   "dashboard.trans_label": "TRANS",
   "dashboard.overlay_label": "OVERLAY",
   "dashboard.ready": "번역 준비 완료...",
+  "dashboard.managed_auth_pending": "인증 중이에요...",
   "dashboard.warn_stt_key": "올바른 STT API 키를 입력해주세요",
   "dashboard.warn_llm_key": "올바른 LLM API 키를 입력해주세요",
   "dashboard.trial.source.managed": "관리형",

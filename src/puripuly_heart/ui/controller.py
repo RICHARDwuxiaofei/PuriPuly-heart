@@ -59,6 +59,7 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseBehavior,
     ManagedOpenRouterReleaseService,
     UnavailableManagedOpenRouterReleaseClient,
+    format_managed_openrouter_diagnostics,
 )
 from puripuly_heart.core.openrouter_credentials import resolve_openrouter_credentials
 from puripuly_heart.core.orchestrator.hub import ClientHub
@@ -216,6 +217,10 @@ class GuiController:
         if self.settings is None:
             return False
         return self._effective_peer_translation_enabled_for(self.settings)
+
+    @property
+    def managed_auth_pending(self) -> bool:
+        return self._managed_trial_pending_auth
 
     @property
     def effective_context_mode(self) -> str:
@@ -489,6 +494,33 @@ class GuiController:
             and self.hub.llm is not None
         )
 
+    def _sync_managed_auth_dashboard_notice(self) -> None:
+        dash = getattr(self.app, "view_dashboard", None)
+        setter = getattr(dash, "set_managed_auth_pending", None) if dash is not None else None
+        if callable(setter):
+            setter(self._managed_trial_pending_auth)
+
+    def _set_managed_trial_pending_auth(self, pending: bool) -> None:
+        self._managed_trial_pending_auth = bool(pending)
+        self._sync_managed_auth_dashboard_notice()
+
+    def clear_managed_auth_pending_state(self) -> None:
+        self._set_managed_trial_pending_auth(False)
+
+    def _should_show_managed_auth_pending_before_prepare(self) -> bool:
+        if self.settings is None:
+            return False
+        try:
+            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+            resolution = resolve_openrouter_credentials(
+                self.settings,
+                secrets=secrets,
+                request_intent="TRANS",
+            )
+        except Exception:
+            return True
+        return resolution.api_key is None
+
     def _set_managed_trial_transient_message(
         self,
         message_key: str | None,
@@ -515,7 +547,7 @@ class GuiController:
             asyncio.get_running_loop().create_task(self._refresh_managed_trial_usage_state())
 
     def _on_managed_trial_delegate_ready(self) -> None:
-        self._managed_trial_pending_auth = False
+        self._set_managed_trial_pending_auth(False)
         self._set_managed_trial_transient_message(None)
         self._schedule_managed_trial_usage_refresh()
 
@@ -531,13 +563,10 @@ class GuiController:
             or self.settings.provider.llm != LLMProviderName.OPENROUTER
             or self.settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED
         ):
-            self._managed_trial_pending_auth = False
+            self._set_managed_trial_pending_auth(False)
             self._set_managed_trial_transient_message(None)
             if callable(setter):
                 setter(visible=False, remaining_percent=None)
-            return
-
-        if not callable(setter):
             return
 
         try:
@@ -549,13 +578,15 @@ class GuiController:
         usage_metadata: OpenRouterKeyMetadata | None = None
         api_key = resolution.api_key if resolution is not None else None
         if api_key:
-            self._managed_trial_pending_auth = False
-            usage_metadata = await OpenRouterLLMProvider.fetch_key_metadata(api_key)
+            self._set_managed_trial_pending_auth(False)
+            if callable(setter):
+                usage_metadata = await OpenRouterLLMProvider.fetch_key_metadata(api_key)
 
-        setter(
-            visible=True,
-            remaining_percent=self._managed_trial_remaining_percent(usage_metadata),
-        )
+        if callable(setter):
+            setter(
+                visible=True,
+                remaining_percent=self._managed_trial_remaining_percent(usage_metadata),
+            )
 
     def _build_llm_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
         return (
@@ -1070,6 +1101,8 @@ class GuiController:
         self.cancel_overlay_calibration()
 
     async def set_translation_enabled(self, enabled: bool) -> None:
+        if not enabled:
+            self._set_managed_trial_pending_auth(False)
         if self.hub is None:
             return
         self.log_basic(f"[Translation] Toggle request: enabled={enabled}")
@@ -1192,16 +1225,26 @@ class GuiController:
         if service is None:
             return True
 
-        result = await service.prepare_for_translation()
+        self._set_managed_trial_pending_auth(
+            self._should_show_managed_auth_pending_before_prepare()
+        )
+        try:
+            result = await service.prepare_for_translation()
+        except Exception:
+            self._set_managed_trial_pending_auth(False)
+            raise
         if result.behavior == ManagedOpenRouterReleaseBehavior.READY:
-            self._managed_trial_pending_auth = bool(result.pending_issue and not result.api_key)
+            self._set_managed_trial_pending_auth(bool(result.pending_issue and not result.api_key))
             self._set_managed_trial_transient_message(None)
             await self._refresh_managed_trial_usage_state()
             if self.hub.llm is None:
                 await self._rebuild_llm_provider()
             return True
 
-        self._managed_trial_pending_auth = False
+        self._set_managed_trial_pending_auth(False)
+        diagnostics_text = format_managed_openrouter_diagnostics(result.diagnostics)
+        if diagnostics_text:
+            self.log_basic(f"[ManagedAuth] {diagnostics_text}", level=logging.ERROR)
         self._set_managed_trial_transient_message(result.message_key, dict(result.message_kwargs))
         await self._refresh_managed_trial_usage_state()
         self.hub.translation_enabled = False
@@ -1685,6 +1728,13 @@ class GuiController:
         self.settings = next_settings
         self._save_settings()
         self._clear_local_stt_pending_enable_if_provider_switched_away()
+        if (
+            next_settings.provider.llm != LLMProviderName.OPENROUTER
+            or next_settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED
+        ):
+            self._set_managed_trial_pending_auth(False)
+        else:
+            self._sync_managed_auth_dashboard_notice()
 
         if self.hub is not None:
             self.hub.source_language = next_settings.languages.source_language

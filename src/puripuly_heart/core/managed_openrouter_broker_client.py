@@ -157,6 +157,7 @@ def _parse_error_response(
 
     try:
         return ManagedOpenRouterReleaseError(
+            operation=operation,
             code=_require_public_error_code(raw_error, "code"),
             error_class=_require_public_error_class(raw_error, "class"),
             subcode=_require_optional_text(raw_error, "subcode"),
@@ -235,6 +236,7 @@ def _require_optional_int(payload: Mapping[str, object], key: str) -> int | None
 
 def _retryable_error(operation: str, detail: str) -> ManagedOpenRouterReleaseError:
     return ManagedOpenRouterReleaseError(
+        operation=operation,
         code=RETRYABLE_ERROR_CODE,
         error_class=RETRYABLE_ERROR_CLASS,
         message=f"managed OpenRouter broker {operation} failed: {detail}",
