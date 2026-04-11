@@ -290,6 +290,7 @@
   "settings.peer_language.target": "번역",
   "settings.peer_language.follow": "셀프와 동일",
   "settings.peer_stt_provider": "상대 STT 프로바이더",
+  "settings.peer_stt.local_qwen_unavailable": "상대 음성 인식은 지금 지원되는 클라우드 프로바이더를 사용해서, Local Qwen은 내 목소리 인식용으로만 남겨둘게요.",
   "settings.peer_qwen_region": "상대 Qwen 리전",
   "settings.peer_qwen_model": "상대 Qwen 모델",
   "settings.peer_soniox_model": "상대 Soniox 모델",

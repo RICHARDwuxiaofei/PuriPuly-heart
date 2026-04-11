@@ -467,7 +467,7 @@ def test_update_api_visibility_hides_openrouter_routing_for_non_openrouter(
     assert view._openrouter_routing_row.visible is False
 
 
-def test_update_api_visibility_hides_secret_fields_for_local_qwen(
+def test_update_api_visibility_uses_effective_peer_provider_for_legacy_local_qwen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -479,7 +479,7 @@ def test_update_api_visibility_hides_secret_fields_for_local_qwen(
     view._settings = settings
     view._update_api_visibility()
 
-    assert view._deepgram_key.visible is False
+    assert view._deepgram_key.visible is True
     assert view._soniox_key.visible is False
     assert view._qwen_region_btn.visible is False
     assert view._alibaba_key_beijing.visible is False
@@ -525,6 +525,71 @@ def test_on_peer_stt_selected_updates_provider_and_pipeline_flags(
     assert pending.provider.peer_stt == STTProviderName.SONIOX
     assert view.has_provider_changes is True
     assert changed == []
+
+
+def test_peer_stt_local_qwen_option_is_disabled_with_explanation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.page = object()
+
+    captured: dict[str, object] = {}
+
+    class DummyModal:
+        def __init__(self, _page, title, options, _on_select, *, show_description=False):
+            captured["title"] = title
+            captured["options"] = options
+            captured["show_description"] = show_description
+
+        def open(self, current: str) -> None:
+            captured["current"] = current
+
+    monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
+
+    view._on_peer_stt_click(None)
+
+    options = captured["options"]
+    local_qwen_option = next(
+        option for option in options if option.value == STTProviderName.LOCAL_QWEN.value
+    )
+
+    assert captured["title"] == t("settings.peer_stt_provider")
+    assert captured["show_description"] is True
+    assert local_qwen_option.label == t("provider.local_qwen")
+    assert local_qwen_option.disabled is True
+    assert local_qwen_option.description == t("settings.peer_stt.local_qwen_unavailable")
+    assert all(
+        not option.disabled
+        for option in options
+        if option.value != STTProviderName.LOCAL_QWEN.value
+    )
+
+
+def test_peer_stt_local_qwen_choice_cannot_be_persisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_peer_stt_selected(STTProviderName.LOCAL_QWEN.value)
+
+    pending = view.build_provider_apply_settings()
+
+    assert settings.provider.peer_stt == STTProviderName.DEEPGRAM
+    assert pending is not None
+    assert pending.provider.peer_stt == STTProviderName.DEEPGRAM
+    assert view.has_provider_changes is False
+
+    settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    normalized_pending = view.build_provider_apply_settings()
+
+    assert normalized_pending is not None
+    assert normalized_pending.provider.peer_stt == STTProviderName.DEEPGRAM
 
 
 def test_on_overlay_selected_uses_dedicated_overlay_toggle_callback(
@@ -964,6 +1029,25 @@ def test_audio_vad_and_low_latency_handlers_update_state(
     assert view._low_latency_text.content.value == t("toggle.on")
 
 
+def test_immediate_settings_emit_normalizes_legacy_peer_local_qwen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._on_low_latency_selected("off")
+
+    assert changed
+    assert changed[-1] is not settings
+    assert changed[-1].provider.peer_stt == STTProviderName.DEEPGRAM
+    assert settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
+    assert settings.stt.low_latency_mode is False
+
+
 def test_overlay_controls_gate_peer_translation_until_overlay_is_connected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1329,6 +1413,83 @@ def test_peer_provider_labels_are_backed_by_i18n(monkeypatch: pytest.MonkeyPatch
 
     assert view._peer_stt_label.value == t("settings.peer_stt_provider")
     assert view._peer_qwen_region_label.value == t("settings.peer_qwen_region")
+
+
+@pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
+def test_peer_stt_local_qwen_explanatory_copy_renders_from_i18n(
+    monkeypatch: pytest.MonkeyPatch,
+    locale: str,
+) -> None:
+    old_locale = i18n_module.get_locale()
+    try:
+        settings = AppSettings()
+        settings.ui.locale = locale
+        view, _ = _make_settings_view(monkeypatch)
+        view.load_from_settings(settings, config_path=Path("settings.json"))
+        view.page = object()
+
+        captured: dict[str, object] = {}
+
+        class DummyModal:
+            def __init__(self, _page, title, options, _on_select, *, show_description=False):
+                captured["title"] = title
+                captured["options"] = options
+                captured["show_description"] = show_description
+
+            def open(self, current: str) -> None:
+                captured["current"] = current
+
+        monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
+
+        i18n_module.set_locale(locale)
+        view.apply_locale()
+        view._on_peer_stt_click(None)
+
+        options = captured["options"]
+        local_qwen_option = next(
+            option for option in options if option.value == STTProviderName.LOCAL_QWEN.value
+        )
+
+        assert captured["title"] == t("settings.peer_stt_provider")
+        assert local_qwen_option.description == t("settings.peer_stt.local_qwen_unavailable")
+    finally:
+        i18n_module.set_locale(old_locale)
+
+
+def test_legacy_peer_local_qwen_load_normalizes_display_and_modal_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
+    assert view._peer_stt_text.content.value == t("provider.deepgram")
+
+    view._peer_stt_text.content.value = "stale"
+    view.apply_locale()
+
+    assert view._peer_stt_text.content.value == t("provider.deepgram")
+
+    view.page = object()
+    captured: dict[str, object] = {}
+
+    class DummyModal:
+        def __init__(self, _page, title, options, _on_select, *, show_description=False):
+            captured["title"] = title
+            captured["options"] = options
+            captured["show_description"] = show_description
+
+        def open(self, current: str) -> None:
+            captured["current"] = current
+
+    monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
+
+    view._on_peer_stt_click(None)
+
+    assert captured["title"] == t("settings.peer_stt_provider")
+    assert captured["current"] == STTProviderName.DEEPGRAM.value
 
 
 def test_overlay_display_toggles_update_persistent_settings(
@@ -1790,6 +1951,26 @@ def test_prompt_commit_emits_once_when_no_provider_changes(monkeypatch: pytest.M
     assert changed
     assert changed[-1].system_prompt == "custom prompt"
     assert changed[-1].system_prompts[view._active_prompt_key()] == "custom prompt"
+
+
+def test_prompt_commit_normalizes_legacy_peer_local_qwen_before_emit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._on_prompt_change("custom prompt")
+    view._on_prompt_commit("custom prompt")
+
+    assert changed
+    assert changed[-1] is not settings
+    assert changed[-1].provider.peer_stt == STTProviderName.DEEPGRAM
+    assert settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
+    assert changed[-1].system_prompt == "custom prompt"
 
 
 def test_prompt_commit_noops_when_value_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
