@@ -308,6 +308,42 @@ class SettingsView(ft.Column):
             on_click=on_click,
         )
 
+    def _build_integrated_context_prompt_card(self) -> SharedCardWrapper:
+        self._integrated_context_label = ft.Text(
+            t("settings.integrated_context"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._integrated_context_button = self._build_action_button(
+            t("settings.context.local"),
+            self._on_integrated_context_click,
+        )
+        self._integrated_context_hint = ft.Text("", size=13, color=COLOR_NEUTRAL)
+
+        integrated_context_header = ft.Row(
+            controls=[
+                self._integrated_context_label,
+                ft.Container(expand=True),
+                self._integrated_context_button,
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self._integrated_context_prompt_card = SharedCardWrapper(
+            ft.Column(
+                [
+                    integrated_context_header,
+                    ft.Container(height=8),
+                    self._integrated_context_hint,
+                ],
+                spacing=0,
+            ),
+            height=None,
+            expand=False,
+        )
+        return self._integrated_context_prompt_card
+
     def _build_overlay_calibration_field(
         self,
         *,
@@ -790,11 +826,6 @@ class SettingsView(ft.Column):
             size=16,
             color=COLOR_ON_BACKGROUND,
         )
-        self._integrated_context_label = ft.Text(
-            t("settings.integrated_context"),
-            size=16,
-            color=COLOR_ON_BACKGROUND,
-        )
         self._overlay_enabled_button = self._build_action_button(
             t("settings.option.off"),
             self._on_overlay_click,
@@ -811,17 +842,12 @@ class SettingsView(ft.Column):
             t("settings.option.on"),
             self._on_overlay_peer_original_click,
         )
-        self._integrated_context_button = self._build_action_button(
-            t("settings.context.local"),
-            self._on_integrated_context_click,
-        )
         self._peer_translation_status_text = ft.Text(
             "",
             size=14,
             color=COLOR_NEUTRAL,
         )
         self._peer_translation_hint = ft.Text("", size=13, color=COLOR_NEUTRAL)
-        self._integrated_context_hint = ft.Text("", size=13, color=COLOR_NEUTRAL)
         self._overlay_status_text = ft.Text(
             "",
             size=14,
@@ -913,11 +939,6 @@ class SettingsView(ft.Column):
                         self._overlay_peer_original_label,
                         self._overlay_peer_original_button,
                     ),
-                    self._build_setting_action_row(
-                        self._integrated_context_label,
-                        self._integrated_context_button,
-                    ),
-                    self._integrated_context_hint,
                     ft.Container(height=12),
                     self._overlay_status_text,
                 ],
@@ -1078,6 +1099,7 @@ class SettingsView(ft.Column):
             height=None,
             expand=False,
         )
+        integrated_context_card = self._build_integrated_context_prompt_card()
 
         # === Row 9: Custom Vocabulary (2x1) ===
         self._custom_vocab_title = ft.Text(
@@ -1137,7 +1159,7 @@ class SettingsView(ft.Column):
             {
                 "api": [row1, row2, self._openrouter_routing_row],
                 "general": [row3, row4, row_chatbox_source],
-                "prompt": [persona_card, row7],
+                "prompt": [persona_card, integrated_context_card, row7],
                 "overlay": [row5, overlay_calibration_card],
             }
         )
