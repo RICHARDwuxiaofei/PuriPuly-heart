@@ -392,19 +392,32 @@ class SettingsView(ft.Column):
 
     def _build_ui(self) -> None:
         """Build the settings UI with Bento grid layout."""
-        # === Row 1: STT (1x1) + Translation (1x1) ===
-        self._stt_text = self._build_clickable_text(
+        # === API provider surfaces: Self STT + Peer STT + Shared Translation ===
+        self._stt_text = self._build_setting_action_text(
             provider_label(STTProviderName.LOCAL_QWEN.value),
             self._on_stt_click,
         )
         self._stt_title = ft.Text(
             t("settings.section.stt"), size=24, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL
         )
+        self._stt_provider_label = ft.Text(
+            t("settings.self_stt_provider"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
         stt_card = self._wrap_card(
-            ft.Column([self._stt_title, self._stt_text], spacing=0, expand=True)
+            ft.Column(
+                [
+                    self._stt_title,
+                    ft.Container(height=12),
+                    self._build_setting_action_row(self._stt_provider_label, self._stt_text),
+                ],
+                spacing=6,
+                expand=True,
+            )
         )
 
-        self._llm_text = self._build_clickable_text(
+        self._llm_text = self._build_setting_action_text(
             t("provider.gemini3_flash"),
             self._on_llm_click,
         )
@@ -414,13 +427,24 @@ class SettingsView(ft.Column):
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
-        trans_card = self._wrap_card(
-            ft.Column([self._trans_title, self._llm_text], spacing=0, expand=True)
+        self._translation_provider_label = ft.Text(
+            t("settings.shared_translation_provider"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
         )
-
-        row1 = ft.Container(
-            content=ft.Row([stt_card, trans_card], spacing=16, expand=True),
-            height=280,
+        trans_card = self._wrap_card(
+            ft.Column(
+                [
+                    self._trans_title,
+                    ft.Container(height=12),
+                    self._build_setting_action_row(
+                        self._translation_provider_label,
+                        self._llm_text,
+                    ),
+                ],
+                spacing=6,
+                expand=True,
+            )
         )
 
         # === Row 2: API Keys (2x1) ===
@@ -523,6 +547,11 @@ class SettingsView(ft.Column):
         self._api_title = ft.Text(
             t("settings.section.api_keys"), size=24, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL
         )
+        self._api_credentials_helper_text = ft.Text(
+            t("settings.api_credentials_helper"),
+            size=16,
+            color=COLOR_NEUTRAL,
+        )
         # Header row with title and region button
         api_header = ft.Row(
             controls=[
@@ -535,7 +564,16 @@ class SettingsView(ft.Column):
         )
 
         api_card = self._wrap_card(
-            ft.Column([api_header, ft.Container(height=16), self._api_keys_column], spacing=0)
+            ft.Column(
+                [
+                    api_header,
+                    ft.Container(height=8),
+                    self._api_credentials_helper_text,
+                    ft.Container(height=16),
+                    self._api_keys_column,
+                ],
+                spacing=0,
+            )
         )
         row2 = api_card
 
@@ -755,9 +793,14 @@ class SettingsView(ft.Column):
                 expand=True,
             )
         )
+        row1 = ft.Container(
+            content=ft.Row([stt_card, peer_stt_card, trans_card], spacing=16, expand=True),
+            height=300,
+        )
+
         row_chatbox_source = ft.Container(
             content=ft.Row(
-                [vrc_mic_card, chatbox_source_card, peer_stt_card],
+                [vrc_mic_card, chatbox_source_card],
                 spacing=16,
                 expand=True,
             ),
@@ -1401,7 +1444,10 @@ class SettingsView(ft.Column):
         self._ui_text.content.value = locale_label(settings.ui.locale)
 
         # STT Provider
-        self._stt_text.content.value = provider_label(settings.provider.stt.value)
+        self._set_setting_action_text(
+            self._stt_text,
+            provider_label(settings.provider.stt.value),
+        )
         self._set_setting_action_text(
             self._peer_stt_text,
             provider_label(settings.provider.peer_stt.value),
@@ -1421,7 +1467,10 @@ class SettingsView(ft.Column):
         self._update_api_visibility()
 
         # LLM Provider
-        self._llm_text.content.value = self._get_llm_display_label(settings)
+        self._set_setting_action_text(
+            self._llm_text,
+            self._get_llm_display_label(settings),
+        )
         self._set_openrouter_routing_text(
             self._get_openrouter_routing_display_label(settings),
         )
@@ -1564,11 +1613,7 @@ class SettingsView(ft.Column):
         stt = settings.provider.stt
         llm = settings.provider.llm
         peer_stt = settings.provider.peer_stt
-        peer_enabled = bool(settings.ui.peer_translation_enabled)
-
-        active_stt_providers = {stt}
-        if peer_enabled:
-            active_stt_providers.add(peer_stt)
+        active_stt_providers = {stt, peer_stt}
         self._deepgram_key.visible = STTProviderName.DEEPGRAM in active_stt_providers
         self._soniox_key.visible = STTProviderName.SONIOX in active_stt_providers
 
@@ -1583,7 +1628,7 @@ class SettingsView(ft.Column):
         qwen_regions: set[QwenRegion] = set()
         if stt == STTProviderName.QWEN_ASR or llm == LLMProviderName.QWEN:
             qwen_regions.add(settings.qwen.region)
-        if peer_enabled and peer_stt == STTProviderName.QWEN_ASR:
+        if peer_stt == STTProviderName.QWEN_ASR:
             qwen_regions.add(settings.peer_qwen_asr_stt.region or settings.qwen.region)
 
         self._qwen_region_btn.visible = (
@@ -1656,7 +1701,7 @@ class SettingsView(ft.Column):
         self.has_provider_changes = True
 
         # Update text
-        self._stt_text.content.value = provider_label(provider.value)
+        self._set_setting_action_text(self._stt_text, provider_label(provider.value))
 
         # Check compatibility warning
         source_lang = self._settings.languages.source_language
@@ -1983,7 +2028,10 @@ class SettingsView(ft.Column):
         # Update text
         display_settings = self._build_settings_with_provider_draft()
         assert display_settings is not None
-        self._llm_text.content.value = self._get_llm_display_label(display_settings)
+        self._set_setting_action_text(
+            self._llm_text,
+            self._get_llm_display_label(display_settings),
+        )
         self._set_openrouter_routing_text(
             self._get_openrouter_routing_display_label(display_settings),
         )
@@ -2928,6 +2976,9 @@ class SettingsView(ft.Column):
         self._stt_title.value = t("settings.section.stt")
         self._trans_title.value = t("settings.section.translation")
         self._api_title.value = t("settings.section.api_keys")
+        self._stt_provider_label.value = t("settings.self_stt_provider")
+        self._translation_provider_label.value = t("settings.shared_translation_provider")
+        self._api_credentials_helper_text.value = t("settings.api_credentials_helper")
         self._ui_title.value = t("settings.section.ui")
         self._audio_title.value = t("settings.section.audio")
         self._vad_title.value = t("settings.vad_sensitivity")
@@ -3015,12 +3066,18 @@ class SettingsView(ft.Column):
         # Update text controls with current selection labels
         display_settings = self._build_settings_with_provider_draft()
         if display_settings:
-            self._stt_text.content.value = provider_label(display_settings.provider.stt.value)
+            self._set_setting_action_text(
+                self._stt_text,
+                provider_label(display_settings.provider.stt.value),
+            )
             self._set_setting_action_text(
                 self._peer_stt_text,
                 provider_label(display_settings.provider.peer_stt.value),
             )
-            self._llm_text.content.value = self._get_llm_display_label(display_settings)
+            self._set_setting_action_text(
+                self._llm_text,
+                self._get_llm_display_label(display_settings),
+            )
             self._set_openrouter_routing_text(
                 self._get_openrouter_routing_display_label(display_settings),
             )

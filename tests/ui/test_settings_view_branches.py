@@ -113,31 +113,60 @@ def _subtab_controls(view: settings_view.SettingsView, key: str) -> list[ft.Cont
     return list(view._settings_subtab_shell.body_by_key[key].controls)
 
 
+def _layout_cards(control: ft.Control) -> list[ft.Control]:
+    content = getattr(control, "content", None)
+    if isinstance(content, ft.Row):
+        return list(content.controls)
+    if _card_title(control) is not None:
+        return [control]
+    return []
+
+
 def _wrapped_card_column(card: ft.Control) -> ft.Control:
     return card.content.controls[1].content.content
 
 
 def _card_title(card: ft.Control) -> str | None:
     column = _wrapped_card_column(card)
-    if not column.controls:
+    controls = getattr(column, "controls", None)
+    if not controls:
         return None
-    title = column.controls[0]
+    title = controls[0]
     return title.value if isinstance(title, ft.Text) else None
 
 
 def _general_tab_card_titles(view: settings_view.SettingsView) -> list[str]:
     titles: list[str] = []
     for row in _subtab_controls(view, "general"):
-        titles.extend(title for card in _row_cards(row) if (title := _card_title(card)) is not None)
+        titles.extend(
+            title for card in _layout_cards(row) if (title := _card_title(card)) is not None
+        )
+    return titles
+
+
+def _api_tab_card_titles(view: settings_view.SettingsView) -> list[str]:
+    titles: list[str] = []
+    for row in _subtab_controls(view, "api"):
+        titles.extend(
+            title for card in _layout_cards(row) if (title := _card_title(card)) is not None
+        )
     return titles
 
 
 def _general_tab_card(view: settings_view.SettingsView, title: str) -> ft.Control:
     for row in _subtab_controls(view, "general"):
-        for card in _row_cards(row):
+        for card in _layout_cards(row):
             if _card_title(card) == title:
                 return card
     raise AssertionError(f"General tab card not found: {title}")
+
+
+def _api_tab_card(view: settings_view.SettingsView, title: str) -> ft.Control:
+    for row in _subtab_controls(view, "api"):
+        for card in _layout_cards(row):
+            if _card_title(card) == title:
+                return card
+    raise AssertionError(f"API tab card not found: {title}")
 
 
 def _iter_control_tree(control: ft.Control):
@@ -194,15 +223,22 @@ def test_peer_language_card_removed_from_general_tab(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
-    titles = _general_tab_card_titles(view)
+    general_titles = _general_tab_card_titles(view)
+    api_titles = _api_tab_card_titles(view)
     general_labels: list[str] = []
+    api_labels: list[str] = []
     for row in _subtab_controls(view, "general"):
         general_labels.extend(_control_labels(row))
+    for row in _subtab_controls(view, "api"):
+        api_labels.extend(_control_labels(row))
 
-    assert t("settings.peer_language") not in titles
-    assert t("settings.section.peer_stt") in titles
+    assert t("settings.peer_language") not in general_titles
+    assert t("settings.section.peer_stt") not in general_titles
+    assert t("settings.section.peer_stt") in api_titles
     assert t("settings.peer_language.source") not in general_labels
     assert t("settings.peer_language.target") not in general_labels
+    assert t("settings.dashboard_language_redirect") not in general_labels
+    assert t("settings.dashboard_language_redirect") in api_labels
     assert not hasattr(view, "_peer_source_text")
     assert not hasattr(view, "_peer_target_text")
 
@@ -411,6 +447,7 @@ def test_update_api_visibility_hides_secret_fields_for_local_qwen(
 ) -> None:
     settings = AppSettings()
     settings.provider.stt = STTProviderName.LOCAL_QWEN
+    settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
     settings.provider.llm = LLMProviderName.GEMINI
 
     view, _ = _make_settings_view(monkeypatch)
@@ -1031,9 +1068,45 @@ def test_peer_qwen_region_control_is_visible_before_peer_translation_is_enabled(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
+    assert view._peer_qwen_region_label.visible is True
+    assert view._peer_qwen_region_text.visible is True
+
+
+def test_update_api_visibility_keeps_peer_auth_controls_visible_when_peer_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    settings.provider.peer_stt = STTProviderName.DEEPGRAM
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.ui.peer_translation_enabled = False
+
+    view, _ = _make_settings_view(monkeypatch)
+    view._settings = settings
+    view._update_api_visibility()
+
+    assert view._deepgram_key.visible is True
+    assert view._soniox_key.visible is False
+    assert view._google_key.visible is True
+
+
+def test_update_api_visibility_keeps_peer_qwen_credentials_visible_when_peer_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.LOCAL_QWEN
+    settings.provider.peer_stt = STTProviderName.QWEN_ASR
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.ui.peer_translation_enabled = False
+    settings.peer_qwen_asr_stt.region = QwenRegion.SINGAPORE
+
+    view, _ = _make_settings_view(monkeypatch)
+    view._settings = settings
+    view._update_api_visibility()
+
     assert view._peer_qwen_region_text.visible is True
     assert view._alibaba_key_beijing.visible is False
-    assert view._alibaba_key_singapore.visible is False
+    assert view._alibaba_key_singapore.visible is True
 
 
 def test_peer_qwen_region_override_can_be_cleared_back_to_inherited_none(
@@ -1220,7 +1293,7 @@ def test_on_overlay_selected_refreshes_api_visibility_when_disabled(
 
     assert settings.ui.overlay_enabled is False
     assert settings.ui.peer_translation_enabled is False
-    assert view._deepgram_key.visible is False
+    assert view._deepgram_key.visible is True
     assert api_key_updates == ["api_keys_column"]
 
 
@@ -1346,16 +1419,47 @@ def test_general_tab_excludes_prompt_and_overlay_controls(
     assert t("settings.overlay.calibration") not in general_labels
 
 
-def test_dashboard_language_redirect_copy_is_rendered_in_general_tab(
+def test_dashboard_language_redirect_copy_is_rendered_in_api_tab(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
-    peer_stt_card = _general_tab_card(view, t("settings.section.peer_stt"))
+    peer_stt_card = _api_tab_card(view, t("settings.section.peer_stt"))
     peer_stt_labels = _control_labels(peer_stt_card)
 
     assert view._dashboard_language_redirect_text.value == t("settings.dashboard_language_redirect")
     assert t("settings.dashboard_language_redirect") in peer_stt_labels
     assert isinstance(view._dashboard_language_redirect_text, ft.Text)
+
+
+@pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
+def test_api_tab_provider_labels_and_credential_copy_render_from_i18n(
+    monkeypatch: pytest.MonkeyPatch,
+    locale: str,
+) -> None:
+    old_locale = i18n_module.get_locale()
+    try:
+        settings = AppSettings()
+        settings.ui.locale = locale
+        view, _ = _make_settings_view(monkeypatch)
+        view.load_from_settings(settings, config_path=Path("settings.json"))
+
+        i18n_module.set_locale(locale)
+        view.apply_locale()
+
+        api_labels: list[str] = []
+        for row in _subtab_controls(view, "api"):
+            api_labels.extend(_control_labels(row))
+
+        assert view._stt_provider_label.value == t("settings.self_stt_provider")
+        assert view._translation_provider_label.value == t("settings.shared_translation_provider")
+        assert view._peer_stt_label.value == t("settings.peer_stt_provider")
+        assert view._api_credentials_helper_text.value == t("settings.api_credentials_helper")
+        assert t("settings.self_stt_provider") in api_labels
+        assert t("settings.shared_translation_provider") in api_labels
+        assert t("settings.peer_stt_provider") in api_labels
+        assert t("settings.api_credentials_helper") in api_labels
+    finally:
+        i18n_module.set_locale(old_locale)
 
 
 def test_general_tab_audio_card_excludes_desktop_vad_hangover_and_pre_roll_controls(
@@ -1568,8 +1672,8 @@ def test_translation_card_no_longer_contains_openrouter_routing_row(
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
 
-    row1 = _subtab_controls(view, "api")[0]
-    translation_column = row1.content.controls[1].content.controls[1].content.content
+    translation_card = _api_tab_card(view, t("settings.section.translation"))
+    translation_column = translation_card.content.controls[1].content.content
 
     assert view._openrouter_routing_row not in translation_column.controls
 
