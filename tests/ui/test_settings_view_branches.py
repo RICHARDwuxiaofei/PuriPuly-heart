@@ -110,6 +110,59 @@ def _subtab_controls(view: settings_view.SettingsView, key: str) -> list[ft.Cont
     return list(view._settings_subtab_shell.body_by_key[key].controls)
 
 
+def _wrapped_card_column(card: ft.Control) -> ft.Control:
+    return card.content.controls[1].content.content
+
+
+def _card_title(card: ft.Control) -> str | None:
+    column = _wrapped_card_column(card)
+    if not column.controls:
+        return None
+    title = column.controls[0]
+    return title.value if isinstance(title, ft.Text) else None
+
+
+def _general_tab_card_titles(view: settings_view.SettingsView) -> list[str]:
+    titles: list[str] = []
+    for row in _subtab_controls(view, "general"):
+        titles.extend(title for card in _row_cards(row) if (title := _card_title(card)) is not None)
+    return titles
+
+
+def _general_tab_card(view: settings_view.SettingsView, title: str) -> ft.Control:
+    for row in _subtab_controls(view, "general"):
+        for card in _row_cards(row):
+            if _card_title(card) == title:
+                return card
+    raise AssertionError(f"General tab card not found: {title}")
+
+
+def _iter_control_tree(control: ft.Control):
+    yield control
+    content = getattr(control, "content", None)
+    if content is not None:
+        yield from _iter_control_tree(content)
+    controls = getattr(control, "controls", None) or []
+    for child in controls:
+        yield from _iter_control_tree(child)
+
+
+def _control_labels(control: ft.Control) -> list[str]:
+    labels: list[str] = []
+    for node in _iter_control_tree(control):
+        if isinstance(node, ft.Text) and node.value:
+            labels.append(node.value)
+        elif isinstance(node, ft.TextField) and node.label:
+            labels.append(node.label)
+        elif isinstance(node, ft.TextButton) and node.text:
+            labels.append(node.text)
+    return labels
+
+
+def _tree_contains_control(root: ft.Control, target: ft.Control) -> bool:
+    return any(node is target for node in _iter_control_tree(root))
+
+
 def test_load_secret_value_prefers_existing_value() -> None:
     store = DummySecretStore({"new_key": "new", "old_key": "old"})
 
@@ -780,11 +833,14 @@ def test_audio_vad_and_low_latency_handlers_update_state(
     monkeypatch.setattr(type(view._vad_slider), "update", lambda self: None)
     view._handle_vad_visual_change(visual_event)
     view._handle_vad_change(visual_event)
+    view._peer_vad_field.value = "0.61"
+    view._on_peer_vad_threshold_change(SimpleNamespace(control=view._peer_vad_field))
     view._on_low_latency_selected("on")
 
     assert settings.audio.input_host_api == "MME"
     assert settings.audio.input_device == "Mic 2"
     assert settings.stt.vad_speech_threshold == 0.72
+    assert settings.desktop_audio.vad_speech_threshold == 0.61
     assert settings.stt.low_latency_mode is True
     assert view._low_latency_text.content.value == t("toggle.on")
 
@@ -1085,16 +1141,112 @@ def test_audio_change_updates_desktop_loopback_controls(monkeypatch: pytest.Monk
     view.on_settings_changed = lambda incoming: changed.append(incoming)
 
     view._audio_settings.desktop_output_device = "Speakers (Loopback)"
-    view._audio_settings.desktop_vad_threshold = 0.72
-    view._audio_settings.desktop_hangover_ms = 950
-    view._audio_settings.desktop_pre_roll_ms = 420
     view._on_audio_change()
+    view._peer_vad_field.value = "0.72"
+    view._on_peer_vad_threshold_change(SimpleNamespace(control=view._peer_vad_field))
+    view._peer_hangover_field.value = "950"
+    view._on_peer_hangover_change(SimpleNamespace(control=view._peer_hangover_field))
+    view._peer_pre_roll_field.value = "420"
+    view._on_peer_pre_roll_change(SimpleNamespace(control=view._peer_pre_roll_field))
 
     assert settings.desktop_audio.output_device == "Speakers (Loopback)"
     assert settings.desktop_audio.vad_speech_threshold == 0.72
     assert settings.desktop_audio.vad_hangover_ms == 950
     assert settings.desktop_audio.vad_pre_roll_ms == 420
-    assert changed == [settings]
+    assert changed == [settings, settings, settings, settings]
+
+
+def test_general_tab_contains_ui_language_audio_low_latency_vrc_mic_and_chatbox_cards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    titles = _general_tab_card_titles(view)
+
+    assert t("settings.section.ui") in titles
+    assert t("settings.section.audio") in titles
+    assert t("settings.low_latency_mode") in titles
+    assert t("settings.vad_sensitivity") in titles
+    assert t("settings.vrc_mic_intercept") in titles
+    assert t("settings.chatbox_include_source") in titles
+
+
+def test_general_tab_excludes_prompt_and_overlay_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    general_labels: list[str] = []
+    for row in _subtab_controls(view, "general"):
+        general_labels.extend(_control_labels(row))
+
+    assert t("settings.section.persona") not in general_labels
+    assert t("settings.section.custom_vocabulary") not in general_labels
+    assert t("settings.section.overlay") not in general_labels
+    assert t("settings.overlay.enabled") not in general_labels
+    assert t("settings.integrated_context") not in general_labels
+    assert t("settings.overlay.calibration") not in general_labels
+
+
+def test_general_tab_audio_card_excludes_desktop_vad_hangover_and_pre_roll_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    audio_card = _general_tab_card(view, t("settings.section.audio"))
+    audio_labels = _control_labels(audio_card)
+
+    assert t("settings.audio_host_api") in audio_labels
+    assert t("settings.microphone") in audio_labels
+    assert t("settings.desktop_audio.output_device") in audio_labels
+    assert t("settings.desktop_audio.vad_speech_threshold") not in audio_labels
+    assert t("settings.desktop_audio.vad_hangover_ms") not in audio_labels
+    assert t("settings.desktop_audio.vad_pre_roll_ms") not in audio_labels
+
+
+def test_general_tab_vad_card_includes_self_and_peer_vad_with_hangover_and_pre_roll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    vad_card = _general_tab_card(view, t("settings.vad_sensitivity"))
+    vad_labels = _control_labels(vad_card)
+
+    assert t("settings.vad.self") in vad_labels
+    assert t("settings.vad.peer") in vad_labels
+    assert t("settings.vad.peer_hangover_ms") in vad_labels
+    assert t("settings.vad.peer_pre_roll_ms") in vad_labels
+    assert _tree_contains_control(vad_card, view._vad_slider)
+    assert _tree_contains_control(vad_card, view._peer_vad_field)
+    assert _tree_contains_control(vad_card, view._peer_hangover_field)
+    assert _tree_contains_control(vad_card, view._peer_pre_roll_field)
+
+
+@pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
+def test_general_tab_labels_and_section_headings_render_from_i18n(
+    monkeypatch: pytest.MonkeyPatch,
+    locale: str,
+) -> None:
+    settings = AppSettings()
+    settings.ui.locale = locale
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    old_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale(locale)
+        view.apply_locale()
+
+        assert view._ui_title.value == t("settings.section.ui")
+        assert view._audio_title.value == t("settings.section.audio")
+        assert view._low_latency_title.value == t("settings.low_latency_mode")
+        assert view._vad_title.value == t("settings.vad_sensitivity")
+        assert view._self_vad_label.value == t("settings.vad.self")
+        assert view._peer_vad_field.label == t("settings.vad.peer")
+        assert view._peer_hangover_field.label == t("settings.vad.peer_hangover_ms")
+        assert view._peer_pre_roll_field.label == t("settings.vad.peer_pre_roll_ms")
+        assert view._vrc_mic_title.value == t("settings.vrc_mic_intercept")
+        assert view._chatbox_source_title.value == t("settings.chatbox_include_source")
+    finally:
+        i18n_module.set_locale(old_locale)
 
 
 @pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])

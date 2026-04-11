@@ -321,6 +321,26 @@ class SettingsView(ft.Column):
             on_blur=on_blur,
         )
 
+    def _build_numeric_setting_field(
+        self,
+        *,
+        label: str,
+        value: str,
+        on_change_end,
+    ) -> ft.TextField:
+        return ft.TextField(
+            label=label,
+            value=value,
+            dense=True,
+            expand=True,
+            text_align=ft.TextAlign.CENTER,
+            border_radius=10,
+            border_color=COLOR_DIVIDER,
+            focused_border_color=COLOR_PRIMARY,
+            on_blur=on_change_end,
+            on_submit=on_change_end,
+        )
+
     def _build_overlay_calibration_column(
         self,
         *,
@@ -335,6 +355,37 @@ class SettingsView(ft.Column):
 
     def _format_overlay_calibration_number(self, value: float) -> str:
         return f"{value:.2f}"
+
+    def _parse_setting_float(
+        self,
+        raw_value: str,
+        *,
+        fallback: float,
+        minimum: float,
+        maximum: float | None = None,
+    ) -> float:
+        try:
+            parsed = float(raw_value)
+        except (TypeError, ValueError):
+            parsed = fallback
+        if parsed < minimum:
+            parsed = minimum
+        if maximum is not None and parsed > maximum:
+            parsed = maximum
+        return parsed
+
+    def _parse_setting_int(
+        self,
+        raw_value: str,
+        *,
+        fallback: int,
+        minimum: int,
+    ) -> int:
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError):
+            parsed = fallback
+        return max(minimum, parsed)
 
     def _build_ui(self) -> None:
         """Build the settings UI with Bento grid layout."""
@@ -532,6 +583,11 @@ class SettingsView(ft.Column):
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
+        self._self_vad_label = ft.Text(
+            t("settings.vad.self"),
+            size=16,
+            color=COLOR_ON_BACKGROUND,
+        )
         self._vad_slider = ft.Slider(
             min=0.0,
             max=1.0,
@@ -542,17 +598,42 @@ class SettingsView(ft.Column):
             on_change=self._handle_vad_visual_change,
             on_change_end=self._handle_vad_change,
         )
+        self._peer_vad_field = self._build_numeric_setting_field(
+            label=t("settings.vad.peer"),
+            value="0.60",
+            on_change_end=self._on_peer_vad_threshold_change,
+        )
+        self._peer_hangover_field = self._build_numeric_setting_field(
+            label=t("settings.vad.peer_hangover_ms"),
+            value="700",
+            on_change_end=self._on_peer_hangover_change,
+        )
+        self._peer_pre_roll_field = self._build_numeric_setting_field(
+            label=t("settings.vad.peer_pre_roll_ms"),
+            value="500",
+            on_change_end=self._on_peer_pre_roll_change,
+        )
         vad_card = self._wrap_card(
             ft.Column(
                 [
                     self._vad_title,
+                    ft.Container(height=12),
+                    self._self_vad_label,
                     ft.Container(
                         content=self._vad_slider,
                         alignment=_CENTER_ALIGNMENT,
-                        expand=True,
+                        padding=ft.padding.only(top=4, bottom=8),
+                    ),
+                    ft.Row(
+                        controls=[
+                            self._peer_vad_field,
+                            self._peer_hangover_field,
+                            self._peer_pre_roll_field,
+                        ],
+                        spacing=8,
                     ),
                 ],
-                spacing=0,
+                spacing=6,
                 expand=True,
             )
         )
@@ -691,8 +772,12 @@ class SettingsView(ft.Column):
             )
         )
         row_chatbox_source = ft.Container(
-            content=ft.Row([chatbox_source_card, peer_lang_card], spacing=16, expand=True),
-            height=280,
+            content=ft.Row(
+                [vrc_mic_card, chatbox_source_card, peer_lang_card],
+                spacing=16,
+                expand=True,
+            ),
+            height=320,
         )
 
         self._overlay_title = ft.Text(
@@ -851,7 +936,7 @@ class SettingsView(ft.Column):
             )
         )
         row5 = ft.Container(
-            content=ft.Row([vrc_mic_card, overlay_card], spacing=16, expand=True),
+            content=ft.Row([ft.Container(expand=True), overlay_card], spacing=16, expand=True),
             height=380,
         )
 
@@ -1322,13 +1407,13 @@ class SettingsView(ft.Column):
         self._audio_settings.host_api = settings.audio.input_host_api
         self._audio_settings.microphone = settings.audio.input_device
         self._audio_settings.desktop_output_device = settings.desktop_audio.output_device
-        self._audio_settings.desktop_vad_threshold = settings.desktop_audio.vad_speech_threshold
-        self._audio_settings.desktop_hangover_ms = settings.desktop_audio.vad_hangover_ms
-        self._audio_settings.desktop_pre_roll_ms = settings.desktop_audio.vad_pre_roll_ms
 
         # VAD
         self._vad_slider.value = settings.stt.vad_speech_threshold
         self._vad_slider.label = f"{settings.stt.vad_speech_threshold:.2f}"
+        self._peer_vad_field.value = f"{settings.desktop_audio.vad_speech_threshold:.2f}"
+        self._peer_hangover_field.value = str(settings.desktop_audio.vad_hangover_ms)
+        self._peer_pre_roll_field.value = str(settings.desktop_audio.vad_pre_roll_ms)
         self._low_latency_text.content.value = t(
             "toggle.on" if settings.stt.low_latency_mode else "toggle.off"
         )
@@ -2061,15 +2146,9 @@ class SettingsView(ft.Column):
         new_host = self._audio_settings.host_api
         new_device = self._audio_settings.microphone
         new_desktop_output = self._audio_settings.desktop_output_device
-        new_desktop_vad = self._audio_settings.desktop_vad_threshold
-        new_desktop_hangover = self._audio_settings.desktop_hangover_ms
-        new_desktop_pre_roll = self._audio_settings.desktop_pre_roll_ms
         old_host = self._settings.audio.input_host_api
         old_device = self._settings.audio.input_device
         old_desktop_output = self._settings.desktop_audio.output_device
-        old_desktop_vad = self._settings.desktop_audio.vad_speech_threshold
-        old_desktop_hangover = self._settings.desktop_audio.vad_hangover_ms
-        old_desktop_pre_roll = self._settings.desktop_audio.vad_pre_roll_ms
 
         if old_host != new_host:
             self._emit_runtime_detailed(f"[Settings] Audio Host changed: {old_host} -> {new_host}")
@@ -2081,25 +2160,10 @@ class SettingsView(ft.Column):
             self._emit_runtime_detailed(
                 f"[Settings] Desktop loopback output changed: {old_desktop_output} -> {new_desktop_output}"
             )
-        if abs(old_desktop_vad - new_desktop_vad) > 0.001:
-            self._emit_runtime_detailed(
-                f"[Settings] Desktop loopback VAD threshold changed: {old_desktop_vad:.2f} -> {new_desktop_vad:.2f}"
-            )
-        if old_desktop_hangover != new_desktop_hangover:
-            self._emit_runtime_detailed(
-                f"[Settings] Desktop loopback hangover changed: {old_desktop_hangover} -> {new_desktop_hangover}"
-            )
-        if old_desktop_pre_roll != new_desktop_pre_roll:
-            self._emit_runtime_detailed(
-                f"[Settings] Desktop loopback pre-roll changed: {old_desktop_pre_roll} -> {new_desktop_pre_roll}"
-            )
 
         self._settings.audio.input_host_api = new_host
         self._settings.audio.input_device = new_device
         self._settings.desktop_audio.output_device = new_desktop_output
-        self._settings.desktop_audio.vad_speech_threshold = new_desktop_vad
-        self._settings.desktop_audio.vad_hangover_ms = new_desktop_hangover
-        self._settings.desktop_audio.vad_pre_roll_ms = new_desktop_pre_roll
         self._emit_settings_changed()
 
     def set_overlay_calibration(self, calibration: OverlayCalibration) -> None:
@@ -2511,6 +2575,70 @@ class SettingsView(ft.Column):
         self._settings.stt.vad_speech_threshold = new_vad
         self._emit_settings_changed()
 
+    def _on_peer_vad_threshold_change(self, e) -> None:
+        if not self._settings:
+            return
+
+        old_value = self._settings.desktop_audio.vad_speech_threshold
+        new_value = self._parse_setting_float(
+            e.control.value,
+            fallback=old_value,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        if abs(old_value - new_value) > 0.001:
+            self._emit_runtime_detailed(
+                f"[Settings] Peer VAD threshold changed: {old_value:.2f} -> {new_value:.2f}"
+            )
+
+        self._settings.desktop_audio.vad_speech_threshold = new_value
+        self._peer_vad_field.value = f"{new_value:.2f}"
+        if self.page:
+            self._peer_vad_field.update()
+        self._emit_settings_changed()
+
+    def _on_peer_hangover_change(self, e) -> None:
+        if not self._settings:
+            return
+
+        old_value = self._settings.desktop_audio.vad_hangover_ms
+        new_value = self._parse_setting_int(
+            e.control.value,
+            fallback=old_value,
+            minimum=0,
+        )
+        if old_value != new_value:
+            self._emit_runtime_detailed(
+                f"[Settings] Peer hangover changed: {old_value} -> {new_value}"
+            )
+
+        self._settings.desktop_audio.vad_hangover_ms = new_value
+        self._peer_hangover_field.value = str(new_value)
+        if self.page:
+            self._peer_hangover_field.update()
+        self._emit_settings_changed()
+
+    def _on_peer_pre_roll_change(self, e) -> None:
+        if not self._settings:
+            return
+
+        old_value = self._settings.desktop_audio.vad_pre_roll_ms
+        new_value = self._parse_setting_int(
+            e.control.value,
+            fallback=old_value,
+            minimum=0,
+        )
+        if old_value != new_value:
+            self._emit_runtime_detailed(
+                f"[Settings] Peer pre-roll changed: {old_value} -> {new_value}"
+            )
+
+        self._settings.desktop_audio.vad_pre_roll_ms = new_value
+        self._peer_pre_roll_field.value = str(new_value)
+        if self.page:
+            self._peer_pre_roll_field.update()
+        self._emit_settings_changed()
+
     def _on_vrc_mic_click(self, e) -> None:
         """打开 VRC 闭麦同步选项框
 
@@ -2797,6 +2925,10 @@ class SettingsView(ft.Column):
         self._ui_title.value = t("settings.section.ui")
         self._audio_title.value = t("settings.section.audio")
         self._vad_title.value = t("settings.vad_sensitivity")
+        self._self_vad_label.value = t("settings.vad.self")
+        self._peer_vad_field.label = t("settings.vad.peer")
+        self._peer_hangover_field.label = t("settings.vad.peer_hangover_ms")
+        self._peer_pre_roll_field.label = t("settings.vad.peer_pre_roll_ms")
         self._low_latency_title.value = t("settings.low_latency_mode")
         self._openrouter_routing_title.value = t("settings.openrouter_routing")
         self._persona_title.value = t("settings.section.persona")
