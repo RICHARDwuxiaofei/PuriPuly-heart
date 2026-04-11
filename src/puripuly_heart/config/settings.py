@@ -488,7 +488,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         "settings_version": settings.settings_version,
         "provider": {
             "stt": settings.provider.stt.value,
-            "peer_stt": settings.provider.peer_stt.value,
+            "peer_stt": _parse_peer_stt_provider(settings.provider.peer_stt.value).value,
             "llm": settings.provider.llm.value,
         },
         "languages": {
@@ -619,6 +619,13 @@ def _parse_stt_provider(value: str) -> STTProviderName:
         return STTProviderName(value)
     except ValueError:
         return STTProviderName.DEEPGRAM
+
+
+def _parse_peer_stt_provider(value: str) -> STTProviderName:
+    provider = _parse_stt_provider(value)
+    if provider == STTProviderName.LOCAL_QWEN:
+        return STTProviderName.DEEPGRAM
+    return provider
 
 
 def _parse_llm_provider(value: object) -> LLMProviderName:
@@ -1107,7 +1114,7 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         changed = True
     if isinstance(provider_data, dict) and "peer_stt" in provider_data:
         raw_peer_provider = provider_data.get("peer_stt")
-        normalized_peer_provider = _parse_stt_provider(str(raw_peer_provider)).value
+        normalized_peer_provider = _parse_peer_stt_provider(str(raw_peer_provider)).value
         if raw_peer_provider != normalized_peer_provider:
             provider_data["peer_stt"] = normalized_peer_provider
             changed = True
@@ -1338,7 +1345,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         settings_version=_coerce_int(data.get("settings_version"), SETTINGS_SCHEMA_VERSION),
         provider=ProviderSettings(
             stt=_parse_stt_provider(str(stt_provider_value)),
-            peer_stt=_parse_stt_provider(str(raw_peer_provider)),
+            peer_stt=_parse_peer_stt_provider(str(raw_peer_provider)),
             llm=_parse_llm_provider(provider_data.get("llm", LLMProviderName.GEMINI.value)),
         ),
         languages=LanguageSettings(

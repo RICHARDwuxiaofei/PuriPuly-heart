@@ -30,6 +30,7 @@ class OptionItem:
     value: str
     label: str
     description: str = ""
+    disabled: bool = False
 
 
 class SettingsModal:
@@ -117,14 +118,23 @@ class SettingsModal:
         """Build scrollable list of options."""
         items = []
         for option in self._options:
-            is_selected = option.value == current
+            is_selected = option.value == current and not option.disabled
 
             # Colors
-            bg_color = COLOR_PRIMARY if is_selected else COLOR_BACKGROUND
-            text_color = ft.Colors.WHITE if is_selected else COLOR_ON_BACKGROUND
-            desc_color = (
-                ft.Colors.with_opacity(0.8, ft.Colors.WHITE) if is_selected else COLOR_NEUTRAL_DARK
-            )
+            if option.disabled:
+                bg_color = COLOR_SURFACE
+                text_color = COLOR_NEUTRAL
+                desc_color = COLOR_ON_BACKGROUND
+                border = ft.border.all(1, ft.Colors.with_opacity(0.2, COLOR_PRIMARY))
+            else:
+                bg_color = COLOR_PRIMARY if is_selected else COLOR_BACKGROUND
+                text_color = ft.Colors.WHITE if is_selected else COLOR_ON_BACKGROUND
+                desc_color = (
+                    ft.Colors.with_opacity(0.8, ft.Colors.WHITE)
+                    if is_selected
+                    else COLOR_NEUTRAL_DARK
+                )
+                border = None
 
             # Shadow for depth
             shadow = (
@@ -171,10 +181,11 @@ class SettingsModal:
                 content=content,
                 bgcolor=bg_color,
                 border_radius=16,
+                border=border,
                 padding=ft.padding.all(24),
                 alignment=ft.alignment.center,
-                on_click=lambda e, val=option.value: self._select(val),
-                on_hover=self._on_item_hover,
+                on_click=None if option.disabled else lambda e, val=option.value: self._select(val),
+                on_hover=None if option.disabled else self._on_item_hover,
                 animate=ft.Animation(150, ft.AnimationCurve.EASE_OUT),
                 shadow=shadow,
                 height=110,

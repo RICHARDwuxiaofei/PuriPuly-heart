@@ -1404,6 +1404,39 @@ class SettingsView(ft.Column):
             self._provider_settings_draft = copy.deepcopy(self._settings)
         return self._provider_settings_draft
 
+    def _normalized_peer_stt_provider(self, provider: STTProviderName) -> STTProviderName:
+        if provider == STTProviderName.LOCAL_QWEN:
+            return STTProviderName.DEEPGRAM
+        return provider
+
+    def _effective_peer_stt_provider(self, settings: AppSettings | None) -> STTProviderName:
+        if settings is None:
+            return STTProviderName.DEEPGRAM
+        return self._normalized_peer_stt_provider(settings.provider.peer_stt)
+
+    def _peer_stt_option_item(self, provider: STTProviderName) -> OptionItem:
+        if provider == STTProviderName.LOCAL_QWEN:
+            return OptionItem(
+                value=provider.value,
+                label=provider_label(provider.value),
+                description=t("settings.peer_stt.local_qwen_unavailable"),
+                disabled=True,
+            )
+        return OptionItem(
+            value=provider.value,
+            label=provider_label(provider.value),
+            description=t(f"provider.{provider.value}.description", default=""),
+        )
+
+    def _sanitize_provider_apply_settings(self, settings: AppSettings | None) -> AppSettings | None:
+        if settings is None:
+            return None
+        if settings.provider.peer_stt != STTProviderName.LOCAL_QWEN:
+            return settings
+        sanitized = copy.deepcopy(settings)
+        sanitized.provider.peer_stt = STTProviderName.DEEPGRAM
+        return sanitized
+
     def _stage_prompt_draft(self, value: str) -> None:
         if not self._settings:
             return
@@ -1423,10 +1456,10 @@ class SettingsView(ft.Column):
         return self._settings.system_prompts.get(prompt_key, self._settings.system_prompt)
 
     def build_provider_apply_settings(self) -> AppSettings | None:
-        return self._build_settings_with_provider_draft()
+        return self._sanitize_provider_apply_settings(self._build_settings_with_provider_draft())
 
     def consume_provider_apply_settings(self) -> AppSettings | None:
-        settings = self._build_settings_with_provider_draft()
+        settings = self.build_provider_apply_settings()
         if settings is None:
             return None
         self._settings = settings
@@ -1438,7 +1471,9 @@ class SettingsView(ft.Column):
     def consume_prompt_apply_settings(self) -> AppSettings | None:
         if not self.has_pending_prompt_changes:
             return None
-        settings = self._build_settings_with_provider_draft()
+        settings = self._sanitize_provider_apply_settings(
+            self._build_settings_with_provider_draft()
+        )
         if settings is None:
             return None
         self._settings = settings
@@ -1472,7 +1507,7 @@ class SettingsView(ft.Column):
         )
         self._set_setting_action_text(
             self._peer_stt_text,
-            provider_label(settings.provider.peer_stt.value),
+            provider_label(self._effective_peer_stt_provider(settings).value),
         )
         self._set_setting_action_text(
             self._peer_qwen_region_text,
@@ -1634,7 +1669,7 @@ class SettingsView(ft.Column):
 
         stt = settings.provider.stt
         llm = settings.provider.llm
-        peer_stt = settings.provider.peer_stt
+        peer_stt = self._effective_peer_stt_provider(settings)
         active_stt_providers = {stt, peer_stt}
         self._deepgram_key.visible = STTProviderName.DEEPGRAM in active_stt_providers
         self._soniox_key.visible = STTProviderName.SONIOX in active_stt_providers
@@ -1665,7 +1700,7 @@ class SettingsView(ft.Column):
         if settings is None:
             return
 
-        peer_stt = settings.provider.peer_stt
+        peer_stt = self._effective_peer_stt_provider(settings)
         show_qwen = peer_stt == STTProviderName.QWEN_ASR
         show_soniox = peer_stt == STTProviderName.SONIOX
 
@@ -1751,20 +1786,14 @@ class SettingsView(ft.Column):
     def _on_peer_stt_click(self, e) -> None:
         if not self.page:
             return
-        options = [
-            OptionItem(
-                value=provider.value,
-                label=provider_label(provider.value),
-                description=t(f"provider.{provider.value}.description", default=""),
-            )
-            for provider in STTProviderName
-        ]
+        options = [self._peer_stt_option_item(provider) for provider in STTProviderName]
         display_settings = self._build_settings_with_provider_draft()
-        current = (
-            display_settings.provider.peer_stt.value
+        current_provider = (
+            display_settings.provider.peer_stt
             if display_settings is not None
-            else STTProviderName.DEEPGRAM.value
+            else STTProviderName.DEEPGRAM
         )
+        current = self._normalized_peer_stt_provider(current_provider).value
         SettingsModal(
             self.page,
             t("settings.peer_stt_provider"),
@@ -1779,6 +1808,8 @@ class SettingsView(ft.Column):
         current_settings = self._build_settings_with_provider_draft()
         assert current_settings is not None
         provider = STTProviderName(value)
+        if provider == STTProviderName.LOCAL_QWEN:
+            return
         if current_settings.provider.peer_stt == provider:
             return
         draft = self._ensure_provider_settings_draft()
@@ -2984,7 +3015,7 @@ class SettingsView(ft.Column):
 
     def _emit_settings_changed(self) -> None:
         if self._settings and self.on_settings_changed:
-            self.on_settings_changed(self._settings)
+            self.on_settings_changed(self._sanitize_provider_apply_settings(self._settings))
 
     # --- Locale ---
     def apply_locale(self) -> None:
@@ -3094,7 +3125,7 @@ class SettingsView(ft.Column):
             )
             self._set_setting_action_text(
                 self._peer_stt_text,
-                provider_label(display_settings.provider.peer_stt.value),
+                provider_label(self._effective_peer_stt_provider(display_settings).value),
             )
             self._set_setting_action_text(
                 self._llm_text,
