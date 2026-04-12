@@ -88,9 +88,9 @@ class TranslatorApp:
         self.page.padding = 0
         self.page.window.frameless = True
         self.page.window.resizable = True  # Ensure resizing is allowed
-        self.page.window.width = 960
-        self.page.window.height = 780  # 16:13 ratio (approx)
-        self.page.window.min_width = 800
+        self.page.window.width = 1200
+        self.page.window.height = 800
+        self.page.window.min_width = 1080
         self.page.window.min_height = 600
         self.page.window.icon = "icons/icon.ico"
 

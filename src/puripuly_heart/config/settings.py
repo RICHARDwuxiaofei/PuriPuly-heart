@@ -9,7 +9,7 @@ from typing import Any
 
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 13
+SETTINGS_SCHEMA_VERSION = 14
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
@@ -361,10 +361,7 @@ class OpenRouterSettings:
 @dataclass(slots=True)
 class UiSettings:
     locale: str = "en"
-    # Session-only toggle; intentionally not persisted to settings.json.
-    overlay_enabled: bool = False
-    show_overlay_translation: bool = True
-    show_overlay_peer_original: bool = True
+    overlay_enabled: bool = True
     peer_translation_enabled: bool = False
     integrated_context_enabled: bool = False
     integrated_context_bootstrapped: bool = False
@@ -372,6 +369,20 @@ class UiSettings:
     def validate(self) -> None:
         if not self.locale:
             raise ValueError("locale must be non-empty")
+
+
+@dataclass(slots=True)
+class OverlaySettings:
+    show_translation: bool = True
+    show_peer_original: bool = True
+    calibration: OverlayCalibration = field(default_factory=OverlayCalibration)
+
+    def validate(self) -> None:
+        if not isinstance(self.show_translation, bool):
+            raise ValueError("overlay show_translation must be a bool")
+        if not isinstance(self.show_peer_original, bool):
+            raise ValueError("overlay show_peer_original must be a bool")
+        self.calibration.validate()
 
 
 @dataclass(slots=True)
@@ -424,7 +435,7 @@ class AppSettings:
     languages: LanguageSettings = field(default_factory=LanguageSettings)
     audio: AudioSettings = field(default_factory=AudioSettings)
     desktop_audio: DesktopAudioSettings = field(default_factory=DesktopAudioSettings)
-    overlay_calibration: OverlayCalibration = field(default_factory=OverlayCalibration)
+    overlay: OverlaySettings = field(default_factory=OverlaySettings)
     stt: STTSettings = field(default_factory=STTSettings)
     deepgram_stt: DeepgramSTTSettings = field(default_factory=DeepgramSTTSettings)
     qwen_asr_stt: QwenASRSTTSettings = field(default_factory=QwenASRSTTSettings)
@@ -443,6 +454,14 @@ class AppSettings:
     system_prompt: str = ""
     system_prompts: dict[str, str] = field(default_factory=dict)
 
+    @property
+    def overlay_calibration(self) -> OverlayCalibration:
+        return self.overlay.calibration
+
+    @overlay_calibration.setter
+    def overlay_calibration(self, value: OverlayCalibration) -> None:
+        self.overlay.calibration = value
+
     def validate(self) -> None:
         if self.settings_version <= 0:
             raise ValueError("settings_version must be > 0")
@@ -450,7 +469,7 @@ class AppSettings:
         self.languages.validate()
         self.audio.validate()
         self.desktop_audio.validate()
-        self.overlay_calibration.validate()
+        self.overlay.validate()
         self.stt.validate()
         self.deepgram_stt.validate()
         self.qwen_asr_stt.validate()
@@ -512,7 +531,11 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "vad_hangover_ms": settings.desktop_audio.vad_hangover_ms,
             "vad_pre_roll_ms": settings.desktop_audio.vad_pre_roll_ms,
         },
-        "overlay_calibration": settings.overlay_calibration.to_dict(),
+        "overlay": {
+            "show_translation": settings.overlay.show_translation,
+            "show_peer_original": settings.overlay.show_peer_original,
+            "calibration": settings.overlay.calibration.to_dict(),
+        },
         "stt": {
             "drain_timeout_s": settings.stt.drain_timeout_s,
             "vad_speech_threshold": settings.stt.vad_speech_threshold,
@@ -582,8 +605,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         },
         "ui": {
             "locale": settings.ui.locale,
-            "show_overlay_translation": settings.ui.show_overlay_translation,
-            "show_overlay_peer_original": settings.ui.show_overlay_peer_original,
+            "overlay_enabled": settings.ui.overlay_enabled,
             "peer_translation_enabled": settings.ui.peer_translation_enabled,
             "integrated_context_enabled": settings.ui.integrated_context_enabled,
             "integrated_context_bootstrapped": settings.ui.integrated_context_bootstrapped,
@@ -1070,6 +1092,9 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 13
 
+    if version < 14:
+        version = 14
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -1215,22 +1240,61 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         qwen_data["llm_model"] = normalized_qwen_model
         changed = True
 
+    overlay_data = data.get("overlay")
+    if not isinstance(overlay_data, dict):
+        overlay_data = {}
+        data["overlay"] = overlay_data
+        changed = True
+
+    overlay_calibration_data = overlay_data.get("calibration")
+    if not isinstance(overlay_calibration_data, dict):
+        overlay_calibration_data = {}
+
+    legacy_overlay_calibration_data = data.get("overlay_calibration")
+    if not isinstance(legacy_overlay_calibration_data, dict):
+        legacy_overlay_calibration_data = {}
+
+    normalized_overlay_calibration = OverlayCalibration().to_dict()
+    normalized_overlay_calibration.update(legacy_overlay_calibration_data)
+    normalized_overlay_calibration.update(overlay_calibration_data)
+    if overlay_data.get("calibration") != normalized_overlay_calibration:
+        overlay_data["calibration"] = normalized_overlay_calibration
+        changed = True
+
     ui_data = data.get("ui")
     if not isinstance(ui_data, dict):
         ui_data = {}
         data["ui"] = ui_data
         changed = True
 
-    if "show_overlay_translation" not in ui_data:
-        ui_data["show_overlay_translation"] = True
+    normalized_show_translation = bool(
+        overlay_data.get("show_translation", ui_data.get("show_overlay_translation", True))
+    )
+    if overlay_data.get("show_translation") != normalized_show_translation:
+        overlay_data["show_translation"] = normalized_show_translation
         changed = True
 
-    if "show_overlay_peer_original" not in ui_data:
-        ui_data["show_overlay_peer_original"] = True
+    normalized_show_peer_original = bool(
+        overlay_data.get("show_peer_original", ui_data.get("show_overlay_peer_original", True))
+    )
+    if overlay_data.get("show_peer_original") != normalized_show_peer_original:
+        overlay_data["show_peer_original"] = normalized_show_peer_original
         changed = True
 
-    if "overlay_enabled" in ui_data:
-        del ui_data["overlay_enabled"]
+    if "show_overlay_translation" in ui_data:
+        del ui_data["show_overlay_translation"]
+        changed = True
+
+    if "show_overlay_peer_original" in ui_data:
+        del ui_data["show_overlay_peer_original"]
+        changed = True
+
+    if "overlay_calibration" in data:
+        del data["overlay_calibration"]
+        changed = True
+
+    if "overlay_enabled" not in ui_data:
+        ui_data["overlay_enabled"] = False
         changed = True
 
     managed_identity_data = data.get("managed_identity")
@@ -1293,7 +1357,16 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 def from_dict(data: dict[str, Any]) -> AppSettings:
     audio_data = data.get("audio") or {}
     desktop_audio_data = data.get("desktop_audio") or {}
-    overlay_calibration_data = data.get("overlay_calibration") or {}
+    overlay_data = data.get("overlay") if isinstance(data.get("overlay"), dict) else {}
+    legacy_overlay_calibration_data = (
+        data.get("overlay_calibration") if isinstance(data.get("overlay_calibration"), dict) else {}
+    )
+    overlay_calibration_data = (
+        overlay_data.get("calibration") if isinstance(overlay_data.get("calibration"), dict) else {}
+    )
+    merged_overlay_calibration_data = OverlayCalibration().to_dict()
+    merged_overlay_calibration_data.update(legacy_overlay_calibration_data)
+    merged_overlay_calibration_data.update(overlay_calibration_data)
     stt_data = data.get("stt") or {}
     ui_data = data.get("ui") or {}
     managed_identity_data = (
@@ -1383,42 +1456,52 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             vad_hangover_ms=int(desktop_audio_data.get("vad_hangover_ms", 600)),
             vad_pre_roll_ms=int(desktop_audio_data.get("vad_pre_roll_ms", 500)),
         ),
-        overlay_calibration=OverlayCalibration(
-            anchor=str(
-                overlay_calibration_data.get(
-                    "anchor",
-                    OverlayCalibration().anchor,
+        overlay=OverlaySettings(
+            show_translation=bool(
+                overlay_data.get("show_translation", ui_data.get("show_overlay_translation", True))
+            ),
+            show_peer_original=bool(
+                overlay_data.get(
+                    "show_peer_original", ui_data.get("show_overlay_peer_original", True)
                 )
             ),
-            offset_x=float(
-                overlay_calibration_data.get(
-                    "offset_x",
-                    OverlayCalibration().offset_x,
-                )
-            ),
-            offset_y=float(
-                overlay_calibration_data.get(
-                    "offset_y",
-                    OverlayCalibration().offset_y,
-                )
-            ),
-            distance=float(
-                overlay_calibration_data.get(
-                    "distance",
-                    OverlayCalibration().distance,
-                )
-            ),
-            text_scale=float(
-                overlay_calibration_data.get(
-                    "text_scale",
-                    OverlayCalibration().text_scale,
-                )
-            ),
-            background_alpha=float(
-                overlay_calibration_data.get(
-                    "background_alpha",
-                    OverlayCalibration().background_alpha,
-                )
+            calibration=OverlayCalibration(
+                anchor=str(
+                    merged_overlay_calibration_data.get(
+                        "anchor",
+                        OverlayCalibration().anchor,
+                    )
+                ),
+                offset_x=float(
+                    merged_overlay_calibration_data.get(
+                        "offset_x",
+                        OverlayCalibration().offset_x,
+                    )
+                ),
+                offset_y=float(
+                    merged_overlay_calibration_data.get(
+                        "offset_y",
+                        OverlayCalibration().offset_y,
+                    )
+                ),
+                distance=float(
+                    merged_overlay_calibration_data.get(
+                        "distance",
+                        OverlayCalibration().distance,
+                    )
+                ),
+                text_scale=float(
+                    merged_overlay_calibration_data.get(
+                        "text_scale",
+                        OverlayCalibration().text_scale,
+                    )
+                ),
+                background_alpha=float(
+                    merged_overlay_calibration_data.get(
+                        "background_alpha",
+                        OverlayCalibration().background_alpha,
+                    )
+                ),
             ),
         ),
         stt=STTSettings(
@@ -1514,8 +1597,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         ),
         ui=UiSettings(
             locale=str(ui_data.get("locale", "en")),
-            show_overlay_translation=bool(ui_data.get("show_overlay_translation", True)),
-            show_overlay_peer_original=bool(ui_data.get("show_overlay_peer_original", True)),
+            overlay_enabled=bool(ui_data.get("overlay_enabled", False)),
             peer_translation_enabled=bool(ui_data.get("peer_translation_enabled", False)),
             integrated_context_enabled=bool(ui_data.get("integrated_context_enabled", False)),
             integrated_context_bootstrapped=bool(

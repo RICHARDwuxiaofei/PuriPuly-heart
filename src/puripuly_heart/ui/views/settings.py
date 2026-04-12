@@ -24,7 +24,6 @@ from puripuly_heart.config.settings import (
     STTProviderName,
 )
 from puripuly_heart.core.language import get_stt_compatibility_warning
-from puripuly_heart.ui.components.glow import GLOW_CARD, create_glow_stack
 from puripuly_heart.ui.components.managed_trial_usage_bar import ManagedTrialUsageBar
 from puripuly_heart.ui.components.settings import (
     ApiKeyField,
@@ -54,8 +53,6 @@ from puripuly_heart.ui.theme import (
     COLOR_NEUTRAL,
     COLOR_ON_BACKGROUND,
     COLOR_PRIMARY,
-    COLOR_SURFACE,
-    get_card_shadow,
 )
 
 logger = logging.getLogger(__name__)
@@ -162,20 +159,18 @@ class SettingsView(ft.Column):
         self._build_ui()
 
     # --- Card Wrapper (About page pattern) ---
-    def _wrap_card(self, content: ft.Control, *, expand: bool = True) -> ft.Control:
-        """Wrap content in a styled Bento card with glow effect."""
-        content_with_glow = create_glow_stack(
-            ft.Container(content=content, expand=True, padding=24),
-            config=GLOW_CARD,
-        )
-        return ft.Container(
-            content=content_with_glow,
-            bgcolor=COLOR_SURFACE,
-            border_radius=16,
-            border=ft.border.all(1, ft.Colors.with_opacity(0.4, ft.Colors.WHITE)),
+    def _wrap_card(
+        self,
+        content: ft.Control,
+        *,
+        expand: bool | None = None,
+        height: float | int | None = SharedCardWrapper.DEFAULT_HEIGHT,
+    ) -> SharedCardWrapper:
+        """Wrap content in the shared card shell used across settings/about."""
+        return SharedCardWrapper(
+            content,
             expand=expand,
-            clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            shadow=get_card_shadow(),
+            height=height,
         )
 
     # --- Clickable Text Builders ---
@@ -606,7 +601,8 @@ class SettingsView(ft.Column):
                     self._api_keys_column,
                 ],
                 spacing=0,
-            )
+            ),
+            height=None,
         )
         row2 = api_card
 
@@ -632,7 +628,6 @@ class SettingsView(ft.Column):
 
         row3 = ft.Container(
             content=ft.Row([ui_card, audio_card], spacing=16, expand=True),
-            height=420,
         )
 
         # === Row 4: Low Latency (1x1) + VAD (1x1) ===
@@ -714,7 +709,6 @@ class SettingsView(ft.Column):
 
         row4 = ft.Container(
             content=ft.Row([low_latency_card, vad_card], spacing=16, expand=True),
-            height=280,
         )
 
         # === Row 5: VRChat Mic Sync (1x1) + Overlay (1x1) ===
@@ -828,7 +822,6 @@ class SettingsView(ft.Column):
         )
         row1 = ft.Container(
             content=ft.Row([stt_card, peer_stt_card, trans_card], spacing=16, expand=True),
-            height=300,
         )
 
         row_chatbox_source = ft.Container(
@@ -837,7 +830,6 @@ class SettingsView(ft.Column):
                 spacing=16,
                 expand=True,
             ),
-            height=280,
         )
 
         self._overlay_display_options_title = ft.Text(
@@ -1028,7 +1020,6 @@ class SettingsView(ft.Column):
                 spacing=16,
                 expand=True,
             ),
-            height=280,
             visible=False,
         )
 
@@ -1535,7 +1526,10 @@ class SettingsView(ft.Column):
         self._custom_vocab_terms.helper_text = ""
         self._overlay_peer_contract = None
         self._sync_overlay_controls()
-        self._sync_overlay_calibration_controls()
+        self.set_overlay_calibration(
+            settings.overlay.calibration,
+            preserve_draft=self._overlay_calibration_session_active,
+        )
 
         # Load secrets
         self._load_secrets(settings, config_path)
@@ -2242,9 +2236,19 @@ class SettingsView(ft.Column):
         self._settings.desktop_audio.output_device = new_desktop_output
         self._emit_settings_changed()
 
-    def set_overlay_calibration(self, calibration: OverlayCalibration) -> None:
+    def set_overlay_calibration(
+        self,
+        calibration: OverlayCalibration,
+        *,
+        preserve_draft: bool = False,
+    ) -> None:
         calibration.validate()
         self._overlay_calibration = calibration.copy()
+
+        if preserve_draft and self._overlay_calibration_session_active:
+            self._sync_overlay_calibration_controls(self._overlay_calibration_draft)
+            return
+
         self._overlay_calibration_draft = calibration.copy()
         self._overlay_calibration_session_active = False
         self._sync_overlay_calibration_controls(self._overlay_calibration)
@@ -2403,10 +2407,10 @@ class SettingsView(ft.Column):
     def _sync_overlay_controls(self) -> None:
         contract = self._overlay_peer_contract
         overlay_translation_enabled = bool(
-            self._settings and self._settings.ui.show_overlay_translation
+            self._settings and self._settings.overlay.show_translation
         )
         overlay_peer_original_enabled = bool(
-            self._settings and self._settings.ui.show_overlay_peer_original
+            self._settings and self._settings.overlay.show_peer_original
         )
         peer_translation_enabled = (
             contract.peer.intent_enabled
@@ -2496,12 +2500,12 @@ class SettingsView(ft.Column):
             self._on_overlay_translation_selected,
             show_description=False,
         )
-        modal.open("on" if self._settings.ui.show_overlay_translation else "off")
+        modal.open("on" if self._settings.overlay.show_translation else "off")
 
     def _on_overlay_translation_selected(self, value: str) -> None:
         if not self._settings:
             return
-        self._settings.ui.show_overlay_translation = value == "on"
+        self._settings.overlay.show_translation = value == "on"
         self._sync_overlay_controls()
         self._emit_settings_changed()
 
@@ -2519,12 +2523,12 @@ class SettingsView(ft.Column):
             self._on_overlay_peer_original_selected,
             show_description=False,
         )
-        modal.open("on" if self._settings.ui.show_overlay_peer_original else "off")
+        modal.open("on" if self._settings.overlay.show_peer_original else "off")
 
     def _on_overlay_peer_original_selected(self, value: str) -> None:
         if not self._settings:
             return
-        self._settings.ui.show_overlay_peer_original = value == "on"
+        self._settings.overlay.show_peer_original = value == "on"
         self._sync_overlay_controls()
         self._emit_settings_changed()
 

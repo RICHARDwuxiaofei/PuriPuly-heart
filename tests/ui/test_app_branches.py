@@ -170,8 +170,10 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert page.title == app_module.t("app.title")
     assert page.window.frameless is True
     assert page.window.resizable is True
-    assert page.window.width == 960
-    assert page.window.height == 780
+    assert page.window.width == 1200
+    assert page.window.height == 800
+    assert page.window.min_width == 1080
+    assert page.window.min_height == 600
     assert page.added
     assert app.view_dashboard.on_send_message == app._on_manual_submit
     assert app.view_dashboard.on_toggle_overlay == app._on_overlay_toggle

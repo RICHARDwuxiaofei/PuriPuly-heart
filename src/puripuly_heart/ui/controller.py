@@ -286,7 +286,7 @@ class GuiController:
 
     async def start(self) -> None:
         self.settings = self._load_or_init_settings(self.config_path)
-        self.overlay_calibration = self.settings.overlay_calibration.copy()
+        self._sync_overlay_calibration_cache(self.settings)
         self._overlay_calibration_draft = None
         set_locale(self.settings.ui.locale)
         self._sync_ui_from_settings()
@@ -786,8 +786,8 @@ class GuiController:
                     clock=self.clock,
                     diagnostics=diagnostics,
                     runtime_log_detailed=runtime_log_detailed,
-                    show_translation=self.settings.ui.show_overlay_translation,
-                    show_peer_original=self.settings.ui.show_overlay_peer_original,
+                    show_translation=self.settings.overlay.show_translation,
+                    show_peer_original=self.settings.overlay.show_peer_original,
                 )
                 self._overlay_presenter = presenter
             else:
@@ -1048,7 +1048,7 @@ class GuiController:
         self.overlay_calibration = self._overlay_calibration_draft.copy()
         self._overlay_calibration_draft = None
         if self.settings is not None:
-            self.settings.overlay_calibration = self.overlay_calibration.copy()
+            self.settings.overlay.calibration = self.overlay_calibration.copy()
             self._save_settings()
         self._schedule_overlay_calibration_emit()
         return self.overlay_calibration.copy()
@@ -1056,6 +1056,12 @@ class GuiController:
     def cancel_overlay_calibration(self) -> OverlayCalibration:
         self._overlay_calibration_draft = None
         return self.overlay_calibration.copy()
+
+    def _sync_overlay_calibration_cache(self, settings: AppSettings | None = None) -> None:
+        resolved_settings = settings or self.settings
+        if resolved_settings is None:
+            return
+        self.overlay_calibration = resolved_settings.overlay.calibration.copy()
 
     async def _emit_overlay_calibration_update(self) -> None:
         presenter = self._overlay_presenter
@@ -1549,6 +1555,7 @@ class GuiController:
                 f"{self.hub is not None and presenter is not None and getattr(self.hub, 'overlay_sink', None) is presenter}"
             )
         self.settings = settings
+        self._sync_overlay_calibration_cache(settings)
         self._save_settings()
         self._refresh_local_stt_runtime_state()
         self._clear_local_stt_pending_enable_if_provider_switched_away()
@@ -1586,8 +1593,8 @@ class GuiController:
         presenter = self._overlay_presenter
         if presenter is not None:
             await presenter.update_display_preferences(
-                show_translation=settings.ui.show_overlay_translation,
-                show_peer_original=settings.ui.show_overlay_peer_original,
+                show_translation=settings.overlay.show_translation,
+                show_peer_original=settings.overlay.show_peer_original,
             )
 
         if prev_overlay_enabled != settings.ui.overlay_enabled:
