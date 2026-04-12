@@ -2423,6 +2423,7 @@ async def test_start_initializes_dashboard_and_bridge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.ui.overlay_enabled = False
     settings.provider.llm = LLMProviderName.QWEN
     settings.provider.stt = STTProviderName.QWEN_ASR
     settings.qwen.region = QwenRegion.SINGAPORE
@@ -2523,6 +2524,7 @@ async def test_start_keeps_managed_openrouter_dashboard_toggle_available_without
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.ui.overlay_enabled = False
     settings.provider.llm = LLMProviderName.OPENROUTER
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     settings.api_key_verified.openrouter = False
@@ -3030,6 +3032,7 @@ async def test_apply_settings_source_language_change_reloads_settings_view(
         app=SimpleNamespace(view_settings=settings_view, apply_locale=lambda: None)
     )
     controller.settings = settings
+    controller.overlay_calibration = settings.overlay.calibration.copy()
     controller.hub = DummyHub()
     controller.hub.source_language = "en"
     replace_calls: list[str] = []
@@ -3049,6 +3052,53 @@ async def test_apply_settings_source_language_change_reloads_settings_view(
 
     assert replace_calls == ["replace"]
     assert settings_view.calls == [(settings, Path("settings.json"), True)]
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_reload_updates_overlay_calibration_baseline_without_clobbering_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.calibration.distance = 0.9
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_settings=settings_view, apply_locale=lambda: None)
+    )
+    controller.settings = settings
+    controller.overlay_calibration = settings.overlay.calibration.copy()
+    controller.hub = DummyHub()
+    controller.hub.source_language = settings.languages.source_language
+    controller.hub.target_language = settings.languages.target_language
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        _ = self
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        _ = self
+
+    monkeypatch.setattr(controller_module, "get_locale", lambda: settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+
+    controller.begin_overlay_calibration_for_test()
+    controller.set_overlay_calibration_field_for_test("distance", 1.2)
+
+    updated = AppSettings()
+    updated.languages.source_language = "ja"
+    updated.overlay.calibration.distance = 0.8
+
+    await controller.apply_settings(updated)
+
+    assert settings_view.calls == [(updated, Path("settings.json"), True)]
+    assert controller.overlay_calibration.distance == 0.8
+    assert controller.begin_overlay_calibration().distance == 1.2
+
+    canceled = controller.cancel_overlay_calibration()
+
+    assert canceled.distance == 0.8
 
 
 @pytest.mark.asyncio
@@ -3939,8 +3989,10 @@ def test_load_or_init_settings_creates_default_file(
     loaded = controller._load_or_init_settings(path)
 
     assert isinstance(loaded, AppSettings)
+    assert loaded.ui.overlay_enabled is True
     assert path.parent.exists() is True
     assert saves == [(path, loaded)]
+    assert saves[0][1].ui.overlay_enabled is True
 
 
 @pytest.mark.asyncio
@@ -4409,7 +4461,7 @@ def test_apply_overlay_calibration_uses_page_run_task_when_available(
     controller.set_overlay_calibration_field_for_test("offset_x", 0.25)
     controller.apply_overlay_calibration_for_test()
 
-    assert controller.settings.overlay_calibration.offset_x == 0.25
+    assert controller.settings.overlay.calibration.offset_x == 0.25
     assert saved == [(Path("settings.json"), controller.settings)]
     assert len(page.tasks) == 1
 
@@ -4468,7 +4520,7 @@ async def test_apply_overlay_calibration_persists_settings_and_emits_overlay_eve
     controller.apply_overlay_calibration_for_test()
     await asyncio.sleep(0)
 
-    assert controller.settings.overlay_calibration.distance == 1.2
+    assert controller.settings.overlay.calibration.distance == 1.2
     assert saved == [(Path("settings.json"), controller.settings)]
     assert controller._overlay_bridge.snapshots[-1].calibration.distance == 1.2
 
@@ -4486,8 +4538,8 @@ async def test_apply_settings_updates_overlay_presenter_display_preferences() ->
     )
 
     updated = AppSettings()
-    updated.ui.show_overlay_translation = False
-    updated.ui.show_overlay_peer_original = False
+    updated.overlay.show_translation = False
+    updated.overlay.show_peer_original = False
 
     await controller.apply_settings(updated)
 
@@ -4535,8 +4587,8 @@ async def test_apply_settings_pushes_updated_overlay_snapshot_to_bridge_and_rest
 
     updated = AppSettings()
     updated.ui.overlay_enabled = True
-    updated.ui.show_overlay_translation = False
-    updated.ui.show_overlay_peer_original = False
+    updated.overlay.show_translation = False
+    updated.overlay.show_peer_original = False
 
     await controller.apply_settings(updated)
 
@@ -4605,8 +4657,8 @@ async def test_apply_settings_pushes_peer_overlay_snapshot_preferences_to_bridge
 
     updated = AppSettings()
     updated.ui.overlay_enabled = True
-    updated.ui.show_overlay_translation = True
-    updated.ui.show_overlay_peer_original = False
+    updated.overlay.show_translation = True
+    updated.overlay.show_peer_original = False
 
     await controller.apply_settings(updated)
 

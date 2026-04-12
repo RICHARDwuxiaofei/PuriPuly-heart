@@ -1485,8 +1485,8 @@ def test_overlay_display_toggles_update_persistent_settings(
     view._on_overlay_translation_selected("off")
     view._on_overlay_peer_original_selected("off")
 
-    assert settings.ui.show_overlay_translation is False
-    assert settings.ui.show_overlay_peer_original is False
+    assert settings.overlay.show_translation is False
+    assert settings.overlay.show_peer_original is False
     assert settings_calls == [settings, settings]
 
 
@@ -1937,11 +1937,11 @@ def test_overlay_calibration_reset_restores_defaults_until_apply(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
-    settings.overlay_calibration.distance = 1.2
-    settings.overlay_calibration.offset_y = 0.5
+    settings.overlay.calibration.distance = 1.2
+    settings.overlay.calibration.offset_y = 0.5
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.set_overlay_calibration(settings.overlay_calibration)
+    view.set_overlay_calibration(settings.overlay.calibration)
 
     defaults = OverlayCalibration()
 
@@ -1970,6 +1970,61 @@ def test_overlay_calibration_reset_restores_defaults_until_apply(
     )
 
 
+def test_overlay_calibration_reload_preserves_active_draft_until_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.calibration.distance = 0.9
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._overlay_distance_field.value = "1.20"
+    view._on_overlay_calibration_numeric_blur(
+        "distance",
+        SimpleNamespace(control=view._overlay_distance_field),
+    )
+
+    reloaded = AppSettings()
+    reloaded.languages.source_language = "ja"
+    reloaded.overlay.calibration.distance = 0.8
+
+    view.load_from_settings(reloaded, config_path=Path("settings.json"))
+
+    assert view._overlay_calibration_session_active is True
+    assert view._overlay_distance_field.value == "1.20"
+    assert view._overlay_calibration.distance == 0.8
+
+    view._on_overlay_calibration_cancel(None)
+
+    assert view._overlay_distance_field.value == view._format_overlay_calibration_number(0.8)
+
+
+def test_overlay_calibration_reload_preserves_active_draft_until_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.calibration.distance = 0.9
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._overlay_distance_field.value = "1.20"
+    view._on_overlay_calibration_numeric_blur(
+        "distance",
+        SimpleNamespace(control=view._overlay_distance_field),
+    )
+
+    reloaded = AppSettings()
+    reloaded.languages.source_language = "ja"
+    reloaded.overlay.calibration.distance = 0.8
+
+    view.load_from_settings(reloaded, config_path=Path("settings.json"))
+    view._on_overlay_calibration_apply(None)
+
+    assert view._overlay_calibration_session_active is False
+    assert view._overlay_distance_field.value == "1.20"
+    assert view._overlay_calibration.distance == 1.2
+
+
 def test_overlay_calibration_section_uses_dedicated_row_card(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1981,6 +2036,10 @@ def test_overlay_calibration_section_uses_dedicated_row_card(
     assert overlay_cards == [view._overlay_display_options_card, view._overlay_calibration_card]
     assert isinstance(view._overlay_display_options_card, settings_view.SharedCardWrapper)
     assert isinstance(view._overlay_calibration_card, settings_view.SharedCardWrapper)
+    assert view._overlay_display_options_card.height is None
+    assert view._overlay_calibration_card.height is None
+    assert view._overlay_display_options_card.expand is False
+    assert view._overlay_calibration_card.expand is False
 
     display_column = _wrapped_card_column(view._overlay_display_options_card)
     assert view._overlay_calibration_title not in display_column.controls
@@ -2508,6 +2567,56 @@ def test_prompt_tab_uses_shared_full_width_cards(monkeypatch: pytest.MonkeyPatch
     assert all(isinstance(card, SharedCardWrapper) for card in prompt_cards)
     assert all(card.height is None for card in prompt_cards)
     assert all(card.expand is False for card in prompt_cards)
+
+
+def test_settings_single_cell_cards_use_shared_wrapper_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.ui.components.shared_card_wrapper import SharedCardWrapper
+
+    view, _ = _make_settings_view(monkeypatch)
+
+    single_cell_cards = [
+        _api_tab_card(view, t("settings.section.stt")),
+        _api_tab_card(view, t("settings.section.peer_stt")),
+        _api_tab_card(view, t("settings.section.translation")),
+        _general_tab_card(view, t("settings.section.ui")),
+        _general_tab_card(view, t("settings.section.audio")),
+        _general_tab_card(view, t("settings.low_latency_mode")),
+        _general_tab_card(view, t("settings.vad_sensitivity")),
+        _general_tab_card(view, t("settings.vrc_mic_intercept")),
+        _general_tab_card(view, t("settings.chatbox_include_source")),
+        view._openrouter_routing_card,
+        view._openrouter_routing_empty_card,
+    ]
+
+    assert all(isinstance(card, SharedCardWrapper) for card in single_cell_cards)
+    assert {card.height for card in single_cell_cards} == {SharedCardWrapper.DEFAULT_HEIGHT}
+    assert all(card.expand is True for card in single_cell_cards)
+    assert all(getattr(row, "height", None) is None for row in _subtab_controls(view, "general"))
+    assert view._openrouter_routing_row.height is None
+
+
+def test_api_keys_card_uses_shared_full_width_auto_height(monkeypatch: pytest.MonkeyPatch) -> None:
+    from puripuly_heart.ui.components.shared_card_wrapper import SharedCardWrapper
+
+    view, _ = _make_settings_view(monkeypatch)
+
+    api_card = _api_tab_card(view, t("settings.section.api_keys"))
+
+    assert isinstance(api_card, SharedCardWrapper)
+    assert api_card.height is None
+    assert api_card.expand is False
+
+
+def test_api_provider_row_does_not_override_shared_card_height(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    api_provider_row = _subtab_controls(view, "api")[0]
+
+    assert api_provider_row.height is None
 
 
 def test_integrated_context_controls_are_removed_from_overlay_tab(
