@@ -21,6 +21,7 @@ from puripuly_heart.config.settings import (
     STTProviderName,
 )
 from puripuly_heart.ui import i18n as i18n_module
+from puripuly_heart.ui.components import subtab_shell as subtab_shell_module
 from puripuly_heart.ui.i18n import language_name, provider_label, t
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 from puripuly_heart.ui.overlay_peer_contract import build_overlay_peer_consumer_contract
@@ -2983,7 +2984,7 @@ def test_settings_subtab_bar_is_text_only_and_distinct_from_bottom_nav(
     assert shell.subtab_row.scroll == ft.ScrollMode.AUTO
     assert all(isinstance(button, ft.TextButton) for button in buttons)
     assert all(button.icon is None for button in buttons)
-    assert shell.subtab_bar.bgcolor == settings_view.COLOR_SURFACE
+    assert shell.subtab_bar.bgcolor == subtab_shell_module.COLOR_SURFACE
     assert shell.subtab_bar.border_radius == 24
     assert shell.subtab_bar.height is None
 
