@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from puripuly_heart.config.settings import (
+    STT_INTERNAL_SAMPLE_RATE_HZ,
     AppSettings,
     LLMProviderName,
     OpenRouterCredentialSource,
@@ -252,7 +253,7 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
 
         return LocalQwenSherpaSTTBackend(
             model_dir=default_local_stt_model_dir(),
-            sample_rate_hz=settings.audio.internal_sample_rate_hz,
+            sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
             stream_label="self",
             language_hint=get_local_qwen_language_hint(settings.languages.source_language),
         )
@@ -290,7 +291,7 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
             model=settings.qwen_asr_stt.model,
             endpoint=endpoint,
             language=get_qwen_asr_language(settings.languages.source_language),
-            sample_rate_hz=settings.audio.internal_sample_rate_hz,
+            sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
         )
 
     if settings.provider.stt == STTProviderName.SONIOX:
@@ -303,7 +304,7 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
             model=settings.soniox_stt.model,
             endpoint=settings.soniox_stt.endpoint,
             language_hints=get_soniox_language_hints(settings.languages.source_language),
-            sample_rate_hz=settings.audio.internal_sample_rate_hz,
+            sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
             keepalive_interval_s=settings.soniox_stt.keepalive_interval_s,
             trailing_silence_ms=settings.soniox_stt.trailing_silence_ms,
             context_terms=effective_terms,
@@ -321,7 +322,7 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
         return ResolvedPeerSTTConfig(
             provider=provider,
             source_language=peer_source_language,
-            sample_rate_hz=settings.audio.internal_sample_rate_hz,
+            sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
             keyterms=keyterms,
             deepgram_model=settings.deepgram_stt.model,
         )
@@ -330,7 +331,7 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
         return ResolvedPeerSTTConfig(
             provider=provider,
             source_language=peer_source_language,
-            sample_rate_hz=settings.audio.internal_sample_rate_hz,
+            sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
             keyterms=keyterms,
             qwen_model=settings.peer_qwen_asr_stt.model or settings.qwen_asr_stt.model,
             qwen_region=settings.peer_qwen_asr_stt.region or settings.qwen.region,
@@ -340,7 +341,7 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
         return ResolvedPeerSTTConfig(
             provider=provider,
             source_language=peer_source_language,
-            sample_rate_hz=settings.audio.internal_sample_rate_hz,
+            sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
             keyterms=keyterms,
             soniox_model=settings.peer_soniox_stt.model or settings.soniox_stt.model,
             soniox_endpoint=settings.peer_soniox_stt.endpoint or settings.soniox_stt.endpoint,
@@ -360,7 +361,7 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
         return ResolvedPeerSTTConfig(
             provider=provider,
             source_language=peer_source_language,
-            sample_rate_hz=settings.audio.internal_sample_rate_hz,
+            sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
             keyterms=tuple(get_effective_local_qwen_hotwords(settings, peer_source_language)),
         )
 
@@ -475,7 +476,7 @@ def _create_deepgram_stt_backend(
         api_key=api_key,
         model=model or settings.deepgram_stt.model,
         language=get_deepgram_language(source_language),
-        sample_rate_hz=settings.audio.internal_sample_rate_hz,
+        sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
         keyterms=keyterms,
         stream_label=stream_label,
     )

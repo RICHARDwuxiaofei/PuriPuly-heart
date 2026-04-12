@@ -49,8 +49,16 @@ async def test_qwen_asr_llm_pipeline_smoke() -> None:
         pytest.skip(f"Audio file not found: {audio_path}")
 
     audio_samples, sample_rate = load_audio_wav(audio_path)
-    if sample_rate not in (8000, 16000):
-        pytest.skip(f"Unsupported sample rate: {sample_rate}")
+    runtime_sample_rate_hz = 16000
+    if sample_rate != runtime_sample_rate_hz:
+        from puripuly_heart.core.audio.format import resample_f32_linear
+
+        audio_samples = resample_f32_linear(
+            audio_samples,
+            from_rate_hz=sample_rate,
+            to_rate_hz=runtime_sample_rate_hz,
+        )
+        sample_rate = runtime_sample_rate_hz
 
     stt_backend = QwenASRRealtimeSTTBackend(
         api_key=api_key,

@@ -20,6 +20,7 @@ from puripuly_heart.config.settings import (
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
+    _migrate_settings_dict,
     from_dict,
     load_settings,
     save_settings,
@@ -85,6 +86,13 @@ def test_settings_validation_rejects_invalid_audio():
         settings.validate()
 
 
+def test_settings_validation_rejects_legacy_8khz_audio() -> None:
+    settings = AppSettings(audio=AudioSettings(internal_sample_rate_hz=8000))
+
+    with pytest.raises(ValueError, match="internal_sample_rate_hz"):
+        settings.validate()
+
+
 def test_settings_validation_rejects_invalid_osc():
     settings = AppSettings(osc=OSCSettings(ttl_s=-1))
     with pytest.raises(ValueError):
@@ -105,6 +113,17 @@ def test_from_dict_preserves_cloud_qwen_asr_provider_value() -> None:
     loaded = from_dict(data)
 
     assert loaded.provider.stt == STTProviderName.QWEN_ASR
+
+
+@pytest.mark.parametrize("legacy_rate", [8000, "8000"])
+def test_from_dict_normalizes_legacy_8khz_audio_to_16khz(legacy_rate: int | str) -> None:
+    data = to_dict(AppSettings())
+    data["audio"]["internal_sample_rate_hz"] = legacy_rate
+
+    loaded = from_dict(data)
+
+    assert loaded.audio.internal_sample_rate_hz == 16000
+    assert to_dict(loaded)["audio"]["internal_sample_rate_hz"] == 16000
 
 
 def test_qwen_asr_endpoint_is_normalized_from_region_on_load_and_save() -> None:
@@ -450,6 +469,51 @@ def test_load_settings_migrates_previous_default_concurrency_limit_and_persists(
     persisted = json.loads(path.read_text(encoding="utf-8"))
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["llm"]["concurrency_limit"] == 5
+
+
+@pytest.mark.parametrize("legacy_rate", [8000, "8000"])
+def test_migrate_settings_dict_forces_legacy_8khz_audio_to_16khz(
+    legacy_rate: int | str,
+) -> None:
+    legacy = to_dict(AppSettings())
+    legacy["settings_version"] = SETTINGS_SCHEMA_VERSION - 1
+    legacy["audio"]["internal_sample_rate_hz"] = legacy_rate
+
+    migrated, changed = _migrate_settings_dict(legacy)
+
+    assert changed is True
+    assert migrated["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert migrated["audio"]["internal_sample_rate_hz"] == 16000
+
+
+@pytest.mark.parametrize("legacy_rate", [8000, "8000"])
+def test_load_settings_rewrites_migrated_8khz_audio_via_normal_save_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, legacy_rate: int | str
+) -> None:
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["settings_version"] = SETTINGS_SCHEMA_VERSION - 1
+    legacy["audio"]["internal_sample_rate_hz"] = legacy_rate
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    replace_calls: list[tuple[str, str]] = []
+    path_type = type(path)
+    original_replace = path_type.replace
+
+    def recording_replace(self: Path, target: Path) -> Path:
+        replace_calls.append((self.name, Path(target).name))
+        return original_replace(self, target)
+
+    monkeypatch.setattr(path_type, "replace", recording_replace)
+
+    loaded = load_settings(path)
+
+    assert loaded.audio.internal_sample_rate_hz == 16000
+    assert replace_calls == [("settings.json.tmp", "settings.json")]
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert persisted["audio"]["internal_sample_rate_hz"] == 16000
 
 
 def test_load_settings_migration_preserves_custom_concurrency_limit(tmp_path):

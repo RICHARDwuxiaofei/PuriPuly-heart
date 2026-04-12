@@ -66,6 +66,18 @@ def test_normalize_audio_frame_uses_channel_metadata_for_mixdown():
     assert np.allclose(normalized.samples, np.array([0.5, 0.5], dtype=np.float32))
 
 
+def test_normalize_audio_f32_same_rate_stereo_only_mixdowns() -> None:
+    raw = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32)
+    normalized = normalize_audio_f32(
+        raw,
+        input_sample_rate_hz=16000,
+        target_sample_rate_hz=16000,
+    )
+    assert normalized.sample_rate_hz == 16000
+    assert normalized.channels == 1
+    assert np.allclose(normalized.samples, np.array([0.5, 0.5], dtype=np.float32))
+
+
 def test_ring_buffer_returns_last_samples():
     rb = RingBufferF32(capacity_samples=10)
     rb.append(np.arange(6, dtype=np.float32))

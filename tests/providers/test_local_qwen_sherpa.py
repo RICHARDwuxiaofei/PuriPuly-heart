@@ -149,6 +149,19 @@ def test_create_local_qwen_sherpa_recognizer_bootstraps_windows_runtime_before_u
     assert order.index("bootstrap") < order.index("recognizer")
 
 
+def test_create_local_qwen_sherpa_recognizer_rejects_legacy_8000_sample_rate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_sherpa(monkeypatch, recognizer_factory=lambda _config: SimpleNamespace())
+
+    with pytest.raises(ValueError, match="16000"):
+        local_qwen_module.create_local_qwen_sherpa_recognizer(
+            model_dir=Path("/models/qwen"),
+            num_threads=3,
+            sample_rate_hz=8000,
+        )
+
+
 @pytest.mark.asyncio
 async def test_local_qwen_backend_emits_final_transcript_on_speech_end(
     monkeypatch: pytest.MonkeyPatch,
@@ -237,6 +250,98 @@ async def test_local_qwen_backend_emits_final_transcript_on_speech_end(
 
 
 @pytest.mark.asyncio
+async def test_local_qwen_session_send_audio_f32_preserves_float32_samples(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recognizer_state: dict[str, object] = {}
+
+    class FakeStream:
+        def __init__(self) -> None:
+            self.accepted: list[tuple[int, np.ndarray]] = []
+            self.result = SimpleNamespace(text="hello local qwen")
+
+        def accept_waveform(self, sample_rate: int, samples) -> None:
+            self.accepted.append((sample_rate, np.asarray(samples, dtype=np.float32)))
+
+    class FakeRecognizer:
+        def create_stream(self) -> FakeStream:
+            stream = FakeStream()
+            recognizer_state["stream"] = stream
+            return stream
+
+        def decode_stream(self, stream: FakeStream) -> None:
+            recognizer_state["decoded"] = stream
+
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    _install_fake_sherpa(monkeypatch, recognizer_factory=lambda _config: FakeRecognizer())
+
+    backend = LocalQwenSherpaSTTBackend(model_dir=Path("/models/qwen"), sample_rate_hz=16000)
+    session = await backend.open_session()
+    original = np.array([0.123456, -0.234567, 0.9999], dtype=np.float32)
+
+    await session.send_audio_f32(original)
+    await session.on_speech_end()
+
+    stream = recognizer_state["stream"]
+    assert isinstance(stream, FakeStream)
+    accepted_rate, accepted_samples = stream.accepted[0]
+    assert accepted_rate == 16000
+    np.testing.assert_array_equal(accepted_samples, original)
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_session_clips_float32_before_accept_waveform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recognizer_state: dict[str, object] = {}
+
+    class FakeStream:
+        def __init__(self) -> None:
+            self.accepted: list[tuple[int, np.ndarray]] = []
+            self.result = SimpleNamespace(text="hello local qwen")
+
+        def accept_waveform(self, sample_rate: int, samples) -> None:
+            self.accepted.append((sample_rate, np.asarray(samples, dtype=np.float32)))
+
+    class FakeRecognizer:
+        def create_stream(self) -> FakeStream:
+            stream = FakeStream()
+            recognizer_state["stream"] = stream
+            return stream
+
+        def decode_stream(self, stream: FakeStream) -> None:
+            recognizer_state["decoded"] = stream
+
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    _install_fake_sherpa(monkeypatch, recognizer_factory=lambda _config: FakeRecognizer())
+
+    backend = LocalQwenSherpaSTTBackend(model_dir=Path("/models/qwen"), sample_rate_hz=16000)
+    session = await backend.open_session()
+    original = np.array([1.25, -1.50, 0.25], dtype=np.float32)
+
+    await session.send_audio_f32(original)
+    await session.on_speech_end()
+
+    stream = recognizer_state["stream"]
+    assert isinstance(stream, FakeStream)
+    accepted_rate, accepted_samples = stream.accepted[0]
+    assert accepted_rate == 16000
+    np.testing.assert_array_equal(
+        accepted_samples,
+        np.array([1.0, -1.0, 0.25], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(original, np.array([1.25, -1.50, 0.25], dtype=np.float32))
+
+
+@pytest.mark.asyncio
 async def test_local_qwen_backend_sets_stream_language_hint_and_hotwords(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -283,55 +388,9 @@ async def test_local_qwen_backend_sets_stream_language_hint_and_hotwords(
     assert stream.options == {"language": "Korean", "hotwords": "Puripuly,VRChat"}
 
 
-@pytest.mark.asyncio
-async def test_local_qwen_backend_resamples_8000_input_to_16000_for_recognizer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    recognizer_state: dict[str, object] = {}
-
-    class FakeStream:
-        def __init__(self) -> None:
-            self.accepted: list[tuple[int, np.ndarray]] = []
-            self.result = SimpleNamespace(text="hello local qwen")
-
-        def accept_waveform(self, sample_rate: int, samples) -> None:
-            self.accepted.append((sample_rate, np.asarray(samples)))
-
-    class FakeRecognizer:
-        def create_stream(self) -> FakeStream:
-            stream = FakeStream()
-            recognizer_state["stream"] = stream
-            return stream
-
-        def decode_stream(self, stream: FakeStream) -> None:
-            recognizer_state["decoded"] = stream
-
-    class FakeRecognizerEngine(FakeRecognizer):
-        def __init__(self, recognizer_config) -> None:
-            recognizer_state["recognizer_config"] = recognizer_config
-
-    monkeypatch.setattr(
-        local_qwen_module,
-        "validate_local_stt_runtime_ready",
-        lambda *args, **kwargs: _installed_manifest(),
-    )
-    _install_fake_sherpa(monkeypatch, recognizer_factory=FakeRecognizerEngine)
-
-    backend = LocalQwenSherpaSTTBackend(model_dir=Path("/models/qwen"), sample_rate_hz=8000)
-    session = await backend.open_session()
-    await session.send_audio(b"\x00\x00\xff\x7f")
-    await session.on_speech_end()
-
-    stream = recognizer_state["stream"]
-    assert isinstance(stream, FakeStream)
-    accepted_rate, accepted_samples = stream.accepted[0]
-    assert accepted_rate == 16000
-    assert accepted_samples.shape == (4,)
-    assert accepted_samples[0] == pytest.approx(0.0)
-    assert accepted_samples[-1] == pytest.approx(32767 / 32768.0, rel=1e-4)
-    assert (
-        recognizer_state["recognizer_config"].kwargs["feat_config"].kwargs["sampling_rate"] == 16000
-    )
+def test_local_qwen_backend_rejects_legacy_8000_runtime_sample_rate() -> None:
+    with pytest.raises(ValueError, match="16000"):
+        LocalQwenSherpaSTTBackend(model_dir=Path("/models/qwen"), sample_rate_hz=8000)
 
 
 @pytest.mark.asyncio

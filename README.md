@@ -320,9 +320,22 @@ python -m pytest         # Test (recommended within venv)
 
 ### Build
 
+Direct executable-only / manual packaging steps:
+
+This direct executable/manual-installer path is not the release-complete compliance-packaging path. It also requires the staged overlay executable at `build/overlay/PuriPulyHeartOverlay.exe`, as enforced by `build.spec`.
+
 ```bash
+.\scripts\ci\prepare-soxr-release-inputs.ps1
 .venv\Scripts\pyinstaller build.spec   # Executable
-ISCC installer.iss       # Installer
+ISCC installer.iss                      # Manual installer packaging
+```
+
+For the release-complete compliance-packaging path, run `scripts/ci/prepare-soxr-release-inputs.ps1` first and then `scripts/ci/build-release-artifacts.ps1`:
+
+```bash
+$env:APP_VERSION = (& ".\.venv\Scripts\python.exe" scripts/ci/read-project-version.py).Trim()
+.\scripts\ci\prepare-soxr-release-inputs.ps1
+.\scripts\ci\build-release-artifacts.ps1 -AppVersion $env:APP_VERSION -InnoSetupVersion 6.6.1
 ```
 ---
 

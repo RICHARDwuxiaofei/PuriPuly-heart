@@ -9,6 +9,7 @@ from uuid import UUID
 import numpy as np
 
 logger = logging.getLogger(__name__)
+MANAGED_STT_SAMPLE_RATE_HZ = 16000
 
 from puripuly_heart.core.audio.format import float32_to_pcm16le_bytes
 from puripuly_heart.core.audio.ring_buffer import RingBufferF32
@@ -16,6 +17,7 @@ from puripuly_heart.core.clock import Clock, SystemClock
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.core.stt.backend import (
     STTBackend,
+    STTBackendFloat32Session,
     STTBackendSession,
 )
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadEvent
@@ -62,8 +64,8 @@ class ManagedSTTProvider:
     def __post_init__(self) -> None:
         if self.channel not in ("self", "peer"):
             raise ValueError("channel must be 'self' or 'peer'")
-        if self.sample_rate_hz not in (8000, 16000):
-            raise ValueError("sample_rate_hz must be 8000 or 16000")
+        if self.sample_rate_hz != MANAGED_STT_SAMPLE_RATE_HZ:
+            raise ValueError(f"sample_rate_hz must be {MANAGED_STT_SAMPLE_RATE_HZ}")
         if self.reset_deadline_s <= 0:
             raise ValueError("reset_deadline_s must be > 0")
         if self.drain_timeout_s <= 0:
@@ -211,12 +213,23 @@ class ManagedSTTProvider:
         if samples_f32.size == 0:
             return
         self._audio_ring.append(samples_f32)  # type: ignore[union-attr]
+        if self._active_session is None:
+            raise RuntimeError("STT session is not active")
+        await self._send_audio_to_session(self._active_session, samples_f32)
+
+    async def _send_audio_to_session(
+        self, session: STTBackendSession, samples_f32: np.ndarray
+    ) -> None:
+        if samples_f32.size == 0:
+            return
+        if isinstance(session, STTBackendFloat32Session):
+            await session.send_audio_f32(samples_f32)
+            return
+
         pcm = float32_to_pcm16le_bytes(samples_f32)
         if not pcm:
             return
-        if self._active_session is None:
-            raise RuntimeError("STT session is not active")
-        await self._active_session.send_audio(pcm)
+        await session.send_audio(pcm)
 
     async def _ensure_session(self) -> bool:
         if self._active_session is not None:
@@ -313,7 +326,7 @@ class ManagedSTTProvider:
 
         await self._set_state(STTSessionState.STREAMING)
 
-        await new_session.send_audio(float32_to_pcm16le_bytes(bridging_audio))
+        await self._send_audio_to_session(new_session, bridging_audio)
         self._emit_basic("[STT] Session reset while speaking; bridged to a new session")
 
         if old_session and old_consumer:

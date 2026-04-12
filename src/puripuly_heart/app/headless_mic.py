@@ -18,13 +18,13 @@ from puripuly_heart.config.paths import default_vad_model_path
 from puripuly_heart.config.settings import AppSettings
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
-from puripuly_heart.core.audio.format import normalize_audio_f32
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.audio.source import (
     AudioSource,
     SoundDeviceAudioSource,
     resolve_sounddevice_input_device,
 )
+from puripuly_heart.core.audio.streaming_resampler import MonoFirstStreamingResampler
 from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.orchestrator.hub import ClientHub
@@ -321,14 +321,11 @@ async def run_audio_vad_loop(
 ) -> None:
     chunk_samples = vad.chunk_samples
     buffer = np.empty((0,), dtype=np.float32)
+    resampler: MonoFirstStreamingResampler | None = None
+    source_format: tuple[int, int] | None = None
 
-    async for frame in source.frames():
-        normalized = normalize_audio_f32(
-            frame.samples,
-            input_sample_rate_hz=frame.sample_rate_hz,
-            target_sample_rate_hz=target_sample_rate_hz,
-        )
-        buffer = np.concatenate([buffer, normalized.samples.reshape(-1)])
+    async def _process_buffered_chunks() -> None:
+        nonlocal buffer
         while buffer.size >= chunk_samples:
             chunk = buffer[:chunk_samples]
             buffer = buffer[chunk_samples:]
@@ -336,3 +333,33 @@ async def run_audio_vad_loop(
                 chunk = audio_gate.process_chunk(chunk)
             for ev in vad.process_chunk(chunk):
                 await sink.handle_vad_event(ev)
+
+    async for frame in source.frames():
+        frame_format = (frame.sample_rate_hz, frame.channels)
+        if source_format is None:
+            source_format = frame_format
+            resampler = MonoFirstStreamingResampler(
+                input_sample_rate_hz=frame.sample_rate_hz,
+                output_sample_rate_hz=target_sample_rate_hz,
+                input_channels=frame.channels,
+            )
+        elif frame_format != source_format:
+            raise ValueError(
+                "source audio format changed during streaming: "
+                f"expected {source_format[0]}Hz/{source_format[1]}ch, "
+                f"got {frame.sample_rate_hz}Hz/{frame.channels}ch"
+            )
+
+        assert resampler is not None
+        normalized = resampler.resample_chunk(frame.samples)
+        if normalized.size:
+            buffer = np.concatenate([buffer, normalized.reshape(-1)])
+            await _process_buffered_chunks()
+
+    if resampler is None:
+        return
+
+    tail = resampler.flush()
+    if tail.size:
+        buffer = np.concatenate([buffer, tail.reshape(-1)])
+    await _process_buffered_chunks()

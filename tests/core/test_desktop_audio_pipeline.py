@@ -32,13 +32,16 @@ async def test_desktop_pipeline_outputs_16khz_vad_ready_frames():
     )
     pipeline = DesktopPeerPipeline(source=source)
 
-    frame = await pipeline.frames().__anext__()
+    frames = [frame async for frame in pipeline.frames()]
+    combined = np.concatenate([frame.samples for frame in frames])
+    combined_pcm = b"".join(frame.deepgram_pcm16le for frame in frames)
 
-    assert frame.sample_rate_hz == 16000
-    assert frame.samples.dtype == np.float32
-    assert frame.samples.ndim == 1
-    assert frame.samples.shape == (1600,)
-    assert len(frame.deepgram_pcm16le) == 3200
+    assert len(frames) >= 1
+    assert all(frame.sample_rate_hz == 16000 for frame in frames)
+    assert all(frame.samples.dtype == np.float32 for frame in frames)
+    assert all(frame.samples.ndim == 1 for frame in frames)
+    assert combined.shape == (1600,)
+    assert len(combined_pcm) == 3200
 
 
 @pytest.mark.asyncio

@@ -320,9 +320,22 @@ python -m pytest         # 테스트 (가상환경에서 실행 권장)
 
 ### 빌드
 
+실행 파일 전용 / 수동 패키징 단계:
+
+이 경로는 실행 파일/수동 인스톨러만 만드는 직접 패키징 경로이며, 릴리스 완료(compliance) 패키징 경로가 아닙니다. 또한 `build.spec`가 검사하는 스테이징된 오버레이 실행 파일 `build/overlay/PuriPulyHeartOverlay.exe`가 필요합니다.
+
 ```bash
+.\scripts\ci\prepare-soxr-release-inputs.ps1
 .venv\Scripts\pyinstaller build.spec   # 실행 파일
-ISCC installer.iss       # 인스톨러
+ISCC installer.iss                      # 수동 인스톨러 패키징
+```
+
+릴리스 완료(compliance) Windows 패키징 경로는 먼저 `scripts/ci/prepare-soxr-release-inputs.ps1`를 실행한 뒤 `scripts/ci/build-release-artifacts.ps1`를 실행합니다:
+
+```bash
+$env:APP_VERSION = (& ".\.venv\Scripts\python.exe" scripts/ci/read-project-version.py).Trim()
+.\scripts\ci\prepare-soxr-release-inputs.ps1
+.\scripts\ci\build-release-artifacts.ps1 -AppVersion $env:APP_VERSION -InnoSetupVersion 6.6.1
 ```
 ---
 
