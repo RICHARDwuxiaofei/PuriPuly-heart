@@ -249,6 +249,21 @@ def test_shared_windows_build_script_runs_packaged_smoke_test() -> None:
     assert "Get-Command choco" in script
 
 
+def test_shared_windows_build_script_reads_soxr_runtime_report_files_for_packaged_and_installed_smoke() -> (
+    None
+):
+    script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
+
+    assert "PURIPULY_HEART_SOXR_RUNTIME_REPORT_PATH" in script
+    assert '$soxrRuntimeReportDir = Join-Path $PWD "build/soxr-runtime-smoke"' in script
+    assert "$packagedSoxrRuntimeReportPath" in script
+    assert "$installedSoxrRuntimeReportPath" in script
+    assert "$reinstalledSoxrRuntimeReportPath" in script
+    assert "ConvertFrom-Json" in script
+    assert "$reportedImportedExtensionPath" in script
+    assert "$reportedLoadedSoxrDllPath" in script
+
+
 def test_shared_windows_build_script_uses_alternate_app_id_and_isolated_installer_smoke_dir() -> (
     None
 ):
@@ -355,13 +370,16 @@ def test_build_spec_header_distinguishes_direct_packaging_from_full_release_comp
 def test_shared_windows_build_script_checks_packaged_local_qwen_runtime_dir_for_onnx_dlls() -> None:
     script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
 
-    assert '$packagedLocalQwenRuntimeDir = Join-Path $distDir "_runtime\\local_qwen"' in script
+    assert "function Resolve-PackagedLocalQwenRuntimeDir" in script
+    assert 'Join-Path $DistDir "_runtime\\local_qwen"' in script
+    assert 'Join-Path $DistDir "_internal\\_runtime\\local_qwen"' in script
+    assert "if (Test-Path $packagedLocalQwenRuntimeDir) {" in script
+    assert "return $packagedLocalQwenRuntimeDir" in script
+    assert "return $packagedLocalQwenFallbackRuntimeDir" in script
     assert (
-        '$packagedLocalQwenFallbackRuntimeDir = Join-Path $distDir "_internal\\_runtime\\local_qwen"'
+        "$packagedLocalQwenRuntimeDir = Resolve-PackagedLocalQwenRuntimeDir -DistDir $distDir"
         in script
     )
-    assert "if (-not (Test-Path $packagedLocalQwenRuntimeDir)) {" in script
-    assert "$packagedLocalQwenRuntimeDir = $packagedLocalQwenFallbackRuntimeDir" in script
     assert (
         '$packagedOnnxRuntimeDllPath = Join-Path $packagedLocalQwenRuntimeDir "onnxruntime.dll"'
         in script
@@ -466,15 +484,51 @@ def test_prepare_soxr_release_inputs_script_adds_built_libsoxr_bin_to_path_befor
     assert '$env:PATH = "$libsoxrBinDir;$env:PATH"' in script
 
 
-def test_prepare_soxr_release_inputs_script_stages_soxr_dll_beside_build_python_for_stubgen() -> (
+def test_prepare_soxr_release_inputs_script_temporarily_stages_soxr_dll_beside_build_python_and_removes_it() -> (
     None
 ):
     script = (ROOT / SOXR_RELEASE_INPUTS_SCRIPT).read_text(encoding="utf-8")
 
     assert '$wheelBuildSoxrDllPath = Join-Path $projectEnvironmentScripts "soxr.dll"' in script
     assert (
+        "$wheelBuildSoxrDllBackupPath = Join-Path $ReleaseInputsRoot "
+        '"wheel-build-python-soxr.dll.backup"' in script
+    )
+    assert "$hadExistingWheelBuildSoxrDll = Test-Path $wheelBuildSoxrDllPath" in script
+    assert script.index("try {") < script.index(
+        "Move-Item -Path $wheelBuildSoxrDllPath -Destination $wheelBuildSoxrDllBackupPath -Force"
+    )
+    assert script.index(
+        "Move-Item -Path $wheelBuildSoxrDllPath -Destination $wheelBuildSoxrDllBackupPath -Force"
+    ) < script.index(
+        "Copy-Item -Path $libsoxrBuiltDllPath -Destination $wheelBuildSoxrDllPath -Force"
+    )
+    assert (
+        "Move-Item -Path $wheelBuildSoxrDllPath -Destination $wheelBuildSoxrDllBackupPath -Force"
+        in script
+    )
+    assert (
         "Copy-Item -Path $libsoxrBuiltDllPath -Destination $wheelBuildSoxrDllPath -Force" in script
     )
+    assert "$wheelBuildError = $null" in script
+    assert "catch {" in script
+    assert "$wheelBuildError = $_" in script
+    assert "finally {" in script
+    assert "Remove-Item -Path $wheelBuildSoxrDllPath -Force -ErrorAction SilentlyContinue" in script
+    assert (
+        "if ($hadExistingWheelBuildSoxrDll -and (Test-Path $wheelBuildSoxrDllBackupPath)) {"
+        in script
+    )
+    assert (
+        "Move-Item -Path $wheelBuildSoxrDllBackupPath -Destination $wheelBuildSoxrDllPath -Force"
+        in script
+    )
+    assert "$wheelBuildCleanupActionError = $null" in script
+    assert "$wheelBuildCleanupIssues = @()" in script
+    assert "if ($null -ne $wheelBuildCleanupActionError) {" in script
+    assert script.index("finally {") < script.index("$wheelBuildCleanupIssues = @()")
+    assert "if ($wheelBuildCleanupIssues.Count -gt 0) {" in script
+    assert "$PSCmdlet.ThrowTerminatingError($wheelBuildError)" in script
 
 
 def test_prepare_soxr_release_inputs_script_skips_python_soxr_stub_generation_in_release_input_build() -> (
@@ -512,14 +566,13 @@ def test_build_spec_uses_prepared_soxr_release_inputs_and_guards_packaged_layout
     assert 'collect_dynamic_libs("soxr")' not in spec
 
 
-def test_build_spec_deduplicates_only_root_level_auto_collected_soxr_dll() -> None:
+def test_build_spec_deduplicates_any_root_level_auto_collected_soxr_dll() -> None:
     spec = (ROOT / "build.spec").read_text(encoding="utf-8")
 
     assert "def normalize_soxr_runtime_binaries(binaries):" in spec
     assert 'normalized_destination_name = destination_name.replace("\\\\", "/")' in spec
     assert 'normalized_destination_name == "soxr.dll"' in spec
-    assert "Path(source_path).resolve() == sibling_dll_path" in spec
-    assert "binaries[:] = [" in spec
+    assert "Path(source_path).resolve() == sibling_dll_path" not in spec
     assert "normalize_soxr_runtime_binaries(a.binaries)" in spec
     assert spec.index("a = Analysis(") < spec.index("normalize_soxr_runtime_binaries(a.binaries)")
 
@@ -611,12 +664,30 @@ def test_shared_windows_build_script_runs_local_qwen_runtime_check_smoke() -> No
     assert "Local Qwen runtime smoke test failed" in script
 
 
+def test_shared_windows_build_script_resolves_packaged_local_qwen_runtime_dir_after_pyinstaller_build() -> (
+    None
+):
+    script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
+
+    assert "function Resolve-PackagedLocalQwenRuntimeDir" in script
+    assert (
+        "$packagedLocalQwenRuntimeDir = Resolve-PackagedLocalQwenRuntimeDir -DistDir $distDir"
+        in script
+    )
+    assert 'Join-Path $DistDir "_runtime\\local_qwen"' in script
+    assert 'Join-Path $DistDir "_internal\\_runtime\\local_qwen"' in script
+    assert script.index("Invoke-ExternalProcess -FilePath $pythonCommand") < script.index(
+        "$packagedLocalQwenRuntimeDir = Resolve-PackagedLocalQwenRuntimeDir -DistDir $distDir"
+    )
+
+
 def test_shared_windows_build_script_runs_soxr_runtime_check_smoke() -> None:
     script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
 
     assert (
-        'Start-Process -FilePath $exePath -ArgumentList @("soxr-runtime-check") -Wait -PassThru'
-        in script
+        "Invoke-SoxrRuntimeSmokeCheck -ExePath $exePath -ReportPath $packagedSoxrRuntimeReportPath "
+        "-ExpectedExtensionPath $packagedSoxrExtensionPath -ExpectedSoxrDllPath $packagedSoxrDllPath "
+        '-Label "Packaged"' in script
     )
     assert "soxr runtime smoke test failed" in script
     assert script.index("soxr-runtime-check") < script.index('"osc-send", "ci-smoke"')
@@ -694,19 +765,23 @@ def test_shared_windows_build_script_runs_installed_app_soxr_runtime_check_after
 
     assert '$installedExePath = Join-Path $InstallerSmokeDir "PuriPulyHeart.exe"' in script
     assert '$installedSoxrDllPath = Join-Path $InstallerSmokeDir "soxr\\soxr.dll"' in script
+    assert "$installedSoxrExtensionPath" in script
     assert (
         '$installedLegacySoxrDllPath = Join-Path $InstallerSmokeDir "soxr\\libsoxr.dll"' in script
     )
     assert (
-        'Start-Process -FilePath $installedExePath -ArgumentList @("soxr-runtime-check") -Wait -PassThru'
-        in script
+        "Invoke-SoxrRuntimeSmokeCheck -ExePath $installedExePath -ReportPath $installedSoxrRuntimeReportPath "
+        "-ExpectedExtensionPath $installedSoxrExtensionPath -ExpectedSoxrDllPath $installedSoxrDllPath "
+        '-Label "Installed"' in script
     )
-    assert "Installed app soxr runtime smoke test failed" in script
+    assert "$Label soxr runtime smoke test failed" in script
     assert (
         "Installed app still contains stale legacy soxr runtime DLL after installer smoke" in script
     )
     assert script.index("if ($installerSmoke.ExitCode -ne 0) {") < script.index(
-        'Start-Process -FilePath $installedExePath -ArgumentList @("soxr-runtime-check") -Wait -PassThru'
+        "Invoke-SoxrRuntimeSmokeCheck -ExePath $installedExePath -ReportPath $installedSoxrRuntimeReportPath "
+        "-ExpectedExtensionPath $installedSoxrExtensionPath -ExpectedSoxrDllPath $installedSoxrDllPath "
+        '-Label "Installed"'
     )
 
 
@@ -730,12 +805,15 @@ def test_shared_windows_build_script_reinstall_smoke_restores_official_soxr_runt
     assert "$reinstalledSoxrDllHash" in script
     assert "Installed soxr runtime DLL reinstall smoke failed to restore bundled hash" in script
     assert "Installed stale legacy soxr runtime DLL was not removed by reinstall smoke" in script
-    assert (
-        script.count(
-            'Start-Process -FilePath $installedExePath -ArgumentList @("soxr-runtime-check") -Wait -PassThru'
-        )
-        >= 2
-    )
+    assert script.count("Invoke-SoxrRuntimeSmokeCheck -ExePath $installedExePath") >= 2
+
+
+def test_shared_windows_build_script_reinstall_smoke_removes_seeded_root_level_soxr_dll() -> None:
+    script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
+
+    assert '$legacyRootLevelSoxrDllPath = Join-Path $InstallerSmokeDir "soxr.dll"' in script
+    assert "[System.IO.File]::WriteAllBytes($legacyRootLevelSoxrDllPath" in script
+    assert "if (Test-Path $legacyRootLevelSoxrDllPath) {" in script
 
 
 def test_shared_setup_action_installs_pinned_uv_and_uses_frozen_sync() -> None:
@@ -841,16 +919,11 @@ def test_installer_script_deletes_managed_default_vad_cache_on_install() -> None
     assert 'Type: files; Name: "{localappdata}\\puripuly-heart\\silero_vad.onnx"' in script
 
 
-def test_installer_script_deletes_legacy_installed_libsoxr_dll_on_install() -> None:
+def test_installer_script_deletes_root_level_and_nested_legacy_soxr_dlls_on_install() -> None:
     script = (ROOT / "installer.iss").read_text(encoding="utf-8")
 
-    assert (
-        'Source: "{#MyPackagedAppDir}\\*"; DestDir: "{app}"; '
-        "Flags: ignoreversion recursesubdirs createallsubdirs" in script
-    )
+    assert 'Type: files; Name: "{app}\\soxr.dll"' in script
     assert 'Type: files; Name: "{app}\\soxr\\libsoxr.dll"' in script
-    assert 'Excludes: "soxr\\soxr.dll"' not in script
-    assert "Flags: ignoreversion onlyifdoesntexist" not in script
 
 
 def test_local_stt_installer_script_uses_manifest_validation_and_atomic_promotion() -> None:

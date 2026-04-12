@@ -84,21 +84,26 @@ def _load_headless_mic_types():
     return HeadlessMicRunner, HeadlessMicInitializationError
 
 
+def _requires_soxr_runtime_startup_check(args: argparse.Namespace) -> bool:
+    return args.command == "run-mic"
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_main_logging()
     parser = build_parser()
     args = parser.parse_args(argv)
-
-    try:
-        ensure_soxr_runtime_available_for_startup()
-    except SoxrRuntimeAvailabilityError as exc:
-        return _print_runtime_error("packaged soxr runtime", exc)
 
     if args.version:
         from puripuly_heart import __version__
 
         print(__version__)
         return 0
+
+    try:
+        if _requires_soxr_runtime_startup_check(args):
+            ensure_soxr_runtime_available_for_startup()
+    except SoxrRuntimeAvailabilityError as exc:
+        return _print_runtime_error("packaged soxr runtime", exc)
 
     if args.command == "run-gui":
         import flet as ft

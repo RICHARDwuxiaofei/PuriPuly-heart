@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import builtins
+import importlib.util
+import sys
+
 import numpy as np
 import pytest
 
@@ -8,6 +12,30 @@ import puripuly_heart.core.audio.streaming_resampler as streaming_resampler
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.format import AudioFrameF32, float32_to_pcm16le_bytes
 from puripuly_heart.core.audio.streaming_resampler import MonoFirstStreamingResampler
+
+
+def test_streaming_resampler_module_import_does_not_import_soxr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "soxr":
+            raise AssertionError("module import should not import soxr")
+        return real_import(name, globals, locals, fromlist, level)
+
+    shadow_name = "puripuly_heart._test_shadow_streaming_resampler"
+    shadow_spec = importlib.util.spec_from_file_location(shadow_name, streaming_resampler.__file__)
+    assert shadow_spec is not None and shadow_spec.loader is not None
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    shadow_module = importlib.util.module_from_spec(shadow_spec)
+    monkeypatch.setitem(sys.modules, shadow_name, shadow_module)
+    shadow_spec.loader.exec_module(shadow_module)
+
+    resampler = shadow_module.MonoFirstStreamingResampler(16000, 16000, 2)
+    out = resampler.resample_chunk(np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32))
+    np.testing.assert_allclose(out, np.array([0.5, 0.5], dtype=np.float32))
 
 
 def test_resample_chunk_mixes_down_before_streaming_soxr_with_mq_quality(
@@ -31,7 +59,15 @@ def test_resample_chunk_mixes_down_before_streaming_soxr_with_mq_quality(
             stream_calls.append(("chunk", samples.copy(), last, None, None))
             return np.asarray(samples * 2.0, dtype=np.float32)
 
-    monkeypatch.setattr(streaming_resampler.soxr, "ResampleStream", FakeResampleStream)
+    class FakeSoxrModule:
+        ResampleStream = FakeResampleStream
+
+    monkeypatch.setattr(
+        streaming_resampler,
+        "_import_soxr",
+        lambda: FakeSoxrModule,
+        raising=False,
+    )
 
     resampler = MonoFirstStreamingResampler(
         input_sample_rate_hz=48000,
@@ -51,10 +87,12 @@ def test_resample_chunk_mixes_down_before_streaming_soxr_with_mq_quality(
 def test_16khz_noop_path_mixdowns_without_building_soxr_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fail_on_stream_init(*args: object, **kwargs: object) -> None:
-        pytest.fail("16k no-op path should not create a soxr stream")
-
-    monkeypatch.setattr(streaming_resampler.soxr, "ResampleStream", fail_on_stream_init)
+    monkeypatch.setattr(
+        streaming_resampler,
+        "_import_soxr",
+        lambda: pytest.fail("16k no-op path should not import soxr"),
+        raising=False,
+    )
 
     resampler = MonoFirstStreamingResampler(
         input_sample_rate_hz=16000,
@@ -95,7 +133,15 @@ def test_flush_uses_last_true_and_rejects_future_chunks(monkeypatch: pytest.Monk
                 return np.array([0.25, -0.25], dtype=np.float32)
             return np.empty((0,), dtype=np.float32)
 
-    monkeypatch.setattr(streaming_resampler.soxr, "ResampleStream", FakeResampleStream)
+    class FakeSoxrModule:
+        ResampleStream = FakeResampleStream
+
+    monkeypatch.setattr(
+        streaming_resampler,
+        "_import_soxr",
+        lambda: FakeSoxrModule,
+        raising=False,
+    )
 
     resampler = MonoFirstStreamingResampler(input_sample_rate_hz=48000, output_sample_rate_hz=16000)
 

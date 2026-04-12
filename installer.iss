@@ -97,6 +97,7 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 ; Remove the managed default-path VAD cache so the app can rehydrate it from the bundled model.
 Type: files; Name: "{localappdata}\puripuly-heart\silero_vad.onnx"
 ; Remove stale legacy soxr runtime names before laying down the current packaged tree.
+Type: files; Name: "{app}\soxr.dll"
 Type: files; Name: "{app}\soxr\libsoxr.dll"
 
 [UninstallDelete]

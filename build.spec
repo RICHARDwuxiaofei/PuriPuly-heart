@@ -85,19 +85,17 @@ def collect_staged_soxr_runtime_binaries() -> list[tuple[str, str]]:
 
 
 def normalize_soxr_runtime_binaries(binaries):
-    _, sibling_dll_path = get_prepared_soxr_runtime_paths()
-
     binaries[:] = [
         binary
         for binary in binaries
-        if not _is_root_level_auto_collected_soxr_dll(binary, sibling_dll_path)
+        if not _is_root_level_auto_collected_soxr_dll(binary)
     ]
 
 
-def _is_root_level_auto_collected_soxr_dll(binary, sibling_dll_path: Path) -> bool:
-    destination_name, source_path, _typecode = binary
+def _is_root_level_auto_collected_soxr_dll(binary) -> bool:
+    destination_name, _source_path, _typecode = binary
     normalized_destination_name = destination_name.replace("\\", "/")
-    return normalized_destination_name == "soxr.dll" and Path(source_path).resolve() == sibling_dll_path
+    return normalized_destination_name == "soxr.dll"
 
 # Collect data files
 datas = [

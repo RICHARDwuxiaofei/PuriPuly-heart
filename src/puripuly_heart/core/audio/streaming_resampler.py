@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import importlib
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
-import soxr
 
 from puripuly_heart.core.audio.format import mixdown_to_mono_f32, reshape_audio_samples_f32
 
 NOOP_SAMPLE_RATE_HZ = 16000
+
+
+def _import_soxr() -> Any:
+    return importlib.import_module("soxr")
 
 
 @dataclass(slots=True)
@@ -15,7 +20,7 @@ class MonoFirstStreamingResampler:
     input_sample_rate_hz: int
     output_sample_rate_hz: int = NOOP_SAMPLE_RATE_HZ
     input_channels: int = 1
-    _stream: soxr.ResampleStream | None = field(init=False, default=None, repr=False)
+    _stream: Any | None = field(init=False, default=None, repr=False)
     _flushed: bool = field(init=False, default=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -25,7 +30,7 @@ class MonoFirstStreamingResampler:
             raise ValueError("input_channels must be > 0")
         if self._uses_noop_path:
             return
-        self._stream = soxr.ResampleStream(
+        self._stream = _import_soxr().ResampleStream(
             self.input_sample_rate_hz,
             self.output_sample_rate_hz,
             1,

@@ -241,8 +241,6 @@ if (-not (Test-Path $libsoxrHeaderPath)) {
 }
 
 $env:PATH = "$libsoxrBinDir;$env:PATH"
-$wheelBuildSoxrDllPath = Join-Path $projectEnvironmentScripts "soxr.dll"
-Copy-Item -Path $libsoxrBuiltDllPath -Destination $wheelBuildSoxrDllPath -Force
 
 Write-Host "Bootstrapping pip into the prepared project environment..."
 Invoke-External -FilePath $pythonCommand -ArgumentList @(
@@ -261,21 +259,73 @@ if (-not (Test-Path $nanobindConfigPath)) {
 }
 
 Write-Host "Building custom system-linked python-soxr source wheel using the prepared project environment (no build isolation)..."
-Invoke-External -FilePath $pythonCommand -ArgumentList @(
-    "-m",
-    "pip",
-    "wheel",
-    "--no-build-isolation",
-    "--no-deps",
-    "--wheel-dir",
-    $wheelOutputDir,
-    "--config-settings=cmake.define.USE_SYSTEM_LIBSOXR=ON",
-    "--config-settings=cmake.define.CMAKE_PREFIX_PATH=$libsoxrInstallDir",
-    "--config-settings=cmake.define.nanobind_DIR=$nanobindCmakeDir",
-    "--config-settings=cmake.define.SOXR_LIBRARY=$libsoxrImportLibPath",
-    "--config-settings=cmake.define.SOXR_INCLUDE_DIR=$(Join-Path $libsoxrInstallDir 'include')",
-    $soxrSourceRoot.FullName
-)
+$wheelBuildSoxrDllPath = Join-Path $projectEnvironmentScripts "soxr.dll"
+$wheelBuildSoxrDllBackupPath = Join-Path $ReleaseInputsRoot "wheel-build-python-soxr.dll.backup"
+$hadExistingWheelBuildSoxrDll = Test-Path $wheelBuildSoxrDllPath
+$wheelBuildError = $null
+$wheelBuildCleanupActionError = $null
+try {
+    if ($hadExistingWheelBuildSoxrDll) {
+        Move-Item -Path $wheelBuildSoxrDllPath -Destination $wheelBuildSoxrDllBackupPath -Force
+    }
+
+    Copy-Item -Path $libsoxrBuiltDllPath -Destination $wheelBuildSoxrDllPath -Force
+
+    Invoke-External -FilePath $pythonCommand -ArgumentList @(
+        "-m",
+        "pip",
+        "wheel",
+        "--no-build-isolation",
+        "--no-deps",
+        "--wheel-dir",
+        $wheelOutputDir,
+        "--config-settings=cmake.define.USE_SYSTEM_LIBSOXR=ON",
+        "--config-settings=cmake.define.CMAKE_PREFIX_PATH=$libsoxrInstallDir",
+        "--config-settings=cmake.define.nanobind_DIR=$nanobindCmakeDir",
+        "--config-settings=cmake.define.SOXR_LIBRARY=$libsoxrImportLibPath",
+        "--config-settings=cmake.define.SOXR_INCLUDE_DIR=$(Join-Path $libsoxrInstallDir 'include')",
+        $soxrSourceRoot.FullName
+    )
+}
+catch {
+    $wheelBuildError = $_
+}
+finally {
+    try {
+        Remove-Item -Path $wheelBuildSoxrDllPath -Force -ErrorAction SilentlyContinue
+        if ($hadExistingWheelBuildSoxrDll -and (Test-Path $wheelBuildSoxrDllBackupPath)) {
+            Move-Item -Path $wheelBuildSoxrDllBackupPath -Destination $wheelBuildSoxrDllPath -Force
+        }
+    }
+    catch {
+        $wheelBuildCleanupActionError = $_
+    }
+}
+
+$wheelBuildCleanupIssues = @()
+if ($null -ne $wheelBuildCleanupActionError) {
+    $wheelBuildCleanupIssues += "Wheel-build soxr.dll cleanup action failed: $($wheelBuildCleanupActionError.Exception.Message)"
+}
+if ($hadExistingWheelBuildSoxrDll) {
+    if (-not (Test-Path $wheelBuildSoxrDllPath)) {
+        $wheelBuildCleanupIssues += "Preexisting wheel-build soxr.dll was not restored: $wheelBuildSoxrDllPath"
+    }
+    if (Test-Path $wheelBuildSoxrDllBackupPath) {
+        $wheelBuildCleanupIssues += "Temporary wheel-build soxr.dll backup was not removed after restore: $wheelBuildSoxrDllBackupPath"
+    }
+}
+elseif (Test-Path $wheelBuildSoxrDllPath) {
+    $wheelBuildCleanupIssues += "Temporary wheel-build soxr.dll staging was not removed: $wheelBuildSoxrDllPath"
+}
+if ($wheelBuildCleanupIssues.Count -gt 0) {
+    if ($null -ne $wheelBuildError) {
+        $wheelBuildCleanupIssues += "Original wheel build failure: $($wheelBuildError.Exception.Message)"
+    }
+    throw ($wheelBuildCleanupIssues -join [Environment]::NewLine)
+}
+if ($null -ne $wheelBuildError) {
+    $PSCmdlet.ThrowTerminatingError($wheelBuildError)
+}
 
 $wheelPath = Get-ChildItem -Path $wheelOutputDir -Filter "soxr-$SoxrVersion-*.whl" | Select-Object -First 1
 if ($null -eq $wheelPath) {

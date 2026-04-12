@@ -101,6 +101,117 @@ function Resolve-CommandPath {
     throw "Required command not found on PATH: $Name"
 }
 
+function Get-CanonicalPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw "Canonical path cannot be resolved from a blank path value."
+    }
+
+    return (Get-Item -LiteralPath $Path).FullName
+}
+
+function Resolve-PackagedLocalQwenRuntimeDir {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DistDir
+    )
+
+    $packagedLocalQwenRuntimeDir = Join-Path $DistDir "_runtime\local_qwen"
+    $packagedLocalQwenFallbackRuntimeDir = Join-Path $DistDir "_internal\_runtime\local_qwen"
+    if (Test-Path $packagedLocalQwenRuntimeDir) {
+        return $packagedLocalQwenRuntimeDir
+    }
+
+    return $packagedLocalQwenFallbackRuntimeDir
+}
+
+function Assert-SoxrRuntimeReport {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ReportPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedExtensionPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSoxrDllPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    if (-not (Test-Path $ReportPath)) {
+        throw "$Label soxr runtime report not found: $ReportPath"
+    }
+
+    $soxrRuntimeReport = Get-Content -Path $ReportPath -Raw -Encoding utf8 | ConvertFrom-Json
+    $reportedExpectedExtensionPath = [string]$soxrRuntimeReport.expected_extension_path
+    $reportedExpectedSoxrDllPath = [string]$soxrRuntimeReport.expected_sibling_dll_path
+    $reportedImportedExtensionPath = [string]$soxrRuntimeReport.imported_extension_path
+    $reportedLoadedSoxrDllPath = [string]$soxrRuntimeReport.loaded_sibling_dll_path
+
+    $canonicalExpectedExtensionPath = Get-CanonicalPath -Path $ExpectedExtensionPath
+    $canonicalExpectedSoxrDllPath = Get-CanonicalPath -Path $ExpectedSoxrDllPath
+    $canonicalReportedExpectedExtensionPath = Get-CanonicalPath -Path $reportedExpectedExtensionPath
+    $canonicalReportedExpectedSoxrDllPath = Get-CanonicalPath -Path $reportedExpectedSoxrDllPath
+    $canonicalReportedImportedExtensionPath = Get-CanonicalPath -Path $reportedImportedExtensionPath
+    $canonicalReportedLoadedSoxrDllPath = Get-CanonicalPath -Path $reportedLoadedSoxrDllPath
+
+    if ($canonicalReportedExpectedExtensionPath -ne $canonicalExpectedExtensionPath) {
+        throw "$Label soxr runtime report expected_extension_path mismatch: $reportedExpectedExtensionPath"
+    }
+    if ($canonicalReportedExpectedSoxrDllPath -ne $canonicalExpectedSoxrDllPath) {
+        throw "$Label soxr runtime report expected_sibling_dll_path mismatch: $reportedExpectedSoxrDllPath"
+    }
+    if ($canonicalReportedImportedExtensionPath -ne $canonicalExpectedExtensionPath) {
+        throw "$Label soxr runtime report imported_extension_path mismatch: $reportedImportedExtensionPath"
+    }
+    if ($canonicalReportedLoadedSoxrDllPath -ne $canonicalExpectedSoxrDllPath) {
+        throw "$Label soxr runtime report loaded_sibling_dll_path mismatch: $reportedLoadedSoxrDllPath"
+    }
+}
+
+function Invoke-SoxrRuntimeSmokeCheck {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ExePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ReportPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedExtensionPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSoxrDllPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    $previousSoxrRuntimeReportPath = $env:PURIPULY_HEART_SOXR_RUNTIME_REPORT_PATH
+    $env:PURIPULY_HEART_SOXR_RUNTIME_REPORT_PATH = $ReportPath
+    try {
+        $soxrRuntimeSmokeTest = Start-Process -FilePath $ExePath -ArgumentList @("soxr-runtime-check") -Wait -PassThru
+    } finally {
+        if ($null -eq $previousSoxrRuntimeReportPath) {
+            Remove-Item Env:PURIPULY_HEART_SOXR_RUNTIME_REPORT_PATH -ErrorAction SilentlyContinue
+        } else {
+            $env:PURIPULY_HEART_SOXR_RUNTIME_REPORT_PATH = $previousSoxrRuntimeReportPath
+        }
+    }
+
+    if ($soxrRuntimeSmokeTest.ExitCode -ne 0) {
+        throw "$Label soxr runtime smoke test failed with exit code $($soxrRuntimeSmokeTest.ExitCode)"
+    }
+
+    Assert-SoxrRuntimeReport -ReportPath $ReportPath -ExpectedExtensionPath $ExpectedExtensionPath -ExpectedSoxrDllPath $ExpectedSoxrDllPath -Label $Label
+}
+
 $projectEnvironmentScripts = Resolve-ProjectEnvironmentScriptsPath
 $projectEnvironmentPath = Resolve-ProjectEnvironmentPath
 if (Test-Path $projectEnvironmentScripts) {
@@ -139,15 +250,12 @@ $pyInstallerBuildDir = Join-Path $PWD "build/build"
 $distDir = Join-Path $PWD "dist/PuriPulyHeart"
 $soxrLicenseTextPath = Join-Path $PWD "src\puripuly_heart\data\licenses\COPYING.LGPL-2.1.txt"
 $soxrReleaseInputsManifestPath = Join-Path $PWD "build/soxr-release-inputs/manifest.json"
-$packagedLocalQwenRuntimeDir = Join-Path $distDir "_runtime\local_qwen"
-$packagedLocalQwenFallbackRuntimeDir = Join-Path $distDir "_internal\_runtime\local_qwen"
-if (-not (Test-Path $packagedLocalQwenRuntimeDir)) {
-    $packagedLocalQwenRuntimeDir = $packagedLocalQwenFallbackRuntimeDir
-}
-$packagedOnnxRuntimeDllPath = Join-Path $packagedLocalQwenRuntimeDir "onnxruntime.dll"
-$packagedOnnxRuntimeProvidersSharedDllPath = Join-Path $packagedLocalQwenRuntimeDir "onnxruntime_providers_shared.dll"
 $packagedSoxrRuntimeDir = Join-Path $distDir "soxr"
+$soxrRuntimeReportDir = Join-Path $PWD "build/soxr-runtime-smoke"
 $packagedSoxrDllPath = Join-Path $packagedSoxrRuntimeDir "soxr.dll"
+$packagedSoxrRuntimeReportPath = Join-Path $soxrRuntimeReportDir "packaged-soxr-runtime-check.json"
+$installedSoxrRuntimeReportPath = Join-Path $soxrRuntimeReportDir "installed-soxr-runtime-check.json"
+$reinstalledSoxrRuntimeReportPath = Join-Path $soxrRuntimeReportDir "reinstalled-soxr-runtime-check.json"
 $packagedSoxrComplianceDir = Join-Path $distDir "third_party\soxr"
 $packagedSoxrLicensePath = Join-Path $packagedSoxrComplianceDir "COPYING.LGPL-2.1.txt"
 $packagedSoxrSourceBundlePath = $null
@@ -223,6 +331,10 @@ if (-not (Test-Path $exePath)) {
     throw "Packaged executable not found: $exePath"
 }
 
+$packagedLocalQwenRuntimeDir = Resolve-PackagedLocalQwenRuntimeDir -DistDir $distDir
+$packagedOnnxRuntimeDllPath = Join-Path $packagedLocalQwenRuntimeDir "onnxruntime.dll"
+$packagedOnnxRuntimeProvidersSharedDllPath = Join-Path $packagedLocalQwenRuntimeDir "onnxruntime_providers_shared.dll"
+
 $numpyCoreExtensions = @(Get-ChildItem -Path $distDir -Filter "_multiarray_umath*.pyd" -Recurse -File -ErrorAction SilentlyContinue)
 if ($numpyCoreExtensions.Count -eq 0) {
     throw "Packaged executable is missing numpy._core._multiarray_umath in $distDir"
@@ -244,6 +356,12 @@ $packagedSoxrSourceBundlePath = Join-Path $packagedSoxrComplianceDir ([System.IO
 if (-not (Test-Path $packagedSoxrDllPath)) {
     throw "Packaged soxr runtime DLL not found: $packagedSoxrDllPath"
 }
+
+$packagedSoxrExtensions = @(Get-ChildItem -Path $packagedSoxrRuntimeDir -Filter "soxr_ext*.pyd" -File -ErrorAction SilentlyContinue)
+if ($packagedSoxrExtensions.Count -ne 1) {
+    throw "Packaged soxr runtime must contain exactly one soxr extension module in $packagedSoxrRuntimeDir; found $($packagedSoxrExtensions.Count)"
+}
+$packagedSoxrExtensionPath = $packagedSoxrExtensions[0].FullName
 
 $packagedSoxrDlls = @(Get-ChildItem -Path $distDir -Filter "soxr.dll" -Recurse -File -ErrorAction SilentlyContinue)
 if ($packagedSoxrDlls.Count -ne 1) {
@@ -323,6 +441,9 @@ if (-not (Test-Path $packagedOverlayDllPath)) {
     throw "Packaged OpenVR runtime DLL not found: $packagedOverlayDllPath"
 }
 
+Remove-Item -Recurse -Force $soxrRuntimeReportDir -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $soxrRuntimeReportDir | Out-Null
+
 Write-Host "Smoke-testing packaged executable..."
 $versionSmokeTest = Start-Process -FilePath $exePath -ArgumentList @("--version") -Wait -PassThru
 if ($versionSmokeTest.ExitCode -ne 0) {
@@ -334,10 +455,7 @@ if ($localQwenRuntimeSmokeTest.ExitCode -ne 0) {
     throw "Local Qwen runtime smoke test failed with exit code $($localQwenRuntimeSmokeTest.ExitCode)"
 }
 
-$soxrRuntimeSmokeTest = Start-Process -FilePath $exePath -ArgumentList @("soxr-runtime-check") -Wait -PassThru
-if ($soxrRuntimeSmokeTest.ExitCode -ne 0) {
-    throw "Packaged soxr runtime smoke test failed with exit code $($soxrRuntimeSmokeTest.ExitCode)"
-}
+Invoke-SoxrRuntimeSmokeCheck -ExePath $exePath -ReportPath $packagedSoxrRuntimeReportPath -ExpectedExtensionPath $packagedSoxrExtensionPath -ExpectedSoxrDllPath $packagedSoxrDllPath -Label "Packaged"
 
 $smokeTest = Start-Process -FilePath $exePath -ArgumentList @("osc-send", "ci-smoke") -Wait -PassThru
 if ($smokeTest.ExitCode -ne 0) {
@@ -388,6 +506,8 @@ $InstallerSmokeLogPath = Join-Path $env:TEMP "PuriPulyHeart-LocalSTT-Test.log"
 $InstallerReinstallSmokeLogPath = Join-Path $env:TEMP "PuriPulyHeart-LocalSTT-Test-reinstall.log"
 $installedExePath = Join-Path $InstallerSmokeDir "PuriPulyHeart.exe"
 $installedSoxrDllPath = Join-Path $InstallerSmokeDir "soxr\soxr.dll"
+$installedSoxrExtensionPath = Join-Path $InstallerSmokeDir (Join-Path "soxr" ([System.IO.Path]::GetFileName($packagedSoxrExtensionPath)))
+$legacyRootLevelSoxrDllPath = Join-Path $InstallerSmokeDir "soxr.dll"
 $installedLegacySoxrDllPath = Join-Path $InstallerSmokeDir "soxr\libsoxr.dll"
 $installedSoxrComplianceDir = Join-Path $InstallerSmokeDir "third_party\soxr"
 $installedSoxrLicensePath = Join-Path $installedSoxrComplianceDir "COPYING.LGPL-2.1.txt"
@@ -491,10 +611,7 @@ if (-not (Test-Path $installedSoxrSourceBundlePath)) {
     throw "Installed soxr source bundle not found after installer smoke: $installedSoxrSourceBundlePath"
 }
 
-$installedSoxrRuntimeSmokeTest = Start-Process -FilePath $installedExePath -ArgumentList @("soxr-runtime-check") -Wait -PassThru
-if ($installedSoxrRuntimeSmokeTest.ExitCode -ne 0) {
-    throw "Installed app soxr runtime smoke test failed with exit code $($installedSoxrRuntimeSmokeTest.ExitCode)"
-}
+Invoke-SoxrRuntimeSmokeCheck -ExePath $installedExePath -ReportPath $installedSoxrRuntimeReportPath -ExpectedExtensionPath $installedSoxrExtensionPath -ExpectedSoxrDllPath $installedSoxrDllPath -Label "Installed"
 
 $expectedInstalledSoxrDllHash = (Get-FileHash -Path $packagedSoxrDllPath -Algorithm SHA256).Hash
 $expectedInstalledSoxrLicenseHash = (Get-FileHash -Path $packagedSoxrLicensePath -Algorithm SHA256).Hash
@@ -525,6 +642,10 @@ if ($mutatedInstalledSoxrSourceBundleHash -eq $expectedInstalledSoxrSourceBundle
 [System.IO.File]::WriteAllBytes($installedLegacySoxrDllPath, [System.Text.Encoding]::ASCII.GetBytes("stale legacy runtime smoke payload"))
 if (-not (Test-Path $installedLegacySoxrDllPath)) {
     throw "Failed to seed stale legacy soxr runtime DLL before reinstall smoke"
+}
+[System.IO.File]::WriteAllBytes($legacyRootLevelSoxrDllPath, [System.Text.Encoding]::ASCII.GetBytes("stale root-level runtime smoke payload"))
+if (-not (Test-Path $legacyRootLevelSoxrDllPath)) {
+    throw "Failed to seed stale root-level soxr runtime DLL before reinstall smoke"
 }
 
 Write-Host "Smoke-testing installer reinstall replaces installed soxr runtime DLL..."
@@ -580,11 +701,11 @@ if ($reinstalledSoxrSourceBundleHash -ne $expectedInstalledSoxrSourceBundleHash)
 if (Test-Path $installedLegacySoxrDllPath) {
     throw "Installed stale legacy soxr runtime DLL was not removed by reinstall smoke: $installedLegacySoxrDllPath"
 }
-
-$installedSoxrRuntimeSmokeTestAfterReinstall = Start-Process -FilePath $installedExePath -ArgumentList @("soxr-runtime-check") -Wait -PassThru
-if ($installedSoxrRuntimeSmokeTestAfterReinstall.ExitCode -ne 0) {
-    throw "Installed app soxr runtime smoke test after reinstall failed with exit code $($installedSoxrRuntimeSmokeTestAfterReinstall.ExitCode)"
+if (Test-Path $legacyRootLevelSoxrDllPath) {
+    throw "Installed stale root-level soxr runtime DLL was not removed by reinstall smoke: $legacyRootLevelSoxrDllPath"
 }
+
+Invoke-SoxrRuntimeSmokeCheck -ExePath $installedExePath -ReportPath $reinstalledSoxrRuntimeReportPath -ExpectedExtensionPath $installedSoxrExtensionPath -ExpectedSoxrDllPath $installedSoxrDllPath -Label "Reinstalled"
 
 Write-Host "Generating SHA256..."
 $hash = (Get-FileHash -Path $installerPath -Algorithm SHA256).Hash
