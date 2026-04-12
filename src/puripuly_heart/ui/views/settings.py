@@ -127,6 +127,7 @@ class SettingsView(ft.Column):
 
         # Callbacks (assigned by App)
         self.on_settings_changed: Callable[[AppSettings], None] | None = None
+        self.on_prompt_apply_settings: Callable[[AppSettings], None] | None = None
         self.on_providers_changed: Callable[[], None] | None = None
         self.on_verify_api_key: Callable[[str, str], object] | None = None
         self.on_secret_cleared: Callable[[str], None] | None = None  # key name
@@ -2770,7 +2771,7 @@ class SettingsView(ft.Column):
         pending = self.consume_prompt_apply_settings()
         if pending is None:
             return
-        self._emit_settings_changed()
+        self._emit_prompt_apply_settings(pending)
 
     def _on_reset_prompt(self, e) -> None:
         """Reset prompt to default for current provider."""
@@ -2844,6 +2845,16 @@ class SettingsView(ft.Column):
     def _emit_settings_changed(self) -> None:
         if self._settings and self.on_settings_changed:
             self.on_settings_changed(self._sanitize_provider_apply_settings(self._settings))
+
+    def _emit_prompt_apply_settings(self, settings: AppSettings) -> None:
+        sanitized = self._sanitize_provider_apply_settings(settings)
+        if sanitized is None:
+            return
+        if self.on_prompt_apply_settings:
+            self.on_prompt_apply_settings(sanitized)
+            return
+        if self.on_settings_changed:
+            self.on_settings_changed(sanitized)
 
     # --- Locale ---
     def apply_locale(self) -> None:

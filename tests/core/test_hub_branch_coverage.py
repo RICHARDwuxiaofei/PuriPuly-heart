@@ -57,6 +57,35 @@ class StubLLM:
 
 
 @dataclass(slots=True)
+class RecordingLanguageLLM:
+    calls: list[dict[str, str]] = field(default_factory=list)
+
+    async def translate(
+        self,
+        *,
+        utterance_id: UUID,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ) -> Translation:
+        _ = system_prompt
+        self.calls.append(
+            {
+                "text": text,
+                "source_language": source_language,
+                "target_language": target_language,
+                "context": context,
+            }
+        )
+        return Translation(utterance_id=utterance_id, text=f"{target_language}:{text}")
+
+    async def close(self) -> None:
+        return None
+
+
+@dataclass(slots=True)
 class ManagedAuthFailingLLM:
     diagnostics: ManagedOpenRouterReleaseDiagnostics
     closed: bool = False
@@ -333,6 +362,124 @@ async def test_replace_stt_provider_none_stops_event_loop_and_clears_runtime_sta
     assert hub._latency_timelines == {}
 
     await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_clear_language_runtime_state_self_preserves_stt_task_and_clears_overlay_preview() -> (
+    None
+):
+    hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), clock=FakeClock())
+    self_id = uuid4()
+    standalone_id = uuid4()
+    peer_id = uuid4()
+    stt_task = asyncio.create_task(asyncio.sleep(60.0))
+    translation_task = asyncio.create_task(asyncio.sleep(60.0))
+    standalone_translation_task = asyncio.create_task(asyncio.sleep(60.0))
+    spec_task = asyncio.create_task(asyncio.sleep(60.0))
+    finalize_wait_task = asyncio.create_task(asyncio.sleep(60.0))
+    awaiting_vad_timeout_task = asyncio.create_task(asyncio.sleep(60.0))
+    resume_end_timeout_task = asyncio.create_task(asyncio.sleep(60.0))
+    all_tasks = [
+        stt_task,
+        translation_task,
+        standalone_translation_task,
+        spec_task,
+        finalize_wait_task,
+        awaiting_vad_timeout_task,
+        resume_end_timeout_task,
+    ]
+
+    hub.self_runtime.stt_task = stt_task
+    hub.self_runtime.translation_tasks[self_id] = translation_task
+    hub.self_runtime.translation_tasks[standalone_id] = standalone_translation_task
+    hub.self_runtime.get_or_create_bundle(self_id)
+    hub.self_runtime.get_or_create_bundle(standalone_id)
+    hub.self_runtime.utterance_sources[self_id] = "Mic"
+    hub.self_runtime.utterance_sources[standalone_id] = "Mic"
+    hub.self_runtime.utterance_start_times[self_id] = 1.0
+    hub.self_runtime.utterance_start_times[standalone_id] = 1.5
+    hub.self_runtime.speech_ended_ids.add(self_id)
+    hub.self_runtime.speech_ended_ids.add(standalone_id)
+    hub.self_runtime.translation_history.append(ContextEntry("history", "ko", "en", 1.0))
+    hub.self_runtime.merge_buffer = _MergeBuffer(
+        merge_id=uuid4(),
+        utterance_ids=[self_id],
+        spec_task=spec_task,
+        finalize_wait_task=finalize_wait_task,
+        awaiting_vad_timeout_task=awaiting_vad_timeout_task,
+        resume_end_timeout_task=resume_end_timeout_task,
+    )
+    hub._overlay_active_self_text = "preview"
+    hub._overlay_active_self_secondary_text = "secondary"
+    hub._record_latency_stage(
+        channel="self",
+        utterance_id=self_id,
+        stage="speech_end",
+        timestamp=1.0,
+        publish_now=False,
+    )
+    hub._record_latency_stage(
+        channel="peer",
+        utterance_id=peer_id,
+        stage="speech_end",
+        timestamp=2.0,
+        publish_now=False,
+    )
+
+    try:
+        await hub.clear_language_runtime_state(channel="self")
+
+        assert hub.self_runtime.stt_task is stt_task
+        assert hub._stt_task is stt_task
+        assert hub.self_runtime.translation_tasks == {}
+        assert hub.self_runtime.merge_buffer is None
+        assert standalone_id in hub.self_runtime.utterances
+        assert hub.self_runtime.utterance_sources == {standalone_id: "Mic"}
+        assert hub.self_runtime.utterance_start_times == {}
+        assert hub.self_runtime.speech_ended_ids == set()
+        assert hub.self_runtime.translation_history == [ContextEntry("history", "ko", "en", 1.0)]
+        assert hub._overlay_active_self_text is None
+        assert hub._overlay_active_self_secondary_text is None
+        assert ("self", self_id) not in hub._latency_timelines
+        assert ("peer", peer_id) in hub._latency_timelines
+        assert translation_task.cancelled() is True
+        assert standalone_translation_task.cancelled() is True
+        assert spec_task.cancelled() is True
+        assert finalize_wait_task.cancelled() is True
+        assert awaiting_vad_timeout_task.cancelled() is True
+        assert resume_end_timeout_task.cancelled() is True
+        assert stt_task.done() is False
+    finally:
+        for task in all_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*all_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_language_change_updates_next_self_translation_request_target() -> None:
+    llm = RecordingLanguageLLM()
+    hub = ClientHub(stt=None, llm=llm, osc=RecordingOscQueue(), clock=FakeClock())
+
+    await hub._translate_text(uuid4(), "hello")
+    hub.target_language = "ja"
+    await hub.clear_language_runtime_state(channel="self")
+    await hub._translate_text(uuid4(), "world")
+
+    assert llm.calls == [
+        {
+            "text": "hello",
+            "source_language": "ko",
+            "target_language": "en",
+            "context": "",
+        },
+        {
+            "text": "world",
+            "source_language": "ko",
+            "target_language": "ja",
+            "context": "",
+        },
+    ]
 
 
 @pytest.mark.asyncio

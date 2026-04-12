@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -209,6 +210,8 @@ class DummyHub:
         self.stop_calls = 0
         self.submit_calls: list[tuple[str, str]] = []
         self.reset_overlay_preview_calls = 0
+        self.clear_language_runtime_state_calls: list[str] = []
+        self.clear_language_runtime_state_errors: dict[str, Exception] = {}
         self.ui_events: asyncio.Queue[object] = asyncio.Queue()
 
     def clear_context(self) -> None:
@@ -228,6 +231,11 @@ class DummyHub:
 
     async def reset_overlay_preview(self) -> None:
         self.reset_overlay_preview_calls += 1
+
+    async def clear_language_runtime_state(self, *, channel: str) -> None:
+        self.clear_language_runtime_state_calls.append(channel)
+        if channel in self.clear_language_runtime_state_errors:
+            raise self.clear_language_runtime_state_errors[channel]
 
     async def replace_stt_provider(self, stt: object | None) -> None:
         old_stt = self.stt
@@ -3233,6 +3241,258 @@ async def test_apply_settings_source_language_change_reloads_settings_view(
 
 
 @pytest.mark.asyncio
+async def test_apply_settings_reloads_settings_view_for_target_only_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "en"
+    settings.languages.target_language = "ja"
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_settings=settings_view, apply_locale=lambda: None)
+    )
+    controller.settings = settings
+    controller.overlay_calibration = settings.overlay.calibration.copy()
+    controller.hub = DummyHub()
+    controller.hub.source_language = "en"
+    controller.hub.target_language = "ko"
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        _ = self
+
+    monkeypatch.setattr(controller_module, "get_locale", lambda: settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        settings
+    )
+
+    await controller.apply_settings(settings)
+
+    assert settings_view.calls == [(settings, Path("settings.json"), True)]
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_target_only_change_clears_self_language_runtime_state_without_restarting_stt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = settings
+    controller.hub = DummyHub()
+    controller.hub.source_language = settings.languages.source_language
+    controller.hub.target_language = settings.languages.target_language
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        settings
+    )
+    controller._last_peer_translation_enabled = settings.ui.peer_translation_enabled
+    controller._last_vrc_mic_sync_enabled = settings.osc.vrc_mic_intercept
+
+    replace_calls: list[str] = []
+    refresh_peer_calls: list[str] = []
+
+    updated = copy.deepcopy(settings)
+    updated.languages.target_language = "ja"
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        _ = self
+        replace_calls.append("replace")
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        _ = self
+        refresh_peer_calls.append("peer")
+
+    monkeypatch.setattr(controller_module, "get_locale", lambda: settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+
+    await controller.apply_settings(updated)
+
+    assert controller.hub.clear_language_runtime_state_calls == ["self"]
+    assert replace_calls == []
+    assert refresh_peer_calls == []
+    assert controller.hub.target_language == "ja"
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_self_target_change_clears_peer_runtime_when_peer_target_follows_self(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = settings
+    controller.hub = DummyHub()
+    controller.hub.source_language = settings.languages.source_language
+    controller.hub.target_language = settings.languages.target_language
+    controller.hub.peer_source_language = settings.languages.peer_source_language
+    controller.hub.peer_target_language = settings.languages.peer_target_language
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        settings
+    )
+    controller._last_peer_translation_enabled = settings.ui.peer_translation_enabled
+    controller._last_vrc_mic_sync_enabled = settings.osc.vrc_mic_intercept
+
+    refresh_peer_calls: list[str] = []
+
+    updated = copy.deepcopy(settings)
+    updated.languages.target_language = "ja"
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        raise AssertionError("self STT runtime should not restart for target-only change")
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        _ = self
+        refresh_peer_calls.append("peer")
+
+    monkeypatch.setattr(controller_module, "get_locale", lambda: settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+
+    await controller.apply_settings(updated)
+
+    assert controller.hub.clear_language_runtime_state_calls == ["self", "peer"]
+    assert refresh_peer_calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_self_source_change_clears_peer_runtime_when_peer_source_follows_self(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = settings
+    controller.hub = DummyHub()
+    controller.hub.source_language = settings.languages.source_language
+    controller.hub.target_language = settings.languages.target_language
+    controller.hub.peer_source_language = settings.languages.peer_source_language
+    controller.hub.peer_target_language = settings.languages.peer_target_language
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        settings
+    )
+    controller._last_peer_translation_enabled = settings.ui.peer_translation_enabled
+    controller._last_vrc_mic_sync_enabled = settings.osc.vrc_mic_intercept
+
+    replace_calls: list[str] = []
+    refresh_peer_calls: list[str] = []
+
+    updated = copy.deepcopy(settings)
+    updated.languages.source_language = "ja"
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        _ = self
+        replace_calls.append("replace")
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        _ = self
+        refresh_peer_calls.append("peer")
+
+    monkeypatch.setattr(controller_module, "get_locale", lambda: settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+
+    await controller.apply_settings(updated)
+
+    assert controller.hub.clear_language_runtime_state_calls == ["self", "peer"]
+    assert replace_calls == ["replace"]
+    assert refresh_peer_calls == ["peer"]
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_logs_and_continues_when_language_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.peer_target_language = "fr"
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = settings
+    controller.hub = DummyHub()
+    controller.hub.source_language = settings.languages.source_language
+    controller.hub.target_language = settings.languages.target_language
+    controller.hub.peer_source_language = settings.languages.peer_source_language
+    controller.hub.peer_target_language = settings.languages.peer_target_language
+    controller.hub.clear_language_runtime_state_errors["self"] = RuntimeError("cleanup boom")
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        settings
+    )
+    controller._last_peer_translation_enabled = settings.ui.peer_translation_enabled
+    controller._last_vrc_mic_sync_enabled = settings.osc.vrc_mic_intercept
+
+    errors: list[str] = []
+
+    updated = copy.deepcopy(settings)
+    updated.languages.target_language = "ja"
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        raise AssertionError("self STT runtime should not restart for target-only change")
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        raise AssertionError("peer runtime should not refresh for explicit peer target")
+
+    monkeypatch.setattr(controller_module, "get_locale", lambda: settings.ui.locale)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_refresh_local_stt_runtime_state", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_clear_local_stt_pending_enable_if_provider_switched_away",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+    monkeypatch.setattr(GuiController, "_log_error", lambda self, message: errors.append(message))
+
+    await controller.apply_settings(updated)
+
+    assert controller.hub.clear_language_runtime_state_calls == ["self"]
+    assert controller.hub.target_language == "ja"
+    assert any("cleanup boom" in message for message in errors)
+    assert any("language runtime state" in message for message in errors)
+
+
+@pytest.mark.asyncio
 async def test_apply_settings_reload_updates_overlay_calibration_baseline_without_clobbering_draft(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3676,6 +3936,145 @@ async def test_verify_api_key_routes_alibaba_singapore_to_qwen_fallback(
     assert calls == [("secret", "https://dashscope-intl.aliyuncs.com/api/v1")]
 
 
+def test_merge_settings_tab_apply_with_current_languages_preserves_all_language_fields() -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.languages.source_language = "fr"
+    controller.settings.languages.target_language = "de"
+    controller.settings.languages.peer_source_language = "ja"
+    controller.settings.languages.peer_target_language = "it"
+    controller.settings.languages.recent_source_languages = ["fr", "ko"]
+    controller.settings.languages.recent_target_languages = ["de", "en"]
+    controller.hub = DummyHub()
+    controller.hub.source_language = "es"
+    controller.hub.target_language = "pt"
+    controller.hub.peer_source_language = "zh-CN"
+    controller.hub.peer_target_language = "nl"
+
+    pending = AppSettings()
+    pending.languages.source_language = "ko"
+    pending.languages.target_language = "en"
+    pending.languages.peer_source_language = ""
+    pending.languages.peer_target_language = "ja"
+    pending.provider.stt = STTProviderName.SONIOX
+    pending.provider.peer_stt = STTProviderName.SONIOX
+    pending.provider.llm = LLMProviderName.OPENROUTER
+    pending.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    pending.openrouter.routing_mode = OpenRouterRoutingMode.NOVITA_FIRST
+    pending.qwen.llm_model = QwenLLMModel.QWEN_35_FLASH
+    pending.qwen.region = QwenRegion.SINGAPORE
+    pending.managed_identity.verified_hardware_hash = "pending-hash"
+    pending.managed_identity.verified_hardware_hash_salt_version = 7
+    pending.system_prompt = "draft prompt"
+    pending.system_prompts = {"openrouter": "draft prompt"}
+
+    merged = controller.merge_settings_tab_apply_with_current_languages(pending)
+
+    assert merged is not controller.settings
+    assert merged is not pending
+    assert merged.languages.source_language == "es"
+    assert merged.languages.target_language == "pt"
+    assert merged.languages.peer_source_language == "zh-CN"
+    assert merged.languages.peer_target_language == "nl"
+    assert merged.languages.recent_source_languages == ["fr", "ko"]
+    assert merged.languages.recent_target_languages == ["de", "en"]
+    assert merged.provider.stt == STTProviderName.SONIOX
+    assert merged.provider.peer_stt == STTProviderName.SONIOX
+    assert merged.provider.llm == LLMProviderName.OPENROUTER
+    assert merged.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert merged.openrouter.routing_mode == OpenRouterRoutingMode.NOVITA_FIRST
+    assert merged.qwen.llm_model == QwenLLMModel.QWEN_35_FLASH
+    assert merged.qwen.region == QwenRegion.SINGAPORE
+    assert merged.managed_identity.verified_hardware_hash == "pending-hash"
+    assert merged.managed_identity.verified_hardware_hash_salt_version == 7
+    assert merged.system_prompt == "draft prompt"
+    assert merged.system_prompts == {"openrouter": "draft prompt"}
+    assert merged.system_prompts is not pending.system_prompts
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_preserves_current_languages_while_applying_provider_and_prompt_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.languages.source_language = "fr"
+    controller.settings.languages.target_language = "de"
+    controller.settings.languages.peer_source_language = "ja"
+    controller.settings.languages.peer_target_language = "it"
+    controller.settings.languages.recent_source_languages = ["fr", "ko"]
+    controller.settings.languages.recent_target_languages = ["de", "en"]
+    controller.hub = DummyHub()
+    controller.hub.source_language = "es"
+    controller.hub.target_language = "pt"
+    controller.hub.peer_source_language = "zh-CN"
+    controller.hub.peer_target_language = "nl"
+    controller._stt_desired = False
+    controller._last_self_stt_provider_signature = controller._build_self_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_provider_signature = controller._build_peer_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_llm_provider_signature = controller._build_llm_provider_signature(
+        controller.settings
+    )
+    calls: list[str] = []
+
+    pending = AppSettings()
+    pending.languages.source_language = "ko"
+    pending.languages.target_language = "en"
+    pending.languages.peer_source_language = ""
+    pending.languages.peer_target_language = "ja"
+    pending.provider.stt = STTProviderName.SONIOX
+    pending.provider.peer_stt = STTProviderName.SONIOX
+    pending.provider.llm = LLMProviderName.OPENROUTER
+    pending.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    pending.openrouter.routing_mode = OpenRouterRoutingMode.NOVITA_FIRST
+    pending.managed_identity.verified_hardware_hash = "pending-hash"
+    pending.managed_identity.verified_hardware_hash_salt_version = 5
+    pending.system_prompt = "draft prompt"
+    pending.system_prompts = {"openrouter": "draft prompt"}
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+
+    async def fake_rebuild_stt_provider(self) -> None:
+        calls.append("rebuild_stt")
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        calls.append("peer")
+
+    async def fake_rebuild_llm_provider(self) -> None:
+        calls.append("llm")
+
+    monkeypatch.setattr(GuiController, "_rebuild_stt_provider", fake_rebuild_stt_provider)
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+
+    await controller.apply_providers(pending)
+
+    assert controller.settings.languages.source_language == "es"
+    assert controller.settings.languages.target_language == "pt"
+    assert controller.settings.languages.peer_source_language == "zh-CN"
+    assert controller.settings.languages.peer_target_language == "nl"
+    assert controller.settings.languages.recent_source_languages == ["fr", "ko"]
+    assert controller.settings.languages.recent_target_languages == ["de", "en"]
+    assert controller.hub.source_language == "es"
+    assert controller.hub.target_language == "pt"
+    assert controller.hub.peer_source_language == "zh-CN"
+    assert controller.hub.peer_target_language == "nl"
+    assert controller.settings.provider.stt == STTProviderName.SONIOX
+    assert controller.settings.provider.peer_stt == STTProviderName.SONIOX
+    assert controller.settings.provider.llm == LLMProviderName.OPENROUTER
+    assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert controller.settings.openrouter.routing_mode == OpenRouterRoutingMode.NOVITA_FIRST
+    assert controller.settings.managed_identity.verified_hardware_hash == "pending-hash"
+    assert controller.settings.managed_identity.verified_hardware_hash_salt_version == 5
+    assert controller.settings.system_prompt == "draft prompt"
+    assert controller.settings.system_prompts == {"openrouter": "draft prompt"}
+    assert calls == ["llm", "peer", "rebuild_stt"]
+
+
 @pytest.mark.asyncio
 async def test_apply_providers_replaces_runtime_self_stt_once_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
@@ -3716,7 +4115,7 @@ async def test_apply_providers_replaces_runtime_self_stt_once_when_enabled(
 
     await controller.apply_providers(updated)
 
-    assert controller.settings is updated
+    assert controller.settings.provider.stt == STTProviderName.SONIOX
     assert calls == ["replace"]
 
 

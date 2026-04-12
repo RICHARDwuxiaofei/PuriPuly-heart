@@ -199,6 +199,28 @@ def test_prompt_draft_survives_provider_round_trip_until_commit(monkeypatch) -> 
     assert settings.system_prompt == "GEMINI CUSTOM"
 
 
+def test_prompt_commit_uses_prompt_apply_callback_without_generic_settings_emit(
+    monkeypatch,
+) -> None:
+    settings = AppSettings()
+    prompt_applied: list[AppSettings] = []
+    generic_changed: list[AppSettings] = []
+
+    view = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_prompt_apply_settings = lambda incoming: prompt_applied.append(incoming)
+    view.on_settings_changed = lambda incoming: generic_changed.append(incoming)
+
+    view._on_prompt_change("custom prompt")
+    view._on_prompt_commit("custom prompt")
+
+    assert view.has_pending_prompt_changes is False
+    assert len(prompt_applied) == 1
+    assert prompt_applied[0].system_prompt == "custom prompt"
+    assert prompt_applied[0].system_prompts[view._active_prompt_key()] == "custom prompt"
+    assert generic_changed == []
+
+
 def test_settings_view_llm_modal_orders_qwen_plus_before_flash(monkeypatch) -> None:
     settings = AppSettings()
     view = _make_settings_view(monkeypatch)

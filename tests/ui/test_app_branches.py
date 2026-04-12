@@ -10,12 +10,14 @@ pytest.importorskip("flet")
 import flet as ft
 
 import puripuly_heart.ui.app as app_module
+from puripuly_heart.config.settings import AppSettings
 from puripuly_heart.ui.app import TranslatorApp, _check_and_notify_update
 
 
 class DummyPage:
     def __init__(self) -> None:
         self.opened: list[object] = []
+        self.closed: list[object] = []
         self.tasks: list[object] = []
         self.title: str = ""
         self.theme = None
@@ -33,9 +35,15 @@ class DummyPage:
             min_height=0,
             icon="",
         )
+        self.dialog = None
 
     def open(self, control) -> None:
         self.opened.append(control)
+
+    def close(self, control) -> None:
+        self.closed.append(control)
+        if self.dialog is control:
+            self.dialog = None
 
     def run_task(self, coro_fn) -> None:
         self.tasks.append(coro_fn)
@@ -115,6 +123,7 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
         def __init__(self) -> None:
             super().__init__()
             self.on_settings_changed = None
+            self.on_prompt_apply_settings = None
             self.on_providers_changed = None
             self.on_verify_api_key = None
             self.on_secret_cleared = None
@@ -179,6 +188,7 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert app.view_dashboard.on_toggle_overlay == app._on_overlay_toggle
     assert app.view_dashboard.on_toggle_peer_translation == app._on_peer_translation_toggle
     assert app.view_settings.on_verify_api_key == app._on_verify_api_key
+    assert app.view_settings.on_prompt_apply_settings == app._on_prompt_apply_settings
     assert not hasattr(app.view_settings, "on_overlay_toggle")
     assert not hasattr(app.view_settings, "on_peer_translation_toggle")
     assert app.view_settings.runtime_log_basic == app.controller.log_basic
@@ -241,6 +251,46 @@ async def test_main_gui_routes_update_check_through_app_log_helper(
     assert seen["check"][0] is page
     assert getattr(seen["check"][1], "__self__", None) is seen["app"]
     assert getattr(seen["check"][1], "__func__", None) is FakeApp._log_detailed
+
+
+@pytest.mark.asyncio
+async def test_on_nav_change_merges_current_languages_into_prompt_only_apply() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._current_tab = 1
+    app.view_dashboard = object()
+    app.view_logs = SimpleNamespace(scroll_to_bottom=lambda: asyncio.sleep(0))
+    app.view_about = object()
+    pending_settings = object()
+    merged_settings = object()
+    app.view_settings = SimpleNamespace(
+        has_provider_changes=False,
+        has_pending_prompt_changes=True,
+        consume_prompt_apply_settings=lambda: pending_settings,
+        refresh_prompt_if_empty=lambda: None,
+    )
+    app.content_area = DummyContent()
+    events: list[tuple[str, object]] = []
+
+    def fake_merge_settings(settings) -> object:
+        events.append(("merge", settings))
+        return merged_settings
+
+    async def fake_apply_settings(settings) -> None:
+        events.append(("apply", settings))
+
+    app.controller = SimpleNamespace(
+        merge_settings_tab_apply_with_current_languages=fake_merge_settings,
+        apply_settings=fake_apply_settings,
+        apply_providers=lambda _settings=None: asyncio.sleep(0),
+    )
+
+    app._on_nav_change(0)
+
+    assert app.content_area.content is app.view_dashboard
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert events == [("merge", pending_settings), ("apply", merged_settings)]
 
 
 @pytest.mark.asyncio
@@ -312,19 +362,27 @@ async def test_on_nav_change_applies_pending_prompt_changes_when_leaving_setting
     app.view_dashboard = object()
     app.view_logs = SimpleNamespace(scroll_to_bottom=lambda: asyncio.sleep(0))
     app.view_about = object()
+    pending_settings = object()
+    merged_settings = object()
+    merge_calls: list[object] = []
     app.view_settings = SimpleNamespace(
         has_provider_changes=False,
         has_pending_prompt_changes=True,
-        consume_prompt_apply_settings=lambda: "prompt-settings",
+        consume_prompt_apply_settings=lambda: pending_settings,
         refresh_prompt_if_empty=lambda: None,
     )
     app.content_area = DummyContent()
     seen: list[object] = []
 
+    def fake_merge_settings(settings) -> object:
+        merge_calls.append(settings)
+        return merged_settings
+
     async def fake_apply_settings(settings) -> None:
         seen.append(settings)
 
     app.controller = SimpleNamespace(
+        merge_settings_tab_apply_with_current_languages=fake_merge_settings,
         apply_settings=fake_apply_settings,
         apply_providers=lambda _settings=None: asyncio.sleep(0),
     )
@@ -334,7 +392,216 @@ async def test_on_nav_change_applies_pending_prompt_changes_when_leaving_setting
     assert app.content_area.content is app.view_dashboard
     assert len(app.page.tasks) == 1
     await app.page.tasks[0]()
-    assert seen == ["prompt-settings"]
+    assert merge_calls == [pending_settings]
+    assert seen == [merged_settings]
+
+
+@pytest.mark.asyncio
+async def test_on_prompt_apply_settings_merges_current_languages_before_apply_settings() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    pending_settings = object()
+    merged_settings = object()
+    events: list[tuple[str, object]] = []
+
+    def fake_merge_settings(settings) -> object:
+        events.append(("merge", settings))
+        return merged_settings
+
+    async def fake_apply_settings(settings) -> None:
+        events.append(("apply", settings))
+
+    app.controller = SimpleNamespace(
+        merge_settings_tab_apply_with_current_languages=fake_merge_settings,
+        apply_settings=fake_apply_settings,
+    )
+
+    app._on_prompt_apply_settings(pending_settings)
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert events == [("merge", pending_settings), ("apply", merged_settings)]
+
+
+@pytest.mark.asyncio
+async def test_prompt_apply_keeps_dashboard_target_for_next_request() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    pending_settings = AppSettings()
+    pending_settings.languages.target_language = "en"
+    merged_settings = AppSettings()
+    merged_settings.languages.target_language = "ja"
+    applied_targets: list[str] = []
+
+    def fake_merge_settings(settings: AppSettings) -> AppSettings:
+        assert settings is pending_settings
+        return merged_settings
+
+    async def fake_apply_settings(settings: AppSettings) -> None:
+        applied_targets.append(settings.languages.target_language)
+
+    app.controller = SimpleNamespace(
+        merge_settings_tab_apply_with_current_languages=fake_merge_settings,
+        apply_settings=fake_apply_settings,
+    )
+
+    app._on_prompt_apply_settings(pending_settings)
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert pending_settings.languages.target_language == "en"
+    assert applied_targets == ["ja"]
+
+
+@pytest.mark.asyncio
+async def test_on_settings_changed_applies_raw_settings_without_prompt_merge() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    raw_settings = object()
+    seen: list[object] = []
+
+    def fake_merge_settings(_settings) -> object:
+        raise AssertionError("prompt merge should not run for generic settings changes")
+
+    async def fake_apply_settings(settings) -> None:
+        seen.append(settings)
+
+    app.controller = SimpleNamespace(
+        merge_settings_tab_apply_with_current_languages=fake_merge_settings,
+        apply_settings=fake_apply_settings,
+    )
+
+    app._on_settings_changed(raw_settings)
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert seen == [raw_settings]
+
+
+@pytest.mark.asyncio
+async def test_queue_orders_generic_settings_change_before_prompt_apply() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    raw_settings = object()
+    pending_settings = object()
+    merged_settings = object()
+    events: list[tuple[str, object]] = []
+
+    def fake_merge_settings(settings) -> object:
+        events.append(("merge", settings))
+        return merged_settings
+
+    async def fake_apply_settings(settings) -> None:
+        events.append(("apply", settings))
+
+    app.controller = SimpleNamespace(
+        merge_settings_tab_apply_with_current_languages=fake_merge_settings,
+        apply_settings=fake_apply_settings,
+    )
+
+    app._on_settings_changed(raw_settings)
+    app._on_prompt_apply_settings(pending_settings)
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+
+    assert events == [
+        ("apply", raw_settings),
+        ("merge", pending_settings),
+        ("apply", merged_settings),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_queue_orders_generic_settings_change_before_provider_apply_on_settings_exit() -> (
+    None
+):
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._current_tab = 1
+    raw_settings = object()
+    provider_settings = object()
+    app.view_dashboard = object()
+    app.view_logs = SimpleNamespace(scroll_to_bottom=lambda: asyncio.sleep(0))
+    app.view_about = object()
+    app.view_settings = SimpleNamespace(
+        has_provider_changes=True,
+        consume_provider_apply_settings=lambda: provider_settings,
+        refresh_prompt_if_empty=lambda: None,
+    )
+    app.content_area = DummyContent()
+    events: list[tuple[str, object]] = []
+
+    async def fake_apply_settings(settings) -> None:
+        events.append(("settings", settings))
+
+    async def fake_apply_providers(settings) -> None:
+        events.append(("providers", settings))
+
+    app.controller = SimpleNamespace(
+        apply_settings=fake_apply_settings,
+        apply_providers=fake_apply_providers,
+    )
+
+    app._on_settings_changed(raw_settings)
+    app._on_nav_change(0)
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+
+    assert events == [("settings", raw_settings), ("providers", provider_settings)]
+
+
+def test_on_nav_change_closes_open_dialog_before_switching_tabs() -> None:
+    events: list[tuple[str, object]] = []
+
+    class RecordingContent:
+        def __init__(self, initial) -> None:
+            self._content = initial
+
+        @property
+        def content(self):
+            return self._content
+
+        @content.setter
+        def content(self, value) -> None:
+            events.append(("content", value))
+            self._content = value
+
+        def update(self) -> None:
+            events.append(("update", self._content))
+
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = object()
+    app.page.dialog = dialog
+
+    def fake_close(control) -> None:
+        events.append(("close", control))
+        app.page.closed.append(control)
+        if app.page.dialog is control:
+            app.page.dialog = None
+
+    app.page.close = fake_close
+    app._current_tab = 0
+    app.view_dashboard = object()
+    app.view_settings = SimpleNamespace(
+        has_provider_changes=False,
+        refresh_prompt_if_empty=lambda: None,
+    )
+    app.view_logs = SimpleNamespace(scroll_to_bottom=lambda: asyncio.sleep(0))
+    app.view_about = object()
+    app.content_area = RecordingContent(app.view_dashboard)
+    app.controller = SimpleNamespace(apply_providers=lambda _settings=None: asyncio.sleep(0))
+
+    app._on_nav_change(1)
+
+    assert events[:3] == [
+        ("close", dialog),
+        ("content", app.view_settings),
+        ("update", app.view_settings),
+    ]
+    assert app.page.closed == [dialog]
 
 
 def test_apply_locale_updates_views_and_page(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -443,7 +710,7 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
     app._on_settings_changed("settings")
     app._on_providers_changed()
 
-    assert len(app.page.tasks) == 7
+    assert len(app.page.tasks) == 6
     for task_fn in app.page.tasks:
         await task_fn()
 

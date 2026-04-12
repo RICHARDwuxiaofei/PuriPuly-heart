@@ -756,6 +756,14 @@ class ClientHub:
     def _runtime_for_channel(self, channel: ChannelId) -> ChannelRuntime:
         return self.self_runtime if channel == "self" else self.peer_runtime
 
+    async def clear_language_runtime_state(self, *, channel: ChannelId) -> None:
+        runtime = self._runtime_for_channel(channel)
+        await runtime.clear_live_translation_state()
+        self._clear_latency_state(channel=channel)
+        if channel == "self":
+            await self.reset_overlay_preview()
+            self._sync_self_runtime_aliases()
+
     def _runtime_for_utterance(
         self, utterance_id: UUID, *, default_channel: ChannelId = "self"
     ) -> ChannelRuntime:

@@ -621,6 +621,53 @@ class GuiController:
         self._last_llm_provider_signature = self._build_llm_provider_signature(settings)
         self._last_peer_translation_enabled = settings.ui.peer_translation_enabled
 
+    def _copy_provider_prompt_apply_fields(self, source: AppSettings, target: AppSettings) -> None:
+        target.provider.stt = source.provider.stt
+        target.provider.peer_stt = source.provider.peer_stt
+        target.provider.llm = source.provider.llm
+        target.peer_qwen_asr_stt.model = source.peer_qwen_asr_stt.model
+        target.peer_qwen_asr_stt.region = source.peer_qwen_asr_stt.region
+        target.peer_soniox_stt.model = source.peer_soniox_stt.model
+        target.gemini.llm_model = source.gemini.llm_model
+        target.openrouter.llm_model = source.openrouter.llm_model
+        target.openrouter.routing_mode = source.openrouter.routing_mode
+        target.openrouter.selected_source = source.openrouter.selected_source
+        target.qwen.llm_model = source.qwen.llm_model
+        target.qwen.region = source.qwen.region
+        if source.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
+            target.managed_identity.verified_hardware_hash = (
+                source.managed_identity.verified_hardware_hash
+            )
+            target.managed_identity.verified_hardware_hash_salt_version = (
+                source.managed_identity.verified_hardware_hash_salt_version
+            )
+        else:
+            target.managed_identity.verified_hardware_hash = None
+            target.managed_identity.verified_hardware_hash_salt_version = None
+        target.system_prompt = source.system_prompt
+        target.system_prompts = copy.deepcopy(source.system_prompts)
+
+    def merge_settings_tab_apply_with_current_languages(self, pending: AppSettings) -> AppSettings:
+        if self.settings is None:
+            return copy.deepcopy(pending)
+
+        merged = copy.deepcopy(self.settings)
+        self._copy_provider_prompt_apply_fields(pending, merged)
+        if self.hub is not None:
+            merged.languages.source_language = self.hub.source_language
+            merged.languages.target_language = self.hub.target_language
+            merged.languages.peer_source_language = getattr(
+                self.hub,
+                "peer_source_language",
+                merged.languages.peer_source_language,
+            )
+            merged.languages.peer_target_language = getattr(
+                self.hub,
+                "peer_target_language",
+                merged.languages.peer_target_language,
+            )
+        return merged
+
     def _peer_runtime_should_be_active(self, settings: AppSettings) -> bool:
         return bool(
             settings.ui.peer_translation_enabled
@@ -1516,6 +1563,9 @@ class GuiController:
         await self.apply_settings(updated)
 
     async def apply_settings(self, settings: AppSettings) -> None:
+        def _effective_peer_language(language: str, peer_language: str) -> str:
+            return peer_language or language
+
         prev_locale = get_locale()
         prev_overlay_enabled = (
             self.settings.ui.overlay_enabled if self.settings is not None else False
@@ -1532,12 +1582,44 @@ class GuiController:
         # hub.source_language를 기준으로 비교 (settings 객체는 이미 수정되어 전달될 수 있음)
         prev_source_lang = self.hub.source_language if self.hub else None
         prev_target_lang = self.hub.target_language if self.hub else None
+        prev_peer_source_lang = (
+            getattr(self.hub, "peer_source_language", None) if self.hub else None
+        )
+        prev_peer_target_lang = (
+            getattr(self.hub, "peer_target_language", None) if self.hub else None
+        )
+        prev_effective_peer_source = (
+            _effective_peer_language(prev_source_lang, prev_peer_source_lang)
+            if prev_source_lang is not None and prev_peer_source_lang is not None
+            else None
+        )
+        prev_effective_peer_target = (
+            _effective_peer_language(prev_target_lang, prev_peer_target_lang)
+            if prev_target_lang is not None and prev_peer_target_lang is not None
+            else None
+        )
         prev_low_latency = self.hub.low_latency_mode if self.hub else None
         source_language_changed = (
             prev_source_lang is not None and prev_source_lang != settings.languages.source_language
         )
         target_language_changed = (
             prev_target_lang is not None and prev_target_lang != settings.languages.target_language
+        )
+        effective_peer_source_changed = (
+            prev_effective_peer_source is not None
+            and prev_effective_peer_source
+            != _effective_peer_language(
+                settings.languages.source_language,
+                settings.languages.peer_source_language,
+            )
+        )
+        effective_peer_target_changed = (
+            prev_effective_peer_target is not None
+            and prev_effective_peer_target
+            != _effective_peer_language(
+                settings.languages.target_language,
+                settings.languages.peer_target_language,
+            )
         )
         if source_language_changed or target_language_changed:
             presenter = self._overlay_presenter
@@ -1590,6 +1672,17 @@ class GuiController:
             self.hub.chatbox_include_source = settings.osc.chatbox_include_source
             self._sync_effective_hub_flags(settings)
 
+            async def _clear_language_runtime_state(channel: str) -> None:
+                try:
+                    await self.hub.clear_language_runtime_state(channel=channel)
+                except Exception as exc:
+                    self._log_error(f"Failed to clear language runtime state for {channel}: {exc}")
+
+            if source_language_changed or target_language_changed:
+                await _clear_language_runtime_state("self")
+            if effective_peer_source_changed or effective_peer_target_changed:
+                await _clear_language_runtime_state("peer")
+
         presenter = self._overlay_presenter
         if presenter is not None:
             await presenter.update_display_preferences(
@@ -1635,7 +1728,7 @@ class GuiController:
         if should_restart_stt:
             await self._replace_runtime_stt_provider()
 
-        if source_language_changed:
+        if source_language_changed or target_language_changed:
             view_settings = getattr(self.app, "view_settings", None)
             if view_settings is not None:
                 with contextlib.suppress(Exception):
@@ -1694,7 +1787,11 @@ class GuiController:
             return False, str(exc)
 
     async def apply_providers(self, settings: AppSettings | None = None) -> None:
-        next_settings = settings or self.settings
+        next_settings = (
+            self.settings
+            if settings is None
+            else self.merge_settings_tab_apply_with_current_languages(settings)
+        )
         if next_settings is None:
             return
 

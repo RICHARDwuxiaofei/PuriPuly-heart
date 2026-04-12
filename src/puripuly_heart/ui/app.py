@@ -48,6 +48,7 @@ class TranslatorApp:
         self.view_dashboard.on_language_change = self._on_language_change
 
         self.view_settings.on_settings_changed = self._on_settings_changed
+        self.view_settings.on_prompt_apply_settings = self._on_prompt_apply_settings
         self.view_settings.on_providers_changed = self._on_providers_changed
         self.view_settings.on_verify_api_key = self._on_verify_api_key
         self.view_settings.on_secret_cleared = self._on_secret_cleared
@@ -127,9 +128,44 @@ class TranslatorApp:
 
         self.page.add(ft.Container(content=self.layout, expand=True, padding=0))
 
+    def _close_open_dialog_for_navigation(self) -> None:
+        dialog = getattr(self.page, "dialog", None)
+        close_dialog = getattr(self.page, "close", None)
+        if dialog is None or not callable(close_dialog):
+            return
+        try:
+            close_dialog(dialog)
+        except Exception:
+            logger.exception("Failed to close dialog during navigation")
+
+    def _queue_settings_mutation_task(self, task_factory) -> None:
+        queue = getattr(self, "_settings_mutation_queue", None)
+        if queue is None:
+            queue = []
+            self._settings_mutation_queue = queue
+        queue.append(task_factory)
+        if getattr(self, "_settings_mutation_worker_active", False):
+            return
+        self._settings_mutation_worker_active = True
+
+        async def _worker():
+            try:
+                while self._settings_mutation_queue:
+                    next_task = self._settings_mutation_queue.pop(0)
+                    try:
+                        await next_task()
+                    except Exception:
+                        logger.exception("Settings mutation task failed")
+            finally:
+                self._settings_mutation_worker_active = False
+
+        self.page.run_task(_worker)
+
     def _on_nav_change(self, index: int):
         # Track previous tab for Settings auto-apply
         previous_tab = getattr(self, "_current_tab", 0)
+        if previous_tab != index:
+            self._close_open_dialog_for_navigation()
         self._current_tab = index
 
         # Auto-apply Settings changes when leaving Settings (tab 1)
@@ -142,15 +178,20 @@ class TranslatorApp:
                     async def _task():
                         await self.controller.apply_providers(pending_settings)
 
-                    self.page.run_task(_task)
+                    self._queue_settings_mutation_task(_task)
             elif getattr(self.view_settings, "has_pending_prompt_changes", False):
                 pending_settings = self.view_settings.consume_prompt_apply_settings()
                 if pending_settings is not None:
 
                     async def _task():
-                        await self.controller.apply_settings(pending_settings)
+                        merged_settings = (
+                            self.controller.merge_settings_tab_apply_with_current_languages(
+                                pending_settings
+                            )
+                        )
+                        await self.controller.apply_settings(merged_settings)
 
-                    self.page.run_task(_task)
+                    self._queue_settings_mutation_task(_task)
 
         if index == 0:
             self.content_area.content = self.view_dashboard
@@ -326,13 +367,22 @@ class TranslatorApp:
                 peer_target_code=peer_target_code,
             )
 
-        self.page.run_task(_task)
+        self._queue_settings_mutation_task(_task)
 
     def _on_settings_changed(self, settings) -> None:
         async def _task():
             await self.controller.apply_settings(settings)
 
-        self.page.run_task(_task)
+        self._queue_settings_mutation_task(_task)
+
+    def _on_prompt_apply_settings(self, settings) -> None:
+        async def _task():
+            merged_settings = self.controller.merge_settings_tab_apply_with_current_languages(
+                settings
+            )
+            await self.controller.apply_settings(merged_settings)
+
+        self._queue_settings_mutation_task(_task)
 
     def _on_runtime_logging_mode_change(self, mode: str) -> None:
         self.controller.set_runtime_logging_mode(mode)
@@ -342,7 +392,7 @@ class TranslatorApp:
         async def _task():
             await self.controller.apply_providers()
 
-        self.page.run_task(_task)
+        self._queue_settings_mutation_task(_task)
 
     async def _on_verify_api_key(self, provider: str, key: str) -> tuple[bool, str]:
         success, msg = await self.controller.verify_api_key(provider, key)
