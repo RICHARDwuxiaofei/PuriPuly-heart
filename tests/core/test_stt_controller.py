@@ -105,6 +105,60 @@ class FakeBackend:
 
 
 @dataclass(slots=True)
+class Float32Session:
+    audio_f32: list[np.ndarray]
+    audio_bytes: list[bytes]
+    _queue: asyncio.Queue
+    calls: list[str]
+    _closed: bool = False
+
+    def __init__(self) -> None:
+        self.audio_f32 = []
+        self.audio_bytes = []
+        self._queue = asyncio.Queue()
+        self.calls = []
+
+    async def send_audio(self, pcm16le: bytes) -> None:
+        self.audio_bytes.append(pcm16le)
+
+    async def send_audio_f32(self, samples_f32: np.ndarray) -> None:
+        self.audio_f32.append(np.asarray(samples_f32, dtype=np.float32).copy())
+
+    async def stop(self) -> None:
+        self.calls.append("stop")
+        await self._queue.put(None)
+
+    async def on_speech_end(self, *, trailing_silence_ms: int | None = None) -> None:
+        _ = trailing_silence_ms
+        self.calls.append("on_speech_end")
+
+    async def close(self) -> None:
+        self._closed = True
+        self.calls.append("close")
+        await self._queue.put(None)
+
+    async def events(self):
+        while True:
+            item = await self._queue.get()
+            if item is None:
+                return
+            yield item
+
+
+@dataclass(slots=True)
+class Float32Backend:
+    sessions: list[Float32Session]
+
+    def __init__(self) -> None:
+        self.sessions = []
+
+    async def open_session(self) -> Float32Session:
+        session = Float32Session()
+        self.sessions.append(session)
+        return session
+
+
+@dataclass(slots=True)
 class EventOnlySession:
     items: list[object]
 
@@ -235,6 +289,26 @@ async def test_stt_controller_connects_on_speech_start():
     await stt.close()
 
 
+async def test_stt_controller_prefers_float32_session_audio_path() -> None:
+    backend = Float32Backend()
+    stt = ManagedSTTProvider(backend=backend, sample_rate_hz=16000, reset_deadline_s=90.0)
+
+    uid = uuid4()
+    chunk = np.array([0.123456, -0.234567, 0.9999], dtype=np.float32)
+    stream = stt.events()
+    await stt.handle_vad_event(
+        SpeechStart(uid, pre_roll=np.zeros(0, dtype=np.float32), chunk=chunk)
+    )
+    await _next_state(stream, STTSessionState.STREAMING)
+
+    session = backend.sessions[0]
+    assert session.audio_bytes == []
+    assert len(session.audio_f32) == 1
+    np.testing.assert_array_equal(session.audio_f32[0], chunk)
+
+    await stt.close()
+
+
 async def test_stt_controller_resets_with_bridging_during_speech():
     """Timer-based reset triggers bridging when speaking at deadline."""
     backend = FakeBackend()
@@ -268,6 +342,36 @@ async def test_stt_controller_resets_with_bridging_during_speech():
     finally:
         await stt.close()
         runtime_logging.close()
+
+
+async def test_stt_controller_resets_with_bridging_uses_float32_fast_path() -> None:
+    backend = Float32Backend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        reset_deadline_s=0.1,
+        drain_timeout_s=0.05,
+        bridging_ms=64,
+        finalize_grace_s=0.0,
+    )
+
+    try:
+        uid = uuid4()
+        chunk = np.array([0.123456, -0.234567, 0.9999], dtype=np.float32)
+        stream = stt.events()
+        await stt.handle_vad_event(
+            SpeechStart(uid, pre_roll=np.zeros(0, dtype=np.float32), chunk=chunk)
+        )
+        await _next_state(stream, STTSessionState.STREAMING)
+
+        await asyncio.sleep(0.15)
+
+        assert len(backend.sessions) == 2
+        assert backend.sessions[1].audio_bytes == []
+        assert len(backend.sessions[1].audio_f32) == 1
+        np.testing.assert_array_equal(backend.sessions[1].audio_f32[0], chunk)
+    finally:
+        await stt.close()
 
 
 async def test_stt_controller_resets_on_silence():

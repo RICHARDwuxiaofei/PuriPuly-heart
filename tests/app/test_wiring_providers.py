@@ -37,6 +37,7 @@ from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
 from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterLLMProvider
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
+from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
@@ -335,6 +336,7 @@ def test_create_stt_backend_deepgram_uses_settings_and_secret() -> None:
         provider=ProviderSettings(stt=STTProviderName.DEEPGRAM),
         deepgram_stt=DeepgramSTTSettings(model="nova-3"),
     )
+    settings.audio.internal_sample_rate_hz = 8000
     secrets = InMemorySecretStore()
     secrets.set("deepgram_api_key", "k3")
 
@@ -342,7 +344,7 @@ def test_create_stt_backend_deepgram_uses_settings_and_secret() -> None:
     assert isinstance(backend, DeepgramRealtimeSTTBackend)
     assert backend.api_key == "k3"
     assert backend.model == "nova-3"
-    assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
+    assert backend.sample_rate_hz == 16000
     assert backend.language == get_deepgram_language(settings.languages.source_language)
     assert list(backend.keyterms) == ["아이리", "시나노"]
 
@@ -369,13 +371,14 @@ def test_create_stt_backend_local_qwen_uses_shared_model_path_without_secret() -
     settings = AppSettings(
         provider=ProviderSettings(stt=STTProviderName.LOCAL_QWEN),
     )
+    settings.audio.internal_sample_rate_hz = 8000
     secrets = InMemorySecretStore()
 
     backend = create_stt_backend(settings, secrets=secrets)
 
     assert isinstance(backend, LocalQwenSherpaSTTBackend)
     assert backend.model_dir == default_local_stt_model_dir()
-    assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
+    assert backend.sample_rate_hz == 16000
     assert backend.stream_label == "self"
 
 
@@ -400,6 +403,7 @@ def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None
         provider=ProviderSettings(stt=STTProviderName.SONIOX),
         deepgram_stt=DeepgramSTTSettings(model="nova-3"),
     )
+    settings.audio.internal_sample_rate_hz = 8000
     secrets = InMemorySecretStore()
     secrets.set("deepgram_api_key", "peer-k")
 
@@ -408,7 +412,7 @@ def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None
     assert isinstance(backend, DeepgramRealtimeSTTBackend)
     assert backend.api_key == "peer-k"
     assert backend.model == "nova-3"
-    assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
+    assert backend.sample_rate_hz == 16000
     assert backend.language == get_deepgram_language(settings.languages.source_language)
     assert list(backend.keyterms) == ["아이리", "시나노"]
     assert backend.stream_label == "peer"
@@ -500,14 +504,14 @@ def test_build_peer_stt_provider_signature_includes_backend_affecting_values() -
     assert 350 in signature
 
 
-def test_build_peer_stt_provider_signature_includes_sample_rate_hz() -> None:
+def test_build_peer_stt_provider_signature_uses_fixed_16khz_runtime_contract() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.QWEN_ASR
-    settings.audio.internal_sample_rate_hz = 48000
+    settings.audio.internal_sample_rate_hz = 8000
 
     signature = build_peer_stt_provider_signature(settings)
 
-    assert 48000 in signature
+    assert signature[2] == 16000
 
 
 def test_resolve_peer_stt_config_inherits_peer_qwen_model_until_override() -> None:
@@ -527,18 +531,31 @@ def test_resolve_peer_stt_config_inherits_peer_qwen_model_until_override() -> No
     assert resolved.qwen_model == "peer-qwen-asr"
 
 
-def test_create_peer_stt_backend_uses_peer_local_qwen_provider_and_sample_rate() -> None:
+def test_create_peer_stt_backend_uses_peer_local_qwen_provider_and_fixed_sample_rate() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
-    settings.audio.internal_sample_rate_hz = 44100
+    settings.audio.internal_sample_rate_hz = 8000
     secrets = InMemorySecretStore()
 
     backend = create_peer_stt_backend(settings, secrets=secrets)
 
     assert isinstance(backend, LocalQwenSherpaSTTBackend)
     assert backend.model_dir == default_local_stt_model_dir()
-    assert backend.sample_rate_hz == 44100
+    assert backend.sample_rate_hz == 16000
     assert backend.stream_label == "peer"
+
+
+def test_managed_stt_provider_rejects_legacy_8khz_runtime_sample_rate() -> None:
+    with pytest.raises(ValueError, match="16000"):
+        ManagedSTTProvider(backend=None, sample_rate_hz=8000)  # type: ignore[arg-type]
+
+
+def test_local_qwen_sherpa_backend_rejects_legacy_8khz_runtime_sample_rate() -> None:
+    with pytest.raises(ValueError, match="16000"):
+        LocalQwenSherpaSTTBackend(
+            model_dir=default_local_stt_model_dir(),
+            sample_rate_hz=8000,
+        )
 
 
 def test_create_peer_stt_backend_local_qwen_uses_peer_language_without_hotwords() -> None:
@@ -600,6 +617,7 @@ def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:
             model="qwen3-asr-flash-realtime",
         ),
     )
+    settings.audio.internal_sample_rate_hz = 8000
     secrets = InMemorySecretStore()
     # Default region is Beijing, so we need alibaba_api_key_beijing
     secrets.set("alibaba_api_key_beijing", "k4")
@@ -610,7 +628,7 @@ def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:
     assert backend.model == "qwen3-asr-flash-realtime"
     # Endpoint is derived from region (Beijing default)
     assert backend.endpoint == "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
-    assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
+    assert backend.sample_rate_hz == 16000
     assert backend.language == get_qwen_asr_language(settings.languages.source_language)
 
 

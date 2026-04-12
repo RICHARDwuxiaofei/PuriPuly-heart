@@ -4,14 +4,18 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from puripuly_heart.app.headless_mic import HeadlessMicInitializationError, HeadlessMicRunner
 from puripuly_heart.app.headless_stdin import HeadlessStdinRunner
 from puripuly_heart.app.local_qwen_runtime_check import run_local_qwen_runtime_check
+from puripuly_heart.app.soxr_runtime_check import run_soxr_runtime_check
 from puripuly_heart.app.wiring import create_llm_provider, create_secret_store
 from puripuly_heart.config.paths import default_settings_path, default_vad_model_path
 from puripuly_heart.config.settings import AppSettings, load_settings
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.runtime_logging import configure_main_logging
+from puripuly_heart.core.soxr_runtime import (
+    SoxrRuntimeAvailabilityError,
+    ensure_soxr_runtime_available_for_startup,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,6 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
         "local-qwen-runtime-check",
         help="Verify the Local Qwen Windows runtime DLL directory",
     )
+    sub.add_parser(
+        "soxr-runtime-check",
+        help="Verify the packaged soxr runtime contract and smoke resample",
+    )
 
     sub.add_parser("run-gui", help="Run the Graphical User Interface (Flet)")
 
@@ -65,10 +73,26 @@ def _print_initialization_error(component: str, exc: Exception) -> int:
     return 2
 
 
+def _print_runtime_error(component: str, exc: Exception) -> int:
+    print(f"Error: failed to verify {component}: {exc}", flush=True)
+    return 2
+
+
+def _load_headless_mic_types():
+    from puripuly_heart.app.headless_mic import HeadlessMicInitializationError, HeadlessMicRunner
+
+    return HeadlessMicRunner, HeadlessMicInitializationError
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_main_logging()
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    try:
+        ensure_soxr_runtime_available_for_startup()
+    except SoxrRuntimeAvailabilityError as exc:
+        return _print_runtime_error("packaged soxr runtime", exc)
 
     if args.version:
         from puripuly_heart import __version__
@@ -92,6 +116,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "local-qwen-runtime-check":
         return run_local_qwen_runtime_check()
+
+    if args.command == "soxr-runtime-check":
+        return run_soxr_runtime_check()
 
     settings = _load_settings_or_default(args.config)
 
@@ -122,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(runner.run())
 
     if args.command == "run-mic":
+        HeadlessMicRunner, HeadlessMicInitializationError = _load_headless_mic_types()
         runner = HeadlessMicRunner(
             settings=settings,
             config_path=args.config,

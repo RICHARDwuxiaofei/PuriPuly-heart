@@ -10,6 +10,7 @@ from typing import Any
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
 SETTINGS_SCHEMA_VERSION = 14
+STT_INTERNAL_SAMPLE_RATE_HZ = 16000
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
@@ -103,15 +104,15 @@ class LanguageSettings:
 
 @dataclass(slots=True)
 class AudioSettings:
-    internal_sample_rate_hz: int = 16000
+    internal_sample_rate_hz: int = STT_INTERNAL_SAMPLE_RATE_HZ
     internal_channels: int = 1
     ring_buffer_ms: int = 500
     input_host_api: str = "Windows DirectSound"
     input_device: str = ""
 
     def validate(self) -> None:
-        if self.internal_sample_rate_hz not in (8000, 16000):
-            raise ValueError("internal_sample_rate_hz must be 8000 or 16000")
+        if self.internal_sample_rate_hz != STT_INTERNAL_SAMPLE_RATE_HZ:
+            raise ValueError(f"internal_sample_rate_hz must be {STT_INTERNAL_SAMPLE_RATE_HZ}")
         if self.internal_channels != 1:
             raise ValueError("internal_channels must be 1 (mono)")
         if self.ring_buffer_ms <= 0:
@@ -831,6 +832,13 @@ def _coerce_int(value: object, fallback: int) -> int:
         return fallback
 
 
+def _normalize_internal_sample_rate_hz(value: object) -> int:
+    normalized = _coerce_int(value, STT_INTERNAL_SAMPLE_RATE_HZ)
+    if normalized == 8000:
+        return STT_INTERNAL_SAMPLE_RATE_HZ
+    return normalized
+
+
 def _parse_optional_str(value: object) -> str | None:
     if not isinstance(value, str):
         return None
@@ -1093,6 +1101,18 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         version = 13
 
     if version < 14:
+        audio_data = data.get("audio")
+        if isinstance(audio_data, dict):
+            raw_internal_sample_rate_hz = audio_data.get(
+                "internal_sample_rate_hz", STT_INTERNAL_SAMPLE_RATE_HZ
+            )
+            normalized_internal_sample_rate_hz = _normalize_internal_sample_rate_hz(
+                raw_internal_sample_rate_hz
+            )
+            if raw_internal_sample_rate_hz != normalized_internal_sample_rate_hz:
+                audio_data["internal_sample_rate_hz"] = normalized_internal_sample_rate_hz
+                changed = True
+
         version = 14
 
     stt_data = data.get("stt")
@@ -1100,6 +1120,18 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         stt_data = {}
         data["stt"] = stt_data
         changed = True
+
+    audio_data = data.get("audio")
+    if isinstance(audio_data, dict):
+        raw_internal_sample_rate_hz = audio_data.get(
+            "internal_sample_rate_hz", STT_INTERNAL_SAMPLE_RATE_HZ
+        )
+        normalized_internal_sample_rate_hz = _normalize_internal_sample_rate_hz(
+            raw_internal_sample_rate_hz
+        )
+        if raw_internal_sample_rate_hz != normalized_internal_sample_rate_hz:
+            audio_data["internal_sample_rate_hz"] = normalized_internal_sample_rate_hz
+            changed = True
 
     if "custom_terms" not in stt_data:
         stt_data["custom_terms"] = _default_custom_terms()
@@ -1440,7 +1472,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             )[:6],
         ),
         audio=AudioSettings(
-            internal_sample_rate_hz=int(audio_data.get("internal_sample_rate_hz", 16000)),
+            internal_sample_rate_hz=_normalize_internal_sample_rate_hz(
+                audio_data.get("internal_sample_rate_hz", STT_INTERNAL_SAMPLE_RATE_HZ)
+            ),
             internal_channels=int(audio_data.get("internal_channels", 1)),
             ring_buffer_ms=int(audio_data.get("ring_buffer_ms", 500)),
             input_host_api=str(input_host_api_raw) if input_host_api_raw is not None else "",
