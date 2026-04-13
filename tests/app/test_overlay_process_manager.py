@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from puripuly_heart.core.overlay import openvr_vendor as openvr_vendor_module
+from puripuly_heart.core.overlay import process as process_module
 from puripuly_heart.core.overlay.manifest import OverlayLaunchManifest
+from puripuly_heart.core.overlay.openvr_vendor import VendoredOpenVrBundle
 from puripuly_heart.core.overlay.process import (
     DefaultOverlayProcessRunner,
     OverlayManagedProcess,
+    OverlayPreparationError,
     OverlayProcessManager,
 )
 
@@ -127,6 +134,124 @@ class MissingExecutableRunner:
     ) -> OverlayManagedProcess:
         _ = (executable_path, manifest_path)
         raise AssertionError("spawn should not be called")
+
+
+def _overlay_manifest() -> OverlayLaunchManifest:
+    return OverlayLaunchManifest(
+        contract_version=5,
+        app_version="test",
+        overlay_instance_id="overlay-test",
+        bridge_url="ws://127.0.0.1:8765",
+        session_token="session-token",
+        parent_pid=1234,
+        startup_deadline_ms=3000,
+        log_dir="logs",
+        log_level="INFO",
+        locale="en",
+    )
+
+
+def _write_vendored_openvr_bundle(
+    repo_root: Path,
+    *,
+    dll_bytes: bytes = b"vendored-openvr-runtime",
+) -> VendoredOpenVrBundle:
+    bundle_dir = repo_root / "third_party" / "openvr"
+    dll_path = bundle_dir / "win64" / "openvr_api.dll"
+    sha256_path = bundle_dir / "win64" / "openvr_api.dll.sha256"
+    license_path = bundle_dir / "LICENSE"
+    readme_path = bundle_dir / "README.md"
+
+    dll_path.parent.mkdir(parents=True, exist_ok=True)
+    dll_path.write_bytes(dll_bytes)
+    sha256_path.write_text(
+        f"{hashlib.sha256(dll_bytes).hexdigest()} *openvr_api.dll\n",
+        encoding="utf-8",
+    )
+    license_path.write_text("OpenVR license", encoding="utf-8")
+    readme_path.write_text("Vendored OpenVR runtime", encoding="utf-8")
+
+    return VendoredOpenVrBundle(
+        bundle_dir=bundle_dir,
+        dll_path=dll_path,
+        sha256_path=sha256_path,
+        license_path=license_path,
+        readme_path=readme_path,
+        dll_sha256=hashlib.sha256(dll_bytes).hexdigest(),
+    )
+
+
+def _make_local_dev_overlay_fixture(
+    tmp_path: Path,
+    *,
+    staged_dll_bytes: bytes | None,
+    vendored_dll_bytes: bytes = b"vendored-openvr-runtime",
+) -> tuple[Path, VendoredOpenVrBundle]:
+    repo_root = tmp_path / "repo"
+    staged = repo_root / "build" / "overlay" / "PuriPulyHeartOverlay.exe"
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_text("staged-overlay", encoding="utf-8")
+
+    overlay_source = repo_root / "native" / "overlay" / "src" / "state.rs"
+    overlay_source.parent.mkdir(parents=True, exist_ok=True)
+    overlay_source.write_text("// overlay source", encoding="utf-8")
+
+    if staged_dll_bytes is not None:
+        staged.with_name("openvr_api.dll").write_bytes(staged_dll_bytes)
+
+    base_mtime = 1_700_000_000
+    os.utime(overlay_source, (base_mtime, base_mtime))
+    os.utime(staged, (base_mtime + 60, base_mtime + 60))
+
+    return staged, _write_vendored_openvr_bundle(repo_root, dll_bytes=vendored_dll_bytes)
+
+
+def _make_packaged_overlay_fixture(
+    tmp_path: Path,
+    *,
+    packaged_dll_bytes: bytes | None,
+    vendored_dll_bytes: bytes = b"vendored-openvr-runtime",
+) -> tuple[Path, VendoredOpenVrBundle]:
+    overlay_executable = tmp_path / "installed" / "PuriPulyHeartOverlay.exe"
+    overlay_executable.parent.mkdir(parents=True, exist_ok=True)
+    overlay_executable.write_text("packaged-overlay", encoding="utf-8")
+
+    if packaged_dll_bytes is not None:
+        overlay_executable.with_name("openvr_api.dll").write_bytes(packaged_dll_bytes)
+
+    return overlay_executable, _write_vendored_openvr_bundle(
+        tmp_path / "repo",
+        dll_bytes=vendored_dll_bytes,
+    )
+
+
+def _repo_vendored_openvr_dll_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[2] / "third_party" / "openvr" / "win64" / "openvr_api.dll"
+    )
+
+
+def _patch_vendored_openvr_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    bundle: VendoredOpenVrBundle | None = None,
+    error: Exception | None = None,
+) -> None:
+    def validate_vendored_openvr_bundle() -> VendoredOpenVrBundle:
+        if error is not None:
+            raise error
+        assert bundle is not None
+        return bundle
+
+    monkeypatch.setattr(
+        process_module,
+        "openvr_vendor",
+        SimpleNamespace(
+            validate_openvr_runtime_dll=openvr_vendor_module.validate_openvr_runtime_dll,
+            validate_vendored_openvr_bundle=validate_vendored_openvr_bundle,
+        ),
+        raising=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -358,34 +483,100 @@ async def test_overlay_process_manager_rejects_stale_staged_overlay_build(
     assert manager.failure_reason == "stale_overlay_build"
 
 
-def test_default_overlay_process_runner_bundles_openvr_runtime_dll_next_to_overlay_executable(
+@pytest.mark.parametrize("staged_dll_bytes", [None, b"stale-openvr-runtime"])
+def test_default_overlay_process_runner_refreshes_staged_openvr_runtime_dll_from_vendored_bundle(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    staged_dll_bytes: bytes | None,
 ) -> None:
-    program_files_x86 = tmp_path / "Program Files (x86)"
-    source_dll = (
-        program_files_x86
-        / "Steam"
-        / "steamapps"
-        / "common"
-        / "SteamVR"
-        / "bin"
-        / "win64"
-        / "openvr_api.dll"
+    overlay_executable, bundle = _make_local_dev_overlay_fixture(
+        tmp_path,
+        staged_dll_bytes=staged_dll_bytes,
     )
-    source_dll.parent.mkdir(parents=True)
-    source_dll.write_text("steamvr-runtime", encoding="utf-8")
+    _patch_vendored_openvr_bundle(monkeypatch, bundle=bundle)
 
-    overlay_executable = tmp_path / "build" / "overlay" / "PuriPulyHeartOverlay.exe"
-    overlay_executable.parent.mkdir(parents=True)
-    overlay_executable.write_text("overlay", encoding="utf-8")
+    resolved = DefaultOverlayProcessRunner(executable_path=overlay_executable).prepare(
+        _overlay_manifest()
+    )
+    bundled_path = overlay_executable.with_name("openvr_api.dll")
 
-    bundled_path = DefaultOverlayProcessRunner.ensure_bundled_openvr_runtime_dll(
-        overlay_executable,
-        environ={"ProgramFiles(x86)": str(program_files_x86)},
+    assert resolved == overlay_executable
+    assert bundled_path.read_bytes() == bundle.dll_path.read_bytes()
+
+
+def test_default_overlay_process_runner_rejects_missing_vendored_openvr_bundle_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    overlay_executable, bundle = _make_local_dev_overlay_fixture(
+        tmp_path,
+        staged_dll_bytes=b"stale-openvr-runtime",
+    )
+    _ = bundle
+    _patch_vendored_openvr_bundle(
+        monkeypatch,
+        error=FileNotFoundError("vendored bundle contract missing"),
     )
 
-    assert bundled_path == overlay_executable.with_name("openvr_api.dll")
-    assert bundled_path.read_text(encoding="utf-8") == "steamvr-runtime"
+    with pytest.raises(OverlayPreparationError) as exc_info:
+        DefaultOverlayProcessRunner(executable_path=overlay_executable).prepare(_overlay_manifest())
+
+    assert exc_info.value.failure_reason == "vendored_openvr_dll_missing"
+
+
+def test_default_overlay_process_runner_rejects_missing_packaged_openvr_runtime_dll(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    overlay_executable, bundle = _make_packaged_overlay_fixture(tmp_path, packaged_dll_bytes=None)
+    _patch_vendored_openvr_bundle(monkeypatch, bundle=bundle)
+
+    with pytest.raises(OverlayPreparationError) as exc_info:
+        DefaultOverlayProcessRunner(executable_path=overlay_executable).prepare(_overlay_manifest())
+
+    assert exc_info.value.failure_reason == "packaged_openvr_dll_missing"
+
+
+def test_default_overlay_process_runner_rejects_packaged_openvr_runtime_dll_hash_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    overlay_executable, bundle = _make_packaged_overlay_fixture(
+        tmp_path,
+        packaged_dll_bytes=b"mismatched-openvr-runtime",
+    )
+    _patch_vendored_openvr_bundle(monkeypatch, bundle=bundle)
+
+    with pytest.raises(OverlayPreparationError) as exc_info:
+        DefaultOverlayProcessRunner(executable_path=overlay_executable).prepare(_overlay_manifest())
+
+    assert exc_info.value.failure_reason == "openvr_dll_hash_mismatch"
+
+
+def test_default_overlay_process_runner_accepts_packaged_sibling_openvr_runtime_without_repo_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    overlay_executable = tmp_path / "installed" / "PuriPulyHeartOverlay.exe"
+    overlay_executable.parent.mkdir(parents=True, exist_ok=True)
+    overlay_executable.write_text("packaged-overlay", encoding="utf-8")
+
+    packaged_dll = overlay_executable.with_name("openvr_api.dll")
+    shutil.copy2(_repo_vendored_openvr_dll_path(), packaged_dll)
+
+    fake_repo_module = (
+        tmp_path / "fake-repo" / "src" / "puripuly_heart" / "core" / "overlay" / "openvr_vendor.py"
+    )
+    fake_repo_module.parent.mkdir(parents=True, exist_ok=True)
+    fake_repo_module.write_text("# fake packaged layout module path\n", encoding="utf-8")
+    monkeypatch.setattr(openvr_vendor_module, "__file__", str(fake_repo_module))
+
+    resolved = DefaultOverlayProcessRunner(executable_path=overlay_executable).prepare(
+        _overlay_manifest()
+    )
+
+    assert resolved == overlay_executable
+    assert packaged_dll.read_bytes() == _repo_vendored_openvr_dll_path().read_bytes()
 
 
 @pytest.mark.asyncio

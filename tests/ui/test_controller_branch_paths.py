@@ -2169,6 +2169,9 @@ async def test_overlay_start_failure_keeps_saved_preferences_but_effective_state
     "failure_reason",
     [
         "stale_overlay_build",
+        "vendored_openvr_dll_missing",
+        "packaged_openvr_dll_missing",
+        "openvr_dll_hash_mismatch",
         "steamvr_not_installed",
         "steamvr_not_running",
         "hmd_not_found",

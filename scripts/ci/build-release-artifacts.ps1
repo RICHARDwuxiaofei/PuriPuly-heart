@@ -10,6 +10,8 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+$PinnedOpenVrVendorDllSha256 = "bab8ac6ef64e68a9ca53315b0014d131088584b2efdfa6db511d67ec03cfcb4a"
+
 function Invoke-External {
     param(
         [Parameter(Mandatory = $true)]
@@ -129,6 +131,69 @@ function Resolve-PackagedLocalQwenRuntimeDir {
     return $packagedLocalQwenFallbackRuntimeDir
 }
 
+function Get-FileSha256 {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path $Path)) {
+        throw "File not found for SHA256 calculation: $Path"
+    }
+
+    return (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-PinnedSha256FromFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter()]
+        [string]$ExpectedFileName = "openvr_api.dll"
+    )
+
+    if (-not (Test-Path $Path)) {
+        throw "Pinned SHA256 file not found: $Path"
+    }
+
+    $sha256Line = (Get-Content -Path $Path -Raw -Encoding utf8).Trim()
+    $sha256Match = [regex]::Match($sha256Line, '^(?<sha>[0-9A-Fa-f]{64})\s+\*(?<name>.+)$')
+    if (-not $sha256Match.Success) {
+        throw "Pinned SHA256 file must be a single sha256sum line for ${ExpectedFileName}: $Path"
+    }
+
+    $resolvedFileName = $sha256Match.Groups["name"].Value
+    if ($resolvedFileName -ne $ExpectedFileName) {
+        throw "Pinned SHA256 file must target $ExpectedFileName; found $resolvedFileName"
+    }
+
+    return $sha256Match.Groups["sha"].Value.ToLowerInvariant()
+}
+
+function Assert-FileSha256Equals {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSha256,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    if (-not (Test-Path $Path)) {
+        throw "$Label not found: $Path"
+    }
+
+    $normalizedExpectedSha256 = $ExpectedSha256.Trim().ToLowerInvariant()
+    $actualSha256 = Get-FileSha256 -Path $Path
+    if ($actualSha256 -ne $normalizedExpectedSha256) {
+        throw "$Label sha256 mismatch: expected $normalizedExpectedSha256, found $actualSha256"
+    }
+}
+
 function Assert-SoxrRuntimeReport {
     param(
         [Parameter(Mandatory = $true)]
@@ -246,6 +311,8 @@ $overlayBuildDir = Join-Path $PWD "build/overlay"
 $overlayReleasePath = Join-Path $overlayTargetDir "release/PuriPulyHeartOverlay.exe"
 $overlayStagedPath = Join-Path $overlayBuildDir "PuriPulyHeartOverlay.exe"
 $overlayBundledDllPath = Join-Path $overlayBuildDir "openvr_api.dll"
+$openVrVendorDllPath = Join-Path $PWD "third_party/openvr/win64/openvr_api.dll"
+$openVrVendorSha256Path = Join-Path $PWD "third_party/openvr/win64/openvr_api.dll.sha256"
 $pyInstallerBuildDir = Join-Path $PWD "build/build"
 $distDir = Join-Path $PWD "dist/PuriPulyHeart"
 $soxrLicenseTextPath = Join-Path $PWD "src\puripuly_heart\data\licenses\COPYING.LGPL-2.1.txt"
@@ -260,27 +327,11 @@ $packagedSoxrComplianceDir = Join-Path $distDir "third_party\soxr"
 $packagedSoxrLicensePath = Join-Path $packagedSoxrComplianceDir "COPYING.LGPL-2.1.txt"
 $packagedSoxrSourceBundlePath = $null
 $packagedOverlayDllPath = Join-Path $distDir "openvr_api.dll"
-
-$openVrRuntimeDllPath = $null
-foreach ($programFilesRoot in @(
-    ${env:ProgramFiles(x86)},
-    $env:ProgramW6432,
-    $env:ProgramFiles
-)) {
-    if ([string]::IsNullOrWhiteSpace($programFilesRoot)) {
-        continue
-    }
-
-    $candidate = Join-Path $programFilesRoot "Steam\steamapps\common\SteamVR\bin\win64\openvr_api.dll"
-    if (Test-Path $candidate) {
-        $openVrRuntimeDllPath = $candidate
-        break
-    }
+$pinnedOpenVrVendorDllSha256FromFile = Get-PinnedSha256FromFile -Path $openVrVendorSha256Path
+if ($pinnedOpenVrVendorDllSha256FromFile -ne $PinnedOpenVrVendorDllSha256) {
+    throw "Vendored OpenVR runtime DLL pinned SHA256 literal drifted from $openVrVendorSha256Path"
 }
-
-if ([string]::IsNullOrWhiteSpace($openVrRuntimeDllPath) -or -not (Test-Path $openVrRuntimeDllPath)) {
-    throw "SteamVR OpenVR runtime DLL not found at expected SteamVR bin\win64 path."
-}
+Assert-FileSha256Equals -Path $openVrVendorDllPath -ExpectedSha256 $PinnedOpenVrVendorDllSha256 -Label "Vendored OpenVR runtime DLL"
 
 Write-Host "Building Rust overlay executable..."
 Invoke-External -FilePath $cargoCommand -ArgumentList @(
@@ -301,7 +352,7 @@ if (-not (Test-Path $overlayReleasePath)) {
 
 New-Item -ItemType Directory -Force -Path $overlayBuildDir | Out-Null
 Copy-Item -Path $overlayReleasePath -Destination $overlayStagedPath -Force
-Copy-Item -Path $openVrRuntimeDllPath -Destination $overlayBundledDllPath -Force
+Copy-Item -Path $openVrVendorDllPath -Destination $overlayBundledDllPath -Force
 
 if (-not (Test-Path $overlayStagedPath)) {
     throw "Staged overlay executable not found: $overlayStagedPath"
@@ -309,6 +360,7 @@ if (-not (Test-Path $overlayStagedPath)) {
 if (-not (Test-Path $overlayBundledDllPath)) {
     throw "Staged OpenVR runtime DLL not found: $overlayBundledDllPath"
 }
+Assert-FileSha256Equals -Path $overlayBundledDllPath -ExpectedSha256 $PinnedOpenVrVendorDllSha256 -Label "Staged OpenVR runtime DLL"
 
 Write-Host "Smoke-testing staged overlay executable..."
 Invoke-External -FilePath $overlayStagedPath -ArgumentList @("--check-startup-contract")
@@ -432,7 +484,6 @@ if (-not (Test-Path $packagedSoxrSourceBundlePath)) {
 
 $packagedOverlayPath = Join-Path $PWD "dist/PuriPulyHeart/PuriPulyHeartOverlay.exe"
 Copy-Item -Path $overlayStagedPath -Destination $packagedOverlayPath -Force
-Copy-Item -Path $openVrRuntimeDllPath -Destination $packagedOverlayDllPath -Force
 
 if (-not (Test-Path $packagedOverlayPath)) {
     throw "Packaged overlay executable not found: $packagedOverlayPath"
@@ -440,6 +491,7 @@ if (-not (Test-Path $packagedOverlayPath)) {
 if (-not (Test-Path $packagedOverlayDllPath)) {
     throw "Packaged OpenVR runtime DLL not found: $packagedOverlayDllPath"
 }
+Assert-FileSha256Equals -Path $packagedOverlayDllPath -ExpectedSha256 $PinnedOpenVrVendorDllSha256 -Label "Packaged OpenVR runtime DLL"
 
 Remove-Item -Recurse -Force $soxrRuntimeReportDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $soxrRuntimeReportDir | Out-Null
@@ -505,6 +557,7 @@ $InstallerSmokeAppDataRoot = Join-Path $env:TEMP "PuriPulyHeart-LocalSTT-Test-Ap
 $InstallerSmokeLogPath = Join-Path $env:TEMP "PuriPulyHeart-LocalSTT-Test.log"
 $InstallerReinstallSmokeLogPath = Join-Path $env:TEMP "PuriPulyHeart-LocalSTT-Test-reinstall.log"
 $installedExePath = Join-Path $InstallerSmokeDir "PuriPulyHeart.exe"
+$installedOpenVrDllPath = Join-Path $InstallerSmokeDir "openvr_api.dll"
 $installedSoxrDllPath = Join-Path $InstallerSmokeDir "soxr\soxr.dll"
 $installedSoxrExtensionPath = Join-Path $InstallerSmokeDir (Join-Path "soxr" ([System.IO.Path]::GetFileName($packagedSoxrExtensionPath)))
 $legacyRootLevelSoxrDllPath = Join-Path $InstallerSmokeDir "soxr.dll"
@@ -595,6 +648,10 @@ if ($installerSmokeLog -notmatch [regex]::Escape("Local STT provisioning complet
 if (-not (Test-Path $installedExePath)) {
     throw "Installed app executable not found after installer smoke: $installedExePath"
 }
+if (-not (Test-Path $installedOpenVrDllPath)) {
+    throw "Installed OpenVR runtime DLL not found after installer smoke: $installedOpenVrDllPath"
+}
+Assert-FileSha256Equals -Path $installedOpenVrDllPath -ExpectedSha256 $PinnedOpenVrVendorDllSha256 -Label "Installed OpenVR runtime DLL"
 if (-not (Test-Path $installedSoxrDllPath)) {
     throw "Installed app soxr runtime DLL not found after installer smoke: $installedSoxrDllPath"
 }
@@ -623,6 +680,11 @@ if ($installedSoxrLicenseHash -ne $expectedInstalledSoxrLicenseHash) {
 $installedSoxrSourceBundleHash = (Get-FileHash -Path $installedSoxrSourceBundlePath -Algorithm SHA256).Hash
 if ($installedSoxrSourceBundleHash -ne $expectedInstalledSoxrSourceBundleHash) {
     throw "Installed soxr source bundle hash does not match packaged compliance bundle after installer smoke"
+}
+[System.IO.File]::WriteAllBytes($installedOpenVrDllPath, [System.Text.Encoding]::ASCII.GetBytes("manual replacement openvr smoke payload"))
+$mutatedInstalledOpenVrDllHash = Get-FileSha256 -Path $installedOpenVrDllPath
+if ($mutatedInstalledOpenVrDllHash -eq $PinnedOpenVrVendorDllSha256) {
+    throw "Failed to mutate installed OpenVR runtime DLL before reinstall smoke"
 }
 [System.IO.File]::WriteAllBytes($installedSoxrDllPath, [System.Text.Encoding]::ASCII.GetBytes("manual replacement smoke payload"))
 $mutatedInstalledSoxrDllHash = (Get-FileHash -Path $installedSoxrDllPath -Algorithm SHA256).Hash
@@ -680,6 +742,11 @@ if ($installerReinstallSmokeLog -notmatch [regex]::Escape("Local STT provisionin
     throw "Installer reinstall smoke log is missing local STT provisioning success marker"
 }
 
+$reinstalledOpenVrDllHash = Get-FileSha256 -Path $installedOpenVrDllPath
+if ($reinstalledOpenVrDllHash -ne $PinnedOpenVrVendorDllSha256) {
+    throw "Installed OpenVR runtime DLL reinstall smoke failed to restore pinned hash"
+}
+Assert-FileSha256Equals -Path $installedOpenVrDllPath -ExpectedSha256 $PinnedOpenVrVendorDllSha256 -Label "Reinstalled OpenVR runtime DLL"
 $reinstalledSoxrDllHash = (Get-FileHash -Path $installedSoxrDllPath -Algorithm SHA256).Hash
 if ($reinstalledSoxrDllHash -ne $expectedInstalledSoxrDllHash) {
     throw "Installed soxr runtime DLL reinstall smoke failed to restore bundled hash"

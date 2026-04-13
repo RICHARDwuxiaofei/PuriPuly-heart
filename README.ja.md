@@ -321,7 +321,7 @@ python -m pytest         # テスト（仮想環境での実行を推奨）
 
 実行ファイル単体 / 手動パッケージング手順:
 
-この手順は実行ファイル/手動インストーラ向けの直接パッケージング専用で、リリース完了のコンプライアンスパッケージング手順ではありません。さらに、`build.spec` が検証するステージ済みオーバーレイ実行ファイル `build/overlay/PuriPulyHeartOverlay.exe` が必要です。
+この手順は実行ファイル/手動インストーラ向けの直接パッケージング専用で、リリース完了のコンプライアンスパッケージング手順ではありません。さらに、`build.spec` が検証するステージ済みオーバーレイ実行ファイル `build/overlay/PuriPulyHeartOverlay.exe` と、ベンダリングされた OpenVR バンドル `third_party/openvr/` が必要です。
 
 ```bash
 .\scripts\ci\prepare-soxr-release-inputs.ps1
