@@ -143,48 +143,38 @@ jobs:
 
           hardware_hash = "${{ github.event.inputs.hardware_hash }}"
           salt_version = int("${{ github.event.inputs.hardware_hash_salt_version }}")
-          sql = f"""
-          BEGIN TRANSACTION;
-          DELETE FROM broker_request_events
-           WHERE installation_id IN (
-            SELECT DISTINCT e.installation_id
-              FROM openrouter_entitlements e
-              JOIN installations i ON i.installation_id = e.installation_id
-             WHERE e.status IN ('pending_release', 'active')
-               AND (
-                 (e.verified_hardware_hash = '{hardware_hash}' AND e.verified_hardware_hash_salt_version = {salt_version})
-                 OR (
-                   e.verified_hardware_hash IS NULL
-                   AND e.verified_hardware_hash_salt_version IS NULL
-                   AND i.hardware_hash = '{hardware_hash}'
-                   AND i.hardware_hash_salt_version = {salt_version}
-                 )
+          subquery = f"""
+          SELECT DISTINCT e.installation_id
+            FROM openrouter_entitlements e
+            JOIN installations i ON i.installation_id = e.installation_id
+           WHERE e.status IN ('pending_release', 'active')
+             AND (
+               (e.verified_hardware_hash = '{hardware_hash}' AND e.verified_hardware_hash_salt_version = {salt_version})
+               OR (
+                 e.verified_hardware_hash IS NULL
+                 AND e.verified_hardware_hash_salt_version IS NULL
+                 AND i.hardware_hash = '{hardware_hash}'
+                 AND i.hardware_hash_salt_version = {salt_version}
                )
-           );
-
-          DELETE FROM installations
-           WHERE installation_id IN (
-            SELECT DISTINCT e.installation_id
-              FROM openrouter_entitlements e
-              JOIN installations i ON i.installation_id = e.installation_id
-             WHERE e.status IN ('pending_release', 'active')
-               AND (
-                 (e.verified_hardware_hash = '{hardware_hash}' AND e.verified_hardware_hash_salt_version = {salt_version})
-                 OR (
-                   e.verified_hardware_hash IS NULL
-                   AND e.verified_hardware_hash_salt_version IS NULL
-                   AND i.hardware_hash = '{hardware_hash}'
-                   AND i.hardware_hash_salt_version = {salt_version}
-                 )
-               )
-           );
-          COMMIT;
+             )
           """
-          Path(".maintenance-delete.sql").write_text(sql.strip() + "\n", encoding="utf-8")
+          delete_request_events = f"DELETE FROM broker_request_events WHERE installation_id IN ({subquery.strip()});"
+          delete_installations = f"DELETE FROM installations WHERE installation_id IN ({subquery.strip()});"
+          Path(".maintenance-delete-request-events.sql").write_text(
+              delete_request_events + "\n", encoding="utf-8"
+          )
+          Path(".maintenance-delete-installations.sql").write_text(
+              delete_installations + "\n", encoding="utf-8"
+          )
           PY
 
-          pnpm exec wrangler d1 execute puripuly-heart-broker --remote --config wrangler.production.jsonc --file .maintenance-delete.sql --json > .maintenance-delete.json
-          cat .maintenance-delete.json
+          delete_request_events_sql="$(tr '\n' ' ' < .maintenance-delete-request-events.sql)"
+          pnpm exec wrangler d1 execute puripuly-heart-broker --remote --config wrangler.production.jsonc --command "$delete_request_events_sql" --json > .maintenance-delete-request-events.json
+          cat .maintenance-delete-request-events.json
+
+          delete_installations_sql="$(tr '\n' ' ' < .maintenance-delete-installations.sql)"
+          pnpm exec wrangler d1 execute puripuly-heart-broker --remote --config wrangler.production.jsonc --command "$delete_installations_sql" --json > .maintenance-delete-installations.json
+          cat .maintenance-delete-installations.json
 
       - name: Re-inspect after delete
         if: ${{ github.event.inputs.mode == 'delete' }}
