@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 
 import flet as ft
@@ -39,6 +40,27 @@ class UIEventBridge:
         controller = getattr(self.app, "controller", None)
         hub = getattr(controller, "hub", None)
         return bool(getattr(hub, "translation_enabled", False))
+
+    def _emit_dashboard_translation_applied_detailed(
+        self,
+        *,
+        translation: Translation,
+        source_label: str,
+        dashboard_target_language: str | None,
+    ) -> None:
+        if self.runtime_logging is None:
+            return
+        message = (
+            "[Detailed][UIEventBridge] dashboard_translation_applied "
+            f"utterance_id={translation.utterance_id} "
+            f"channel={translation.channel} "
+            f"source_label={json.dumps(source_label, ensure_ascii=False)} "
+            f"dashboard_target_language={dashboard_target_language} "
+            f"translation_target_language={translation.target_language} "
+            f"text_len={len(translation.text)}"
+        )
+        with contextlib.suppress(Exception):
+            self.runtime_logging.emit_detailed(message)
 
     def report_overlay_state(
         self,
@@ -109,6 +131,11 @@ class UIEventBridge:
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 dash.set_display_translation_text(translation.text, language_code=target_lang)
+                self._emit_dashboard_translation_applied_detailed(
+                    translation=translation,
+                    source_label=source,
+                    dashboard_target_language=target_lang,
+                )
             add_history = getattr(self.app, "add_history_entry", None)
             if add_history is not None:
                 add_history(source, translation.text, translated=True, language_code=target_lang)
