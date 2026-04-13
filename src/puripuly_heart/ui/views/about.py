@@ -16,6 +16,8 @@ from puripuly_heart.ui.theme import (
     COLOR_SURFACE,
 )
 
+_CENTER_ALIGNMENT = ft.alignment.Alignment(0, 0)
+
 
 def _load_third_party_notices() -> str:
     """Load THIRD_PARTY_NOTICES.txt from package data."""
@@ -83,7 +85,7 @@ class AboutView(ft.Column):
                     weight=ft.FontWeight.BOLD,
                     color=COLOR_PRIMARY,
                 ),
-                alignment=ft.alignment.center,
+                alignment=_CENTER_ALIGNMENT,
             )
         )
 
@@ -102,7 +104,7 @@ class AboutView(ft.Column):
                 color=COLOR_ON_BACKGROUND,
                 text_align=ft.TextAlign.CENTER,
             ),
-            alignment=ft.alignment.center,
+            alignment=_CENTER_ALIGNMENT,
             expand=True,
             on_click=lambda _: webbrowser.open("https://github.com/kapitalismho/PuriPuly-heart"),
             on_hover=self._on_version_hover,
@@ -152,7 +154,7 @@ class AboutView(ft.Column):
                 weight=ft.FontWeight.BOLD,
                 color=COLOR_ON_BACKGROUND,
             ),
-            on_click=lambda _: webbrowser.open("https://discord.com/users/377814093182140416"),
+            on_click=lambda _: webbrowser.open("https://x.com/kapitalismho"),
             on_hover=self._on_name_hover,
         )
 

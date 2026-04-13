@@ -68,7 +68,7 @@ def test_about_view_link_actions_handle_missing_page_gracefully(
         handler(None)
 
     assert "https://github.com/kapitalismho/PuriPuly-heart" in opened
-    assert "https://discord.com/users/377814093182140416" in opened
+    assert "https://x.com/kapitalismho" in opened
     assert "https://github.com/misyaguziya/VRCT" in opened
     assert "https://github.com/naeruru/mimiuchi" in opened
     assert "https://github.com/febilly/Yakutan" in opened
