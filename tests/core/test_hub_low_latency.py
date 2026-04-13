@@ -193,13 +193,12 @@ class TestSpeechEndedTracking:
 
 class TestRuntimeLatencyLogging:
     @pytest.mark.asyncio
-    async def test_low_latency_self_runtime_uses_translate_without_changing_peer_streaming_contract(
+    async def test_low_latency_self_and_peer_success_paths_both_use_translate(
         self,
     ):
         llm = FakeLLMProvider(
             response_text="translated",
             delay_s=0.0,
-            stream_snapshots=["peer", "peer translated"],
         )
         overlay_sink = RecordingOverlaySink()
         hub = ClientHub(
@@ -231,9 +230,8 @@ class TestRuntimeLatencyLogging:
 
             await hub._translate_and_enqueue(uuid4(), "peer hello", runtime=hub.peer_runtime)
 
-            assert len(llm.calls) == 1
-            assert len(llm.stream_calls) == 1
-            assert llm.stream_calls[0]["text"] == "peer hello"
+            assert [call["text"] for call in llm.calls] == ["hello", "peer hello"]
+            assert llm.stream_calls == []
         finally:
             await hub.stop()
 
