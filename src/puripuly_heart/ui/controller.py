@@ -205,6 +205,8 @@ class GuiController:
         default_factory=dict,
     )
     _managed_trial_pending_auth: bool = field(init=False, default=False)
+    _translation_toggle_intent_enabled: bool = field(init=False, default=False)
+    _translation_toggle_generation: int = field(init=False, default=0)
     _runtime_logging: SessionRuntimeLoggingService | None = field(init=False, default=None)
 
     overlay_state: str = "off"
@@ -508,6 +510,16 @@ class GuiController:
     def clear_managed_auth_pending_state(self) -> None:
         self._set_managed_trial_pending_auth(False)
 
+    def _record_translation_toggle_intent(self, enabled: bool) -> int:
+        self._translation_toggle_intent_enabled = bool(enabled)
+        self._translation_toggle_generation += 1
+        return self._translation_toggle_generation
+
+    def _translation_toggle_intent_matches(self, *, enabled: bool, generation: int) -> bool:
+        return generation == self._translation_toggle_generation and (
+            self._translation_toggle_intent_enabled == bool(enabled)
+        )
+
     def _should_show_managed_auth_pending_before_prepare(self) -> bool:
         if self.settings is None:
             return False
@@ -544,13 +556,25 @@ class GuiController:
         )
 
     def _schedule_managed_trial_usage_refresh(self) -> None:
+        async def _run_refresh() -> None:
+            await self._refresh_managed_trial_usage_state_best_effort()
+
         with contextlib.suppress(RuntimeError):
-            asyncio.get_running_loop().create_task(self._refresh_managed_trial_usage_state())
+            asyncio.get_running_loop().create_task(_run_refresh())
 
     def _on_managed_trial_delegate_ready(self) -> None:
         self._set_managed_trial_pending_auth(False)
         self._set_managed_trial_transient_message(None)
         self._schedule_managed_trial_usage_refresh()
+
+    async def _refresh_managed_trial_usage_state_best_effort(self) -> None:
+        try:
+            await self._refresh_managed_trial_usage_state()
+        except Exception as exc:
+            self.log_basic(
+                f"[ManagedAuth] Usage refresh failed: {exc}",
+                level=logging.WARNING,
+            )
 
     async def _refresh_managed_trial_usage_state(self) -> None:
         view_settings = getattr(self.app, "view_settings", None)
@@ -1166,6 +1190,7 @@ class GuiController:
         self.cancel_overlay_calibration()
 
     async def set_translation_enabled(self, enabled: bool) -> None:
+        request_generation = self._record_translation_toggle_intent(enabled)
         if not enabled:
             self._set_managed_trial_pending_auth(False)
         if self.hub is None:
@@ -1176,7 +1201,15 @@ class GuiController:
             f"current_enabled={self.hub.translation_enabled} "
             f"llm_available={self.hub.llm is not None}"
         )
-        if enabled and await self._handle_managed_translation_enable() is False:
+        if enabled and await self._handle_managed_translation_enable(request_generation) is False:
+            return
+        if enabled and not self._translation_toggle_intent_matches(
+            enabled=True,
+            generation=request_generation,
+        ):
+            self.log_detailed(
+                "[Translation] Skipping stale enable request after newer toggle intent"
+            )
             return
         if enabled and self.hub.llm is None:
             self.hub.translation_enabled = False
@@ -1283,7 +1316,7 @@ class GuiController:
                 return
         self._log_error(message)
 
-    async def _handle_managed_translation_enable(self) -> bool:
+    async def _handle_managed_translation_enable(self, request_generation: int) -> bool:
         if self.settings is None or self.hub is None:
             return True
         if self.settings.provider.llm != LLMProviderName.OPENROUTER:
@@ -1302,15 +1335,26 @@ class GuiController:
         except Exception:
             self._set_managed_trial_pending_auth(False)
             raise
-        if result.behavior == ManagedOpenRouterReleaseBehavior.READY:
-            self._set_managed_trial_pending_auth(bool(result.pending_issue and not result.api_key))
-            self._set_managed_trial_transient_message(None)
-            await self._refresh_managed_trial_usage_state()
-            if self.hub.llm is None:
-                await self._rebuild_llm_provider()
-            return True
 
         self._set_managed_trial_pending_auth(False)
+
+        if not self._translation_toggle_intent_matches(
+            enabled=True,
+            generation=request_generation,
+        ):
+            self.log_detailed(
+                "[Translation] Skipping stale managed enable result after newer toggle intent"
+            )
+            return False
+
+        if result.behavior == ManagedOpenRouterReleaseBehavior.READY and result.local_key_available:
+            self._set_managed_trial_transient_message(None)
+            if self.hub.llm is None:
+                await self._rebuild_llm_provider()
+            else:
+                self._schedule_managed_trial_usage_refresh()
+            return True
+
         diagnostics_text = format_managed_openrouter_diagnostics(result.diagnostics)
         if diagnostics_text:
             self.log_basic(f"[ManagedAuth] {diagnostics_text}", level=logging.ERROR)
@@ -2041,7 +2085,7 @@ class GuiController:
         if dash is not None:
             dash.set_translation_needs_key(llm is None)
 
-        await self._refresh_managed_trial_usage_state()
+        await self._refresh_managed_trial_usage_state_best_effort()
 
         if llm is None:
             message = "LLM provider not available"

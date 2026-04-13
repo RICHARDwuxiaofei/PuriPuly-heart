@@ -42,6 +42,8 @@ class FakeManagedReleaseClient:
     verify_result: object | None = None
     issue_result: object | None = None
     challenge_gate: asyncio.Event | None = None
+    issue_gate: asyncio.Event | None = None
+    issue_started: asyncio.Event | None = None
     calls: list[tuple[str, dict[str, object]]] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -80,6 +82,10 @@ class FakeManagedReleaseClient:
 
     async def issue(self, request: dict[str, object]):
         self.calls.append(("issue", dict(request)))
+        if self.issue_started is not None:
+            self.issue_started.set()
+        if self.issue_gate is not None:
+            await self.issue_gate.wait()
         result = self.issue_result
         if isinstance(result, Exception):
             raise result
@@ -178,13 +184,14 @@ async def test_prepare_for_translation_short_circuits_when_managed_key_exists() 
     result = await service.prepare_for_translation()
 
     assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert result.api_key == "managed-key"
     assert result.local_key_available is True
     assert result.pending_issue is False
     assert client.calls == []
 
 
 @pytest.mark.asyncio
-async def test_prepare_for_translation_runs_challenge_then_verify_and_persists_release_token() -> (
+async def test_prepare_for_translation_runs_challenge_verify_issue_and_persists_managed_key() -> (
     None
 ):
     client = FakeManagedReleaseClient(
@@ -197,16 +204,18 @@ async def test_prepare_for_translation_runs_challenge_then_verify_and_persists_r
             release_token="release-token-1",
             release_token_expires_at="2026-04-08T06:15:00.000Z",
         ),
+        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
     )
     persist_calls: list[tuple[str | None, str | None]] = []
-    service, settings, _ = _make_service(client=client, persist_calls=persist_calls)
+    service, settings, secrets = _make_service(client=client, persist_calls=persist_calls)
 
     result = await service.prepare_for_translation()
 
     assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
-    assert result.local_key_available is False
-    assert result.pending_issue is True
-    assert [name for name, _payload in client.calls] == ["challenge", "verify"]
+    assert result.api_key == "managed-key"
+    assert result.local_key_available is True
+    assert result.pending_issue is False
+    assert [name for name, _payload in client.calls] == ["challenge", "verify", "issue"]
     verify_payload = client.calls[1][1]
     assert verify_payload["challenge"] == "challenge-1"
     assert verify_payload["hardware_hash"] == _expected_hardware_hash(
@@ -214,48 +223,95 @@ async def test_prepare_for_translation_runs_challenge_then_verify_and_persists_r
         raw_hardware_fingerprint="raw-hardware-fingerprint-test",
     )
     assert verify_payload["app_version"] == "2.0.0"
+    issue_payload = client.calls[2][1]
+    assert issue_payload["reason"] == "llm_start"
+    assert issue_payload["budget_usd"] == 0.08
+    assert issue_payload["hardware_hash"] == _expected_hardware_hash(
+        fingerprint_salt="fingerprint-salt-test",
+        raw_hardware_fingerprint="raw-hardware-fingerprint-test",
+    )
     assert settings.managed_identity.installation_id
-    assert settings.managed_identity.release_token == "release-token-1"
-    assert settings.managed_identity.release_token_expires_at == "2026-04-08T06:15:00.000Z"
+    assert settings.managed_identity.release_token is None
+    assert settings.managed_identity.release_token_expires_at is None
+    assert settings.managed_identity.verified_hardware_hash is None
+    assert settings.managed_identity.verified_hardware_hash_salt_version is None
+    assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
     assert len(persist_calls) >= 2
 
 
 @pytest.mark.asyncio
-async def test_prepare_for_translation_persists_verified_snapshot_and_issue_reuses_it() -> None:
-    client = FakeManagedReleaseClient(
-        challenge_result=ManagedOpenRouterChallengeSuccess(
-            challenge="challenge-1",
-            challenge_expires_at="2026-04-08T06:05:00.000Z",
-            fingerprint_salt=_make_fingerprint_salt(),
-        ),
-        verify_result=ManagedOpenRouterVerifySuccess(
-            release_token="release-token-1",
-            release_token_expires_at="2026-04-08T06:15:00.000Z",
-        ),
-        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
-    )
-    service, settings, secrets = _make_service(client=client)
-
-    prepare_result = await service.prepare_for_translation()
-
+async def test_prepare_for_translation_reuses_verified_pending_release_state_and_issues_key() -> (
+    None
+):
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    settings.managed_identity.release_token = "release-token-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
     expected_hardware_hash = _expected_hardware_hash(
         fingerprint_salt="fingerprint-salt-test",
         raw_hardware_fingerprint="raw-hardware-fingerprint-test",
     )
+    settings.managed_identity.verified_hardware_hash = expected_hardware_hash
+    settings.managed_identity.verified_hardware_hash_salt_version = 7
+    client = FakeManagedReleaseClient(
+        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key")
+    )
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    prepare_result = await service.prepare_for_translation()
+
     assert prepare_result.behavior == ManagedOpenRouterReleaseBehavior.READY
-    assert settings.managed_identity.verified_hardware_hash == expected_hardware_hash
-    assert settings.managed_identity.verified_hardware_hash_salt_version == 7
-
-    issue_result = await service.ensure_key_for_llm_start()
-
-    assert issue_result.behavior == ManagedOpenRouterReleaseBehavior.READY
-    assert issue_result.api_key == "managed-key"
+    assert prepare_result.api_key == "managed-key"
+    assert prepare_result.local_key_available is True
+    assert prepare_result.pending_issue is False
     assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
-    issue_payload = client.calls[2][1]
+    issue_payload = client.calls[0][1]
     assert issue_payload["budget_usd"] == 0.08
     assert issue_payload["hardware_hash"] == expected_hardware_hash
     assert settings.managed_identity.verified_hardware_hash is None
     assert settings.managed_identity.verified_hardware_hash_salt_version is None
+    assert [name for name, _payload in client.calls] == ["issue"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_for_translation_and_ensure_key_for_llm_start_share_single_issue_task() -> (
+    None
+):
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    settings.managed_identity.release_token = "release-token-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
+    issue_started = asyncio.Event()
+    issue_gate = asyncio.Event()
+    client = FakeManagedReleaseClient(
+        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
+        issue_gate=issue_gate,
+        issue_started=issue_started,
+    )
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    prepare_task = asyncio.create_task(service.prepare_for_translation())
+    await issue_started.wait()
+    ensure_task = asyncio.create_task(service.ensure_key_for_llm_start())
+    await asyncio.sleep(0)
+    issue_gate.set()
+
+    prepare_result, ensure_result = await asyncio.gather(prepare_task, ensure_task)
+
+    assert [name for name, _payload in client.calls] == ["issue"]
+    assert prepare_result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert ensure_result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert prepare_result.local_key_available is True
+    assert ensure_result.local_key_available is True
+    assert sorted([prepare_result.single_flight_reused, ensure_result.single_flight_reused]) == [
+        False,
+        True,
+    ]
 
 
 @pytest.mark.asyncio
@@ -276,6 +332,7 @@ async def test_issue_uses_qwen_managed_model_from_selection_alias() -> None:
     result = await service.ensure_key_for_llm_start()
 
     assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert result.api_key == "managed-key"
     issue_payload = client.calls[0][1]
     assert issue_payload["model"] == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
 
@@ -407,6 +464,7 @@ async def test_prepare_for_translation_reuses_single_flight_for_repeated_trans_a
             release_token="release-token-1",
             release_token_expires_at="2026-04-08T06:15:00.000Z",
         ),
+        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
         challenge_gate=gate,
     )
     service, _, _ = _make_service(client=client)
@@ -419,7 +477,7 @@ async def test_prepare_for_translation_reuses_single_flight_for_repeated_trans_a
 
     first_result, second_result = await asyncio.gather(first_task, second_task)
 
-    assert [name for name, _payload in client.calls] == ["challenge", "verify"]
+    assert [name for name, _payload in client.calls] == ["challenge", "verify", "issue"]
     assert first_result.behavior == ManagedOpenRouterReleaseBehavior.READY
     assert second_result.behavior == ManagedOpenRouterReleaseBehavior.READY
     assert sorted([first_result.single_flight_reused, second_result.single_flight_reused]) == [
@@ -774,6 +832,7 @@ async def test_prepare_single_flight_survives_waiter_cancellation() -> None:
             release_token="release-token-1",
             release_token_expires_at="2026-04-08T06:15:00.000Z",
         ),
+        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
         challenge_gate=gate,
     )
     service, _, _ = _make_service(client=client)
@@ -791,7 +850,7 @@ async def test_prepare_single_flight_survives_waiter_cancellation() -> None:
     second_result = await second_task
 
     assert second_result.behavior == ManagedOpenRouterReleaseBehavior.READY
-    assert [name for name, _payload in client.calls] == ["challenge", "verify"]
+    assert [name for name, _payload in client.calls] == ["challenge", "verify", "issue"]
 
 
 @pytest.mark.asyncio
@@ -977,6 +1036,44 @@ async def test_managed_openrouter_provider_issues_on_first_llm_start_only() -> N
     assert service.ensure_calls == ["llm_start"]
     assert created_keys == ["managed-key"]
     assert len(delegate.translate_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_managed_openrouter_provider_translate_after_preissue_does_not_issue_again() -> None:
+    client = FakeManagedReleaseClient(
+        challenge_result=ManagedOpenRouterChallengeSuccess(
+            challenge="challenge-1",
+            challenge_expires_at="2026-04-08T06:05:00.000Z",
+            fingerprint_salt=_make_fingerprint_salt(),
+        ),
+        verify_result=ManagedOpenRouterVerifySuccess(
+            release_token="release-token-1",
+            release_token_expires_at="2026-04-08T06:15:00.000Z",
+        ),
+        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
+    )
+    service, _, _ = _make_service(client=client)
+    delegate = FakeDelegateProvider()
+    created_keys: list[str] = []
+    provider = ManagedOpenRouterLLMProvider(
+        release_service=service,
+        delegate_factory=lambda api_key: created_keys.append(api_key) or delegate,
+    )
+
+    prepare_result = await service.prepare_for_translation()
+    translate_result = await provider.translate(
+        utterance_id=uuid4(),
+        text="hello",
+        system_prompt="prompt",
+        source_language="ko",
+        target_language="en",
+    )
+
+    assert prepare_result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert prepare_result.api_key == "managed-key"
+    assert translate_result.text == "translated"
+    assert created_keys == ["managed-key"]
+    assert [name for name, _payload in client.calls] == ["challenge", "verify", "issue"]
 
 
 @pytest.mark.asyncio
