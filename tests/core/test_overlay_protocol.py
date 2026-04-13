@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
 from puripuly_heart.core.overlay.protocol import (
@@ -7,7 +9,7 @@ from puripuly_heart.core.overlay.protocol import (
     OverlayPresentationCalibration,
     OverlayPresentationSnapshot,
 )
-from puripuly_heart.core.overlay.sink import OverlayEventAdapter
+from puripuly_heart.core.overlay.sink import OverlayEventAdapter, SelfActiveUpdate
 
 
 def test_overlay_presentation_snapshot_round_trips_blocks_and_calibration() -> None:
@@ -95,31 +97,52 @@ def test_overlay_presentation_block_round_trips_occupant_metadata() -> None:
 
 def test_overlay_event_adapter_self_active_update_carries_occupant_key() -> None:
     adapter = OverlayEventAdapter()
+    utterance_id = uuid4()
 
     event = adapter.self_active_update(
         text="hello live",
-        occupant_key="self:merge-1",
+        utterance_id=utterance_id,
+        occupant_key=f"self:{utterance_id}",
         created_at=11.0,
     )
 
     assert event.type == "self_active_update"
-    assert event.occupant_key == "self:merge-1"
+    assert event.utterance_id == utterance_id
+    assert event.occupant_key == f"self:{utterance_id}"
     assert event.secondary_text == ""
 
 
 def test_overlay_event_adapter_self_active_update_accepts_secondary_text() -> None:
     adapter = OverlayEventAdapter()
+    utterance_id = uuid4()
 
     event = adapter.self_active_update(
         text="hello live",
         secondary_text="translated live",
-        occupant_key="self:merge-1",
+        utterance_id=utterance_id,
+        occupant_key=f"self:{utterance_id}",
         created_at=11.0,
     )
 
     assert event.type == "self_active_update"
-    assert event.occupant_key == "self:merge-1"
+    assert event.utterance_id == utterance_id
+    assert event.occupant_key == f"self:{utterance_id}"
     assert event.secondary_text == "translated live"
+
+
+def test_self_active_update_requires_utterance_id() -> None:
+    utterance_id = uuid4()
+
+    with pytest.raises(ValueError, match="SelfActiveUpdate requires utterance_id"):
+        SelfActiveUpdate(
+            event_id="evt-1",
+            seq=1,
+            utterance_id=None,
+            channel="self",
+            created_at=10.0,
+            text="hello live",
+            occupant_key=f"self:{utterance_id}",
+        )
 
 
 def test_overlay_presentation_snapshot_rejects_non_list_blocks() -> None:

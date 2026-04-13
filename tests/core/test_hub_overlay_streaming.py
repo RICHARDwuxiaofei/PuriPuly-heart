@@ -844,7 +844,7 @@ async def test_hub_emits_self_translation_to_overlay_after_translation_completio
 
 
 @pytest.mark.asyncio
-async def test_hub_keeps_recently_translated_self_row_visible_until_newer_translation_arrives() -> (
+async def test_hub_newer_self_row_replaces_older_translated_self_row_without_protection_boost() -> (
     None
 ):
     bridge = RecordingPresentationBridge()
@@ -874,8 +874,8 @@ async def test_hub_keeps_recently_translated_self_row_visible_until_newer_transl
 
     second_id = await hub.submit_text("second", source="You")
 
-    assert [block.id for block in presenter.snapshot().blocks] == [f"self:{first_id}"]
-    assert presenter.snapshot().blocks[0].secondary_text == "translated first"
+    assert [block.id for block in presenter.snapshot().blocks] == [f"self:{second_id}"]
+    assert presenter.snapshot().blocks[0].secondary_text == ""
 
     await asyncio.gather(*hub.self_runtime.translation_tasks.values(), return_exceptions=True)
 
@@ -1142,6 +1142,11 @@ async def test_low_latency_self_active_updates_only_when_merged_text_changes() -
         "self_active_update",
     ]
     assert [event.text for event in sink.events] == ["hello", "hello world"]
+    assert hub._merge_buffer is not None
+    assert [event.utterance_id for event in sink.events] == [
+        hub._merge_buffer.merge_id,
+        hub._merge_buffer.merge_id,
+    ]
 
 
 @pytest.mark.asyncio
@@ -1542,6 +1547,7 @@ async def test_low_latency_merge_commit_reuses_merge_identity_without_emitting_c
         "utterance_closed",
     ]
     final_event = next(event for event in sink.events if event.type == "self_transcript_final")
+    assert active_event.utterance_id == final_event.utterance_id
     assert active_event.occupant_key == f"self:{final_event.utterance_id}"
 
 

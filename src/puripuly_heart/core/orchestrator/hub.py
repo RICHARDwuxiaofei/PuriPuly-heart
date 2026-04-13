@@ -159,6 +159,8 @@ class ClientHub:
     )
     _overlay_active_self_text: str | None = field(init=False, default=None)
     _overlay_active_self_secondary_text: str | None = field(init=False, default=None)
+    _overlay_active_self_utterance_id: UUID | None = field(init=False, default=None)
+    _overlay_active_self_occupant_key: str | None = field(init=False, default=None)
     overlay_stream_coalesce_ms: int = 300
     last_error_source: str | None = None
     _last_overlay_secondary_runtime_signature: tuple[object, ...] | None = field(
@@ -1068,9 +1070,13 @@ class ClientHub:
         if getattr(event, "type", None) == "self_active_update":
             self._overlay_active_self_text = getattr(event, "text", None)
             self._overlay_active_self_secondary_text = getattr(event, "secondary_text", "")
+            self._overlay_active_self_utterance_id = getattr(event, "utterance_id", None)
+            self._overlay_active_self_occupant_key = getattr(event, "occupant_key", None)
         elif getattr(event, "type", None) == "self_active_clear":
             self._overlay_active_self_text = None
             self._overlay_active_self_secondary_text = None
+            self._overlay_active_self_utterance_id = None
+            self._overlay_active_self_occupant_key = None
 
     def _overlay_active_self_secondary(self, buffer: _MergeBuffer) -> str:
         secondary_text, _source, _reuse_mode = self._overlay_active_self_secondary_decision(buffer)
@@ -1114,24 +1120,27 @@ class ClientHub:
             source=source,
             reuse_mode=reuse_mode,
         )
-        if active_text == self._overlay_active_self_text and secondary_text == (
-            self._overlay_active_self_secondary_text or ""
+        occupant_key = self._active_self_occupant_key(buffer)
+        if (
+            buffer.merge_id == self._overlay_active_self_utterance_id
+            and occupant_key == self._overlay_active_self_occupant_key
+            and active_text == self._overlay_active_self_text
+            and secondary_text == (self._overlay_active_self_secondary_text or "")
         ):
             return
 
-        utterance_id = buffer.utterance_ids[-1] if buffer.utterance_ids else None
-        if utterance_id is not None:
-            self._record_overlay_emit(
-                event_kind="active_self",
-                utterance_id=utterance_id,
-                channel="self",
-                secondary_len=len(secondary_text),
-            )
+        self._record_overlay_emit(
+            event_kind="active_self",
+            utterance_id=buffer.merge_id,
+            channel="self",
+            secondary_len=len(secondary_text),
+        )
         await self._emit_overlay_active_self_event(
             self.overlay_event_adapter.self_active_update(
                 text=active_text,
+                utterance_id=buffer.merge_id,
                 secondary_text=secondary_text,
-                occupant_key=self._active_self_occupant_key(buffer),
+                occupant_key=occupant_key,
                 created_at=created_at,
             )
         )
@@ -1142,6 +1151,8 @@ class ClientHub:
         if self.overlay_sink is None:
             self._overlay_active_self_text = None
             self._overlay_active_self_secondary_text = None
+            self._overlay_active_self_utterance_id = None
+            self._overlay_active_self_occupant_key = None
             return
         await self._emit_overlay_active_self_event(self.overlay_event_adapter.self_active_clear())
 
@@ -1801,9 +1812,16 @@ class ClientHub:
             final_text=final_text,
             reuse_mode=reuse_mode,
         ):
+            self._record_overlay_emit(
+                event_kind="active_self",
+                utterance_id=buffer.merge_id,
+                channel="self",
+                secondary_len=0,
+            )
             await self._emit_overlay_active_self_event(
                 self.overlay_event_adapter.self_active_update(
                     text=final_text,
+                    utterance_id=buffer.merge_id,
                     secondary_text="",
                     occupant_key=self._active_self_occupant_key(buffer),
                     created_at=self.clock.now(),
@@ -1833,6 +1851,8 @@ class ClientHub:
         )
         self._overlay_active_self_text = None
         self._overlay_active_self_secondary_text = None
+        self._overlay_active_self_utterance_id = None
+        self._overlay_active_self_occupant_key = None
         await self._handle_transcript(transcript, is_final=True, source="Mic")
 
         if self.llm is None or not self.translation_enabled:
