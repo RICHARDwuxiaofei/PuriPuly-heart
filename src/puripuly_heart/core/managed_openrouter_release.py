@@ -287,6 +287,8 @@ class ManagedOpenRouterReleaseService:
             )
             if prepare_result.behavior != ManagedOpenRouterReleaseBehavior.READY:
                 return prepare_result
+            if prepare_result.local_key_available or prepare_result.api_key is not None:
+                return prepare_result
 
         if self._issue_task is not None and not self._issue_task.done():
             return await self._await_shared_task(self._issue_task, single_flight_reused=True)
@@ -301,8 +303,7 @@ class ManagedOpenRouterReleaseService:
         if retry_result is not None:
             return retry_result
 
-        task = self._start_shared_task("_issue_task", self._run_issue_flow())
-        return await self._await_shared_task(task, single_flight_reused=False)
+        return await self._await_or_start_issue_flow()
 
     async def _run_prepare_flow(self) -> ManagedOpenRouterReleaseResult:
         resolution = resolve_openrouter_credentials(
@@ -320,6 +321,7 @@ class ManagedOpenRouterReleaseService:
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.READY,
                 message_key="managed_release.ready",
+                api_key=resolution.api_key,
                 local_key_available=True,
             )
 
@@ -339,11 +341,7 @@ class ManagedOpenRouterReleaseService:
                     behavior=ManagedOpenRouterReleaseBehavior.RESTART,
                     message_key="managed_release.restart",
                 )
-            return ManagedOpenRouterReleaseResult(
-                behavior=ManagedOpenRouterReleaseBehavior.READY,
-                message_key="managed_release.ready",
-                pending_issue=True,
-            )
+            return await self._await_or_start_issue_flow()
 
         try:
             challenge_response = await self.client.challenge(
@@ -394,12 +392,32 @@ class ManagedOpenRouterReleaseService:
             challenge_response.fingerprint_salt.version
         )
         self.persist_settings(self.settings)
-        self._clear_retry_after()
-        return ManagedOpenRouterReleaseResult(
-            behavior=ManagedOpenRouterReleaseBehavior.READY,
-            message_key="managed_release.ready",
-            pending_issue=True,
+        return await self._await_or_start_issue_flow()
+
+    async def _await_or_start_issue_flow(self) -> ManagedOpenRouterReleaseResult:
+        resolution = resolve_openrouter_credentials(
+            self.settings,
+            secrets=self.secrets,
+            request_intent="TRANS",
         )
+        if resolution.api_key is not None:
+            self._clear_retry_after()
+            return ManagedOpenRouterReleaseResult(
+                behavior=ManagedOpenRouterReleaseBehavior.READY,
+                message_key="managed_release.ready",
+                api_key=resolution.api_key,
+                local_key_available=True,
+            )
+
+        if self._issue_task is not None and not self._issue_task.done():
+            return await self._await_shared_task(self._issue_task, single_flight_reused=True)
+
+        retry_result = self._result_for_retry_after_window()
+        if retry_result is not None:
+            return retry_result
+
+        task = self._start_shared_task("_issue_task", self._run_issue_flow())
+        return await self._await_shared_task(task, single_flight_reused=False)
 
     async def _run_issue_flow(self) -> ManagedOpenRouterReleaseResult:
         bundle = ensure_managed_identity_bundle(
