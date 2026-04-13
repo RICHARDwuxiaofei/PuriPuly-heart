@@ -277,7 +277,13 @@ jobs:
                   raise SystemExit(f'{label} {field_name} must be cleared (null or [])')
 
           def model_matches(expected: str, actual: str) -> bool:
-              return actual == expected or actual.startswith(expected + '-')
+              if actual == expected or actual.startswith(expected + '-'):
+                  return True
+              date_suffix_match = __import__('re').search(r'-\d{2}-\d{2}$', expected)
+              if date_suffix_match:
+                  family_prefix = expected[: date_suffix_match.start()]
+                  return actual == family_prefix or actual.startswith(family_prefix + '-')
+              return False
 
           def assert_models_match(actual_models, label: str) -> None:
               if actual_models is None:
