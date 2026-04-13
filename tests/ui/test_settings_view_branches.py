@@ -508,7 +508,7 @@ def test_update_api_visibility_keeps_openrouter_cards_visible_for_inactive_fallb
     )
 
 
-def test_update_api_visibility_uses_effective_peer_provider_for_legacy_local_qwen(
+def test_update_api_visibility_treats_peer_local_qwen_as_local_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -520,7 +520,7 @@ def test_update_api_visibility_uses_effective_peer_provider_for_legacy_local_qwe
     view._settings = settings
     view._update_api_visibility()
 
-    assert view._deepgram_key.visible is True
+    assert view._deepgram_key.visible is False
     assert view._soniox_key.visible is False
     assert view._qwen_region_btn.visible is False
     assert view._alibaba_key_beijing.visible is False
@@ -568,7 +568,7 @@ def test_on_peer_stt_selected_updates_provider_and_pipeline_flags(
     assert changed == []
 
 
-def test_peer_stt_local_qwen_option_is_disabled_with_explanation(
+def test_peer_stt_local_qwen_option_is_selectable_with_provider_description(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -599,16 +599,12 @@ def test_peer_stt_local_qwen_option_is_disabled_with_explanation(
     assert captured["title"] == t("settings.peer_stt_provider")
     assert captured["show_description"] is True
     assert local_qwen_option.label == t("provider.local_qwen")
-    assert local_qwen_option.disabled is True
-    assert local_qwen_option.description == t("settings.peer_stt.local_qwen_unavailable")
-    assert all(
-        not option.disabled
-        for option in options
-        if option.value != STTProviderName.LOCAL_QWEN.value
-    )
+    assert local_qwen_option.disabled is False
+    assert local_qwen_option.description == t("provider.local_qwen.description")
+    assert all(not option.disabled for option in options)
 
 
-def test_peer_stt_local_qwen_choice_cannot_be_persisted(
+def test_peer_stt_local_qwen_choice_can_be_persisted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -621,8 +617,8 @@ def test_peer_stt_local_qwen_choice_cannot_be_persisted(
 
     assert settings.provider.peer_stt == STTProviderName.DEEPGRAM
     assert pending is not None
-    assert pending.provider.peer_stt == STTProviderName.DEEPGRAM
-    assert view.has_provider_changes is False
+    assert pending.provider.peer_stt == STTProviderName.LOCAL_QWEN
+    assert view.has_provider_changes is True
 
     settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
     view.load_from_settings(settings, config_path=Path("settings.json"))
@@ -630,7 +626,7 @@ def test_peer_stt_local_qwen_choice_cannot_be_persisted(
     normalized_pending = view.build_provider_apply_settings()
 
     assert normalized_pending is not None
-    assert normalized_pending.provider.peer_stt == STTProviderName.DEEPGRAM
+    assert normalized_pending.provider.peer_stt == STTProviderName.LOCAL_QWEN
 
 
 def test_settings_view_omits_legacy_overlay_peer_toggle_api(
@@ -1275,7 +1271,7 @@ def test_audio_vad_and_low_latency_handlers_update_state(
     assert view._low_latency_text.content.value == t("toggle.on")
 
 
-def test_immediate_settings_emit_normalizes_legacy_peer_local_qwen(
+def test_immediate_settings_emit_preserves_peer_local_qwen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -1288,8 +1284,7 @@ def test_immediate_settings_emit_normalizes_legacy_peer_local_qwen(
     view._on_low_latency_selected("off")
 
     assert changed
-    assert changed[-1] is not settings
-    assert changed[-1].provider.peer_stt == STTProviderName.DEEPGRAM
+    assert changed[-1].provider.peer_stt == STTProviderName.LOCAL_QWEN
     assert settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
     assert settings.stt.low_latency_mode is False
 
@@ -1667,12 +1662,12 @@ def test_peer_stt_local_qwen_explanatory_copy_renders_from_i18n(
         )
 
         assert captured["title"] == t("settings.peer_stt_provider")
-        assert local_qwen_option.description == t("settings.peer_stt.local_qwen_unavailable")
+        assert local_qwen_option.description == t("provider.local_qwen.description")
     finally:
         i18n_module.set_locale(old_locale)
 
 
-def test_legacy_peer_local_qwen_load_normalizes_display_and_modal_current(
+def test_peer_local_qwen_load_preserves_display_and_modal_current(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -1681,12 +1676,12 @@ def test_legacy_peer_local_qwen_load_normalizes_display_and_modal_current(
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     assert settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
-    assert view._peer_stt_text.content.value == t("provider.deepgram")
+    assert view._peer_stt_text.content.value == t("provider.local_qwen")
 
     view._peer_stt_text.content.value = "stale"
     view.apply_locale()
 
-    assert view._peer_stt_text.content.value == t("provider.deepgram")
+    assert view._peer_stt_text.content.value == t("provider.local_qwen")
 
     view.page = object()
     captured: dict[str, object] = {}
@@ -1705,7 +1700,7 @@ def test_legacy_peer_local_qwen_load_normalizes_display_and_modal_current(
     view._on_peer_stt_click(None)
 
     assert captured["title"] == t("settings.peer_stt_provider")
-    assert captured["current"] == STTProviderName.DEEPGRAM.value
+    assert captured["current"] == STTProviderName.LOCAL_QWEN.value
 
 
 def test_overlay_display_toggles_update_persistent_settings(
@@ -2408,7 +2403,7 @@ def test_prompt_commit_emits_once_when_no_provider_changes(monkeypatch: pytest.M
     assert changed[-1].system_prompts[view._active_prompt_key()] == "custom prompt"
 
 
-def test_prompt_commit_normalizes_legacy_peer_local_qwen_before_emit(
+def test_prompt_commit_preserves_peer_local_qwen_before_emit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -2423,7 +2418,7 @@ def test_prompt_commit_normalizes_legacy_peer_local_qwen_before_emit(
 
     assert changed
     assert changed[-1] is not settings
-    assert changed[-1].provider.peer_stt == STTProviderName.DEEPGRAM
+    assert changed[-1].provider.peer_stt == STTProviderName.LOCAL_QWEN
     assert settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
     assert changed[-1].system_prompt == "custom prompt"
 

@@ -1489,8 +1489,6 @@ class SettingsView(ft.Column):
         return self._provider_settings_draft
 
     def _normalized_peer_stt_provider(self, provider: STTProviderName) -> STTProviderName:
-        if provider == STTProviderName.LOCAL_QWEN:
-            return STTProviderName.DEEPGRAM
         return provider
 
     def _effective_peer_stt_provider(self, settings: AppSettings | None) -> STTProviderName:
@@ -1499,13 +1497,6 @@ class SettingsView(ft.Column):
         return self._normalized_peer_stt_provider(settings.provider.peer_stt)
 
     def _peer_stt_option_item(self, provider: STTProviderName) -> OptionItem:
-        if provider == STTProviderName.LOCAL_QWEN:
-            return OptionItem(
-                value=provider.value,
-                label=provider_label(provider.value),
-                description=t("settings.peer_stt.local_qwen_unavailable"),
-                disabled=True,
-            )
         return OptionItem(
             value=provider.value,
             label=provider_label(provider.value),
@@ -1513,13 +1504,7 @@ class SettingsView(ft.Column):
         )
 
     def _sanitize_provider_apply_settings(self, settings: AppSettings | None) -> AppSettings | None:
-        if settings is None:
-            return None
-        if settings.provider.peer_stt != STTProviderName.LOCAL_QWEN:
-            return settings
-        sanitized = copy.deepcopy(settings)
-        sanitized.provider.peer_stt = STTProviderName.DEEPGRAM
-        return sanitized
+        return settings
 
     def _stage_prompt_draft(self, value: str) -> None:
         if not self._settings:
@@ -1898,8 +1883,6 @@ class SettingsView(ft.Column):
         current_settings = self._build_settings_with_provider_draft()
         assert current_settings is not None
         provider = STTProviderName(value)
-        if provider == STTProviderName.LOCAL_QWEN:
-            return
         if current_settings.provider.peer_stt == provider:
             return
         draft = self._ensure_provider_settings_draft()

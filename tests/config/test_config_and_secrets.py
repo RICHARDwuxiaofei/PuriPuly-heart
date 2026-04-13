@@ -229,13 +229,13 @@ def test_peer_stt_provider_roundtrips_through_settings_dict() -> None:
     assert "peer_deepgram_stt" not in persisted
 
 
-def test_to_dict_persists_peer_local_qwen_as_deepgram_without_mutating_runtime_settings() -> None:
+def test_to_dict_persists_peer_local_qwen_without_rewriting_runtime_settings() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
 
     persisted = to_dict(settings)
 
-    assert persisted["provider"]["peer_stt"] == STTProviderName.DEEPGRAM.value
+    assert persisted["provider"]["peer_stt"] == STTProviderName.LOCAL_QWEN.value
     assert settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
 
 
@@ -257,13 +257,13 @@ def test_from_dict_falls_back_to_deepgram_for_invalid_peer_stt_provider() -> Non
     assert loaded.provider.peer_stt == STTProviderName.DEEPGRAM
 
 
-def test_from_dict_normalizes_local_qwen_peer_stt_provider_to_deepgram() -> None:
+def test_from_dict_restores_local_qwen_peer_stt_provider() -> None:
     data = to_dict(AppSettings())
     data["provider"]["peer_stt"] = STTProviderName.LOCAL_QWEN.value
 
     loaded = from_dict(data)
 
-    assert loaded.provider.peer_stt == STTProviderName.DEEPGRAM
+    assert loaded.provider.peer_stt == STTProviderName.LOCAL_QWEN
 
 
 def test_from_dict_preserves_legacy_malformed_provider_fallback_behavior() -> None:
@@ -302,7 +302,7 @@ def test_load_settings_backfills_peer_provider_defaults_without_copying_self_val
     assert "peer_deepgram_stt" not in persisted
 
 
-def test_load_settings_rewrites_legacy_peer_local_qwen_to_deepgram(tmp_path) -> None:
+def test_load_settings_preserves_peer_local_qwen(tmp_path) -> None:
     path = tmp_path / "settings.json"
     legacy = to_dict(AppSettings())
     legacy["provider"]["peer_stt"] = STTProviderName.LOCAL_QWEN.value
@@ -311,8 +311,8 @@ def test_load_settings_rewrites_legacy_peer_local_qwen_to_deepgram(tmp_path) -> 
     loaded = load_settings(path)
     persisted = json.loads(path.read_text(encoding="utf-8"))
 
-    assert loaded.provider.peer_stt == STTProviderName.DEEPGRAM
-    assert persisted["provider"]["peer_stt"] == STTProviderName.DEEPGRAM.value
+    assert loaded.provider.peer_stt == STTProviderName.LOCAL_QWEN
+    assert persisted["provider"]["peer_stt"] == STTProviderName.LOCAL_QWEN.value
 
 
 def test_from_dict_recovers_malformed_peer_soniox_override_values() -> None:
