@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from puripuly_heart.config.llm_profiles import OPENROUTER_FALLBACK_SELECTION_ALIASES
 from puripuly_heart.config.settings import (
     SETTINGS_SCHEMA_VERSION,
     AppSettings,
@@ -13,10 +14,13 @@ from puripuly_heart.config.settings import (
     GeminiLLMModel,
     LLMProviderName,
     OpenRouterCredentialSource,
+    OpenRouterFallbackSelectionAlias,
     OpenRouterLLMModel,
     OpenRouterRoutingMode,
+    OpenRouterSelectionAlias,
     OpenRouterSettings,
     OSCSettings,
+    ProviderSettings,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
@@ -104,6 +108,32 @@ def test_default_stt_provider_is_local_qwen() -> None:
 
     assert settings.provider.stt == STTProviderName.LOCAL_QWEN
     assert to_dict(settings)["provider"]["stt"] == STTProviderName.LOCAL_QWEN.value
+
+
+def test_app_settings_defaults_to_managed_openrouter_gemma4_with_gemini25_fallback() -> None:
+    settings = AppSettings()
+
+    assert settings.provider.llm == LLMProviderName.OPENROUTER
+    assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
+    assert (
+        settings.openrouter.fallback_selection_alias
+        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+    )
+
+
+def test_openrouter_fallback_aliases_only_include_none_gemini25_and_qwen35() -> None:
+    assert tuple(alias.value for alias in OpenRouterFallbackSelectionAlias) == (
+        OpenRouterFallbackSelectionAlias.NONE.value,
+        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value,
+        OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value,
+    )
+    assert OPENROUTER_FALLBACK_SELECTION_ALIASES == (
+        OpenRouterFallbackSelectionAlias.NONE.value,
+        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value,
+        OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value,
+    )
 
 
 def test_from_dict_preserves_cloud_qwen_asr_provider_value() -> None:
@@ -238,6 +268,14 @@ def test_from_dict_preserves_legacy_malformed_provider_fallback_behavior() -> No
 
     assert loaded.provider.stt == STTProviderName.DEEPGRAM
     assert loaded.provider.peer_stt == STTProviderName.DEEPGRAM
+
+
+def test_from_dict_defaults_missing_llm_provider_to_legacy_gemini_and_inactive_openrouter() -> None:
+    loaded = from_dict({"provider": {"stt": STTProviderName.LOCAL_QWEN.value}})
+
+    assert loaded.provider.llm == LLMProviderName.GEMINI
+    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.NONE
+    assert loaded.openrouter.selection_alias is None
 
 
 def test_load_settings_backfills_peer_provider_defaults_without_copying_self_values(
@@ -855,14 +893,14 @@ def test_system_prompts_roundtrip(tmp_path):
 def test_openrouter_settings_roundtrip(tmp_path):
     path = tmp_path / "settings.json"
     settings = AppSettings(
-        provider=AppSettings().provider,
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
         openrouter=OpenRouterSettings(
             llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
             routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
             selected_source=OpenRouterCredentialSource.BYOK,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
         ),
     )
-    settings.provider.llm = LLMProviderName.OPENROUTER
     save_settings(path, settings)
 
     loaded = load_settings(path)
@@ -871,12 +909,131 @@ def test_openrouter_settings_roundtrip(tmp_path):
     assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     assert loaded.openrouter.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
     assert loaded.openrouter.selected_source == OpenRouterCredentialSource.BYOK
+    assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
+
+
+def test_openrouter_settings_roundtrip_constructor_without_alias_preserves_model_and_source() -> (
+    None
+):
+    settings = OpenRouterSettings(
+        llm_model=OpenRouterLLMModel.QWEN_35_FLASH_02_23,
+        selected_source=OpenRouterCredentialSource.BYOK,
+    )
+
+    assert settings.llm_model == OpenRouterLLMModel.QWEN_35_FLASH_02_23
+    assert settings.selected_source == OpenRouterCredentialSource.BYOK
+    assert settings.selection_alias == OpenRouterSelectionAlias.QWEN35_FLASH_BYOK
+
+
+def test_openrouter_explicit_inactive_state_keeps_selection_alias_none(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.GEMINI),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.NONE,
+            selection_alias=None,
+        ),
+    )
+
+    serialized = to_dict(settings)
+    save_settings(path, settings)
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    assert settings.openrouter.selected_source == OpenRouterCredentialSource.NONE
+    assert settings.openrouter.selection_alias is None
+    assert serialized["openrouter"]["selection_alias"] is None
+    assert loaded.openrouter.selection_alias is None
+    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.NONE
+    assert persisted["openrouter"]["selection_alias"] is None
+
+
+def test_from_dict_migrates_legacy_openrouter_gemma4_fallback_to_gemini25_flash_lite() -> None:
+    data = to_dict(AppSettings())
+    data["openrouter"]["fallback_selection_alias"] = "gemma4"
+
+    loaded = from_dict(data)
+
+    assert (
+        loaded.openrouter.fallback_selection_alias
+        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+    )
+    assert (
+        to_dict(loaded)["openrouter"]["fallback_selection_alias"]
+        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value
+    )
+
+
+def test_from_dict_defaults_invalid_openrouter_fallback_to_gemini25_flash_lite() -> None:
+    data = to_dict(AppSettings())
+    data["openrouter"]["fallback_selection_alias"] = "broken-fallback"
+
+    loaded = from_dict(data)
+
+    assert (
+        loaded.openrouter.fallback_selection_alias
+        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+    )
+
+
+def test_openrouter_settings_roundtrip_persists_selection_and_fallback_aliases(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.QWEN_35_FLASH_02_23,
+            routing_mode=OpenRouterRoutingMode.LATENCY,
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            selection_alias=OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE,
+        ),
+    )
+
+    serialized = to_dict(settings)
+
+    assert (
+        serialized["openrouter"]["selection_alias"]
+        == OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED.value
+    )
+    assert serialized["openrouter"]["llm_model"] == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
+    assert serialized["openrouter"]["selected_source"] == OpenRouterCredentialSource.MANAGED.value
+    assert (
+        serialized["openrouter"]["fallback_selection_alias"]
+        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value
+    )
+
+    save_settings(path, settings)
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert isinstance(loaded.openrouter.selection_alias, OpenRouterSelectionAlias)
+    assert isinstance(loaded.openrouter.fallback_selection_alias, OpenRouterFallbackSelectionAlias)
+    assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    assert (
+        loaded.openrouter.fallback_selection_alias
+        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+    )
+    assert loaded.openrouter.llm_model == OpenRouterLLMModel.QWEN_35_FLASH_02_23
+    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert (
+        persisted["openrouter"]["selection_alias"]
+        == OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED.value
+    )
+    assert persisted["openrouter"]["llm_model"] == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
+    assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.MANAGED.value
+    assert (
+        persisted["openrouter"]["fallback_selection_alias"]
+        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value
+    )
 
 
 def test_load_settings_backfills_openrouter_blocks_and_persists(tmp_path):
     path = tmp_path / "settings.json"
     legacy = to_dict(AppSettings())
     legacy["settings_version"] = 4
+    legacy["provider"]["llm"] = LLMProviderName.GEMINI.value
     legacy.pop("openrouter", None)
     legacy.setdefault("api_key_verified", {}).pop("openrouter", None)
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -888,12 +1045,46 @@ def test_load_settings_backfills_openrouter_blocks_and_persists(tmp_path):
     assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     assert loaded.openrouter.routing_mode == OpenRouterRoutingMode.LATENCY
     assert loaded.openrouter.selected_source == OpenRouterCredentialSource.NONE
+    assert loaded.openrouter.selection_alias is None
     assert loaded.api_key_verified.openrouter is False
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["openrouter"]["llm_model"] == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value
     assert persisted["openrouter"]["routing_mode"] == OpenRouterRoutingMode.LATENCY.value
     assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.NONE.value
+    assert persisted["openrouter"]["selection_alias"] is None
     assert persisted["api_key_verified"]["openrouter"] is False
+
+
+def test_load_settings_backfills_openrouter_aliases_from_legacy_fields(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["settings_version"] = SETTINGS_SCHEMA_VERSION - 1
+    legacy["provider"]["llm"] = LLMProviderName.OPENROUTER.value
+    legacy["openrouter"]["llm_model"] = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value
+    legacy["openrouter"]["selected_source"] = OpenRouterCredentialSource.MANAGED.value
+    legacy["openrouter"].pop("selection_alias", None)
+    legacy["openrouter"].pop("fallback_selection_alias", None)
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
+    assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
+    assert (
+        loaded.openrouter.fallback_selection_alias
+        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+    )
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert (
+        persisted["openrouter"]["selection_alias"] == OpenRouterSelectionAlias.GEMMA4_MANAGED.value
+    )
+    assert (
+        persisted["openrouter"]["fallback_selection_alias"]
+        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value
+    )
 
 
 def test_load_settings_backfills_openrouter_selected_source_to_byok_for_legacy_openrouter_provider(
@@ -904,29 +1095,37 @@ def test_load_settings_backfills_openrouter_selected_source_to_byok_for_legacy_o
     legacy["settings_version"] = 9
     legacy["provider"]["llm"] = LLMProviderName.OPENROUTER.value
     legacy["openrouter"].pop("selected_source", None)
+    legacy["openrouter"].pop("selection_alias", None)
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
     persisted = json.loads(path.read_text(encoding="utf-8"))
 
     assert loaded.openrouter.selected_source == OpenRouterCredentialSource.BYOK
+    assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
     assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.BYOK.value
+    assert persisted["openrouter"]["selection_alias"] == OpenRouterSelectionAlias.GEMMA4_BYOK.value
 
 
-def test_load_settings_repairs_schema10_openrouter_none_selected_source_to_byok(tmp_path) -> None:
+def test_load_settings_normalizes_legacy_active_openrouter_none_selected_source_to_byok(
+    tmp_path,
+) -> None:
     path = tmp_path / "settings.json"
     legacy = to_dict(AppSettings())
     legacy["settings_version"] = 10
     legacy["provider"]["llm"] = LLMProviderName.OPENROUTER.value
     legacy["openrouter"]["selected_source"] = OpenRouterCredentialSource.NONE.value
+    legacy["openrouter"].pop("selection_alias", None)
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
     persisted = json.loads(path.read_text(encoding="utf-8"))
 
     assert loaded.openrouter.selected_source == OpenRouterCredentialSource.BYOK
+    assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.BYOK.value
+    assert persisted["openrouter"]["selection_alias"] == OpenRouterSelectionAlias.GEMMA4_BYOK.value
 
 
 def test_from_dict_defaults_invalid_openrouter_routing_mode_to_latency() -> None:

@@ -54,7 +54,11 @@ describe('broker foundation', () => {
       trialProviderPolicy: {
         managedFreeTrial: {
           provider: 'OpenRouter',
-          model: 'google/gemma-4-26b-a4b-it',
+          models: [
+            'google/gemma-4-26b-a4b-it',
+            'qwen/qwen3.5-flash-02-23',
+            'google/gemini-2.5-flash-lite-preview',
+          ],
         },
         upstreamProviderRouting: 'unpinned-by-broker',
         excludedProviders: ['Alibaba'],

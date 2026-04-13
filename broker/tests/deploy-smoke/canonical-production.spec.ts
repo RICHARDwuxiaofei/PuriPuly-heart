@@ -109,7 +109,7 @@ describeDeploySmoke('broker direct deploy smoke', () => {
     expect(foundation.body.trialProviderPolicy?.managedFreeTrial?.provider).toBe(
       'OpenRouter',
     );
-    expect(foundation.body.trialProviderPolicy?.managedFreeTrial?.model).toBe(
+    expect(foundation.body.trialProviderPolicy?.managedFreeTrial?.models).toContain(
       ISSUE_MODEL,
     );
 

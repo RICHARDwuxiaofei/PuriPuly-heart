@@ -43,6 +43,11 @@ const ISSUE_SIGNATURE_PAYLOAD_FIELDS = [
   'signed_at',
 ] as const;
 const ISSUE_SINGLE_FLIGHT_LOCK_PREFIX = '__issue_lock__:';
+const MANAGED_TRIAL_ALLOWED_MODEL_SET = new Set<string>(
+  TRIAL_PROVIDER_POLICY.managedFreeTrial.models,
+);
+const MANAGED_TRIAL_ALLOWED_MODEL_LIST =
+  TRIAL_PROVIDER_POLICY.managedFreeTrial.models.join(', ');
 
 const STRICT_ISO_8601_TIMESTAMP =
   /^(?<year>\d{4})-(?<month>0[1-9]|1[0-2])-(?<day>0[1-9]|[12]\d|3[01])T(?<hour>[01]\d|2[0-3]):(?<minute>[0-5]\d):(?<second>[0-5]\d)(?:\.(?<millisecond>\d{3}))?(?:(?<utc>Z)|(?<offsetSign>[+-])(?<offsetHour>[01]\d|2[0-3]):(?<offsetMinute>[0-5]\d))$/u;
@@ -131,12 +136,12 @@ export async function handleOpenRouterIssue(
     );
   }
 
-  if (model !== TRIAL_PROVIDER_POLICY.managedFreeTrial.model) {
+  if (!MANAGED_TRIAL_ALLOWED_MODEL_SET.has(model)) {
     return errorResponse(
       c,
       400,
       'invalid_request',
-      `model must equal ${TRIAL_PROVIDER_POLICY.managedFreeTrial.model}`,
+      `model must be one of ${MANAGED_TRIAL_ALLOWED_MODEL_LIST}`,
     );
   }
 
@@ -337,7 +342,7 @@ export async function handleOpenRouterIssue(
       throw new Error('active entitlement missing after successful issue activation');
     }
 
-    return issueSuccessResponse(c, activeEntitlement, childKey.rawKey);
+    return issueSuccessResponse(c, activeEntitlement, childKey.rawKey, model);
   } catch (error) {
     if (childKey) {
       return handleManagedChildKeyFailure(c, {
@@ -520,6 +525,7 @@ function issueSuccessResponse(
   c: Context<BrokerEnv>,
   entitlement: OpenRouterEntitlementRecord,
   rawKey: string,
+  model: string,
 ): Response {
   if (!entitlement.managed_credential_ref || !entitlement.expires_at) {
     throw new Error('active entitlement missing managed release metadata');
@@ -534,7 +540,7 @@ function issueSuccessResponse(
     },
     expires_at: entitlement.expires_at,
     budget_usd: entitlement.budget_usd,
-    model: TRIAL_PROVIDER_POLICY.managedFreeTrial.model,
+    model,
   });
 }
 

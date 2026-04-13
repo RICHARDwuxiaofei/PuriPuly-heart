@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from puripuly_heart.app.wiring import (
+    _LazyFactoryLLMProvider,
     build_peer_stt_provider_signature,
     create_llm_provider,
     create_peer_stt_backend,
@@ -17,8 +18,10 @@ from puripuly_heart.config.settings import (
     LLMProviderName,
     LLMSettings,
     OpenRouterCredentialSource,
+    OpenRouterFallbackSelectionAlias,
     OpenRouterLLMModel,
     OpenRouterRoutingMode,
+    OpenRouterSelectionAlias,
     OpenRouterSettings,
     ProviderSettings,
     QwenASRSTTSettings,
@@ -33,9 +36,13 @@ from puripuly_heart.core.language import (
     get_deepgram_language,
     get_qwen_asr_language,
 )
+from puripuly_heart.core.llm import FallbackRacingLLMProvider
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
-from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterLLMProvider
+from puripuly_heart.core.managed_openrouter_release import (
+    ManagedOpenRouterLLMProvider,
+    ManagedOpenRouterReleaseService,
+)
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
@@ -205,6 +212,7 @@ def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
         openrouter=OpenRouterSettings(
             llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
             routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
             selected_source=OpenRouterCredentialSource.BYOK,
         ),
     )
@@ -225,7 +233,10 @@ def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
 def test_create_llm_provider_openrouter_passes_runtime_logging() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
-        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.BYOK),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.BYOK,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
     )
     secrets = InMemorySecretStore()
     secrets.set("openrouter_api_key", "or-key")
@@ -242,7 +253,10 @@ def test_create_llm_provider_openrouter_uses_env_fallback(monkeypatch: pytest.Mo
     monkeypatch.setenv("OPENROUTER_API_KEY", "env-or-key")
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
-        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.BYOK),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.BYOK,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
     )
     secrets = InMemorySecretStore()
 
@@ -256,7 +270,10 @@ def test_create_llm_provider_openrouter_uses_env_fallback(monkeypatch: pytest.Mo
 def test_create_llm_provider_openrouter_uses_selected_managed_key() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
-        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.MANAGED),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
     )
     secrets = InMemorySecretStore()
     secrets.set("openrouter_api_key", "byok-key")
@@ -277,7 +294,10 @@ def test_create_llm_provider_openrouter_uses_selected_managed_key() -> None:
 def test_create_llm_provider_openrouter_requires_release_service_for_managed_mode() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
-        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.MANAGED),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
     )
     secrets = InMemorySecretStore()
     secrets.set("openrouter_api_key", "byok-key")
@@ -292,7 +312,10 @@ def test_create_llm_provider_openrouter_uses_managed_wrapper_when_release_servic
 ):
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
-        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.MANAGED),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
     )
     secrets = InMemorySecretStore()
     managed_release_service = object()
@@ -313,8 +336,102 @@ def test_create_llm_provider_openrouter_uses_managed_wrapper_when_release_servic
     assert delegate.runtime_logging is runtime_logging
 
 
+def test_create_llm_provider_openrouter_wraps_primary_with_source_locked_openrouter_fallback() -> (
+    None
+):
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source=OpenRouterCredentialSource.BYOK,
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "or-key")
+    runtime_logging = object()
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        runtime_logging=runtime_logging,
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.primary, OpenRouterLLMProvider)
+    assert provider.inner.primary.api_key == "or-key"
+    assert provider.inner.primary.model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value
+    assert provider.inner.primary.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+    assert provider.inner.primary.runtime_logging is runtime_logging
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+    assert provider.inner.fallback._delegate is None
+
+    fallback_delegate = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_delegate, OpenRouterLLMProvider)
+    assert fallback_delegate.api_key == "or-key"
+    assert fallback_delegate.model == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
+    assert fallback_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+    assert fallback_delegate.runtime_logging is runtime_logging
+
+
+def test_create_llm_provider_openrouter_managed_fallback_reuses_primary_managed_service() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.QWEN35_FLASH,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    managed_release_service = ManagedOpenRouterReleaseService(
+        settings=settings,
+        secrets=secrets,
+        client=object(),
+        persist_settings=lambda _updated: None,
+        app_version="2.0.0",
+        raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
+    )
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=managed_release_service,
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.primary, ManagedOpenRouterLLMProvider)
+    assert provider.inner.primary.release_service is managed_release_service
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+    assert provider.inner.fallback._delegate is None
+
+    fallback_delegate = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
+    assert fallback_delegate.release_service is managed_release_service
+
+    fallback_openrouter_delegate = fallback_delegate.delegate_factory("managed-key")
+
+    assert isinstance(fallback_openrouter_delegate, OpenRouterLLMProvider)
+    assert fallback_openrouter_delegate.model == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
+    assert fallback_openrouter_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+
+
 def test_create_llm_provider_openrouter_rejects_none_selected_source_even_with_keys() -> None:
-    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.OPENROUTER))
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.NONE,
+            selection_alias=None,
+        ),
+    )
     secrets = InMemorySecretStore()
     secrets.set("openrouter_api_key", "byok-key")
     secrets.set("openrouter_managed_api_key", "managed-key")

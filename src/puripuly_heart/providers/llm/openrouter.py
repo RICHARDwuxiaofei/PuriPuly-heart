@@ -28,27 +28,13 @@ def _log_basic_request(
     target_language: str,
     context: str,
 ) -> None:
-    message = "[Basic][LLM] OpenRouter request [%s][context=%s] %s -> %s: %r" % (
-        operation,
-        "yes" if context else "no",
-        source_language,
-        target_language,
-        text,
-    )
-    if runtime_logging is not None:
-        runtime_logging.emit_basic(message)
-        return
-    logger.info(message)
+    return None
 
 
 def _log_basic_response(
     *, runtime_logging: SessionRuntimeLoggingService | None, operation: str, text: str
 ) -> None:
-    message = "[Basic][LLM] OpenRouter response [%s]: %r" % (operation, text)
-    if runtime_logging is not None:
-        runtime_logging.emit_basic(message)
-        return
-    logger.info(message)
+    return None
 
 
 def _log_basic_request_failure(

@@ -10,7 +10,12 @@ from uuid import uuid4
 
 import pytest
 
-from puripuly_heart.config.settings import AppSettings, OpenRouterCredentialSource
+from puripuly_heart.config.settings import (
+    AppSettings,
+    OpenRouterCredentialSource,
+    OpenRouterLLMModel,
+    OpenRouterSelectionAlias,
+)
 from puripuly_heart.core.managed_identity import ensure_managed_identity_bundle
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterChallengeSuccess,
@@ -250,6 +255,28 @@ async def test_prepare_for_translation_persists_verified_snapshot_and_issue_reus
     assert issue_payload["hardware_hash"] == expected_hardware_hash
     assert settings.managed_identity.verified_hardware_hash is None
     assert settings.managed_identity.verified_hardware_hash_salt_version is None
+
+
+@pytest.mark.asyncio
+async def test_issue_uses_qwen_managed_model_from_selection_alias() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    settings.managed_identity.release_token = "release-token-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
+    client = FakeManagedReleaseClient(
+        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key")
+    )
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.ensure_key_for_llm_start()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    issue_payload = client.calls[0][1]
+    assert issue_payload["model"] == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
 
 
 @pytest.mark.asyncio

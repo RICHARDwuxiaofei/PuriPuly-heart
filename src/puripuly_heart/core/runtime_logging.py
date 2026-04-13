@@ -247,6 +247,18 @@ class SessionRuntimeLoggingService:
         self._session_logger.log(level, message)
         return True
 
+    def emit_persisted(self, message: str, *, level: int = logging.INFO) -> None:
+        record = self._session_logger.makeRecord(
+            self._session_logger.name,
+            level,
+            fn="",
+            lno=0,
+            msg=message,
+            args=(),
+            exc_info=None,
+        )
+        self._sinks.file_handler.handle(record)
+
     def close(self) -> None:
         self.detach_realtime_sink()
         for handler in self._session_handlers:

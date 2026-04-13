@@ -7,9 +7,23 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from puripuly_heart.config.llm_profiles import (
+    OPENROUTER_FALLBACK_SELECTION_ALIAS_GEMINI25_FLASH_LITE,
+    OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE,
+    OPENROUTER_FALLBACK_SELECTION_ALIAS_QWEN35_FLASH,
+    OPENROUTER_MODEL_GEMINI_25_FLASH_LITE,
+    OPENROUTER_SELECTION_ALIAS_GEMMA4_BYOK,
+    OPENROUTER_SELECTION_ALIAS_GEMMA4_MANAGED,
+    OPENROUTER_SELECTION_ALIAS_QWEN35_FLASH_BYOK,
+    OPENROUTER_SELECTION_ALIAS_QWEN35_FLASH_MANAGED,
+    get_openrouter_llm_profile,
+    get_openrouter_selection_alias_for_model_and_source,
+    normalize_openrouter_fallback_selection_alias,
+    openrouter_alias_for_fields,
+)
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 14
+SETTINGS_SCHEMA_VERSION = 15
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
@@ -64,6 +78,8 @@ class QwenLLMModel(str, Enum):
 
 class OpenRouterLLMModel(str, Enum):
     GEMMA_4_26B_A4B_IT = "google/gemma-4-26b-a4b-it"
+    QWEN_35_FLASH_02_23 = "qwen/qwen3.5-flash-02-23"
+    GEMINI_25_FLASH_LITE = OPENROUTER_MODEL_GEMINI_25_FLASH_LITE
 
 
 class OpenRouterRoutingMode(str, Enum):
@@ -76,6 +92,19 @@ class OpenRouterCredentialSource(str, Enum):
     NONE = "none"
     MANAGED = "managed"
     BYOK = "byok"
+
+
+class OpenRouterSelectionAlias(str, Enum):
+    GEMMA4_MANAGED = OPENROUTER_SELECTION_ALIAS_GEMMA4_MANAGED
+    GEMMA4_BYOK = OPENROUTER_SELECTION_ALIAS_GEMMA4_BYOK
+    QWEN35_FLASH_MANAGED = OPENROUTER_SELECTION_ALIAS_QWEN35_FLASH_MANAGED
+    QWEN35_FLASH_BYOK = OPENROUTER_SELECTION_ALIAS_QWEN35_FLASH_BYOK
+
+
+class OpenRouterFallbackSelectionAlias(str, Enum):
+    NONE = OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE
+    GEMINI25_FLASH_LITE = OPENROUTER_FALLBACK_SELECTION_ALIAS_GEMINI25_FLASH_LITE
+    QWEN35_FLASH = OPENROUTER_FALLBACK_SELECTION_ALIAS_QWEN35_FLASH
 
 
 @dataclass(slots=True)
@@ -287,7 +316,7 @@ class OSCSettings:
 class ProviderSettings:
     stt: STTProviderName = STTProviderName.LOCAL_QWEN
     peer_stt: STTProviderName = STTProviderName.DEEPGRAM
-    llm: LLMProviderName = LLMProviderName.GEMINI
+    llm: LLMProviderName = LLMProviderName.OPENROUTER
 
     def validate(self) -> None:
         if not isinstance(self.stt, STTProviderName):
@@ -345,8 +374,23 @@ class QwenSettings:
 class OpenRouterSettings:
     llm_model: OpenRouterLLMModel = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
-    selected_source: OpenRouterCredentialSource = OpenRouterCredentialSource.NONE
+    selected_source: OpenRouterCredentialSource = OpenRouterCredentialSource.MANAGED
+    selection_alias: OpenRouterSelectionAlias | None = None
+    fallback_selection_alias: OpenRouterFallbackSelectionAlias = (
+        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+    )
     broker_base_url: str = DEFAULT_OPENROUTER_BROKER_BASE_URL
+
+    def __post_init__(self) -> None:
+        (
+            self.llm_model,
+            self.selected_source,
+            self.selection_alias,
+        ) = _resolve_openrouter_runtime_main_selection(
+            selection_alias=self.selection_alias,
+            llm_model=self.llm_model,
+            selected_source=self.selected_source,
+        )
 
     def validate(self) -> None:
         if not isinstance(self.llm_model, OpenRouterLLMModel):
@@ -355,6 +399,14 @@ class OpenRouterSettings:
             raise ValueError("invalid openrouter routing mode")
         if not isinstance(self.selected_source, OpenRouterCredentialSource):
             raise ValueError("invalid openrouter credential source")
+        if self.selection_alias is not None and not isinstance(
+            self.selection_alias, OpenRouterSelectionAlias
+        ):
+            raise ValueError("invalid openrouter selection alias")
+        if self.selection_alias is None and self.selected_source != OpenRouterCredentialSource.NONE:
+            raise ValueError("openrouter selection alias is required for active sources")
+        if not isinstance(self.fallback_selection_alias, OpenRouterFallbackSelectionAlias):
+            raise ValueError("invalid openrouter fallback selection alias")
         if not isinstance(self.broker_base_url, str) or not self.broker_base_url.strip():
             raise ValueError("invalid openrouter broker base url")
 
@@ -504,6 +556,21 @@ def _enum_to_value(obj: object) -> object:
 
 
 def to_dict(settings: AppSettings) -> dict[str, Any]:
+    (
+        normalized_openrouter_model,
+        normalized_openrouter_selected_source,
+        normalized_openrouter_selection_alias,
+    ) = _resolve_openrouter_runtime_main_selection(
+        selection_alias=settings.openrouter.selection_alias,
+        llm_model=settings.openrouter.llm_model,
+        selected_source=settings.openrouter.selected_source,
+    )
+    normalized_openrouter_selection_alias_value = (
+        normalized_openrouter_selection_alias.value
+        if normalized_openrouter_selection_alias is not None
+        else None
+    )
+
     data: dict[str, Any] = {
         "settings_version": settings.settings_version,
         "provider": {
@@ -578,9 +645,11 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "llm_model": settings.gemini.llm_model.value,
         },
         "openrouter": {
-            "llm_model": settings.openrouter.llm_model.value,
+            "llm_model": normalized_openrouter_model.value,
             "routing_mode": settings.openrouter.routing_mode.value,
-            "selected_source": settings.openrouter.selected_source.value,
+            "selected_source": normalized_openrouter_selected_source.value,
+            "selection_alias": normalized_openrouter_selection_alias_value,
+            "fallback_selection_alias": settings.openrouter.fallback_selection_alias.value,
             "broker_base_url": settings.openrouter.broker_base_url,
         },
         "qwen": {
@@ -721,6 +790,111 @@ def _parse_openrouter_credential_source(
     return fallback
 
 
+def _parse_openrouter_selection_alias_profile(value: object):
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized:
+            return get_openrouter_llm_profile(normalized)
+    return None
+
+
+def _derive_openrouter_selection_alias(
+    llm_model: OpenRouterLLMModel,
+    selected_source: OpenRouterCredentialSource,
+) -> OpenRouterSelectionAlias:
+    alias = get_openrouter_selection_alias_for_model_and_source(
+        llm_model.value,
+        selected_source.value,
+    )
+    if alias is None:
+        alias = (
+            OpenRouterSelectionAlias.GEMMA4_MANAGED.value
+            if selected_source == OpenRouterCredentialSource.MANAGED
+            else OpenRouterSelectionAlias.GEMMA4_BYOK.value
+        )
+    return OpenRouterSelectionAlias(alias)
+
+
+def _parse_openrouter_selection_alias(
+    value: object,
+    *,
+    llm_model: OpenRouterLLMModel,
+    selected_source: OpenRouterCredentialSource,
+) -> OpenRouterSelectionAlias:
+    profile = _parse_openrouter_selection_alias_profile(value)
+    if profile is not None and profile.openrouter_model is not None:
+        canonical_alias = openrouter_alias_for_fields(
+            model=profile.openrouter_model,
+            source=profile.openrouter_source,
+        )
+        if canonical_alias is not None:
+            return OpenRouterSelectionAlias(canonical_alias)
+    return _derive_openrouter_selection_alias(llm_model, selected_source)
+
+
+def _parse_openrouter_fallback_selection_alias(value: object) -> OpenRouterFallbackSelectionAlias:
+    if isinstance(value, str):
+        normalized = normalize_openrouter_fallback_selection_alias(value)
+        if normalized is not None:
+            try:
+                return OpenRouterFallbackSelectionAlias(normalized)
+            except ValueError:
+                pass
+    return OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+
+
+def _resolve_openrouter_runtime_main_selection(
+    *,
+    selection_alias: object,
+    llm_model: object,
+    selected_source: object,
+) -> tuple[
+    OpenRouterLLMModel,
+    OpenRouterCredentialSource,
+    OpenRouterSelectionAlias | None,
+]:
+    selection_profile = _parse_openrouter_selection_alias_profile(selection_alias)
+    if selection_profile is not None and selection_profile.openrouter_model is not None:
+        resolved_llm_model = _parse_openrouter_llm_model(selection_profile.openrouter_model)
+        resolved_selected_source = _parse_openrouter_credential_source(
+            selection_profile.openrouter_source
+        )
+        if (
+            resolved_selected_source == OpenRouterCredentialSource.NONE
+            and _parse_openrouter_credential_source(selected_source)
+            != OpenRouterCredentialSource.NONE
+        ):
+            resolved_selected_source = _parse_openrouter_credential_source(selected_source)
+        if resolved_selected_source == OpenRouterCredentialSource.NONE:
+            return resolved_llm_model, resolved_selected_source, None
+        canonical_selection_alias = _derive_openrouter_selection_alias(
+            resolved_llm_model,
+            resolved_selected_source,
+        )
+        canonical_profile = get_openrouter_llm_profile(canonical_selection_alias.value)
+        assert canonical_profile is not None and canonical_profile.openrouter_model is not None
+        return (
+            _parse_openrouter_llm_model(canonical_profile.openrouter_model),
+            _parse_openrouter_credential_source(canonical_profile.openrouter_source),
+            canonical_selection_alias,
+        )
+
+    normalized_llm_model = _parse_openrouter_llm_model(llm_model)
+    normalized_selected_source = _parse_openrouter_credential_source(selected_source)
+    if normalized_selected_source == OpenRouterCredentialSource.NONE:
+        return normalized_llm_model, normalized_selected_source, None
+    normalized_selection_alias = _derive_openrouter_selection_alias(
+        normalized_llm_model, normalized_selected_source
+    )
+    normalized_profile = get_openrouter_llm_profile(normalized_selection_alias.value)
+    assert normalized_profile is not None and normalized_profile.openrouter_model is not None
+    return (
+        _parse_openrouter_llm_model(normalized_profile.openrouter_model),
+        _parse_openrouter_credential_source(normalized_profile.openrouter_source),
+        normalized_selection_alias,
+    )
+
+
 def _parse_openrouter_broker_base_url(value: object) -> str:
     if isinstance(value, str):
         normalized = value.strip()
@@ -729,14 +903,18 @@ def _parse_openrouter_broker_base_url(value: object) -> str:
     return DEFAULT_OPENROUTER_BROKER_BASE_URL
 
 
-def _default_openrouter_credential_source_value(data: dict[str, Any]) -> OpenRouterCredentialSource:
-    provider_data = data.get("provider")
+def _loaded_llm_provider(settings_data: dict[str, Any]) -> LLMProviderName:
+    provider_data = settings_data.get("provider")
     provider_llm_value = (
         provider_data.get("llm", LLMProviderName.GEMINI.value)
         if isinstance(provider_data, dict)
         else LLMProviderName.GEMINI.value
     )
-    if _parse_llm_provider(provider_llm_value) == LLMProviderName.OPENROUTER:
+    return _parse_llm_provider(provider_llm_value)
+
+
+def _default_openrouter_credential_source_value(data: dict[str, Any]) -> OpenRouterCredentialSource:
+    if _loaded_llm_provider(data) == LLMProviderName.OPENROUTER:
         return OpenRouterCredentialSource.BYOK
     return OpenRouterCredentialSource.NONE
 
@@ -749,6 +927,57 @@ def _get_raw_openrouter_selected_source(openrouter_data: dict[str, Any]) -> obje
     if "selected_credential_source" in openrouter_data:
         return openrouter_data["selected_credential_source"]
     return None
+
+
+def _resolve_openrouter_main_selection(
+    openrouter_data: dict[str, Any],
+    settings_data: dict[str, Any],
+) -> tuple[
+    OpenRouterLLMModel,
+    OpenRouterCredentialSource,
+    OpenRouterSelectionAlias | None,
+]:
+    raw_selected_source = _parse_openrouter_credential_source(
+        _get_raw_openrouter_selected_source(openrouter_data),
+        fallback=_default_openrouter_credential_source_value(settings_data),
+    )
+    if (
+        _loaded_llm_provider(settings_data) == LLMProviderName.OPENROUTER
+        and raw_selected_source == OpenRouterCredentialSource.NONE
+    ):
+        raw_selected_source = _default_openrouter_credential_source_value(settings_data)
+    selection_profile = _parse_openrouter_selection_alias_profile(
+        openrouter_data.get("selection_alias")
+    )
+    if raw_selected_source == OpenRouterCredentialSource.NONE:
+        llm_default = (
+            selection_profile.openrouter_model
+            if selection_profile is not None and selection_profile.openrouter_model is not None
+            else OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value
+        )
+        llm_model = _parse_openrouter_llm_model(openrouter_data.get("llm_model", llm_default))
+        return llm_model, raw_selected_source, None
+
+    if selection_profile is not None and selection_profile.openrouter_model is not None:
+        llm_model = _parse_openrouter_llm_model(selection_profile.openrouter_model)
+        selected_source = _parse_openrouter_credential_source(
+            selection_profile.openrouter_source,
+            fallback=_default_openrouter_credential_source_value(settings_data),
+        )
+        if (
+            selected_source == OpenRouterCredentialSource.NONE
+            and raw_selected_source != OpenRouterCredentialSource.NONE
+        ):
+            selected_source = raw_selected_source
+        if selected_source == OpenRouterCredentialSource.NONE:
+            return llm_model, selected_source, None
+        selection_alias = _derive_openrouter_selection_alias(llm_model, selected_source)
+        return llm_model, selected_source, selection_alias
+
+    llm_model = _parse_openrouter_llm_model(openrouter_data.get("llm_model"))
+    selected_source = raw_selected_source
+    selection_alias = _derive_openrouter_selection_alias(llm_model, selected_source)
+    return llm_model, selected_source, selection_alias
 
 
 def _infer_qwen_region_from_legacy_asr_endpoint(value: object) -> QwenRegion | None:
@@ -1115,6 +1344,43 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 14
 
+    if version < 15:
+        openrouter_data = data.get("openrouter")
+        if not isinstance(openrouter_data, dict):
+            openrouter_data = {}
+            data["openrouter"] = openrouter_data
+            changed = True
+
+        (
+            normalized_openrouter_model,
+            normalized_openrouter_selected_source,
+            normalized_selection_alias,
+        ) = _resolve_openrouter_main_selection(openrouter_data, data)
+        normalized_selection_alias_value = (
+            normalized_selection_alias.value if normalized_selection_alias is not None else None
+        )
+        if openrouter_data.get("llm_model") != normalized_openrouter_model.value:
+            openrouter_data["llm_model"] = normalized_openrouter_model.value
+            changed = True
+        if openrouter_data.get("selected_source") != normalized_openrouter_selected_source.value:
+            openrouter_data["selected_source"] = normalized_openrouter_selected_source.value
+            changed = True
+        if openrouter_data.get("selection_alias") != normalized_selection_alias_value:
+            openrouter_data["selection_alias"] = normalized_selection_alias_value
+            changed = True
+
+        normalized_fallback_selection_alias = _parse_openrouter_fallback_selection_alias(
+            openrouter_data.get("fallback_selection_alias")
+        )
+        if (
+            openrouter_data.get("fallback_selection_alias")
+            != normalized_fallback_selection_alias.value
+        ):
+            openrouter_data["fallback_selection_alias"] = normalized_fallback_selection_alias.value
+            changed = True
+
+        version = 15
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -1211,10 +1477,16 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         data["openrouter"] = openrouter_data
         changed = True
 
-    raw_openrouter_model = openrouter_data.get("llm_model")
-    normalized_openrouter_model = _parse_openrouter_llm_model(raw_openrouter_model).value
-    if raw_openrouter_model != normalized_openrouter_model:
-        openrouter_data["llm_model"] = normalized_openrouter_model
+    (
+        normalized_openrouter_model,
+        normalized_openrouter_selected_source,
+        normalized_selection_alias,
+    ) = _resolve_openrouter_main_selection(openrouter_data, data)
+    normalized_selection_alias_value = (
+        normalized_selection_alias.value if normalized_selection_alias is not None else None
+    )
+    if openrouter_data.get("llm_model") != normalized_openrouter_model.value:
+        openrouter_data["llm_model"] = normalized_openrouter_model.value
         changed = True
 
     raw_openrouter_routing_mode = openrouter_data.get("routing_mode")
@@ -1225,19 +1497,25 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         openrouter_data["routing_mode"] = normalized_openrouter_routing_mode
         changed = True
 
-    raw_openrouter_selected_source = _get_raw_openrouter_selected_source(openrouter_data)
-    normalized_openrouter_selected_source = _parse_openrouter_credential_source(
-        raw_openrouter_selected_source,
-        fallback=_default_openrouter_credential_source_value(data),
-    )
     if openrouter_data.get("selected_source") != normalized_openrouter_selected_source.value:
         openrouter_data["selected_source"] = normalized_openrouter_selected_source.value
+        changed = True
+    if openrouter_data.get("selection_alias") != normalized_selection_alias_value:
+        openrouter_data["selection_alias"] = normalized_selection_alias_value
         changed = True
     if "credential_source" in openrouter_data:
         del openrouter_data["credential_source"]
         changed = True
     if "selected_credential_source" in openrouter_data:
         del openrouter_data["selected_credential_source"]
+        changed = True
+
+    raw_fallback_selection_alias = openrouter_data.get("fallback_selection_alias")
+    normalized_fallback_selection_alias = _parse_openrouter_fallback_selection_alias(
+        raw_fallback_selection_alias
+    )
+    if raw_fallback_selection_alias != normalized_fallback_selection_alias.value:
+        openrouter_data["fallback_selection_alias"] = normalized_fallback_selection_alias.value
         changed = True
 
     raw_openrouter_broker_base_url = openrouter_data.get("broker_base_url")
@@ -1438,6 +1716,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     qwen_raw = data.get("qwen") if isinstance(data.get("qwen"), dict) else {}
     qwen_asr_raw = data.get("qwen_asr_stt") if isinstance(data.get("qwen_asr_stt"), dict) else {}
     openrouter_raw = data.get("openrouter") if isinstance(data.get("openrouter"), dict) else {}
+    openrouter_model, openrouter_selected_source, openrouter_selection_alias = (
+        _resolve_openrouter_main_selection(openrouter_raw, data)
+    )
     qwen_settings = QwenSettings(
         region=_parse_qwen_region(
             qwen_raw.get("region"),
@@ -1589,21 +1870,17 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             ),
         ),
         openrouter=OpenRouterSettings(
-            llm_model=_parse_openrouter_llm_model(
-                openrouter_raw.get(
-                    "llm_model",
-                    OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
-                )
-            ),
+            llm_model=openrouter_model,
             routing_mode=_parse_openrouter_routing_mode(
                 openrouter_raw.get(
                     "routing_mode",
                     OpenRouterRoutingMode.LATENCY.value,
                 )
             ),
-            selected_source=_parse_openrouter_credential_source(
-                _get_raw_openrouter_selected_source(openrouter_raw),
-                fallback=_default_openrouter_credential_source_value(data),
+            selected_source=openrouter_selected_source,
+            selection_alias=openrouter_selection_alias,
+            fallback_selection_alias=_parse_openrouter_fallback_selection_alias(
+                openrouter_raw.get("fallback_selection_alias")
             ),
             broker_base_url=_parse_openrouter_broker_base_url(
                 openrouter_raw.get("broker_base_url")

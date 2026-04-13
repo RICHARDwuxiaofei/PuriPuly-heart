@@ -39,8 +39,10 @@ class FakeLLMProvider:
     """Fake LLM provider that records calls."""
 
     calls: list[dict] = field(default_factory=list)
+    stream_calls: list[dict] = field(default_factory=list)
     response_text: str = "translated"
     delay_s: float = 0.01
+    stream_snapshots: list[str] = field(default_factory=list)
 
     async def translate(
         self,
@@ -61,6 +63,28 @@ class FakeLLMProvider:
         )
         await asyncio.sleep(self.delay_s)
         return Translation(utterance_id=utterance_id, text=self.response_text)
+
+    async def stream_translate(
+        self,
+        *,
+        utterance_id,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ):
+        self.stream_calls.append(
+            {
+                "utterance_id": utterance_id,
+                "text": text,
+                "context": context,
+            }
+        )
+        await asyncio.sleep(self.delay_s)
+        snapshots = self.stream_snapshots or [self.response_text]
+        for snapshot in snapshots:
+            yield snapshot
 
     async def close(self) -> None:
         pass
@@ -168,6 +192,51 @@ class TestSpeechEndedTracking:
 
 
 class TestRuntimeLatencyLogging:
+    @pytest.mark.asyncio
+    async def test_low_latency_self_runtime_uses_translate_without_changing_peer_streaming_contract(
+        self,
+    ):
+        llm = FakeLLMProvider(
+            response_text="translated",
+            delay_s=0.0,
+            stream_snapshots=["peer", "peer translated"],
+        )
+        overlay_sink = RecordingOverlaySink()
+        hub = ClientHub(
+            stt=None,
+            llm=llm,
+            osc=FakeOscQueue(),
+            overlay_sink=overlay_sink,
+            low_latency_mode=True,
+            low_latency_finalize_wait_ms=0,
+            peer_translation_enabled=True,
+        )
+
+        try:
+            transcript = Transcript(
+                utterance_id=uuid4(),
+                text="hello",
+                is_final=True,
+                created_at=0.0,
+            )
+            await hub._handle_low_latency_final(transcript)
+
+            spec_task = hub._merge_buffer.spec_task if hub._merge_buffer is not None else None
+            assert spec_task is not None
+            await asyncio.gather(spec_task, return_exceptions=True)
+
+            assert len(llm.calls) == 1
+            assert llm.calls[0]["text"] == "hello"
+            assert llm.stream_calls == []
+
+            await hub._translate_and_enqueue(uuid4(), "peer hello", runtime=hub.peer_runtime)
+
+            assert len(llm.calls) == 1
+            assert len(llm.stream_calls) == 1
+            assert llm.stream_calls[0]["text"] == "peer hello"
+        finally:
+            await hub.stop()
+
     @pytest.mark.asyncio
     async def test_basic_latency_summary_uses_speech_end_boundary_without_hangover(self):
         runtime_logging, log_stream = _make_runtime_logging_capture()

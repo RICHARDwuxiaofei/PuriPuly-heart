@@ -10,6 +10,10 @@ from enum import Enum
 from typing import Protocol
 from uuid import UUID
 
+from puripuly_heart.config.llm_profiles import (
+    get_openrouter_llm_profile,
+    openrouter_alias_for_fields,
+)
 from puripuly_heart.config.settings import AppSettings, OpenRouterCredentialSource
 from puripuly_heart.core.hardware_fingerprint import compute_hardware_hash
 from puripuly_heart.core.llm.provider import LLMProvider
@@ -25,7 +29,6 @@ from puripuly_heart.core.openrouter_credentials import (
 from puripuly_heart.core.storage.secrets import SecretStore
 from puripuly_heart.domain.models import Translation
 
-MANAGED_OPENROUTER_TRIAL_MODEL = "google/gemma-4-26b-a4b-it"
 MANAGED_OPENROUTER_TRIAL_BUDGET_USD = 0.07
 BINDING_MISMATCH_SUBCODES = {
     "device_public_key_registered",
@@ -424,7 +427,7 @@ class ManagedOpenRouterReleaseService:
             reason="llm_start",
             hardware_hash=verified_hardware_hash,
             budget_usd=MANAGED_OPENROUTER_TRIAL_BUDGET_USD,
-            model=MANAGED_OPENROUTER_TRIAL_MODEL,
+            model=_resolve_managed_issue_model(self.settings),
             signed_at=self.signed_at_provider(),
         )
         try:
@@ -776,3 +779,18 @@ async def _resolve_provider_without_blocking_event_loop(
     if inspect.iscoroutinefunction(provider):
         return await _resolve_maybe_awaitable(provider())
     return await _resolve_maybe_awaitable(await asyncio.to_thread(provider))
+
+
+def _resolve_managed_issue_model(settings: AppSettings) -> str:
+    selection_alias = settings.openrouter.selection_alias
+    if selection_alias is None:
+        selection_alias = openrouter_alias_for_fields(
+            model=settings.openrouter.llm_model.value,
+            source=settings.openrouter.selected_source.value,
+        )
+    profile = get_openrouter_llm_profile(
+        selection_alias.value if hasattr(selection_alias, "value") else selection_alias
+    )
+    if profile is not None and profile.openrouter_model is not None:
+        return profile.openrouter_model
+    return settings.openrouter.llm_model.value

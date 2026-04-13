@@ -17,7 +17,9 @@ from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
     OpenRouterCredentialSource,
+    OpenRouterFallbackSelectionAlias,
     OpenRouterRoutingMode,
+    OpenRouterSelectionAlias,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
@@ -1030,6 +1032,27 @@ def test_verified_key_and_runtime_signature_depend_on_region_and_settings() -> N
     assert key_beijing == "alibaba_beijing"
     assert key_singapore == "alibaba_singapore"
     assert baseline != changed
+
+
+def test_build_llm_provider_signature_tracks_openrouter_fallback_alias_only() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    base = AppSettings()
+    base.provider.llm = LLMProviderName.OPENROUTER
+    base.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    base.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+
+    same_runtime_missing_ui_alias = copy.deepcopy(base)
+    same_runtime_missing_ui_alias.openrouter.selection_alias = None
+
+    different_fallback = copy.deepcopy(base)
+    different_fallback.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.NONE
+
+    assert controller._build_llm_provider_signature(
+        base
+    ) == controller._build_llm_provider_signature(same_runtime_missing_ui_alias)
+    assert controller._build_llm_provider_signature(
+        base
+    ) != controller._build_llm_provider_signature(different_fallback)
 
 
 def test_stt_runtime_signature_includes_custom_vocabulary_state() -> None:
