@@ -1,8 +1,16 @@
+export const MANAGED_TRIAL_ALLOWED_MODELS = [
+  'google/gemma-4-26b-a4b-it',
+  'qwen/qwen3.5-flash-02-23',
+  'google/gemini-2.5-flash-lite-preview',
+] as const;
+
+const MANAGED_FREE_TRIAL_POLICY = {
+  provider: 'OpenRouter',
+  models: MANAGED_TRIAL_ALLOWED_MODELS,
+} as const;
+
 export const TRIAL_PROVIDER_POLICY = {
-  managedFreeTrial: {
-    provider: 'OpenRouter',
-    model: 'google/gemma-4-26b-a4b-it',
-  },
+  managedFreeTrial: MANAGED_FREE_TRIAL_POLICY,
   upstreamProviderRouting: 'unpinned-by-broker',
   excludedProviders: ['Alibaba'],
 } as const;
@@ -64,7 +72,7 @@ export const MANAGED_TRIAL_LIVE_USAGE_POLICY = {
 } as const;
 
 export const MANAGED_TRIAL_POLICY = {
-  managedPath: TRIAL_PROVIDER_POLICY.managedFreeTrial,
+  managedPath: MANAGED_FREE_TRIAL_POLICY,
   budget: MANAGED_TRIAL_BUDGET_POLICY,
   onboardingCostAccounting: MANAGED_TRIAL_COST_ACCOUNTING_POLICY,
   entitlement: MANAGED_TRIAL_ENTITLEMENT_POLICY,

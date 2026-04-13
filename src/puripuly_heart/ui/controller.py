@@ -607,6 +607,11 @@ class GuiController:
                 if settings.provider.llm == LLMProviderName.OPENROUTER
                 else None
             ),
+            (
+                settings.openrouter.fallback_selection_alias
+                if settings.provider.llm == LLMProviderName.OPENROUTER
+                else None
+            ),
             settings.qwen.llm_model if settings.provider.llm == LLMProviderName.QWEN else None,
             settings.qwen.region if settings.provider.llm == LLMProviderName.QWEN else None,
         )

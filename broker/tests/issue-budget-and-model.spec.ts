@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { TRIAL_PROVIDER_POLICY } from '../src/contract';
 import { signCanonicalIssueRequest } from './test-support/ed25519';
 import { normalizedErrorEnvelope } from './test-support/errors';
 import {
@@ -18,6 +19,8 @@ interface PolicyViolationCase {
   }>;
   message: string;
 }
+
+const CURATED_MANAGED_MODEL_POOL = TRIAL_PROVIDER_POLICY.managedFreeTrial.models;
 
 describe('POST /v1/providers/openrouter/issue policy enforcement', () => {
   afterEach(() => {
@@ -45,7 +48,7 @@ describe('POST /v1/providers/openrouter/issue policy enforcement', () => {
       overrides: {
         model: 'openai/gpt-4.1-mini',
       },
-      message: 'model must equal google/gemma-4-26b-a4b-it',
+      message: `model must be one of ${CURATED_MANAGED_MODEL_POOL.join(', ')}`,
     },
   ] satisfies PolicyViolationCase[])(
     'rejects invalid $name values without consuming the pending_release entitlement',
@@ -100,6 +103,41 @@ describe('POST /v1/providers/openrouter/issue policy enforcement', () => {
         expires_at: null,
         release_token_hash: expect.any(String),
         release_token_expires_at: release.releaseTokenExpiresAt,
+      });
+    },
+  );
+
+  it.each(CURATED_MANAGED_MODEL_POOL)(
+    'accepts allowlisted managed model %s',
+    async (model) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+      mockOpenRouterManagementApi();
+      const env = createTestBrokerEnv();
+      const release = await createPendingReleaseSession({
+        env,
+        installationId: `install-issue-policy-allowlisted-${model.replace(/[^a-z0-9]+/gi, '-')}`,
+        appVersion: '1.2.3',
+        hardwareHash: `hardware-hash-issue-policy-allowlisted-${model.replace(/[^a-z0-9]+/gi, '-')}`,
+      });
+      const requestBody = await signCanonicalIssueRequest(release.keyPair.privateKey, {
+        installation_id: `install-issue-policy-allowlisted-${model.replace(/[^a-z0-9]+/gi, '-')}`,
+        device_public_key: release.keyPair.devicePublicKey,
+        release_token: release.releaseToken,
+        hardware_hash: release.hardwareHash,
+        reason: 'llm_start',
+        budget_usd: 0.07,
+        model,
+        signed_at: '2026-04-08T06:00:45.000Z',
+      });
+
+      const response = await postIssue(env, requestBody);
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        budget_usd: 0.07,
+        model,
       });
     },
   );

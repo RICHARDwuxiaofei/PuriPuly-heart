@@ -195,6 +195,54 @@ async def test_issue_parses_success_payload() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "model",
+    [
+        "google/gemma-4-26b-a4b-it",
+        "qwen/qwen3.5-flash-02-23",
+        "google/gemini-2.5-flash-lite-preview",
+    ],
+)
+async def test_issue_accepts_curated_managed_model_pool(model: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["model"] == model
+        return httpx.Response(
+            200,
+            json={
+                "openrouter_api_key": "managed-openrouter-api-key",
+                "managed_credential_ref": "managed-credential-ref-123",
+                "expires_at": "2026-10-10T06:00:00.000Z",
+                "managed_state": {
+                    "lifecycle": "active",
+                    "managed_availability": True,
+                },
+                "budget_usd": 0.07,
+                "model": model,
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.issue(
+        {
+            "installation_id": "install-123",
+            "device_public_key": "device-public-key-123",
+            "release_token": "release-token-123",
+            "hardware_hash": "hardware-hash-123",
+            "reason": "llm_start",
+            "budget_usd": 0.07,
+            "model": model,
+            "signed_at": "2026-04-10T06:00:45.000Z",
+            "signature": "signature-123",
+        }
+    )
+
+    assert result.openrouter_api_key == "managed-openrouter-api-key"
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "payload",
     [
         {

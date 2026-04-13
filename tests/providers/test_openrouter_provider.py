@@ -426,7 +426,7 @@ async def test_httpx_openrouter_client_surfaces_stream_error_message(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_httpx_openrouter_client_logs_basic_request_and_response(
+async def test_httpx_openrouter_client_success_path_is_quiet_without_runtime_logging(
     monkeypatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     fake_client = FakeAsyncClient()
@@ -444,11 +444,7 @@ async def test_httpx_openrouter_client_logs_basic_request_and_response(
         )
 
     assert result == "OK"
-    assert (
-        "[Basic][LLM] OpenRouter request [translate][context=yes] ko -> en: 'hello'"
-        in caplog.messages
-    )
-    assert "[Basic][LLM] OpenRouter response [translate]: 'OK'" in caplog.messages
+    assert caplog.messages == []
 
 
 @pytest.mark.asyncio
@@ -492,7 +488,7 @@ async def test_httpx_openrouter_client_logs_basic_translate_failure(
 
 
 @pytest.mark.asyncio
-async def test_httpx_openrouter_client_uses_runtime_logging_for_basic_translate_payloads(
+async def test_httpx_openrouter_client_success_path_does_not_emit_basic_payload_logs(
     monkeypatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     fake_client = FakeAsyncClient()
@@ -516,19 +512,13 @@ async def test_httpx_openrouter_client_uses_runtime_logging_for_basic_translate_
         )
 
     assert result == "OK"
-    assert runtime_logging.basic_messages == [
-        (
-            "[Basic][LLM] OpenRouter request [translate][context=yes] ko -> en: 'hello'",
-            logging.INFO,
-        ),
-        ("[Basic][LLM] OpenRouter response [translate]: 'OK'", logging.INFO),
-    ]
+    assert runtime_logging.basic_messages == []
     assert runtime_logging.detailed_messages == []
     assert caplog.messages == []
 
 
 @pytest.mark.asyncio
-async def test_httpx_openrouter_client_uses_runtime_logging_for_failure_breadcrumbs(
+async def test_httpx_openrouter_client_still_logs_basic_failures(
     monkeypatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     class ErrorResponse(FakeResponse):
@@ -566,10 +556,6 @@ async def test_httpx_openrouter_client_uses_runtime_logging_for_failure_breadcru
 
     assert runtime_logging.detailed_messages == []
     assert runtime_logging.basic_messages == [
-        (
-            "[Basic][LLM] OpenRouter request [translate][context=no] ko -> en: 'hello'",
-            logging.INFO,
-        ),
         (
             "[Basic][LLM] OpenRouter request failed [translate]: status=429 message=quota exceeded",
             logging.ERROR,
