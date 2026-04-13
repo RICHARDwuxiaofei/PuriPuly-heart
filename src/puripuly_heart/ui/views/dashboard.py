@@ -17,15 +17,20 @@ from puripuly_heart.ui.theme import (
     COLOR_PRIMARY,
     COLOR_SECONDARY,
     COLOR_SURFACE,
-    COLOR_TERTIARY,
-    COLOR_TRANS_ON,
-    COLOR_WARNING,
     get_card_shadow,
 )
 
+DASHBOARD_LAYOUT_GAP = 12
+DASHBOARD_CONTROL_REGION_EXPAND = 45
+DASHBOARD_INFO_REGION_EXPAND = 55
+DASHBOARD_DISPLAY_CARD_EXPAND = 1
+DASHBOARD_LANGUAGE_CARD_EXPAND = 1
+DASHBOARD_POWER_BUTTON_ICON_SIZE = 80
+DASHBOARD_POWER_BUTTON_LABEL_SIZE = 32
+
 
 class DashboardView(ft.Column):
-    """Main dashboard with widened K-2 shell layout."""
+    """Main dashboard tuned for the 4:3 VR-friendly shell layout."""
 
     _LANG_OPTIONS = get_all_language_options()
 
@@ -79,32 +84,29 @@ class DashboardView(ft.Column):
             label=t("dashboard.stt_label"),
             icon=ft.Icons.MIC,
             on_click=self._toggle_stt,
-            icon_size=80,
-            label_size=32,
+            icon_size=DASHBOARD_POWER_BUTTON_ICON_SIZE,
+            label_size=DASHBOARD_POWER_BUTTON_LABEL_SIZE,
         )
         self.peer_button = PowerButton(
             label=t("dashboard.peer_label"),
             icon=ft.Icons.RECORD_VOICE_OVER,
             on_click=self._toggle_peer_translation,
-            icon_size=80,
-            label_size=32,
-            color_on=COLOR_WARNING,
+            icon_size=DASHBOARD_POWER_BUTTON_ICON_SIZE,
+            label_size=DASHBOARD_POWER_BUTTON_LABEL_SIZE,
         )
         self.trans_button = PowerButton(
             label=t("dashboard.trans_label"),
             icon=ft.Icons.TRANSLATE,
             on_click=self._toggle_translation,
-            icon_size=80,
-            label_size=32,
-            color_on=COLOR_TRANS_ON,
+            icon_size=DASHBOARD_POWER_BUTTON_ICON_SIZE,
+            label_size=DASHBOARD_POWER_BUTTON_LABEL_SIZE,
         )
         self.overlay_button = PowerButton(
             label=t("dashboard.overlay_label"),
-            icon=ft.Icons.VISIBILITY,
+            icon=ft.Icons.SUBTITLES,
             on_click=self._toggle_overlay,
-            icon_size=80,
-            label_size=32,
-            color_on=COLOR_TERTIARY,
+            icon_size=DASHBOARD_POWER_BUTTON_ICON_SIZE,
+            label_size=DASHBOARD_POWER_BUTTON_LABEL_SIZE,
         )
         self._sync_stt_button_state()
         self._sync_translation_button_state()
@@ -127,42 +129,69 @@ class DashboardView(ft.Column):
         self._refresh_language_card()
         self._update_input_font()
 
-        top_controls = ft.Row(
+        self.top_controls = ft.Row(
             [
                 ft.Container(content=self.stt_button, expand=True),
                 ft.Container(content=self.peer_button, expand=True),
             ],
-            spacing=16,
+            spacing=DASHBOARD_LAYOUT_GAP,
             expand=True,
         )
-        bottom_controls = ft.Row(
+        self.bottom_controls = ft.Row(
             [
                 ft.Container(content=self.trans_button, expand=True),
                 ft.Container(content=self.overlay_button, expand=True),
             ],
-            spacing=16,
+            spacing=DASHBOARD_LAYOUT_GAP,
             expand=True,
         )
 
-        control_grid = ft.Column([top_controls, bottom_controls], spacing=16, expand=True)
-        info_stack = ft.Column([self.display_card, self.language_card], spacing=16, expand=True)
-
-        main_surface = ft.Row(
+        self.control_grid = ft.Column(
+            [self.top_controls, self.bottom_controls],
+            spacing=DASHBOARD_LAYOUT_GAP,
+            expand=True,
+        )
+        self.display_card_slot = ft.Container(
+            content=self.display_card,
+            expand=DASHBOARD_DISPLAY_CARD_EXPAND,
+        )
+        self.language_card_slot = ft.Container(
+            content=self.language_card,
+            expand=DASHBOARD_LANGUAGE_CARD_EXPAND,
+        )
+        self.info_stack = ft.Column(
             [
-                ft.Container(content=control_grid, expand=40),
-                ft.Container(content=info_stack, expand=60),
+                self.display_card_slot,
+                self.language_card_slot,
             ],
-            spacing=16,
+            spacing=DASHBOARD_LAYOUT_GAP,
+            expand=True,
+        )
+
+        self.control_region = ft.Container(
+            content=self.control_grid,
+            expand=DASHBOARD_CONTROL_REGION_EXPAND,
+        )
+        self.info_region = ft.Container(
+            content=self.info_stack,
+            expand=DASHBOARD_INFO_REGION_EXPAND,
+        )
+        self.main_surface = ft.Row(
+            [
+                self.control_region,
+                self.info_region,
+            ],
+            spacing=DASHBOARD_LAYOUT_GAP,
             expand=True,
         )
 
         self._managed_trial_card = self._build_managed_trial_card()
-        shell_content = ft.Column(
-            [main_surface, self._managed_trial_card],
-            spacing=16,
+        self.shell_content = ft.Column(
+            [self.main_surface, self._managed_trial_card],
+            spacing=DASHBOARD_LAYOUT_GAP,
             expand=True,
         )
-        self.controls = [create_background_glow_stack(shell_content)]
+        self.controls = [create_background_glow_stack(self.shell_content)]
         self._sync_managed_trial_card(update_ui=False)
 
     def _build_managed_trial_card(self) -> ft.Container:
@@ -289,47 +318,35 @@ class DashboardView(ft.Column):
         if self.on_toggle_peer_translation:
             self.on_toggle_peer_translation(enabled)
 
-    def _toggle_status_copy(self, is_on: bool) -> str:
-        return t("settings.option.on" if is_on else "settings.option.off")
-
     def _sync_stt_button_state(self) -> None:
-        helper_text = t("dashboard.warn_stt_key") if self._stt_showing_warning else ""
         self.stt_button.set_state(
             self.is_stt_on,
             needs_key=self._stt_showing_warning,
-            status_text=self._toggle_status_copy(self.is_stt_on),
-            helper_text=helper_text,
         )
 
     def _sync_translation_button_state(self) -> None:
-        helper_text = t("dashboard.warn_llm_key") if self._translation_showing_warning else ""
         self.trans_button.set_state(
             self.is_translation_on,
             needs_key=self._translation_showing_warning,
-            status_text=self._toggle_status_copy(self.is_translation_on),
-            helper_text=helper_text,
         )
 
     def _sync_overlay_peer_buttons(self) -> None:
         contract = self._overlay_peer_contract
         if contract is None:
-            off_text = self._toggle_status_copy(False)
-            self.peer_button.set_state(False, status_text=off_text, helper_text="")
-            self.overlay_button.set_state(False, status_text=off_text, helper_text="")
+            self.peer_button.set_state(False)
+            self.overlay_button.set_state(False)
+            self._sync_notice()
             return
 
         self.peer_button.set_state(
             contract.peer.state == "on",
             needs_key=contract.peer.state == "warning",
-            status_text=contract.peer.status_text,
-            helper_text=contract.peer.helper_text,
         )
         self.overlay_button.set_state(
             contract.overlay.state == "on",
             needs_key=contract.overlay.state == "warning",
-            status_text=contract.overlay.status_text,
-            helper_text=contract.overlay.helper_text,
         )
+        self._sync_notice()
 
     @property
     def managed_trial_state(self) -> dict[str, object]:
@@ -616,11 +633,41 @@ class DashboardView(ft.Column):
         )
         return notice_text, tone_by_status.get(status)
 
+    def _current_overlay_failure_notice(self) -> tuple[str | None, str | None]:
+        contract = self._overlay_peer_contract
+        if contract is None:
+            return None, None
+
+        overlay = contract.overlay
+        if overlay.state != "warning" or not overlay.failure_reason:
+            return None, None
+
+        status_text = t("settings.overlay.status.failed", default="failed")
+        reason_text = t(
+            f"settings.overlay.failure.{overlay.failure_reason}",
+            default=overlay.failure_reason,
+        )
+        return (
+            t(
+                "settings.overlay.status.failed_with_reason",
+                status=status_text,
+                reason=reason_text,
+                default=f"{status_text}: {reason_text}",
+            ),
+            "error",
+        )
+
     def _sync_notice(self) -> None:
+        if not hasattr(self, "display_card"):
+            return
         if self._managed_auth_pending:
             self.display_card.set_notice(t("dashboard.managed_auth_pending"), "info")
             return
         notice_text, tone = self._current_local_stt_notice()
+        if notice_text is not None:
+            self.display_card.set_notice(notice_text, tone)
+            return
+        notice_text, tone = self._current_overlay_failure_notice()
         self.display_card.set_notice(notice_text, tone)
 
     def apply_locale(self) -> None:
@@ -644,7 +691,6 @@ class DashboardView(ft.Column):
             self.set_display_text(t("dashboard.warn_stt_key"))
         elif self._translation_showing_warning:
             self.set_display_text(t("dashboard.warn_llm_key"))
-        self._sync_notice()
         self._managed_trial_usage_bar.apply_locale()
         self._sync_managed_trial_card(update_ui=False)
 

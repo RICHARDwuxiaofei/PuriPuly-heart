@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("flet")
+ft = pytest.importorskip("flet")
 
 from puripuly_heart.ui.overlay_peer_contract import (
     OverlayPeerConsumerContract,
@@ -128,6 +128,20 @@ class FakeManagedTrialUsageBar:
 
 
 def _make_dashboard(monkeypatch: pytest.MonkeyPatch):
+    if not hasattr(dashboard_module.ft.alignment, "center"):
+        monkeypatch.setattr(
+            dashboard_module.ft.alignment,
+            "center",
+            dashboard_module.ft.alignment.Alignment(0, 0),
+            raising=False,
+        )
+    if not hasattr(dashboard_module.ft.alignment, "center_left"):
+        monkeypatch.setattr(
+            dashboard_module.ft.alignment,
+            "center_left",
+            dashboard_module.ft.alignment.Alignment(-1, 0),
+            raising=False,
+        )
     monkeypatch.setattr(dashboard_module, "PowerButton", FakePowerButton)
     monkeypatch.setattr(dashboard_module, "DisplayCard", FakeDisplayCard)
     monkeypatch.setattr(dashboard_module, "LanguageCard", FakeLanguageCard)
@@ -143,11 +157,16 @@ def _make_dashboard(monkeypatch: pytest.MonkeyPatch):
     return view
 
 
+def _button_labels(row) -> list[str]:
+    return [slot.content.label for slot in row.controls]
+
+
 def _make_overlay_peer_contract(
     *,
     overlay_intent_enabled: bool,
     overlay_state: str,
     overlay_status_text: str,
+    overlay_helper_text: str = "",
     peer_intent_enabled: bool,
     peer_effective_enabled: bool,
     peer_status_text: str,
@@ -164,6 +183,7 @@ def _make_overlay_peer_contract(
                 else ("off" if not overlay_intent_enabled else "warning")
             ),
             status_text=overlay_status_text,
+            helper_text=overlay_helper_text,
         ),
         peer=OverlayPeerToggleContract(
             intent_enabled=peer_intent_enabled,
@@ -284,14 +304,14 @@ def test_dashboard_public_setters_update_components(monkeypatch: pytest.MonkeyPa
     assert view.trans_button.states[-1] == {
         "is_on": False,
         "needs_key": True,
-        "status_text": dashboard_module.t("settings.option.off"),
-        "helper_text": dashboard_module.t("dashboard.warn_llm_key"),
+        "status_text": None,
+        "helper_text": None,
     }
     assert view.stt_button.states[-1] == {
         "is_on": False,
         "needs_key": True,
-        "status_text": dashboard_module.t("settings.option.off"),
-        "helper_text": dashboard_module.t("dashboard.warn_stt_key"),
+        "status_text": None,
+        "helper_text": None,
     }
     assert view._recent_source_langs == ["a", "b", "c", "d", "e", "f"]
 
@@ -326,35 +346,83 @@ def test_dashboard_apply_locale_reapplies_managed_auth_pending_notice(
     ]
 
 
-def test_dashboard_builds_k2_shell_and_managed_trial_row(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dashboard_builds_4x3_friendly_shell_and_managed_trial_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     view = _make_dashboard(monkeypatch)
 
-    shell = view.controls[0]
-    assert len(shell.controls) == 2
+    assert view.controls[0] is view.shell_content
+    assert view.shell_content.controls == [view.main_surface, view._managed_trial_card]
+    assert view.shell_content.spacing == dashboard_module.DASHBOARD_LAYOUT_GAP
+    assert view.main_surface.controls == [view.control_region, view.info_region]
+    assert view.main_surface.spacing == dashboard_module.DASHBOARD_LAYOUT_GAP
+    assert dashboard_module.DASHBOARD_CONTROL_REGION_EXPAND == 45
+    assert dashboard_module.DASHBOARD_INFO_REGION_EXPAND == 55
+    assert view.control_region.expand == 45
+    assert view.info_region.expand == 55
+    assert view.control_grid.spacing == dashboard_module.DASHBOARD_LAYOUT_GAP
+    assert view.top_controls.spacing == dashboard_module.DASHBOARD_LAYOUT_GAP
+    assert view.bottom_controls.spacing == dashboard_module.DASHBOARD_LAYOUT_GAP
+    assert _button_labels(view.top_controls) == ["STT", "PEER"]
+    assert _button_labels(view.bottom_controls) == ["TRANS", "Subtitles"]
+    assert view.stt_button.kwargs["icon_size"] == dashboard_module.DASHBOARD_POWER_BUTTON_ICON_SIZE
+    assert view.peer_button.kwargs["icon_size"] == dashboard_module.DASHBOARD_POWER_BUTTON_ICON_SIZE
+    assert (
+        view.trans_button.kwargs["icon_size"] == dashboard_module.DASHBOARD_POWER_BUTTON_ICON_SIZE
+    )
+    assert (
+        view.overlay_button.kwargs["icon_size"] == dashboard_module.DASHBOARD_POWER_BUTTON_ICON_SIZE
+    )
+    assert (
+        view.stt_button.kwargs["label_size"] == dashboard_module.DASHBOARD_POWER_BUTTON_LABEL_SIZE
+    )
+    assert (
+        view.peer_button.kwargs["label_size"] == dashboard_module.DASHBOARD_POWER_BUTTON_LABEL_SIZE
+    )
+    assert (
+        view.trans_button.kwargs["label_size"] == dashboard_module.DASHBOARD_POWER_BUTTON_LABEL_SIZE
+    )
+    assert (
+        view.overlay_button.kwargs["label_size"]
+        == dashboard_module.DASHBOARD_POWER_BUTTON_LABEL_SIZE
+    )
+    assert view.overlay_button.icon == ft.Icons.SUBTITLES
+    assert "color_on" not in view.peer_button.kwargs
+    assert "color_on" not in view.trans_button.kwargs
+    assert "color_on" not in view.overlay_button.kwargs
+    assert view.info_stack.spacing == dashboard_module.DASHBOARD_LAYOUT_GAP
+    assert view.info_stack.controls == [view.display_card_slot, view.language_card_slot]
+    assert view.display_card_slot.content is view.display_card
+    assert dashboard_module.DASHBOARD_DISPLAY_CARD_EXPAND == 1
+    assert view.display_card_slot.expand == 1
+    assert view.language_card_slot.content is view.language_card
+    assert dashboard_module.DASHBOARD_LANGUAGE_CARD_EXPAND == 1
+    assert view.language_card_slot.expand == 1
+    assert view._managed_trial_card.visible is False
 
-    main_surface, managed_trial_card = shell.controls
-    assert len(main_surface.controls) == 2
 
-    left_region, right_region = main_surface.controls
-    assert left_region.expand == 40
-    assert right_region.expand == 60
+def test_dashboard_bottom_row_uses_trans_and_subtitles_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
 
-    left_grid = left_region.content
-    top_controls = [slot.content.label for slot in left_grid.controls[0].controls]
-    bottom_controls = [slot.content.label for slot in left_grid.controls[1].controls]
+    assert _button_labels(view.bottom_controls) == ["TRANS", "Subtitles"]
 
-    assert top_controls == ["STT", "PEER"]
-    assert bottom_controls == ["TRANS", "OVERLAY"]
-    assert view.stt_button.kwargs["icon_size"] == 80
-    assert view.peer_button.kwargs["icon_size"] == 80
-    assert view.trans_button.kwargs["icon_size"] == 80
-    assert view.overlay_button.kwargs["icon_size"] == 80
-    assert view.stt_button.kwargs["label_size"] == 32
-    assert view.peer_button.kwargs["label_size"] == 32
-    assert view.trans_button.kwargs["label_size"] == 32
-    assert view.overlay_button.kwargs["label_size"] == 32
-    assert right_region.content.controls == [view.display_card, view.language_card]
-    assert managed_trial_card.visible is False
+
+def test_dashboard_overlay_button_uses_subtitles_icon(monkeypatch: pytest.MonkeyPatch) -> None:
+    view = _make_dashboard(monkeypatch)
+
+    assert view.overlay_button.icon == ft.Icons.SUBTITLES
+
+
+def test_dashboard_peer_trans_overlay_buttons_use_default_on_color(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+
+    assert "color_on" not in view.peer_button.kwargs
+    assert "color_on" not in view.trans_button.kwargs
+    assert "color_on" not in view.overlay_button.kwargs
 
 
 def test_dashboard_managed_trial_row_can_be_shown_without_runtime_wiring(
@@ -391,13 +459,13 @@ def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.Monkey
     assert view.stt_button.label == "STT"
     assert view.peer_button.label == "PEER"
     assert view.trans_button.label == "TRANS"
-    assert view.overlay_button.label == "OVERLAY"
+    assert view.overlay_button.label == "Subtitles"
     warning_texts = [text for text, _is_error, _font in view.display_card.display_calls]
     assert dashboard_module.t("dashboard.warn_stt_key") in warning_texts
     assert dashboard_module.t("dashboard.warn_llm_key") in warning_texts
 
 
-def test_dashboard_overlay_peer_buttons_render_consumer_contract_copy(
+def test_dashboard_overlay_peer_buttons_render_consumer_contract_state_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view = _make_dashboard(monkeypatch)
@@ -405,6 +473,7 @@ def test_dashboard_overlay_peer_buttons_render_consumer_contract_copy(
         overlay_intent_enabled=True,
         overlay_state="failed",
         overlay_status_text="Overlay failed",
+        overlay_helper_text="Overlay helper copy",
         peer_intent_enabled=True,
         peer_effective_enabled=False,
         peer_status_text="Peer waiting",
@@ -416,15 +485,106 @@ def test_dashboard_overlay_peer_buttons_render_consumer_contract_copy(
     assert view.overlay_button.states[-1] == {
         "is_on": False,
         "needs_key": True,
-        "status_text": "Overlay failed",
-        "helper_text": "",
+        "status_text": None,
+        "helper_text": None,
     }
     assert view.peer_button.states[-1] == {
         "is_on": False,
         "needs_key": True,
-        "status_text": "Peer waiting",
-        "helper_text": "Overlay is starting",
+        "status_text": None,
+        "helper_text": None,
     }
+
+
+def test_dashboard_overlay_failure_notice_is_lowest_priority_notice_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    overlay_failure_notice = dashboard_module.t(
+        "settings.overlay.status.failed_with_reason",
+        status=dashboard_module.t("settings.overlay.status.failed"),
+        reason=dashboard_module.t(
+            "settings.overlay.failure.runtime_unavailable",
+            default="runtime_unavailable",
+        ),
+        default="Overlay failed: runtime_unavailable",
+    )
+
+    view.set_overlay_peer_contract(
+        OverlayPeerConsumerContract(
+            overlay=OverlayPeerToggleContract(
+                intent_enabled=True,
+                effective_enabled=False,
+                action_enabled=True,
+                state="warning",
+                status_text="Failed: runtime unavailable",
+                failure_reason="runtime_unavailable",
+            ),
+            peer=OverlayPeerToggleContract(
+                intent_enabled=False,
+                effective_enabled=False,
+                action_enabled=True,
+                state="off",
+                status_text="Off",
+            ),
+        )
+    )
+    view.set_local_stt_notice("missing")
+    view.set_managed_auth_pending(True)
+    view.set_managed_auth_pending(False)
+    view.set_local_stt_notice(None)
+
+    assert view.display_card.notice_calls == [
+        (overlay_failure_notice, "error"),
+        (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
+        (dashboard_module.t("dashboard.managed_auth_pending"), "info"),
+        (dashboard_module.t("dashboard.local_stt_notice_missing"), "warning"),
+        (overlay_failure_notice, "error"),
+    ]
+
+
+def test_dashboard_overlay_failure_notice_relocalizes_on_apply_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    view.set_overlay_peer_contract(
+        OverlayPeerConsumerContract(
+            overlay=OverlayPeerToggleContract(
+                intent_enabled=True,
+                effective_enabled=False,
+                action_enabled=True,
+                state="warning",
+                status_text="stale contract literal",
+                failure_reason="runtime_disconnected",
+            ),
+            peer=OverlayPeerToggleContract(
+                intent_enabled=False,
+                effective_enabled=False,
+                action_enabled=True,
+                state="off",
+                status_text="Off",
+            ),
+        )
+    )
+
+    def localized_t(key: str, **kwargs: object) -> str:
+        if key == "settings.overlay.status.failed":
+            return "localized failed"
+        if key == "settings.overlay.failure.runtime_disconnected":
+            return "localized disconnect"
+        if key == "settings.overlay.status.failed_with_reason":
+            return f"{kwargs['status']} :: {kwargs['reason']}"
+        return f"i18n:{key}"
+
+    monkeypatch.setattr(dashboard_module, "t", localized_t)
+
+    view.apply_locale()
+
+    assert view.display_card.notice_calls[-1] == (
+        "localized failed :: localized disconnect",
+        "error",
+    )
+    assert view.display_card.notice_calls[-1][0] != "stale contract literal"
 
 
 def test_dashboard_overlay_and_peer_buttons_toggle_live_from_contract_intent(

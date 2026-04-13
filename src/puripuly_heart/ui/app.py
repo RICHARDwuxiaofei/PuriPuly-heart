@@ -28,6 +28,12 @@ from puripuly_heart.ui.views.settings import SettingsView
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_WINDOW_WIDTH = 1136
+DEFAULT_WINDOW_HEIGHT = 850
+MIN_WINDOW_WIDTH = 1024
+MIN_WINDOW_HEIGHT = 760
+APP_CONTENT_PADDING = 16
+
 
 class TranslatorApp:
     def __init__(self, page: ft.Page, *, config_path):
@@ -89,10 +95,10 @@ class TranslatorApp:
         self.page.padding = 0
         self.page.window.frameless = True
         self.page.window.resizable = True  # Ensure resizing is allowed
-        self.page.window.width = 1200
-        self.page.window.height = 800
-        self.page.window.min_width = 1080
-        self.page.window.min_height = 600
+        self.page.window.width = DEFAULT_WINDOW_WIDTH
+        self.page.window.height = DEFAULT_WINDOW_HEIGHT
+        self.page.window.min_width = MIN_WINDOW_WIDTH
+        self.page.window.min_height = MIN_WINDOW_HEIGHT
         self.page.window.icon = "icons/icon.ico"
 
     def _build_layout(self):
@@ -111,7 +117,7 @@ class TranslatorApp:
         # Content area
         self.content_area = ft.Container(
             expand=True,
-            padding=16,
+            padding=APP_CONTENT_PADDING,
             content=self.view_dashboard,
         )
 

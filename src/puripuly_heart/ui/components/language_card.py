@@ -4,8 +4,6 @@ import flet as ft
 
 from puripuly_heart.ui.components.glow import create_glow_stack
 from puripuly_heart.ui.theme import (
-    COLOR_BACKGROUND,
-    COLOR_DIVIDER,
     COLOR_NEUTRAL_DARK,
     COLOR_PRIMARY,
     COLOR_SECONDARY,
@@ -15,6 +13,8 @@ from puripuly_heart.ui.theme import (
 
 # CJK (Chinese, Japanese, Korean) characters start at this Unicode point
 _CJK_START = 0x3000
+_CAPTION_TEXT_SIZE = 16
+_ARROW_SIZE_DELTA = 4
 
 
 def _weighted_len(text: str) -> int:
@@ -52,9 +52,9 @@ class _LanguageRow(ft.Container):
 
         self._label_text = ft.Text(
             label,
-            size=13,
-            weight=ft.FontWeight.BOLD,
-            color=COLOR_PRIMARY,
+            size=_CAPTION_TEXT_SIZE,
+            weight=ft.FontWeight.W_600,
+            color=COLOR_SECONDARY,
             no_wrap=True,
         )
         self._source_text = ft.Text(
@@ -62,6 +62,7 @@ class _LanguageRow(ft.Container):
             size=34,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL_DARK,
+            text_align=ft.TextAlign.CENTER,
             no_wrap=True,
             overflow=ft.TextOverflow.ELLIPSIS,
         )
@@ -70,21 +71,20 @@ class _LanguageRow(ft.Container):
             size=34,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL_DARK,
+            text_align=ft.TextAlign.CENTER,
             no_wrap=True,
             overflow=ft.TextOverflow.ELLIPSIS,
         )
         self._arrow_icon = ft.Icon(
-            name=ft.Icons.SWAP_HORIZ_ROUNDED,
-            size=34,
+            name=ft.Icons.ARROW_RIGHT_ALT,
+            size=34 + _ARROW_SIZE_DELTA,
             color=COLOR_SECONDARY,
         )
 
-        label_chip = ft.Container(
+        caption = ft.Container(
             content=self._label_text,
-            bgcolor=ft.Colors.with_opacity(0.14, COLOR_PRIMARY),
-            border_radius=999,
-            padding=ft.padding.symmetric(horizontal=12, vertical=8),
-            alignment=ft.alignment.center,
+            alignment=ft.alignment.top_left,
+            padding=ft.padding.only(left=12),
         )
         self._arrow = ft.Container(
             content=self._arrow_icon,
@@ -114,18 +114,25 @@ class _LanguageRow(ft.Container):
             alignment=ft.alignment.center,
         )
 
-        row_content = ft.Row(
-            [label_chip, self._source_btn, self._arrow, self._target_btn],
-            spacing=12,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        pair = ft.Container(
+            content=ft.Row(
+                [self._source_btn, self._arrow, self._target_btn],
+                spacing=10,
+                alignment=ft.MainAxisAlignment.CENTER,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            alignment=ft.alignment.center,
+        )
+
+        row_content = ft.Column(
+            [caption, pair],
+            spacing=10,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
 
         super().__init__(
             content=row_content,
-            bgcolor=ft.Colors.with_opacity(0.72, COLOR_BACKGROUND),
-            border_radius=20,
-            border=ft.border.all(1, ft.Colors.with_opacity(0.7, COLOR_DIVIDER)),
-            padding=ft.padding.symmetric(horizontal=14, vertical=14),
+            padding=ft.padding.symmetric(vertical=4),
         )
 
     def _on_source_hover(self, e):
@@ -149,7 +156,7 @@ class _LanguageRow(ft.Container):
         size = _row_text_size(source, target)
         self._source_text.size = size
         self._target_text.size = size
-        self._arrow_icon.size = size
+        self._arrow_icon.size = size + _ARROW_SIZE_DELTA
         self._source_text.value = source
         self._target_text.value = target
 
@@ -190,7 +197,7 @@ class LanguageCard(ft.Container):
             ft.Container(
                 content=ft.Column(
                     [self._self_row, self._peer_row],
-                    spacing=12,
+                    spacing=20,
                     alignment=ft.MainAxisAlignment.CENTER,
                 ),
                 expand=True,

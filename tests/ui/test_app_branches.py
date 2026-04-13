@@ -78,92 +78,99 @@ class RuntimeLoggingController:
         self.detailed_messages.append(message)
 
 
-def test_translator_app_init_builds_layout_and_wires_callbacks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class DummyController:
-        def __init__(self, page, app, config_path):
-            self.page = page
-            self.app = app
-            self.config_path = config_path
-            self.settings = None
-            self.runtime_logging_mode = "detailed"
-            self.basic_messages: list[str] = []
-            self.detailed_messages: list[str] = []
+class ConstructionDummyController:
+    def __init__(self, page, app, config_path):
+        self.page = page
+        self.app = app
+        self.config_path = config_path
+        self.settings = None
+        self.runtime_logging_mode = "detailed"
+        self.basic_messages: list[str] = []
+        self.detailed_messages: list[str] = []
 
-        def set_runtime_logging_mode(self, mode: str) -> None:
-            self.runtime_logging_mode = mode
+    def set_runtime_logging_mode(self, mode: str) -> None:
+        self.runtime_logging_mode = mode
 
-        def log_basic(self, message: str, *, level: int = app_module.logging.INFO) -> None:
-            _ = level
-            self.basic_messages.append(message)
+    def log_basic(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+        _ = level
+        self.basic_messages.append(message)
 
-        def log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
-            _ = level
-            self.detailed_messages.append(message)
+    def log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+        _ = level
+        self.detailed_messages.append(message)
 
-    class DummyDashboardView(ft.Container):
-        def __init__(self) -> None:
-            super().__init__()
-            self.on_send_message = None
-            self.on_toggle_translation = None
-            self.on_toggle_stt = None
-            self.on_toggle_overlay = None
-            self.on_toggle_peer_translation = None
-            self.on_language_change = None
-            self.overlay_peer_contract = None
 
-        def set_overlay_peer_contract(self, contract) -> None:
-            self.overlay_peer_contract = contract
+class ConstructionDummyDashboardView(ft.Container):
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_send_message = None
+        self.on_toggle_translation = None
+        self.on_toggle_stt = None
+        self.on_toggle_overlay = None
+        self.on_toggle_peer_translation = None
+        self.on_language_change = None
+        self.overlay_peer_contract = None
 
-        def apply_locale(self) -> None:
-            return None
+    def set_overlay_peer_contract(self, contract) -> None:
+        self.overlay_peer_contract = contract
 
-    class DummySettingsView(ft.Container):
-        def __init__(self) -> None:
-            super().__init__()
-            self.on_settings_changed = None
-            self.on_prompt_apply_settings = None
-            self.on_providers_changed = None
-            self.on_verify_api_key = None
-            self.on_secret_cleared = None
-            self.show_snackbar = None
-            self.overlay_peer_contract = None
+    def apply_locale(self) -> None:
+        return None
 
-        def set_overlay_runtime_state(self, *_args, **_kwargs) -> None:
-            return None
 
-        def set_overlay_peer_contract(self, contract) -> None:
-            self.overlay_peer_contract = contract
+class ConstructionDummySettingsView(ft.Container):
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_settings_changed = None
+        self.on_prompt_apply_settings = None
+        self.on_providers_changed = None
+        self.on_verify_api_key = None
+        self.on_secret_cleared = None
+        self.show_snackbar = None
+        self.overlay_peer_contract = None
+        self.has_provider_changes = False
+        self.has_pending_prompt_changes = False
 
-        def apply_locale(self) -> None:
-            return None
+    def set_overlay_runtime_state(self, *_args, **_kwargs) -> None:
+        return None
 
-    class DummyLogsView(ft.Container):
-        def __init__(self) -> None:
-            super().__init__()
-            self.on_mode_change = None
-            self.runtime_logging_mode = "basic"
+    def set_overlay_peer_contract(self, contract) -> None:
+        self.overlay_peer_contract = contract
 
-        def set_runtime_logging_mode(self, mode: str) -> None:
-            self.runtime_logging_mode = mode
+    def apply_locale(self) -> None:
+        return None
 
-        def apply_locale(self) -> None:
-            return None
+    def refresh_prompt_if_empty(self) -> None:
+        return None
 
-        async def scroll_to_bottom(self) -> None:
-            return None
 
-        def log_basic(self, message: str, *, level: int = app_module.logging.INFO) -> None:
-            _ = (message, level)
+class ConstructionDummyLogsView(ft.Container):
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_mode_change = None
+        self.runtime_logging_mode = "basic"
 
-        def log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
-            _ = (message, level)
+    def set_runtime_logging_mode(self, mode: str) -> None:
+        self.runtime_logging_mode = mode
 
-    monkeypatch.setattr(app_module, "GuiController", DummyController)
-    monkeypatch.setattr(app_module, "DashboardView", DummyDashboardView)
-    monkeypatch.setattr(app_module, "SettingsView", DummySettingsView)
-    monkeypatch.setattr(app_module, "LogsView", DummyLogsView)
+    def apply_locale(self) -> None:
+        return None
+
+    async def scroll_to_bottom(self) -> None:
+        return None
+
+    def log_basic(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+        _ = (message, level)
+
+    def log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+        _ = (message, level)
+
+
+def _patch_app_construction(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_module, "GuiController", ConstructionDummyController)
+    monkeypatch.setattr(app_module, "DashboardView", ConstructionDummyDashboardView)
+    monkeypatch.setattr(app_module, "SettingsView", ConstructionDummySettingsView)
+    monkeypatch.setattr(app_module, "LogsView", ConstructionDummyLogsView)
     monkeypatch.setattr(app_module, "AboutView", lambda: ft.Container())
     monkeypatch.setattr(app_module, "TitleBar", lambda _page: ft.Container())
     monkeypatch.setattr(app_module, "BottomNavBar", lambda on_change: ft.Container(data=on_change))
@@ -172,6 +179,12 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     monkeypatch.setattr(app_module, "font_for_language", lambda _code: "font")
     monkeypatch.setattr(app_module, "get_locale", lambda: "en")
 
+
+def test_translator_app_init_builds_layout_and_wires_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_app_construction(monkeypatch)
+
     page = DummyPage()
     app = TranslatorApp(page, config_path=Path("settings.json"))
 
@@ -179,10 +192,12 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert page.title == app_module.t("app.title")
     assert page.window.frameless is True
     assert page.window.resizable is True
-    assert page.window.width == 1200
-    assert page.window.height == 800
-    assert page.window.min_width == 1080
-    assert page.window.min_height == 600
+    assert page.window.width == app_module.DEFAULT_WINDOW_WIDTH
+    assert page.window.height == app_module.DEFAULT_WINDOW_HEIGHT
+    assert page.window.min_width == app_module.MIN_WINDOW_WIDTH
+    assert page.window.min_height == app_module.MIN_WINDOW_HEIGHT
+    assert page.window.width >= page.window.min_width
+    assert page.window.height >= page.window.min_height
     assert page.added
     assert app.view_dashboard.on_send_message == app._on_manual_submit
     assert app.view_dashboard.on_toggle_overlay == app._on_overlay_toggle
@@ -195,6 +210,33 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert app.view_settings.runtime_log_detailed == app.controller.log_detailed
     assert app.view_logs.on_mode_change == app._on_runtime_logging_mode_change
     assert app.view_logs.runtime_logging_mode == "detailed"
+
+
+def test_translator_app_4x3_window_keeps_shell_navigation_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_app_construction(monkeypatch)
+
+    page = DummyPage()
+    app = TranslatorApp(page, config_path=Path("settings.json"))
+    monkeypatch.setattr(app.content_area, "update", lambda: None)
+
+    assert app.content_area.padding == app_module.APP_CONTENT_PADDING
+    assert app.layout.controls == [app.title_bar, app.content_area, app.bottom_nav]
+    assert app.content_area.content is app.view_dashboard
+
+    app._on_nav_change(1)
+    assert app.content_area.content is app.view_settings
+
+    app._on_nav_change(2)
+    assert app.content_area.content is app.view_logs
+
+    app._on_nav_change(3)
+    assert app.content_area.content is app.view_about
+
+    app._on_nav_change(0)
+    assert app.content_area.content is app.view_dashboard
+    assert len(page.tasks) == 1
 
 
 def test_on_runtime_logging_mode_change_updates_controller_and_logs_view() -> None:
