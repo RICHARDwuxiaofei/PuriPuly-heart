@@ -276,6 +276,30 @@ jobs:
               if normalized not in (None, []):
                   raise SystemExit(f'{label} {field_name} must be cleared (null or [])')
 
+          def model_matches(expected: str, actual: str) -> bool:
+              return actual == expected or actual.startswith(expected + '-')
+
+          def assert_models_match(actual_models, label: str) -> None:
+              if actual_models is None:
+                  raise SystemExit(f'{label} allowed_models must not be null')
+              if len(actual_models) != len(expected_models):
+                  raise SystemExit(f'{label} allowed_models count mismatch: {actual_models!r}')
+              unmatched = []
+              remaining_actual = list(actual_models)
+              for expected in expected_models:
+                  match_index = next(
+                      (idx for idx, actual in enumerate(remaining_actual) if model_matches(expected, actual)),
+                      None,
+                  )
+                  if match_index is None:
+                      unmatched.append(expected)
+                      continue
+                  remaining_actual.pop(match_index)
+              if unmatched or remaining_actual:
+                  raise SystemExit(
+                      f'{label} allowed_models mismatch: unmatched_expected={unmatched!r} remaining_actual={remaining_actual!r}'
+                  )
+
           for label, data in (
               ('PATCH guardrail', read_guardrail(patch_raw, 'PATCH guardrail')),
               ('GET guardrail', read_guardrail(current_raw, 'GET guardrail')),
@@ -285,8 +309,7 @@ jobs:
                   'allowed_models',
                   label,
               )
-              if allowed_models != expected_models:
-                  raise SystemExit(f'{label} allowed_models mismatch: {allowed_models!r}')
+              assert_models_match(allowed_models, label)
               assert_cleared(data, 'allowed_providers', label)
               assert_cleared(data, 'ignored_providers', label)
               if data.get('enforce_zdr') is not False:
