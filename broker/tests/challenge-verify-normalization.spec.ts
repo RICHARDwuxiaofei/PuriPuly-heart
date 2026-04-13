@@ -87,7 +87,7 @@ describe('challenge and verify managed-state normalization', () => {
     insertEntitlement(env, {
       installation_id: 'install-revoked-state',
       status: 'revoked',
-      budget_usd: 0.07,
+      budget_usd: 0.08,
       managed_credential_ref: 'internal-ref-revoked',
       issued_at: '2026-04-01T00:00:00Z',
       expires_at: '2026-04-05T00:00:00Z',
@@ -121,7 +121,7 @@ describe('challenge and verify managed-state normalization', () => {
       },
       current_entitlement: {
         provider: 'OpenRouter',
-        budget_usd: 0.07,
+        budget_usd: 0.08,
         issued_at: '2026-04-01T00:00:00Z',
         expires_at: '2026-04-05T00:00:00Z',
       },

@@ -434,7 +434,7 @@ async def test_fallback_racer_persists_fast_primary_success_event() -> None:
     )
     fallback = FakeLLM(
         translated_text="fallback",
-        model="google/gemini-2.5-flash-lite-preview",
+        model="google/gemini-2.5-flash-lite",
         selected_source="byok",
     )
     runtime_logging = _PersistedRuntimeLogging()
@@ -455,7 +455,7 @@ async def test_fallback_racer_persists_fast_primary_success_event() -> None:
     assert payload["winner"] == "primary"
     assert payload["returned_source"] == "primary"
     assert payload["primary_model"] == "google/gemma-4-26b-a4b-it"
-    assert payload["fallback_model"] == "google/gemini-2.5-flash-lite-preview"
+    assert payload["fallback_model"] == "google/gemini-2.5-flash-lite"
     assert payload["primary_credential_source"] == "byok"
     assert payload["fallback_credential_source"] == "byok"
     assert isinstance(payload["primary_elapsed_ms"], int)
@@ -481,7 +481,7 @@ async def test_fallback_racer_returns_fallback_after_timeout_and_emits_persisted
     )
     fallback = FakeLLM(
         translated_text="fallback",
-        model="google/gemini-2.5-flash-lite-preview",
+        model="google/gemini-2.5-flash-lite",
         selected_source="managed",
     )
     runtime_logging = _PersistedRuntimeLogging()
@@ -506,7 +506,7 @@ async def test_fallback_racer_returns_fallback_after_timeout_and_emits_persisted
     assert fallback_triggered["race_id"] == race_finished["race_id"]
     assert fallback_triggered["utterance_id"] == str(utterance_id)
     assert fallback_triggered["primary_model"] == "google/gemma-4-26b-a4b-it"
-    assert fallback_triggered["fallback_model"] == "google/gemini-2.5-flash-lite-preview"
+    assert fallback_triggered["fallback_model"] == "google/gemini-2.5-flash-lite"
     assert fallback_triggered["primary_credential_source"] == "managed"
     assert fallback_triggered["fallback_credential_source"] == "managed"
     assert isinstance(fallback_triggered["primary_elapsed_ms"], int)
@@ -534,7 +534,7 @@ async def test_fallback_racer_returns_fallback_after_primary_exception() -> None
     )
     fallback = FakeLLM(
         translated_text="fallback",
-        model="google/gemini-2.5-flash-lite-preview",
+        model="google/gemini-2.5-flash-lite",
         selected_source="managed",
     )
     runtime_logging = _PersistedRuntimeLogging()

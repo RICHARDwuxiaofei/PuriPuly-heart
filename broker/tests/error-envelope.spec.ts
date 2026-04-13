@@ -37,7 +37,7 @@ describe('broker public error envelope', () => {
       release_token: release.releaseToken,
       hardware_hash: release.hardwareHash,
       reason: 'llm_start',
-      budget_usd: 0.07,
+      budget_usd: 0.08,
       model: 'google/gemma-4-26b-a4b-it',
       signed_at: '2026-04-08T06:15:00.000Z',
     });
@@ -59,7 +59,7 @@ describe('broker public error envelope', () => {
       },
       current_entitlement: {
         provider: 'OpenRouter',
-        budget_usd: 0.07,
+        budget_usd: 0.08,
         issued_at: null,
         expires_at: null,
       },
@@ -86,7 +86,7 @@ describe('broker public error envelope', () => {
         release_token: active.releaseToken,
         hardware_hash: active.hardwareHash,
         reason: 'llm_start',
-        budget_usd: 0.07,
+        budget_usd: 0.08,
         model: 'google/gemma-4-26b-a4b-it',
         signed_at: '2026-04-08T06:00:45.000Z',
       }),
@@ -105,7 +105,7 @@ describe('broker public error envelope', () => {
         },
         currentEntitlement: {
           provider: 'OpenRouter',
-          budget_usd: 0.07,
+          budget_usd: 0.08,
           issued_at: '2026-04-08T06:00:00.000Z',
           expires_at: '2026-10-08T06:00:00.000Z',
         },
@@ -138,7 +138,7 @@ describe('broker public error envelope', () => {
       release_token: release.releaseToken,
       hardware_hash: release.hardwareHash,
       reason: 'llm_start',
-      budget_usd: 0.07,
+      budget_usd: 0.08,
       model: 'google/gemma-4-26b-a4b-it',
       signed_at: '2026-04-08T06:00:45.000Z',
     });
@@ -157,7 +157,7 @@ describe('broker public error envelope', () => {
         },
         currentEntitlement: {
           provider: 'OpenRouter',
-          budget_usd: 0.07,
+          budget_usd: 0.08,
           issued_at: null,
           expires_at: null,
         },
@@ -192,7 +192,7 @@ describe('broker public error envelope', () => {
       release_token: release.releaseToken,
       hardware_hash: release.hardwareHash,
       reason: 'llm_start',
-      budget_usd: 0.07,
+      budget_usd: 0.08,
       model: 'google/gemma-4-26b-a4b-it',
       signed_at: '2026-04-08T06:00:45.000Z',
     });

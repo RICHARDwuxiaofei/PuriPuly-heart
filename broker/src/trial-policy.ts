@@ -1,7 +1,7 @@
 export const MANAGED_TRIAL_ALLOWED_MODELS = [
   'google/gemma-4-26b-a4b-it',
   'qwen/qwen3.5-flash-02-23',
-  'google/gemini-2.5-flash-lite-preview',
+  'google/gemini-2.5-flash-lite',
 ] as const;
 
 const MANAGED_FREE_TRIAL_POLICY = {
@@ -17,7 +17,7 @@ export const TRIAL_PROVIDER_POLICY = {
 
 export const MANAGED_TRIAL_BUDGET_POLICY = {
   currency: 'USD',
-  hardLimit: 0.07,
+  hardLimit: 0.08,
   limitReset: null,
 } as const;
 
@@ -28,7 +28,6 @@ export const MANAGED_TRIAL_COST_ACCOUNTING_POLICY = {
     outputTokens: 15,
     llmCallsPerUtterance: 1.3,
   },
-  theoreticalUsesAtHardLimit: 396,
   operationalBufferPercent: {
     min: 5,
     max: 10,

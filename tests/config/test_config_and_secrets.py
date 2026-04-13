@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from puripuly_heart.config.llm_profiles import OPENROUTER_FALLBACK_SELECTION_ALIASES
+from puripuly_heart.config.llm_profiles import (
+    OPENROUTER_FALLBACK_SELECTION_ALIASES,
+    resolve_openrouter_fallback_model,
+)
 from puripuly_heart.config.settings import (
     SETTINGS_SCHEMA_VERSION,
     AppSettings,
@@ -974,6 +977,18 @@ def test_from_dict_defaults_invalid_openrouter_fallback_to_gemini25_flash_lite()
     assert (
         loaded.openrouter.fallback_selection_alias
         == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+    )
+
+
+def test_openrouter_gemini25_flash_lite_fallback_uses_stable_slug() -> None:
+    expected = "google/gemini-2.5-flash-lite"
+
+    assert OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value == expected
+    assert (
+        resolve_openrouter_fallback_model(
+            OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value
+        )
+        == expected
     )
 
 

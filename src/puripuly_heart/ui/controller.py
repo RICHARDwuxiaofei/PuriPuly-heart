@@ -637,6 +637,8 @@ class GuiController:
         target.openrouter.llm_model = source.openrouter.llm_model
         target.openrouter.routing_mode = source.openrouter.routing_mode
         target.openrouter.selected_source = source.openrouter.selected_source
+        target.openrouter.selection_alias = source.openrouter.selection_alias
+        target.openrouter.fallback_selection_alias = source.openrouter.fallback_selection_alias
         target.qwen.llm_model = source.qwen.llm_model
         target.qwen.region = source.qwen.region
         if source.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:

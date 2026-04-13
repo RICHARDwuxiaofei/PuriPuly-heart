@@ -77,7 +77,7 @@ describe('GET /v1/trial/status response contract', () => {
     insertEntitlement(env, {
       installation_id: 'install-status-hidden-fields',
       status: 'pending_release',
-      budget_usd: 0.07,
+      budget_usd: 0.08,
       managed_credential_ref: 'internal-pending-ref',
       release_session_ref: 'release-session',
       release_token_hash: 'release-token-hash',
@@ -123,7 +123,7 @@ describe('GET /v1/trial/status response contract', () => {
     insertEntitlement(env, {
       installation_id: 'install-status-pending-release',
       status: 'pending_release',
-      budget_usd: 0.07,
+      budget_usd: 0.08,
     });
     const signedRequest = await signCanonicalStatusRequest(keyPair.privateKey, {
       installation_id: 'install-status-pending-release',

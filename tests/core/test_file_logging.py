@@ -290,7 +290,7 @@ def test_session_runtime_logging_service_persists_file_only_events_in_basic_mode
     service.emit_persisted(
         '[Persisted][Fallback] {"dual_bill_candidate": true, "event": "race_finished", '
         '"fallback_credential_source": "managed", "fallback_model": '
-        '"google/gemini-2.5-flash-lite-preview", "fallback_triggered": true, '
+        '"google/gemini-2.5-flash-lite", "fallback_triggered": true, '
         '"primary_credential_source": "managed", "primary_model": '
         '"google/gemma-4-26b-a4b-it", "returned_source": "fallback", '
         '"winner": "fallback"}'
@@ -304,5 +304,5 @@ def test_session_runtime_logging_service_persists_file_only_events_in_basic_mode
     assert log_lines[1].startswith("[Persisted][Fallback] ")
     assert '"event": "race_finished"' in log_lines[1]
     assert '"primary_model": "google/gemma-4-26b-a4b-it"' in log_lines[1]
-    assert '"fallback_model": "google/gemini-2.5-flash-lite-preview"' in log_lines[1]
+    assert '"fallback_model": "google/gemini-2.5-flash-lite"' in log_lines[1]
     assert '"winner": "fallback"' in log_lines[1]

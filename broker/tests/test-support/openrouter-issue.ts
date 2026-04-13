@@ -93,7 +93,7 @@ export async function activatePendingReleaseSession(options: {
     release_token: pendingRelease.releaseToken,
     hardware_hash: options.hardwareHash,
     reason: 'llm_start',
-    budget_usd: 0.07,
+    budget_usd: 0.08,
     model: 'google/gemma-4-26b-a4b-it',
     signed_at: options.issueSignedAt ?? '2026-04-08T06:00:45.000Z',
   });

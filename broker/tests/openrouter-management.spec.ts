@@ -22,7 +22,7 @@ describe('OpenRouter management client', () => {
           data: {
             hash: 'hash_123',
             expires_at: '2026-10-10T06:00:00.000Z',
-            limit: 0.07,
+            limit: 0.08,
             limit_reset: null,
           },
         },
@@ -50,7 +50,7 @@ describe('OpenRouter management client', () => {
         }),
         body: JSON.stringify({
           name: 'puripuly-heart:install-123:session-123',
-          limit: 0.07,
+          limit: 0.08,
           limit_reset: null,
           include_byok_in_limit: false,
           expires_at: '2026-10-10T06:00:00.000Z',

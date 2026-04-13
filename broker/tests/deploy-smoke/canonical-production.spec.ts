@@ -14,7 +14,7 @@ import {
 
 const CANONICAL_WORKER_NAME = 'puripuly-heart-broker';
 const ISSUE_REASON = 'llm_start';
-const ISSUE_BUDGET_USD = 0.07;
+const ISSUE_BUDGET_USD = 0.08;
 const ISSUE_MODEL = 'google/gemma-4-26b-a4b-it';
 const BOOTSTRAP_PLACEHOLDER = '__BOOTSTRAP_REQUIRED__';
 const OPENROUTER_API_BASE_URL = new URL('https://openrouter.ai');

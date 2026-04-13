@@ -34,7 +34,7 @@ describe('POST /v1/providers/openrouter/issue route contract', () => {
       release_token: release.releaseToken,
       hardware_hash: release.hardwareHash,
       reason: 'llm_start',
-      budget_usd: 0.07,
+      budget_usd: 0.08,
       model: 'google/gemma-4-26b-a4b-it',
       signed_at: '2026-04-08T06:00:45.000Z',
     });
@@ -69,11 +69,11 @@ describe('POST /v1/providers/openrouter/issue route contract', () => {
       managed_availability: true,
     });
     expect(payload.expires_at).toBe('2026-10-08T06:00:00.000Z');
-    expect(payload.budget_usd).toBe(0.07);
+    expect(payload.budget_usd).toBe(0.08);
     expect(payload.model).toBe('google/gemma-4-26b-a4b-it');
     expect(entitlement).toEqual({
       status: 'active',
-      budget_usd: 0.07,
+      budget_usd: 0.08,
       managed_credential_ref: managementApi.childKey.hash,
       issued_at: '2026-04-08T06:00:00.000Z',
       expires_at: '2026-10-08T06:00:00.000Z',
@@ -107,7 +107,7 @@ describe('POST /v1/providers/openrouter/issue route contract', () => {
       release_token: release.releaseToken,
       hardware_hash: 'hardware-hash-different',
       reason: 'llm_start',
-      budget_usd: 0.07,
+      budget_usd: 0.08,
       model: 'google/gemma-4-26b-a4b-it',
       signed_at: '2026-04-08T06:00:45.000Z',
     });
@@ -127,7 +127,7 @@ describe('POST /v1/providers/openrouter/issue route contract', () => {
         },
         currentEntitlement: {
           provider: 'OpenRouter',
-          budget_usd: 0.07,
+          budget_usd: 0.08,
           issued_at: null,
           expires_at: null,
         },
@@ -156,7 +156,7 @@ describe('POST /v1/providers/openrouter/issue route contract', () => {
       release_token: release.releaseToken,
       hardware_hash: release.hardwareHash,
       reason: 'llm_start',
-      budget_usd: 0.07,
+      budget_usd: 0.08,
       model: 'google/gemma-4-26b-a4b-it',
       signed_at: '2026-04-08T06:15:00.000Z',
     });
@@ -176,7 +176,7 @@ describe('POST /v1/providers/openrouter/issue route contract', () => {
         },
         currentEntitlement: {
           provider: 'OpenRouter',
-          budget_usd: 0.07,
+          budget_usd: 0.08,
           issued_at: null,
           expires_at: null,
         },

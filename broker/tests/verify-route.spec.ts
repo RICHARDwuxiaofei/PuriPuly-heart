@@ -562,7 +562,7 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
     insertEntitlement(env, {
       installation_id: 'install-verify-rotates-release-session',
       status: 'pending_release',
-      budget_usd: 0.07,
+      budget_usd: 0.08,
       release_session_ref: 'old-release-session',
       release_token_hash: await sha256Base64Url(staleReleaseToken),
       release_token_expires_at: '2026-04-08T06:15:00.000Z',
@@ -607,7 +607,7 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
       release_token: staleReleaseToken,
       hardware_hash: 'hardware-hash-verify-old-session',
       reason: 'llm_start',
-      budget_usd: 0.07,
+      budget_usd: 0.08,
       model: 'google/gemma-4-26b-a4b-it',
       signed_at: '2026-04-08T06:00:30.000Z',
     });

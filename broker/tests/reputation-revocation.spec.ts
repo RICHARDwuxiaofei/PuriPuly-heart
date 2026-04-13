@@ -118,7 +118,7 @@ describe('broker denylist, reputation, and revocation hooks', () => {
       },
       current_entitlement: {
         provider: 'OpenRouter',
-        budget_usd: 0.07,
+        budget_usd: 0.08,
         issued_at: '2026-04-08T06:00:00.000Z',
         expires_at: '2026-10-08T06:00:00.000Z',
       },
@@ -198,7 +198,7 @@ describe('broker denylist, reputation, and revocation hooks', () => {
       },
       current_entitlement: {
         provider: 'OpenRouter',
-        budget_usd: 0.07,
+        budget_usd: 0.08,
         issued_at: '2026-04-08T06:00:00.000Z',
         expires_at: '2026-10-08T06:00:00.000Z',
       },

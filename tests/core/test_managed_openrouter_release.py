@@ -252,6 +252,7 @@ async def test_prepare_for_translation_persists_verified_snapshot_and_issue_reus
     assert issue_result.api_key == "managed-key"
     assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
     issue_payload = client.calls[2][1]
+    assert issue_payload["budget_usd"] == 0.08
     assert issue_payload["hardware_hash"] == expected_hardware_hash
     assert settings.managed_identity.verified_hardware_hash is None
     assert settings.managed_identity.verified_hardware_hash_salt_version is None

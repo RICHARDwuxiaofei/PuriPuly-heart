@@ -29,7 +29,7 @@ from puripuly_heart.core.openrouter_credentials import (
 from puripuly_heart.core.storage.secrets import SecretStore
 from puripuly_heart.domain.models import Translation
 
-MANAGED_OPENROUTER_TRIAL_BUDGET_USD = 0.07
+MANAGED_OPENROUTER_TRIAL_BUDGET_USD = 0.08
 BINDING_MISMATCH_SUBCODES = {
     "device_public_key_registered",
     "installation_binding_mismatch",

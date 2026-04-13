@@ -2812,7 +2812,7 @@ async def test_refresh_managed_trial_usage_state_uses_settings_view_live_openrou
 
     async def fake_fetch_key_metadata(_api_key: str):
         return controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.07,
+            limit_usd=0.08,
             remaining_usd=0.05,
             usage_usd=0.02,
         )
@@ -2832,7 +2832,7 @@ async def test_refresh_managed_trial_usage_state_uses_settings_view_live_openrou
 
     assert settings_view.managed_trial_usage_state == {
         "visible": True,
-        "remaining_percent": 71,
+        "remaining_percent": 62,
     }
     assert dash.managed_trial_calls == []
 
@@ -2859,7 +2859,7 @@ async def test_refresh_managed_trial_usage_state_computes_remaining_percent_with
 
     async def fake_fetch_key_metadata(_api_key: str):
         return controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.07,
+            limit_usd=0.08,
             remaining_usd=0.05,
             usage_usd=None,
         )
@@ -2879,7 +2879,7 @@ async def test_refresh_managed_trial_usage_state_computes_remaining_percent_with
 
     assert settings_view.managed_trial_usage_state == {
         "visible": True,
-        "remaining_percent": 71,
+        "remaining_percent": 62,
     }
     assert dash.managed_trial_calls == []
 
@@ -2906,7 +2906,7 @@ async def test_refresh_managed_trial_usage_state_marks_usage_unavailable_when_me
 
     metadata_responses = [
         controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.07,
+            limit_usd=0.08,
             remaining_usd=0.05,
             usage_usd=0.02,
         ),
@@ -2959,12 +2959,12 @@ async def test_refresh_managed_trial_usage_state_marks_usage_unavailable_when_li
 
     metadata_responses = [
         controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.07,
+            limit_usd=0.08,
             remaining_usd=0.05,
             usage_usd=0.02,
         ),
         controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.07,
+            limit_usd=0.08,
             remaining_usd=None,
             usage_usd=0.02,
         ),
@@ -3962,6 +3962,10 @@ async def test_verify_api_key_routes_alibaba_singapore_to_qwen_fallback(
 def test_merge_settings_tab_apply_with_current_languages_preserves_all_language_fields() -> None:
     controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
     controller.settings = AppSettings()
+    controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    controller.settings.openrouter.fallback_selection_alias = (
+        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+    )
     controller.settings.languages.source_language = "fr"
     controller.settings.languages.target_language = "de"
     controller.settings.languages.peer_source_language = "ja"
@@ -3983,6 +3987,8 @@ def test_merge_settings_tab_apply_with_current_languages_preserves_all_language_
     pending.provider.peer_stt = STTProviderName.SONIOX
     pending.provider.llm = LLMProviderName.OPENROUTER
     pending.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    pending.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    pending.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
     pending.openrouter.routing_mode = OpenRouterRoutingMode.NOVITA_FIRST
     pending.qwen.llm_model = QwenLLMModel.QWEN_35_FLASH
     pending.qwen.region = QwenRegion.SINGAPORE
@@ -4005,6 +4011,10 @@ def test_merge_settings_tab_apply_with_current_languages_preserves_all_language_
     assert merged.provider.peer_stt == STTProviderName.SONIOX
     assert merged.provider.llm == LLMProviderName.OPENROUTER
     assert merged.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert merged.openrouter.selection_alias == OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    assert (
+        merged.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    )
     assert merged.openrouter.routing_mode == OpenRouterRoutingMode.NOVITA_FIRST
     assert merged.qwen.llm_model == QwenLLMModel.QWEN_35_FLASH
     assert merged.qwen.region == QwenRegion.SINGAPORE
@@ -4021,6 +4031,10 @@ async def test_apply_providers_preserves_current_languages_while_applying_provid
 ) -> None:
     controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
     controller.settings = AppSettings()
+    controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    controller.settings.openrouter.fallback_selection_alias = (
+        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+    )
     controller.settings.languages.source_language = "fr"
     controller.settings.languages.target_language = "de"
     controller.settings.languages.peer_source_language = "ja"
@@ -4053,6 +4067,8 @@ async def test_apply_providers_preserves_current_languages_while_applying_provid
     pending.provider.peer_stt = STTProviderName.SONIOX
     pending.provider.llm = LLMProviderName.OPENROUTER
     pending.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    pending.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    pending.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
     pending.openrouter.routing_mode = OpenRouterRoutingMode.NOVITA_FIRST
     pending.managed_identity.verified_hardware_hash = "pending-hash"
     pending.managed_identity.verified_hardware_hash_salt_version = 5
@@ -4090,12 +4106,75 @@ async def test_apply_providers_preserves_current_languages_while_applying_provid
     assert controller.settings.provider.peer_stt == STTProviderName.SONIOX
     assert controller.settings.provider.llm == LLMProviderName.OPENROUTER
     assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert (
+        controller.settings.openrouter.selection_alias
+        == OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    )
+    assert (
+        controller.settings.openrouter.fallback_selection_alias
+        == OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    )
     assert controller.settings.openrouter.routing_mode == OpenRouterRoutingMode.NOVITA_FIRST
     assert controller.settings.managed_identity.verified_hardware_hash == "pending-hash"
     assert controller.settings.managed_identity.verified_hardware_hash_salt_version == 5
     assert controller.settings.system_prompt == "draft prompt"
     assert controller.settings.system_prompts == {"openrouter": "draft prompt"}
     assert calls == ["llm", "peer", "rebuild_stt"]
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_rebuilds_only_llm_for_openrouter_fallback_alias_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_MANAGED
+    controller.settings.openrouter.fallback_selection_alias = (
+        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+    )
+    controller.hub = DummyHub()
+    controller._last_self_stt_provider_signature = controller._build_self_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_peer_stt_provider_signature = controller._build_peer_stt_provider_signature(
+        controller.settings
+    )
+    controller._last_llm_provider_signature = controller._build_llm_provider_signature(
+        controller.settings
+    )
+    calls: list[str] = []
+
+    updated = copy.deepcopy(controller.settings)
+    updated.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+
+    async def fake_rebuild_llm_provider(self) -> None:
+        calls.append("llm")
+
+    async def fake_refresh_peer_stt_runtime(self) -> None:
+        calls.append("peer")
+
+    async def fake_replace_runtime_stt_provider(self) -> None:
+        calls.append("replace")
+
+    async def fake_rebuild_pipeline(self, *, rebuild_stt: bool) -> None:
+        calls.append(f"pipeline:{rebuild_stt}")
+
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", fake_refresh_peer_stt_runtime)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", fake_replace_runtime_stt_provider
+    )
+    monkeypatch.setattr(GuiController, "_rebuild_pipeline", fake_rebuild_pipeline)
+
+    await controller.apply_providers(updated)
+
+    assert controller.settings.openrouter.fallback_selection_alias == (
+        OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    )
+    assert calls == ["llm"]
 
 
 @pytest.mark.asyncio

@@ -95,8 +95,8 @@ describe('release-session handshake state', () => {
     expect(count.count).toBe(1);
     expect(firstRow.status).toBe('pending_release');
     expect(secondRow.status).toBe('pending_release');
-    expect(firstRow.budget_usd).toBe(0.07);
-    expect(secondRow.budget_usd).toBe(0.07);
+    expect(firstRow.budget_usd).toBe(0.08);
+    expect(secondRow.budget_usd).toBe(0.08);
     expect(secondRow.release_session_ref).not.toBe(firstRow.release_session_ref);
     expect(secondRow.release_token_hash).not.toBe(firstRow.release_token_hash);
     expect(secondRow.release_token_expires_at).toBe('2026-04-08T06:16:00.000Z');

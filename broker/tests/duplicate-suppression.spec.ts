@@ -115,7 +115,7 @@ describe('broker duplicate hardware suppression', () => {
     insertEntitlement(env, {
       installation_id: 'install-legacy-active-source',
       status: 'active',
-      budget_usd: 0.07,
+      budget_usd: 0.08,
       managed_credential_ref: 'managed-legacy-active-ref',
       issued_at: '2026-04-08T05:59:10.000Z',
       expires_at: '2026-10-08T05:59:10.000Z',
@@ -188,7 +188,7 @@ describe('broker duplicate hardware suppression', () => {
     insertEntitlement(env, {
       installation_id: 'install-legacy-pending-source',
       status: 'pending_release',
-      budget_usd: 0.07,
+      budget_usd: 0.08,
       release_session_ref: 'legacy-pending-session',
       release_token_hash: 'legacy-pending-token-hash',
       release_token_expires_at: '2026-04-08T06:15:00.000Z',

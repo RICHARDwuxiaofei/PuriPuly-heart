@@ -92,7 +92,7 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
   - consumes the `pending_release` token, upgrades the entitlement to `active`, and returns terminal `managed_key_unrecoverable` for same-session retries after activation because the issued child key cannot be recovered
   - success response returns `openrouter_api_key`, distinct `managed_credential_ref`, normalized `managed_state`, `expires_at`, `budget_usd`, and `model`
   - `openrouter_api_key` is a newly created per-installation OpenRouter child key, not the shared worker secret
-  - the child key is created with the managed-trial limit (`0.07` USD), a six-month expiry anchored to `issued_at`, and the configured managed guardrail before the broker returns it
+  - the child key is created with the managed-trial limit (`0.08` USD), a six-month expiry anchored to `issued_at`, and the configured managed guardrail before the broker returns it
   - live remaining budget and usage stay upstream in OpenRouter metadata and are not mirrored into the issue response
 
 ## Persistence model

@@ -45,7 +45,7 @@ describe('POST /v1/trial/challenge/verify signing contract', () => {
       },
       current_entitlement: {
         provider: 'OpenRouter',
-        budget_usd: 0.07,
+        budget_usd: 0.08,
         issued_at: null,
         expires_at: null,
       },
