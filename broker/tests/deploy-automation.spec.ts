@@ -193,7 +193,7 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toContain(
       'BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION is required',
     );
-    expect(workflow).toContain('must differ from the managed allowlisted model');
+    expect(workflow).toContain('must differ from the managed allowlisted models.');
     expect(workflow).toContain('ref: refs/heads/dev');
     expect(workflow).toContain('render-production-wrangler-config.mjs');
     expect(workflow).toContain('render-fingerprint-bootstrap-sql.mjs');
@@ -204,6 +204,16 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toMatch(/wrangler types --config/u);
     expect(workflow).toContain('BROKER_CANONICAL_WORKERS_DEV_URL is required');
     expect(workflow).toContain('refs/heads/dev');
+    expect(workflow).toContain("broker/src/trial-policy.ts");
+    expect(workflow).toContain('MANAGED_TRIAL_ALLOWED_MODELS was not found');
+    expect(workflow).toContain('https://openrouter.ai/api/v1/guardrails/');
+    expect(workflow).toContain('PATCH "$guardrail_url"');
+    expect(workflow).toContain('allowed_models');
+    expect(workflow).toContain('allowed_providers');
+    expect(workflow).toContain('ignored_providers');
+    expect(workflow).toContain('enforce_zdr');
+    expect(workflow).toContain('must be cleared (null or [])');
+    expect(workflow).toContain('GET guardrail');
     expect(workflow).toMatch(
       /wrangler d1 migrations apply\s+puripuly-heart-broker\s+--remote\s+--config/u,
     );
@@ -231,20 +241,32 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toContain('transitional runtime compatibility');
     expect(workflow).toContain('managed child-key creation and cleanup');
     expect(workflow).toContain('assign the canonical production guardrail');
+    expect(workflow).toContain('positive Qwen/Gemini routing');
     expect(smokeSpec).toContain("process.env.CI === 'true'");
     expect(smokeSpec).toContain('/api/v1/key');
     expect(smokeSpec).toContain('/api/v1/chat/completions');
     expect(smokeSpec).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL');
     expect(smokeSpec).toContain('reads issued child-key metadata');
     expect(smokeSpec).toContain('recognizes model-routing failures as guardrail enforcement');
+    expect(smokeSpec).toContain('assertSuccessfulChatCompletionResponse');
+    expect(smokeSpec).toContain('MANAGED_TRIAL_ALLOWED_MODELS');
+    expect(smokeSpec).toContain('qwen/qwen3.5-flash-02-23');
+    expect(smokeSpec).toContain('google/gemini-2.5-flash-lite');
+    expect(smokeSpec).toContain('MANAGED_TRIAL_ALLOWED_MODELS');
+    expect(smokeSpec).toContain('must differ from the managed allowlisted models');
     expect(readme).toContain('per-installation OpenRouter child key');
     expect(readme).toContain('not the shared worker secret');
     expect(readme).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION');
     expect(readme).toContain('OPENROUTER_MANAGED_API_KEY_PRODUCTION` remains transitional');
+    expect(readme).toContain('reconciles the production OpenRouter guardrail');
+    expect(readme).toContain('qwen/qwen3.5-flash-02-23');
+    expect(readme).toContain('google/gemini-2.5-flash-lite');
     expect(checklist).toContain('OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION');
     expect(checklist).toContain('OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION');
     expect(checklist).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION');
     expect(checklist).toContain('transitional compatibility only');
+    expect(checklist).toContain('guardrail reconcile');
+    expect(checklist).toContain('positive routing for');
   });
 });
 

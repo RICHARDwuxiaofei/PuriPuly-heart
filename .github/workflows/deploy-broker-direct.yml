@@ -55,11 +55,6 @@ jobs:
             exit 1
           fi
 
-          if [[ "$BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION" == 'google/gemma-4-26b-a4b-it' ]]; then
-            echo 'BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION must differ from the managed allowlisted model.' >&2
-            exit 1
-          fi
-
       - name: Validate canonical workers.dev smoke target
         shell: bash
         run: |
@@ -72,6 +67,40 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: refs/heads/dev
+
+      - name: Validate disallowed smoke probe against managed allowlist
+        shell: bash
+        run: |
+          managed_models_json="$(python3 - <<'PY'
+          import ast
+          import json
+          import re
+          from pathlib import Path
+
+          source = Path('broker/src/trial-policy.ts').read_text(encoding='utf-8')
+          match = re.search(
+              r"export const MANAGED_TRIAL_ALLOWED_MODELS = \[(?P<body>.*?)\] as const;",
+              source,
+              re.S,
+          )
+          if match is None:
+              raise SystemExit('MANAGED_TRIAL_ALLOWED_MODELS was not found in broker/src/trial-policy.ts')
+          body = '[' + match.group('body') + ']'
+          print(json.dumps(ast.literal_eval(body)))
+          PY
+          )"
+
+          python3 - <<'PY' "$managed_models_json" "$BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION"
+          import json
+          import sys
+
+          managed_models = json.loads(sys.argv[1])
+          disallowed_model = sys.argv[2]
+          if disallowed_model in managed_models:
+              raise SystemExit(
+                  'BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION must differ from the managed allowlisted models.'
+              )
+          PY
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -162,6 +191,108 @@ jobs:
               raise SystemExit('fingerprint_salt bootstrap validation failed; placeholder still present')
           PY
 
+      - name: Reconcile production OpenRouter guardrail
+        shell: bash
+        run: |
+          guardrail_url="https://openrouter.ai/api/v1/guardrails/$OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION"
+          expected_models_json="$(python3 - <<'PY'
+          import ast
+          import json
+          import re
+          from pathlib import Path
+
+          source = Path('broker/src/trial-policy.ts').read_text(encoding='utf-8')
+          match = re.search(
+              r"export const MANAGED_TRIAL_ALLOWED_MODELS = \[(?P<body>.*?)\] as const;",
+              source,
+              re.S,
+          )
+          if match is None:
+              raise SystemExit('MANAGED_TRIAL_ALLOWED_MODELS was not found in broker/src/trial-policy.ts')
+          body = '[' + match.group('body') + ']'
+          print(json.dumps(ast.literal_eval(body)))
+          PY
+          )"
+          guardrail_patch_json="$(python3 - <<'PY'
+          import json
+          import ast
+          import re
+          from pathlib import Path
+
+          source = Path('broker/src/trial-policy.ts').read_text(encoding='utf-8')
+          match = re.search(
+              r"export const MANAGED_TRIAL_ALLOWED_MODELS = \[(?P<body>.*?)\] as const;",
+              source,
+              re.S,
+          )
+          if match is None:
+              raise SystemExit('MANAGED_TRIAL_ALLOWED_MODELS was not found in broker/src/trial-policy.ts')
+          body = '[' + match.group('body') + ']'
+          managed_models = ast.literal_eval(body)
+
+          print(json.dumps({
+              'allowed_models': managed_models,
+              'allowed_providers': None,
+              'ignored_providers': None,
+              'enforce_zdr': False,
+          }))
+          PY
+          )"
+
+          patch_response="$(curl --fail-with-body --silent --show-error --max-time 30 \
+            -H "Authorization: Bearer $OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION" \
+            -H 'Content-Type: application/json' \
+            -X PATCH "$guardrail_url" \
+            --data "$guardrail_patch_json")"
+          current_response="$(curl --fail-with-body --silent --show-error --max-time 30 \
+            -H "Authorization: Bearer $OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION" \
+            "$guardrail_url")"
+
+          python3 - <<'PY' "$patch_response" "$current_response" "$expected_models_json" "$OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION"
+          import json
+          import sys
+
+          patch_raw, current_raw, expected_models_raw, guardrail_id = sys.argv[1:5]
+          expected_models = sorted(json.loads(expected_models_raw))
+
+          def read_guardrail(raw: str, label: str) -> dict:
+              payload = json.loads(raw)
+              data = payload.get('data')
+              if not isinstance(data, dict):
+                  raise SystemExit(f'{label} response missing data object')
+              if data.get('id') != guardrail_id:
+                  raise SystemExit(f'{label} id mismatch for {guardrail_id}')
+              return data
+
+          def normalize_optional_string_list(value, field_name: str, label: str):
+              if value is None:
+                  return None
+              if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                  raise SystemExit(f'{label} {field_name} must be null or a string list')
+              return sorted(value)
+
+          def assert_cleared(data: dict, field_name: str, label: str) -> None:
+              normalized = normalize_optional_string_list(data.get(field_name), field_name, label)
+              if normalized not in (None, []):
+                  raise SystemExit(f'{label} {field_name} must be cleared (null or [])')
+
+          for label, data in (
+              ('PATCH guardrail', read_guardrail(patch_raw, 'PATCH guardrail')),
+              ('GET guardrail', read_guardrail(current_raw, 'GET guardrail')),
+          ):
+              allowed_models = normalize_optional_string_list(
+                  data.get('allowed_models'),
+                  'allowed_models',
+                  label,
+              )
+              if allowed_models != expected_models:
+                  raise SystemExit(f'{label} allowed_models mismatch: {allowed_models!r}')
+              assert_cleared(data, 'allowed_providers', label)
+              assert_cleared(data, 'ignored_providers', label)
+              if data.get('enforce_zdr') is not False:
+                  raise SystemExit(f'{label} enforce_zdr must be false')
+          PY
+
       - name: Sync OpenRouter worker secrets for managed child-key issuance
         shell: bash
         working-directory: broker
@@ -217,7 +348,7 @@ jobs:
           cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
           Direct broker smoke passed.
 
-          Verified issued child-key metadata plus disallowed-model guardrail enforcement.
+          Verified issued child-key metadata, positive Qwen/Gemini routing, and disallowed-model guardrail enforcement.
 
           Do not connect app / public traffic to the broker until this run has been reviewed and an explicit cutover is approved.
           EOF

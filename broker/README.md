@@ -6,7 +6,7 @@ This directory establishes the managed-trial broker as a separate deployable ser
 
 - Runtime stack: TypeScript + Hono on Cloudflare Workers with native D1 and Worker secrets.
 - Hosting scope: single-region rollout assumption for the initial Worker deployment, with D1 `location_hint` set to `apac`.
-- Managed free-trial path: `OpenRouter` + `google/gemma-4-26b-a4b-it`.
+- Managed free-trial path: `OpenRouter` + curated allowlist `google/gemma-4-26b-a4b-it`, `qwen/qwen3.5-flash-02-23`, and `google/gemini-2.5-flash-lite`.
 - Inference boundary: the app talks to OpenRouter directly; the broker remains a trial and credential broker.
 - Out of scope in this foundation: translation proxying, multi-region deployment, KV, R2, and admin dashboard work.
 
@@ -20,9 +20,11 @@ Use `pnpm --filter @puripuly-heart/broker run verify:config` to exercise the pin
 
 - `broker/scripts/render-production-wrangler-config.mjs` renders a temporary deploy-time Wrangler config from `broker/wrangler.jsonc`, injects the production D1 `database_id`, and fails if the checked-in worker name stops being the canonical `puripuly-heart-broker`.
 - `broker/deploy/fingerprint-bootstrap.template.sql` plus `broker/scripts/render-fingerprint-bootstrap-sql.mjs` render guarded bootstrap SQL for `wrangler d1 execute --file ... --yes`. The rendered SQL only replaces the migration placeholder and fails before mutating `broker_config` if the placeholder is already gone.
-- `.github/workflows/deploy-broker-direct.yml` is the manual `workflow_dispatch` path for the first canonical deploy. It applies remote D1 migrations, bootstraps the fingerprint salt, syncs the OpenRouter worker secrets needed for managed child-key issuance, deploys the canonical worker, and runs `broker/tests/deploy-smoke/canonical-production.spec.ts` against the canonical `workers.dev` URL.
+- `.github/workflows/deploy-broker-direct.yml` is the manual `workflow_dispatch` path for the first canonical deploy. It applies remote D1 migrations, bootstraps the fingerprint salt, reconciles the production OpenRouter guardrail through `PATCH /api/v1/guardrails/{id}`, syncs the OpenRouter worker secrets needed for managed child-key issuance, deploys the canonical worker, and runs `broker/tests/deploy-smoke/canonical-production.spec.ts` against the canonical `workers.dev` URL.
 - `OPENROUTER_MANAGED_API_KEY_PRODUCTION` remains transitional runtime compatibility only; `OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION` drives managed child-key creation / cleanup and `OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION` assigns the production guardrail to each issued key.
-- The deploy smoke now verifies issued child-key metadata through `https://openrouter.ai/api/v1/key` and probes `https://openrouter.ai/api/v1/chat/completions` with `BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION` to confirm guardrail enforcement.
+- The deploy reconcile step sets `allowed_models` to `google/gemma-4-26b-a4b-it`, `qwen/qwen3.5-flash-02-23`, and `google/gemini-2.5-flash-lite`, clears provider restrictions inside the guardrail (`allowed_providers` / `ignored_providers`), and sets `enforce_zdr = false` before smoke.
+- The deploy smoke verifies issued child-key metadata through `https://openrouter.ai/api/v1/key`, proves positive routing through `qwen/qwen3.5-flash-02-23` and `google/gemini-2.5-flash-lite`, and still probes `https://openrouter.ai/api/v1/chat/completions` with `BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION` to confirm guardrail enforcement.
+- Account-level OpenRouter privacy / provider settings remain outside repo control and may still narrow effective routing even after the guardrail reconcile; the production smoke is the proof point for the resulting path.
 - The workflow expects CI-managed secrets / vars in the `production` GitHub Environment: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `BROKER_D1_DATABASE_ID_PRODUCTION`, `OPENROUTER_MANAGED_API_KEY_PRODUCTION`, `OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION`, `OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION`, `BROKER_CANONICAL_WORKERS_DEV_URL`, and `BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION`.
 - App / public traffic must stay disconnected from the broker until the direct deploy smoke run passes and is explicitly reviewed.
 
@@ -77,7 +79,7 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
   - request: `installation_id`, base64url `device_public_key`, base64url `release_token`, `hardware_hash`, `reason`, `budget_usd`, `model`, `signed_at`, base64url `signature`
   - `installation_id` and `hardware_hash` keep the same public bound: `1-128` chars and must not be blank or whitespace-only, and must not contain embedded control characters or newline separators
   - activation reason is fixed to `llm_start`
-  - `budget_usd` must match the managed-trial hard limit and `model` must match the pinned managed OpenRouter model
+  - `budget_usd` must match the managed-trial hard limit and `model` must be one of the curated managed OpenRouter models
   - supported timestamp subset for `signed_at`: `YYYY-MM-DDTHH:MM:SS(.mmm)?(Z|±HH:MM)` with a real calendar date/time
   - Ed25519 signature payload is canonical UTF-8 text joined by newlines in this order:
     1. `installation_id`

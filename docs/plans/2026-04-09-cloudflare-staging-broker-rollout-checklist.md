@@ -61,10 +61,11 @@ What it does **not** mean:
 - The deployment order remains:
   1. migrations
   2. fingerprint salt bootstrap
-  3. secrets
-  4. deploy
-  5. automated smoke test
-  6. human review before app / public traffic is pointed at the broker
+  3. guardrail reconcile
+  4. secrets
+  5. deploy
+  6. automated smoke test
+  7. human review before app / public traffic is pointed at the broker
 - Secrets should live in GitHub Environments / CI secret storage, not in the repo.
 - Because the smoke test runs against the canonical worker, the app must remain disconnected from the broker until the smoke path passes.
 
@@ -94,6 +95,7 @@ What it does **not** mean:
 - [x] Generate a deploy-time Wrangler config or equivalent environment-specific config with the production D1 `database_id`
 - [x] Apply remote D1 migrations in CI
 - [x] Replace the D1 `fingerprint_salt` bootstrap placeholder in CI before smoke traffic
+- [x] Reconcile the production OpenRouter guardrail in CI before deploy / smoke
 - [x] Push production Worker secret(s) in CI
 - [x] Deploy the canonical Worker in CI
 - [x] Run automated smoke tests after deploy
@@ -128,10 +130,13 @@ Implementation notes for the minimum smoke path:
 
 - [x] create a fresh installation ID and Ed25519 device keypair per run
 - [x] use canonical signing for `verify`, `status`, and `issue`
-- [x] use the pinned managed issue payload values:
+- [x] use a managed issue payload drawn from the curated allowlist:
   - `reason = llm_start`
-  - `budget_usd = 0.07`
+  - `budget_usd = 0.08`
   - `model = google/gemma-4-26b-a4b-it`
+- [x] after issue, probe positive routing for:
+  - `qwen/qwen3.5-flash-02-23`
+  - `google/gemini-2.5-flash-lite`
 - [x] prefer existing broker test helpers where possible:
   - `broker/tests/test-support/ed25519.ts`
   - `broker/tests/test-support/trial-api.ts`
@@ -147,6 +152,8 @@ Recommended failure-path smoke coverage:
 Canonical production smoke now also verifies:
 
 - [x] issued child-key metadata reflects the managed limit / expiry contract
+- [x] the deploy path performs guardrail reconcile before deploy / smoke
+- [x] positive routing for `qwen/qwen3.5-flash-02-23` and `google/gemini-2.5-flash-lite`
 - [x] a known disallowed model is rejected after guardrail assignment
 
 Recommended later expansion:
@@ -171,13 +178,15 @@ Repo-side direct-production automation now exists:
 The remaining rollout work is operational, not repo-side automation:
 
 1. register the production Environment secrets / variable
-   - `OPENROUTER_MANAGED_API_KEY_PRODUCTION` remains transitional compatibility only
-   - `OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION` and `OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION` are required for child-key issuance
-   - `BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION` must be set to a model blocked by the configured guardrail
+    - `OPENROUTER_MANAGED_API_KEY_PRODUCTION` remains transitional compatibility only
+    - `OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION` and `OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION` are required for child-key issuance
+    - `BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION` must be set to a model blocked by the configured guardrail
 2. create or confirm the production D1 database and capture its `database_id`
 3. review the manual workflow inputs / guards
 4. run the first canonical deployment and smoke
 5. keep app / public traffic disconnected until that smoke passes and is reviewed
+
+If that live smoke still cannot route Qwen or Gemini after the repo-controlled guardrail reconcile, inspect account-level OpenRouter privacy / provider settings outside repo control.
 
 ## Related references
 

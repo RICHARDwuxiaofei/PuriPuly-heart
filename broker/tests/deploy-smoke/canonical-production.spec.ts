@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { BROKER_SERVICE_NAME } from '../../src/contract';
+import { MANAGED_TRIAL_ALLOWED_MODELS } from '../../src/trial-policy';
 import {
   TRIAL_STATUS_SIGNATURE_HEADER,
   TRIAL_STATUS_TIMESTAMP_HEADER,
@@ -15,13 +16,17 @@ import {
 const CANONICAL_WORKER_NAME = 'puripuly-heart-broker';
 const ISSUE_REASON = 'llm_start';
 const ISSUE_BUDGET_USD = 0.08;
-const ISSUE_MODEL = 'google/gemma-4-26b-a4b-it';
+const MANAGED_ALLOWLIST_MODELS = [...MANAGED_TRIAL_ALLOWED_MODELS] as const;
+const ISSUE_MODEL = MANAGED_ALLOWLIST_MODELS[0];
+const POSITIVE_ROUTING_PROBE_MODELS = MANAGED_ALLOWLIST_MODELS.filter(
+  (model) => model !== ISSUE_MODEL,
+);
 const BOOTSTRAP_PLACEHOLDER = '__BOOTSTRAP_REQUIRED__';
 const OPENROUTER_API_BASE_URL = new URL('https://openrouter.ai');
 const smokeBaseUrl = process.env.BROKER_DEPLOY_SMOKE_BASE_URL?.trim();
 const smokeDisallowedModel = normalizeDisallowedModel(
   process.env.BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL,
-  ISSUE_MODEL,
+  MANAGED_ALLOWLIST_MODELS,
   process.env.CI === 'true',
 );
 type JsonRequestOptions = {
@@ -68,14 +73,58 @@ describe('broker deploy smoke helpers', () => {
     ).toBe(false);
   });
 
+  it('accepts successful OpenRouter chat completion response shapes for managed model probes', () => {
+    expect(() =>
+      assertSuccessfulChatCompletionResponse(
+        {
+          status: 200,
+          body: {
+            id: 'chatcmpl-123',
+            choices: [
+              {
+                message: {
+                  role: 'assistant',
+                  content: 'routed',
+                },
+              },
+            ],
+          },
+        },
+        'qwen/qwen3.5-flash-02-23',
+      ),
+    ).not.toThrow();
+  });
+
   it('requires a distinct disallowed model probe when smoke runs in CI', () => {
-    expect(normalizeDisallowedModel(undefined, ISSUE_MODEL, false)).toBeUndefined();
-    expect(normalizeDisallowedModel('openai/gpt-4o-mini', ISSUE_MODEL, true)).toBe(
-      'openai/gpt-4o-mini',
-    );
-    expect(() => normalizeDisallowedModel(ISSUE_MODEL, ISSUE_MODEL, true)).toThrow(
-      /must differ from the managed allowlisted model/i,
-    );
+    expect(normalizeDisallowedModel(undefined, MANAGED_ALLOWLIST_MODELS, false)).toBeUndefined();
+    expect(
+      normalizeDisallowedModel('openai/gpt-4o-mini', MANAGED_ALLOWLIST_MODELS, true),
+    ).toBe('openai/gpt-4o-mini');
+    expect(() =>
+      normalizeDisallowedModel(ISSUE_MODEL, MANAGED_ALLOWLIST_MODELS, true),
+    ).toThrow(/must differ from the managed allowlisted models/i);
+    expect(() =>
+      normalizeDisallowedModel(
+        'qwen/qwen3.5-flash-02-23',
+        MANAGED_ALLOWLIST_MODELS,
+        true,
+      ),
+    ).toThrow(/must differ from the managed allowlisted models/i);
+    expect(() =>
+      normalizeDisallowedModel(
+        'google/gemini-2.5-flash-lite',
+        MANAGED_ALLOWLIST_MODELS,
+        true,
+      ),
+    ).toThrow(/must differ from the managed allowlisted models/i);
+  });
+
+  it('keeps the positive routing probes pinned to Qwen and Gemini', () => {
+    expect(POSITIVE_ROUTING_PROBE_MODELS).toEqual([
+      'qwen/qwen3.5-flash-02-23',
+      'google/gemini-2.5-flash-lite',
+    ]);
+    expect(MANAGED_ALLOWLIST_MODELS).toEqual(MANAGED_TRIAL_ALLOWED_MODELS);
   });
 });
 
@@ -109,8 +158,8 @@ describeDeploySmoke('broker direct deploy smoke', () => {
     expect(foundation.body.trialProviderPolicy?.managedFreeTrial?.provider).toBe(
       'OpenRouter',
     );
-    expect(foundation.body.trialProviderPolicy?.managedFreeTrial?.models).toContain(
-      ISSUE_MODEL,
+    expect(foundation.body.trialProviderPolicy?.managedFreeTrial?.models).toEqual(
+      expect.arrayContaining(MANAGED_ALLOWLIST_MODELS),
     );
 
     const challenge = await requestJson({
@@ -211,23 +260,21 @@ describeDeploySmoke('broker direct deploy smoke', () => {
     expect(issuedKeyMetadata.limit).toBe(ISSUE_BUDGET_USD);
     expect(Date.parse(issuedKeyMetadata.expiresAt)).toBe(Date.parse(issue.body.expires_at));
 
-    const guardrailProbe = await requestJsonAllowFailure({
-      method: 'POST',
-      url: new URL('/api/v1/chat/completions', OPENROUTER_API_BASE_URL),
-      headers: {
-        authorization: `Bearer ${issue.body.openrouter_api_key}`,
-      },
-      body: {
-        model: requireDisallowedModel(smokeDisallowedModel),
-        messages: [
-          {
-            role: 'user',
-            content: 'Reply with the single word blocked.',
-          },
-        ],
-        max_tokens: 8,
-      },
-    });
+    for (const managedModel of POSITIVE_ROUTING_PROBE_MODELS) {
+      const managedModelProbe = await requestOpenRouterChatCompletion(
+        issue.body.openrouter_api_key,
+        managedModel,
+        'Reply with the single word routed.',
+      );
+
+      assertSuccessfulChatCompletionResponse(managedModelProbe, managedModel);
+    }
+
+    const guardrailProbe = await requestOpenRouterChatCompletion(
+      issue.body.openrouter_api_key,
+      requireDisallowedModel(smokeDisallowedModel),
+      'Reply with the single word blocked.',
+    );
     expect(guardrailProbe.status).toBeGreaterThanOrEqual(400);
     expect(
       isDisallowedModelGuardrailFailure(guardrailProbe.status, guardrailProbe.body),
@@ -237,7 +284,7 @@ describeDeploySmoke('broker direct deploy smoke', () => {
 
 function normalizeDisallowedModel(
   rawValue: string | undefined,
-  managedAllowlistedModel: string,
+  managedAllowlistedModels: readonly string[],
   isCi: boolean,
 ): string | undefined {
   const normalized = rawValue?.trim();
@@ -252,9 +299,9 @@ function normalizeDisallowedModel(
     return undefined;
   }
 
-  if (normalized === managedAllowlistedModel) {
+  if (managedAllowlistedModels.includes(normalized)) {
     throw new Error(
-      'BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL must differ from the managed allowlisted model',
+      'BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL must differ from the managed allowlisted models',
     );
   }
 
@@ -331,6 +378,61 @@ function readOpenRouterCurrentKeyMetadata(payload: unknown): {
   };
 }
 
+function assertSuccessfulChatCompletionResponse(
+  response: { status: number; body: unknown },
+  requestedModel: string,
+): void {
+  if (response.status !== 200) {
+    throw new Error(
+      `Expected successful chat completion for ${requestedModel}, got ${response.status}: ${stringifyForPatternMatch(response.body)}`,
+    );
+  }
+
+  const payload = readRecord(
+    response.body,
+    `OpenRouter chat completion response for ${requestedModel}`,
+  );
+  const choices = readArrayField(
+    payload,
+    'choices',
+    `OpenRouter chat completion response for ${requestedModel}`,
+  );
+
+  if (typeof payload.id !== 'string' || payload.id.length === 0) {
+    throw new Error(
+      `OpenRouter chat completion response for ${requestedModel} must include a non-empty id`,
+    );
+  }
+
+  if (choices.length === 0) {
+    throw new Error(
+      `OpenRouter chat completion response for ${requestedModel} must include at least one choice`,
+    );
+  }
+
+  const firstChoice = readRecord(
+    choices[0],
+    `OpenRouter first chat completion choice for ${requestedModel}`,
+  );
+  const message = readObjectField(
+    firstChoice,
+    'message',
+    `OpenRouter first chat completion choice for ${requestedModel}`,
+  );
+
+  if (message.role !== 'assistant') {
+    throw new Error(
+      `OpenRouter chat completion response for ${requestedModel} must include an assistant message`,
+    );
+  }
+
+  if (!hasNonEmptyChatCompletionContent(message.content)) {
+    throw new Error(
+      `OpenRouter chat completion response for ${requestedModel} must include non-empty assistant content`,
+    );
+  }
+}
+
 function isDisallowedModelGuardrailFailure(status: number, body: unknown): boolean {
   if (status < 400 || status === 401) {
     return false;
@@ -339,6 +441,26 @@ function isDisallowedModelGuardrailFailure(status: number, body: unknown): boole
   return /allowed model|disallowed model|model\/provider|model[^\n]*available|provider[^\n]*available|guardrail|route/iu.test(
     stringifyForPatternMatch(body),
   );
+}
+
+function readRecord(value: unknown, context: string): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new Error(`${context} must be a JSON object`);
+  }
+
+  return value;
+}
+
+function readArrayField(
+  value: unknown,
+  fieldName: string,
+  context: string,
+): unknown[] {
+  if (!isRecord(value) || !Array.isArray(value[fieldName])) {
+    throw new Error(`${context} must include an array ${fieldName}`);
+  }
+
+  return value[fieldName] as unknown[];
 }
 
 function readObjectField(
@@ -350,7 +472,15 @@ function readObjectField(
     throw new Error(`${context} must include an object ${fieldName}`);
   }
 
-  return value[fieldName];
+  return value[fieldName] as Record<string, unknown>;
+}
+
+function hasNonEmptyChatCompletionContent(content: unknown): boolean {
+  if (typeof content === 'string') {
+    return content.trim().length > 0;
+  }
+
+  return Array.isArray(content) && content.length > 0;
 }
 
 function stringifyForPatternMatch(value: unknown): string {
@@ -427,6 +557,30 @@ async function requestJsonAllowFailure({
       body: redactIssueBody(rawText),
     };
   }
+}
+
+async function requestOpenRouterChatCompletion(
+  apiKey: string,
+  model: string,
+  prompt: string,
+) {
+  return requestJsonAllowFailure({
+    method: 'POST',
+    url: new URL('/api/v1/chat/completions', OPENROUTER_API_BASE_URL),
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+    },
+    body: {
+      model,
+      messages: [
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+      max_tokens: 8,
+    },
+  });
 }
 
 function redactIssueBody(rawText: string): string {
