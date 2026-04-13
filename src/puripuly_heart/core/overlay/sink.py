@@ -63,6 +63,8 @@ class SelfActiveUpdate(OverlayEvent):
     def __post_init__(self) -> None:
         if self.channel != "self":
             raise ValueError("SelfActiveUpdate requires channel='self'")
+        if self.utterance_id is None:
+            raise ValueError("SelfActiveUpdate requires utterance_id")
         if not self.occupant_key.strip():
             raise ValueError("SelfActiveUpdate requires non-empty occupant_key")
 
@@ -237,13 +239,14 @@ class OverlayEventAdapter:
         self,
         *,
         text: str,
+        utterance_id: UUID,
         secondary_text: str = "",
         occupant_key: str,
         created_at: float | None = None,
     ) -> SelfActiveUpdate:
         return SelfActiveUpdate(
             **self._common_event_fields(
-                utterance_id=None,
+                utterance_id=utterance_id,
                 channel="self",
                 created_at=created_at,
             ),

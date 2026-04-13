@@ -153,6 +153,16 @@ class RecordingOverlaySink:
         self.events.append(event)
 
 
+@dataclass
+class RecordingOverlayDiagnostics:
+    hub_events: list[dict[str, object]] = field(default_factory=list)
+
+    def record_hub(self, event: str, **fields: object) -> dict[str, object]:
+        payload = {"event": event, **fields}
+        self.hub_events.append(payload)
+        return payload
+
+
 def samples(value: float, n: int = 512) -> np.ndarray:
     return np.full((n,), value, dtype=np.float32)
 
@@ -459,10 +469,12 @@ class TestRuntimeLatencyLogging:
         runtime_logging.set_mode(SessionLoggingMode.DETAILED)
         clock = FakeClock(initial_time=10.0)
         osc = FakeOscQueue()
+        overlay_sink = RecordingOverlaySink()
         hub = ClientHub(
             stt=None,
             llm=None,
             osc=osc,
+            overlay_sink=overlay_sink,
             clock=clock,
             low_latency_mode=True,
             low_latency_finalize_wait_ms=0,
@@ -483,6 +495,9 @@ class TestRuntimeLatencyLogging:
             )
 
             output_utterance_id = osc.messages[0].utterance_id
+            active_events = [
+                event for event in overlay_sink.events if event.type == "self_active_update"
+            ]
             messages = _runtime_log_messages(log_stream)
             output_messages = [
                 message
@@ -497,6 +512,8 @@ class TestRuntimeLatencyLogging:
                 and f"utterance_id={str(source_utterance_id)[:8]}" in message
             ]
 
+            assert len(active_events) == 1
+            assert active_events[0].utterance_id == output_utterance_id
             assert any("stage=speech_end" in message for message in output_messages)
             assert any("stage=stt_final" in message for message in output_messages)
             assert any("stage=self_chatbox_enqueue" in message for message in output_messages)
@@ -1168,6 +1185,8 @@ class TestResumeEndTimeout:
         hub._merge_buffer = buffer
         hub._overlay_active_self_text = "첫 번째"
         hub._overlay_active_self_secondary_text = "translated live"
+        hub._overlay_active_self_utterance_id = merge_id
+        hub._overlay_active_self_occupant_key = f"self:{merge_id}"
 
         await hub.handle_vad_event(SpeechChunk(resumed_utterance_id, chunk=samples(0.5)))
 
@@ -1232,11 +1251,14 @@ class TestSpecCommitPaths:
             "utterance_closed",
         ]
         assert overlay_sink.events[1].text == "hola"
+        assert overlay_sink.events[1].utterance_id == merge_id
         assert overlay_sink.events[-1].channel == "self"
         assert overlay_sink.events[-1].is_final is True
 
     @pytest.mark.asyncio
-    async def test_commit_merge_clears_stale_active_secondary_before_finalizing_mismatch(self):
+    async def test_commit_merge_self_active_update_carries_merge_id_when_clearing_stale_active_secondary_before_finalizing_mismatch(
+        self,
+    ):
         clock = FakeClock(initial_time=10.0)
         osc = FakeOscQueue()
         overlay_sink = RecordingOverlaySink()
@@ -1276,11 +1298,133 @@ class TestSpecCommitPaths:
         ]
         assert overlay_sink.events[0].text == "hello live"
         assert overlay_sink.events[0].secondary_text == "translated live"
+        assert overlay_sink.events[0].utterance_id == merge_id
         assert overlay_sink.events[1].text == "hello live"
         assert overlay_sink.events[1].secondary_text == ""
+        assert overlay_sink.events[1].utterance_id == merge_id
         assert overlay_sink.events[1].occupant_key == overlay_sink.events[0].occupant_key
         assert overlay_sink.events[2].utterance_id == merge_id
         assert overlay_sink.events[3].text == "nuevo"
+        assert overlay_sink.events[3].utterance_id == merge_id
+
+    @pytest.mark.asyncio
+    async def test_sync_overlay_active_self_records_overlay_emit_with_merge_id(self):
+        clock = FakeClock(initial_time=10.0)
+        diagnostics = RecordingOverlayDiagnostics()
+        overlay_sink = RecordingOverlaySink()
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            overlay_sink=overlay_sink,
+            overlay_diagnostics=diagnostics,
+            clock=clock,
+            low_latency_mode=True,
+        )
+        source_utterance_id = uuid4()
+        merge_id = uuid4()
+        buffer = _MergeBuffer(
+            merge_id=merge_id,
+            parts=["hello live"],
+            utterance_ids=[source_utterance_id],
+            spec_text="hello live",
+            spec_translation=Translation(utterance_id=merge_id, text="translated live"),
+        )
+
+        await hub._sync_overlay_active_self(buffer, created_at=clock.now())
+
+        active_self_emit = next(
+            event
+            for event in diagnostics.hub_events
+            if event["event"] == "overlay_emit" and event["event_kind"] == "active_self"
+        )
+        assert active_self_emit["utterance_id"] == str(merge_id)
+        assert active_self_emit["secondary_len"] == len("translated live")
+
+    @pytest.mark.asyncio
+    async def test_sync_overlay_active_self_dedupes_only_within_same_logical_turn(self):
+        clock = FakeClock(initial_time=10.0)
+        overlay_sink = RecordingOverlaySink()
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            overlay_sink=overlay_sink,
+            clock=clock,
+            low_latency_mode=True,
+        )
+        first_buffer = _MergeBuffer(
+            merge_id=uuid4(),
+            parts=["same preview"],
+            utterance_ids=[uuid4()],
+        )
+        second_buffer = _MergeBuffer(
+            merge_id=uuid4(),
+            parts=["same preview"],
+            utterance_ids=[uuid4()],
+        )
+
+        await hub._sync_overlay_active_self(first_buffer, created_at=clock.now())
+        await hub._sync_overlay_active_self(second_buffer, created_at=clock.now())
+
+        active_events = [
+            event for event in overlay_sink.events if event.type == "self_active_update"
+        ]
+        assert [event.utterance_id for event in active_events] == [
+            first_buffer.merge_id,
+            second_buffer.merge_id,
+        ]
+        assert [event.occupant_key for event in active_events] == [
+            f"self:{first_buffer.merge_id}",
+            f"self:{second_buffer.merge_id}",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_commit_merge_blanking_active_self_records_overlay_emit_with_merge_id(self):
+        clock = FakeClock(initial_time=10.0)
+        diagnostics = RecordingOverlayDiagnostics()
+        overlay_sink = RecordingOverlaySink()
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(response_text="nuevo", delay_s=0.0),
+            osc=FakeOscQueue(),
+            overlay_sink=overlay_sink,
+            overlay_diagnostics=diagnostics,
+            clock=clock,
+            low_latency_mode=True,
+        )
+        source_utterance_id = uuid4()
+        merge_id = uuid4()
+        buffer = _MergeBuffer(
+            merge_id=merge_id,
+            parts=["hello live"],
+            utterance_ids=[source_utterance_id],
+            start_time=clock.now(),
+            last_end_time=clock.now(),
+            spec_text="hello live",
+            spec_translation=Translation(utterance_id=merge_id, text="translated live"),
+        )
+        hub._merge_buffer = buffer
+        hub._utterance_start_times[source_utterance_id] = clock.now()
+
+        await hub._sync_overlay_active_self(buffer, created_at=clock.now())
+        buffer.spec_text = "goodbye live"
+        await hub._commit_merge(buffer, reason="spec_done")
+
+        active_self_emits = [
+            event
+            for event in diagnostics.hub_events
+            if event["event"] == "overlay_emit" and event["event_kind"] == "active_self"
+        ]
+
+        assert [event["utterance_id"] for event in active_self_emits] == [
+            str(merge_id),
+            str(merge_id),
+        ]
+        assert [event["secondary_len"] for event in active_self_emits] == [
+            len("translated live"),
+            0,
+        ]
 
     @pytest.mark.asyncio
     async def test_commit_merge_reuses_spec_translation_for_soft_boundary_difference(self):
