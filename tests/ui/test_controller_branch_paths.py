@@ -1295,6 +1295,37 @@ async def test_set_peer_translation_enabled_routes_through_controller_runtime_ru
 
 
 @pytest.mark.asyncio
+async def test_set_peer_translation_enabled_surfaces_local_notice_for_peer_local_qwen_when_runtime_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=dash,
+            refresh_overlay_peer_contract=lambda: None,
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+    controller._local_stt_install_state = controller_module.LocalSTTInstallState(status="missing")
+
+    async def fake_begin_overlay_start(self: GuiController) -> None:
+        self.overlay_state = "starting"
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_begin_overlay_start", fake_begin_overlay_start)
+    monkeypatch.setattr(
+        GuiController, "_refresh_overlay_runtime_dependencies", lambda self: asyncio.sleep(0)
+    )
+
+    await controller.set_peer_translation_enabled(True)
+
+    assert controller.settings.ui.peer_translation_enabled is True
+    assert dash.local_stt_notice_status == "missing"
+
+
+@pytest.mark.asyncio
 async def test_rebuild_pipeline_closes_previous_peer_runtime_before_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1549,6 +1580,141 @@ async def test_refresh_peer_stt_runtime_does_not_warm_peer_runtime() -> None:
     assert len(controller._peer_runtime.policy_calls) == 1
     assert controller._peer_runtime.policy_calls[0]["desired_active"] is True
     assert controller._peer_runtime.warmup_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_until_local_runtime_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+    controller.overlay_state = "connected"
+    controller._overlay_bridge = object()
+    controller._peer_runtime = DummyPeerRuntime()
+    controller._local_stt_install_state = controller_module.LocalSTTInstallState(status="missing")
+
+    download_requests: list[str] = []
+
+    monkeypatch.setattr(
+        GuiController,
+        "_start_local_stt_download",
+        lambda self, *, origin: download_requests.append(origin) or True,
+    )
+
+    await controller._refresh_peer_stt_runtime()
+
+    assert len(controller._peer_runtime.policy_calls) == 1
+    assert controller._peer_runtime.policy_calls[0]["desired_active"] is False
+    assert download_requests == ["manual"]
+    assert dash.local_stt_notice_status == "missing"
+    assert dash.stt_enabled is None
+    assert dash.stt_needs_key is None
+
+
+@pytest.mark.asyncio
+async def test_peer_local_qwen_download_completion_resumes_peer_runtime_after_refresh_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+    controller.overlay_state = "connected"
+    controller._overlay_bridge = object()
+    controller._peer_runtime = DummyPeerRuntime()
+    controller._local_stt_install_state = controller_module.LocalSTTInstallState(status="missing")
+
+    download_requests: list[str] = []
+
+    monkeypatch.setattr(
+        GuiController,
+        "_start_local_stt_download",
+        lambda self, *, origin: download_requests.append(origin) or True,
+    )
+
+    await controller._refresh_peer_stt_runtime()
+
+    async def fake_install(*, locale: str, on_status, cancel_event) -> object:
+        _ = (locale, on_status, cancel_event)
+        return object()
+
+    class SuccessfulPeerSession:
+        async def close(self) -> None:
+            return None
+
+    class SuccessfulPeerBackend:
+        async def open_session(self):
+            return SuccessfulPeerSession()
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        controller_module,
+        "create_peer_stt_backend",
+        lambda *_a, **_k: SuccessfulPeerBackend(),
+    )
+
+    await controller._run_local_stt_download(origin="manual")
+
+    assert download_requests == ["manual"]
+    assert [call["desired_active"] for call in controller._peer_runtime.policy_calls] == [
+        False,
+        True,
+    ]
+    assert dash.local_stt_notice_status is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_when_probe_load_fails_despite_ready_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+    controller.overlay_state = "connected"
+    controller._overlay_bridge = object()
+    controller._peer_runtime = DummyPeerRuntime()
+    controller._local_stt_install_state = controller_module.LocalSTTInstallState(status="ready")
+
+    download_requests: list[str] = []
+
+    class FailingPeerBackend:
+        async def open_session(self):
+            raise controller_module.LocalQwenSherpaLoadError("bootstrap failed")
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        controller_module,
+        "create_peer_stt_backend",
+        lambda *_a, **_k: FailingPeerBackend(),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_start_local_stt_download",
+        lambda self, *, origin: download_requests.append(origin) or True,
+    )
+
+    await controller._refresh_peer_stt_runtime()
+
+    assert len(controller._peer_runtime.policy_calls) == 1
+    assert controller._peer_runtime.policy_calls[0]["desired_active"] is False
+    assert download_requests == ["manual"]
+    assert dash.local_stt_notice_status == "invalid"
 
 
 @pytest.mark.asyncio

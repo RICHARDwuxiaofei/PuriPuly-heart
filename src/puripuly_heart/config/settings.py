@@ -714,10 +714,7 @@ def _parse_stt_provider(value: str) -> STTProviderName:
 
 
 def _parse_peer_stt_provider(value: str) -> STTProviderName:
-    provider = _parse_stt_provider(value)
-    if provider == STTProviderName.LOCAL_QWEN:
-        return STTProviderName.DEEPGRAM
-    return provider
+    return _parse_stt_provider(value)
 
 
 def _parse_llm_provider(value: object) -> LLMProviderName:
