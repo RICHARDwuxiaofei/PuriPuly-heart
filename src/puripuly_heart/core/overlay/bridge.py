@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -229,8 +230,18 @@ class OverlayBridge:
 
         message = json.dumps(payload)
         revision: int | None = None
+        block_update_ids: list[str] = []
         if payload.get("type") == "snapshot":
             revision = payload.get("payload", {}).get("revision")  # type: ignore[assignment]
+            block_update_ids = self._snapshot_block_update_ids(payload)
+        start_time = time.perf_counter()
+        self._log_broadcast_marker(
+            stage="start",
+            payload_type=str(payload.get("type")),
+            revision=revision,
+            block_update_ids=block_update_ids,
+            authenticated_connections=len(self._authenticated_connections),
+        )
         stale_connections: list[ServerConnection] = []
         for connection in tuple(self._authenticated_connections):
             try:
@@ -255,6 +266,66 @@ class OverlayBridge:
 
         for connection in stale_connections:
             self._authenticated_connections.discard(connection)
+
+        self._log_broadcast_marker(
+            stage="finish",
+            payload_type=str(payload.get("type")),
+            revision=revision,
+            block_update_ids=block_update_ids,
+            authenticated_connections=len(self._authenticated_connections),
+            stale_connections=len(stale_connections),
+            elapsed_ms=max(0, int((time.perf_counter() - start_time) * 1000)),
+        )
+
+    def _snapshot_block_update_ids(self, payload: dict[str, Any]) -> list[str]:
+        snapshot_payload = payload.get("payload")
+        if not isinstance(snapshot_payload, dict):
+            return []
+        raw_blocks = snapshot_payload.get("blocks")
+        if not isinstance(raw_blocks, list):
+            return []
+        update_ids: list[str] = []
+        for block in raw_blocks:
+            if not isinstance(block, dict):
+                continue
+            update_id = block.get("update_id")
+            if isinstance(update_id, str) and update_id:
+                update_ids.append(update_id)
+        return update_ids
+
+    def _should_log_detailed_broadcast(self, payload_type: str) -> bool:
+        return (
+            payload_type == "snapshot"
+            and normalize_overlay_logging_mode(self.runtime_logging_mode or "basic") == "detailed"
+        )
+
+    def _log_broadcast_marker(
+        self,
+        *,
+        stage: str,
+        payload_type: str,
+        revision: int | None,
+        block_update_ids: list[str],
+        authenticated_connections: int,
+        stale_connections: int | None = None,
+        elapsed_ms: int | None = None,
+    ) -> None:
+        if not self._should_log_detailed_broadcast(payload_type):
+            return
+        parts = [
+            "[OverlayBridge][Broadcast]",
+            f"stage={stage}",
+            f"overlay_instance_id={self.overlay_instance_id}",
+            f"type={payload_type}",
+            f"revision={revision}",
+            f"authenticated_connections={authenticated_connections}",
+            f"block_update_ids={block_update_ids}",
+        ]
+        if stale_connections is not None:
+            parts.append(f"stale_connections={stale_connections}")
+        if elapsed_ms is not None:
+            parts.append(f"elapsed_ms={elapsed_ms}")
+        logger.info(" ".join(parts))
 
     def _connection_id(self, connection: ServerConnection) -> str:
         return f"conn-{id(connection):x}"

@@ -112,6 +112,7 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
             self.on_toggle_peer_translation = None
             self.on_language_change = None
             self.overlay_peer_contract = None
+            self.runtime_log_detailed = None
 
         def set_overlay_peer_contract(self, contract) -> None:
             self.overlay_peer_contract = contract
@@ -195,6 +196,88 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert app.view_settings.runtime_log_detailed == app.controller.log_detailed
     assert app.view_logs.on_mode_change == app._on_runtime_logging_mode_change
     assert app.view_logs.runtime_logging_mode == "detailed"
+
+
+def test_translator_app_wires_runtime_log_detailed_into_dashboard_visual_commit_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyController:
+        def __init__(self, page, app, config_path):
+            self.page = page
+            self.app = app
+            self.config_path = config_path
+            self.settings = None
+            self.runtime_logging_mode = "basic"
+
+        def set_runtime_logging_mode(self, mode: str) -> None:
+            self.runtime_logging_mode = mode
+
+        def log_basic(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+            _ = (message, level)
+
+        def log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> bool:
+            _ = (message, level)
+            return True
+
+    class DummyDashboardView(ft.Container):
+        def __init__(self) -> None:
+            super().__init__()
+            self.on_send_message = None
+            self.on_toggle_translation = None
+            self.on_toggle_stt = None
+            self.on_toggle_overlay = None
+            self.on_toggle_peer_translation = None
+            self.on_language_change = None
+            self.runtime_log_detailed = None
+
+        def apply_locale(self) -> None:
+            return None
+
+    class DummySettingsView(ft.Container):
+        def __init__(self) -> None:
+            super().__init__()
+            self.on_settings_changed = None
+            self.on_prompt_apply_settings = None
+            self.on_providers_changed = None
+            self.on_verify_api_key = None
+            self.on_secret_cleared = None
+            self.show_snackbar = None
+
+        def set_overlay_runtime_state(self, *_args, **_kwargs) -> None:
+            return None
+
+        def apply_locale(self) -> None:
+            return None
+
+    class DummyLogsView(ft.Container):
+        def __init__(self) -> None:
+            super().__init__()
+            self.on_mode_change = None
+
+        def set_runtime_logging_mode(self, mode: str) -> None:
+            _ = mode
+
+        def apply_locale(self) -> None:
+            return None
+
+        async def scroll_to_bottom(self) -> None:
+            return None
+
+    monkeypatch.setattr(app_module, "GuiController", DummyController)
+    monkeypatch.setattr(app_module, "DashboardView", DummyDashboardView)
+    monkeypatch.setattr(app_module, "SettingsView", DummySettingsView)
+    monkeypatch.setattr(app_module, "LogsView", DummyLogsView)
+    monkeypatch.setattr(app_module, "AboutView", lambda: ft.Container())
+    monkeypatch.setattr(app_module, "TitleBar", lambda _page: ft.Container())
+    monkeypatch.setattr(app_module, "BottomNavBar", lambda on_change: ft.Container(data=on_change))
+    monkeypatch.setattr(app_module, "register_fonts", lambda _page: None)
+    monkeypatch.setattr(app_module, "get_app_theme", lambda **_kwargs: "theme")
+    monkeypatch.setattr(app_module, "font_for_language", lambda _code: "font")
+    monkeypatch.setattr(app_module, "get_locale", lambda: "en")
+
+    app = TranslatorApp(DummyPage(), config_path=Path("settings.json"))
+
+    assert app.view_dashboard.runtime_log_detailed == app._log_detailed
 
 
 def test_on_runtime_logging_mode_change_updates_controller_and_logs_view() -> None:

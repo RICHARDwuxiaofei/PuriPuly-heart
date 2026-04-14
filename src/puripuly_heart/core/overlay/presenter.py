@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -54,8 +55,23 @@ class _LogicalTurnEntry:
     first_input_seq: int | None = None
     live_text: str = ""
     live_secondary_text: str = ""
+    live_update_id: str | None = None
+    live_origin_wall_clock_ms: int | None = None
+    live_session_scope: str | None = None
+    live_source_text_hash: str | None = None
+    live_source_text_len: int | None = None
+    live_logical_turn_key: str | None = None
+    live_seq: int | None = None
     original_text: str = ""
+    original_seq: int | None = None
     translation_text: str = ""
+    translation_update_id: str | None = None
+    translation_origin_wall_clock_ms: int | None = None
+    translation_session_scope: str | None = None
+    translation_source_text_hash: str | None = None
+    translation_source_text_len: int | None = None
+    translation_logical_turn_key: str | None = None
+    translation_seq: int | None = None
     occupant_key: str = ""
     appearance_seq: int | None = None
     publishable_seq: int | None = None
@@ -64,6 +80,7 @@ class _LogicalTurnEntry:
     visible_since: float | None = None
     last_meaningful_visible_at: float | None = None
     translation_visible_since: float | None = None
+    translation_observed_visible_since: float | None = None
     last_updated_seq: int = 0
     closed_seq: int | None = None
     closed_at: float | None = None
@@ -133,42 +150,195 @@ class OverlayPresenter(OverlaySink):
         except Exception:
             return False
 
+    def _emit_detailed_lazy(
+        self,
+        build_message: Callable[[], str],
+        *,
+        level: int = logging.INFO,
+    ) -> bool:
+        runtime_log_detailed = self.runtime_log_detailed
+        if runtime_log_detailed is None:
+            return False
+
+        owner = getattr(runtime_log_detailed, "__self__", None)
+        try:
+            if owner is not None:
+                emit_detailed_lazy = getattr(owner, "emit_detailed_lazy", None)
+                if callable(emit_detailed_lazy):
+                    return emit_detailed_lazy(build_message, level=level)
+                log_detailed_lazy = getattr(owner, "log_detailed_lazy", None)
+                if callable(log_detailed_lazy):
+                    return log_detailed_lazy(build_message, level=level)
+            return runtime_log_detailed(build_message(), level=level)
+        except Exception:
+            return False
+
     def _emit_turn_decision(
         self,
         decision: str,
         *,
+        disposition: str | None = None,
         key: tuple[str, UUID] | None = None,
         entry: _LogicalTurnEntry | None = None,
         block: OverlayPresentationBlock | None = None,
         extras: dict[str, object] | None = None,
     ) -> bool:
-        resolved_key = key
-        if resolved_key is None and entry is not None:
-            resolved_key = (entry.channel, entry.utterance_id)
-        parts = [f"decision={decision}"]
-        if resolved_key is not None:
-            parts.append(f"entry={self._format_entry_key(resolved_key)}")
-        if entry is not None:
-            parts.extend(
-                [
-                    f"channel={entry.channel}",
-                    f"publishable={self._entry_is_publishable(entry)}",
-                    f"ever_visible={entry.ever_visible}",
-                    f"retained_hidden={entry.retained_hidden}",
-                ]
+        def build_message() -> str:
+            resolved_key = key
+            if resolved_key is None and entry is not None:
+                resolved_key = (entry.channel, entry.utterance_id)
+            parts = [f"decision={decision}"]
+            if disposition is not None:
+                parts.append(f"disposition={disposition}")
+            if resolved_key is not None:
+                parts.append(f"entry={self._format_entry_key(resolved_key)}")
+            if entry is not None:
+                parts.extend(
+                    [
+                        f"channel={entry.channel}",
+                        f"publishable={self._entry_is_publishable(entry)}",
+                        f"ever_visible={entry.ever_visible}",
+                        "ever_visible_with_translation="
+                        f"{entry.translation_observed_visible_since is not None}",
+                        f"retained_hidden={entry.retained_hidden}",
+                    ]
+                )
+            if block is not None:
+                parts.extend(
+                    [
+                        f"block_variant={block.block_variant}",
+                        f"primary_len={len(block.primary_text)}",
+                        f"secondary_len={len(block.secondary_text)}",
+                    ]
+                )
+            if extras is not None:
+                for field_name, value in extras.items():
+                    parts.append(f"{field_name}={value}")
+            return f"[OverlayPresenter][Decision] {' '.join(parts)}"
+
+        return self._emit_detailed_lazy(build_message)
+
+    def _emit_pair_state(
+        self,
+        key: tuple[str, UUID],
+        entry: _LogicalTurnEntry,
+        block: OverlayPresentationBlock,
+        *,
+        publish_kind: str,
+    ) -> bool:
+        def build_message() -> str:
+            rendered_primary_source, rendered_secondary_source = self._rendered_text_sources(
+                entry,
+                block,
             )
-        if block is not None:
-            parts.extend(
-                [
-                    f"block_variant={block.block_variant}",
-                    f"primary_len={len(block.primary_text)}",
-                    f"secondary_len={len(block.secondary_text)}",
-                ]
-            )
-        if extras is not None:
-            for field_name, value in extras.items():
-                parts.append(f"{field_name}={value}")
-        return self._emit_detailed(f"[OverlayPresenter][Decision] {' '.join(parts)}")
+            parts = [
+                "[OverlayPresenter][PairState]",
+                f"entry={self._format_entry_key(key)}",
+                f"channel={entry.channel}",
+                f"block_variant={block.block_variant}",
+                f"publish_kind={publish_kind}",
+                f"update_id={block.update_id}",
+                f"origin_wall_clock_ms={block.origin_wall_clock_ms}",
+                f"source_text_hash={block.source_text_hash}",
+                f"source_text_len={block.source_text_len}",
+                f"original_seq={entry.original_seq}",
+                f"translation_seq={entry.translation_seq}",
+                "rendered_pair_state="
+                f"{self._rendered_pair_state(rendered_primary_source, rendered_secondary_source)}",
+                f"rendered_primary_source={rendered_primary_source}",
+                f"rendered_secondary_source={rendered_secondary_source}",
+                f"appearance_seq={block.appearance_seq}",
+                f"primary_len={len(block.primary_text)}",
+                f"secondary_len={len(block.secondary_text) if block.secondary_enabled else 0}",
+            ]
+            elapsed_ms = self._elapsed_from_origin_wall_clock_ms(block.origin_wall_clock_ms)
+            if elapsed_ms is not None:
+                parts.append(f"elapsed_ms={elapsed_ms}")
+            return " ".join(parts)
+
+        return self._emit_detailed_lazy(build_message)
+
+    def _emit_skip_disposition(
+        self,
+        *,
+        decision: str,
+        disposition: str,
+        key: tuple[str, UUID] | None = None,
+        entry: _LogicalTurnEntry | None = None,
+        extras: dict[str, object] | None = None,
+    ) -> bool:
+        return self._emit_turn_decision(
+            decision,
+            disposition=disposition,
+            key=key,
+            entry=entry,
+            extras=extras,
+        )
+
+    def _elapsed_from_origin_wall_clock_ms(self, origin_wall_clock_ms: int | None) -> int | None:
+        if origin_wall_clock_ms is None:
+            return None
+        return max(0, int(time.time() * 1000) - origin_wall_clock_ms)
+
+    def _rendered_text_sources(
+        self,
+        entry: _LogicalTurnEntry,
+        block: OverlayPresentationBlock,
+    ) -> tuple[str, str]:
+        secondary_source = "none"
+        if block.secondary_enabled and block.secondary_text:
+            if entry.channel == "peer":
+                secondary_source = "original_text"
+            elif block.block_variant == "active_self" and entry.live_secondary_text.strip():
+                secondary_source = "live_secondary_text"
+            else:
+                secondary_source = "translation_text"
+
+        if block.block_variant == "active_self":
+            return "live_text", secondary_source
+        if entry.channel == "peer":
+            return "translation_text", secondary_source
+        return "original_text", secondary_source
+
+    def _rendered_pair_state(self, primary_source: str, secondary_source: str) -> str:
+        if primary_source == "live_text":
+            if secondary_source == "live_secondary_text":
+                return "live_with_preview_translation"
+            if secondary_source == "translation_text":
+                return "live_with_translation"
+            return "live_only"
+        if primary_source == "translation_text":
+            if secondary_source == "original_text":
+                return "translation_with_original"
+            return "translation_only"
+        if secondary_source in {"translation_text", "live_secondary_text"}:
+            return "original_with_translation"
+        return "original_only"
+
+    def _rendered_self_translation_text(self, entry: _LogicalTurnEntry) -> str:
+        live_secondary_text = entry.live_secondary_text.strip()
+        if live_secondary_text:
+            return live_secondary_text
+        return entry.translation_text.strip()
+
+    def _update_self_translation_visibility(
+        self,
+        entry: _LogicalTurnEntry,
+        *,
+        previous_rendered_text: str,
+        next_rendered_text: str,
+        now: float,
+    ) -> None:
+        if not self.show_translation:
+            return
+        entry.translation_visible_since = self._next_translation_visible_since(
+            previous_text=previous_rendered_text,
+            next_text=next_rendered_text,
+            previous_visible_since=entry.translation_visible_since,
+            now=now,
+        )
+        if next_rendered_text and entry.translation_observed_visible_since is None:
+            entry.translation_observed_visible_since = now
 
     def _should_ignore_terminal_update(
         self, channel: str | None, utterance_id: UUID | None
@@ -180,12 +350,14 @@ class OverlayPresenter(OverlaySink):
         if terminal_reason == "evicted_by_newer_turn":
             self._emit_turn_decision(
                 "overlay_turn_late_update_ignored_after_eviction",
+                disposition="evicted",
                 key=key,
                 extras={"terminal_reason": terminal_reason},
             )
         elif terminal_reason == "expired":
             self._emit_turn_decision(
                 "overlay_turn_late_update_ignored_after_idle_hide",
+                disposition="hidden_idle_ttl",
                 key=key,
                 extras={"terminal_reason": terminal_reason},
             )
@@ -312,26 +484,65 @@ class OverlayPresenter(OverlaySink):
         key = self._entry_key(event.channel, event.utterance_id)
         retired_preview_seq = self._retired_preview_self_seqs.get(key)
         if retired_preview_seq is not None and event.seq <= retired_preview_seq:
+            self._emit_skip_disposition(
+                decision="overlay_turn_superseded",
+                disposition="superseded",
+                key=key,
+                extras={"event_seq": event.seq, "retired_preview_seq": retired_preview_seq},
+            )
             return False
         live_self = self._live_self_entry()
         if live_self is not None:
             live_key, live_entry = live_self
             if live_key != key and event.seq < live_entry.last_updated_seq:
+                self._emit_skip_disposition(
+                    decision="overlay_turn_superseded",
+                    disposition="superseded",
+                    key=key,
+                    entry=live_entry,
+                    extras={
+                        "event_seq": event.seq,
+                        "superseded_by_entry": self._format_entry_key(live_key),
+                        "superseded_by_seq": live_entry.last_updated_seq,
+                    },
+                )
                 return False
 
         entry = self._entry_for(event.channel, event.utterance_id)
         if event.seq < entry.last_updated_seq:
+            self._emit_skip_disposition(
+                decision="overlay_turn_superseded",
+                disposition="superseded",
+                key=key,
+                entry=entry,
+                extras={"event_seq": event.seq, "last_updated_seq": entry.last_updated_seq},
+            )
             return False
 
         if live_self is not None and live_self[0] != key:
             self._clear_live_self_pointer(reason="live_self_replaced")
+
+        previous_rendered_translation_text = self._rendered_self_translation_text(entry)
 
         if (
             self._live_self_turn_key == key
             and entry.live_text == event.text
             and entry.live_secondary_text == event.secondary_text
             and entry.occupant_key == event.occupant_key
+            and entry.live_update_id == event.update_id
+            and entry.live_origin_wall_clock_ms == event.origin_wall_clock_ms
+            and entry.live_session_scope == event.session_scope
+            and entry.live_source_text_hash == event.source_text_hash
+            and entry.live_source_text_len == event.source_text_len
+            and entry.live_logical_turn_key == event.logical_turn_key
         ):
+            self._emit_skip_disposition(
+                decision="overlay_turn_coalesced",
+                disposition="coalesced",
+                key=key,
+                entry=entry,
+                extras={"event_seq": event.seq},
+            )
             entry.last_updated_seq = event.seq
             return False
 
@@ -344,7 +555,32 @@ class OverlayPresenter(OverlaySink):
         if retired_preview_seq is not None and event.seq > retired_preview_seq:
             self._retired_preview_self_seqs.pop(key, None)
         entry.live_text = event.text
+        entry.live_seq = event.seq
+        entry.original_seq = event.seq
         entry.live_secondary_text = event.secondary_text
+        if event.secondary_text.strip():
+            entry.live_update_id = event.update_id
+            entry.live_origin_wall_clock_ms = event.origin_wall_clock_ms
+            entry.live_session_scope = event.session_scope
+            entry.live_source_text_hash = event.source_text_hash
+            entry.live_source_text_len = event.source_text_len
+            entry.live_logical_turn_key = event.logical_turn_key
+            entry.translation_seq = event.seq
+        else:
+            entry.live_update_id = None
+            entry.live_origin_wall_clock_ms = None
+            entry.live_session_scope = None
+            entry.live_source_text_hash = None
+            entry.live_source_text_len = None
+            entry.live_logical_turn_key = None
+            if not entry.translation_text.strip():
+                entry.translation_seq = None
+        self._update_self_translation_visibility(
+            entry,
+            previous_rendered_text=previous_rendered_translation_text,
+            next_rendered_text=self._rendered_self_translation_text(entry),
+            now=now,
+        )
         entry.last_updated_seq = event.seq
         self._live_self_turn_key = key
         return True
@@ -355,14 +591,42 @@ class OverlayPresenter(OverlaySink):
             return False
         key, entry = live_self
         if event.seq < entry.last_updated_seq:
+            self._emit_skip_disposition(
+                decision="overlay_turn_superseded",
+                disposition="superseded",
+                key=key,
+                entry=entry,
+                extras={"event_seq": event.seq, "last_updated_seq": entry.last_updated_seq},
+            )
             return False
         if not entry.live_text:
             self._live_self_turn_key = None
             entry.last_updated_seq = event.seq
+            self._emit_skip_disposition(
+                decision="overlay_turn_coalesced",
+                disposition="coalesced",
+                key=key,
+                entry=entry,
+                extras={"event_seq": event.seq},
+            )
             return False
 
+        previous_rendered_translation_text = self._rendered_self_translation_text(entry)
         entry.live_text = ""
         entry.live_secondary_text = ""
+        entry.live_update_id = None
+        entry.live_origin_wall_clock_ms = None
+        entry.live_session_scope = None
+        entry.live_source_text_hash = None
+        entry.live_source_text_len = None
+        entry.live_logical_turn_key = None
+        entry.live_seq = None
+        self._update_self_translation_visibility(
+            entry,
+            previous_rendered_text=previous_rendered_translation_text,
+            next_rendered_text=self._rendered_self_translation_text(entry),
+            now=self.clock.now(),
+        )
         entry.last_updated_seq = event.seq
         if self._live_self_turn_key == key:
             self._live_self_turn_key = None
@@ -388,22 +652,65 @@ class OverlayPresenter(OverlaySink):
         if entry.retained_hidden:
             return False
         if event.seq < entry.last_updated_seq:
+            self._emit_skip_disposition(
+                decision="overlay_turn_superseded",
+                disposition="superseded",
+                key=key,
+                entry=entry,
+                extras={"event_seq": event.seq, "last_updated_seq": entry.last_updated_seq},
+            )
             return False
         if entry.original_text == event.text and entry.last_updated_seq == event.seq:
+            self._emit_skip_disposition(
+                decision="overlay_turn_coalesced",
+                disposition="coalesced",
+                key=key,
+                entry=entry,
+                extras={"event_seq": event.seq},
+            )
             return False
 
+        previous_rendered_translation_text = (
+            self._rendered_self_translation_text(entry) if event.channel == "self" else ""
+        )
         self._remember_entry_input_seq(entry, event_seq=event.seq)
         entry.original_text = event.text
+        entry.original_seq = event.seq
         entry.last_updated_seq = event.seq
         if isinstance(event, SelfTranscriptFinal) and self._live_self_turn_key == key:
             promoted_secondary_text = entry.live_secondary_text.strip()
             if promoted_secondary_text:
                 entry.translation_text = promoted_secondary_text
-                if entry.translation_visible_since is None:
-                    entry.translation_visible_since = now
+                entry.translation_update_id = entry.live_update_id
+                entry.translation_origin_wall_clock_ms = entry.live_origin_wall_clock_ms
+                entry.translation_session_scope = entry.live_session_scope
+                entry.translation_source_text_hash = entry.live_source_text_hash
+                entry.translation_source_text_len = entry.live_source_text_len
+                entry.translation_logical_turn_key = entry.live_logical_turn_key
+                if entry.live_seq is not None:
+                    entry.translation_seq = entry.live_seq
+                if self.show_translation:
+                    if entry.translation_visible_since is None:
+                        entry.translation_visible_since = now
+                    if entry.translation_observed_visible_since is None:
+                        entry.translation_observed_visible_since = now
             entry.live_text = ""
             entry.live_secondary_text = ""
+            entry.live_update_id = None
+            entry.live_origin_wall_clock_ms = None
+            entry.live_session_scope = None
+            entry.live_source_text_hash = None
+            entry.live_source_text_len = None
+            entry.live_logical_turn_key = None
+            entry.live_seq = None
             self._live_self_turn_key = None
+        if event.channel == "self":
+            self._update_self_translation_visibility(
+                entry,
+                previous_rendered_text=previous_rendered_translation_text,
+                next_rendered_text=self._rendered_self_translation_text(entry),
+                now=now,
+            )
         if event.channel == "self":
             self._retired_preview_self_seqs.pop(key, None)
         self._refresh_entry_visibility_and_expiration(
@@ -425,14 +732,31 @@ class OverlayPresenter(OverlaySink):
         key = self._entry_key(event.channel, event.utterance_id)
         entry = self._entry_for(event.channel, event.utterance_id)
         if event.seq < entry.last_updated_seq:
+            self._emit_skip_disposition(
+                decision="overlay_turn_superseded",
+                disposition="superseded",
+                key=key,
+                entry=entry,
+                extras={"event_seq": event.seq, "last_updated_seq": entry.last_updated_seq},
+            )
             return False
         if entry.translation_text == event.text and entry.last_updated_seq == event.seq:
+            self._emit_skip_disposition(
+                decision="overlay_turn_coalesced",
+                disposition="coalesced",
+                key=key,
+                entry=entry,
+                extras={"event_seq": event.seq},
+            )
             return False
+        previous_rendered_translation_text = (
+            self._rendered_self_translation_text(entry) if event.channel == "self" else ""
+        )
         self._remember_entry_input_seq(entry, event_seq=event.seq)
         if entry.retained_hidden and event.channel == "self" and event.text.strip():
             entry.retained_hidden = False
             entry.window_evicted_at = None
-        if not entry.retained_hidden:
+        if not entry.retained_hidden and event.channel != "self":
             entry.translation_visible_since = self._next_translation_visible_since(
                 previous_text=entry.translation_text,
                 next_text=event.text,
@@ -440,6 +764,32 @@ class OverlayPresenter(OverlaySink):
                 now=now,
             )
         entry.translation_text = event.text
+        if event.text.strip():
+            entry.translation_update_id = event.update_id
+            entry.translation_origin_wall_clock_ms = event.origin_wall_clock_ms
+            entry.translation_session_scope = event.session_scope
+            entry.translation_source_text_hash = event.source_text_hash
+            entry.translation_source_text_len = event.source_text_len
+            entry.translation_logical_turn_key = event.logical_turn_key
+            entry.translation_seq = event.seq
+        else:
+            entry.translation_update_id = None
+            entry.translation_origin_wall_clock_ms = None
+            entry.translation_session_scope = None
+            entry.translation_source_text_hash = None
+            entry.translation_source_text_len = None
+            entry.translation_logical_turn_key = None
+            if not entry.live_secondary_text.strip():
+                entry.translation_seq = None
+        if not entry.retained_hidden and event.channel == "self":
+            self._update_self_translation_visibility(
+                entry,
+                previous_rendered_text=previous_rendered_translation_text,
+                next_rendered_text=self._rendered_self_translation_text(entry),
+                now=now,
+            )
+        elif event.text.strip() and entry.translation_observed_visible_since is None:
+            entry.translation_observed_visible_since = now
         entry.last_updated_seq = event.seq
         if event.channel == "self":
             self._retired_preview_self_seqs.pop(key, None)
@@ -459,8 +809,22 @@ class OverlayPresenter(OverlaySink):
         if entry is None:
             return False
         if event.seq < entry.last_updated_seq:
+            self._emit_skip_disposition(
+                decision="overlay_turn_superseded",
+                disposition="superseded",
+                key=key,
+                entry=entry,
+                extras={"event_seq": event.seq, "last_updated_seq": entry.last_updated_seq},
+            )
             return False
         if entry.closed_seq == event.seq:
+            self._emit_skip_disposition(
+                decision="overlay_turn_coalesced",
+                disposition="coalesced",
+                key=key,
+                entry=entry,
+                extras={"event_seq": event.seq},
+            )
             return False
         entry.closed_seq = event.seq
         entry.closed_at = now
@@ -501,9 +865,23 @@ class OverlayPresenter(OverlaySink):
         if live_self is None:
             return
         key, entry = live_self
+        previous_rendered_translation_text = self._rendered_self_translation_text(entry)
         entry.live_text = ""
         entry.live_secondary_text = ""
+        entry.live_update_id = None
+        entry.live_origin_wall_clock_ms = None
+        entry.live_session_scope = None
+        entry.live_source_text_hash = None
+        entry.live_source_text_len = None
+        entry.live_logical_turn_key = None
+        entry.live_seq = None
         self._live_self_turn_key = None
+        self._update_self_translation_visibility(
+            entry,
+            previous_rendered_text=previous_rendered_translation_text,
+            next_rendered_text=self._rendered_self_translation_text(entry),
+            now=self.clock.now(),
+        )
         if self._should_retire_preview_only_self_entry(entry):
             self._retire_preview_only_self_entry(key, entry, reason=reason, now=self.clock.now())
 
@@ -531,6 +909,8 @@ class OverlayPresenter(OverlaySink):
         rendered_entries = self._visible_block_entries(now=now)
         next_blocks = [block for _, block in rendered_entries]
         next_calibration = _calibration_from_overlay(self.calibration)
+        previous_rendered_signature = self._rendered_blocks_signature(self._snapshot.blocks)
+        next_rendered_signature = self._rendered_blocks_signature(next_blocks)
         previous_signatures = {
             block.id: self._rendered_block_signature(block) for block in self._snapshot.blocks
         }
@@ -539,15 +919,21 @@ class OverlayPresenter(OverlaySink):
             previous_blocks=self._snapshot.blocks,
             now=now,
         )
-        if next_blocks == self._snapshot.blocks and next_calibration == self._snapshot.calibration:
+        if (
+            next_rendered_signature == previous_rendered_signature
+            and next_calibration == self._snapshot.calibration
+        ):
             self._emit_turn_decision(
                 "overlay_turn_no_visible_change",
+                disposition="rendered_signature_unchanged",
                 extras={"block_count": len(next_blocks)},
             )
             return
 
         for key, block in rendered_entries:
             entry = self._entries.get(key)
+            if entry is None:
+                continue
             previous_signature = previous_signatures.get(block.id)
             if previous_signature is None:
                 self._emit_turn_decision(
@@ -556,6 +942,7 @@ class OverlayPresenter(OverlaySink):
                     entry=entry,
                     block=block,
                 )
+                self._emit_pair_state(key, entry, block, publish_kind="first_visible")
                 continue
             if previous_signature != self._rendered_block_signature(block):
                 self._emit_turn_decision(
@@ -564,6 +951,7 @@ class OverlayPresenter(OverlaySink):
                     entry=entry,
                     block=block,
                 )
+                self._emit_pair_state(key, entry, block, publish_kind="visible_update")
 
         self._revision += 1
         self._snapshot = OverlayPresentationSnapshot(
@@ -580,14 +968,14 @@ class OverlayPresenter(OverlaySink):
             }
             for block in next_blocks
         ]
-        self._emit_detailed(
-            "[OverlayPresenter] Snapshot publish: revision=%s block_count=%s bridge_attached=%s blocks=%s"
+        self._emit_detailed_lazy(
+            lambda: "[OverlayPresenter] Snapshot publish: revision=%s block_count=%s bridge_attached=%s blocks=%s"
             % (
                 self._snapshot.revision,
                 len(next_blocks),
                 self.bridge is not None,
                 blocks_summary,
-            ),
+            )
         )
         if self.diagnostics is not None:
             self.diagnostics.record_presenter(
@@ -659,10 +1047,10 @@ class OverlayPresenter(OverlaySink):
         now: float,
     ) -> None:
         previous_signatures = {
-            block.id: self._rendered_block_signature(block) for block in previous_blocks
+            block.id: self._visible_block_content_signature(block) for block in previous_blocks
         }
         for key, block in rendered_entries:
-            if previous_signatures.get(block.id) == self._rendered_block_signature(block):
+            if previous_signatures.get(block.id) == self._visible_block_content_signature(block):
                 continue
             entry = self._entries.get(key)
             if entry is None:
@@ -673,18 +1061,61 @@ class OverlayPresenter(OverlaySink):
             entry.last_meaningful_visible_at = now
             self._schedule_expiration(key, entry)
 
-    def _rendered_block_signature(
+    def _visible_block_content_signature(
         self,
         block: OverlayPresentationBlock,
-    ) -> tuple[str, str, str, str, bool]:
+    ) -> tuple[str, str, str, bool]:
         secondary_text = block.secondary_text if block.secondary_enabled else ""
         return (
-            block.channel,
             block.block_variant,
             block.primary_text,
             secondary_text,
             block.secondary_enabled,
         )
+
+    def _rendered_block_signature(
+        self,
+        block: OverlayPresentationBlock,
+    ) -> tuple[
+        str,
+        str,
+        int,
+        str,
+        str,
+        str,
+        str,
+        bool,
+        str | None,
+        int | None,
+        str | None,
+        str | None,
+        int | None,
+        str | None,
+    ]:
+        secondary_text = block.secondary_text if block.secondary_enabled else ""
+        include_translation_metadata = block.channel == "peer" or bool(secondary_text)
+        return (
+            block.id,
+            block.occupant_key,
+            block.appearance_seq,
+            block.channel,
+            block.block_variant,
+            block.primary_text,
+            secondary_text,
+            block.secondary_enabled,
+            block.update_id if include_translation_metadata else None,
+            block.origin_wall_clock_ms if include_translation_metadata else None,
+            block.session_scope if include_translation_metadata else None,
+            block.source_text_hash if include_translation_metadata else None,
+            block.source_text_len if include_translation_metadata else None,
+            block.logical_turn_key if include_translation_metadata else None,
+        )
+
+    def _rendered_blocks_signature(
+        self,
+        blocks: list[OverlayPresentationBlock],
+    ) -> tuple[object, ...]:
+        return tuple(self._rendered_block_signature(block) for block in blocks)
 
     def _logical_visible_entry_keys(
         self,
@@ -737,7 +1168,22 @@ class OverlayPresenter(OverlaySink):
             primary_text = entry.live_text.strip()
             if not primary_text:
                 return None
-            secondary_text = entry.live_secondary_text.strip() or entry.translation_text.strip()
+            live_secondary_text = entry.live_secondary_text.strip()
+            secondary_text = live_secondary_text or entry.translation_text.strip()
+            if live_secondary_text:
+                update_id = entry.live_update_id
+                origin_wall_clock_ms = entry.live_origin_wall_clock_ms
+                session_scope = entry.live_session_scope
+                source_text_hash = entry.live_source_text_hash
+                source_text_len = entry.live_source_text_len
+                logical_turn_key = entry.live_logical_turn_key
+            else:
+                update_id = entry.translation_update_id
+                origin_wall_clock_ms = entry.translation_origin_wall_clock_ms
+                session_scope = entry.translation_session_scope
+                source_text_hash = entry.translation_source_text_hash
+                source_text_len = entry.translation_source_text_len
+                logical_turn_key = entry.translation_logical_turn_key
             return OverlayPresentationBlock(
                 id=entry.block_id,
                 occupant_key=entry.occupant_key,
@@ -747,6 +1193,12 @@ class OverlayPresenter(OverlaySink):
                 primary_text=primary_text,
                 secondary_text=secondary_text,
                 secondary_enabled=self.show_translation,
+                update_id=update_id,
+                origin_wall_clock_ms=origin_wall_clock_ms,
+                session_scope=session_scope,
+                source_text_hash=source_text_hash,
+                source_text_len=source_text_len,
+                logical_turn_key=logical_turn_key,
             )
 
         if entry.channel == "peer":
@@ -771,6 +1223,12 @@ class OverlayPresenter(OverlaySink):
             primary_text=primary_text,
             secondary_text=secondary_text,
             secondary_enabled=secondary_enabled,
+            update_id=entry.translation_update_id,
+            origin_wall_clock_ms=entry.translation_origin_wall_clock_ms,
+            session_scope=entry.translation_session_scope,
+            source_text_hash=entry.translation_source_text_hash,
+            source_text_len=entry.translation_source_text_len,
+            logical_turn_key=entry.translation_logical_turn_key,
         )
 
     def _prune_displaced_finalized_entries(
@@ -1088,16 +1546,18 @@ class OverlayPresenter(OverlaySink):
             if entry.visible_since is not None:
                 lifetime_ms = max(0.0, (removal_time - entry.visible_since) * 1000.0)
             translated_lifetime_ms = 0.0
-            if entry.translation_visible_since is not None:
+            if entry.translation_observed_visible_since is not None:
                 translated_lifetime_ms = max(
                     0.0,
-                    (removal_time - entry.translation_visible_since) * 1000.0,
+                    (removal_time - entry.translation_observed_visible_since) * 1000.0,
                 )
             extra_fields = {
                 "lifetime_ms": lifetime_ms,
                 "translated_lifetime_ms": translated_lifetime_ms,
                 "had_translation": bool(entry.translation_text.strip()),
-                "ever_visible_with_translation": entry.translation_visible_since is not None,
+                "ever_visible_with_translation": entry.translation_observed_visible_since
+                is not None,
+                "translation_observed_visible_since": entry.translation_observed_visible_since,
             }
         if self.diagnostics is not None:
             self.diagnostics.record_presenter_removal(
@@ -1121,6 +1581,7 @@ class OverlayPresenter(OverlaySink):
             self._remember_scene_terminal_reason(key, reason=reason)
             self._emit_turn_decision(
                 "overlay_turn_hidden_idle_ttl",
+                disposition="hidden_idle_ttl",
                 key=key,
                 entry=entry,
                 extras={"deadline": effective_deadline},
@@ -1129,6 +1590,7 @@ class OverlayPresenter(OverlaySink):
             self._remember_scene_terminal_reason(key, reason=reason)
             self._emit_turn_decision(
                 "overlay_turn_evicted_by_newer_turn",
+                disposition="evicted",
                 key=key,
                 entry=entry,
             )

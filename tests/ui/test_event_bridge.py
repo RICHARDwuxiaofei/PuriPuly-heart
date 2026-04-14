@@ -30,6 +30,7 @@ class DummyDashboard:
         self.statuses: list[str] = []
         self.display_calls: list[tuple[str, str | None, bool]] = []
         self.translation_calls: list[tuple[str, str | None]] = []
+        self.translation_metadata_calls: list[dict[str, object]] = []
         self.notice_calls: list[str | None] = []
 
     def set_status(self, status: str) -> None:
@@ -49,8 +50,28 @@ class DummyDashboard:
         text: str,
         *,
         language_code: str | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        utterance_id: object | None = None,
+        channel: str | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
     ) -> None:
         self.translation_calls.append((text, language_code))
+        self.translation_metadata_calls.append(
+            {
+                "update_id": update_id,
+                "origin_wall_clock_ms": origin_wall_clock_ms,
+                "utterance_id": utterance_id,
+                "channel": channel,
+                "session_scope": session_scope,
+                "source_text_hash": source_text_hash,
+                "source_text_len": source_text_len,
+                "logical_turn_key": logical_turn_key,
+            }
+        )
 
     def set_local_stt_notice(self, status: str | None) -> None:
         self.notice_calls.append(status)
@@ -62,8 +83,27 @@ class FailingTranslationDashboard(DummyDashboard):
         text: str,
         *,
         language_code: str | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        utterance_id: object | None = None,
+        channel: str | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
     ) -> None:
-        _ = text, language_code
+        _ = (
+            text,
+            language_code,
+            update_id,
+            origin_wall_clock_ms,
+            utterance_id,
+            channel,
+            session_scope,
+            source_text_hash,
+            source_text_len,
+            logical_turn_key,
+        )
         raise RuntimeError("dashboard setter failed")
 
 
@@ -281,6 +321,49 @@ async def test_event_bridge_logs_self_dashboard_translation_applied_detail_only(
         translation_target_language="en",
         text_len=len("translated self"),
     )
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_passes_dashboard_translation_visual_commit_metadata_to_dashboard() -> (
+    None
+):
+    app = DummyApp()
+    bridge = UIEventBridge(app=app, event_queue=asyncio.Queue())
+    utterance_id = uuid4()
+    translation = Translation(
+        utterance_id=utterance_id,
+        text="translated peer",
+        channel="peer",
+        target_language="ja",
+        update_id="upd-dashboard-1",
+        origin_wall_clock_ms=1712345678901,
+        session_scope="session-42",
+        source_text_hash="src-hash-42",
+        source_text_len=17,
+        logical_turn_key="peer:turn-42",
+    )
+
+    await bridge._handle_event(
+        UIEvent(
+            type=UIEventType.TRANSLATION_DONE,
+            payload=translation,
+            source="Peer Mic",
+        )
+    )
+
+    assert app.view_dashboard.translation_calls == [("translated peer", "en")]
+    assert app.view_dashboard.translation_metadata_calls == [
+        {
+            "update_id": "upd-dashboard-1",
+            "origin_wall_clock_ms": 1712345678901,
+            "utterance_id": utterance_id,
+            "channel": "peer",
+            "session_scope": "session-42",
+            "source_text_hash": "src-hash-42",
+            "source_text_len": 17,
+            "logical_turn_key": "peer:turn-42",
+        }
+    ]
 
 
 @pytest.mark.asyncio

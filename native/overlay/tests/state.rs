@@ -1,3 +1,5 @@
+use serde_json::json;
+
 use puripuly_heart_overlay::{
     OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
     OverlayPresentationSnapshot, OverlayState,
@@ -19,6 +21,9 @@ fn block(
         primary_text: primary_text.to_string(),
         secondary_text: secondary_text.to_string(),
         secondary_enabled,
+        update_id: None,
+        origin_wall_clock_ms: None,
+        session_scope: None,
     }
 }
 
@@ -40,7 +45,45 @@ fn slot_block(
         primary_text: primary_text.to_string(),
         secondary_text: secondary_text.to_string(),
         secondary_enabled,
+        update_id: None,
+        origin_wall_clock_ms: None,
+        session_scope: None,
     }
+}
+
+#[test]
+fn overlay_state_preserves_snapshot_slot_correlation_observability_metadata() {
+    let snapshot: OverlayPresentationSnapshot = serde_json::from_value(json!({
+        "revision": 7,
+        "calibration": OverlayPresentationCalibration::default(),
+        "blocks": [
+            {
+                "id": "self:1",
+                "occupant_key": "self:1",
+                "appearance_seq": 1,
+                "channel": "self",
+                "block_variant": "finalized",
+                "primary_text": "hello",
+                "secondary_text": "",
+                "secondary_enabled": true,
+                "update_id": "upd-self-1",
+                "origin_wall_clock_ms": 1712345678901u64,
+                "session_scope": "session:self"
+            }
+        ]
+    }))
+    .unwrap();
+    let mut state = OverlayState::default();
+
+    assert!(state.apply_snapshot(&snapshot));
+
+    let persisted = serde_json::to_value(state.snapshot()).unwrap();
+    assert_eq!(persisted["blocks"][0]["update_id"], "upd-self-1");
+    assert_eq!(
+        persisted["blocks"][0]["origin_wall_clock_ms"],
+        1712345678901u64
+    );
+    assert_eq!(persisted["blocks"][0]["session_scope"], "session:self");
 }
 
 #[test]
@@ -185,6 +228,9 @@ fn overlay_state_promotes_matching_occupant_key_without_reassigning_slot() {
             primary_text: "hello live".into(),
             secondary_text: String::new(),
             secondary_enabled: true,
+            update_id: None,
+            origin_wall_clock_ms: None,
+            session_scope: None,
         }],
     }));
     let original_slot = state.scene().slots()[0].as_ref().unwrap().slot_index;

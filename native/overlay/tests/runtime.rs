@@ -1,6 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
@@ -80,6 +81,9 @@ fn block(
         primary_text: primary_text.to_string(),
         secondary_text: secondary_text.to_string(),
         secondary_enabled,
+        update_id: None,
+        origin_wall_clock_ms: None,
+        session_scope: None,
     }
 }
 
@@ -101,6 +105,9 @@ fn slot_block(
         primary_text: primary_text.to_string(),
         secondary_text: secondary_text.to_string(),
         secondary_enabled,
+        update_id: None,
+        origin_wall_clock_ms: None,
+        session_scope: None,
     }
 }
 
@@ -114,7 +121,118 @@ fn active_self_block(id: &str, primary_text: &str) -> OverlayPresentationBlock {
         primary_text: primary_text.to_string(),
         secondary_text: String::new(),
         secondary_enabled: true,
+        update_id: None,
+        origin_wall_clock_ms: None,
+        session_scope: None,
     }
+}
+
+static SCRIPTED_BRIDGE_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+enum BridgeAction {
+    WaitMs(u64),
+    SendSnapshot(serde_json::Value),
+    SendShutdown,
+}
+
+async fn run_overlay_binary_with_scripted_bridge(
+    name: &str,
+    initial_snapshot: serde_json::Value,
+    actions: Vec<BridgeAction>,
+) -> std::process::Output {
+    let _guard = SCRIPTED_BRIDGE_TEST_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+
+        let _auth = ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            json!({
+                "type": "snapshot",
+                "payload": initial_snapshot,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        while let Some(message) = ws.next().await {
+            let Ok(Message::Text(text)) = message else {
+                continue;
+            };
+            let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
+            if payload["type"] == "overlay_ready" {
+                break;
+            }
+        }
+
+        for action in actions {
+            match action {
+                BridgeAction::WaitMs(delay_ms) => {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                BridgeAction::SendSnapshot(snapshot) => {
+                    if ws
+                        .send(Message::Text(
+                            json!({
+                                "type": "snapshot",
+                                "payload": snapshot,
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                BridgeAction::SendShutdown => {
+                    if ws
+                        .send(Message::Text(json!({"type": "shutdown"}).to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+    });
+
+    let manifest_path = unique_temp_file(name, "json");
+    let manifest = OverlayManifest {
+        bridge_url: format!("ws://{}", address),
+        logging_mode: OverlayLoggingMode::Detailed,
+        ..test_manifest()
+    };
+    std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+    let manifest_path_for_process = manifest_path.clone();
+    let output = tokio::time::timeout(Duration::from_secs(10), async move {
+        tokio::task::spawn_blocking(move || {
+            Command::new(overlay_binary())
+                .arg("--config")
+                .arg(&manifest_path_for_process)
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap()
+    })
+    .await
+    .unwrap();
+
+    server.await.unwrap();
+    let _ = std::fs::remove_file(manifest_path);
+    output
 }
 
 #[derive(Default)]
@@ -518,6 +636,9 @@ fn runtime_keeps_active_self_and_finalized_rows_visible_within_two_slot_cap() {
                 primary_text: "speaking".into(),
                 secondary_text: String::new(),
                 secondary_enabled: true,
+                update_id: None,
+                origin_wall_clock_ms: None,
+                session_scope: None,
             },
         ],
     });
@@ -1136,6 +1257,136 @@ async fn bridge_client_receives_runtime_logging_mode_updates() {
             if control.logging_mode == OverlayLoggingMode::Detailed
     ));
     server.await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "child-process timing race under parallel cargo; covered by src/runtime.rs unit tests"]
+async fn runtime_emits_snapshot_slot_correlation_and_overlay_visible_update_rendered_logs() {
+    let output = run_overlay_binary_with_scripted_bridge(
+        "slot-correlation-visible-update-rendered",
+        json!({
+            "revision": 1,
+            "calibration": OverlayPresentationCalibration::default(),
+            "blocks": [
+                {
+                    "id": "self:1",
+                    "occupant_key": "self:1",
+                    "appearance_seq": 1,
+                    "channel": "self",
+                    "block_variant": "finalized",
+                    "primary_text": "hello",
+                    "secondary_text": "",
+                    "secondary_enabled": true,
+                    "update_id": "upd-self-1",
+                    "origin_wall_clock_ms": 1712345678901u64,
+                    "session_scope": "session:self"
+                }
+            ]
+        }),
+        vec![
+            BridgeAction::SendSnapshot(json!({
+                "revision": 2,
+                "calibration": OverlayPresentationCalibration::default(),
+                "blocks": [
+                    {
+                        "id": "self:1",
+                        "occupant_key": "self:1",
+                        "appearance_seq": 1,
+                        "channel": "self",
+                        "block_variant": "finalized",
+                        "primary_text": "hello again",
+                        "secondary_text": "translated",
+                        "secondary_enabled": true,
+                        "update_id": "upd-self-2",
+                        "origin_wall_clock_ms": 1712345678955u64,
+                        "session_scope": "session:self"
+                    }
+                ]
+            })),
+            BridgeAction::WaitMs(200),
+            BridgeAction::SendShutdown,
+        ],
+    )
+    .await;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("snapshot_slot_correlation"));
+    assert!(stdout.contains("update_ids=[upd-self-2]"));
+    assert!(stdout.contains("session_scope=session:self"));
+    assert!(stdout.contains("presenter_order=0"));
+    assert!(stdout.contains("slot_index=0"));
+    assert!(stdout.contains("overlay_visible_update_applied"));
+    assert!(stdout.contains("overlay_visible_update_rendered"));
+}
+
+#[tokio::test]
+#[ignore = "child-process timing race under parallel cargo; covered by src/runtime.rs unit tests"]
+async fn runtime_emits_two_row_window_closed_log_when_visible_window_collapses() {
+    let output = run_overlay_binary_with_scripted_bridge(
+        "two-row-window-closed",
+        json!({
+            "revision": 1,
+            "calibration": OverlayPresentationCalibration::default(),
+            "blocks": [
+                {
+                    "id": "self:1",
+                    "occupant_key": "self:1",
+                    "appearance_seq": 1,
+                    "channel": "self",
+                    "block_variant": "finalized",
+                    "primary_text": "one",
+                    "secondary_text": "",
+                    "secondary_enabled": true,
+                    "update_id": "upd-self-1",
+                    "origin_wall_clock_ms": 1712345678901u64,
+                    "session_scope": "session:self"
+                },
+                {
+                    "id": "peer:2",
+                    "occupant_key": "peer:2",
+                    "appearance_seq": 2,
+                    "channel": "peer",
+                    "block_variant": "finalized",
+                    "primary_text": "two",
+                    "secondary_text": "",
+                    "secondary_enabled": true,
+                    "update_id": "upd-peer-2",
+                    "origin_wall_clock_ms": 1712345678910u64,
+                    "session_scope": "session:peer"
+                }
+            ]
+        }),
+        vec![
+            BridgeAction::WaitMs(120),
+            BridgeAction::SendSnapshot(json!({
+                "revision": 2,
+                "calibration": OverlayPresentationCalibration::default(),
+                "blocks": [
+                    {
+                        "id": "self:1",
+                        "occupant_key": "self:1",
+                        "appearance_seq": 1,
+                        "channel": "self",
+                        "block_variant": "finalized",
+                        "primary_text": "one",
+                        "secondary_text": "",
+                        "secondary_enabled": true,
+                        "update_id": "upd-self-1",
+                        "origin_wall_clock_ms": 1712345678901u64,
+                        "session_scope": "session:self"
+                    }
+                ]
+            })),
+            BridgeAction::WaitMs(200),
+            BridgeAction::SendShutdown,
+        ],
+    )
+    .await;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("two_row_window_closed"));
+    assert!(stdout.contains("threshold_ms=500"));
+    assert!(stdout.contains("too_brief_to_be_perceptibly_stable=true"));
 }
 
 #[test]

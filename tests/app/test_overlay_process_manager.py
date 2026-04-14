@@ -739,6 +739,85 @@ async def test_overlay_process_manager_peer_first_render_trace_passthrough_is_hi
 
 
 @pytest.mark.asyncio
+async def test_overlay_process_manager_overlay_visible_update_rendered_passthrough_is_visible_in_detailed_mode(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script_path = tmp_path / "overlay_stub_visible_update_rendered_detailed.py"
+    script_path.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import sys",
+                "import time",
+                "assert sys.argv[1] == '--config'",
+                'print("[overlay][INFO] overlay_visible_update_rendered revision=7 block_id=self:1 update_id=upd-self-2 slot_index=0", flush=True)',
+                'print(\'{"type": "overlay_ready"}\', flush=True)',
+                "time.sleep(5)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+    manager = OverlayProcessManager(
+        process_runner=DefaultOverlayProcessRunner(executable_path=script_path),
+        startup_timeout_ms=500,
+        logging_mode="detailed",
+    )
+
+    try:
+        with caplog.at_level("INFO", logger="puripuly_heart.core.overlay.process"):
+            await manager.start()
+
+        assert manager.state == "connected"
+        assert any(
+            "overlay_visible_update_rendered" in message and "update_id=upd-self-2" in message
+            for message in caplog.messages
+        )
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_overlay_visible_update_rendered_passthrough_is_hidden_in_basic_mode(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script_path = tmp_path / "overlay_stub_visible_update_rendered_basic.py"
+    script_path.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import sys",
+                "import time",
+                "assert sys.argv[1] == '--config'",
+                'print("[overlay][INFO] overlay_visible_update_rendered revision=8 block_id=self:1 update_id=upd-self-3 slot_index=0", flush=True)',
+                'print(\'{"type": "overlay_ready"}\', flush=True)',
+                "time.sleep(5)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+    manager = OverlayProcessManager(
+        process_runner=DefaultOverlayProcessRunner(executable_path=script_path),
+        startup_timeout_ms=500,
+        logging_mode="basic",
+    )
+
+    try:
+        with caplog.at_level("INFO", logger="puripuly_heart.core.overlay.process"):
+            await manager.start()
+
+        assert manager.state == "connected"
+        assert not any("overlay_visible_update_rendered" in message for message in caplog.messages)
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
 async def test_overlay_process_manager_maps_post_ready_runtime_error_to_failure_reason() -> None:
     manager = OverlayProcessManager(
         process_runner=FakeProcessRunner(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, ClassVar, Literal, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from puripuly_heart.core.clock import Clock, SystemClock
 from puripuly_heart.domain.models import ChannelId, Transcript
@@ -18,6 +18,12 @@ class OverlayEvent:
     utterance_id: UUID | None
     channel: ChannelId | None
     created_at: float
+    update_id: str | None = None
+    origin_wall_clock_ms: int | None = None
+    session_scope: str | None = None
+    source_text_hash: str | None = None
+    source_text_len: int | None = None
+    logical_turn_key: str | None = None
 
     EVENT_TYPE: ClassVar[str] = "overlay_event"
 
@@ -221,12 +227,24 @@ class OverlayEventAdapter:
         target_language: str,
         applied_context_mode: AppliedContextMode | None,
         created_at: float | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
     ) -> TranslationStreamUpdate:
         return TranslationStreamUpdate(
             **self._common_event_fields(
                 utterance_id=utterance_id,
                 channel=channel,
                 created_at=created_at,
+                update_id=update_id or uuid4().hex,
+                origin_wall_clock_ms=origin_wall_clock_ms,
+                session_scope=session_scope,
+                source_text_hash=source_text_hash,
+                source_text_len=source_text_len,
+                logical_turn_key=logical_turn_key,
             ),
             text=text,
             source_language=source_language,
@@ -243,12 +261,24 @@ class OverlayEventAdapter:
         secondary_text: str = "",
         occupant_key: str,
         created_at: float | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
     ) -> SelfActiveUpdate:
         return SelfActiveUpdate(
             **self._common_event_fields(
                 utterance_id=utterance_id,
                 channel="self",
                 created_at=created_at,
+                update_id=update_id,
+                origin_wall_clock_ms=origin_wall_clock_ms,
+                session_scope=session_scope,
+                source_text_hash=source_text_hash,
+                source_text_len=source_text_len,
+                logical_turn_key=logical_turn_key,
             ),
             text=text,
             secondary_text=secondary_text,
@@ -274,12 +304,24 @@ class OverlayEventAdapter:
         target_language: str,
         applied_context_mode: AppliedContextMode | None,
         created_at: float | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
     ) -> TranslationFinal:
         return TranslationFinal(
             **self._common_event_fields(
                 utterance_id=utterance_id,
                 channel=channel,
                 created_at=created_at,
+                update_id=update_id or uuid4().hex,
+                origin_wall_clock_ms=origin_wall_clock_ms,
+                session_scope=session_scope,
+                source_text_hash=source_text_hash,
+                source_text_len=source_text_len,
+                logical_turn_key=logical_turn_key,
             ),
             text=text,
             source_language=source_language,
@@ -311,6 +353,12 @@ class OverlayEventAdapter:
         utterance_id: UUID | None,
         channel: ChannelId | None,
         created_at: float | None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
     ) -> dict[str, object]:
         self._seq += 1
         return {
@@ -319,4 +367,10 @@ class OverlayEventAdapter:
             "utterance_id": utterance_id,
             "channel": channel,
             "created_at": created_at if created_at is not None else self.clock.now(),
+            "update_id": update_id,
+            "origin_wall_clock_ms": origin_wall_clock_ms,
+            "session_scope": session_scope,
+            "source_text_hash": source_text_hash,
+            "source_text_len": source_text_len,
+            "logical_turn_key": logical_turn_key,
         }

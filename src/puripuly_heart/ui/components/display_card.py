@@ -1,3 +1,5 @@
+import logging
+import time
 from typing import Callable
 
 import flet as ft
@@ -188,12 +190,39 @@ class DisplayCard(ft.Container):
         self._secondary_font_family = None
         self._sync_display(is_error=is_error)
 
-    def set_display_translation(self, text: str | None, font_family: str | None = None) -> None:
-        """Update the secondary display text and sync font sizing."""
+    def set_display_translation(
+        self,
+        text: str | None,
+        font_family: str | None = None,
+        *,
+        runtime_log_detailed: Callable[..., bool | None] | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        utterance_id: object | None = None,
+        channel: str | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
+    ) -> None:
+        """Update the secondary display text and emit a post-update visual commit marker."""
         self._showing_status = False
         self._secondary_value = text or None
         self._secondary_font_family = font_family if text else None
-        self._sync_display()
+        primary_update_issued, secondary_update_issued = self._sync_display()
+        self._emit_dashboard_translation_visual_commit(
+            runtime_log_detailed=runtime_log_detailed,
+            update_id=update_id,
+            origin_wall_clock_ms=origin_wall_clock_ms,
+            utterance_id=utterance_id,
+            channel=channel,
+            session_scope=session_scope,
+            source_text_hash=source_text_hash,
+            source_text_len=source_text_len,
+            logical_turn_key=logical_turn_key,
+            primary_update_issued=primary_update_issued,
+            secondary_update_issued=secondary_update_issued,
+        )
 
     def set_status(self, status: str, font_family: str | None = None):
         """Update connection status display."""
@@ -251,7 +280,58 @@ class DisplayCard(ft.Container):
             self._secondary_font_family = None
             self._sync_display()
 
-    def _sync_display(self, *, is_error: bool = False) -> None:
+    def _emit_dashboard_translation_visual_commit(
+        self,
+        *,
+        runtime_log_detailed: Callable[..., bool | None] | None,
+        update_id: str | None,
+        origin_wall_clock_ms: int | None,
+        utterance_id: object | None,
+        channel: str | None,
+        session_scope: str | None,
+        source_text_hash: str | None,
+        source_text_len: int | None,
+        logical_turn_key: str | None,
+        primary_update_issued: bool,
+        secondary_update_issued: bool,
+    ) -> None:
+        if runtime_log_detailed is None or update_id is None:
+            return
+        if not (primary_update_issued or secondary_update_issued):
+            return
+        if not self._display_secondary.visible or not self._display_secondary.value:
+            return
+
+        elapsed_ms = None
+        if origin_wall_clock_ms is not None:
+            elapsed_ms = max(0, int(time.time() * 1000) - origin_wall_clock_ms)
+
+        parts = [
+            "[Detailed][DisplayCard] dashboard_translation_visual_commit",
+            f"utterance_id={utterance_id}",
+            f"channel={channel}",
+            f"update_id={update_id}",
+            f"origin_wall_clock_ms={origin_wall_clock_ms}",
+            f"session_scope={session_scope}",
+            f"source_text_hash={source_text_hash}",
+            f"source_text_len={source_text_len}",
+            f"logical_turn_key={logical_turn_key}",
+            f"primary_text_len={len(self._display_primary.value or '')}",
+            f"secondary_text_len={len(self._display_secondary.value or '')}",
+            f"secondary_visible={self._display_secondary.visible}",
+            f"showing_status={self._showing_status}",
+            f"primary_update_issued={primary_update_issued}",
+            f"secondary_update_issued={secondary_update_issued}",
+        ]
+        if elapsed_ms is not None:
+            parts.append(f"elapsed_ms={elapsed_ms}")
+
+        try:
+            runtime_log_detailed(" ".join(parts), level=logging.INFO)
+        except Exception:
+            return
+
+    def _sync_display(self, *, is_error: bool = False) -> tuple[bool, bool]:
         primary_text = self._notice_value or self._primary_value or ""
         secondary_text = "" if self._notice_value else self._secondary_value or ""
         max_len = max(_weighted_len(primary_text), _weighted_len(secondary_text))
@@ -270,7 +350,10 @@ class DisplayCard(ft.Container):
         self._display_secondary.color = text_color
         self._display_secondary.font_family = self._secondary_font_family
 
+        primary_update_issued = self._display_primary.page is not None
+        secondary_update_issued = self._display_secondary.page is not None
         if self._display_primary.page is not None:
             self._display_primary.update()
         if self._display_secondary.page is not None:
             self._display_secondary.update()
+        return primary_update_issued, secondary_update_issued

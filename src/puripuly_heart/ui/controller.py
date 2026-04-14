@@ -7,6 +7,7 @@ import logging
 import secrets
 import threading
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -863,22 +864,19 @@ class GuiController:
             overlay_instance_id = f"overlay-{secrets.token_hex(8)}"
             diagnostics = OverlayDiagnosticsRecorder(overlay_instance_id=overlay_instance_id)
 
-            def runtime_log_detailed(message: str, *, level: int = logging.INFO) -> bool:
-                return self.log_detailed(message, level=level)
-
             if presenter is None:
                 presenter = OverlayPresenter(
                     calibration=self.overlay_calibration.copy(),
                     clock=self.clock,
                     diagnostics=diagnostics,
-                    runtime_log_detailed=runtime_log_detailed,
+                    runtime_log_detailed=self.log_detailed,
                     show_translation=self.settings.overlay.show_translation,
                     show_peer_original=self.settings.overlay.show_peer_original,
                 )
                 self._overlay_presenter = presenter
             else:
                 presenter.diagnostics = diagnostics
-                presenter.runtime_log_detailed = runtime_log_detailed
+                presenter.runtime_log_detailed = self.log_detailed
             bridge = OverlayBridge(
                 session_token=secrets.token_urlsafe(16),
                 initial_snapshot=presenter.snapshot(),
@@ -2700,6 +2698,29 @@ class GuiController:
             return self.runtime_logging.emit_detailed(rendered_message, level=level)
         except Exception:
             logger.log(level, message, exc_info=exc_info)
+            return True
+
+    def log_detailed_lazy(
+        self,
+        build_message: Callable[[], str],
+        *,
+        level: int = logging.INFO,
+        exception: BaseException | None = None,
+    ) -> bool:
+        exc_info = None
+        if exception is not None:
+            exc_info = (type(exception), exception, exception.__traceback__)
+
+        def render_message() -> str:
+            rendered_message = build_message()
+            if exc_info is None:
+                return rendered_message
+            return f"{rendered_message}\n{''.join(traceback.format_exception(*exc_info)).rstrip()}"
+
+        try:
+            return self.runtime_logging.emit_detailed_lazy(render_message, level=level)
+        except Exception:
+            logger.log(level, build_message(), exc_info=exc_info)
             return True
 
     def _log_error(self, message: str) -> None:
