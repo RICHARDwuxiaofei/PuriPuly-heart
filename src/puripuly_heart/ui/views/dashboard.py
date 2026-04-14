@@ -1,3 +1,5 @@
+from typing import Callable
+
 import flet as ft
 
 from puripuly_heart.core.language import get_all_language_options
@@ -70,6 +72,7 @@ class DashboardView(ft.Column):
         self.on_toggle_peer_translation = None
         self.on_language_change = None
         self.on_recent_languages_change = None  # For persistence
+        self.runtime_log_detailed: Callable[..., bool | None] | None = None
 
         self._build_ui()
 
@@ -571,10 +574,30 @@ class DashboardView(ft.Column):
         text: str | None,
         *,
         language_code: str | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        utterance_id: object | None = None,
+        channel: str | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
     ) -> None:
         """Update the display card translation line."""
         font_family = font_for_language(language_code) if language_code else self._ui_font()
-        self.display_card.set_display_translation(text, font_family=font_family)
+        self.display_card.set_display_translation(
+            text,
+            font_family=font_family,
+            runtime_log_detailed=self.runtime_log_detailed,
+            update_id=update_id,
+            origin_wall_clock_ms=origin_wall_clock_ms,
+            utterance_id=utterance_id,
+            channel=channel,
+            session_scope=session_scope,
+            source_text_hash=source_text_hash,
+            source_text_len=source_text_len,
+            logical_turn_key=logical_turn_key,
+        )
 
     def set_managed_auth_pending(self, pending: bool) -> None:
         self._managed_auth_pending = bool(pending)

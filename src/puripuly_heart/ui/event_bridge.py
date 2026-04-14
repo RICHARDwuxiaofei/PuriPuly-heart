@@ -130,7 +130,18 @@ class UIEventBridge:
             _, target_lang = self._get_language_codes()
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
-                dash.set_display_translation_text(translation.text, language_code=target_lang)
+                dash.set_display_translation_text(
+                    translation.text,
+                    language_code=target_lang,
+                    update_id=translation.update_id,
+                    origin_wall_clock_ms=translation.origin_wall_clock_ms,
+                    utterance_id=translation.utterance_id,
+                    channel=translation.channel,
+                    session_scope=translation.session_scope,
+                    source_text_hash=translation.source_text_hash,
+                    source_text_len=translation.source_text_len,
+                    logical_turn_key=translation.logical_turn_key,
+                )
                 self._emit_dashboard_translation_applied_detailed(
                     translation=translation,
                     source_label=source,

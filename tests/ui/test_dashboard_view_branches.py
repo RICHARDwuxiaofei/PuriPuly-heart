@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 pytest.importorskip("flet")
@@ -47,6 +49,7 @@ class FakeDisplayCard:
         self.statuses: list[tuple[str, str | None]] = []
         self.display_calls: list[tuple[str, bool, str | None]] = []
         self.translation_calls: list[tuple[str | None, str | None]] = []
+        self.translation_metadata_calls: list[dict[str, object]] = []
         self.notice_calls: list[tuple[str | None, str | None]] = []
         self.input_fonts: list[str | None] = []
         self.locale_calls: list[tuple[str | None, str | None]] = []
@@ -59,8 +62,14 @@ class FakeDisplayCard:
     ) -> None:
         self.display_calls.append((text, is_error, font_family))
 
-    def set_display_translation(self, text: str | None, font_family: str | None = None) -> None:
+    def set_display_translation(
+        self,
+        text: str | None,
+        font_family: str | None = None,
+        **metadata,
+    ) -> None:
         self.translation_calls.append((text, font_family))
+        self.translation_metadata_calls.append(dict(metadata))
 
     def set_notice(self, text: str | None, tone: str | None = None) -> None:
         self.notice_calls.append((text, tone))
@@ -219,6 +228,44 @@ def test_dashboard_translation_toggle_controls_power_state(monkeypatch: pytest.M
         call[0] == dashboard_module.t("dashboard.warn_llm_key")
         for call in view.display_card.display_calls
     )
+
+
+def test_dashboard_translation_visual_commit_forwards_metadata_and_runtime_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+
+    def fake_runtime_log_detailed(message: str, *, level: int = logging.INFO) -> bool:
+        _ = (message, level)
+        return True
+
+    view.runtime_log_detailed = fake_runtime_log_detailed
+
+    view.set_display_translation_text(
+        "dst",
+        language_code="en",
+        update_id="upd-1",
+        origin_wall_clock_ms=1712345678901,
+        utterance_id="utt-1",
+        channel="peer",
+        session_scope="session-1",
+        source_text_hash="src-hash-1",
+        source_text_len=12,
+        logical_turn_key="peer:utt-1",
+    )
+
+    assert view.display_card.translation_calls[-1] == ("dst", "font-en")
+    assert view.display_card.translation_metadata_calls[-1] == {
+        "runtime_log_detailed": fake_runtime_log_detailed,
+        "update_id": "upd-1",
+        "origin_wall_clock_ms": 1712345678901,
+        "utterance_id": "utt-1",
+        "channel": "peer",
+        "session_scope": "session-1",
+        "source_text_hash": "src-hash-1",
+        "source_text_len": 12,
+        "logical_turn_key": "peer:utt-1",
+    }
 
 
 def test_dashboard_submit_and_language_selection_paths(monkeypatch: pytest.MonkeyPatch) -> None:

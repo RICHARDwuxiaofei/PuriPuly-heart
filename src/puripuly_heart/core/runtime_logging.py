@@ -11,12 +11,18 @@ from uuid import uuid4
 
 from puripuly_heart.config.paths import user_config_dir
 
-LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-LOG_DATE_FORMAT = "%H:%M:%S"
 MAIN_LOG_FILENAME = "puripuly_heart.log"
 _MAIN_STREAM_HANDLER_NAME = "puripuly_heart.main.stream"
 _MAIN_FILE_HANDLER_NAME = "puripuly_heart.main.file"
 _SESSION_LOGGER_NAME = "puripuly_heart.runtime.session"
+
+
+LOG_FORMAT = "%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s: %(message)s"
+LOG_DATE_FORMAT = "%H:%M:%S"
+
+
+def _main_formatter() -> logging.Formatter:
+    return logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +123,36 @@ def format_detailed_latency_breakdown(
     return f"[Detailed][LatencyBreakdown] {' '.join(parts)}"
 
 
+def format_translation_ready_for_output(
+    *,
+    channel: str,
+    utterance_id: str,
+    update_id: str,
+    origin_wall_clock_ms: int | None,
+    session_scope: str | None,
+    source_text_hash: str | None,
+    source_text_len: int | None,
+    logical_turn_key: str | None,
+    translation_len: int,
+    elapsed_ms: int | None,
+) -> str:
+    parts = [
+        "[Detailed][Hub] translation_ready_for_output",
+        f"channel={channel}",
+        f"utterance_id={utterance_id}",
+        f"update_id={update_id}",
+        f"origin_wall_clock_ms={origin_wall_clock_ms}",
+        f"session_scope={session_scope}",
+        f"source_text_hash={source_text_hash}",
+        f"source_text_len={source_text_len}",
+        f"logical_turn_key={logical_turn_key}",
+        f"translation_len={translation_len}",
+    ]
+    if elapsed_ms is not None:
+        parts.append(f"elapsed_ms={elapsed_ms}")
+    return " ".join(parts)
+
+
 class RealtimeLogSink(Protocol):
     def append_log(self, line: str) -> None: ...
 
@@ -151,8 +187,8 @@ def configure_main_logging(
     if stream_handler is None:
         stream_handler = logging.StreamHandler()
         stream_handler.set_name(_MAIN_STREAM_HANDLER_NAME)
-        stream_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
         target_logger.addHandler(stream_handler)
+    stream_handler.setFormatter(_main_formatter())
 
     file_handler = _find_main_file_handler(target_logger, log_file=log_file)
     if file_handler is None:
@@ -163,8 +199,8 @@ def configure_main_logging(
             encoding="utf-8",
         )
         file_handler.set_name(_MAIN_FILE_HANDLER_NAME)
-        file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
         target_logger.addHandler(file_handler)
+    file_handler.setFormatter(_main_formatter())
 
     target_logger.setLevel(logging.INFO)
     return RuntimeLoggingSinks(
@@ -245,6 +281,17 @@ class SessionRuntimeLoggingService:
         if self._mode is not SessionLoggingMode.DETAILED:
             return False
         self._session_logger.log(level, message)
+        return True
+
+    def emit_detailed_lazy(
+        self,
+        build_message: Callable[[], str],
+        *,
+        level: int = logging.INFO,
+    ) -> bool:
+        if self._mode is not SessionLoggingMode.DETAILED:
+            return False
+        self._session_logger.log(level, build_message())
         return True
 
     def emit_persisted(self, message: str, *, level: int = logging.INFO) -> None:
