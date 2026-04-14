@@ -42,6 +42,7 @@ from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterLLMProvider,
     ManagedOpenRouterReleaseService,
+    _resolve_managed_issue_model,
 )
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
@@ -378,7 +379,9 @@ def test_create_llm_provider_openrouter_wraps_primary_with_source_locked_openrou
     assert fallback_delegate.runtime_logging is runtime_logging
 
 
-def test_create_llm_provider_openrouter_managed_fallback_reuses_primary_managed_service() -> None:
+def test_create_llm_provider_openrouter_managed_qwen_fallback_uses_fallback_specific_release_service() -> (
+    None
+):
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
         openrouter=OpenRouterSettings(
@@ -415,12 +418,83 @@ def test_create_llm_provider_openrouter_managed_fallback_reuses_primary_managed_
     fallback_delegate = provider.inner.fallback.factory()
 
     assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
-    assert fallback_delegate.release_service is managed_release_service
+    assert isinstance(fallback_delegate.release_service, ManagedOpenRouterReleaseService)
+    assert fallback_delegate.release_service is not managed_release_service
+    assert fallback_delegate.release_service.settings is not settings
+    assert fallback_delegate.release_service.settings.openrouter is not settings.openrouter
+    assert fallback_delegate.release_service.settings.openrouter.selection_alias is None
+    assert (
+        fallback_delegate.release_service.settings.openrouter.llm_model
+        == OpenRouterLLMModel.QWEN_35_FLASH_02_23
+    )
+    assert (
+        _resolve_managed_issue_model(fallback_delegate.release_service.settings)
+        == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
+    )
+    assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
+    assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
 
     fallback_openrouter_delegate = fallback_delegate.delegate_factory("managed-key")
 
     assert isinstance(fallback_openrouter_delegate, OpenRouterLLMProvider)
     assert fallback_openrouter_delegate.model == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
+    assert fallback_openrouter_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+
+
+def test_create_llm_provider_openrouter_managed_gemini_fallback_clears_primary_alias_for_issue_identity() -> (
+    None
+):
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    managed_release_service = ManagedOpenRouterReleaseService(
+        settings=settings,
+        secrets=secrets,
+        client=object(),
+        persist_settings=lambda _updated: None,
+        app_version="2.0.0",
+        raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
+    )
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=managed_release_service,
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+
+    fallback_delegate = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
+    assert isinstance(fallback_delegate.release_service, ManagedOpenRouterReleaseService)
+    assert fallback_delegate.release_service is not managed_release_service
+    assert fallback_delegate.release_service.settings.openrouter.selection_alias is None
+    assert (
+        fallback_delegate.release_service.settings.openrouter.llm_model
+        == OpenRouterLLMModel.GEMINI_25_FLASH_LITE
+    )
+    assert (
+        _resolve_managed_issue_model(fallback_delegate.release_service.settings)
+        == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
+    )
+    assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
+    assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+
+    fallback_openrouter_delegate = fallback_delegate.delegate_factory("managed-key")
+
+    assert isinstance(fallback_openrouter_delegate, OpenRouterLLMProvider)
+    assert fallback_openrouter_delegate.model == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
     assert fallback_openrouter_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
 
 

@@ -156,6 +156,20 @@ def _extract_stream_delta(data: object) -> str:
     return ""
 
 
+def _has_length_finish_reason(data: object) -> bool:
+    if not isinstance(data, dict):
+        return False
+
+    choices = data.get("choices")
+    if not isinstance(choices, list):
+        return False
+
+    for choice in choices:
+        if isinstance(choice, dict) and choice.get("finish_reason") == "length":
+            return True
+    return False
+
+
 def _build_provider_preferences(
     routing_mode: OpenRouterRoutingMode,
 ) -> dict[str, object]:
@@ -209,6 +223,7 @@ class OpenRouterLLMProvider:
     base_url: str = "https://openrouter.ai/api/v1"
     model: str = "google/gemma-4-26b-a4b-it"
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
+    max_tokens: int = 50
     timeout: float = 30.0
     runtime_logging: SessionRuntimeLoggingService | None = None
     client: OpenRouterClient | None = None
@@ -223,6 +238,7 @@ class OpenRouterLLMProvider:
                 model=self.model,
                 base_url=self.base_url,
                 routing_mode=self.routing_mode,
+                max_tokens=self.max_tokens,
                 timeout=self.timeout,
                 runtime_logging=self.runtime_logging,
             )
@@ -325,6 +341,7 @@ class HttpxOpenRouterClient:
     model: str
     base_url: str = "https://openrouter.ai/api/v1"
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
+    max_tokens: int = 50
     timeout: float = 30.0
     runtime_logging: SessionRuntimeLoggingService | None = None
     _client: httpx.AsyncClient | None = field(init=False, default=None, repr=False)
@@ -364,6 +381,7 @@ class HttpxOpenRouterClient:
             ],
             "reasoning": {"effort": "none"},
             "provider": _build_provider_preferences(self.routing_mode),
+            "max_tokens": self.max_tokens,
         }
         if stream:
             request_body["stream"] = True
@@ -429,6 +447,8 @@ class HttpxOpenRouterClient:
         choices = data.get("choices", [])
         if not choices:
             raise RuntimeError("OpenRouter response did not contain choices")
+        if _has_length_finish_reason(data):
+            raise RuntimeError("OpenRouter response was truncated by max_tokens limit")
 
         message = choices[0].get("message", {})
         result = _extract_message_content(message.get("content"))
@@ -491,6 +511,7 @@ class HttpxOpenRouterClient:
                 )
 
             saw_text = False
+            saw_length_truncation = False
             async for line in response.aiter_lines():
                 if not line or not line.startswith("data:"):
                     continue
@@ -498,11 +519,15 @@ class HttpxOpenRouterClient:
                 if not payload or payload == "[DONE]":
                     continue
                 data = json.loads(payload)
+                if _has_length_finish_reason(data):
+                    saw_length_truncation = True
                 part = _extract_stream_delta(data)
                 if not part:
                     continue
                 saw_text = True
                 yield part
+            if saw_length_truncation:
+                raise RuntimeError("OpenRouter stream was truncated by max_tokens limit")
             if not saw_text:
                 raise RuntimeError("OpenRouter stream did not contain message content")
 

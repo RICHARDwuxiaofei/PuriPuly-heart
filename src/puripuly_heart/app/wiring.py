@@ -150,6 +150,16 @@ def _settings_for_openrouter_alias(settings: AppSettings, *, alias: str) -> AppS
     )
 
 
+def _settings_for_openrouter_fallback_model(
+    settings: AppSettings, *, fallback_model: str
+) -> AppSettings:
+    resolved_settings = replace(settings)
+    resolved_settings.openrouter = replace(settings.openrouter)
+    resolved_settings.openrouter.llm_model = OpenRouterLLMModel(fallback_model)
+    resolved_settings.openrouter.selection_alias = None
+    return resolved_settings
+
+
 def _create_llm_provider_from_alias_profile(
     settings: AppSettings,
     *,
@@ -257,12 +267,9 @@ def _create_openrouter_fallback_provider(
     if fallback_model is None:
         raise ValueError("OpenRouter fallback selection must resolve to a model")
 
-    resolved_settings = replace(
+    resolved_settings = _settings_for_openrouter_fallback_model(
         settings,
-        openrouter=replace(
-            settings.openrouter,
-            llm_model=OpenRouterLLMModel(fallback_model),
-        ),
+        fallback_model=fallback_model,
     )
 
     if settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
@@ -271,12 +278,17 @@ def _create_openrouter_fallback_provider(
 
         from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterLLMProvider
 
+        fallback_managed_release_service = _managed_release_service_for_alias(
+            managed_release_service,
+            alias_settings=resolved_settings,
+        )
+
         return ManagedOpenRouterLLMProvider(
-            release_service=managed_release_service,
+            release_service=fallback_managed_release_service,
             delegate_factory=lambda api_key: OpenRouterLLMProvider(
                 api_key=api_key,
-                model=fallback_model,
-                routing_mode=settings.openrouter.routing_mode,
+                model=resolved_settings.openrouter.llm_model.value,
+                routing_mode=resolved_settings.openrouter.routing_mode,
                 runtime_logging=runtime_logging,
             ),
             on_delegate_ready=managed_delegate_ready,
@@ -285,8 +297,8 @@ def _create_openrouter_fallback_provider(
     api_key = require_openrouter_execution_api_key(resolved_settings, secrets=secrets)
     return OpenRouterLLMProvider(
         api_key=api_key,
-        model=fallback_model,
-        routing_mode=settings.openrouter.routing_mode,
+        model=resolved_settings.openrouter.llm_model.value,
+        routing_mode=resolved_settings.openrouter.routing_mode,
         runtime_logging=runtime_logging,
     )
 

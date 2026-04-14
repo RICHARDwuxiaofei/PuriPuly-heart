@@ -682,6 +682,22 @@ class ManagedOpenRouterLLMProvider(LLMProvider):
     _delegate: LLMProvider | None = field(init=False, default=None, repr=False)
     _delegate_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock, repr=False)
 
+    @property
+    def model(self) -> object | None:
+        if self._delegate is not None:
+            return getattr(self._delegate, "model", None)
+        settings = getattr(self.release_service, "settings", None)
+        openrouter_settings = getattr(settings, "openrouter", None)
+        return getattr(openrouter_settings, "llm_model", None)
+
+    @property
+    def selected_source(self) -> object | None:
+        if self._delegate is not None:
+            return getattr(self._delegate, "selected_source", None)
+        settings = getattr(self.release_service, "settings", None)
+        openrouter_settings = getattr(settings, "openrouter", None)
+        return getattr(openrouter_settings, "selected_source", None)
+
     async def _ensure_delegate(self) -> LLMProvider:
         if self._delegate is not None:
             return self._delegate
