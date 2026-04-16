@@ -317,7 +317,7 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_la
 
     body = fake_client.last_request["json"]
     assert body["model"] == "google/gemma-4-26b-a4b-it"
-    assert body["max_tokens"] == 50
+    assert body["max_tokens"] == 100
     assert body["reasoning"] == {"effort": "none"}
     assert body["provider"] == {
         "sort": "latency",
@@ -404,7 +404,7 @@ async def test_httpx_openrouter_client_stream_translate_builds_streaming_request
     assert request["url"] == "https://example/chat/completions"
     assert request["headers"]["Authorization"] == "Bearer k"
     assert request["json"]["stream"] is True
-    assert request["json"]["max_tokens"] == 50
+    assert request["json"]["max_tokens"] == 100
     assert request["json"]["reasoning"] == {"effort": "none"}
     assert request["json"]["provider"] == {
         "sort": "latency",

@@ -223,7 +223,7 @@ class OpenRouterLLMProvider:
     base_url: str = "https://openrouter.ai/api/v1"
     model: str = "google/gemma-4-26b-a4b-it"
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
-    max_tokens: int = 50
+    max_tokens: int = 100
     timeout: float = 30.0
     runtime_logging: SessionRuntimeLoggingService | None = None
     client: OpenRouterClient | None = None
@@ -341,7 +341,7 @@ class HttpxOpenRouterClient:
     model: str
     base_url: str = "https://openrouter.ai/api/v1"
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
-    max_tokens: int = 50
+    max_tokens: int = 100
     timeout: float = 30.0
     runtime_logging: SessionRuntimeLoggingService | None = None
     _client: httpx.AsyncClient | None = field(init=False, default=None, repr=False)
