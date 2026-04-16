@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import time
 import traceback
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -31,6 +32,7 @@ from puripuly_heart.core.overlay.sink import (
     OverlaySink,
 )
 from puripuly_heart.core.runtime_logging import (
+    SessionLoggingMode,
     SessionRuntimeLoggingService,
     format_basic_latency_summary,
     format_detailed_latency_breakdown,
@@ -1156,6 +1158,11 @@ class ClientHub:
     async def _emit_overlay_event(self, event: object) -> None:
         if self.overlay_sink is None:
             return
+        detailed_mode = (
+            self.runtime_logging is not None
+            and self.runtime_logging.mode is SessionLoggingMode.DETAILED
+        )
+        start = time.perf_counter() if detailed_mode else 0.0
         try:
             await self.overlay_sink.emit(event)  # type: ignore[arg-type]
         except Exception as exc:
@@ -1164,6 +1171,23 @@ class ClientHub:
                 "[Hub] Overlay sink emit failed: %s",
                 exc,
                 level=logging.ERROR,
+            )
+            return
+        if detailed_mode:
+            elapsed_ms = max(0, int((time.perf_counter() - start) * 1000))
+            event_type = type(event).__name__
+            channel = getattr(event, "channel", None)
+            utterance_id = getattr(event, "utterance_id", None)
+            update_id = getattr(event, "update_id", None)
+            self.runtime_logging.emit_detailed_lazy(
+                lambda: (
+                    "[Detailed][Hub] overlay_sink_emit_duration "
+                    f"event_type={event_type} "
+                    f"channel={channel} "
+                    f"utterance_id={utterance_id} "
+                    f"update_id={update_id} "
+                    f"elapsed_ms={elapsed_ms}"
+                )
             )
 
     async def _emit_overlay_active_self_event(self, event: object) -> None:

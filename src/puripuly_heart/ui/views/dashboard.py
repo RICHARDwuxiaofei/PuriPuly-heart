@@ -564,10 +564,29 @@ class DashboardView(ft.Column):
         *,
         language_code: str | None = None,
         is_error: bool = False,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        utterance_id: object | None = None,
+        channel: str | None = None,
+        source_text_len: int | None = None,
+        transcript_kind: str | None = None,
+        should_log: bool = False,
     ) -> None:
         """Update the display card primary line with new text."""
         font_family = font_for_language(language_code) if language_code else self._ui_font()
-        self.display_card.set_display(text, is_error=is_error, font_family=font_family)
+        self.display_card.set_display(
+            text,
+            is_error=is_error,
+            font_family=font_family,
+            runtime_log_detailed=self.runtime_log_detailed,
+            update_id=update_id,
+            origin_wall_clock_ms=origin_wall_clock_ms,
+            utterance_id=utterance_id,
+            channel=channel,
+            source_text_len=source_text_len,
+            transcript_kind=transcript_kind,
+            should_log=should_log,
+        )
 
     def set_display_translation_text(
         self,

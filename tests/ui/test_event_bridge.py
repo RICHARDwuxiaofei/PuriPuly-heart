@@ -42,6 +42,13 @@ class DummyDashboard:
         *,
         language_code: str | None = None,
         is_error: bool = False,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        utterance_id: object | None = None,
+        channel: str | None = None,
+        source_text_len: int | None = None,
+        transcript_kind: str | None = None,
+        should_log: bool = False,
     ) -> None:
         self.display_calls.append((text, language_code, is_error))
 

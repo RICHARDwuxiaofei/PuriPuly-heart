@@ -120,6 +120,7 @@ pub struct OverlayRuntime {
     last_snapshot_slot_correlation_signature: Option<String>,
     last_submitted_visible_rows: HashMap<u64, String>,
     two_row_window: Option<TwoRowWindowState>,
+    last_frame_timing_sampled_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +193,7 @@ impl OverlayRuntime {
             last_snapshot_slot_correlation_signature: None,
             last_submitted_visible_rows: HashMap::new(),
             two_row_window: None,
+            last_frame_timing_sampled_at: None,
         };
         if runtime.state.seed_snapshot(&snapshot) {
             runtime.redraw_requested = true;
@@ -511,9 +513,17 @@ impl OverlayRuntime {
         .await?;
         self.emit_visible_update_rendered_diagnostics(logger, &rendered_diagnostic_rows)
             .await?;
+        let detailed_logging = logger.is_detailed();
+        let submit_started = if detailed_logging {
+            Some(Instant::now())
+        } else {
+            None
+        };
         openvr
             .submit_frame(&frame)
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
+        let submit_duration_us =
+            submit_started.map(|start| start.elapsed().as_micros());
         if should_show_after_submit {
             openvr
                 .set_overlay_visible(true)
@@ -530,11 +540,13 @@ impl OverlayRuntime {
             .await?;
         self.emit_peer_overlay_first_render_hooks(logger, peer_overlay_first_render_ids)
             .await?;
-        if should_log_frame_submitted(
-            visible_block_count,
-            self_block_count,
-            self.last_submitted_had_self,
-        ) {
+        if detailed_logging
+            && should_log_frame_submitted(
+                visible_block_count,
+                self_block_count,
+                self.last_submitted_had_self,
+            )
+        {
             log_runtime_info(
                 logger,
                 format_frame_submitted_log(
@@ -544,9 +556,13 @@ impl OverlayRuntime {
                     overlay_visible_before,
                     self.overlay_visible,
                     should_show_after_submit,
+                    submit_duration_us,
                 ),
             )
             .await?;
+        }
+        if detailed_logging {
+            self.sample_and_log_frame_timing(openvr, logger).await?;
         }
         self.last_submitted_had_self = self_block_count > 0;
         self.redraw_requested = false;
@@ -701,6 +717,42 @@ impl OverlayRuntime {
             )
             .await?;
         }
+        Ok(())
+    }
+
+    async fn sample_and_log_frame_timing<S: OverlayFrameSubmitter>(
+        &mut self,
+        openvr: &S,
+        logger: &OverlayLogger,
+    ) -> Result<(), RuntimeFailure> {
+        const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+        let now = Instant::now();
+        if let Some(last) = self.last_frame_timing_sampled_at {
+            if now.duration_since(last) < SAMPLE_INTERVAL {
+                return Ok(());
+            }
+        }
+        self.last_frame_timing_sampled_at = Some(now);
+        let Some(t) = openvr.sample_frame_timing() else {
+            return Ok(());
+        };
+        log_runtime_info(
+            logger,
+            format!(
+                "openvr_frame_timing frame_index={} num_frame_presents={} num_mis_presented={} num_dropped_frames={} client_frame_interval_ms={:.2} present_call_cpu_ms={:.2} wait_for_present_cpu_ms={:.2} compositor_render_cpu_ms={:.2} total_render_gpu_ms={:.2} post_submit_gpu_ms={:.2}",
+                t.frame_index,
+                t.num_frame_presents,
+                t.num_mis_presented,
+                t.num_dropped_frames,
+                t.client_frame_interval_ms,
+                t.present_call_cpu_ms,
+                t.wait_for_present_cpu_ms,
+                t.compositor_render_cpu_ms,
+                t.total_render_gpu_ms,
+                t.post_submit_gpu_ms,
+            ),
+        )
+        .await?;
         Ok(())
     }
 }
@@ -1122,8 +1174,9 @@ fn format_frame_submitted_log(
     overlay_visible_before: bool,
     overlay_visible_after: bool,
     should_show_after_submit: bool,
+    submit_duration_us: Option<u128>,
 ) -> String {
-    format!(
+    let mut line = format!(
         "frame_submitted revision={} visible_block_count={} self_block_count={} fully_transparent={} overlay_visible_before={} overlay_visible_after={} should_show_after_submit={}",
         revision,
         layout.visible_blocks.len(),
@@ -1132,7 +1185,11 @@ fn format_frame_submitted_log(
         overlay_visible_before,
         overlay_visible_after,
         should_show_after_submit,
-    )
+    );
+    if let Some(duration_us) = submit_duration_us {
+        line.push_str(&format!(" submit_duration_us={duration_us}"));
+    }
+    line
 }
 
 async fn log_runtime_info(logger: &OverlayLogger, message: String) -> Result<(), RuntimeFailure> {
@@ -1939,7 +1996,7 @@ mod tests {
             &CaptionPresentation::default(),
         );
 
-        let summary = format_frame_submitted_log(&layout, 7, false, false, true, true);
+        let summary = format_frame_submitted_log(&layout, 7, false, false, true, true, None);
 
         assert!(summary.contains("frame_submitted revision=7"));
         assert!(summary.contains("visible_block_count=2"));
@@ -1948,6 +2005,11 @@ mod tests {
         assert!(summary.contains("overlay_visible_before=false"));
         assert!(summary.contains("overlay_visible_after=true"));
         assert!(summary.contains("should_show_after_submit=true"));
+        assert!(!summary.contains("submit_duration_us="));
+
+        let summary_with_duration =
+            format_frame_submitted_log(&layout, 7, false, false, true, true, Some(421));
+        assert!(summary_with_duration.contains("submit_duration_us=421"));
     }
 
     #[test]

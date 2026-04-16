@@ -28,6 +28,7 @@ class UIEventBridge:
         self.event_queue = event_queue
         self.runtime_logging = runtime_logging
         self._running = False
+        self._primary_first_partial_emitted: set[str] = set()
 
     def _get_language_codes(self) -> tuple[str | None, str | None]:
         controller = getattr(self.app, "controller", None)
@@ -112,11 +113,31 @@ class UIEventBridge:
             source = event.source or "Mic"
             source_lang, _ = self._get_language_codes()
 
+            is_final = event.type == UIEventType.TRANSCRIPT_FINAL
+            utterance_key = str(transcript.utterance_id)
+            if is_final:
+                self._primary_first_partial_emitted.discard(utterance_key)
+                should_log = True
+                transcript_kind = "final"
+            else:
+                should_log = utterance_key not in self._primary_first_partial_emitted
+                if should_log:
+                    self._primary_first_partial_emitted.add(utterance_key)
+                transcript_kind = "partial"
+
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
-                dash.set_display_text(transcript.text, language_code=source_lang)
+                dash.set_display_text(
+                    transcript.text,
+                    language_code=source_lang,
+                    utterance_id=transcript.utterance_id,
+                    channel=transcript.channel,
+                    source_text_len=len(transcript.text),
+                    transcript_kind=transcript_kind,
+                    should_log=should_log,
+                )
 
-            if event.type == UIEventType.TRANSCRIPT_FINAL:
+            if is_final:
                 add_history = getattr(self.app, "add_history_entry", None)
                 if add_history is not None:
                     add_history(source, transcript.text, language_code=source_lang)
