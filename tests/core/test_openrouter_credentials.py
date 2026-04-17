@@ -6,17 +6,25 @@ from puripuly_heart.config.settings import AppSettings, OpenRouterCredentialSour
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_BYOK_API_KEY_SECRET,
     OPENROUTER_MANAGED_API_KEY_SECRET,
+    OPENROUTER_MANAGED_USER_ID_MAX_LENGTH,
+    OPENROUTER_MANAGED_USER_ID_SECRET,
+    OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
     OpenRouterManagedRecoveryAction,
     clear_temporary_managed_release_state,
     handle_managed_availability,
     handle_managed_release_error,
+    load_managed_openrouter_user_identifier,
+    normalize_managed_openrouter_user_identifier,
     resolve_openrouter_credentials,
 )
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 
 
-def test_resolve_openrouter_credentials_respects_none_selection_even_with_stored_keys() -> None:
+def test_resolve_openrouter_credentials_respects_explicit_none_selection_even_with_stored_keys() -> (
+    None
+):
     settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.NONE
     store = InMemorySecretStore()
     store.set(OPENROUTER_BYOK_API_KEY_SECRET, "byok-key")
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")
@@ -75,6 +83,76 @@ def test_resolve_openrouter_credentials_requires_explicit_trans_intent_before_ma
     assert resolution.requires_managed_challenge is False
     assert trans_resolution.api_key is None
     assert trans_resolution.requires_managed_challenge is True
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (" user-123 ", "user-123"),
+        ("", None),
+        ("   ", None),
+        (None, None),
+        (123, None),
+        ("x" * OPENROUTER_MANAGED_USER_ID_MAX_LENGTH, "x" * OPENROUTER_MANAGED_USER_ID_MAX_LENGTH),
+        ("x" * (OPENROUTER_MANAGED_USER_ID_MAX_LENGTH + 1), None),
+    ],
+)
+def test_normalize_managed_openrouter_user_identifier(
+    value: object,
+    expected: str | None,
+) -> None:
+    assert normalize_managed_openrouter_user_identifier(value) == expected
+
+
+def test_load_managed_openrouter_user_identifier_returns_cached_user_for_matching_installation() -> (
+    None
+):
+    settings = AppSettings()
+    settings.managed_identity.installation_id = "install-123"
+    store = InMemorySecretStore()
+    store.set(OPENROUTER_MANAGED_USER_ID_SECRET, " user-123 ")
+    store.set(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET, " install-123 ")
+
+    assert load_managed_openrouter_user_identifier(settings, secrets=store) == "user-123"
+
+
+@pytest.mark.parametrize(
+    ("current_installation_id", "cached_installation_id", "cached_user_id"),
+    [
+        ("", "install-123", "user-123"),
+        ("install-123", "other-install-123", "user-123"),
+        ("install-123", "   ", "user-123"),
+        ("install-123", "install-123", "   "),
+        (
+            "install-123",
+            "install-123",
+            "x" * (OPENROUTER_MANAGED_USER_ID_MAX_LENGTH + 1),
+        ),
+    ],
+)
+def test_load_managed_openrouter_user_identifier_returns_none_without_matching_valid_cache(
+    current_installation_id: str,
+    cached_installation_id: str,
+    cached_user_id: str,
+) -> None:
+    settings = AppSettings()
+    settings.managed_identity.installation_id = current_installation_id
+    store = InMemorySecretStore()
+    store.set(OPENROUTER_MANAGED_USER_ID_SECRET, cached_user_id)
+    store.set(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET, cached_installation_id)
+
+    assert load_managed_openrouter_user_identifier(settings, secrets=store) is None
+
+
+def test_load_managed_openrouter_user_identifier_fails_open_when_secret_store_raises() -> None:
+    class BrokenSecretStore:
+        def get(self, key: str) -> str | None:
+            raise RuntimeError(f"boom: {key}")
+
+    settings = AppSettings()
+    settings.managed_identity.installation_id = "install-123"
+
+    assert load_managed_openrouter_user_identifier(settings, secrets=BrokenSecretStore()) is None
 
 
 def test_clear_temporary_managed_release_state_clears_verified_snapshot_fields() -> None:

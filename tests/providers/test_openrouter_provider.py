@@ -215,6 +215,15 @@ def test_openrouter_provider_passes_max_tokens_to_internal_httpx_client() -> Non
     assert client.max_tokens == 17
 
 
+def test_openrouter_provider_passes_user_identifier_to_internal_httpx_client() -> None:
+    provider = OpenRouterLLMProvider(api_key="k", user_identifier="user-123")
+
+    client = provider._get_client()
+
+    assert isinstance(client, HttpxOpenRouterClient)
+    assert client.user_identifier == "user-123"
+
+
 @pytest.mark.asyncio
 async def test_openrouter_verify_api_key_uses_key_endpoint(monkeypatch) -> None:
     seen: dict[str, object] = {}
@@ -300,6 +309,7 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_la
         api_key="test-key",
         model="google/gemma-4-26b-a4b-it",
         base_url="https://example",
+        user_identifier="  managed-user-123  ",
     )
     result = await client.translate(
         text="hello",
@@ -319,6 +329,7 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_la
     assert body["model"] == "google/gemma-4-26b-a4b-it"
     assert body["max_tokens"] == 100
     assert body["reasoning"] == {"effort": "none"}
+    assert body["user"] == "managed-user-123"
     assert body["provider"] == {
         "sort": "latency",
         "allow_fallbacks": True,
@@ -385,7 +396,12 @@ async def test_httpx_openrouter_client_stream_translate_builds_streaming_request
     fake_client = FakeAsyncClient()
     monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
 
-    client = HttpxOpenRouterClient(api_key="k", model="m", base_url="https://example")
+    client = HttpxOpenRouterClient(
+        api_key="k",
+        model="m",
+        base_url="https://example",
+        user_identifier="managed-user-123",
+    )
     chunks = [
         chunk
         async for chunk in client.stream_translate(
@@ -406,6 +422,7 @@ async def test_httpx_openrouter_client_stream_translate_builds_streaming_request
     assert request["json"]["stream"] is True
     assert request["json"]["max_tokens"] == 100
     assert request["json"]["reasoning"] == {"effort": "none"}
+    assert request["json"]["user"] == "managed-user-123"
     assert request["json"]["provider"] == {
         "sort": "latency",
         "allow_fallbacks": True,

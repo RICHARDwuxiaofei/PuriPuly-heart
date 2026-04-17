@@ -30,6 +30,7 @@ from puripuly_heart.config.settings import (
 from puripuly_heart.core.llm import FallbackRacingLLMProvider
 from puripuly_heart.core.llm.provider import LLMProvider, SemaphoreLLMProvider
 from puripuly_heart.core.openrouter_credentials import (
+    load_managed_openrouter_user_identifier,
     require_openrouter_execution_api_key,
     resolve_openrouter_credentials,
 )
@@ -203,6 +204,10 @@ def _create_llm_provider_from_alias_profile(
             release_service=alias_managed_release_service,
             delegate_factory=lambda api_key: OpenRouterLLMProvider(
                 api_key=api_key,
+                user_identifier=load_managed_openrouter_user_identifier(
+                    alias_settings,
+                    secrets=secrets,
+                ),
                 model=alias_settings.openrouter.llm_model.value,
                 routing_mode=settings.openrouter.routing_mode,
                 runtime_logging=runtime_logging,
@@ -211,8 +216,12 @@ def _create_llm_provider_from_alias_profile(
         )
 
     api_key = require_openrouter_execution_api_key(alias_settings, secrets=secrets)
+    user_identifier = None
+    if alias_settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
+        user_identifier = load_managed_openrouter_user_identifier(alias_settings, secrets=secrets)
     return OpenRouterLLMProvider(
         api_key=api_key,
+        user_identifier=user_identifier,
         model=alias_settings.openrouter.llm_model.value,
         routing_mode=settings.openrouter.routing_mode,
         runtime_logging=runtime_logging,
@@ -287,6 +296,10 @@ def _create_openrouter_fallback_provider(
             release_service=fallback_managed_release_service,
             delegate_factory=lambda api_key: OpenRouterLLMProvider(
                 api_key=api_key,
+                user_identifier=load_managed_openrouter_user_identifier(
+                    resolved_settings,
+                    secrets=secrets,
+                ),
                 model=resolved_settings.openrouter.llm_model.value,
                 routing_mode=resolved_settings.openrouter.routing_mode,
                 runtime_logging=runtime_logging,

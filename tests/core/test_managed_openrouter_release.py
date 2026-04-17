@@ -31,7 +31,12 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterUserFacingError,
     ManagedOpenRouterVerifySuccess,
 )
-from puripuly_heart.core.openrouter_credentials import OPENROUTER_MANAGED_API_KEY_SECRET
+from puripuly_heart.core.openrouter_credentials import (
+    OPENROUTER_MANAGED_API_KEY_SECRET,
+    OPENROUTER_MANAGED_USER_ID_SECRET,
+    OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+    load_managed_openrouter_user_identifier,
+)
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 from puripuly_heart.domain.models import Translation
 
@@ -237,6 +242,115 @@ async def test_prepare_for_translation_runs_challenge_verify_issue_and_persists_
     assert settings.managed_identity.verified_hardware_hash_salt_version is None
     assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
     assert len(persist_calls) >= 2
+
+
+@pytest.mark.asyncio
+async def test_issue_persists_managed_user_identifier_after_managed_key_success() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    settings.managed_identity.release_token = "release-token-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
+    client = FakeManagedReleaseClient(
+        issue_result=ManagedOpenRouterIssueSuccess(
+            openrouter_api_key="managed-key",
+            openrouter_user_id="  user-123  ",
+        )
+    )
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.ensure_key_for_llm_start()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert result.api_key == "managed-key"
+    assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
+    assert secrets.get(OPENROUTER_MANAGED_USER_ID_SECRET) == "user-123"
+    assert (
+        secrets.get(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET)
+        == settings.managed_identity.installation_id
+    )
+    assert load_managed_openrouter_user_identifier(settings, secrets=secrets) == "user-123"
+
+
+@pytest.mark.asyncio
+async def test_issue_keeps_ready_and_cleans_managed_user_identifier_cache_on_second_write_failure() -> (
+    None
+):
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = FailingManagedKeySecretStore(
+        fail_on_key=OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET
+    )
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    secrets.set_attempts.clear()
+    settings.managed_identity.release_token = "release-token-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
+    client = FakeManagedReleaseClient(
+        issue_result=ManagedOpenRouterIssueSuccess(
+            openrouter_api_key="managed-key",
+            openrouter_user_id="user-123",
+        )
+    )
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.ensure_key_for_llm_start()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert result.api_key == "managed-key"
+    assert result.local_key_available is True
+    assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
+    assert secrets.get(OPENROUTER_MANAGED_USER_ID_SECRET) is None
+    assert secrets.get(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET) is None
+    assert load_managed_openrouter_user_identifier(settings, secrets=secrets) is None
+    assert secrets.set_attempts == [
+        (OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key"),
+        (OPENROUTER_MANAGED_USER_ID_SECRET, "user-123"),
+        (
+            OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+            settings.managed_identity.installation_id,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("openrouter_user_id", [None, "   "])
+async def test_issue_omission_or_invalid_user_id_preserves_existing_managed_user_identifier_cache(
+    openrouter_user_id: str | None,
+) -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    secrets.set(OPENROUTER_MANAGED_USER_ID_SECRET, "cached-user-1")
+    secrets.set(
+        OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+        settings.managed_identity.installation_id,
+    )
+    settings.managed_identity.release_token = "release-token-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
+    client = FakeManagedReleaseClient(
+        issue_result=ManagedOpenRouterIssueSuccess(
+            openrouter_api_key="managed-key",
+            openrouter_user_id=openrouter_user_id,
+        )
+    )
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.ensure_key_for_llm_start()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert result.api_key == "managed-key"
+    assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
+    assert secrets.get(OPENROUTER_MANAGED_USER_ID_SECRET) == "cached-user-1"
+    assert (
+        secrets.get(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET)
+        == settings.managed_identity.installation_id
+    )
+    assert load_managed_openrouter_user_identifier(settings, secrets=secrets) == "cached-user-1"
 
 
 @pytest.mark.asyncio

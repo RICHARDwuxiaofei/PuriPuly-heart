@@ -24,6 +24,7 @@ import {
   cleanupManagedChildKey,
   createManagedChildKey,
 } from './openrouter-management';
+import { deriveManagedOpenRouterUserId } from './openrouter-user-id';
 import {
   MANAGED_TRIAL_BUDGET_POLICY,
   MANAGED_TRIAL_POLICY,
@@ -342,7 +343,13 @@ export async function handleOpenRouterIssue(
       throw new Error('active entitlement missing after successful issue activation');
     }
 
-    return issueSuccessResponse(c, activeEntitlement, childKey.rawKey, model);
+    return await issueSuccessResponse(
+      c,
+      activeEntitlement,
+      childKey.rawKey,
+      model,
+      installationId,
+    );
   } catch (error) {
     if (childKey) {
       return handleManagedChildKeyFailure(c, {
@@ -521,18 +528,35 @@ async function getEntitlement(
     .first<OpenRouterEntitlementRecord>();
 }
 
-function issueSuccessResponse(
+async function issueSuccessResponse(
   c: Context<BrokerEnv>,
   entitlement: OpenRouterEntitlementRecord,
   rawKey: string,
   model: string,
-): Response {
+  installationId: string,
+): Promise<Response> {
   if (!entitlement.managed_credential_ref || !entitlement.expires_at) {
     throw new Error('active entitlement missing managed release metadata');
   }
 
+  const managedUserHmacSecret = nonEmptyString(
+    c.env.OPENROUTER_MANAGED_USER_HMAC_SECRET,
+  );
+  let openRouterUserId: string | null = null;
+  if (managedUserHmacSecret) {
+    try {
+      openRouterUserId = await deriveManagedOpenRouterUserId({
+        installationId,
+        secret: managedUserHmacSecret,
+      });
+    } catch {
+      openRouterUserId = null;
+    }
+  }
+
   return c.json({
     openrouter_api_key: rawKey,
+    ...(openRouterUserId ? { openrouter_user_id: openRouterUserId } : {}),
     managed_credential_ref: entitlement.managed_credential_ref,
     managed_state: {
       lifecycle: 'active',

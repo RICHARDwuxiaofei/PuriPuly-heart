@@ -23,6 +23,7 @@ from puripuly_heart.core.managed_identity import (
 )
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_MANAGED_API_KEY_SECRET,
+    best_effort_store_managed_openrouter_user_identifier,
     clear_temporary_managed_release_state,
     resolve_openrouter_credentials,
 )
@@ -120,6 +121,7 @@ class ManagedOpenRouterIssueSuccess:
     openrouter_api_key: str
     managed_credential_ref: str | None = None
     expires_at: str | None = None
+    openrouter_user_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,6 +489,11 @@ class ManagedOpenRouterReleaseService:
                 behavior=ManagedOpenRouterReleaseBehavior.STOP,
                 message_key="managed_release.stop",
             )
+        best_effort_store_managed_openrouter_user_identifier(
+            self.settings,
+            secrets=self.secrets,
+            openrouter_user_id=issue_response.openrouter_user_id,
+        )
         clear_temporary_managed_release_state(self.settings)
         self.persist_settings(self.settings)
         self._clear_retry_after()

@@ -309,6 +309,64 @@ async def test_issue_accepts_missing_or_null_optional_success_fields(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "expected_openrouter_user_id"),
+    [
+        ({}, None),
+        ({"openrouter_user_id": None}, None),
+        ({"openrouter_user_id": "   "}, None),
+        ({"openrouter_user_id": 123}, None),
+        ({"openrouter_user_id": {"id": "user-123"}}, None),
+        ({"openrouter_user_id": " user-123 "}, "user-123"),
+    ],
+)
+async def test_issue_tolerates_optional_opaque_openrouter_user_id(
+    payload: dict[str, object],
+    expected_openrouter_user_id: str | None,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "openrouter_api_key": "managed-openrouter-api-key",
+                "managed_credential_ref": "managed-credential-ref-123",
+                "expires_at": "2026-10-10T06:00:00.000Z",
+                **payload,
+                "managed_state": {
+                    "lifecycle": "active",
+                    "managed_availability": True,
+                },
+                "budget_usd": 0.08,
+                "model": "google/gemma-4-26b-a4b-it",
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.issue(
+        {
+            "installation_id": "install-123",
+            "device_public_key": "device-public-key-123",
+            "release_token": "release-token-123",
+            "hardware_hash": "hardware-hash-123",
+            "reason": "llm_start",
+            "budget_usd": 0.08,
+            "model": "google/gemma-4-26b-a4b-it",
+            "signed_at": "2026-04-10T06:00:45.000Z",
+            "signature": "signature-123",
+        }
+    )
+
+    assert result == ManagedOpenRouterIssueSuccess(
+        openrouter_api_key="managed-openrouter-api-key",
+        managed_credential_ref="managed-credential-ref-123",
+        expires_at="2026-10-10T06:00:00.000Z",
+        openrouter_user_id=expected_openrouter_user_id,
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_nested_broker_error_envelope_becomes_release_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

@@ -12,6 +12,7 @@ from uuid import UUID
 import httpx
 
 from puripuly_heart.config.settings import OpenRouterRoutingMode
+from puripuly_heart.core.openrouter_credentials import normalize_managed_openrouter_user_identifier
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.models import Translation
 
@@ -220,6 +221,7 @@ def _optional_number(value: object) -> float | None:
 @dataclass(slots=True)
 class OpenRouterLLMProvider:
     api_key: str
+    user_identifier: str | None = None
     base_url: str = "https://openrouter.ai/api/v1"
     model: str = "google/gemma-4-26b-a4b-it"
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
@@ -235,6 +237,7 @@ class OpenRouterLLMProvider:
         if self._internal_client is None:
             self._internal_client = HttpxOpenRouterClient(
                 api_key=self.api_key,
+                user_identifier=self.user_identifier,
                 model=self.model,
                 base_url=self.base_url,
                 routing_mode=self.routing_mode,
@@ -339,6 +342,7 @@ class OpenRouterLLMProvider:
 class HttpxOpenRouterClient:
     api_key: str
     model: str
+    user_identifier: str | None = None
     base_url: str = "https://openrouter.ai/api/v1"
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
     max_tokens: int = 100
@@ -383,6 +387,9 @@ class HttpxOpenRouterClient:
             "provider": _build_provider_preferences(self.routing_mode),
             "max_tokens": self.max_tokens,
         }
+        user_identifier = normalize_managed_openrouter_user_identifier(self.user_identifier)
+        if user_identifier is not None:
+            request_body["user"] = user_identifier
         if stream:
             request_body["stream"] = True
         return request_body

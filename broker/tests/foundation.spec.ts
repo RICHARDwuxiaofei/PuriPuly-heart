@@ -32,6 +32,7 @@ describe('broker foundation', () => {
           'OPENROUTER_MANAGED_API_KEY',
           'OPENROUTER_MANAGEMENT_API_KEY',
           'OPENROUTER_MANAGED_GUARDRAIL_ID',
+          'OPENROUTER_MANAGED_USER_HMAC_SECRET',
         ],
       },
       hosting: {

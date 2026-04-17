@@ -28,6 +28,7 @@ jobs:
       OPENROUTER_MANAGED_API_KEY_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_API_KEY_PRODUCTION }}
       OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION: ${{ secrets.OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION }}
       OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION }}
+      OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION }}
       BROKER_CANONICAL_WORKERS_DEV_URL: ${{ vars.BROKER_CANONICAL_WORKERS_DEV_URL }}
       BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION: ${{ vars.BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION }}
       BROKER_CANONICAL_WORKER_NAME: puripuly-heart-broker
@@ -52,6 +53,11 @@ jobs:
 
           if [[ -z "${BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION//[[:space:]]/}" ]]; then
             echo 'BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION is required and must not be blank.' >&2
+            exit 1
+          fi
+
+          if [[ -z "${OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION//[[:space:]]/}" ]]; then
+            echo 'OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION is required and must not be blank.' >&2
             exit 1
           fi
 
@@ -336,6 +342,10 @@ jobs:
           # OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION must assign the canonical production guardrail to every issued child key.
           printf '%s' "$OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION" \
             | pnpm exec wrangler secret put OPENROUTER_MANAGED_GUARDRAIL_ID --config "${{ steps.render.outputs.config_path }}"
+          # OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION derives the deterministic managed OpenRouter user id
+          # for each installation at runtime via OPENROUTER_MANAGED_USER_HMAC_SECRET.
+          printf '%s' "$OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION" \
+            | pnpm exec wrangler secret put OPENROUTER_MANAGED_USER_HMAC_SECRET --config "${{ steps.render.outputs.config_path }}"
 
       - name: Deploy canonical broker worker
         working-directory: broker
