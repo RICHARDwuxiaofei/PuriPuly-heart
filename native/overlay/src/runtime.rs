@@ -502,7 +502,6 @@ impl OverlayRuntime {
                 .render_blocks(blocks)
                 .map_err(|error| RuntimeFailure::Render(error.to_string()))?
         };
-        let visible_block_count = frame.layout().visible_blocks.len();
         let self_block_count = visible_self_block_count(frame.layout());
         let fully_transparent = frame.is_fully_transparent();
         let rendered_diagnostic_rows = collect_rendered_diagnostic_rows(self.state(), frame.layout());
@@ -540,13 +539,7 @@ impl OverlayRuntime {
             .await?;
         self.emit_peer_overlay_first_render_hooks(logger, peer_overlay_first_render_ids)
             .await?;
-        if detailed_logging
-            && should_log_frame_submitted(
-                visible_block_count,
-                self_block_count,
-                self.last_submitted_had_self,
-            )
-        {
+        if detailed_logging {
             log_runtime_info(
                 logger,
                 format_frame_submitted_log(
@@ -1159,14 +1152,6 @@ fn visible_self_block_count(layout: &CaptionLayoutResult) -> usize {
         .count()
 }
 
-fn should_log_frame_submitted(
-    visible_block_count: usize,
-    self_block_count: usize,
-    last_submitted_had_self: bool,
-) -> bool {
-    self_block_count > 0 || (visible_block_count == 0 && last_submitted_had_self)
-}
-
 fn format_frame_submitted_log(
     layout: &CaptionLayoutResult,
     revision: u64,
@@ -1454,8 +1439,8 @@ mod tests {
         format_snapshot_received_log, format_snapshot_slot_correlation_log,
         format_two_row_window_closed_log, peer_overlay_first_emit_block_ids_from_snapshot,
         peer_overlay_first_render_block_ids_from_caption_blocks, prepare_openvr_runtime,
-        should_log_frame_submitted, DiagnosticRow, OverlayRuntime, RenderedDiagnosticRow,
-        SnapshotApplyOutcome, StartupError, TwoRowWindowState,
+        DiagnosticRow, OverlayRuntime, RenderedDiagnosticRow, SnapshotApplyOutcome, StartupError,
+        TwoRowWindowState,
     };
     use crate::openvr::{OpenVrError, OpenVrStartupPreflightError};
     use crate::renderer::{
@@ -2010,14 +1995,6 @@ mod tests {
         let summary_with_duration =
             format_frame_submitted_log(&layout, 7, false, false, true, true, Some(421));
         assert!(summary_with_duration.contains("submit_duration_us=421"));
-    }
-
-    #[test]
-    fn frame_submitted_logging_decision_keeps_self_clear_frames() {
-        assert!(should_log_frame_submitted(2, 1, false));
-        assert!(should_log_frame_submitted(0, 0, true));
-        assert!(!should_log_frame_submitted(1, 0, true));
-        assert!(!should_log_frame_submitted(0, 0, false));
     }
 
     #[test]
