@@ -515,7 +515,7 @@ def test_create_stt_backend_local_qwen_passes_language_hint_without_hotwords() -
     assert getattr(backend, "hotwords", ()) == ()
 
 
-def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None:
+def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration_without_hint_terms() -> None:
     settings = AppSettings(
         provider=ProviderSettings(stt=STTProviderName.SONIOX),
         deepgram_stt=DeepgramSTTSettings(model="nova-3"),
@@ -531,11 +531,11 @@ def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None
     assert backend.model == "nova-3"
     assert backend.sample_rate_hz == 16000
     assert backend.language == get_deepgram_language(settings.languages.source_language)
-    assert list(backend.keyterms) == ["아이리", "시나노"]
+    assert list(backend.keyterms) == []
     assert backend.stream_label == "peer"
 
 
-def test_create_peer_stt_backend_uses_effective_peer_source_language_and_terms() -> None:
+def test_create_peer_stt_backend_uses_effective_peer_source_language_without_hint_terms() -> None:
     settings = AppSettings(
         provider=ProviderSettings(stt=STTProviderName.SONIOX),
         deepgram_stt=DeepgramSTTSettings(model="nova-3"),
@@ -549,7 +549,7 @@ def test_create_peer_stt_backend_uses_effective_peer_source_language_and_terms()
 
     assert isinstance(backend, DeepgramRealtimeSTTBackend)
     assert backend.language == get_deepgram_language(settings.languages.effective_peer_source)
-    assert list(backend.keyterms) == ["airi", "shinano"]
+    assert list(backend.keyterms) == []
 
 
 def test_self_stt_provider_setting_does_not_change_peer_backend_choice() -> None:

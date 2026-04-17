@@ -68,7 +68,7 @@ def test_managed_trial_usage_bar_apply_locale_refreshes_overlay_text() -> None:
 
     set_locale("ko")
     bar.apply_locale()
-    assert bar._remaining_text.value == "71% 남음"
+    assert bar._remaining_text.value == "사용량 71% 남음"
 
     bar.set_percent(None)
     bar.apply_locale()

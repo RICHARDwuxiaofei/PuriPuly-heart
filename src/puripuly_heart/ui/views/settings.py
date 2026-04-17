@@ -39,6 +39,7 @@ from puripuly_heart.ui.components.settings import (
     OptionItem,
     PromptEditor,
     SettingsModal,
+    SettingsUnitCard,
 )
 from puripuly_heart.ui.components.shared_card_wrapper import SharedCardWrapper
 from puripuly_heart.ui.components.subtab_shell import TextSubtab, TextSubtabShell
@@ -195,6 +196,28 @@ class SettingsView(ft.Column):
             height=height,
         )
 
+    def _wrap_unit_card(
+        self,
+        *,
+        title: ft.Control,
+        value: ft.Control,
+        extra_controls: tuple[ft.Control, ...] = (),
+        height: float | int | None = SettingsUnitCard.DEFAULT_HEIGHT,
+    ) -> SettingsUnitCard:
+        return SettingsUnitCard(
+            title=title,
+            value=value,
+            extra_controls=extra_controls,
+            height=height,
+        )
+
+    def _wrap_empty_unit_card(
+        self,
+        *,
+        height: float | int | None = SettingsUnitCard.DEFAULT_HEIGHT,
+    ) -> SharedCardWrapper:
+        return self._wrap_card(ft.Container(expand=True), expand=True, height=height)
+
     # --- Clickable Text Builders ---
     def _build_clickable_text(
         self,
@@ -243,6 +266,28 @@ class SettingsView(ft.Column):
         text_control.value = text
         text_control.size = _setting_action_text_size(text)
 
+    def _set_unit_card_value_text(
+        self, control: ft.Container, text: str, *, size: int = 28
+    ) -> None:
+        text_control = control.content
+        text_control.value = text
+        text_control.size = size
+
+    def _sync_general_audio_card_texts(self) -> None:
+        default_label = t("settings.default_option")
+        self._set_unit_card_value_text(
+            self._mic_audio_text,
+            self._audio_settings.microphone or default_label,
+        )
+        self._set_unit_card_value_text(
+            self._audio_host_api_text,
+            self._audio_settings.host_api or default_label,
+        )
+        self._set_unit_card_value_text(
+            self._loopback_audio_text,
+            self._audio_settings.desktop_output_device or default_label,
+        )
+
     def _on_text_hover(self, e: ft.ControlEvent) -> None:
         """Handle hover effect on clickable text."""
         container = e.control
@@ -253,7 +298,7 @@ class SettingsView(ft.Column):
         text_control.color = next_color
         container.update()
 
-    def _get_button_style(self, font_family: str) -> ft.ButtonStyle:
+    def _get_button_style(self, font_family: str, *, size: int = 20) -> ft.ButtonStyle:
         """Create a complete ButtonStyle with the specified font."""
         return ft.ButtonStyle(
             color={
@@ -265,7 +310,7 @@ class SettingsView(ft.Column):
                 ft.ControlState.DEFAULT: COLOR_NEUTRAL,
             },
             text_style=ft.TextStyle(
-                size=20,
+                size=size,
                 font_family=font_family,
             ),
             overlay_color=ft.Colors.TRANSPARENT,
@@ -278,20 +323,14 @@ class SettingsView(ft.Column):
     def _build_settings_subtab_shell(
         self, tab_rows: dict[str, list[ft.Control]]
     ) -> TextSubtabShell:
-        self._settings_shell_title = ft.Text(
-            t("settings.title"),
-            size=32,
-            weight=ft.FontWeight.W_700,
-            color=COLOR_ON_BACKGROUND,
-        )
         return TextSubtabShell(
-            title=self._settings_shell_title,
             tabs=[
                 TextSubtab(key, self._settings_subtab_label(key), tuple(tab_rows[key]))
                 for key in _SETTINGS_SUBTAB_ORDER
             ],
             font_family=font_for_language(get_locale()),
             initial_key=_SETTINGS_SUBTAB_ORDER[0],
+            subtab_bar_position="bottom",
         )
 
     def _build_setting_action_row(self, label: ft.Text, action: ft.Control) -> ft.Row:
@@ -315,14 +354,14 @@ class SettingsView(ft.Column):
             return
         logger.log(level, message)
 
-    def _build_action_button(self, text: str, on_click) -> ft.TextButton:
+    def _build_action_button(self, text: str, on_click, *, size: int = 20) -> ft.TextButton:
         return _make_text_button(
             text,
-            style=self._get_button_style(font_for_language(get_locale())),
+            style=self._get_button_style(font_for_language(get_locale()), size=size),
             on_click=on_click,
         )
 
-    def _build_integrated_context_prompt_card(self) -> SharedCardWrapper:
+    def _build_integrated_context_unit_card(self) -> SettingsUnitCard:
         self._integrated_context_label = ft.Text(
             t("settings.integrated_context"),
             size=24,
@@ -332,31 +371,15 @@ class SettingsView(ft.Column):
         self._integrated_context_button = self._build_action_button(
             t("settings.context.local"),
             self._on_integrated_context_click,
+            size=28,
         )
         self._integrated_context_hint = ft.Text("", size=13, color=COLOR_NEUTRAL)
 
-        integrated_context_header = ft.Row(
-            controls=[
-                self._integrated_context_label,
-                ft.Container(expand=True),
-                self._integrated_context_button,
-            ],
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        self._integrated_context_card = self._wrap_unit_card(
+            title=self._integrated_context_label,
+            value=self._integrated_context_button,
         )
-        self._integrated_context_prompt_card = SharedCardWrapper(
-            ft.Column(
-                [
-                    integrated_context_header,
-                    ft.Container(height=8),
-                    self._integrated_context_hint,
-                ],
-                spacing=0,
-            ),
-            height=None,
-            expand=False,
-        )
-        return self._integrated_context_prompt_card
+        return self._integrated_context_card
 
     def _build_overlay_calibration_field(
         self,
@@ -443,7 +466,7 @@ class SettingsView(ft.Column):
     def _build_ui(self) -> None:
         """Build the settings UI with Bento grid layout."""
         # === API provider surfaces: Self STT + Peer STT + Shared Translation ===
-        self._stt_text = self._build_setting_action_text(
+        self._stt_text = self._build_clickable_text(
             provider_label(STTProviderName.LOCAL_QWEN.value),
             self._on_stt_click,
         )
@@ -451,23 +474,14 @@ class SettingsView(ft.Column):
             t("settings.section.stt"), size=24, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL
         )
         self._stt_provider_label = ft.Text(
-            t("settings.self_stt_provider"),
-            size=16,
-            color=COLOR_ON_BACKGROUND,
+            t("settings.self_stt_provider"), size=16, color=COLOR_ON_BACKGROUND
         )
-        stt_card = self._wrap_card(
-            ft.Column(
-                [
-                    self._stt_title,
-                    ft.Container(height=12),
-                    self._build_setting_action_row(self._stt_provider_label, self._stt_text),
-                ],
-                spacing=6,
-                expand=True,
-            )
+        stt_card = self._wrap_unit_card(
+            title=self._stt_title,
+            value=self._stt_text,
         )
 
-        self._llm_text = self._build_setting_action_text(
+        self._llm_text = self._build_clickable_text(
             t("provider.gemini3_flash"),
             self._on_llm_click,
         )
@@ -478,23 +492,11 @@ class SettingsView(ft.Column):
             color=COLOR_NEUTRAL,
         )
         self._translation_provider_label = ft.Text(
-            t("settings.shared_translation_provider"),
-            size=16,
-            color=COLOR_ON_BACKGROUND,
+            t("settings.shared_translation_provider"), size=16, color=COLOR_ON_BACKGROUND
         )
-        trans_card = self._wrap_card(
-            ft.Column(
-                [
-                    self._trans_title,
-                    ft.Container(height=12),
-                    self._build_setting_action_row(
-                        self._translation_provider_label,
-                        self._llm_text,
-                    ),
-                ],
-                spacing=6,
-                expand=True,
-            )
+        trans_card = self._wrap_unit_card(
+            title=self._trans_title,
+            value=self._llm_text,
         )
 
         # === Row 2: API Keys (2x1) ===
@@ -617,8 +619,6 @@ class SettingsView(ft.Column):
             ft.Column(
                 [
                     api_header,
-                    ft.Container(height=8),
-                    self._api_credentials_helper_text,
                     ft.Container(height=16),
                     self._api_keys_column,
                 ],
@@ -626,9 +626,9 @@ class SettingsView(ft.Column):
             ),
             height=None,
         )
-        row2 = api_card
+        api_keys_row = api_card
 
-        # === Row 3: UI (1x1) + Audio (1x1) ===
+        # === General Tab Row 1: UI / Include Original / Integrated Context ===
         self._ui_text = self._build_clickable_text(
             locale_label(get_locale()),
             self._on_ui_click,
@@ -636,23 +636,105 @@ class SettingsView(ft.Column):
         self._ui_title = ft.Text(
             t("settings.section.ui"), size=24, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL
         )
-        ui_card = self._wrap_card(
-            ft.Column([self._ui_title, self._ui_text], spacing=0, expand=True)
+        ui_card = self._wrap_unit_card(
+            title=self._ui_title,
+            value=self._ui_text,
         )
 
         self._audio_settings = AudioSettings(on_change=self._on_audio_change)
-        self._audio_title = ft.Text(
-            t("settings.section.audio"), size=24, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL
+        self._chatbox_source_text = self._build_clickable_text(
+            t("settings.chatbox_source.on"),
+            self._on_chatbox_source_click,
         )
-        audio_card = self._wrap_card(
-            ft.Column([self._audio_title, ft.Container(height=16), self._audio_settings], spacing=0)
+        self._chatbox_source_title = ft.Text(
+            t("settings.chatbox_include_source"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        chatbox_source_card = self._wrap_unit_card(
+            title=self._chatbox_source_title,
+            value=self._chatbox_source_text,
         )
 
-        row3 = ft.Container(
-            content=ft.Row([ui_card, audio_card], spacing=16, expand=True),
+        self._vrc_mic_text = self._build_clickable_text(
+            t("settings.vrc_mic.on"),
+            self._on_vrc_mic_click,
+        )
+        self._vrc_mic_title = ft.Text(
+            t("settings.vrc_mic_intercept"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        vrc_mic_card = self._wrap_unit_card(
+            title=self._vrc_mic_title,
+            value=self._vrc_mic_text,
         )
 
-        # === Row 4: Low Latency (1x1) + VAD (1x1) ===
+        integrated_context_card = self._build_integrated_context_unit_card()
+
+        general_primary_row = ft.Container(
+            content=ft.Row(
+                [ui_card, chatbox_source_card, integrated_context_card],
+                spacing=16,
+                expand=True,
+            ),
+        )
+
+        # === General Tab Row 2: Host API / Microphone Audio / Loopback Audio ===
+        self._mic_audio_text = self._build_clickable_text(
+            t("settings.default_option"),
+            self._on_mic_audio_click,
+        )
+        self._audio_host_api_title = ft.Text(
+            t("settings.audio_host_api"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._audio_host_api_text = self._build_clickable_text(
+            t("settings.default_option"),
+            self._on_mic_host_api_click,
+        )
+        host_api_card = self._wrap_unit_card(
+            title=self._audio_host_api_title,
+            value=self._audio_host_api_text,
+        )
+        self._mic_audio_title = ft.Text(
+            t("settings.section.microphone_audio"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        mic_audio_card = self._wrap_unit_card(
+            title=self._mic_audio_title,
+            value=self._mic_audio_text,
+        )
+
+        self._loopback_audio_text = self._build_clickable_text(
+            t("settings.default_option"),
+            self._on_loopback_audio_click,
+        )
+        self._loopback_audio_title = ft.Text(
+            t("settings.section.loopback_audio"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        loopback_audio_card = self._wrap_unit_card(
+            title=self._loopback_audio_title,
+            value=self._loopback_audio_text,
+        )
+        general_audio_row = ft.Container(
+            content=ft.Row(
+                [host_api_card, mic_audio_card, loopback_audio_card],
+                spacing=16,
+                expand=True,
+            ),
+        )
+
+        # === API Tab Row 2: Response Mode / Routing / Fallback ===
         self._low_latency_text = self._build_clickable_text(
             t("toggle.off"),
             self._on_low_latency_click,
@@ -663,21 +745,17 @@ class SettingsView(ft.Column):
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
-        low_latency_card = self._wrap_card(
-            ft.Column([self._low_latency_title, self._low_latency_text], spacing=0, expand=True)
+        self._low_latency_card = self._wrap_unit_card(
+            title=self._low_latency_title,
+            value=self._low_latency_text,
         )
 
-        # VAD Box
-        self._vad_title = ft.Text(
-            t("settings.vad_sensitivity"),
+        # === General Tab Row 3: VRChat Mute Sync / Self VAD / Peer VAD ===
+        self._self_vad_title = ft.Text(
+            t("settings.section.self_vad_sensitivity"),
             size=24,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
-        )
-        self._self_vad_label = ft.Text(
-            t("settings.vad.self"),
-            size=16,
-            color=COLOR_ON_BACKGROUND,
         )
         self._vad_slider = ft.Slider(
             min=0.0,
@@ -688,6 +766,27 @@ class SettingsView(ft.Column):
             active_color=COLOR_PRIMARY,
             on_change=self._handle_vad_visual_change,
             on_change_end=self._handle_vad_change,
+        )
+        self._self_vad_card = self._wrap_unit_card(
+            title=self._self_vad_title,
+            value=ft.Container(content=self._vad_slider, alignment=_CENTER_ALIGNMENT, expand=True),
+        )
+
+        self._peer_vad_title = ft.Text(
+            t("settings.section.peer_vad_sensitivity"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._peer_vad_slider = ft.Slider(
+            min=0.0,
+            max=1.0,
+            divisions=20,
+            value=0.6,
+            label="0.60",
+            active_color=COLOR_PRIMARY,
+            on_change=self._handle_peer_vad_visual_change,
+            on_change_end=self._handle_peer_vad_change,
         )
         self._peer_vad_field = self._build_numeric_setting_field(
             label=t("settings.vad.peer"),
@@ -704,68 +803,22 @@ class SettingsView(ft.Column):
             value="500",
             on_change_end=self._on_peer_pre_roll_change,
         )
-        vad_card = self._wrap_card(
-            ft.Column(
-                [
-                    self._vad_title,
-                    ft.Container(height=12),
-                    self._self_vad_label,
-                    ft.Container(
-                        content=self._vad_slider,
-                        alignment=_CENTER_ALIGNMENT,
-                        padding=ft.padding.only(top=4, bottom=8),
-                    ),
-                    ft.Row(
-                        controls=[
-                            self._peer_vad_field,
-                            self._peer_hangover_field,
-                            self._peer_pre_roll_field,
-                        ],
-                        spacing=8,
-                    ),
-                ],
-                spacing=6,
+        self._peer_vad_card = self._wrap_unit_card(
+            title=self._peer_vad_title,
+            value=ft.Container(
+                content=self._peer_vad_slider,
+                alignment=_CENTER_ALIGNMENT,
                 expand=True,
-            )
+            ),
         )
-
-        row4 = ft.Container(
-            content=ft.Row([low_latency_card, vad_card], spacing=16, expand=True),
-        )
-
-        # === Row 5: VRChat Mic Sync (1x1) + Overlay (1x1) ===
-        self._vrc_mic_text = self._build_clickable_text(
-            t("settings.vrc_mic.on"),
-            self._on_vrc_mic_click,
-        )
-        self._vrc_mic_title = ft.Text(
-            t("settings.vrc_mic_intercept"),
-            size=24,
-            weight=ft.FontWeight.BOLD,
-            color=COLOR_NEUTRAL,
-        )
-        vrc_mic_card = self._wrap_card(
-            ft.Column([self._vrc_mic_title, self._vrc_mic_text], spacing=0, expand=True)
-        )
-
-        # === Chatbox source toggle card ===
-        self._chatbox_source_text = self._build_clickable_text(
-            t("settings.chatbox_source.on"),
-            self._on_chatbox_source_click,
-        )
-        self._chatbox_source_title = ft.Text(
-            t("settings.chatbox_include_source"),
-            size=24,
-            weight=ft.FontWeight.BOLD,
-            color=COLOR_NEUTRAL,
-        )
-        chatbox_source_card = self._wrap_card(
-            ft.Column(
-                [self._chatbox_source_title, self._chatbox_source_text],
-                spacing=0,
+        general_vad_row = ft.Container(
+            content=ft.Row(
+                [vrc_mic_card, self._self_vad_card, self._peer_vad_card],
+                spacing=16,
                 expand=True,
-            )
+            ),
         )
+
         # === Peer STT card ===
         self._peer_provider_title = ft.Text(
             t("settings.section.peer_stt"),
@@ -778,7 +831,7 @@ class SettingsView(ft.Column):
             size=16,
             color=COLOR_NEUTRAL,
         )
-        self._peer_stt_text = self._build_setting_action_text(
+        self._peer_stt_text = self._build_clickable_text(
             provider_label(STTProviderName.DEEPGRAM.value),
             self._on_peer_stt_click,
         )
@@ -814,44 +867,26 @@ class SettingsView(ft.Column):
             size=16,
             color=COLOR_ON_BACKGROUND,
         )
-        peer_stt_card = self._wrap_card(
-            ft.Column(
-                [
-                    self._peer_provider_title,
-                    ft.Container(height=8),
-                    self._dashboard_language_redirect_text,
-                    ft.Container(height=12),
-                    self._build_setting_action_row(
-                        self._peer_stt_label,
-                        self._peer_stt_text,
-                    ),
-                    self._build_setting_action_row(
-                        self._peer_qwen_region_label,
-                        self._peer_qwen_region_text,
-                    ),
-                    self._build_setting_action_row(
-                        self._peer_qwen_model_label,
-                        self._peer_qwen_model_text,
-                    ),
-                    self._build_setting_action_row(
-                        self._peer_soniox_model_label,
-                        self._peer_soniox_model_text,
-                    ),
-                ],
-                spacing=6,
-                expand=True,
-            )
+        peer_stt_card = self._wrap_unit_card(
+            title=self._peer_provider_title,
+            value=self._peer_stt_text,
+            extra_controls=(
+                self._build_setting_action_row(
+                    self._peer_qwen_region_label,
+                    self._peer_qwen_region_text,
+                ),
+                self._build_setting_action_row(
+                    self._peer_qwen_model_label,
+                    self._peer_qwen_model_text,
+                ),
+                self._build_setting_action_row(
+                    self._peer_soniox_model_label,
+                    self._peer_soniox_model_text,
+                ),
+            ),
         )
         row1 = ft.Container(
             content=ft.Row([stt_card, peer_stt_card, trans_card], spacing=16, expand=True),
-        )
-
-        row_chatbox_source = ft.Container(
-            content=ft.Row(
-                [vrc_mic_card, chatbox_source_card],
-                spacing=16,
-                expand=True,
-            ),
         )
 
         self._overlay_display_options_title = ft.Text(
@@ -1028,12 +1063,9 @@ class SettingsView(ft.Column):
             t("settings.openrouter_routing.latency"),
             self._on_openrouter_routing_click,
         )
-        self._openrouter_routing_card = self._wrap_card(
-            ft.Column(
-                [self._openrouter_routing_title, self._openrouter_routing_text],
-                spacing=0,
-                expand=True,
-            )
+        self._openrouter_routing_card = self._wrap_unit_card(
+            title=self._openrouter_routing_title,
+            value=self._openrouter_routing_text,
         )
         self._openrouter_fallback_title = ft.Text(
             t("settings.openrouter_fallback"),
@@ -1050,21 +1082,17 @@ class SettingsView(ft.Column):
             size=16,
             color=COLOR_NEUTRAL,
         )
-        self._openrouter_fallback_card = self._wrap_card(
-            ft.Column(
-                [
-                    self._openrouter_fallback_title,
-                    self._openrouter_fallback_text,
-                    ft.Container(height=8),
-                    self._openrouter_fallback_helper_text,
-                ],
-                spacing=0,
-                expand=True,
-            )
+        self._openrouter_fallback_card = self._wrap_unit_card(
+            title=self._openrouter_fallback_title,
+            value=self._openrouter_fallback_text,
         )
         self._openrouter_routing_row = ft.Container(
             content=ft.Row(
-                [self._openrouter_routing_card, self._openrouter_fallback_card],
+                [
+                    self._low_latency_card,
+                    self._openrouter_routing_card,
+                    self._openrouter_fallback_card,
+                ],
                 spacing=16,
                 expand=True,
             ),
@@ -1125,8 +1153,6 @@ class SettingsView(ft.Column):
             ft.Column(
                 [
                     persona_header,
-                    ft.Container(height=8),
-                    self._prompt_for_text,
                     ft.Container(height=16),
                     prompt_container,
                 ],
@@ -1135,8 +1161,6 @@ class SettingsView(ft.Column):
             height=None,
             expand=False,
         )
-        integrated_context_card = self._build_integrated_context_prompt_card()
-
         # === Row 9: Custom Vocabulary (2x1) ===
         self._custom_vocab_title = ft.Text(
             t("settings.section.custom_vocabulary"),
@@ -1180,8 +1204,6 @@ class SettingsView(ft.Column):
             ft.Column(
                 [
                     custom_vocab_header,
-                    ft.Container(height=8),
-                    self._custom_vocab_helper_text,
                     ft.Container(height=16),
                     self._custom_vocab_terms,
                 ],
@@ -1193,9 +1215,9 @@ class SettingsView(ft.Column):
 
         self._settings_subtab_shell = self._build_settings_subtab_shell(
             {
-                "api": [row1, row2, self._openrouter_routing_row],
-                "general": [row3, row4, row_chatbox_source],
-                "prompt": [persona_card, integrated_context_card, row7],
+                "api": [row1, self._openrouter_routing_row, api_keys_row],
+                "general": [general_primary_row, general_audio_row, general_vad_row],
+                "prompt": [row7, persona_card],
                 "overlay": [self._overlay_display_options_card, self._overlay_calibration_card],
             }
         )
@@ -1570,11 +1592,11 @@ class SettingsView(ft.Column):
         self._ui_text.content.value = locale_label(settings.ui.locale)
 
         # STT Provider
-        self._set_setting_action_text(
+        self._set_unit_card_value_text(
             self._stt_text,
             provider_label(settings.provider.stt.value),
         )
-        self._set_setting_action_text(
+        self._set_unit_card_value_text(
             self._peer_stt_text,
             provider_label(self._effective_peer_stt_provider(settings).value),
         )
@@ -1593,7 +1615,7 @@ class SettingsView(ft.Column):
         self._update_api_visibility()
 
         # LLM Provider
-        self._set_setting_action_text(
+        self._set_unit_card_value_text(
             self._llm_text,
             self._get_llm_display_label(settings),
         )
@@ -1610,10 +1632,13 @@ class SettingsView(ft.Column):
         self._audio_settings.host_api = settings.audio.input_host_api
         self._audio_settings.microphone = settings.audio.input_device
         self._audio_settings.desktop_output_device = settings.desktop_audio.output_device
+        self._sync_general_audio_card_texts()
 
         # VAD
         self._vad_slider.value = settings.stt.vad_speech_threshold
         self._vad_slider.label = f"{settings.stt.vad_speech_threshold:.2f}"
+        self._peer_vad_slider.value = settings.desktop_audio.vad_speech_threshold
+        self._peer_vad_slider.label = f"{settings.desktop_audio.vad_speech_threshold:.2f}"
         self._peer_vad_field.value = f"{settings.desktop_audio.vad_speech_threshold:.2f}"
         self._peer_hangover_field.value = str(settings.desktop_audio.vad_hangover_ms)
         self._peer_pre_roll_field.value = str(settings.desktop_audio.vad_pre_roll_ms)
@@ -1833,7 +1858,7 @@ class SettingsView(ft.Column):
         self.has_provider_changes = True
 
         # Update text
-        self._set_setting_action_text(self._stt_text, provider_label(provider.value))
+        self._set_unit_card_value_text(self._stt_text, provider_label(provider.value))
 
         # Check compatibility warning
         source_lang = self._settings.languages.source_language
@@ -1887,7 +1912,7 @@ class SettingsView(ft.Column):
             return
         draft = self._ensure_provider_settings_draft()
         draft.provider.peer_stt = provider
-        self._set_setting_action_text(self._peer_stt_text, provider_label(value))
+        self._set_unit_card_value_text(self._peer_stt_text, provider_label(value))
         self._update_api_visibility()
         if self.page:
             self._peer_stt_text.update()
@@ -2037,11 +2062,6 @@ class SettingsView(ft.Column):
                 value=QwenLLMModel.QWEN_35_PLUS.value,
                 label=t("provider.qwen35_plus"),
                 description=t("provider.qwen35_plus.description", default=""),
-            ),
-            OptionItem(
-                value=QwenLLMModel.QWEN_35_FLASH.value,
-                label=t("provider.qwen35_flash"),
-                description=t("provider.qwen35_flash.description", default=""),
             ),
         ]
         display_settings = self._build_settings_with_provider_draft()
@@ -2203,7 +2223,7 @@ class SettingsView(ft.Column):
         # Update text
         display_settings = self._build_settings_with_provider_draft()
         assert display_settings is not None
-        self._set_setting_action_text(
+        self._set_unit_card_value_text(
             self._llm_text,
             self._get_llm_display_label(display_settings),
         )
@@ -2308,16 +2328,6 @@ class SettingsView(ft.Column):
                 value=OpenRouterRoutingMode.LATENCY.value,
                 label=t("settings.openrouter_routing.latency"),
                 description=t("settings.openrouter_routing.latency.description", default=""),
-            ),
-            OptionItem(
-                value=OpenRouterRoutingMode.PARASAIL_FIRST.value,
-                label=t("settings.openrouter_routing.parasail_first"),
-                description=t("settings.openrouter_routing.parasail_first.description", default=""),
-            ),
-            OptionItem(
-                value=OpenRouterRoutingMode.NOVITA_FIRST.value,
-                label=t("settings.openrouter_routing.novita_first"),
-                description=t("settings.openrouter_routing.novita_first.description", default=""),
             ),
         ]
         display_settings = self._build_settings_with_provider_draft()
@@ -2477,6 +2487,68 @@ class SettingsView(ft.Column):
         self._settings.audio.input_device = new_device
         self._settings.desktop_audio.output_device = new_desktop_output
         self._emit_settings_changed()
+
+    def _on_mic_host_api_click(self, e) -> None:
+        if not self.page:
+            return
+        options = self._audio_settings._get_host_api_options()
+        modal = SettingsModal(
+            self.page,
+            t("settings.audio_host_api"),
+            options,
+            self._on_mic_host_api_selected,
+            show_description=False,
+        )
+        modal.open(self._audio_settings.host_api)
+
+    def _on_mic_host_api_selected(self, value: str) -> None:
+        self._audio_settings.host_api = value
+        self._audio_settings.microphone = ""
+        self._sync_general_audio_card_texts()
+        if self.page:
+            self._mic_audio_text.update()
+            self._audio_host_api_text.update()
+        self._on_audio_change()
+
+    def _on_mic_audio_click(self, e) -> None:
+        if not self.page:
+            return
+        options = self._audio_settings._get_microphone_options()
+        modal = SettingsModal(
+            self.page,
+            t("settings.section.microphone_audio"),
+            options,
+            self._on_mic_audio_selected,
+            show_description=False,
+        )
+        modal.open(self._audio_settings.microphone)
+
+    def _on_mic_audio_selected(self, value: str) -> None:
+        self._audio_settings.microphone = value
+        self._sync_general_audio_card_texts()
+        if self.page:
+            self._mic_audio_text.update()
+        self._on_audio_change()
+
+    def _on_loopback_audio_click(self, e) -> None:
+        if not self.page:
+            return
+        options = self._audio_settings._get_desktop_output_options()
+        modal = SettingsModal(
+            self.page,
+            t("settings.section.loopback_audio"),
+            options,
+            self._on_loopback_audio_selected,
+            show_description=False,
+        )
+        modal.open(self._audio_settings.desktop_output_device)
+
+    def _on_loopback_audio_selected(self, value: str) -> None:
+        self._audio_settings.desktop_output_device = value
+        self._sync_general_audio_card_texts()
+        if self.page:
+            self._loopback_audio_text.update()
+        self._on_audio_change()
 
     def set_overlay_calibration(
         self,
@@ -2647,17 +2719,11 @@ class SettingsView(ft.Column):
         self._sync_overlay_controls()
 
     def _sync_overlay_controls(self) -> None:
-        contract = self._overlay_peer_contract
         overlay_translation_enabled = bool(
             self._settings and self._settings.overlay.show_translation
         )
         overlay_peer_original_enabled = bool(
             self._settings and self._settings.overlay.show_peer_original
-        )
-        peer_translation_enabled = (
-            contract.peer.intent_enabled
-            if contract is not None
-            else bool(self._settings and self._settings.ui.peer_translation_enabled)
         )
         integrated_context_enabled = bool(
             self._settings and self._settings.ui.integrated_context_enabled
@@ -2680,31 +2746,10 @@ class SettingsView(ft.Column):
             ),
         )
 
-        peer_translation_effective = (
-            contract.peer.effective_enabled
-            if contract is not None
-            else bool(peer_translation_enabled and self._overlay_state == "connected")
-        )
-        integrated_context_available = peer_translation_effective and peer_translation_enabled
-
         self._overlay_translation_button.disabled = self._settings is None
         self._overlay_peer_original_button.disabled = self._settings is None
-        self._integrated_context_button.disabled = not integrated_context_available
-
-        if integrated_context_available:
-            self._integrated_context_hint.value = ""
-        elif contract is not None and contract.peer.intent_enabled:
-            self._integrated_context_hint.value = contract.peer.helper_text or t(
-                "settings.integrated_context.disabled.peer_translation_required"
-            )
-        elif self._overlay_state != "connected":
-            self._integrated_context_hint.value = t(
-                "settings.integrated_context.disabled.overlay_required"
-            )
-        else:
-            self._integrated_context_hint.value = t(
-                "settings.integrated_context.disabled.peer_translation_required"
-            )
+        self._integrated_context_button.disabled = self._settings is None
+        self._integrated_context_hint.value = ""
 
         if self.page:
             self.update()
@@ -2775,18 +2820,22 @@ class SettingsView(ft.Column):
         self._emit_settings_changed()
 
     def _on_integrated_context_click(self, e) -> None:
-        if not self.page or not self._settings or self._integrated_context_button.disabled:
+        if not self.page or not self._settings:
             return
         options = [
-            OptionItem(value="on", label=t("settings.context.integrated")),
             OptionItem(value="off", label=t("settings.context.local")),
+            OptionItem(
+                value="on",
+                label=t("settings.context.integrated"),
+                description=t("settings.context.integrated_modal_helper"),
+            ),
         ]
         modal = SettingsModal(
             self.page,
             t("settings.integrated_context"),
             options,
             self._on_integrated_context_selected,
-            show_description=False,
+            show_description=True,
         )
         modal.open("on" if self._settings.ui.integrated_context_enabled else "off")
 
@@ -2814,6 +2863,30 @@ class SettingsView(ft.Column):
             )
 
         self._settings.stt.vad_speech_threshold = new_vad
+        self._emit_settings_changed()
+
+    def _handle_peer_vad_visual_change(self, e) -> None:
+        self._peer_vad_slider.label = f"{float(e.control.value):.2f}"
+        self._peer_vad_slider.update()
+
+    def _handle_peer_vad_change(self, e) -> None:
+        if not self._settings:
+            return
+
+        new_vad = float(e.control.value)
+        old_vad = self._settings.desktop_audio.vad_speech_threshold
+
+        if abs(old_vad - new_vad) > 0.001:
+            self._emit_runtime_detailed(
+                f"[Settings] Peer VAD threshold changed: {old_vad:.2f} -> {new_vad:.2f}"
+            )
+
+        self._settings.desktop_audio.vad_speech_threshold = new_vad
+        self._peer_vad_field.value = f"{new_vad:.2f}"
+        self._peer_vad_slider.label = f"{new_vad:.2f}"
+        if self.page:
+            self._peer_vad_field.update()
+            self._peer_vad_slider.update()
         self._emit_settings_changed()
 
     def _on_peer_vad_threshold_change(self, e) -> None:
@@ -3100,7 +3173,6 @@ class SettingsView(ft.Column):
     # --- Locale ---
     def apply_locale(self) -> None:
         """Update all labels when locale changes."""
-        self._settings_shell_title.value = t("settings.title")
         self._settings_subtab_shell.set_font_family(font_for_language(get_locale()))
         for key in _SETTINGS_SUBTAB_ORDER:
             self._settings_subtab_shell.set_tab_label(key, self._settings_subtab_label(key))
@@ -3113,9 +3185,11 @@ class SettingsView(ft.Column):
         self._translation_provider_label.value = t("settings.shared_translation_provider")
         self._api_credentials_helper_text.value = t("settings.api_credentials_helper")
         self._ui_title.value = t("settings.section.ui")
-        self._audio_title.value = t("settings.section.audio")
-        self._vad_title.value = t("settings.vad_sensitivity")
-        self._self_vad_label.value = t("settings.vad.self")
+        self._audio_host_api_title.value = t("settings.audio_host_api")
+        self._mic_audio_title.value = t("settings.section.microphone_audio")
+        self._loopback_audio_title.value = t("settings.section.loopback_audio")
+        self._self_vad_title.value = t("settings.section.self_vad_sensitivity")
+        self._peer_vad_title.value = t("settings.section.peer_vad_sensitivity")
         self._peer_vad_field.label = t("settings.vad.peer")
         self._peer_hangover_field.label = t("settings.vad.peer_hangover_ms")
         self._peer_pre_roll_field.label = t("settings.vad.peer_pre_roll_ms")
@@ -3137,6 +3211,8 @@ class SettingsView(ft.Column):
         self._overlay_translation_label.value = t("settings.overlay.show_translation")
         self._overlay_peer_original_label.value = t("settings.overlay.show_peer_original")
         self._integrated_context_label.value = t("settings.integrated_context")
+        self._audio_settings.apply_locale()
+        self._sync_general_audio_card_texts()
         self._overlay_calibration_title.value = t("settings.overlay.calibration")
         self._overlay_anchor_label.value = t("settings.overlay.calibration.anchor")
         self._overlay_offset_x_label.value = t("settings.overlay.calibration.offset_x")
@@ -3161,7 +3237,7 @@ class SettingsView(ft.Column):
         if self._overlay_peer_original_button:
             self._overlay_peer_original_button.style = self._get_button_style(ui_font)
         if self._integrated_context_button:
-            self._integrated_context_button.style = self._get_button_style(ui_font)
+            self._integrated_context_button.style = self._get_button_style(ui_font, size=28)
         if self._overlay_calibration_apply_button:
             self._overlay_calibration_apply_button.style = self._get_button_style(ui_font)
         if self._overlay_calibration_cancel_button:
@@ -3194,15 +3270,15 @@ class SettingsView(ft.Column):
         # Update text controls with current selection labels
         display_settings = self._build_settings_with_provider_draft()
         if display_settings:
-            self._set_setting_action_text(
+            self._set_unit_card_value_text(
                 self._stt_text,
                 provider_label(display_settings.provider.stt.value),
             )
-            self._set_setting_action_text(
+            self._set_unit_card_value_text(
                 self._peer_stt_text,
                 provider_label(self._effective_peer_stt_provider(display_settings).value),
             )
-            self._set_setting_action_text(
+            self._set_unit_card_value_text(
                 self._llm_text,
                 self._get_llm_display_label(display_settings),
             )

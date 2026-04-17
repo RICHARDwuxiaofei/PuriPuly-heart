@@ -1123,6 +1123,19 @@ def test_stt_runtime_signature_uses_capped_custom_vocabulary_for_local_qwen() ->
     assert enabled_signature[-1] == tuple(f"term-{i:02d}" for i in range(12))
 
 
+def test_peer_stt_runtime_custom_vocabulary_signature_is_disabled() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+    settings.languages.peer_source_language = "zh-CN"
+    settings.stt.custom_vocabulary_enabled = True
+    settings.stt.custom_terms = {
+        "ko": ["Puripuly"],
+        "zh-CN": ["airi", "shinano"],
+    }
+
+    assert controller._peer_stt_runtime_custom_vocabulary_signature(settings) == (False, ())
+
+
 def test_self_stt_runtime_signature_ignores_overlay_and_peer_desktop_settings() -> None:
     controller = _make_controller(app=SimpleNamespace())
     settings = AppSettings()
@@ -1283,8 +1296,8 @@ async def test_set_peer_translation_enabled_routes_through_controller_runtime_ru
 
     assert controller.settings.ui.overlay_enabled is True
     assert controller.settings.ui.peer_translation_enabled is True
-    assert controller.settings.ui.integrated_context_enabled is True
-    assert controller.settings.ui.integrated_context_bootstrapped is True
+    assert controller.settings.ui.integrated_context_enabled is False
+    assert controller.settings.ui.integrated_context_bootstrapped is False
     assert controller.overlay_state == "starting"
     assert refresh_calls == ["refresh", "refresh"]
 

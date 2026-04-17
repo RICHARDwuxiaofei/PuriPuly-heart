@@ -413,10 +413,8 @@ class GuiController:
     def _peer_stt_runtime_custom_vocabulary_signature(
         self, settings: AppSettings
     ) -> tuple[bool, tuple[str, ...]]:
-        return (
-            settings.stt.custom_vocabulary_enabled,
-            tuple(get_effective_custom_terms(settings, settings.languages.effective_peer_source)),
-        )
+        _ = settings
+        return (False, ())
 
     def _build_self_stt_runtime_signature(self, settings: AppSettings) -> tuple[object, ...]:
         custom_vocab_enabled, custom_terms = self._stt_runtime_custom_vocabulary_signature(settings)
@@ -777,9 +775,6 @@ class GuiController:
             self.settings.ui.overlay_enabled = True
         self.settings.ui.peer_translation_enabled = enabled
         self._last_peer_translation_enabled = enabled
-        if enabled and not self.settings.ui.integrated_context_bootstrapped:
-            self.settings.ui.integrated_context_enabled = True
-            self.settings.ui.integrated_context_bootstrapped = True
         if enabled:
             await self._ensure_peer_local_stt_ready()
         self._clear_local_stt_pending_enable_if_provider_switched_away()

@@ -167,6 +167,9 @@ class TranslatorApp:
 
         self.page.run_task(_worker)
 
+    def _content_padding_for_index(self, index: int) -> int:
+        return 0 if index == 1 else APP_CONTENT_PADDING
+
     def _on_nav_change(self, index: int):
         # Track previous tab for Settings auto-apply
         previous_tab = getattr(self, "_current_tab", 0)
@@ -208,6 +211,7 @@ class TranslatorApp:
         elif index == 3:
             self.content_area.content = self.view_about
 
+        self.content_area.padding = self._content_padding_for_index(index)
         self.content_area.update()
         if index == 1:
             self.view_settings.refresh_prompt_if_empty()

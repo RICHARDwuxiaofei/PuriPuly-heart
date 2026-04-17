@@ -227,15 +227,19 @@ def test_translator_app_4x3_window_keeps_shell_navigation_usable(
 
     app._on_nav_change(1)
     assert app.content_area.content is app.view_settings
+    assert app.content_area.padding == 0
 
     app._on_nav_change(2)
     assert app.content_area.content is app.view_logs
+    assert app.content_area.padding == app_module.APP_CONTENT_PADDING
 
     app._on_nav_change(3)
     assert app.content_area.content is app.view_about
+    assert app.content_area.padding == app_module.APP_CONTENT_PADDING
 
     app._on_nav_change(0)
     assert app.content_area.content is app.view_dashboard
+    assert app.content_area.padding == app_module.APP_CONTENT_PADDING
     assert len(page.tasks) == 1
 
 
