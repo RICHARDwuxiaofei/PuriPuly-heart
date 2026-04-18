@@ -58,7 +58,12 @@ class FakeDisplayCard:
         self.statuses.append((status, font_family))
 
     def set_display(
-        self, text: str, *, is_error: bool = False, font_family: str | None = None
+        self,
+        text: str,
+        *,
+        is_error: bool = False,
+        font_family: str | None = None,
+        **_metadata,
     ) -> None:
         self.display_calls.append((text, is_error, font_family))
 
@@ -420,6 +425,44 @@ def test_dashboard_managed_trial_row_can_be_shown_without_runtime_wiring(
 
     assert view.managed_trial_state == {"visible": False, "remaining_percent": None}
     assert managed_trial_card.visible is False
+
+
+def test_dashboard_managed_trial_row_renders_brake_transient_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+
+    view.set_managed_trial_state(
+        visible=True,
+        remaining_percent=None,
+        transient_message_key="managed_release.brake",
+        transient_message_kwargs={"retry_after_ms": 5000},
+    )
+
+    assert view._managed_trial_card.visible is True
+    assert view._managed_trial_transient_container.visible is True
+    assert view._managed_trial_transient_label.value == dashboard_module.t(
+        "dashboard.trial.transient_label"
+    )
+    assert view._managed_trial_transient_value.value == dashboard_module.t("managed_release.brake")
+
+
+def test_dashboard_managed_trial_row_renders_revoked_transient_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+
+    view.set_managed_trial_state(
+        visible=True,
+        remaining_percent=None,
+        transient_message_key="managed_release.revoked_contact",
+    )
+
+    assert view._managed_trial_card.visible is True
+    assert view._managed_trial_transient_container.visible is True
+    assert view._managed_trial_transient_value.value == dashboard_module.t(
+        "managed_release.revoked_contact"
+    )
 
 
 def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.MonkeyPatch) -> None:

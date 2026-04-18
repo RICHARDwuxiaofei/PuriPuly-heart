@@ -183,4 +183,67 @@ describe('broker cross-endpoint velocity-cap hooks', () => {
     };
     expect(requestEventCount.count).toBe(1);
   });
+
+  it('ignores synthetic verify outcome telemetry when evaluating installation-scoped velocity hooks', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const env = createTestBrokerEnv();
+    const keyPair = await createDeviceKeyPair();
+    await issueChallenge({
+      env,
+      installationId: 'install-velocity-synthetic-outcomes',
+      devicePublicKey: keyPair.devicePublicKey,
+      appVersion: '1.2.3',
+    });
+
+    env.__db
+      .prepare(
+        `INSERT INTO broker_request_events (endpoint, ip, installation_id, observed_at)
+           VALUES (?, ?, ?, ?)`
+      )
+      .run(
+        'POST /v1/trial/challenge/verify/success',
+        '203.0.113.43',
+        'install-velocity-synthetic-outcomes',
+        '2026-04-08T06:00:10.000Z',
+      );
+    env.__db
+      .prepare(
+        `INSERT INTO broker_request_events (endpoint, ip, installation_id, observed_at)
+           VALUES (?, ?, ?, ?)`
+      )
+      .run(
+        'POST /v1/trial/challenge/verify/fail',
+        '203.0.113.43',
+        'install-velocity-synthetic-outcomes',
+        '2026-04-08T06:00:20.000Z',
+      );
+
+    insertVelocityCapHook(env, {
+      subject_type: 'installation_id',
+      subject_value: 'install-velocity-synthetic-outcomes',
+      max_requests: 2,
+      window_minutes: 15,
+      outcome_code: 'trial_unavailable',
+      outcome_class: 'retryable',
+      outcome_subcode: 'velocity_capped',
+      reason: 'manual abuse-defense velocity hook for review',
+    });
+
+    const signedStatus = await signCanonicalStatusRequest(keyPair.privateKey, {
+      installation_id: 'install-velocity-synthetic-outcomes',
+      timestamp: '2026-04-08T06:00:30.000Z',
+    });
+    const response = await getTrialStatus({
+      env,
+      installationId: 'install-velocity-synthetic-outcomes',
+      headers: {
+        'X-Puripuly-Timestamp': signedStatus.timestamp,
+        'X-Puripuly-Signature': signedStatus.signature,
+      },
+    });
+
+    expect(response.status).toBe(200);
+  });
 });

@@ -161,6 +161,13 @@ def _parse_error_response(
             f"broker returned an unexpected error payload (status={response.status_code})",
         )
 
+    managed_lifecycle = None
+    raw_managed_state = payload.get("managed_state")
+    if isinstance(raw_managed_state, Mapping):
+        lifecycle = raw_managed_state.get("lifecycle")
+        if isinstance(lifecycle, str) and lifecycle:
+            managed_lifecycle = lifecycle
+
     try:
         return ManagedOpenRouterReleaseError(
             operation=operation,
@@ -169,6 +176,7 @@ def _parse_error_response(
             subcode=_require_optional_text(raw_error, "subcode"),
             retry_after_ms=_require_optional_int(raw_error, "retry_after_ms"),
             message=_require_text(raw_error, "message"),
+            managed_lifecycle=managed_lifecycle,
         )
     except ValueError as exc:
         return _retryable_error(operation, f"broker returned malformed error payload: {exc}")

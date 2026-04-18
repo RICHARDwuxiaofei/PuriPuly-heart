@@ -1,6 +1,7 @@
 export const BROKER_RUNTIME_CONFIG_KEYS = {
   fingerprintSalt: 'fingerprint_salt',
   abuseControls: 'abuse_controls',
+  abuseRuntimeState: 'abuse_runtime_state',
 } as const;
 
 export interface BrokerEndpointRateLimitConfig {
@@ -17,12 +18,49 @@ export interface BrokerDailyIssuanceCapConfig {
   windowDays: number;
 }
 
+export interface BrokerImmediateAlertsConfig {
+  warn1: number;
+  warn2: number;
+  warn3: number;
+  critical: number;
+}
+
+export interface BrokerAsnFastPathConfig {
+  enabled: boolean;
+  minIssueSuccess1h: number;
+  minTopAsnSharePct: number;
+}
+
+export interface BrokerAsnClassificationEntry {
+  asn: number;
+  kind: 'cloud_or_vps';
+  displayName?: string;
+}
+
+export interface BrokerAbuseRetentionConfig {
+  requestEventsDays: number;
+  issueSuccessDays: number;
+  runtimeAuditDays: number;
+}
+
+export interface BrokerDailyReportConfig {
+  enabled: boolean;
+  hourUtc: number;
+  minuteUtc: number;
+  includeZeroActivity: boolean;
+}
+
 export interface BrokerAbuseControlsConfigValue {
   trialChallenge: BrokerEndpointRateLimitConfig;
   trialChallengeVerify: BrokerEndpointRateLimitConfig;
   openrouterIssue: BrokerEndpointRateLimitConfig;
   trialStatus: BrokerEndpointRateLimitConfig;
   newActiveEntitlementsPerDay: BrokerDailyIssuanceCapConfig;
+  immediateAlerts: BrokerImmediateAlertsConfig;
+  asnFastPath: BrokerAsnFastPathConfig;
+  asnClassifications: BrokerAsnClassificationEntry[];
+  retention: BrokerAbuseRetentionConfig;
+  dailyReport: BrokerDailyReportConfig;
 }
 
 export const DEFAULT_BROKER_ABUSE_CONTROLS: BrokerAbuseControlsConfigValue = {
@@ -56,11 +94,79 @@ export const DEFAULT_BROKER_ABUSE_CONTROLS: BrokerAbuseControlsConfigValue = {
     maxCount: null,
     windowDays: 1,
   },
+  immediateAlerts: {
+    warn1: 10,
+    warn2: 25,
+    warn3: 50,
+    critical: 70,
+  },
+  asnFastPath: {
+    enabled: true,
+    minIssueSuccess1h: 20,
+    minTopAsnSharePct: 70,
+  },
+  asnClassifications: [],
+  retention: {
+    requestEventsDays: 30,
+    issueSuccessDays: 30,
+    runtimeAuditDays: 90,
+  },
+  dailyReport: {
+    enabled: true,
+    hourUtc: 13,
+    minuteUtc: 0,
+    includeZeroActivity: false,
+  },
+};
+
+export interface BrokerAbuseRuntimeBrakeState {
+  active: boolean;
+  reason: 'global_threshold' | 'asn_fast_path' | 'manual' | null;
+  changedAt: string | null;
+  changedBy: 'system' | 'operator' | null;
+}
+
+export interface BrokerAbuseRuntimeAlertLatches {
+  warn1: boolean;
+  warn2: boolean;
+  warn3: boolean;
+  critical: boolean;
+}
+
+export interface BrokerAbuseRuntimeDailyReportState {
+  lastDeliveredAt: string | null;
+  lastDeliveredDateUtc: string | null;
+}
+
+export interface BrokerAbuseRuntimeStateValue {
+  brake: BrokerAbuseRuntimeBrakeState;
+  alertLatches: BrokerAbuseRuntimeAlertLatches;
+  dailyReport: BrokerAbuseRuntimeDailyReportState;
+}
+
+export const DEFAULT_BROKER_ABUSE_RUNTIME_STATE: BrokerAbuseRuntimeStateValue = {
+  brake: {
+    active: false,
+    reason: null,
+    changedAt: null,
+    changedBy: null,
+  },
+  alertLatches: {
+    warn1: false,
+    warn2: false,
+    warn3: false,
+    critical: false,
+  },
+  dailyReport: {
+    lastDeliveredAt: null,
+    lastDeliveredDateUtc: null,
+  },
 };
 
 export const BROKER_RUNTIME_CONFIG_SCHEMA = {
   [BROKER_RUNTIME_CONFIG_KEYS.fingerprintSalt]: ['current', 'previous', 'rotated_at'],
   [BROKER_RUNTIME_CONFIG_KEYS.abuseControls]: DEFAULT_BROKER_ABUSE_CONTROLS,
+  [BROKER_RUNTIME_CONFIG_KEYS.abuseRuntimeState]: DEFAULT_BROKER_ABUSE_RUNTIME_STATE,
 } as const;
 
 export type BrokerRuntimeConfigKey =
@@ -157,6 +263,29 @@ export interface BrokerRequestEventRecord {
   observed_at: string;
 }
 
+export interface BrokerIssueSuccessEventRecord {
+  id: number;
+  installation_id: string;
+  managed_credential_ref: string | null;
+  ip_hash: string | null;
+  ip_prefix_hash: string | null;
+  asn: number | null;
+  country: string | null;
+  http_protocol: string | null;
+  tls_version: string | null;
+  tls_cipher: string | null;
+  risk_label: string | null;
+  observed_at: string;
+}
+
+export interface BrokerAbuseRuntimeAuditRecord {
+  id: number;
+  event_kind: string;
+  reason: string | null;
+  payload_json: string;
+  created_at: string;
+}
+
 export interface BrokerVelocityCapHookRecord {
   id: number;
   subject_type: 'ip' | 'installation_id';
@@ -199,15 +328,15 @@ export const BROKER_PERSISTENCE_MODEL = {
     brokerConfig: {
       name: 'broker_config',
       primaryKey: 'key',
-      columns: ['key', 'value', 'updated_at'],
-      valueEncoding: 'JSON',
-      supportedKeys: ['fingerprint_salt', 'abuse_controls'],
-      constraints: {
-        key: 'supported-keys-only',
-        value: 'valid-json',
+        columns: ['key', 'value', 'updated_at'],
+        valueEncoding: 'JSON',
+        supportedKeys: ['fingerprint_salt', 'abuse_controls', 'abuse_runtime_state'],
+        constraints: {
+          key: 'supported-keys-only',
+          value: 'valid-json',
+        },
+        seedRows: ['fingerprint_salt', 'abuse_controls', 'abuse_runtime_state'],
       },
-      seedRows: ['fingerprint_salt', 'abuse_controls'],
-    },
     installations: {
       name: 'installations',
       primaryKey: 'installation_id',
@@ -308,7 +437,42 @@ export const BROKER_PERSISTENCE_MODEL = {
         'endpoint + installation_id + observed_at',
         'ip + observed_at',
         'installation_id + observed_at',
+        ],
+      },
+    brokerIssueSuccessEvents: {
+      name: 'broker_issue_success_events',
+      purpose: ['issue success alerting', 'daily reporting', 'asn-based heuristics'],
+      columns: [
+        'id',
+        'installation_id',
+        'managed_credential_ref',
+        'ip_hash',
+        'ip_prefix_hash',
+        'asn',
+        'country',
+        'http_protocol',
+        'tls_version',
+        'tls_cipher',
+        'risk_label',
+        'observed_at',
       ],
+      appendOnly: true,
+      indexed: [
+        'installation_id + observed_at',
+        'managed_credential_ref + observed_at',
+        'ip_hash + observed_at',
+        'ip_prefix_hash + observed_at',
+        'asn + observed_at',
+        'observed_at',
+      ],
+    },
+    brokerAbuseRuntimeAudit: {
+      name: 'broker_abuse_runtime_audit',
+      purpose:
+        'append-only audit trail for runtime-state changes and abuse-monitoring decisions',
+      columns: ['id', 'event_kind', 'reason', 'payload_json', 'created_at'],
+      appendOnly: true,
+      indexed: ['event_kind + created_at', 'created_at'],
     },
     brokerVelocityCapHooks: {
       name: 'broker_velocity_cap_hooks',

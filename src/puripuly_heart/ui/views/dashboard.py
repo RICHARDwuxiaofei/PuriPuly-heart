@@ -52,6 +52,8 @@ class DashboardView(ft.Column):
         self._local_stt_notice_percent: int | None = None
         self._managed_trial_visible = False
         self._managed_trial_remaining_percent: int | None = None
+        self._managed_trial_transient_message_key: str | None = None
+        self._managed_trial_transient_message_kwargs: dict[str, object] = {}
         self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
 
         # Current language settings
@@ -196,6 +198,21 @@ class DashboardView(ft.Column):
             size=16,
             color=COLOR_ON_BACKGROUND,
         )
+        self._managed_trial_transient_label = ft.Text(
+            t("dashboard.trial.transient_label"),
+            size=13,
+            color=COLOR_SECONDARY,
+        )
+        self._managed_trial_transient_value = ft.Text(
+            "",
+            size=16,
+            color=COLOR_WARNING,
+        )
+        self._managed_trial_transient_container = ft.Column(
+            [self._managed_trial_transient_label, self._managed_trial_transient_value],
+            spacing=6,
+            visible=False,
+        )
         self._managed_trial_usage_bar = ManagedTrialUsageBar()
 
         info_column = ft.Column(
@@ -222,6 +239,7 @@ class DashboardView(ft.Column):
                     spacing=24,
                     vertical_alignment=ft.CrossAxisAlignment.START,
                 ),
+                self._managed_trial_transient_container,
             ],
             spacing=18,
             expand=True,
@@ -266,8 +284,18 @@ class DashboardView(ft.Column):
         self._managed_trial_badge.value = t("dashboard.trial.source.managed")
         self._managed_trial_status_label.value = t("dashboard.trial.lifecycle_label")
         self._managed_trial_message_label.value = t("dashboard.trial.message_label")
+        self._managed_trial_transient_label.value = t("dashboard.trial.transient_label")
         self._managed_trial_status_value.value = t(self._managed_trial_lifecycle_key())
         self._managed_trial_message_value.value = t(self._managed_trial_message_key())
+        transient_key = self._managed_trial_transient_message_key
+        self._managed_trial_transient_value.value = (
+            t(transient_key, **self._managed_trial_transient_message_kwargs)
+            if transient_key is not None
+            else ""
+        )
+        self._managed_trial_transient_container.visible = bool(
+            self._managed_trial_visible and transient_key is not None
+        )
         self._managed_trial_usage_bar.set_percent(
             self._managed_trial_remaining_percent if self._managed_trial_visible else None
         )
@@ -346,6 +374,8 @@ class DashboardView(ft.Column):
         *,
         visible: bool,
         remaining_percent: int | None = None,
+        transient_message_key: str | None = None,
+        transient_message_kwargs: dict[str, object] | None = None,
         **_extra: object,
     ) -> None:
         self._managed_trial_visible = bool(visible)
@@ -353,6 +383,12 @@ class DashboardView(ft.Column):
             self._managed_trial_remaining_percent = max(0, min(100, int(remaining_percent)))
         else:
             self._managed_trial_remaining_percent = None
+        if self._managed_trial_visible and transient_message_key:
+            self._managed_trial_transient_message_key = transient_message_key
+            self._managed_trial_transient_message_kwargs = dict(transient_message_kwargs or {})
+        else:
+            self._managed_trial_transient_message_key = None
+            self._managed_trial_transient_message_kwargs = {}
         self._sync_managed_trial_card()
 
     def _toggle_stt(self):

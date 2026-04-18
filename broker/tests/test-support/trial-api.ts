@@ -7,6 +7,12 @@ export interface ChallengeResponse {
   challenge_expires_at: string;
 }
 
+export interface TestExecutionContext {
+  props: unknown;
+  waitUntil(promise: Promise<unknown>): void;
+  passThroughOnException(): void;
+}
+
 export async function issueChallenge(options: {
   env: TestBrokerEnv;
   installationId: string;
@@ -87,5 +93,23 @@ export async function postIssue(
       body: typeof body === 'string' ? body : JSON.stringify(body),
     },
     env,
+  );
+}
+
+export async function postIssueWithExecutionContext(
+  env: TestBrokerEnv,
+  body: object | string,
+  executionCtx: TestExecutionContext,
+): Promise<Response> {
+  return app.fetch(
+    new Request('http://broker.test/v1/providers/openrouter/issue', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    }),
+    env,
+    executionCtx,
   );
 }

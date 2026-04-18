@@ -998,6 +998,144 @@ async def test_set_translation_enabled_keeps_managed_translation_disabled_on_ret
     assert dash.managed_trial_calls == []
 
 
+@pytest.mark.asyncio
+async def test_set_translation_enabled_keeps_brake_notice_visible_in_managed_trial_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snackbar_calls: list[tuple[str, str]] = []
+    dash = DummyDashboard()
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(
+            _show_snackbar=lambda message, color: snackbar_calls.append((message, color)),
+            view_dashboard=dash,
+            view_settings=settings_view,
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.RETRY,
+            message_key="managed_release.brake",
+            message_kwargs={"retry_after_ms": 5000},
+            diagnostics=ManagedOpenRouterReleaseDiagnostics(
+                operation="issue",
+                code="issuance_suspended",
+                error_class="retryable",
+                subcode="asn_fast_path",
+                retry_after_ms=5000,
+                message="new entitlement issuance is temporarily suspended",
+            ),
+            retry_after_ms=5000,
+        )
+    )
+
+    async def fail_fetch_key_metadata(_api_key: str):
+        raise AssertionError("fetch_key_metadata should not run without a managed key")
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fail_fetch_key_metadata),
+    )
+
+    await controller.set_translation_enabled(True)
+
+    assert controller._managed_openrouter_release_service.prepare_calls == 1
+    assert controller.hub.translation_enabled is False
+    assert dash.managed_auth_pending is False
+    assert controller._managed_trial_transient_message_key == "managed_release.brake"
+    assert controller._managed_trial_transient_message_kwargs == {"retry_after_ms": 5000}
+    assert dash.managed_trial_state == {
+        "visible": True,
+        "remaining_percent": None,
+        "transient_message_key": "managed_release.brake",
+        "transient_message_kwargs": {"retry_after_ms": 5000},
+    }
+    assert snackbar_calls == [(t("managed_release.brake"), ft.Colors.ORANGE_700)]
+    assert settings_view.managed_trial_usage_state == {
+        "visible": True,
+        "remaining_percent": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_keeps_revoked_notice_visible_in_managed_trial_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snackbar_calls: list[tuple[str, str]] = []
+    dash = DummyDashboard()
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(
+            _show_snackbar=lambda message, color: snackbar_calls.append((message, color)),
+            view_dashboard=dash,
+            view_settings=settings_view,
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.STOP,
+            message_key="managed_release.revoked_contact",
+            diagnostics=ManagedOpenRouterReleaseDiagnostics(
+                operation="issue",
+                code="trial_not_eligible",
+                error_class="terminal",
+                subcode=None,
+                retry_after_ms=None,
+                message="revoked by policy",
+            ),
+        )
+    )
+
+    async def fail_fetch_key_metadata(_api_key: str):
+        raise AssertionError("fetch_key_metadata should not run without a managed key")
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fail_fetch_key_metadata),
+    )
+
+    await controller.set_translation_enabled(True)
+
+    assert controller._managed_openrouter_release_service.prepare_calls == 1
+    assert controller.hub.translation_enabled is False
+    assert dash.managed_auth_pending is False
+    assert controller._managed_trial_transient_message_key == "managed_release.revoked_contact"
+    assert controller._managed_trial_transient_message_kwargs == {}
+    assert dash.managed_trial_state == {
+        "visible": True,
+        "remaining_percent": None,
+        "transient_message_key": "managed_release.revoked_contact",
+        "transient_message_kwargs": {},
+    }
+    assert snackbar_calls == [(t("managed_release.revoked_contact"), ft.Colors.ORANGE_700)]
+    assert settings_view.managed_trial_usage_state == {
+        "visible": True,
+        "remaining_percent": None,
+    }
+
+
 def test_on_managed_trial_delegate_ready_clears_dashboard_pending_notice() -> None:
     dash = DummyDashboard()
     controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))

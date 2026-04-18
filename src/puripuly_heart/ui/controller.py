@@ -543,8 +543,27 @@ class GuiController:
         message_key: str | None,
         message_kwargs: dict[str, object] | None = None,
     ) -> None:
+        previous_message_key = self._managed_trial_transient_message_key
+        persistent_message_keys = {
+            "managed_release.brake",
+            "managed_release.revoked_contact",
+        }
+        if message_key not in persistent_message_keys:
+            message_key = None
+            message_kwargs = None
+
         self._managed_trial_transient_message_key = message_key
         self._managed_trial_transient_message_kwargs = dict(message_kwargs or {})
+
+        dash = getattr(self.app, "view_dashboard", None)
+        setter = getattr(dash, "set_managed_trial_state", None) if dash is not None else None
+        if callable(setter) and (message_key is not None or previous_message_key is not None):
+            setter(
+                visible=message_key is not None,
+                remaining_percent=None,
+                transient_message_key=message_key,
+                transient_message_kwargs=dict(message_kwargs or {}),
+            )
 
     def _managed_trial_remaining_percent(
         self, usage_metadata: OpenRouterKeyMetadata | None

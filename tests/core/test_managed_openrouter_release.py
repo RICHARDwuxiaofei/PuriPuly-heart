@@ -820,6 +820,171 @@ async def test_issue_trial_not_eligible_managed_key_unrecoverable_stops_as_not_e
 
 
 @pytest.mark.asyncio
+async def test_issue_issuance_suspended_retries_with_brake_copy() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    settings.managed_identity.release_token = "release-token-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
+    client = FakeManagedReleaseClient(
+        issue_result=ManagedOpenRouterReleaseError(
+            code="issuance_suspended",
+            error_class="retryable",
+            subcode="asn_fast_path",
+            retry_after_ms=5_000,
+            message="new entitlement issuance is temporarily suspended",
+        )
+    )
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.ensure_key_for_llm_start()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.RETRY
+    assert result.message_key == "managed_release.brake"
+    assert result.message_kwargs == {"retry_after_ms": 5_000}
+    assert result.retry_after_ms == 5_000
+    assert result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="issue",
+        code="issuance_suspended",
+        error_class="retryable",
+        subcode="asn_fast_path",
+        retry_after_ms=5_000,
+        message="new entitlement issuance is temporarily suspended",
+    )
+    assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert settings.managed_identity.release_token == "release-token-1"
+    assert settings.managed_identity.release_token_expires_at == "2026-04-08T06:15:00.000Z"
+    assert settings.managed_identity.verified_hardware_hash == "verified-hardware-hash-1"
+    assert settings.managed_identity.verified_hardware_hash_salt_version == 7
+    assert [name for name, _payload in client.calls] == ["issue"]
+
+
+@pytest.mark.asyncio
+async def test_issue_issuance_suspended_with_revoked_lifecycle_stops_with_contact_copy() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    settings.managed_identity.release_token = "release-token-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
+    client = FakeManagedReleaseClient(
+        issue_result=ManagedOpenRouterReleaseError(
+            code="issuance_suspended",
+            error_class="retryable",
+            subcode="asn_fast_path",
+            retry_after_ms=5_000,
+            message="revoked by policy",
+            managed_lifecycle="revoked",
+        )
+    )
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.ensure_key_for_llm_start()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.STOP
+    assert result.message_key == "managed_release.revoked_contact"
+    assert result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="issue",
+        code="issuance_suspended",
+        error_class="retryable",
+        subcode="asn_fast_path",
+        retry_after_ms=5_000,
+        message="revoked by policy",
+    )
+    assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert settings.managed_identity.release_token is None
+    assert settings.managed_identity.release_token_expires_at is None
+    assert settings.managed_identity.verified_hardware_hash is None
+    assert settings.managed_identity.verified_hardware_hash_salt_version is None
+    assert [name for name, _payload in client.calls] == ["issue"]
+
+
+@pytest.mark.asyncio
+async def test_issue_trial_not_eligible_with_revoked_lifecycle_stops_with_contact_copy() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    settings.managed_identity.release_token = "release-token-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
+    client = FakeManagedReleaseClient(
+        issue_result=ManagedOpenRouterReleaseError(
+            code="trial_not_eligible",
+            error_class="terminal",
+            subcode=None,
+            retry_after_ms=None,
+            message="revoked by policy",
+            managed_lifecycle="revoked",
+        )
+    )
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.ensure_key_for_llm_start()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.STOP
+    assert result.message_key == "managed_release.revoked_contact"
+    assert result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="issue",
+        code="trial_not_eligible",
+        error_class="terminal",
+        subcode=None,
+        retry_after_ms=None,
+        message="revoked by policy",
+    )
+    assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert settings.managed_identity.release_token is None
+    assert settings.managed_identity.release_token_expires_at is None
+    assert settings.managed_identity.verified_hardware_hash is None
+    assert settings.managed_identity.verified_hardware_hash_salt_version is None
+    assert [name for name, _payload in client.calls] == ["issue"]
+
+
+@pytest.mark.asyncio
+async def test_issue_non_trial_code_with_revoked_lifecycle_stops_with_contact_copy() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    settings.managed_identity.release_token = "release-token-1"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    _set_verified_snapshot(settings)
+    client = FakeManagedReleaseClient(
+        issue_result=ManagedOpenRouterReleaseError(
+            code="internal_error",
+            error_class="terminal",
+            subcode=None,
+            retry_after_ms=None,
+            message="revoked by policy",
+            managed_lifecycle="revoked",
+        )
+    )
+    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.ensure_key_for_llm_start()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.STOP
+    assert result.message_key == "managed_release.revoked_contact"
+    assert result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="issue",
+        code="internal_error",
+        error_class="terminal",
+        subcode=None,
+        retry_after_ms=None,
+        message="revoked by policy",
+    )
+    assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert settings.managed_identity.release_token is None
+    assert settings.managed_identity.release_token_expires_at is None
+    assert settings.managed_identity.verified_hardware_hash is None
+    assert settings.managed_identity.verified_hardware_hash_salt_version is None
+    assert [name for name, _payload in client.calls] == ["issue"]
+
+
+@pytest.mark.asyncio
 async def test_issue_restarts_when_identity_bundle_regenerates_before_issue() -> None:
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED

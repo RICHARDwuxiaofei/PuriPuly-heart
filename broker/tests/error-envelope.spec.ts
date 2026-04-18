@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { signCanonicalIssueRequest } from './test-support/ed25519';
+import app from '../src/index';
+import {
+  createDeviceKeyPair,
+  signCanonicalIssueRequest,
+} from './test-support/ed25519';
 import {
   activatePendingReleaseSession,
   createPendingReleaseSession,
   mockOpenRouterManagementApi,
 } from './test-support/openrouter-issue';
+import { updateAbuseRuntimeState } from './test-support/abuse-controls';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import { postIssue } from './test-support/trial-api';
 import { normalizedErrorEnvelope } from './test-support/errors';
@@ -107,7 +112,7 @@ describe('broker public error envelope', () => {
           provider: 'OpenRouter',
           budget_usd: 0.08,
           issued_at: '2026-04-08T06:00:00.000Z',
-          expires_at: '2026-10-08T06:00:00.000Z',
+          expires_at: '2026-07-08T06:00:00.000Z',
         },
       }),
     );
@@ -235,5 +240,46 @@ describe('broker public error envelope', () => {
       release_token_hash: null,
       release_token_expires_at: null,
     });
+  });
+
+  it('normalizes brake-driven challenge rejection into issuance_suspended with the brake reason subcode', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const env = createTestBrokerEnv();
+    const blockedKeyPair = await createDeviceKeyPair();
+    updateAbuseRuntimeState(env, (state) => {
+      state.brake.active = true;
+      state.brake.reason = 'asn_fast_path';
+      state.brake.changedAt = '2026-04-08T06:00:05.000Z';
+      state.brake.changedBy = 'system';
+    });
+
+    const response = await app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'cf-connecting-ip': '203.0.113.44',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-error-envelope-brake',
+          device_public_key: blockedKeyPair.devicePublicKey,
+          app_version: '1.2.3',
+        }),
+      },
+      env,
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'issuance_suspended',
+        class: 'retryable',
+        subcode: 'asn_fast_path',
+        message: 'new entitlement issuance is temporarily suspended',
+      }),
+    );
   });
 });

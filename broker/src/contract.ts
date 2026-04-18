@@ -10,6 +10,7 @@ export {
   BROKER_RUNTIME_CONFIG_KEYS,
   BROKER_RUNTIME_CONFIG_SCHEMA,
   DEFAULT_BROKER_ABUSE_CONTROLS,
+  DEFAULT_BROKER_ABUSE_RUNTIME_STATE,
   FINGERPRINT_SALT_POLICY,
   OPENROUTER_ENTITLEMENT_STATUS_VALUES,
 } from './persistence';
@@ -23,11 +24,15 @@ export {
   TRIAL_PROVIDER_POLICY,
 } from './trial-policy';
 export type {
+  BrokerAbuseRuntimeAuditRecord,
+  BrokerAbuseRuntimeStateValue,
+  BrokerAsnClassificationEntry,
   BrokerDailyIssuanceCapConfig,
   BrokerEndpointRateLimitConfig,
   BrokerAbuseControlsConfigValue,
   BrokerAbuseSubjectHookRecord,
   BrokerConfigRow,
+  BrokerIssueSuccessEventRecord,
   BrokerRequestEventRecord,
   BrokerVelocityCapHookRecord,
   FingerprintSaltConfigValue,
@@ -57,6 +62,8 @@ export const REQUIRED_BINDINGS = {
     'OPENROUTER_MANAGEMENT_API_KEY',
     'OPENROUTER_MANAGED_GUARDRAIL_ID',
     'OPENROUTER_MANAGED_USER_HMAC_SECRET',
+    'DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL',
+    'DISCORD_DAILY_REPORT_WEBHOOK_URL',
   ],
 } as const;
 
@@ -66,6 +73,8 @@ export interface BrokerBindings {
   OPENROUTER_MANAGED_GUARDRAIL_ID: string;
   OPENROUTER_MANAGED_API_KEY: string;
   OPENROUTER_MANAGED_USER_HMAC_SECRET: string;
+  DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL: string;
+  DISCORD_DAILY_REPORT_WEBHOOK_URL: string;
 }
 
 export type BrokerEnv = {

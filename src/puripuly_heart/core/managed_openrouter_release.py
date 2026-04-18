@@ -137,6 +137,7 @@ class ManagedOpenRouterReleaseError(Exception):
     operation: str | None = None
     subcode: str | None = None
     retry_after_ms: int | None = None
+    managed_lifecycle: str | None = None
 
     def __str__(self) -> str:
         return self.message or self.code
@@ -532,6 +533,30 @@ class ManagedOpenRouterReleaseService:
                 behavior=ManagedOpenRouterReleaseBehavior.RESTART,
                 message_key="managed_release.restart",
                 diagnostics=diagnostics,
+            )
+
+        if error.managed_lifecycle == "revoked":
+            clear_temporary_managed_release_state(self.settings)
+            self.persist_settings(self.settings)
+            self._clear_retry_after()
+            return ManagedOpenRouterReleaseResult(
+                behavior=ManagedOpenRouterReleaseBehavior.STOP,
+                message_key="managed_release.revoked_contact",
+                diagnostics=diagnostics,
+            )
+
+        if error.code == "issuance_suspended":
+            retry_after_ms = _normalize_retry_after_ms(error.retry_after_ms)
+            self._clear_retry_after()
+            message_kwargs: dict[str, object] = {}
+            if retry_after_ms is not None:
+                message_kwargs["retry_after_ms"] = retry_after_ms
+            return ManagedOpenRouterReleaseResult(
+                behavior=ManagedOpenRouterReleaseBehavior.RETRY,
+                message_key="managed_release.brake",
+                message_kwargs=message_kwargs,
+                diagnostics=replace(diagnostics, retry_after_ms=retry_after_ms),
+                retry_after_ms=retry_after_ms,
             )
 
         if (

@@ -411,6 +411,7 @@ async def test_nested_broker_error_envelope_becomes_release_error() -> None:
         subcode="broker_backoff",
         retry_after_ms=9000,
         message="broker is temporarily unavailable",
+        managed_lifecycle="none",
     )
     await client.close()
 
@@ -456,6 +457,48 @@ async def test_issue_preserves_managed_key_unrecoverable_subcode() -> None:
         retry_after_ms=None,
         message="managed key was already issued and cannot be recovered",
     )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_issue_parses_revoked_lifecycle_from_error_envelope() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409,
+            json={
+                "error": {
+                    "code": "trial_not_eligible",
+                    "class": "terminal",
+                    "subcode": None,
+                    "retry_after_ms": None,
+                    "message": "manual review required",
+                },
+                "managed_state": {
+                    "lifecycle": "revoked",
+                    "managed_availability": False,
+                },
+                "current_entitlement": None,
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    with pytest.raises(ManagedOpenRouterReleaseError) as exc_info:
+        await client.issue(
+            {
+                "installation_id": "install-123",
+                "device_public_key": "device-public-key-123",
+                "release_token": "release-token-123",
+                "hardware_hash": "hardware-hash-123",
+                "reason": "llm_start",
+                "budget_usd": 0.08,
+                "model": "google/gemma-4-26b-a4b-it",
+                "signed_at": "2026-04-10T06:00:45.000Z",
+                "signature": "signature-123",
+            }
+        )
+
+    assert exc_info.value.managed_lifecycle == "revoked"
     await client.close()
 
 

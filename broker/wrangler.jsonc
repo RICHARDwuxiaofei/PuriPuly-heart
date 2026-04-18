@@ -9,5 +9,8 @@
       "database_name": "puripuly-heart-broker",
       "database_id": "REQUIRED_AT_DEPLOY_TIME"
     }
-  ]
+  ],
+  "triggers": {
+    "crons": ["* * * * *"]
+  }
 }

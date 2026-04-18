@@ -5,6 +5,10 @@ import { describe, expect, it } from 'vitest';
 
 import { validatePublicInput } from '../src/public-input';
 import {
+  TEST_DEFAULT_ABUSE_CONTROLS,
+  TEST_DEFAULT_ABUSE_RUNTIME_STATE,
+} from './test-support/abuse-controls';
+import {
   applyBrokerMigrations,
   readBrokerMigrationSql,
 } from './test-support/migrations';
@@ -15,6 +19,10 @@ const FIRST_MIGRATION = new URL(
 );
 const SECOND_MIGRATION = new URL(
   '../migrations/0001_harden_installation_public_inputs.sql',
+  import.meta.url,
+);
+const FOURTH_MIGRATION = new URL(
+  '../migrations/0003_add_abuse_runtime_state_and_issue_success_events.sql',
   import.meta.url,
 );
 
@@ -49,41 +57,12 @@ describe('broker migration behavior', () => {
 
       expect(rows.map(({ key }) => key)).toEqual([
         'abuse_controls',
+        'abuse_runtime_state',
         'fingerprint_salt',
       ]);
       expect(rows.map(({ value }) => JSON.parse(value))).toEqual([
-        {
-          trialChallenge: {
-            endpoint: 'POST /v1/trial/challenge',
-            scope: 'ip',
-            maxRequests: 10,
-            windowMinutes: 15,
-          },
-          trialChallengeVerify: {
-            endpoint: 'POST /v1/trial/challenge/verify',
-            scope: 'installation_id',
-            maxRequests: 5,
-            windowMinutes: 15,
-          },
-          openrouterIssue: {
-            endpoint: 'POST /v1/providers/openrouter/issue',
-            scope: 'installation_id',
-            maxRequests: 3,
-            windowMinutes: 15,
-          },
-          trialStatus: {
-            endpoint: 'GET /v1/trial/status',
-            scope: 'installation_id',
-            maxRequests: 30,
-            windowMinutes: 15,
-          },
-          newActiveEntitlementsPerDay: {
-            endpoint: 'POST /v1/providers/openrouter/issue',
-            scope: 'global',
-            maxCount: null,
-            windowDays: 1,
-          },
-        },
+        TEST_DEFAULT_ABUSE_CONTROLS,
+        TEST_DEFAULT_ABUSE_RUNTIME_STATE,
         {
           current: {
             version: 1,
@@ -105,6 +84,45 @@ describe('broker migration behavior', () => {
       expect(() => updateConfig.run('not-json', 'abuse_controls')).toThrow(
         /constraint|json/i,
       );
+      expect(() => updateConfig.run('not-json', 'abuse_runtime_state')).toThrow(
+        /constraint|json/i,
+      );
+
+      const tableNames = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .all() as Array<{ name: string }>;
+
+      expect(tableNames.map(({ name }) => name)).toContain('broker_issue_success_events');
+      expect(tableNames.map(({ name }) => name)).toContain('broker_abuse_runtime_audit');
+
+      const issueEventColumns = db
+        .prepare("SELECT name FROM pragma_table_info('broker_issue_success_events') ORDER BY cid")
+        .all() as Array<{ name: string }>;
+      expect(issueEventColumns.map(({ name }) => name)).toEqual([
+        'id',
+        'installation_id',
+        'managed_credential_ref',
+        'ip_hash',
+        'ip_prefix_hash',
+        'asn',
+        'country',
+        'http_protocol',
+        'tls_version',
+        'tls_cipher',
+        'risk_label',
+        'observed_at',
+      ]);
+
+      const runtimeAuditColumns = db
+        .prepare("SELECT name FROM pragma_table_info('broker_abuse_runtime_audit') ORDER BY cid")
+        .all() as Array<{ name: string }>;
+      expect(runtimeAuditColumns.map(({ name }) => name)).toEqual([
+        'id',
+        'event_kind',
+        'reason',
+        'payload_json',
+        'created_at',
+      ]);
     });
   });
 
@@ -349,6 +367,10 @@ describe('broker migration behavior', () => {
     expect(() => readFileSync(SECOND_MIGRATION, 'utf8')).not.toThrow();
   });
 
+  it('ships a follow-up migration that adds abuse runtime-state storage and issue-success event tables', () => {
+    expect(() => readFileSync(FOURTH_MIGRATION, 'utf8')).not.toThrow();
+  });
+
   it('upgrades clean legacy installations and entitlements in place while hardening future writes', () => {
     withLegacyDatabase((db) => {
       db.prepare(
@@ -529,6 +551,137 @@ describe('broker migration behavior', () => {
         managed_credential_ref: 'managed-credential-already-migrated',
         verified_hardware_hash: null,
         verified_hardware_hash_salt_version: null,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('adds the abuse runtime-state row and issue-success storage through a forward migration for already-migrated databases', () => {
+    const db = new DatabaseSync(':memory:');
+
+    try {
+      applyBrokerMigrations(db, {
+        through: '0002_add_entitlement_verified_hardware_snapshot.sql',
+      });
+
+      db.prepare(
+        'INSERT INTO installations (installation_id, device_public_key, app_version) VALUES (?, ?, ?)',
+      ).run('runtime-state-installation', 'runtime-state-device-key', '1.0.0');
+
+      applyBrokerMigrations(db, {
+        after: '0002_add_entitlement_verified_hardware_snapshot.sql',
+      });
+
+      const configKeys = db
+        .prepare('SELECT key FROM broker_config ORDER BY key')
+        .all() as Array<{ key: string }>;
+      expect(configKeys.map(({ key }) => key)).toEqual([
+        'abuse_controls',
+        'abuse_runtime_state',
+        'fingerprint_salt',
+      ]);
+
+      const runtimeStateRow = db
+        .prepare('SELECT value FROM broker_config WHERE key = ?')
+        .get('abuse_runtime_state') as { value: string };
+      expect(JSON.parse(runtimeStateRow.value)).toEqual(
+        TEST_DEFAULT_ABUSE_RUNTIME_STATE,
+      );
+
+      const issueEventColumns = db
+        .prepare("SELECT name FROM pragma_table_info('broker_issue_success_events') ORDER BY cid")
+        .all() as Array<{ name: string }>;
+      expect(issueEventColumns.map(({ name }) => name)).toEqual([
+        'id',
+        'installation_id',
+        'managed_credential_ref',
+        'ip_hash',
+        'ip_prefix_hash',
+        'asn',
+        'country',
+        'http_protocol',
+        'tls_version',
+        'tls_cipher',
+        'risk_label',
+        'observed_at',
+      ]);
+
+      const runtimeAuditColumns = db
+        .prepare("SELECT name FROM pragma_table_info('broker_abuse_runtime_audit') ORDER BY cid")
+        .all() as Array<{ name: string }>;
+      expect(runtimeAuditColumns.map(({ name }) => name)).toEqual([
+        'id',
+        'event_kind',
+        'reason',
+        'payload_json',
+        'created_at',
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('preserves previously tuned abuse controls when 0003 adds the new policy fields', () => {
+    const db = new DatabaseSync(':memory:');
+
+    try {
+      applyBrokerMigrations(db, {
+        through: '0002_add_entitlement_verified_hardware_snapshot.sql',
+      });
+
+      const tunedLegacyControls = {
+        trialChallenge: {
+          endpoint: 'POST /v1/trial/challenge',
+          scope: 'ip',
+          maxRequests: 14,
+          windowMinutes: 9,
+        },
+        trialChallengeVerify: {
+          endpoint: 'POST /v1/trial/challenge/verify',
+          scope: 'installation_id',
+          maxRequests: 7,
+          windowMinutes: 11,
+        },
+        openrouterIssue: {
+          endpoint: 'POST /v1/providers/openrouter/issue',
+          scope: 'installation_id',
+          maxRequests: 4,
+          windowMinutes: 21,
+        },
+        trialStatus: {
+          endpoint: 'GET /v1/trial/status',
+          scope: 'installation_id',
+          maxRequests: 45,
+          windowMinutes: 17,
+        },
+        newActiveEntitlementsPerDay: {
+          endpoint: 'POST /v1/providers/openrouter/issue',
+          scope: 'global',
+          maxCount: 123,
+          windowDays: 3,
+        },
+      };
+
+      db.prepare(
+        'UPDATE broker_config SET value = ?, updated_at = ? WHERE key = ?',
+      ).run(
+        JSON.stringify(tunedLegacyControls),
+        '2026-04-08T06:00:00.000Z',
+        'abuse_controls',
+      );
+
+      applyBrokerMigrations(db, {
+        after: '0002_add_entitlement_verified_hardware_snapshot.sql',
+      });
+
+      const migratedRow = db
+        .prepare('SELECT value FROM broker_config WHERE key = ?')
+        .get('abuse_controls') as { value: string };
+
+      expect(JSON.parse(migratedRow.value)).toEqual({
+        ...TEST_DEFAULT_ABUSE_CONTROLS,
+        ...tunedLegacyControls,
       });
     } finally {
       db.close();

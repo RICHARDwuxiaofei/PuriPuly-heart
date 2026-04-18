@@ -46,12 +46,12 @@ describe('broker deploy smoke helpers', () => {
       readOpenRouterCurrentKeyMetadata({
         data: {
           limit: ISSUE_BUDGET_USD,
-          expires_at: '2026-10-08T06:00:00.000Z',
+          expires_at: '2026-07-08T06:00:00.000Z',
         },
       }),
     ).toEqual({
       limit: ISSUE_BUDGET_USD,
-      expiresAt: '2026-10-08T06:00:00.000Z',
+      expiresAt: '2026-07-08T06:00:00.000Z',
     });
   });
 

@@ -55,7 +55,7 @@ export const MANAGED_TRIAL_ENTITLEMENT_POLICY = {
     keyScope: 'user-specific',
     maxManagedKeysPerEligibleInstallation: 1,
     expiry: {
-      durationMonths: 6,
+      durationMonths: 3,
       anchor: 'issued_at',
     },
   },

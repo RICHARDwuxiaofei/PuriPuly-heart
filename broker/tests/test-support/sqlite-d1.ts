@@ -105,6 +105,8 @@ export interface TestBrokerEnv extends Record<string, unknown> {
   OPENROUTER_MANAGED_GUARDRAIL_ID: string;
   OPENROUTER_MANAGED_API_KEY: string;
   OPENROUTER_MANAGED_USER_HMAC_SECRET: string;
+  DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL: string;
+  DISCORD_DAILY_REPORT_WEBHOOK_URL: string;
   __db: DatabaseSync;
 }
 
@@ -129,6 +131,8 @@ export function createTestBrokerEnv(options: SqliteD1Hooks = {}): TestBrokerEnv 
     OPENROUTER_MANAGED_GUARDRAIL_ID: 'test-managed-guardrail-id',
     OPENROUTER_MANAGED_API_KEY: 'test-managed-api-key',
     OPENROUTER_MANAGED_USER_HMAC_SECRET: 'test-managed-user-hmac-secret',
+    DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL: 'https://discord.test/immediate-alert',
+    DISCORD_DAILY_REPORT_WEBHOOK_URL: 'https://discord.test/daily-report',
     __db: db,
   };
 }

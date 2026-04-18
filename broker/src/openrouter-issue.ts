@@ -8,12 +8,19 @@ import type { BrokerEnv } from './contract';
 import { deleteExpiredChallengePreflightInstallations } from './preflight-retention';
 import { nonEmptyString, stringValue, validatePublicInput } from './public-input';
 import {
+  checkActiveIssuanceBrake,
+  extractRequestNetworkMetadata,
   checkEndpointRateLimit,
   checkVelocityCapHook,
   matchSubjectHook,
   recordRequestEvent,
   resolveClientIp,
 } from './abuse-controls';
+import {
+  deliverImmediateMonitoringSideEffects,
+  evaluateImmediateAbuseState,
+  recordIssueSuccess,
+} from './abuse-monitoring';
 import {
   errorResponse as publicErrorResponse,
   internalErrorResponseWithEntitlement,
@@ -49,6 +56,20 @@ const MANAGED_TRIAL_ALLOWED_MODEL_SET = new Set<string>(
 );
 const MANAGED_TRIAL_ALLOWED_MODEL_LIST =
   TRIAL_PROVIDER_POLICY.managedFreeTrial.models.join(', ');
+
+class PostActivationMonitoringStateError extends Error {
+  readonly issueSuccessRecorded: boolean;
+
+  constructor(input: { cause: unknown; issueSuccessRecorded: boolean }) {
+    super(
+      input.cause instanceof Error
+        ? input.cause.message
+        : 'post-activation monitoring state update failed',
+    );
+    this.name = 'PostActivationMonitoringStateError';
+    this.issueSuccessRecorded = input.issueSuccessRecorded;
+  }
+}
 
 const STRICT_ISO_8601_TIMESTAMP =
   /^(?<year>\d{4})-(?<month>0[1-9]|1[0-2])-(?<day>0[1-9]|[12]\d|3[01])T(?<hour>[01]\d|2[0-3]):(?<minute>[0-5]\d):(?<second>[0-5]\d)(?:\.(?<millisecond>\d{3}))?(?:(?<utc>Z)|(?<offsetSign>[+-])(?<offsetHour>[01]\d|2[0-3]):(?<offsetMinute>[0-5]\d))$/u;
@@ -265,6 +286,21 @@ export async function handleOpenRouterIssue(
     return hardwareSnapshotMismatchResponse(c, entitlement);
   }
 
+  const issuanceBrakeDecision = await checkActiveIssuanceBrake(
+    c.env.BROKER_DB,
+    entitlement,
+  );
+  if (issuanceBrakeDecision) {
+    return publicErrorResponse(c, issuanceBrakeDecision.status, {
+      code: issuanceBrakeDecision.code,
+      class: issuanceBrakeDecision.class,
+      subcode: issuanceBrakeDecision.subcode,
+      retryAfterMs: issuanceBrakeDecision.retryAfterMs,
+      message: issuanceBrakeDecision.message,
+      entitlement,
+    });
+  }
+
   await recordRequestEvent(c.env.BROKER_DB, requestContext);
 
   const rateLimitDecision = await checkEndpointRateLimit(c.env.BROKER_DB, requestContext);
@@ -312,6 +348,7 @@ export async function handleOpenRouterIssue(
   ).toISOString();
 
   let childKey: { rawKey: string; hash: string } | null = null;
+  let activationCommitted = false;
   try {
     childKey = await createManagedChildKey({
       managementApiKey: c.env.OPENROUTER_MANAGEMENT_API_KEY,
@@ -343,6 +380,15 @@ export async function handleOpenRouterIssue(
       throw new Error('active entitlement missing after successful issue activation');
     }
 
+    activationCommitted = true;
+
+    await runPostActivationMonitoring(c, {
+      installationId,
+      managedCredentialRef: activeEntitlement.managed_credential_ref!,
+      issuedAt,
+      now,
+    });
+
     return await issueSuccessResponse(
       c,
       activeEntitlement,
@@ -352,6 +398,16 @@ export async function handleOpenRouterIssue(
     );
   } catch (error) {
     if (childKey) {
+      if (activationCommitted && error instanceof PostActivationMonitoringStateError) {
+        return handlePostActivationMonitoringFailure(c, {
+          installationId,
+          releaseSessionRef: entitlement.release_session_ref,
+          childKey,
+          issuedAt,
+          issueSuccessRecorded: error.issueSuccessRecorded,
+        });
+      }
+
       return handleManagedChildKeyFailure(c, {
         installationId,
         releaseSessionRef: entitlement.release_session_ref,
@@ -494,6 +550,109 @@ async function invalidatePendingRelease(
     )
     .bind(input.installationId)
     .run();
+}
+
+async function runPostActivationMonitoring(
+  c: Context<BrokerEnv>,
+  input: {
+    installationId: string;
+    managedCredentialRef: string;
+    issuedAt: string;
+    now: Date;
+  },
+): Promise<void> {
+  try {
+    let monitoringResult: Awaited<ReturnType<typeof evaluateImmediateAbuseState>> | null =
+      null;
+    let issueSuccessRecorded = false;
+
+    try {
+      const network = await extractRequestNetworkMetadata(c, c.env.BROKER_DB);
+      await recordIssueSuccess(c.env.BROKER_DB, {
+        installationId: input.installationId,
+        managedCredentialRef: input.managedCredentialRef,
+        observedAt: input.issuedAt,
+        network,
+      });
+      issueSuccessRecorded = true;
+      monitoringResult = await evaluateImmediateAbuseState(c.env.BROKER_DB, input.now);
+    } catch (error) {
+      logPostActivationMonitoringFailure({
+        installationId: input.installationId,
+        managedCredentialRef: input.managedCredentialRef,
+        stage: 'record_or_evaluate',
+        error,
+      });
+      throw new PostActivationMonitoringStateError({
+        cause: error,
+        issueSuccessRecorded,
+      });
+    }
+
+    const sideEffectPromise = deliverImmediateMonitoringSideEffects(
+      c.env,
+      monitoringResult,
+    ).catch((error) => {
+      logPostActivationMonitoringFailure({
+        installationId: input.installationId,
+        managedCredentialRef: input.managedCredentialRef,
+        stage: 'deliver_side_effects',
+        error,
+      });
+    });
+
+    const waitUntil = resolveExecutionWaitUntil(c);
+    if (waitUntil) {
+      try {
+        waitUntil(sideEffectPromise);
+        return;
+      } catch {
+        // Fall through and await inline when the request context does not support waitUntil.
+      }
+    }
+
+    await sideEffectPromise;
+  } catch (error) {
+    if (error instanceof PostActivationMonitoringStateError) {
+      throw error;
+    }
+
+    logPostActivationMonitoringFailure({
+      installationId: input.installationId,
+      managedCredentialRef: input.managedCredentialRef,
+      stage: 'unexpected',
+      error,
+    });
+  }
+}
+
+function logPostActivationMonitoringFailure(input: {
+  installationId: string;
+  managedCredentialRef: string;
+  stage: 'record_or_evaluate' | 'deliver_side_effects' | 'unexpected';
+  error: unknown;
+}): void {
+  console.error('post_activation_monitoring_failed', {
+    installation_id: input.installationId,
+    managed_credential_ref: input.managedCredentialRef,
+    stage: input.stage,
+    error_message: input.error instanceof Error ? input.error.message : String(input.error),
+    broker_timestamp: new Date().toISOString(),
+  });
+}
+
+function resolveExecutionWaitUntil(
+  c: Context<BrokerEnv>,
+): ((promise: Promise<unknown>) => void) | null {
+  try {
+    if (typeof c.executionCtx?.waitUntil !== 'function') {
+      return null;
+    }
+
+    return c.executionCtx.waitUntil.bind(c.executionCtx);
+  } catch {
+    return null;
+  }
 }
 
 async function getInstallation(
@@ -651,6 +810,54 @@ async function handleManagedChildKeyFailure(
   );
 }
 
+async function handlePostActivationMonitoringFailure(
+  c: Context<BrokerEnv>,
+  input: {
+    installationId: string;
+    releaseSessionRef: string;
+    childKey: {
+      rawKey: string;
+      hash: string;
+    };
+    issuedAt: string;
+    issueSuccessRecorded: boolean;
+  },
+): Promise<Response> {
+  if (input.issueSuccessRecorded) {
+    await deleteIssueSuccessRecord(c.env.BROKER_DB, {
+      installationId: input.installationId,
+      managedCredentialRef: input.childKey.hash,
+      observedAt: input.issuedAt,
+    });
+  }
+
+  await rollbackActivatedEntitlement(c.env.BROKER_DB, {
+    installationId: input.installationId,
+    managedCredentialRef: input.childKey.hash,
+  });
+
+  const cleanup = await cleanupManagedChildKey({
+    managementApiKey: c.env.OPENROUTER_MANAGEMENT_API_KEY,
+    keyHash: input.childKey.hash,
+  });
+
+  if (!cleanup.ok) {
+    console.error('managed_child_key_orphan_audit', {
+      installation_id: input.installationId,
+      release_session_ref: input.releaseSessionRef,
+      managed_credential_ref: input.childKey.hash,
+      cleanup_outcome: cleanup.reason,
+      failure_stage: 'post_activation_monitoring',
+      broker_timestamp: new Date().toISOString(),
+    });
+  }
+
+  return internalErrorResponseWithEntitlement(
+    c,
+    await getEntitlement(c.env.BROKER_DB, input.installationId),
+  );
+}
+
 async function handleAmbiguousManagedChildKeyCreateFailure(
   c: Context<BrokerEnv>,
   input: {
@@ -674,6 +881,50 @@ async function handleAmbiguousManagedChildKeyCreateFailure(
     c,
     await getEntitlement(c.env.BROKER_DB, input.installationId),
   );
+}
+
+async function deleteIssueSuccessRecord(
+  db: D1Database,
+  input: {
+    installationId: string;
+    managedCredentialRef: string;
+    observedAt: string;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM broker_issue_success_events
+         WHERE installation_id = ?
+           AND managed_credential_ref = ?
+           AND observed_at = ?`,
+    )
+    .bind(input.installationId, input.managedCredentialRef, input.observedAt)
+    .run();
+}
+
+async function rollbackActivatedEntitlement(
+  db: D1Database,
+  input: {
+    installationId: string;
+    managedCredentialRef: string;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE openrouter_entitlements
+          SET status = 'pending_release',
+              managed_credential_ref = NULL,
+              issued_at = NULL,
+              expires_at = NULL,
+              release_session_ref = NULL,
+              release_token_hash = NULL,
+              release_token_expires_at = NULL
+        WHERE installation_id = ?
+          AND status = 'active'
+          AND managed_credential_ref = ?`,
+    )
+    .bind(input.installationId, input.managedCredentialRef)
+    .run();
 }
 
 function normalizeCreateFailure(error: unknown): {

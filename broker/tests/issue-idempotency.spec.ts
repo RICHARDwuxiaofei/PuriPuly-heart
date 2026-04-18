@@ -70,7 +70,7 @@ describe('POST /v1/providers/openrouter/issue idempotency', () => {
           provider: 'OpenRouter',
           budget_usd: 0.08,
           issued_at: '2026-04-08T06:00:00.000Z',
-          expires_at: '2026-10-08T06:00:00.000Z',
+          expires_at: '2026-07-08T06:00:00.000Z',
         },
       }),
     );
@@ -88,7 +88,7 @@ describe('POST /v1/providers/openrouter/issue idempotency', () => {
       status: 'active',
       managed_credential_ref: managementApi.childKey.hash,
       issued_at: '2026-04-08T06:00:00.000Z',
-      expires_at: '2026-10-08T06:00:00.000Z',
+      expires_at: '2026-07-08T06:00:00.000Z',
       release_session_ref: expect.any(String),
       release_token_hash: expect.any(String),
       release_token_expires_at: release.releaseTokenExpiresAt,
@@ -206,7 +206,7 @@ describe('POST /v1/providers/openrouter/issue idempotency', () => {
           provider: 'OpenRouter',
           budget_usd: 0.08,
           issued_at: '2026-04-08T06:00:00.000Z',
-          expires_at: '2026-10-08T06:00:00.000Z',
+          expires_at: '2026-07-08T06:00:00.000Z',
         },
       }),
     );
