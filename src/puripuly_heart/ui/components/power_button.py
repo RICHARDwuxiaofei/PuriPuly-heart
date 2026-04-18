@@ -38,21 +38,6 @@ class PowerButton(ft.Container):
             weight=ft.FontWeight.BOLD,
             color=COLOR_SECONDARY,
         )
-        self._status_control = ft.Text(
-            "",
-            size=18,
-            weight=ft.FontWeight.W_600,
-            color=COLOR_SECONDARY,
-            text_align=ft.TextAlign.CENTER,
-            visible=False,
-        )
-        self._helper_control = ft.Text(
-            "",
-            size=13,
-            color=COLOR_SECONDARY,
-            text_align=ft.TextAlign.CENTER,
-            visible=False,
-        )
 
         # Wrap content in glow stack
         # Valid even for PowerButton: The background color sits on the Container (self),
@@ -67,8 +52,6 @@ class PowerButton(ft.Container):
                     [
                         self._icon_control,
                         self._label_control,
-                        self._status_control,
-                        self._helper_control,
                     ],
                     alignment=ft.MainAxisAlignment.CENTER,
                     horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -98,31 +81,22 @@ class PowerButton(ft.Container):
         helper_text: str | None = None,
     ):
         """Update button visual state."""
+        _ = (status_text, helper_text)
         self._is_on = is_on
         self._needs_key = needs_key
-        self._status_control.value = status_text or ""
-        self._status_control.visible = bool(status_text)
-        self._helper_control.value = helper_text or ""
-        self._helper_control.visible = bool(helper_text)
 
         if needs_key:
             self.bgcolor = COLOR_WARNING
             self._icon_control.color = ft.Colors.WHITE
             self._label_control.color = ft.Colors.WHITE
-            self._status_control.color = ft.Colors.WHITE
-            self._helper_control.color = ft.Colors.WHITE
         elif is_on:
             self.bgcolor = self._color_on
             self._icon_control.color = ft.Colors.WHITE
             self._label_control.color = ft.Colors.WHITE
-            self._status_control.color = ft.Colors.WHITE
-            self._helper_control.color = ft.Colors.WHITE
         else:
             self.bgcolor = COLOR_TRANS_TONAL
             self._icon_control.color = COLOR_SECONDARY
             self._label_control.color = COLOR_SECONDARY
-            self._status_control.color = COLOR_SECONDARY
-            self._helper_control.color = COLOR_SECONDARY
 
         if self.page is not None:
             self.update()

@@ -41,10 +41,7 @@ from puripuly_heart.core.storage.secrets import (
     SecretStore,
 )
 from puripuly_heart.core.stt.backend import STTBackend
-from puripuly_heart.core.stt.custom_vocab import (
-    get_effective_custom_terms,
-    get_effective_local_qwen_hotwords,
-)
+from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.domain.models import Translation
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
@@ -592,7 +589,7 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
 
 def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
     peer_source_language = settings.languages.effective_peer_source
-    keyterms = tuple(get_effective_custom_terms(settings, peer_source_language))
+    keyterms: tuple[str, ...] = ()
     provider = settings.provider.peer_stt
 
     if provider == STTProviderName.DEEPGRAM:
@@ -610,8 +607,8 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
             source_language=peer_source_language,
             sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
             keyterms=keyterms,
-            qwen_model=settings.peer_qwen_asr_stt.model or settings.qwen_asr_stt.model,
-            qwen_region=settings.peer_qwen_asr_stt.region or settings.qwen.region,
+            qwen_model=settings.qwen_asr_stt.model,
+            qwen_region=settings.qwen.region,
         )
 
     if provider == STTProviderName.SONIOX:
@@ -620,18 +617,10 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
             source_language=peer_source_language,
             sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
             keyterms=keyterms,
-            soniox_model=settings.peer_soniox_stt.model or settings.soniox_stt.model,
-            soniox_endpoint=settings.peer_soniox_stt.endpoint or settings.soniox_stt.endpoint,
-            soniox_keepalive_interval_s=(
-                settings.peer_soniox_stt.keepalive_interval_s
-                if settings.peer_soniox_stt.keepalive_interval_s is not None
-                else settings.soniox_stt.keepalive_interval_s
-            ),
-            soniox_trailing_silence_ms=(
-                settings.peer_soniox_stt.trailing_silence_ms
-                if settings.peer_soniox_stt.trailing_silence_ms is not None
-                else settings.soniox_stt.trailing_silence_ms
-            ),
+            soniox_model=settings.soniox_stt.model,
+            soniox_endpoint=settings.soniox_stt.endpoint,
+            soniox_keepalive_interval_s=settings.soniox_stt.keepalive_interval_s,
+            soniox_trailing_silence_ms=settings.soniox_stt.trailing_silence_ms,
         )
 
     if provider == STTProviderName.LOCAL_QWEN:
@@ -639,7 +628,7 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
             provider=provider,
             source_language=peer_source_language,
             sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
-            keyterms=tuple(get_effective_local_qwen_hotwords(settings, peer_source_language)),
+            keyterms=(),
         )
 
     raise ValueError(f"Unsupported peer STT provider: {provider}")

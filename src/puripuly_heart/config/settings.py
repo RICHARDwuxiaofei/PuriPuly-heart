@@ -627,20 +627,6 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "keepalive_interval_s": settings.soniox_stt.keepalive_interval_s,
             "trailing_silence_ms": settings.soniox_stt.trailing_silence_ms,
         },
-        "peer_qwen_asr_stt": {
-            "model": settings.peer_qwen_asr_stt.model,
-            "region": (
-                settings.peer_qwen_asr_stt.region.value
-                if settings.peer_qwen_asr_stt.region is not None
-                else None
-            ),
-        },
-        "peer_soniox_stt": {
-            "model": settings.peer_soniox_stt.model,
-            "endpoint": settings.peer_soniox_stt.endpoint,
-            "keepalive_interval_s": settings.peer_soniox_stt.keepalive_interval_s,
-            "trailing_silence_ms": settings.peer_soniox_stt.trailing_silence_ms,
-        },
         "gemini": {
             "llm_model": settings.gemini.llm_model.value,
         },

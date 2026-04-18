@@ -225,8 +225,10 @@ def test_peer_stt_provider_roundtrips_through_settings_dict() -> None:
     reloaded = from_dict(persisted)
 
     assert reloaded.provider.peer_stt == STTProviderName.SONIOX
-    assert reloaded.peer_qwen_asr_stt.region == QwenRegion.SINGAPORE
+    assert reloaded.peer_qwen_asr_stt.region is None
     assert "peer_deepgram_stt" not in persisted
+    assert "peer_qwen_asr_stt" not in persisted
+    assert "peer_soniox_stt" not in persisted
 
 
 def test_to_dict_persists_peer_local_qwen_without_rewriting_runtime_settings() -> None:
@@ -447,13 +449,8 @@ def test_load_settings_backfills_v4_peer_blocks_from_schema3_fixture(tmp_path) -
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["provider"]["peer_stt"] == STTProviderName.DEEPGRAM.value
     assert "peer_deepgram_stt" not in persisted
-    assert persisted["peer_qwen_asr_stt"] == {"model": None, "region": None}
-    assert persisted["peer_soniox_stt"] == {
-        "model": None,
-        "endpoint": None,
-        "keepalive_interval_s": None,
-        "trailing_silence_ms": None,
-    }
+    assert "peer_qwen_asr_stt" not in persisted
+    assert "peer_soniox_stt" not in persisted
 
 
 def test_from_dict_ignores_legacy_peer_deepgram_override_block() -> None:

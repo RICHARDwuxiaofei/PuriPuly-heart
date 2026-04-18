@@ -782,7 +782,7 @@ def test_create_stt_backend_local_qwen_passes_language_hint_without_hotwords() -
     assert getattr(backend, "hotwords", ()) == ()
 
 
-def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None:
+def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration_without_hint_terms() -> None:
     settings = AppSettings(
         provider=ProviderSettings(stt=STTProviderName.SONIOX),
         deepgram_stt=DeepgramSTTSettings(model="nova-3"),
@@ -798,11 +798,11 @@ def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None
     assert backend.model == "nova-3"
     assert backend.sample_rate_hz == 16000
     assert backend.language == get_deepgram_language(settings.languages.source_language)
-    assert list(backend.keyterms) == ["아이리", "시나노"]
+    assert list(backend.keyterms) == []
     assert backend.stream_label == "peer"
 
 
-def test_create_peer_stt_backend_uses_effective_peer_source_language_and_terms() -> None:
+def test_create_peer_stt_backend_uses_effective_peer_source_language_without_hint_terms() -> None:
     settings = AppSettings(
         provider=ProviderSettings(stt=STTProviderName.SONIOX),
         deepgram_stt=DeepgramSTTSettings(model="nova-3"),
@@ -816,7 +816,7 @@ def test_create_peer_stt_backend_uses_effective_peer_source_language_and_terms()
 
     assert isinstance(backend, DeepgramRealtimeSTTBackend)
     assert backend.language == get_deepgram_language(settings.languages.effective_peer_source)
-    assert list(backend.keyterms) == ["airi", "shinano"]
+    assert list(backend.keyterms) == []
 
 
 def test_self_stt_provider_setting_does_not_change_peer_backend_choice() -> None:
@@ -848,7 +848,7 @@ def test_create_peer_stt_backend_uses_peer_selected_soniox_provider() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.SONIOX
     settings.languages.peer_source_language = "ko"
-    settings.peer_soniox_stt.model = "stt-rt-v4"
+    settings.soniox_stt.model = "stt-rt-v4"
     secrets = InMemorySecretStore()
     secrets.set("soniox_api_key", "peer-soniox")
 
@@ -859,10 +859,10 @@ def test_create_peer_stt_backend_uses_peer_selected_soniox_provider() -> None:
     assert backend.model == "stt-rt-v4"
 
 
-def test_create_peer_stt_backend_uses_peer_qwen_region_for_endpoint_and_secret() -> None:
+def test_create_peer_stt_backend_uses_shared_qwen_region_for_endpoint_and_secret() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.QWEN_ASR
-    settings.peer_qwen_asr_stt.region = QwenRegion.SINGAPORE
+    settings.qwen.region = QwenRegion.SINGAPORE
     secrets = InMemorySecretStore()
     secrets.set("alibaba_api_key_singapore", "peer-qwen")
 
@@ -877,8 +877,8 @@ def test_build_peer_stt_provider_signature_includes_backend_affecting_values() -
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.SONIOX
     settings.languages.peer_source_language = "zh-CN"
-    settings.peer_soniox_stt.model = "stt-rt-v4"
-    settings.peer_soniox_stt.trailing_silence_ms = 350
+    settings.soniox_stt.model = "stt-rt-v4"
+    settings.soniox_stt.trailing_silence_ms = 350
 
     signature = build_peer_stt_provider_signature(settings)
 
@@ -898,21 +898,14 @@ def test_build_peer_stt_provider_signature_uses_fixed_16khz_runtime_contract() -
     assert signature[2] == 16000
 
 
-def test_resolve_peer_stt_config_inherits_peer_qwen_model_until_override() -> None:
+def test_resolve_peer_stt_config_uses_shared_qwen_model_only() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.QWEN_ASR
     settings.qwen_asr_stt.model = "self-qwen-asr"
-    settings.peer_qwen_asr_stt.model = None
 
     resolved = resolve_peer_stt_config(settings)
 
     assert resolved.qwen_model == "self-qwen-asr"
-
-    settings.peer_qwen_asr_stt.model = "peer-qwen-asr"
-
-    resolved = resolve_peer_stt_config(settings)
-
-    assert resolved.qwen_model == "peer-qwen-asr"
 
 
 def test_create_peer_stt_backend_uses_peer_local_qwen_provider_and_fixed_sample_rate() -> None:
@@ -960,7 +953,7 @@ def test_create_peer_stt_backend_local_qwen_uses_peer_language_without_hotwords(
     assert getattr(backend, "hotwords", ()) == ()
 
 
-def test_resolve_peer_stt_config_inherits_soniox_endpoint_keepalive_and_trailing_silence_until_override() -> (
+def test_resolve_peer_stt_config_uses_shared_soniox_endpoint_keepalive_and_trailing_silence() -> (
     None
 ):
     settings = AppSettings()
@@ -969,10 +962,6 @@ def test_resolve_peer_stt_config_inherits_soniox_endpoint_keepalive_and_trailing
     settings.soniox_stt.endpoint = "wss://self-soniox.example/realtime"
     settings.soniox_stt.keepalive_interval_s = 12.5
     settings.soniox_stt.trailing_silence_ms = 900
-    settings.peer_soniox_stt.model = None
-    settings.peer_soniox_stt.endpoint = None
-    settings.peer_soniox_stt.keepalive_interval_s = None
-    settings.peer_soniox_stt.trailing_silence_ms = None
 
     resolved = resolve_peer_stt_config(settings)
 
@@ -980,18 +969,6 @@ def test_resolve_peer_stt_config_inherits_soniox_endpoint_keepalive_and_trailing
     assert resolved.soniox_endpoint == "wss://self-soniox.example/realtime"
     assert resolved.soniox_keepalive_interval_s == 12.5
     assert resolved.soniox_trailing_silence_ms == 900
-
-    settings.peer_soniox_stt.model = "peer-soniox"
-    settings.peer_soniox_stt.endpoint = "wss://peer-soniox.example/realtime"
-    settings.peer_soniox_stt.keepalive_interval_s = 6.0
-    settings.peer_soniox_stt.trailing_silence_ms = 250
-
-    resolved = resolve_peer_stt_config(settings)
-
-    assert resolved.soniox_model == "peer-soniox"
-    assert resolved.soniox_endpoint == "wss://peer-soniox.example/realtime"
-    assert resolved.soniox_keepalive_interval_s == 6.0
-    assert resolved.soniox_trailing_silence_ms == 250
 
 
 def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:

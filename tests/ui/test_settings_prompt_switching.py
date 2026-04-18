@@ -266,7 +266,7 @@ def test_prompt_commit_uses_prompt_apply_callback_without_generic_settings_emit(
     assert generic_changed == []
 
 
-def test_settings_view_llm_modal_orders_qwen_plus_before_flash(monkeypatch) -> None:
+def test_settings_view_llm_modal_ends_with_qwen_plus_only(monkeypatch) -> None:
     settings = AppSettings()
     view = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
@@ -297,7 +297,6 @@ def test_settings_view_llm_modal_orders_qwen_plus_before_flash(monkeypatch) -> N
         OpenRouterSelectionAlias.GEMMA4_BYOK.value,
         OpenRouterSelectionAlias.QWEN35_FLASH_BYOK.value,
         QwenLLMModel.QWEN_35_PLUS.value,
-        QwenLLMModel.QWEN_35_FLASH.value,
     ]
 
 
