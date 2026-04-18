@@ -15,7 +15,8 @@ use crate::manifest::{
 #[cfg(test)]
 use crate::openvr::OpenVrError;
 use crate::openvr::{
-    perform_startup_preflight, OpenVrOverlay, OpenVrStartupPreflightError, OverlayFrameSubmitter,
+    format_openvr_visibility_api_call_log, perform_startup_preflight, OpenVrOverlay,
+    OpenVrStartupPreflightError, OverlayFrameSubmitter,
 };
 use crate::renderer::{
     CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutResult, CaptionPresentation,
@@ -485,6 +486,8 @@ impl OverlayRuntime {
         );
         let overlay_visible_before = self.overlay_visible;
         let should_show_after_submit = has_drawable_text && !self.overlay_visible;
+        let hide_deadline_was_active = self.hide_deadline.is_some();
+        let last_submitted_visible_row_count = self.last_submitted_visible_rows.len();
         if has_drawable_text {
             self.hide_deadline = None;
         } else if self.first_texture_submitted
@@ -510,6 +513,56 @@ impl OverlayRuntime {
             format_frame_rendered_log(frame.layout(), fully_transparent),
         )
         .await?;
+        if !peer_overlay_first_render_ids.is_empty() {
+            log_runtime_info(
+                logger,
+                format_peer_first_render_visibility_checkpoint_log(
+                    self.state.snapshot().revision,
+                    &peer_overlay_first_render_ids,
+                    has_drawable_text,
+                    overlay_visible_before,
+                    should_show_after_submit,
+                    hide_deadline_was_active,
+                    self.first_texture_submitted,
+                    self.redraw_requested,
+                    frame.layout().visible_blocks.len(),
+                    self_block_count,
+                    fully_transparent,
+                ),
+            )
+            .await?;
+            if has_drawable_text
+                && overlay_visible_before
+                && !should_show_after_submit
+                && !hide_deadline_was_active
+                && last_submitted_visible_row_count == 0
+            {
+                log_runtime_warn(
+                    logger,
+                    format_peer_first_render_visibility_desync_suspected_log(
+                        self.state.snapshot().revision,
+                        &peer_overlay_first_render_ids,
+                        overlay_visible_before,
+                        should_show_after_submit,
+                        hide_deadline_was_active,
+                        self.first_texture_submitted,
+                        self.redraw_requested,
+                        last_submitted_visible_row_count,
+                    ),
+                )
+                .await?;
+                log_runtime_info(
+                    logger,
+                    format_openvr_visibility_api_call_log(
+                        true,
+                        overlay_visible_before,
+                        "SkippedByRuntimeCachedVisibleState",
+                        self.overlay_visible,
+                    ),
+                )
+                .await?;
+            }
+        }
         self.emit_visible_update_rendered_diagnostics(logger, &rendered_diagnostic_rows)
             .await?;
         let detailed_logging = logger.is_detailed();
@@ -528,6 +581,9 @@ impl OverlayRuntime {
                 .set_overlay_visible(true)
                 .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
             self.overlay_visible = true;
+            if let Some(message) = openvr.take_visibility_api_call_log() {
+                log_runtime_info(logger, message).await?;
+            }
             log_runtime_info(
                 logger,
                 "overlay_visibility_changed visible=true reason=frame_submit_text_visible"
@@ -668,6 +724,9 @@ impl OverlayRuntime {
             .set_overlay_visible(false)
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
         self.overlay_visible = false;
+        if let Some(message) = openvr.take_visibility_api_call_log() {
+            log_runtime_info(logger, message).await?;
+        }
         log_runtime_info(
             logger,
             "overlay_visibility_changed visible=false reason=idle_hide_deadline".to_string(),
@@ -1177,9 +1236,68 @@ fn format_frame_submitted_log(
     line
 }
 
+fn format_peer_first_render_visibility_checkpoint_log(
+    revision: u64,
+    peer_ids: &[String],
+    has_drawable_text: bool,
+    overlay_visible_before: bool,
+    should_show_after_submit: bool,
+    hide_deadline_active: bool,
+    first_texture_submitted: bool,
+    redraw_requested: bool,
+    visible_block_count: usize,
+    self_block_count: usize,
+    fully_transparent: bool,
+) -> String {
+    format!(
+        "peer_first_render_visibility_checkpoint revision={} peer_ids=[{}] has_drawable_text={} overlay_visible_before={} should_show_after_submit={} hide_deadline_active={} first_texture_submitted={} redraw_requested={} visible_block_count={} self_block_count={} fully_transparent={}",
+        revision,
+        peer_ids.join(","),
+        has_drawable_text,
+        overlay_visible_before,
+        should_show_after_submit,
+        hide_deadline_active,
+        first_texture_submitted,
+        redraw_requested,
+        visible_block_count,
+        self_block_count,
+        fully_transparent,
+    )
+}
+
+fn format_peer_first_render_visibility_desync_suspected_log(
+    revision: u64,
+    peer_ids: &[String],
+    overlay_visible_before: bool,
+    should_show_after_submit: bool,
+    hide_deadline_active: bool,
+    first_texture_submitted: bool,
+    redraw_requested: bool,
+    last_submitted_visible_row_count: usize,
+) -> String {
+    format!(
+        "peer_first_render_visibility_desync_suspected revision={} peer_ids=[{}] overlay_visible_before={} should_show_after_submit={} hide_deadline_active={} first_texture_submitted={} redraw_requested={} last_submitted_visible_row_count={}",
+        revision,
+        peer_ids.join(","),
+        overlay_visible_before,
+        should_show_after_submit,
+        hide_deadline_active,
+        first_texture_submitted,
+        redraw_requested,
+        last_submitted_visible_row_count,
+    )
+}
+
 async fn log_runtime_info(logger: &OverlayLogger, message: String) -> Result<(), RuntimeFailure> {
     logger
         .info(message)
+        .await
+        .map_err(|error| RuntimeFailure::Bridge(error.to_string()))
+}
+
+async fn log_runtime_warn(logger: &OverlayLogger, message: String) -> Result<(), RuntimeFailure> {
+    logger
+        .warn(message)
         .await
         .map_err(|error| RuntimeFailure::Bridge(error.to_string()))
 }
@@ -1436,6 +1554,8 @@ mod tests {
         collect_diagnostic_rows, collect_rendered_diagnostic_rows,
         diagnostic_row_signature, format_caption_blocks_built_log, format_frame_rendered_log,
         format_frame_submitted_log, format_overlay_visible_update_rendered_log,
+        format_peer_first_render_visibility_desync_suspected_log,
+        format_peer_first_render_visibility_checkpoint_log,
         format_snapshot_received_log, format_snapshot_slot_correlation_log,
         format_two_row_window_closed_log, peer_overlay_first_emit_block_ids_from_snapshot,
         peer_overlay_first_render_block_ids_from_caption_blocks, prepare_openvr_runtime,
@@ -1995,6 +2115,55 @@ mod tests {
         let summary_with_duration =
             format_frame_submitted_log(&layout, 7, false, false, true, true, Some(421));
         assert!(summary_with_duration.contains("submit_duration_us=421"));
+    }
+
+    #[test]
+    fn peer_first_render_visibility_checkpoint_summary_reports_visibility_gate_fields() {
+        let summary = format_peer_first_render_visibility_checkpoint_log(
+            11,
+            &["peer:utterance-3".to_string()],
+            true,
+            true,
+            false,
+            true,
+            true,
+            true,
+            1,
+            0,
+            false,
+        );
+
+        assert!(summary.contains("peer_first_render_visibility_checkpoint revision=11"));
+        assert!(summary.contains("peer_ids=[peer:utterance-3]"));
+        assert!(summary.contains("overlay_visible_before=true"));
+        assert!(summary.contains("should_show_after_submit=false"));
+        assert!(summary.contains("hide_deadline_active=true"));
+        assert!(summary.contains("visible_block_count=1"));
+        assert!(summary.contains("self_block_count=0"));
+        assert!(summary.contains("fully_transparent=false"));
+    }
+
+    #[test]
+    fn peer_first_render_visibility_desync_warning_summary_reports_suspect_state() {
+        let summary = format_peer_first_render_visibility_desync_suspected_log(
+            12,
+            &["peer:utterance-4".to_string()],
+            true,
+            false,
+            true,
+            true,
+            true,
+            0,
+        );
+
+        assert!(summary.contains("peer_first_render_visibility_desync_suspected revision=12"));
+        assert!(summary.contains("peer_ids=[peer:utterance-4]"));
+        assert!(summary.contains("overlay_visible_before=true"));
+        assert!(summary.contains("should_show_after_submit=false"));
+        assert!(summary.contains("hide_deadline_active=true"));
+        assert!(summary.contains("first_texture_submitted=true"));
+        assert!(summary.contains("redraw_requested=true"));
+        assert!(summary.contains("last_submitted_visible_row_count=0"));
     }
 
     #[test]

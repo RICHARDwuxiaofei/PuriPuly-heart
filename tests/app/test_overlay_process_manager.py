@@ -818,6 +818,48 @@ async def test_overlay_process_manager_overlay_visible_update_rendered_passthrou
 
 
 @pytest.mark.asyncio
+async def test_overlay_process_manager_peer_first_render_visibility_checkpoint_passthrough_is_visible_in_detailed_mode(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script_path = tmp_path / "overlay_stub_peer_visibility_checkpoint_detailed.py"
+    script_path.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import sys",
+                "import time",
+                "assert sys.argv[1] == '--config'",
+                'print("[overlay][INFO] peer_first_render_visibility_checkpoint revision=11 peer_ids=[peer:utterance-3] has_drawable_text=true overlay_visible_before=true should_show_after_submit=false hide_deadline_active=false first_texture_submitted=true redraw_requested=true visible_block_count=1 self_block_count=0 fully_transparent=false", flush=True)',
+                'print(\'{"type": "overlay_ready"}\', flush=True)',
+                "time.sleep(5)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    script_path.chmod(0o755)
+
+    manager = OverlayProcessManager(
+        process_runner=DefaultOverlayProcessRunner(executable_path=script_path),
+        startup_timeout_ms=500,
+        logging_mode="detailed",
+    )
+
+    try:
+        with caplog.at_level("INFO", logger="puripuly_heart.core.overlay.process"):
+            await manager.start()
+
+        assert manager.state == "connected"
+        assert any(
+            "peer_first_render_visibility_checkpoint" in message
+            and "peer_ids=[peer:utterance-3]" in message
+            for message in caplog.messages
+        )
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
 async def test_overlay_process_manager_maps_post_ready_runtime_error_to_failure_reason() -> None:
     manager = OverlayProcessManager(
         process_runner=FakeProcessRunner(
