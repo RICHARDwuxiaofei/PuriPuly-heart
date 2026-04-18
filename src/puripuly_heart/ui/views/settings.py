@@ -71,6 +71,15 @@ _CENTER_ALIGNMENT = ft.alignment.Alignment(0, 0)
 _CENTER_RIGHT_ALIGNMENT = ft.alignment.Alignment(1, 0)
 _OPENROUTER_MANAGED_OPTION_VALUE = OpenRouterSelectionAlias.GEMMA4_MANAGED.value
 _SETTINGS_SUBTAB_ORDER = ("api", "general", "prompt", "overlay")
+_OVERLAY_DISTANCE_MIN = 0.5
+_OVERLAY_DISTANCE_MAX = 2.0
+_OVERLAY_DISTANCE_DIVISIONS = 30
+_OVERLAY_OFFSET_STEP = 0.05
+_OVERLAY_TEXT_SCALE_PRESETS = (
+    ("large", 1.2),
+    ("normal", 1.0),
+    ("small", 0.8),
+)
 
 
 def _make_text_button(label: str, **kwargs) -> ft.TextButton:
@@ -230,11 +239,15 @@ class SettingsView(ft.Column):
         no_wrap: bool = False,
         max_lines: int | None = None,
         overflow: ft.TextOverflow | None = None,
+        width: float | int | None = None,
+        height: float | int | None = None,
+        expand: bool | int | None = True,
     ) -> ft.Container:
         """Build a clickable centered text with hover effect."""
         text_control = ft.Text(
             text,
             size=size,
+            font_family=font_for_language(get_locale()),
             color=COLOR_ON_BACKGROUND,
             text_align=text_align,
             no_wrap=no_wrap,
@@ -244,7 +257,9 @@ class SettingsView(ft.Column):
         return ft.Container(
             content=text_control,
             alignment=alignment,
-            expand=True,
+            width=width,
+            height=height,
+            expand=expand,
             on_click=on_click,
             on_hover=self._on_text_hover,
         )
@@ -273,6 +288,33 @@ class SettingsView(ft.Column):
         text_control.value = text
         text_control.size = size
 
+    def _iter_locale_sensitive_clickable_text_controls(self) -> tuple[ft.Container, ...]:
+        return (
+            self._integrated_context_button,
+            self._stt_text,
+            self._peer_stt_text,
+            self._llm_text,
+            self._ui_text,
+            self._chatbox_source_text,
+            self._vrc_mic_text,
+            self._mic_audio_text,
+            self._audio_host_api_text,
+            self._loopback_audio_text,
+            self._low_latency_text,
+            self._overlay_translation_button,
+            self._overlay_peer_original_button,
+            self._overlay_anchor_button,
+            self._overlay_text_scale_text,
+            self._overlay_reset_button,
+            self._openrouter_routing_text,
+            self._openrouter_fallback_text,
+        )
+
+    def _sync_clickable_text_control_fonts(self, font_family: str | None) -> None:
+        for control in self._iter_locale_sensitive_clickable_text_controls():
+            if control:
+                control.content.font_family = font_family
+
     def _sync_general_audio_card_texts(self) -> None:
         default_label = t("settings.default_option")
         self._set_unit_card_value_text(
@@ -298,16 +340,129 @@ class SettingsView(ft.Column):
         text_control.color = next_color
         container.update()
 
-    def _get_button_style(self, font_family: str, *, size: int = 20) -> ft.ButtonStyle:
+    def _make_overlay_step_hover_handler(self, text_control: ft.Text):
+        def _on_hover(e: ft.ControlEvent) -> None:
+            next_color = COLOR_PRIMARY if e.data == "true" else COLOR_ON_BACKGROUND
+            if text_control.color == next_color:
+                return
+            text_control.color = next_color
+            if text_control.page is not None:
+                text_control.update()
+
+        return _on_hover
+
+    def _build_overlay_step_hit_lane(self, on_click, *, on_hover=None) -> ft.Container:
+        return ft.Container(
+            content=ft.Container(expand=True),
+            expand=1,
+            on_click=on_click,
+            on_hover=on_hover,
+        )
+
+    def _build_overlay_step_visual_lane(
+        self, text: str, *, alignment
+    ) -> tuple[ft.Container, ft.Text]:
+        text_control = ft.Text(
+            text,
+            size=22,
+            font_family=font_for_language(get_locale()),
+            color=COLOR_ON_BACKGROUND,
+            text_align=ft.TextAlign.CENTER,
+        )
+        return (
+            ft.Container(
+                content=text_control,
+                expand=1,
+                alignment=alignment,
+            ),
+            text_control,
+        )
+
+    def _build_overlay_step_split_layout(
+        self,
+        *,
+        title: ft.Text,
+        value_text: ft.Text,
+        decrease_text: str,
+        increase_text: str,
+        on_decrease,
+        on_increase,
+    ) -> tuple[ft.Stack, ft.Container, ft.Container, ft.Text, ft.Text]:
+        decrease_visual, decrease_glyph = self._build_overlay_step_visual_lane(
+            decrease_text,
+            alignment=ft.alignment.center_right,
+        )
+        increase_visual, increase_glyph = self._build_overlay_step_visual_lane(
+            increase_text,
+            alignment=ft.alignment.center_left,
+        )
+        decrease_lane = self._build_overlay_step_hit_lane(
+            on_decrease,
+            on_hover=self._make_overlay_step_hover_handler(decrease_glyph),
+        )
+        increase_lane = self._build_overlay_step_hit_lane(
+            on_increase,
+            on_hover=self._make_overlay_step_hover_handler(increase_glyph),
+        )
+        visual_row = ft.Row(
+            controls=[
+                decrease_visual,
+                ft.Container(
+                    content=value_text,
+                    width=84,
+                    alignment=ft.alignment.center,
+                ),
+                increase_visual,
+            ],
+            spacing=4,
+            expand=1,
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        visual_column = ft.Column(
+            controls=[
+                title,
+                ft.Container(
+                    content=visual_row,
+                    expand=True,
+                    alignment=ft.alignment.center,
+                ),
+            ],
+            spacing=0,
+            expand=True,
+        )
+        stack = ft.Stack(
+            controls=[
+                ft.Row(
+                    controls=[decrease_lane, increase_lane],
+                    spacing=0,
+                    expand=1,
+                    vertical_alignment=ft.CrossAxisAlignment.STRETCH,
+                ),
+                ft.TransparentPointer(content=visual_column),
+            ],
+            fit=ft.StackFit.EXPAND,
+            expand=True,
+            alignment=ft.alignment.center,
+        )
+        return stack, decrease_lane, increase_lane, decrease_glyph, increase_glyph
+
+    def _get_button_style(
+        self,
+        font_family: str,
+        *,
+        size: int = 20,
+        default_color: str = COLOR_NEUTRAL,
+    ) -> ft.ButtonStyle:
         """Create a complete ButtonStyle with the specified font."""
         return ft.ButtonStyle(
             color={
                 ft.ControlState.HOVERED: COLOR_PRIMARY,
-                ft.ControlState.DEFAULT: COLOR_NEUTRAL,
+                ft.ControlState.DEFAULT: default_color,
             },
             icon_color={
                 ft.ControlState.HOVERED: COLOR_PRIMARY,
-                ft.ControlState.DEFAULT: COLOR_NEUTRAL,
+                ft.ControlState.DEFAULT: default_color,
             },
             text_style=ft.TextStyle(
                 size=size,
@@ -354,11 +509,26 @@ class SettingsView(ft.Column):
             return
         logger.log(level, message)
 
-    def _build_action_button(self, text: str, on_click, *, size: int = 20) -> ft.TextButton:
+    def _build_action_button(
+        self,
+        text: str,
+        on_click,
+        *,
+        size: int = 20,
+        default_color: str = COLOR_NEUTRAL,
+        width: float | int | None = None,
+        height: float | int | None = None,
+    ) -> ft.TextButton:
         return _make_text_button(
             text,
-            style=self._get_button_style(font_for_language(get_locale()), size=size),
+            style=self._get_button_style(
+                font_for_language(get_locale()),
+                size=size,
+                default_color=default_color,
+            ),
             on_click=on_click,
+            width=width,
+            height=height,
         )
 
     def _build_integrated_context_unit_card(self) -> SettingsUnitCard:
@@ -368,10 +538,9 @@ class SettingsView(ft.Column):
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
-        self._integrated_context_button = self._build_action_button(
+        self._integrated_context_button = self._build_clickable_text(
             t("settings.context.local"),
             self._on_integrated_context_click,
-            size=28,
         )
         self._integrated_context_hint = ft.Text("", size=13, color=COLOR_NEUTRAL)
 
@@ -431,6 +600,29 @@ class SettingsView(ft.Column):
 
     def _format_overlay_calibration_number(self, value: float) -> str:
         return f"{value:.2f}"
+
+    def _overlay_anchor_label_for(self, anchor: str) -> str:
+        return t(f"settings.overlay.calibration.anchor.{anchor}")
+
+    def _overlay_text_scale_label_for(self, value: float) -> str:
+        return t(
+            f"settings.overlay.calibration.text_scale.{self._overlay_text_scale_preset_key_for(value)}"
+        )
+
+    def _overlay_text_scale_preset_key_for(self, value: float) -> str:
+        return min(
+            _OVERLAY_TEXT_SCALE_PRESETS,
+            key=lambda preset: abs(preset[1] - value),
+        )[0]
+
+    def _overlay_text_scale_value_for(self, preset_key: str) -> float:
+        for key, scale in _OVERLAY_TEXT_SCALE_PRESETS:
+            if key == preset_key:
+                return scale
+        try:
+            return float(preset_key)
+        except (TypeError, ValueError):
+            return 1.0
 
     def _parse_setting_float(
         self,
@@ -840,216 +1032,218 @@ class SettingsView(ft.Column):
             size=16,
             color=COLOR_ON_BACKGROUND,
         )
-        self._peer_qwen_region_text = self._build_setting_action_text(
-            self._inherit_label(),
-            self._on_peer_qwen_region_click,
-        )
-        self._peer_qwen_region_label = ft.Text(
-            t("settings.peer_qwen_region"),
-            size=16,
-            color=COLOR_ON_BACKGROUND,
-        )
-        self._peer_qwen_model_text = self._build_setting_action_text(
-            self._inherit_label(),
-            self._on_peer_qwen_model_click,
-        )
-        self._peer_qwen_model_label = ft.Text(
-            t("settings.peer_qwen_model"),
-            size=16,
-            color=COLOR_ON_BACKGROUND,
-        )
-        self._peer_soniox_model_text = self._build_setting_action_text(
-            self._inherit_label(),
-            self._on_peer_soniox_model_click,
-        )
-        self._peer_soniox_model_label = ft.Text(
-            t("settings.peer_soniox_model"),
-            size=16,
-            color=COLOR_ON_BACKGROUND,
-        )
         peer_stt_card = self._wrap_unit_card(
             title=self._peer_provider_title,
             value=self._peer_stt_text,
-            extra_controls=(
-                self._build_setting_action_row(
-                    self._peer_qwen_region_label,
-                    self._peer_qwen_region_text,
-                ),
-                self._build_setting_action_row(
-                    self._peer_qwen_model_label,
-                    self._peer_qwen_model_text,
-                ),
-                self._build_setting_action_row(
-                    self._peer_soniox_model_label,
-                    self._peer_soniox_model_text,
-                ),
-            ),
         )
         row1 = ft.Container(
             content=ft.Row([stt_card, peer_stt_card, trans_card], spacing=16, expand=True),
         )
 
-        self._overlay_display_options_title = ft.Text(
-            t("settings.overlay.display_options"),
+        self._overlay_translation_title = ft.Text(
+            t("settings.overlay.show_translation"),
             size=24,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
-        self._overlay_translation_label = ft.Text(
-            t("settings.overlay.show_translation"),
-            size=16,
-            color=COLOR_ON_BACKGROUND,
-        )
-        self._overlay_peer_original_label = ft.Text(
-            t("settings.overlay.show_peer_original"),
-            size=16,
-            color=COLOR_ON_BACKGROUND,
-        )
-        self._overlay_translation_button = self._build_action_button(
+        self._overlay_translation_button = self._build_clickable_text(
             t("settings.option.on"),
             self._on_overlay_translation_click,
         )
-        self._overlay_peer_original_button = self._build_action_button(
-            t("settings.option.on"),
-            self._on_overlay_peer_original_click,
+        self._overlay_translation_card = self._wrap_unit_card(
+            title=self._overlay_translation_title,
+            value=self._overlay_translation_button,
         )
-        self._overlay_calibration_title = ft.Text(
-            t("settings.overlay.calibration"),
+
+        self._overlay_peer_original_title = ft.Text(
+            t("settings.overlay.show_peer_original"),
             size=24,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
-        self._overlay_anchor_label = ft.Text(
-            t("settings.overlay.calibration.anchor"),
-            size=14,
-            color=COLOR_NEUTRAL,
+        self._overlay_peer_original_button = self._build_clickable_text(
+            t("settings.option.on"),
+            self._on_overlay_peer_original_click,
         )
-        self._overlay_offset_x_label = ft.Text(
-            t("settings.overlay.calibration.offset_x"),
-            size=14,
-            color=COLOR_NEUTRAL,
-        )
-        self._overlay_offset_y_label = ft.Text(
-            t("settings.overlay.calibration.offset_y"),
-            size=14,
-            color=COLOR_NEUTRAL,
-        )
-        self._overlay_distance_label = ft.Text(
-            t("settings.overlay.calibration.distance"),
-            size=14,
-            color=COLOR_NEUTRAL,
-        )
-        self._overlay_text_scale_label = ft.Text(
-            t("settings.overlay.calibration.text_scale"),
-            size=14,
-            color=COLOR_NEUTRAL,
-        )
-        self._overlay_anchor_dropdown = _make_overlay_anchor_dropdown(
-            self._overlay_calibration.anchor,
-            self._on_overlay_anchor_change,
-        )
-        self._overlay_offset_x_field = self._build_overlay_calibration_field(
-            value=self._overlay_calibration.offset_x,
-            on_blur=lambda e: self._on_overlay_calibration_numeric_blur("offset_x", e),
-        )
-        self._overlay_offset_y_field = self._build_overlay_calibration_field(
-            value=self._overlay_calibration.offset_y,
-            on_blur=lambda e: self._on_overlay_calibration_numeric_blur("offset_y", e),
-        )
-        self._overlay_distance_field = self._build_overlay_calibration_field(
-            value=self._overlay_calibration.distance,
-            on_blur=lambda e: self._on_overlay_calibration_numeric_blur("distance", e),
-        )
-        self._overlay_text_scale_field = self._build_overlay_calibration_field(
-            value=self._overlay_calibration.text_scale,
-            on_blur=lambda e: self._on_overlay_calibration_numeric_blur("text_scale", e),
-        )
-        self._overlay_calibration_apply_button = self._build_action_button(
-            t("settings.overlay.calibration.apply"),
-            self._on_overlay_calibration_apply,
-        )
-        self._overlay_calibration_cancel_button = self._build_action_button(
-            t("settings.overlay.calibration.cancel"),
-            self._on_overlay_calibration_cancel,
-        )
-        self._overlay_calibration_reset_button = self._build_action_button(
-            t("settings.overlay.calibration.reset"),
-            self._on_overlay_calibration_reset,
-        )
-        self._overlay_display_options_card = SharedCardWrapper(
-            ft.Column(
-                [
-                    self._overlay_display_options_title,
-                    ft.Container(height=12),
-                    self._build_setting_action_row(
-                        self._overlay_translation_label,
-                        self._overlay_translation_button,
-                    ),
-                    self._build_setting_action_row(
-                        self._overlay_peer_original_label,
-                        self._overlay_peer_original_button,
-                    ),
-                ],
-                spacing=6,
-            ),
-            height=None,
-            expand=False,
+        self._overlay_peer_original_card = self._wrap_unit_card(
+            title=self._overlay_peer_original_title,
+            value=self._overlay_peer_original_button,
         )
 
-        # === Row 6: Overlay Calibration ===
-        self._overlay_calibration_card = SharedCardWrapper(
-            ft.Column(
+        self._overlay_anchor_title = ft.Text(
+            t("settings.overlay.calibration.anchor"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._overlay_anchor_button = self._build_clickable_text(
+            self._overlay_anchor_label_for(self._overlay_calibration.anchor),
+            self._on_overlay_anchor_click,
+        )
+        self._overlay_anchor_card = self._wrap_unit_card(
+            title=self._overlay_anchor_title,
+            value=self._overlay_anchor_button,
+        )
+
+        self._overlay_distance_title = ft.Text(
+            t("settings.overlay.calibration.distance"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._overlay_distance_value_text = ft.Text(
+            self._format_overlay_calibration_number(self._overlay_calibration.distance),
+            size=28,
+            color=COLOR_ON_BACKGROUND,
+            text_align=ft.TextAlign.CENTER,
+        )
+        (
+            self._overlay_distance_card_content,
+            self._overlay_distance_decrease_button,
+            self._overlay_distance_increase_button,
+            self._overlay_distance_decrease_glyph,
+            self._overlay_distance_increase_glyph,
+        ) = self._build_overlay_step_split_layout(
+            title=self._overlay_distance_title,
+            value_text=self._overlay_distance_value_text,
+            decrease_text="－",
+            increase_text="＋",
+            on_decrease=lambda _e: self._on_overlay_distance_step(-_OVERLAY_OFFSET_STEP),
+            on_increase=lambda _e: self._on_overlay_distance_step(_OVERLAY_OFFSET_STEP),
+        )
+        self._overlay_distance_card = self._wrap_card(
+            self._overlay_distance_card_content,
+            expand=True,
+            height=SettingsUnitCard.DEFAULT_HEIGHT,
+        )
+
+        self._overlay_offset_x_title = ft.Text(
+            t("settings.overlay.calibration.offset_x"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._overlay_offset_x_value_text = ft.Text(
+            self._format_overlay_calibration_number(self._overlay_calibration.offset_x),
+            size=28,
+            color=COLOR_ON_BACKGROUND,
+            text_align=ft.TextAlign.CENTER,
+        )
+        (
+            self._overlay_offset_x_card_content,
+            self._overlay_offset_x_decrease_button,
+            self._overlay_offset_x_increase_button,
+            self._overlay_offset_x_decrease_glyph,
+            self._overlay_offset_x_increase_glyph,
+        ) = self._build_overlay_step_split_layout(
+            title=self._overlay_offset_x_title,
+            value_text=self._overlay_offset_x_value_text,
+            decrease_text="◀",
+            increase_text="▶",
+            on_decrease=lambda _e: self._on_overlay_offset_x_step(-_OVERLAY_OFFSET_STEP),
+            on_increase=lambda _e: self._on_overlay_offset_x_step(_OVERLAY_OFFSET_STEP),
+        )
+        self._overlay_offset_x_card = self._wrap_card(
+            self._overlay_offset_x_card_content,
+            expand=True,
+            height=SettingsUnitCard.DEFAULT_HEIGHT,
+        )
+
+        self._overlay_offset_y_title = ft.Text(
+            t("settings.overlay.calibration.offset_y"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._overlay_offset_y_value_text = ft.Text(
+            self._format_overlay_calibration_number(self._overlay_calibration.offset_y),
+            size=28,
+            color=COLOR_ON_BACKGROUND,
+            text_align=ft.TextAlign.CENTER,
+        )
+        (
+            self._overlay_offset_y_card_content,
+            self._overlay_offset_y_decrease_button,
+            self._overlay_offset_y_increase_button,
+            self._overlay_offset_y_decrease_glyph,
+            self._overlay_offset_y_increase_glyph,
+        ) = self._build_overlay_step_split_layout(
+            title=self._overlay_offset_y_title,
+            value_text=self._overlay_offset_y_value_text,
+            decrease_text="▲",
+            increase_text="▼",
+            on_decrease=lambda _e: self._on_overlay_offset_y_step(-_OVERLAY_OFFSET_STEP),
+            on_increase=lambda _e: self._on_overlay_offset_y_step(_OVERLAY_OFFSET_STEP),
+        )
+        self._overlay_offset_y_card = self._wrap_card(
+            self._overlay_offset_y_card_content,
+            expand=True,
+            height=SettingsUnitCard.DEFAULT_HEIGHT,
+        )
+
+        self._overlay_text_scale_title = ft.Text(
+            t("settings.overlay.calibration.text_scale"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._overlay_text_scale_text = self._build_clickable_text(
+            self._overlay_text_scale_label_for(self._overlay_calibration.text_scale),
+            self._on_overlay_text_scale_click,
+        )
+        self._overlay_text_scale_card = self._wrap_unit_card(
+            title=self._overlay_text_scale_title,
+            value=self._overlay_text_scale_text,
+        )
+
+        self._overlay_reset_title = ft.Text(
+            t("settings.overlay.position_reset"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._overlay_reset_button = self._build_clickable_text(
+            t("settings.overlay.calibration.reset"),
+            self._on_overlay_position_reset,
+        )
+        self._overlay_reset_card = self._wrap_unit_card(
+            title=self._overlay_reset_title,
+            value=self._overlay_reset_button,
+        )
+        self._overlay_empty_card = self._wrap_empty_unit_card()
+
+        overlay_row1 = ft.Container(
+            content=ft.Row(
                 [
-                    self._overlay_calibration_title,
-                    ft.Container(height=12),
-                    ft.Row(
-                        controls=[
-                            self._build_overlay_calibration_column(
-                                label=self._overlay_anchor_label,
-                                control=self._overlay_anchor_dropdown,
-                            ),
-                            self._build_overlay_calibration_column(
-                                label=self._overlay_distance_label,
-                                control=self._overlay_distance_field,
-                            ),
-                        ],
-                        spacing=12,
-                    ),
-                    ft.Row(
-                        controls=[
-                            self._build_overlay_calibration_column(
-                                label=self._overlay_offset_x_label,
-                                control=self._overlay_offset_x_field,
-                            ),
-                            self._build_overlay_calibration_column(
-                                label=self._overlay_offset_y_label,
-                                control=self._overlay_offset_y_field,
-                            ),
-                        ],
-                        spacing=12,
-                    ),
-                    ft.Row(
-                        controls=[
-                            self._build_overlay_calibration_column(
-                                label=self._overlay_text_scale_label,
-                                control=self._overlay_text_scale_field,
-                            ),
-                        ],
-                        spacing=12,
-                    ),
-                    ft.Row(
-                        controls=[
-                            self._overlay_calibration_apply_button,
-                            self._overlay_calibration_cancel_button,
-                            self._overlay_calibration_reset_button,
-                        ],
-                        spacing=12,
-                    ),
+                    self._overlay_translation_card,
+                    self._overlay_peer_original_card,
+                    self._overlay_anchor_card,
                 ],
-                spacing=6,
+                spacing=16,
+                expand=True,
             ),
-            height=None,
-            expand=False,
+        )
+        overlay_row2 = ft.Container(
+            content=ft.Row(
+                [
+                    self._overlay_distance_card,
+                    self._overlay_offset_x_card,
+                    self._overlay_offset_y_card,
+                ],
+                spacing=16,
+                expand=True,
+            ),
+        )
+        overlay_row3 = ft.Container(
+            content=ft.Row(
+                [
+                    self._overlay_text_scale_card,
+                    self._overlay_reset_card,
+                    self._overlay_empty_card,
+                ],
+                spacing=16,
+                expand=True,
+            ),
         )
 
         # === Row 7: OpenRouter Routing (1x1 + 1x1) ===
@@ -1218,7 +1412,7 @@ class SettingsView(ft.Column):
                 "api": [row1, self._openrouter_routing_row, api_keys_row],
                 "general": [general_primary_row, general_audio_row, general_vad_row],
                 "prompt": [row7, persona_card],
-                "overlay": [self._overlay_display_options_card, self._overlay_calibration_card],
+                "overlay": [overlay_row1, overlay_row2, overlay_row3],
             }
         )
         self.controls = [self._settings_subtab_shell]
@@ -1429,24 +1623,6 @@ class SettingsView(ft.Column):
             terms.append(normalized)
         return terms, unique_count
 
-    def _inherit_label(self) -> str:
-        return t("settings.peer_provider.follow_self")
-
-    def _peer_qwen_region_label_for(self, settings: AppSettings | None) -> str:
-        if settings is None or settings.peer_qwen_asr_stt.region is None:
-            return self._inherit_label()
-        return t(f"region.{settings.peer_qwen_asr_stt.region.value}")
-
-    def _peer_qwen_model_label_for(self, settings: AppSettings | None) -> str:
-        if settings is None or settings.peer_qwen_asr_stt.model is None:
-            return self._inherit_label()
-        return settings.peer_qwen_asr_stt.model
-
-    def _peer_soniox_model_label_for(self, settings: AppSettings | None) -> str:
-        if settings is None or settings.peer_soniox_stt.model is None:
-            return self._inherit_label()
-        return settings.peer_soniox_stt.model
-
     @property
     def managed_trial_usage_state(self) -> dict[str, object]:
         return {
@@ -1471,9 +1647,6 @@ class SettingsView(ft.Column):
         target.provider.stt = source.provider.stt
         target.provider.peer_stt = source.provider.peer_stt
         target.provider.llm = source.provider.llm
-        target.peer_qwen_asr_stt.model = source.peer_qwen_asr_stt.model
-        target.peer_qwen_asr_stt.region = source.peer_qwen_asr_stt.region
-        target.peer_soniox_stt.model = source.peer_soniox_stt.model
         target.gemini.llm_model = source.gemini.llm_model
         target.openrouter.llm_model = source.openrouter.llm_model
         target.openrouter.routing_mode = source.openrouter.routing_mode
@@ -1587,6 +1760,7 @@ class SettingsView(ft.Column):
         self._config_path = config_path
         self.has_provider_changes = False
         self.has_pending_prompt_changes = False
+        self._sync_clickable_text_control_fonts(font_for_language(settings.ui.locale))
 
         # UI Language
         self._ui_text.content.value = locale_label(settings.ui.locale)
@@ -1599,18 +1773,6 @@ class SettingsView(ft.Column):
         self._set_unit_card_value_text(
             self._peer_stt_text,
             provider_label(self._effective_peer_stt_provider(settings).value),
-        )
-        self._set_setting_action_text(
-            self._peer_qwen_region_text,
-            self._peer_qwen_region_label_for(settings),
-        )
-        self._set_setting_action_text(
-            self._peer_qwen_model_text,
-            self._peer_qwen_model_label_for(settings),
-        )
-        self._set_setting_action_text(
-            self._peer_soniox_model_text,
-            self._peer_soniox_model_label_for(settings),
         )
         self._update_api_visibility()
 
@@ -1783,33 +1945,18 @@ class SettingsView(ft.Column):
         self._sync_openrouter_fallback_card(settings)
 
         qwen_regions: set[QwenRegion] = set()
-        if stt == STTProviderName.QWEN_ASR or llm == LLMProviderName.QWEN:
+        if (
+            stt == STTProviderName.QWEN_ASR
+            or llm == LLMProviderName.QWEN
+            or peer_stt == STTProviderName.QWEN_ASR
+        ):
             qwen_regions.add(settings.qwen.region)
-        if peer_stt == STTProviderName.QWEN_ASR:
-            qwen_regions.add(settings.peer_qwen_asr_stt.region or settings.qwen.region)
 
         self._qwen_region_btn.visible = (
             stt == STTProviderName.QWEN_ASR or llm == LLMProviderName.QWEN
         )
         self._alibaba_key_beijing.visible = QwenRegion.BEIJING in qwen_regions
         self._alibaba_key_singapore.visible = QwenRegion.SINGAPORE in qwen_regions
-        self._update_peer_provider_visibility()
-
-    def _update_peer_provider_visibility(self) -> None:
-        settings = self._build_settings_with_provider_draft()
-        if settings is None:
-            return
-
-        peer_stt = self._effective_peer_stt_provider(settings)
-        show_qwen = peer_stt == STTProviderName.QWEN_ASR
-        show_soniox = peer_stt == STTProviderName.SONIOX
-
-        self._peer_qwen_region_label.visible = show_qwen
-        self._peer_qwen_region_text.visible = show_qwen
-        self._peer_qwen_model_label.visible = show_qwen
-        self._peer_qwen_model_text.visible = show_qwen
-        self._peer_soniox_model_label.visible = show_soniox
-        self._peer_soniox_model_text.visible = show_soniox
 
     # --- Event Handlers ---
     def _on_stt_click(self, e) -> None:
@@ -1917,115 +2064,6 @@ class SettingsView(ft.Column):
         if self.page:
             self._peer_stt_text.update()
             self._api_keys_column.update()
-        self.has_provider_changes = True
-
-    def _on_peer_qwen_region_click(self, e) -> None:
-        display_settings = self._build_settings_with_provider_draft()
-        if not self.page or display_settings is None:
-            return
-        options = [
-            OptionItem(value="", label=self._inherit_label()),
-            OptionItem(value=QwenRegion.BEIJING.value, label=t("region.beijing")),
-            OptionItem(value=QwenRegion.SINGAPORE.value, label=t("region.singapore")),
-        ]
-        SettingsModal(
-            self.page,
-            t("settings.peer_qwen_region"),
-            options,
-            self._on_peer_qwen_region_selected,
-            show_description=False,
-        ).open(
-            display_settings.peer_qwen_asr_stt.region.value
-            if display_settings.peer_qwen_asr_stt.region
-            else ""
-        )
-
-    def _on_peer_qwen_region_selected(self, value: str) -> None:
-        if not self._settings:
-            return
-        current_settings = self._build_settings_with_provider_draft()
-        assert current_settings is not None
-        region = QwenRegion(value) if value else None
-        if current_settings.peer_qwen_asr_stt.region == region:
-            return
-        draft = self._ensure_provider_settings_draft()
-        draft.peer_qwen_asr_stt.region = region
-        self._set_setting_action_text(
-            self._peer_qwen_region_text,
-            self._peer_qwen_region_label_for(self._build_settings_with_provider_draft()),
-        )
-        self._update_api_visibility()
-        if self.page:
-            self._peer_qwen_region_text.update()
-            self._api_keys_column.update()
-        self.has_provider_changes = True
-
-    def _on_peer_qwen_model_click(self, e) -> None:
-        display_settings = self._build_settings_with_provider_draft()
-        if not self.page or display_settings is None:
-            return
-        options = [
-            OptionItem(value="", label=self._inherit_label()),
-            OptionItem(value="qwen3-asr-flash-realtime", label="qwen3-asr-flash-realtime"),
-        ]
-        SettingsModal(
-            self.page,
-            t("settings.peer_qwen_model"),
-            options,
-            self._on_peer_qwen_model_selected,
-            show_description=False,
-        ).open(display_settings.peer_qwen_asr_stt.model or "")
-
-    def _on_peer_qwen_model_selected(self, value: str) -> None:
-        if not self._settings:
-            return
-        current_settings = self._build_settings_with_provider_draft()
-        assert current_settings is not None
-        model = value or None
-        if current_settings.peer_qwen_asr_stt.model == model:
-            return
-        draft = self._ensure_provider_settings_draft()
-        draft.peer_qwen_asr_stt.model = model
-        self._set_setting_action_text(
-            self._peer_qwen_model_text,
-            self._peer_qwen_model_label_for(self._build_settings_with_provider_draft()),
-        )
-        if self.page:
-            self._peer_qwen_model_text.update()
-        self.has_provider_changes = True
-
-    def _on_peer_soniox_model_click(self, e) -> None:
-        display_settings = self._build_settings_with_provider_draft()
-        if not self.page or display_settings is None:
-            return
-        options = [
-            OptionItem(value="", label=self._inherit_label()),
-            OptionItem(value="stt-rt-v4", label="stt-rt-v4"),
-        ]
-        SettingsModal(
-            self.page,
-            t("settings.peer_soniox_model"),
-            options,
-            self._on_peer_soniox_model_selected,
-            show_description=False,
-        ).open(display_settings.peer_soniox_stt.model or "")
-
-    def _on_peer_soniox_model_selected(self, value: str) -> None:
-        if not self._settings:
-            return
-        current_settings = self._build_settings_with_provider_draft()
-        assert current_settings is not None
-        model = value or None
-        if current_settings.peer_soniox_stt.model == model:
-            return
-        draft = self._ensure_provider_settings_draft()
-        draft.peer_soniox_stt.model = model
-        self._set_setting_action_text(
-            self._peer_soniox_model_text,
-            self._peer_soniox_model_label_for(self._build_settings_with_provider_draft()),
-        )
-        if self.page:
-            self._peer_soniox_model_text.update()
         self.has_provider_changes = True
 
     def _on_llm_click(self, e) -> None:
@@ -2572,17 +2610,20 @@ class SettingsView(ft.Column):
         calibration: OverlayCalibration | None = None,
     ) -> None:
         current = (calibration or self._overlay_calibration).copy()
-        self._overlay_anchor_dropdown.value = current.anchor
-        self._overlay_offset_x_field.value = self._format_overlay_calibration_number(
-            current.offset_x
+        self._set_unit_card_value_text(
+            self._overlay_anchor_button,
+            self._overlay_anchor_label_for(current.anchor),
         )
-        self._overlay_offset_y_field.value = self._format_overlay_calibration_number(
-            current.offset_y
-        )
-        self._overlay_distance_field.value = self._format_overlay_calibration_number(
+        self._overlay_distance_value_text.value = self._format_overlay_calibration_number(
             current.distance
         )
-        self._overlay_text_scale_field.value = self._format_overlay_calibration_number(
+        self._overlay_offset_x_value_text.value = self._format_overlay_calibration_number(
+            current.offset_x
+        )
+        self._overlay_offset_y_value_text.value = self._format_overlay_calibration_number(
+            current.offset_y
+        )
+        self._overlay_text_scale_text.content.value = self._overlay_text_scale_label_for(
             current.text_scale
         )
 
@@ -2622,93 +2663,105 @@ class SettingsView(ft.Column):
         self._sync_overlay_calibration_controls(self._overlay_calibration_draft)
         return self._overlay_calibration_draft.copy()
 
-    def _on_overlay_anchor_change(self, e) -> None:
-        if getattr(e.control, "value", None) is None:
-            self._sync_overlay_calibration_controls(
-                self._overlay_calibration_draft
-                if self._overlay_calibration_session_active
-                else self._overlay_calibration
-            )
-            return
-        self._update_overlay_calibration_draft("anchor", e.control.value)
-
-    def _on_overlay_calibration_numeric_blur(self, field_name: str, e) -> None:
-        raw_value = str(getattr(e.control, "value", "")).strip()
-        try:
-            value = float(raw_value)
-        except (TypeError, ValueError):
-            self._sync_overlay_calibration_controls(
-                self._overlay_calibration_draft
-                if self._overlay_calibration_session_active
-                else self._overlay_calibration
-            )
-            return
-
-        try:
-            self._update_overlay_calibration_draft(field_name, value)
-        except ValueError:
-            self._sync_overlay_calibration_controls(
-                self._overlay_calibration_draft
-                if self._overlay_calibration_session_active
-                else self._overlay_calibration
-            )
-
-    def _commit_overlay_calibration_form_values(self) -> bool:
-        current = (
-            self._overlay_calibration_draft
-            if self._overlay_calibration_session_active
-            else self._overlay_calibration
-        )
-        anchor_value = self._overlay_anchor_dropdown.value or current.anchor
-        offset_x_raw = (self._overlay_offset_x_field.value or "").strip()
-        offset_y_raw = (self._overlay_offset_y_field.value or "").strip()
-        distance_raw = (self._overlay_distance_field.value or "").strip()
-        text_scale_raw = (self._overlay_text_scale_field.value or "").strip()
-        try:
-            self._update_overlay_calibration_draft("anchor", anchor_value)
-            self._update_overlay_calibration_draft("offset_x", float(offset_x_raw))
-            self._update_overlay_calibration_draft("offset_y", float(offset_y_raw))
-            self._update_overlay_calibration_draft("distance", float(distance_raw))
-            self._update_overlay_calibration_draft("text_scale", float(text_scale_raw))
-        except (TypeError, ValueError):
-            self._sync_overlay_calibration_controls(current)
-            return False
-
-        return True
-
-    def _on_overlay_calibration_apply(self, e) -> None:
-        _ = e
-        if not self._commit_overlay_calibration_form_values():
-            return
+    def _commit_overlay_calibration_draft(self) -> OverlayCalibration:
         if self.on_overlay_calibration_apply:
             calibration = self.on_overlay_calibration_apply()
+            calibration.validate()
         else:
             if not self._overlay_calibration_session_active:
                 self._begin_overlay_calibration_session()
             calibration = self._overlay_calibration_draft.copy()
 
-        calibration.validate()
         self._overlay_calibration = calibration.copy()
         self._overlay_calibration_draft = calibration.copy()
         self._overlay_calibration_session_active = False
+        if self._settings is not None:
+            self._settings.overlay.calibration = calibration.copy()
         self._sync_overlay_calibration_controls(self._overlay_calibration)
 
         if self.page:
             self.update()
 
-    def _on_overlay_calibration_cancel(self, e) -> None:
+        if self.on_overlay_calibration_apply is None:
+            self._emit_settings_changed()
+
+        return calibration.copy()
+
+    def _apply_overlay_calibration_field_immediately(
+        self,
+        field_name: str,
+        value: object,
+    ) -> OverlayCalibration | None:
+        try:
+            self._update_overlay_calibration_draft(field_name, value)
+        except ValueError:
+            self._sync_overlay_calibration_controls(self._overlay_calibration)
+            return None
+
+        return self._commit_overlay_calibration_draft()
+
+    def _on_overlay_distance_step(self, delta: float) -> None:
+        current = self._overlay_calibration.distance
+        next_value = max(_OVERLAY_DISTANCE_MIN, min(_OVERLAY_DISTANCE_MAX, current + delta))
+        self._apply_overlay_calibration_field_immediately("distance", round(next_value, 2))
+
+    def _on_overlay_anchor_click(self, e) -> None:
+        if not self.page or not self._settings:
+            return
+        options = [
+            OptionItem(value=anchor, label=t(f"settings.overlay.calibration.anchor.{anchor}"))
+            for anchor in OVERLAY_CALIBRATION_ANCHORS
+        ]
+        modal = SettingsModal(
+            self.page,
+            t("settings.overlay.calibration.anchor"),
+            options,
+            self._on_overlay_anchor_selected,
+            show_description=False,
+        )
+        modal.open(self._overlay_calibration.anchor)
+
+    def _on_overlay_anchor_selected(self, value: str) -> None:
+        self._apply_overlay_calibration_field_immediately("anchor", value)
+
+    def _on_overlay_offset_x_step(self, delta: float) -> None:
+        current = self._overlay_calibration.offset_x
+        self._apply_overlay_calibration_field_immediately("offset_x", current + delta)
+
+    def _on_overlay_offset_y_step(self, delta: float) -> None:
+        current = self._overlay_calibration.offset_y
+        self._apply_overlay_calibration_field_immediately("offset_y", current + delta)
+
+    def _on_overlay_text_scale_click(self, e) -> None:
+        if not self.page or not self._settings:
+            return
+        options = [
+            OptionItem(
+                value=key,
+                label=t(f"settings.overlay.calibration.text_scale.{key}"),
+            )
+            for key, _scale in _OVERLAY_TEXT_SCALE_PRESETS
+        ]
+        modal = SettingsModal(
+            self.page,
+            t("settings.overlay.calibration.text_scale"),
+            options,
+            self._on_overlay_text_scale_selected,
+            show_description=False,
+        )
+        modal.open(self._overlay_text_scale_preset_key_for(self._overlay_calibration.text_scale))
+
+    def _on_overlay_text_scale_selected(self, value: str) -> None:
+        self._apply_overlay_calibration_field_immediately(
+            "text_scale", self._overlay_text_scale_value_for(value)
+        )
+
+    def _on_overlay_position_reset(self, e) -> None:
         _ = e
-        if self.on_overlay_calibration_cancel:
-            calibration = self.on_overlay_calibration_cancel()
-            calibration.validate()
-            self._overlay_calibration = calibration.copy()
-
-        self._overlay_calibration_draft = self._overlay_calibration.copy()
-        self._overlay_calibration_session_active = False
-        self._sync_overlay_calibration_controls(self._overlay_calibration)
-
-        if self.page:
-            self.update()
+        defaults = OverlayCalibration()
+        for field_name in OverlayCalibration.__dataclass_fields__:
+            self._update_overlay_calibration_draft(field_name, getattr(defaults, field_name))
+        self._commit_overlay_calibration_draft()
 
     def set_overlay_peer_contract(self, contract: OverlayPeerConsumerContract) -> None:
         self._overlay_peer_contract = contract
@@ -2729,15 +2782,15 @@ class SettingsView(ft.Column):
             self._settings and self._settings.ui.integrated_context_enabled
         )
 
-        _set_text_button_label(
+        self._set_unit_card_value_text(
             self._overlay_translation_button,
             t("settings.option.on" if overlay_translation_enabled else "settings.option.off"),
         )
-        _set_text_button_label(
+        self._set_unit_card_value_text(
             self._overlay_peer_original_button,
             t("settings.option.on" if overlay_peer_original_enabled else "settings.option.off"),
         )
-        _set_text_button_label(
+        self._set_unit_card_value_text(
             self._integrated_context_button,
             t(
                 "settings.context.integrated"
@@ -2748,6 +2801,14 @@ class SettingsView(ft.Column):
 
         self._overlay_translation_button.disabled = self._settings is None
         self._overlay_peer_original_button.disabled = self._settings is None
+        self._overlay_anchor_button.disabled = self._settings is None
+        self._overlay_distance_decrease_button.disabled = self._settings is None
+        self._overlay_distance_increase_button.disabled = self._settings is None
+        self._overlay_offset_x_decrease_button.disabled = self._settings is None
+        self._overlay_offset_x_increase_button.disabled = self._settings is None
+        self._overlay_offset_y_decrease_button.disabled = self._settings is None
+        self._overlay_offset_y_increase_button.disabled = self._settings is None
+        self._overlay_reset_button.disabled = self._settings is None
         self._integrated_context_button.disabled = self._settings is None
         self._integrated_context_hint.value = ""
 
@@ -2774,20 +2835,10 @@ class SettingsView(ft.Column):
             self.update()
 
     def _on_overlay_translation_click(self, e) -> None:
-        if not self.page or not self._settings or self._overlay_translation_button.disabled:
+        if not self._settings or self._overlay_translation_button.disabled:
             return
-        options = [
-            OptionItem(value="on", label=t("settings.option.on")),
-            OptionItem(value="off", label=t("settings.option.off")),
-        ]
-        modal = SettingsModal(
-            self.page,
-            t("settings.overlay.show_translation"),
-            options,
-            self._on_overlay_translation_selected,
-            show_description=False,
-        )
-        modal.open("on" if self._settings.overlay.show_translation else "off")
+        next_value = "off" if self._settings.overlay.show_translation else "on"
+        self._on_overlay_translation_selected(next_value)
 
     def _on_overlay_translation_selected(self, value: str) -> None:
         if not self._settings:
@@ -2797,20 +2848,10 @@ class SettingsView(ft.Column):
         self._emit_settings_changed()
 
     def _on_overlay_peer_original_click(self, e) -> None:
-        if not self.page or not self._settings or self._overlay_peer_original_button.disabled:
+        if not self._settings or self._overlay_peer_original_button.disabled:
             return
-        options = [
-            OptionItem(value="on", label=t("settings.option.on")),
-            OptionItem(value="off", label=t("settings.option.off")),
-        ]
-        modal = SettingsModal(
-            self.page,
-            t("settings.overlay.show_peer_original"),
-            options,
-            self._on_overlay_peer_original_selected,
-            show_description=False,
-        )
-        modal.open("on" if self._settings.overlay.show_peer_original else "off")
+        next_value = "off" if self._settings.overlay.show_peer_original else "on"
+        self._on_overlay_peer_original_selected(next_value)
 
     def _on_overlay_peer_original_selected(self, value: str) -> None:
         if not self._settings:
@@ -3204,21 +3245,20 @@ class SettingsView(ft.Column):
         self._peer_provider_title.value = t("settings.section.peer_stt")
         self._dashboard_language_redirect_text.value = t("settings.dashboard_language_redirect")
         self._peer_stt_label.value = t("settings.peer_stt_provider")
-        self._peer_qwen_region_label.value = t("settings.peer_qwen_region")
-        self._peer_qwen_model_label.value = t("settings.peer_qwen_model")
-        self._peer_soniox_model_label.value = t("settings.peer_soniox_model")
-        self._overlay_display_options_title.value = t("settings.overlay.display_options")
-        self._overlay_translation_label.value = t("settings.overlay.show_translation")
-        self._overlay_peer_original_label.value = t("settings.overlay.show_peer_original")
+        self._overlay_translation_title.value = t("settings.overlay.show_translation")
+        self._overlay_peer_original_title.value = t("settings.overlay.show_peer_original")
         self._integrated_context_label.value = t("settings.integrated_context")
         self._audio_settings.apply_locale()
         self._sync_general_audio_card_texts()
-        self._overlay_calibration_title.value = t("settings.overlay.calibration")
-        self._overlay_anchor_label.value = t("settings.overlay.calibration.anchor")
-        self._overlay_offset_x_label.value = t("settings.overlay.calibration.offset_x")
-        self._overlay_offset_y_label.value = t("settings.overlay.calibration.offset_y")
-        self._overlay_distance_label.value = t("settings.overlay.calibration.distance")
-        self._overlay_text_scale_label.value = t("settings.overlay.calibration.text_scale")
+        self._overlay_anchor_title.value = t("settings.overlay.calibration.anchor")
+        self._overlay_distance_title.value = t("settings.overlay.calibration.distance")
+        self._overlay_offset_x_title.value = t("settings.overlay.calibration.offset_x")
+        self._overlay_offset_y_title.value = t("settings.overlay.calibration.offset_y")
+        self._overlay_text_scale_title.value = t("settings.overlay.calibration.text_scale")
+        self._overlay_reset_title.value = t("settings.overlay.position_reset")
+        self._set_unit_card_value_text(
+            self._overlay_reset_button, t("settings.overlay.calibration.reset")
+        )
         _set_text_button_label(self._reset_prompt_btn, t("settings.reset_prompt"))
         self._sync_prompt_tab_copy()
         self._custom_vocab_terms.label = None
@@ -3232,39 +3272,18 @@ class SettingsView(ft.Column):
 
         if self._qwen_region_btn:
             self._qwen_region_btn.style = self._get_button_style(ui_font)
-        if self._overlay_translation_button:
-            self._overlay_translation_button.style = self._get_button_style(ui_font)
-        if self._overlay_peer_original_button:
-            self._overlay_peer_original_button.style = self._get_button_style(ui_font)
-        if self._integrated_context_button:
-            self._integrated_context_button.style = self._get_button_style(ui_font, size=28)
-        if self._overlay_calibration_apply_button:
-            self._overlay_calibration_apply_button.style = self._get_button_style(ui_font)
-        if self._overlay_calibration_cancel_button:
-            self._overlay_calibration_cancel_button.style = self._get_button_style(ui_font)
-        if self._overlay_calibration_reset_button:
-            self._overlay_calibration_reset_button.style = self._get_button_style(ui_font)
-
-        _set_text_button_label(
-            self._overlay_calibration_apply_button,
-            t("settings.overlay.calibration.apply"),
-        )
-        _set_text_button_label(
-            self._overlay_calibration_cancel_button,
-            t("settings.overlay.calibration.cancel"),
-        )
-        _set_text_button_label(
-            self._overlay_calibration_reset_button,
-            t("settings.overlay.calibration.reset"),
-        )
-        self._overlay_anchor_dropdown.options = [
-            ft.dropdown.Option(
-                key=anchor,
-                text=t(f"settings.overlay.calibration.anchor.{anchor}"),
-            )
-            for anchor in OVERLAY_CALIBRATION_ANCHORS
-        ]
-
+        self._sync_clickable_text_control_fonts(ui_font)
+        for glyph_text in (
+            getattr(self, "_overlay_distance_decrease_glyph", None),
+            getattr(self, "_overlay_distance_increase_glyph", None),
+            getattr(self, "_overlay_offset_x_decrease_glyph", None),
+            getattr(self, "_overlay_offset_x_increase_glyph", None),
+            getattr(self, "_overlay_offset_y_decrease_glyph", None),
+            getattr(self, "_overlay_offset_y_increase_glyph", None),
+        ):
+            if glyph_text:
+                glyph_text.font_family = ui_font
+                glyph_text.size = 22
         # Update text controls with current selection labels
 
         # Update text controls with current selection labels
@@ -3300,21 +3319,8 @@ class SettingsView(ft.Column):
                 if display_settings.osc.chatbox_include_source
                 else "settings.chatbox_source.off"
             )
-            self._set_setting_action_text(
-                self._peer_qwen_region_text,
-                self._peer_qwen_region_label_for(display_settings),
-            )
-            self._set_setting_action_text(
-                self._peer_qwen_model_text,
-                self._peer_qwen_model_label_for(display_settings),
-            )
-            self._set_setting_action_text(
-                self._peer_soniox_model_text,
-                self._peer_soniox_model_label_for(display_settings),
-            )
             self._sync_overlay_controls()
             self._sync_overlay_calibration_controls()
-            self._update_peer_provider_visibility()
 
         # Qwen Region label
         if display_settings:

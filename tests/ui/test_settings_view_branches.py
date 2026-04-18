@@ -25,6 +25,7 @@ from puripuly_heart.config.settings import (
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.components import subtab_shell as subtab_shell_module
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
+from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import language_name, provider_label, t
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 from puripuly_heart.ui.overlay_peer_contract import build_overlay_peer_consumer_contract
@@ -150,7 +151,18 @@ def _overlay_tab_cards(view: settings_view.SettingsView) -> list[ft.Control]:
 
 
 def _wrapped_card_column(card: ft.Control) -> ft.Control:
-    return card.content.controls[1].content.content
+    content = card.content.controls[1].content.content
+    if isinstance(content, ft.Stack):
+        for control in content.controls:
+            if isinstance(control, ft.TransparentPointer):
+                return control.content
+    return content
+
+
+def _wrapped_card_stack(card: ft.Control) -> ft.Stack:
+    content = card.content.controls[1].content.content
+    assert isinstance(content, ft.Stack)
+    return content
 
 
 def _card_title(card: ft.Control) -> str | None:
@@ -350,19 +362,23 @@ def test_peer_language_card_removed_from_general_tab(
     assert not hasattr(view, "_peer_target_text")
 
 
-def test_load_from_settings_resizes_long_peer_model_value(
+def test_load_from_settings_peer_stt_card_has_no_peer_subsetting_controls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
-    settings.peer_qwen_asr_stt.model = "qwen3-asr-flash-realtime"
+    settings.provider.peer_stt = STTProviderName.QWEN_ASR
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
+    peer_card = _api_tab_card(view, t("settings.section.peer_stt"))
+    labels = _control_labels(peer_card)
 
-    assert view._peer_qwen_model_text.content.value == "qwen3-asr-flash-realtime"
-    assert view._peer_qwen_model_text.content.size == settings_view._setting_action_text_size(
-        "qwen3-asr-flash-realtime"
-    )
+    assert t("settings.peer_qwen_region") not in labels
+    assert t("settings.peer_qwen_model") not in labels
+    assert t("settings.peer_soniox_model") not in labels
+    assert not hasattr(view, "_peer_qwen_region_text")
+    assert not hasattr(view, "_peer_qwen_model_text")
+    assert not hasattr(view, "_peer_soniox_model_text")
 
 
 def test_load_from_settings_uses_system_prompt_when_provider_prompt_missing(
@@ -1581,7 +1597,7 @@ def test_integrated_context_peer_disabled_hint_redirects_to_dashboard(
         i18n_module.set_locale(old_locale)
 
 
-def test_peer_qwen_region_control_is_visible_before_peer_translation_is_enabled(
+def test_peer_qwen_region_control_is_removed_before_peer_translation_is_enabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -1591,8 +1607,8 @@ def test_peer_qwen_region_control_is_visible_before_peer_translation_is_enabled(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    assert view._peer_qwen_region_label.visible is True
-    assert view._peer_qwen_region_text.visible is True
+    assert not hasattr(view, "_peer_qwen_region_label")
+    assert not hasattr(view, "_peer_qwen_region_text")
 
 
 def test_update_api_visibility_keeps_peer_auth_controls_visible_when_peer_disabled(
@@ -1621,78 +1637,34 @@ def test_update_api_visibility_keeps_peer_qwen_credentials_visible_when_peer_dis
     settings.provider.peer_stt = STTProviderName.QWEN_ASR
     settings.provider.llm = LLMProviderName.GEMINI
     settings.ui.peer_translation_enabled = False
-    settings.peer_qwen_asr_stt.region = QwenRegion.SINGAPORE
-
     view, _ = _make_settings_view(monkeypatch)
     view._settings = settings
     view._update_api_visibility()
 
-    assert view._peer_qwen_region_text.visible is True
-    assert view._alibaba_key_beijing.visible is False
-    assert view._alibaba_key_singapore.visible is True
+    assert view._alibaba_key_beijing.visible is True
+    assert view._alibaba_key_singapore.visible is False
 
 
-def test_peer_qwen_region_override_can_be_cleared_back_to_inherited_none(
+def test_peer_qwen_region_override_controls_are_removed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.QWEN_ASR
-    settings.peer_qwen_asr_stt.region = QwenRegion.BEIJING
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    attach_dummy_page(monkeypatch, view)
-
-    region_updates: list[str] = []
-    api_key_updates: list[str] = []
-    monkeypatch.setattr(
-        type(view._peer_qwen_region_text),
-        "update",
-        lambda self: region_updates.append("peer_qwen_region_text"),
-    )
-    monkeypatch.setattr(
-        type(view._api_keys_column),
-        "update",
-        lambda self: api_key_updates.append("api_keys_column"),
-    )
-
-    view._on_peer_qwen_region_selected("")
-
-    pending = view.build_provider_apply_settings()
-
-    assert settings.peer_qwen_asr_stt.region == QwenRegion.BEIJING
-    assert pending is not None
-    assert pending.peer_qwen_asr_stt.region is None
-    assert view._peer_qwen_region_text.content.value == t("settings.peer_provider.follow_self")
-    assert region_updates == ["peer_qwen_region_text"]
-    assert api_key_updates == ["api_keys_column"]
+    assert not hasattr(view, "_on_peer_qwen_region_selected")
+    assert not hasattr(view, "_peer_qwen_region_text")
 
 
-def test_peer_soniox_model_override_can_be_cleared_back_to_inherited_none(
+def test_peer_soniox_model_override_controls_are_removed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.SONIOX
-    settings.peer_soniox_stt.model = "stt-rt-v4"
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    attach_dummy_page(monkeypatch, view)
-
-    model_updates: list[str] = []
-    monkeypatch.setattr(
-        type(view._peer_soniox_model_text),
-        "update",
-        lambda self: model_updates.append("peer_soniox_model_text"),
-    )
-
-    view._on_peer_soniox_model_selected("")
-
-    pending = view.build_provider_apply_settings()
-
-    assert settings.peer_soniox_stt.model == "stt-rt-v4"
-    assert pending is not None
-    assert pending.peer_soniox_stt.model is None
-    assert view._peer_soniox_model_text.content.value == t("settings.peer_provider.follow_self")
-    assert model_updates == ["peer_soniox_model_text"]
+    assert not hasattr(view, "_on_peer_soniox_model_selected")
+    assert not hasattr(view, "_peer_soniox_model_text")
 
 
 def test_update_api_visibility_includes_enabled_peer_provider(
@@ -1712,7 +1684,7 @@ def test_update_api_visibility_includes_enabled_peer_provider(
     assert view._google_key.visible is True
 
 
-def test_update_api_visibility_shows_both_qwen_region_keys_when_self_and_peer_differ(
+def test_update_api_visibility_uses_shared_qwen_region_for_peer_and_self(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -1720,14 +1692,13 @@ def test_update_api_visibility_shows_both_qwen_region_keys_when_self_and_peer_di
     settings.provider.peer_stt = STTProviderName.QWEN_ASR
     settings.ui.peer_translation_enabled = True
     settings.qwen.region = QwenRegion.BEIJING
-    settings.peer_qwen_asr_stt.region = QwenRegion.SINGAPORE
 
     view, _ = _make_settings_view(monkeypatch)
     view._settings = settings
     view._update_api_visibility()
 
     assert view._alibaba_key_beijing.visible is True
-    assert view._alibaba_key_singapore.visible is True
+    assert view._alibaba_key_singapore.visible is False
 
 
 def test_on_peer_stt_selected_refreshes_api_visibility_and_redraws_immediately(
@@ -1771,7 +1742,6 @@ def test_peer_provider_labels_are_backed_by_i18n(monkeypatch: pytest.MonkeyPatch
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     assert view._peer_stt_label.value == t("settings.peer_stt_provider")
-    assert view._peer_qwen_region_label.value == t("settings.peer_qwen_region")
 
 
 @pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
@@ -1860,13 +1830,150 @@ def test_overlay_display_toggles_update_persistent_settings(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
     view.on_settings_changed = lambda incoming: settings_calls.append(incoming)
+    attach_dummy_page(monkeypatch, view)
 
-    view._on_overlay_translation_selected("off")
-    view._on_overlay_peer_original_selected("off")
+    view._on_overlay_translation_click(None)
+    view._on_overlay_peer_original_click(None)
 
     assert settings.overlay.show_translation is False
     assert settings.overlay.show_peer_original is False
     assert settings_calls == [settings, settings]
+
+
+def test_overlay_anchor_click_opens_modal_with_current_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    attach_dummy_page(monkeypatch, view)
+
+    captured: dict[str, object] = {}
+
+    class DummyModal:
+        def __init__(self, _page, title, options, _on_select, *, show_description=False):
+            captured["title"] = title
+            captured["options"] = options
+            captured["show_description"] = show_description
+
+        def open(self, current: str) -> None:
+            captured["current"] = current
+
+    monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
+
+    view._on_overlay_anchor_click(None)
+
+    assert captured["title"] == t("settings.overlay.calibration.anchor")
+    assert captured["show_description"] is False
+    assert [option.value for option in captured["options"]] == ["head_locked"]
+    assert captured["current"] == "head_locked"
+
+
+def test_integrated_context_card_uses_broad_value_slot_click_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    card = _general_tab_card(view, t("settings.integrated_context"))
+    value_control = _wrapped_card_column(card).controls[1].content
+
+    assert value_control is view._integrated_context_button
+    assert isinstance(view._integrated_context_button, ft.Container)
+    assert view._integrated_context_button.expand is True
+    assert view._integrated_context_button.content.value == t("settings.context.local")
+    assert view._integrated_context_button.content.size == 28
+    assert view._integrated_context_button.content.color == settings_view.COLOR_ON_BACKGROUND
+
+
+def test_overlay_single_action_cards_use_broad_value_slot_click_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    cases = [
+        (
+            _overlay_tab_card(view, t("settings.overlay.show_translation")),
+            view._overlay_translation_button,
+            t("settings.option.on"),
+        ),
+        (
+            _overlay_tab_card(view, t("settings.overlay.show_peer_original")),
+            view._overlay_peer_original_button,
+            t("settings.option.on"),
+        ),
+        (
+            _overlay_tab_card(view, t("settings.overlay.calibration.anchor")),
+            view._overlay_anchor_button,
+            t("settings.overlay.calibration.anchor.head_locked"),
+        ),
+        (
+            _overlay_tab_card(view, t("settings.overlay.position_reset")),
+            view._overlay_reset_button,
+            t("settings.overlay.calibration.reset"),
+        ),
+    ]
+
+    for card, control, expected in cases:
+        value_control = _wrapped_card_column(card).controls[1].content
+
+        assert value_control is control
+        assert isinstance(control, ft.Container)
+        assert control.expand is True
+        assert control.content.value == expected
+        assert control.content.size == 28
+        assert control.content.color == settings_view.COLOR_ON_BACKGROUND
+
+
+def test_overlay_text_size_click_opens_modal_with_named_presets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    attach_dummy_page(monkeypatch, view)
+
+    captured: dict[str, object] = {}
+
+    class DummyModal:
+        def __init__(self, _page, title, options, _on_select, *, show_description=False):
+            captured["title"] = title
+            captured["options"] = options
+            captured["show_description"] = show_description
+
+        def open(self, current: str) -> None:
+            captured["current"] = current
+
+    monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
+
+    view._on_overlay_text_scale_click(None)
+
+    assert captured["title"] == t("settings.overlay.calibration.text_scale")
+    assert captured["show_description"] is False
+    assert [option.value for option in captured["options"]] == ["large", "normal", "small"]
+    assert [option.label for option in captured["options"]] == [
+        t("settings.overlay.calibration.text_scale.large"),
+        t("settings.overlay.calibration.text_scale.normal"),
+        t("settings.overlay.calibration.text_scale.small"),
+    ]
+    assert captured["current"] == "normal"
+
+
+def test_overlay_text_scale_modal_selection_updates_settings_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._on_overlay_text_scale_selected("large")
+
+    assert settings.overlay.calibration.text_scale == 1.2
+    assert view._overlay_text_scale_text.content.value == t(
+        "settings.overlay.calibration.text_scale.large"
+    )
+    assert changed == [settings]
 
 
 def test_audio_change_updates_desktop_loopback_controls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2128,6 +2235,34 @@ def test_general_tab_labels_and_section_headings_render_from_i18n(
         i18n_module.set_locale(old_locale)
 
 
+@pytest.mark.parametrize(
+    ("locale", "expected_title"),
+    [
+        ("ko", "Chatbox 출력 형식"),
+        ("en", "Chatbox Output Format"),
+        ("zh-CN", "Chatbox 输出格式"),
+    ],
+)
+def test_chatbox_source_card_title_uses_chatbox_output_format_wording(
+    monkeypatch: pytest.MonkeyPatch,
+    locale: str,
+    expected_title: str,
+) -> None:
+    settings = AppSettings()
+    settings.ui.locale = locale
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    old_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale(locale)
+        view.apply_locale()
+
+        assert view._chatbox_source_title.value == expected_title
+    finally:
+        i18n_module.set_locale(old_locale)
+
+
 @pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
 def test_overlay_failure_reason_keys_are_localized(locale: str) -> None:
     bundle = i18n_module._load_bundle(locale)
@@ -2140,27 +2275,29 @@ def test_overlay_failure_reason_keys_are_localized(locale: str) -> None:
     assert bundle["settings.overlay.failure.hmd_not_found"]
     assert bundle["settings.overlay.show_translation"]
     assert bundle["settings.overlay.show_peer_original"]
+    assert bundle["settings.overlay.position_reset"]
     assert bundle["settings.peer_translation.status.warning"]
     assert bundle["settings.peer_translation.warning.overlay_failed"]
 
 
-def test_overlay_calibration_controls_are_localized(
+def test_overlay_tab_controls_are_localized(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(AppSettings(), config_path=Path("settings.json"))
 
-    assert view._overlay_calibration_title.value == t("settings.overlay.calibration")
-    assert view._overlay_anchor_label.value == t("settings.overlay.calibration.anchor")
-    assert view._overlay_translation_label.value == t("settings.overlay.show_translation")
-    assert view._overlay_peer_original_label.value == t("settings.overlay.show_peer_original")
-    assert view._overlay_calibration_apply_button.text == t("settings.overlay.calibration.apply")
-    assert view._overlay_calibration_cancel_button.text == t("settings.overlay.calibration.cancel")
-    assert view._overlay_calibration_reset_button.text == t("settings.overlay.calibration.reset")
+    assert view._overlay_translation_title.value == t("settings.overlay.show_translation")
+    assert view._overlay_peer_original_title.value == t("settings.overlay.show_peer_original")
+    assert view._overlay_anchor_title.value == t("settings.overlay.calibration.anchor")
+    assert view._overlay_distance_title.value == t("settings.overlay.calibration.distance")
+    assert view._overlay_offset_x_title.value == t("settings.overlay.calibration.offset_x")
+    assert view._overlay_offset_y_title.value == t("settings.overlay.calibration.offset_y")
+    assert view._overlay_text_scale_title.value == t("settings.overlay.calibration.text_scale")
+    assert view._overlay_reset_title.value == t("settings.overlay.position_reset")
 
 
 @pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
-def test_overlay_apply_save_labels_render_from_i18n(
+def test_overlay_immediate_card_labels_render_from_i18n(
     monkeypatch: pytest.MonkeyPatch,
     locale: str,
 ) -> None:
@@ -2172,60 +2309,74 @@ def test_overlay_apply_save_labels_render_from_i18n(
     old_locale = i18n_module.get_locale()
     try:
         i18n_module.set_locale(locale)
-        view._overlay_display_options_title.value = "stale"
-        view._overlay_translation_label.value = "stale"
-        view._overlay_peer_original_label.value = "stale"
-        view._overlay_calibration_title.value = "stale"
-        view._overlay_calibration_apply_button.text = "stale"
-        view._overlay_calibration_cancel_button.text = "stale"
-        view._overlay_calibration_reset_button.text = "stale"
+        view._overlay_translation_title.value = "stale"
+        view._overlay_peer_original_title.value = "stale"
+        view._overlay_anchor_title.value = "stale"
+        view._overlay_distance_title.value = "stale"
+        view._overlay_offset_x_title.value = "stale"
+        view._overlay_offset_y_title.value = "stale"
+        view._overlay_text_scale_title.value = "stale"
+        view._overlay_reset_title.value = "stale"
 
         view.apply_locale()
 
-        display_card = _overlay_tab_card(view, t("settings.overlay.display_options"))
-        calibration_card = _overlay_tab_card(view, t("settings.overlay.calibration"))
-        display_labels = _control_labels(display_card)
-        calibration_labels = _control_labels(calibration_card)
+        overlay_labels: list[str] = []
+        for card in _overlay_tab_cards(view):
+            overlay_labels.extend(_control_labels(card))
 
-        assert view._overlay_display_options_title.value == t("settings.overlay.display_options")
-        assert view._overlay_translation_label.value == t("settings.overlay.show_translation")
-        assert view._overlay_peer_original_label.value == t("settings.overlay.show_peer_original")
-        assert view._overlay_calibration_title.value == t("settings.overlay.calibration")
-        assert view._overlay_calibration_apply_button.text == t(
-            "settings.overlay.calibration.apply"
-        )
-        assert view._overlay_calibration_cancel_button.text == t(
-            "settings.overlay.calibration.cancel"
-        )
-        assert view._overlay_calibration_reset_button.text == t(
-            "settings.overlay.calibration.reset"
-        )
-        assert t("settings.overlay.show_translation") in display_labels
-        assert t("settings.overlay.show_peer_original") in display_labels
-        assert t("settings.overlay.calibration.apply") in calibration_labels
-        assert t("settings.overlay.calibration.cancel") in calibration_labels
-        assert t("settings.overlay.calibration.reset") in calibration_labels
+        assert view._overlay_translation_title.value == t("settings.overlay.show_translation")
+        assert view._overlay_peer_original_title.value == t("settings.overlay.show_peer_original")
+        assert view._overlay_anchor_title.value == t("settings.overlay.calibration.anchor")
+        assert view._overlay_distance_title.value == t("settings.overlay.calibration.distance")
+        assert view._overlay_offset_x_title.value == t("settings.overlay.calibration.offset_x")
+        assert view._overlay_offset_y_title.value == t("settings.overlay.calibration.offset_y")
+        assert view._overlay_text_scale_title.value == t("settings.overlay.calibration.text_scale")
+        assert view._overlay_reset_title.value == t("settings.overlay.position_reset")
+        assert t("settings.overlay.show_translation") in overlay_labels
+        assert t("settings.overlay.show_peer_original") in overlay_labels
+        assert t("settings.overlay.calibration.anchor") in overlay_labels
+        assert t("settings.overlay.calibration.distance") in overlay_labels
+        assert t("settings.overlay.calibration.offset_x") in overlay_labels
+        assert t("settings.overlay.calibration.offset_y") in overlay_labels
+        assert t("settings.overlay.calibration.text_scale") in overlay_labels
+        assert t("settings.overlay.position_reset") in overlay_labels
     finally:
         i18n_module.set_locale(old_locale)
 
 
-def test_overlay_display_options_card_contains_visibility_controls_only(
+def test_overlay_tab_uses_three_rows_of_unit_cards(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
 
     overlay_titles = _overlay_tab_card_titles(view)
-    display_card = _overlay_tab_card(view, t("settings.overlay.display_options"))
-    display_labels = _control_labels(display_card)
+    overlay_controls = _subtab_controls(view, "overlay")
 
     assert overlay_titles == [
-        t("settings.overlay.display_options"),
-        t("settings.overlay.calibration"),
+        t("settings.overlay.show_translation"),
+        t("settings.overlay.show_peer_original"),
+        t("settings.overlay.calibration.anchor"),
+        t("settings.overlay.calibration.distance"),
+        t("settings.overlay.calibration.offset_x"),
+        t("settings.overlay.calibration.offset_y"),
+        t("settings.overlay.calibration.text_scale"),
+        t("settings.overlay.position_reset"),
     ]
-    assert t("settings.overlay.enabled") not in display_labels
-    assert t("settings.peer_translation") not in display_labels
-    assert t("settings.overlay.show_translation") in display_labels
-    assert t("settings.overlay.show_peer_original") in display_labels
+    assert len(overlay_controls) == 3
+    assert _row_card_titles(overlay_controls[0]) == [
+        t("settings.overlay.show_translation"),
+        t("settings.overlay.show_peer_original"),
+        t("settings.overlay.calibration.anchor"),
+    ]
+    assert _row_card_titles(overlay_controls[1]) == [
+        t("settings.overlay.calibration.distance"),
+        t("settings.overlay.calibration.offset_x"),
+        t("settings.overlay.calibration.offset_y"),
+    ]
+    assert _row_card_titles(overlay_controls[2]) == [
+        t("settings.overlay.calibration.text_scale"),
+        t("settings.overlay.position_reset"),
+    ]
 
 
 def test_legacy_vr_overlay_shell_removed_from_settings_subtabs(
@@ -2247,8 +2398,14 @@ def test_legacy_vr_overlay_shell_removed_from_settings_subtabs(
         t("settings.section.persona"),
     ]
     assert overlay_titles == [
-        t("settings.overlay.display_options"),
-        t("settings.overlay.calibration"),
+        t("settings.overlay.show_translation"),
+        t("settings.overlay.show_peer_original"),
+        t("settings.overlay.calibration.anchor"),
+        t("settings.overlay.calibration.distance"),
+        t("settings.overlay.calibration.offset_x"),
+        t("settings.overlay.calibration.offset_y"),
+        t("settings.overlay.calibration.text_scale"),
+        t("settings.overlay.position_reset"),
     ]
     assert t("settings.section.overlay") not in prompt_labels
     assert t("settings.section.overlay") not in overlay_labels
@@ -2264,23 +2421,21 @@ def test_migrated_overlay_copy_cleanup_keeps_prompt_and_overlay_context_separate
     view, _ = _make_settings_view(monkeypatch)
 
     general_card = _general_tab_card(view, t("settings.integrated_context"))
-    display_card = _overlay_tab_card(view, t("settings.overlay.display_options"))
-    calibration_card = _overlay_tab_card(view, t("settings.overlay.calibration"))
+    translation_card = _overlay_tab_card(view, t("settings.overlay.show_translation"))
+    anchor_card = _overlay_tab_card(view, t("settings.overlay.calibration.anchor"))
     general_labels = _control_labels(general_card)
-    display_labels = _control_labels(display_card)
-    calibration_labels = _control_labels(calibration_card)
+    translation_labels = _control_labels(translation_card)
+    anchor_labels = _control_labels(anchor_card)
 
     assert t("settings.integrated_context") in general_labels
-    assert t("settings.integrated_context") not in display_labels
-    assert t("settings.integrated_context") not in calibration_labels
+    assert t("settings.integrated_context") not in translation_labels
+    assert t("settings.integrated_context") not in anchor_labels
     assert t("settings.context.integrated_modal_helper") not in general_labels
     assert t("settings.overlay.show_translation") not in general_labels
     assert t("settings.overlay.show_peer_original") not in general_labels
-    assert t("settings.overlay.show_translation") in display_labels
-    assert t("settings.overlay.show_peer_original") in display_labels
+    assert t("settings.overlay.show_translation") in translation_labels
     assert t("settings.overlay.calibration") not in general_labels
-    assert t("settings.overlay.calibration") not in display_labels
-    assert t("settings.overlay.calibration") in calibration_labels
+    assert t("settings.overlay.calibration.anchor") in anchor_labels
 
 
 def test_legacy_overlay_cleanup_copy_renders_from_i18n(
@@ -2298,86 +2453,146 @@ def test_legacy_overlay_cleanup_copy_renders_from_i18n(
 
             i18n_module.set_locale(locale)
             view._integrated_context_label.value = "stale"
-            view._integrated_context_button.text = "stale"
+            view._integrated_context_button.content.value = "stale"
             view._integrated_context_hint.value = "stale"
-            view._overlay_display_options_title.value = "stale"
-            view._overlay_translation_label.value = "stale"
-            view._overlay_peer_original_label.value = "stale"
-            view._overlay_calibration_title.value = "stale"
+            view._overlay_translation_title.value = "stale"
+            view._overlay_peer_original_title.value = "stale"
+            view._overlay_anchor_title.value = "stale"
+            view._overlay_distance_title.value = "stale"
+            view._overlay_offset_x_title.value = "stale"
+            view._overlay_offset_y_title.value = "stale"
+            view._overlay_text_scale_title.value = "stale"
+            view._overlay_reset_title.value = "stale"
 
             view.apply_locale()
 
             general_card = _general_tab_card(view, t("settings.integrated_context"))
-            display_card = _overlay_tab_card(view, t("settings.overlay.display_options"))
-            calibration_card = _overlay_tab_card(view, t("settings.overlay.calibration"))
+            translation_card = _overlay_tab_card(view, t("settings.overlay.show_translation"))
+            anchor_card = _overlay_tab_card(view, t("settings.overlay.calibration.anchor"))
             general_labels = _control_labels(general_card)
-            display_labels = _control_labels(display_card)
-            calibration_labels = _control_labels(calibration_card)
+            translation_labels = _control_labels(translation_card)
+            anchor_labels = _control_labels(anchor_card)
 
             assert view._integrated_context_label.value == t("settings.integrated_context")
-            assert view._integrated_context_button.text == t("settings.context.local")
+            assert view._integrated_context_button.content.value == t("settings.context.local")
             assert view._integrated_context_hint.value == ""
-            assert view._overlay_display_options_title.value == t(
-                "settings.overlay.display_options"
-            )
-            assert view._overlay_translation_label.value == t("settings.overlay.show_translation")
-            assert view._overlay_peer_original_label.value == t(
+            assert view._overlay_translation_title.value == t("settings.overlay.show_translation")
+            assert view._overlay_peer_original_title.value == t(
                 "settings.overlay.show_peer_original"
             )
-            assert view._overlay_calibration_title.value == t("settings.overlay.calibration")
+            assert view._overlay_anchor_title.value == t("settings.overlay.calibration.anchor")
+            assert view._overlay_distance_title.value == t("settings.overlay.calibration.distance")
+            assert view._overlay_offset_x_title.value == t("settings.overlay.calibration.offset_x")
+            assert view._overlay_offset_y_title.value == t("settings.overlay.calibration.offset_y")
+            assert view._overlay_text_scale_title.value == t(
+                "settings.overlay.calibration.text_scale"
+            )
+            assert view._overlay_reset_title.value == t("settings.overlay.position_reset")
             assert t("settings.integrated_context") in general_labels
             assert t("settings.context.local") in general_labels
             assert t("settings.context.integrated_modal_helper") not in general_labels
-            assert t("settings.overlay.display_options") in display_labels
-            assert t("settings.overlay.show_translation") in display_labels
-            assert t("settings.overlay.show_peer_original") in display_labels
-            assert t("settings.overlay.calibration") in calibration_labels
+            assert t("settings.overlay.show_translation") in translation_labels
+            assert t("settings.overlay.calibration.anchor") in anchor_labels
             assert t("settings.section.overlay") not in general_labels
-            assert t("settings.section.overlay") not in display_labels
+            assert t("settings.section.overlay") not in translation_labels
             assert t("settings.overlay.enabled") not in general_labels
-            assert t("settings.overlay.enabled") not in display_labels
+            assert t("settings.overlay.enabled") not in translation_labels
             assert t("settings.peer_translation") not in general_labels
-            assert t("settings.peer_translation") not in display_labels
+            assert t("settings.peer_translation") not in translation_labels
     finally:
         i18n_module.set_locale(previous_locale)
 
 
-def test_overlay_calibration_controls_follow_local_apply_cancel_contract(
+def test_apply_locale_updates_general_clickable_value_fonts_to_zh_cn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    settings = AppSettings()
+    settings.ui.locale = "en"
     view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(AppSettings(), config_path=Path("settings.json"))
-    default_distance = view._format_overlay_calibration_number(OverlayCalibration().distance)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    view._overlay_distance_field.value = "1.20"
-    view._on_overlay_calibration_numeric_blur(
-        "distance",
-        SimpleNamespace(control=view._overlay_distance_field),
-    )
-    view._on_overlay_calibration_cancel(None)
+    zh_font = font_for_language("zh-CN")
+    assert zh_font is not None
 
-    assert view._overlay_distance_field.value == default_distance
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale("zh-CN")
+        settings.ui.locale = "zh-CN"
+        view.apply_locale()
 
-    view._overlay_distance_field.value = "1.20"
-    view._on_overlay_calibration_numeric_blur(
-        "distance",
-        SimpleNamespace(control=view._overlay_distance_field),
-    )
-    view._on_overlay_calibration_apply(None)
+        for control in (
+            view._ui_text,
+            view._chatbox_source_text,
+            view._vrc_mic_text,
+            view._mic_audio_text,
+            view._audio_host_api_text,
+            view._loopback_audio_text,
+            view._integrated_context_button,
+        ):
+            assert control.content.font_family == zh_font
+    finally:
+        i18n_module.set_locale(previous_locale)
 
-    assert view._overlay_distance_field.value == "1.20"
 
-
-def test_overlay_calibration_apply_commits_current_field_values_without_blur(
+def test_apply_locale_updates_all_settings_clickable_value_fonts_to_zh_cn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    settings = AppSettings()
+    settings.ui.locale = "ko"
     view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(AppSettings(), config_path=Path("settings.json"))
+    view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    view._overlay_distance_field.value = "1.20"
-    view._on_overlay_calibration_apply(None)
+    zh_font = font_for_language("zh-CN")
+    assert zh_font is not None
 
-    assert view._overlay_distance_field.value == "1.20"
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale("zh-CN")
+        settings.ui.locale = "zh-CN"
+        view.apply_locale()
+
+        for control in (
+            view._stt_text,
+            view._peer_stt_text,
+            view._llm_text,
+            view._low_latency_text,
+            view._openrouter_routing_text,
+            view._openrouter_fallback_text,
+            view._overlay_text_scale_text,
+        ):
+            assert control.content.font_family == zh_font
+    finally:
+        i18n_module.set_locale(previous_locale)
+
+
+def test_overlay_distance_step_buttons_apply_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_overlay_distance_step(0.05)
+    view._on_overlay_distance_step(0.20)
+
+    assert settings.overlay.calibration.distance == 1.35
+    assert view._overlay_distance_value_text.value == "1.35"
+
+
+def test_overlay_offset_step_buttons_apply_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_overlay_offset_x_step(0.05)
+    view._on_overlay_offset_y_step(-0.05)
+
+    assert settings.overlay.calibration.offset_x == 0.05
+    assert settings.overlay.calibration.offset_y == -0.50
+    assert view._overlay_offset_x_value_text.value == "0.05"
+    assert view._overlay_offset_y_value_text.value == "-0.50"
 
 
 def test_overlay_calibration_hides_background_alpha_control(
@@ -2390,7 +2605,7 @@ def test_overlay_calibration_hides_background_alpha_control(
     assert not hasattr(view, "_overlay_background_alpha_label")
 
 
-def test_overlay_calibration_reset_restores_defaults_until_apply(
+def test_overlay_reset_card_restores_defaults_immediately(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -2402,122 +2617,186 @@ def test_overlay_calibration_reset_restores_defaults_until_apply(
 
     defaults = OverlayCalibration()
 
-    view._on_overlay_calibration_reset(None)
+    view._on_overlay_position_reset(None)
 
-    assert view._overlay_distance_field.value == view._format_overlay_calibration_number(
+    assert settings.overlay.calibration.distance == defaults.distance
+    assert settings.overlay.calibration.offset_y == -0.45
+    assert view._overlay_distance_value_text.value == view._format_overlay_calibration_number(
         defaults.distance
     )
-    assert view._overlay_offset_y_field.value == view._format_overlay_calibration_number(
-        defaults.offset_y
-    )
-
-    view._on_overlay_calibration_cancel(None)
-
-    assert view._overlay_distance_field.value == "1.20"
-    assert view._overlay_offset_y_field.value == "0.50"
-
-    view._on_overlay_calibration_reset(None)
-    view._on_overlay_calibration_apply(None)
-
-    assert view._overlay_distance_field.value == view._format_overlay_calibration_number(
-        defaults.distance
-    )
-    assert view._overlay_offset_y_field.value == view._format_overlay_calibration_number(
+    assert view._overlay_offset_y_value_text.value == view._format_overlay_calibration_number(
         defaults.offset_y
     )
 
 
-def test_overlay_calibration_reload_preserves_active_draft_until_cancel(
+def test_overlay_tab_cards_use_settings_unit_card_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = AppSettings()
-    settings.overlay.calibration.distance = 0.9
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
+    from puripuly_heart.ui.components.settings.settings_unit_card import SettingsUnitCard
+    from puripuly_heart.ui.components.shared_card_wrapper import SharedCardWrapper
 
-    view._overlay_distance_field.value = "1.20"
-    view._on_overlay_calibration_numeric_blur(
-        "distance",
-        SimpleNamespace(control=view._overlay_distance_field),
-    )
-
-    reloaded = AppSettings()
-    reloaded.languages.source_language = "ja"
-    reloaded.overlay.calibration.distance = 0.8
-
-    view.load_from_settings(reloaded, config_path=Path("settings.json"))
-
-    assert view._overlay_calibration_session_active is True
-    assert view._overlay_distance_field.value == "1.20"
-    assert view._overlay_calibration.distance == 0.8
-
-    view._on_overlay_calibration_cancel(None)
-
-    assert view._overlay_distance_field.value == view._format_overlay_calibration_number(0.8)
-
-
-def test_overlay_calibration_reload_preserves_active_draft_until_apply(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    settings.overlay.calibration.distance = 0.9
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-
-    view._overlay_distance_field.value = "1.20"
-    view._on_overlay_calibration_numeric_blur(
-        "distance",
-        SimpleNamespace(control=view._overlay_distance_field),
-    )
-
-    reloaded = AppSettings()
-    reloaded.languages.source_language = "ja"
-    reloaded.overlay.calibration.distance = 0.8
-
-    view.load_from_settings(reloaded, config_path=Path("settings.json"))
-    view._on_overlay_calibration_apply(None)
-
-    assert view._overlay_calibration_session_active is False
-    assert view._overlay_distance_field.value == "1.20"
-    assert view._overlay_calibration.distance == 1.2
-
-
-def test_overlay_calibration_section_uses_dedicated_row_card(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
     view, _ = _make_settings_view(monkeypatch)
 
     overlay_cards = _overlay_tab_cards(view)
-    api_controls = _subtab_controls(view, "api")
+    assert all(isinstance(card, SharedCardWrapper) for card in overlay_cards)
+    assert {card.height for card in overlay_cards} == {SettingsUnitCard.DEFAULT_HEIGHT}
+    assert all(card.expand is True for card in overlay_cards)
+    assert _tree_contains_control(
+        _overlay_tab_card(view, t("settings.overlay.calibration.distance")),
+        view._overlay_distance_decrease_button,
+    )
+    assert _tree_contains_control(
+        _overlay_tab_card(view, t("settings.overlay.calibration.offset_x")),
+        view._overlay_offset_x_decrease_button,
+    )
+    assert not hasattr(view, "_overlay_calibration_apply_button")
+    assert not hasattr(view, "_overlay_calibration_cancel_button")
 
-    assert overlay_cards == [view._overlay_display_options_card, view._overlay_calibration_card]
-    assert isinstance(view._overlay_display_options_card, settings_view.SharedCardWrapper)
-    assert isinstance(view._overlay_calibration_card, settings_view.SharedCardWrapper)
-    assert view._overlay_display_options_card.height is None
-    assert view._overlay_calibration_card.height is None
-    assert view._overlay_display_options_card.expand is False
-    assert view._overlay_calibration_card.expand is False
 
-    display_column = _wrapped_card_column(view._overlay_display_options_card)
-    assert view._overlay_calibration_title not in display_column.controls
+def test_overlay_distance_card_uses_inline_minus_value_plus_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
 
-    calibration_column = _wrapped_card_column(view._overlay_calibration_card)
-    assert calibration_column.controls[0] is view._overlay_calibration_title
-    assert view._overlay_calibration_apply_button in calibration_column.controls[-1].controls
-    assert view._overlay_calibration_cancel_button in calibration_column.controls[-1].controls
-    assert view._overlay_calibration_reset_button in calibration_column.controls[-1].controls
+    distance_card = _overlay_tab_card(view, t("settings.overlay.calibration.distance"))
+    distance_card_stack = _wrapped_card_stack(distance_card)
+    distance_column = _wrapped_card_column(distance_card)
+    distance_value_row = distance_column.controls[1].content
 
-    row2 = api_controls[1]
-    assert row2 is view._openrouter_routing_row
-    assert row2.content.controls[0] is view._low_latency_card
-    assert row2.content.controls[1] is view._openrouter_routing_card
-    assert row2.content.controls[2] is view._openrouter_fallback_card
-    openrouter_column = row2.content.controls[1].content.controls[1].content.content
-    assert openrouter_column.controls[0] is view._openrouter_routing_title
-    assert openrouter_column.controls[1].content is view._openrouter_routing_text
-    fallback_column = row2.content.controls[2].content.controls[1].content.content
-    assert fallback_column.controls[0] is view._openrouter_fallback_title
-    assert fallback_column.controls[1].content is view._openrouter_fallback_text
+    assert isinstance(distance_card_stack, ft.Stack)
+    assert distance_card_stack.fit == ft.StackFit.EXPAND
+    click_row = distance_card_stack.controls[0]
+    visual_layer = distance_card_stack.controls[1]
+    distance_value_container = distance_value_row.controls[1]
+
+    assert isinstance(click_row, ft.Row)
+    assert click_row.expand == 1
+    assert click_row.spacing == 0
+    assert click_row.vertical_alignment == ft.CrossAxisAlignment.STRETCH
+    assert click_row.controls[0] is view._overlay_distance_decrease_button
+    assert click_row.controls[1] is view._overlay_distance_increase_button
+    assert isinstance(visual_layer, ft.TransparentPointer)
+    assert visual_layer.content is distance_column
+    assert isinstance(distance_value_row, ft.Row)
+    assert distance_value_row.controls[1].content is view._overlay_distance_value_text
+    assert distance_value_row.spacing == 4
+    assert isinstance(view._overlay_distance_decrease_button, ft.Container)
+    assert isinstance(view._overlay_distance_increase_button, ft.Container)
+    assert view._overlay_distance_decrease_button.expand == 1
+    assert view._overlay_distance_decrease_button.width is None
+    assert view._overlay_distance_decrease_button.height is None
+    assert view._overlay_distance_increase_button.expand == 1
+    assert view._overlay_distance_increase_button.width is None
+    assert view._overlay_distance_increase_button.height is None
+    assert distance_value_row.controls[0].content.value == "－"
+    assert distance_value_row.controls[0].alignment == ft.alignment.center_right
+    assert distance_value_row.controls[2].content.value == "＋"
+    assert distance_value_row.controls[2].alignment == ft.alignment.center_left
+    assert distance_value_container.width == 84
+    assert view._overlay_distance_value_text.size == 28
+    assert distance_value_row.controls[0].content.size == 22
+    assert distance_value_row.controls[2].content.size == 22
+
+
+def test_overlay_offset_cards_use_inline_arrow_value_arrow_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    offset_x_card = _overlay_tab_card(view, t("settings.overlay.calibration.offset_x"))
+    offset_y_card = _overlay_tab_card(view, t("settings.overlay.calibration.offset_y"))
+    offset_x_card_stack = _wrapped_card_stack(offset_x_card)
+    offset_y_card_stack = _wrapped_card_stack(offset_y_card)
+    offset_x_column = _wrapped_card_column(offset_x_card)
+    offset_y_column = _wrapped_card_column(offset_y_card)
+    offset_x_value_row = offset_x_column.controls[1].content
+    offset_y_value_row = offset_y_column.controls[1].content
+
+    assert isinstance(offset_x_card_stack, ft.Stack)
+    assert offset_x_card_stack.fit == ft.StackFit.EXPAND
+    offset_x_click_row = offset_x_card_stack.controls[0]
+    offset_x_visual_layer = offset_x_card_stack.controls[1]
+    offset_x_value_container = offset_x_value_row.controls[1]
+
+    assert isinstance(offset_x_click_row, ft.Row)
+    assert offset_x_click_row.expand == 1
+    assert offset_x_click_row.spacing == 0
+    assert offset_x_click_row.vertical_alignment == ft.CrossAxisAlignment.STRETCH
+    assert offset_x_click_row.controls[0] is view._overlay_offset_x_decrease_button
+    assert offset_x_click_row.controls[1] is view._overlay_offset_x_increase_button
+    assert isinstance(offset_x_visual_layer, ft.TransparentPointer)
+    assert offset_x_visual_layer.content is offset_x_column
+    assert isinstance(offset_x_value_row, ft.Row)
+    assert offset_x_value_row.controls[1].content is view._overlay_offset_x_value_text
+    assert offset_x_value_row.spacing == 4
+    assert offset_x_value_container.width == 84
+    assert isinstance(view._overlay_offset_x_decrease_button, ft.Container)
+    assert isinstance(view._overlay_offset_x_increase_button, ft.Container)
+    assert view._overlay_offset_x_decrease_button.expand == 1
+    assert view._overlay_offset_x_decrease_button.width is None
+    assert view._overlay_offset_x_decrease_button.height is None
+    assert view._overlay_offset_x_increase_button.expand == 1
+    assert view._overlay_offset_x_increase_button.width is None
+    assert view._overlay_offset_x_increase_button.height is None
+    assert offset_x_value_row.controls[0].content.value == "◀"
+    assert offset_x_value_row.controls[0].alignment == ft.alignment.center_right
+    assert offset_x_value_row.controls[2].content.value == "▶"
+    assert offset_x_value_row.controls[2].alignment == ft.alignment.center_left
+
+    assert isinstance(offset_y_card_stack, ft.Stack)
+    assert offset_y_card_stack.fit == ft.StackFit.EXPAND
+    offset_y_click_row = offset_y_card_stack.controls[0]
+    offset_y_visual_layer = offset_y_card_stack.controls[1]
+    offset_y_value_container = offset_y_value_row.controls[1]
+
+    assert isinstance(offset_y_click_row, ft.Row)
+    assert offset_y_click_row.expand == 1
+    assert offset_y_click_row.spacing == 0
+    assert offset_y_click_row.vertical_alignment == ft.CrossAxisAlignment.STRETCH
+    assert offset_y_click_row.controls[0] is view._overlay_offset_y_decrease_button
+    assert offset_y_click_row.controls[1] is view._overlay_offset_y_increase_button
+    assert isinstance(offset_y_visual_layer, ft.TransparentPointer)
+    assert offset_y_visual_layer.content is offset_y_column
+    assert isinstance(offset_y_value_row, ft.Row)
+    assert offset_y_value_row.controls[1].content is view._overlay_offset_y_value_text
+    assert offset_y_value_row.spacing == 4
+    assert offset_y_value_container.width == 84
+    assert isinstance(view._overlay_offset_y_decrease_button, ft.Container)
+    assert isinstance(view._overlay_offset_y_increase_button, ft.Container)
+    assert view._overlay_offset_y_decrease_button.expand == 1
+    assert view._overlay_offset_y_decrease_button.width is None
+    assert view._overlay_offset_y_decrease_button.height is None
+    assert view._overlay_offset_y_increase_button.expand == 1
+    assert view._overlay_offset_y_increase_button.width is None
+    assert view._overlay_offset_y_increase_button.height is None
+    assert offset_y_value_row.controls[0].content.value == "▲"
+    assert offset_y_value_row.controls[0].alignment == ft.alignment.center_right
+    assert offset_y_value_row.controls[2].content.value == "▼"
+    assert offset_y_value_row.controls[2].alignment == ft.alignment.center_left
+
+    assert view._overlay_offset_x_value_text.size == 28
+    assert view._overlay_offset_y_value_text.size == 28
+    assert offset_x_value_row.controls[0].content.size == 22
+    assert offset_y_value_row.controls[0].content.size == 22
+
+
+def test_overlay_step_buttons_use_large_vr_hit_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    for button in (
+        view._overlay_distance_decrease_button,
+        view._overlay_distance_increase_button,
+        view._overlay_offset_x_decrease_button,
+        view._overlay_offset_x_increase_button,
+        view._overlay_offset_y_decrease_button,
+        view._overlay_offset_y_increase_button,
+    ):
+        assert isinstance(button, ft.Container)
+        assert button.expand == 1
+        assert button.width is None
+        assert button.height is None
 
 
 def test_translation_card_no_longer_contains_openrouter_routing_row(
@@ -2550,12 +2829,22 @@ def test_overlay_tab_labels_and_headings_render_from_i18n(
         for card in _overlay_tab_cards(view):
             overlay_labels.extend(_control_labels(card))
 
-        assert view._overlay_display_options_title.value == t("settings.overlay.display_options")
-        assert view._overlay_calibration_title.value == t("settings.overlay.calibration")
-        assert view._overlay_translation_label.value == t("settings.overlay.show_translation")
-        assert view._overlay_peer_original_label.value == t("settings.overlay.show_peer_original")
-        assert t("settings.overlay.display_options") in overlay_labels
-        assert t("settings.overlay.calibration") in overlay_labels
+        assert view._overlay_translation_title.value == t("settings.overlay.show_translation")
+        assert view._overlay_peer_original_title.value == t("settings.overlay.show_peer_original")
+        assert view._overlay_anchor_title.value == t("settings.overlay.calibration.anchor")
+        assert view._overlay_distance_title.value == t("settings.overlay.calibration.distance")
+        assert view._overlay_offset_x_title.value == t("settings.overlay.calibration.offset_x")
+        assert view._overlay_offset_y_title.value == t("settings.overlay.calibration.offset_y")
+        assert view._overlay_text_scale_title.value == t("settings.overlay.calibration.text_scale")
+        assert view._overlay_reset_title.value == t("settings.overlay.position_reset")
+        assert t("settings.overlay.show_translation") in overlay_labels
+        assert t("settings.overlay.show_peer_original") in overlay_labels
+        assert t("settings.overlay.calibration.anchor") in overlay_labels
+        assert t("settings.overlay.calibration.distance") in overlay_labels
+        assert t("settings.overlay.calibration.offset_x") in overlay_labels
+        assert t("settings.overlay.calibration.offset_y") in overlay_labels
+        assert t("settings.overlay.calibration.text_scale") in overlay_labels
+        assert t("settings.overlay.position_reset") in overlay_labels
     finally:
         i18n_module.set_locale(old_locale)
 
@@ -2762,45 +3051,22 @@ def test_apply_locale_refreshes_peer_labels_and_inherit_texts(
     settings = AppSettings()
     settings.ui.locale = "ko"
     settings.provider.peer_stt = STTProviderName.QWEN_ASR
-    settings.peer_qwen_asr_stt.region = None
-    settings.peer_qwen_asr_stt.model = None
-    settings.peer_soniox_stt.model = None
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     old_locale = i18n_module.get_locale()
     expected_peer_stt_label = ""
-    expected_peer_qwen_region_label = ""
-    expected_peer_qwen_model_label = ""
-    expected_peer_soniox_model_label = ""
-    expected_inherit_label = ""
     try:
         i18n_module.set_locale("ko")
         view._peer_stt_label.value = "stale"
-        view._peer_qwen_region_label.value = "stale"
-        view._peer_qwen_model_label.value = "stale"
-        view._peer_soniox_model_label.value = "stale"
-        view._peer_qwen_region_text.content.value = "stale"
-        view._peer_qwen_model_text.content.value = "stale"
-        view._peer_soniox_model_text.content.value = "stale"
 
         view.apply_locale()
         expected_peer_stt_label = t("settings.peer_stt_provider")
-        expected_peer_qwen_region_label = t("settings.peer_qwen_region")
-        expected_peer_qwen_model_label = t("settings.peer_qwen_model")
-        expected_peer_soniox_model_label = t("settings.peer_soniox_model")
-        expected_inherit_label = t("settings.peer_provider.follow_self")
     finally:
         i18n_module.set_locale(old_locale)
 
     assert view._peer_stt_label.value == expected_peer_stt_label
-    assert view._peer_qwen_region_label.value == expected_peer_qwen_region_label
-    assert view._peer_qwen_model_label.value == expected_peer_qwen_model_label
-    assert view._peer_soniox_model_label.value == expected_peer_soniox_model_label
-    assert view._peer_qwen_region_text.content.value == expected_inherit_label
-    assert view._peer_qwen_model_text.content.value == expected_inherit_label
-    assert view._peer_soniox_model_text.content.value == expected_inherit_label
 
 
 @pytest.mark.parametrize(
@@ -3220,8 +3486,10 @@ def test_general_cards_use_settings_unit_card_defaults(
     assert {card.height for card in general_cards} == {SettingsUnitCard.DEFAULT_HEIGHT}
     assert all(card.expand is True for card in general_cards)
     assert all(getattr(row, "height", None) is None for row in _subtab_controls(view, "general"))
-    text_style = view._integrated_context_button.style.text_style[ft.ControlState.DEFAULT]
-    assert text_style.size == 28
+    assert isinstance(view._integrated_context_button, ft.Container)
+    assert view._integrated_context_button.expand is True
+    assert view._integrated_context_button.content.size == 28
+    assert view._integrated_context_button.content.color == settings_view.COLOR_ON_BACKGROUND
     assert view._openrouter_routing_row.height is None
 
 
@@ -3304,7 +3572,7 @@ def test_integrated_context_general_card_labels_render_from_i18n(
         general_labels = _control_labels(general_card)
 
         assert view._integrated_context_label.value == t("settings.integrated_context")
-        assert view._integrated_context_button.text == t("settings.context.local")
+        assert view._integrated_context_button.content.value == t("settings.context.local")
         assert view._integrated_context_hint.value == ""
         assert t("settings.integrated_context") in general_labels
         assert t("settings.context.local") in general_labels

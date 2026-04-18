@@ -11,7 +11,7 @@ BlockVariant = Literal["active_self", "finalized"]
 class OverlayPresentationCalibration:
     anchor: str = "head_locked"
     offset_x: float = 0.0
-    offset_y: float = 0.0
+    offset_y: float = -0.45
     distance: float = 1.1
     text_scale: float = 1.0
     background_alpha: float = 0.24
@@ -31,7 +31,7 @@ class OverlayPresentationCalibration:
         return cls(
             anchor=str(data.get("anchor", "head_locked")),
             offset_x=float(data.get("offset_x", 0.0)),
-            offset_y=float(data.get("offset_y", 0.0)),
+            offset_y=float(data.get("offset_y", -0.45)),
             distance=float(data.get("distance", 1.1)),
             text_scale=float(data.get("text_scale", 1.0)),
             background_alpha=float(data.get("background_alpha", 0.24)),
@@ -70,9 +70,7 @@ class OverlayPresentationBlock:
             raise ValueError(f"invalid overlay presentation channel: {channel!r}")
         block_variant = data.get("block_variant")
         if block_variant not in ("active_self", "finalized"):
-            raise ValueError(
-                f"invalid overlay presentation block variant: {block_variant!r}"
-            )
+            raise ValueError(f"invalid overlay presentation block variant: {block_variant!r}")
         if block_variant == "active_self" and channel != "self":
             raise ValueError("active_self blocks require channel='self'")
         occupant_key = _require_string_field(data, "occupant_key").strip()

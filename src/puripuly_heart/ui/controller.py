@@ -629,9 +629,6 @@ class GuiController:
         target.provider.stt = source.provider.stt
         target.provider.peer_stt = source.provider.peer_stt
         target.provider.llm = source.provider.llm
-        target.peer_qwen_asr_stt.model = source.peer_qwen_asr_stt.model
-        target.peer_qwen_asr_stt.region = source.peer_qwen_asr_stt.region
-        target.peer_soniox_stt.model = source.peer_soniox_stt.model
         target.gemini.llm_model = source.gemini.llm_model
         target.openrouter.llm_model = source.openrouter.llm_model
         target.openrouter.routing_mode = source.openrouter.routing_mode

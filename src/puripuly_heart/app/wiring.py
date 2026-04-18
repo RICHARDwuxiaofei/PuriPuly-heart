@@ -582,8 +582,8 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
             source_language=peer_source_language,
             sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
             keyterms=keyterms,
-            qwen_model=settings.peer_qwen_asr_stt.model or settings.qwen_asr_stt.model,
-            qwen_region=settings.peer_qwen_asr_stt.region or settings.qwen.region,
+            qwen_model=settings.qwen_asr_stt.model,
+            qwen_region=settings.qwen.region,
         )
 
     if provider == STTProviderName.SONIOX:
@@ -592,18 +592,10 @@ def resolve_peer_stt_config(settings: AppSettings) -> ResolvedPeerSTTConfig:
             source_language=peer_source_language,
             sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
             keyterms=keyterms,
-            soniox_model=settings.peer_soniox_stt.model or settings.soniox_stt.model,
-            soniox_endpoint=settings.peer_soniox_stt.endpoint or settings.soniox_stt.endpoint,
-            soniox_keepalive_interval_s=(
-                settings.peer_soniox_stt.keepalive_interval_s
-                if settings.peer_soniox_stt.keepalive_interval_s is not None
-                else settings.soniox_stt.keepalive_interval_s
-            ),
-            soniox_trailing_silence_ms=(
-                settings.peer_soniox_stt.trailing_silence_ms
-                if settings.peer_soniox_stt.trailing_silence_ms is not None
-                else settings.soniox_stt.trailing_silence_ms
-            ),
+            soniox_model=settings.soniox_stt.model,
+            soniox_endpoint=settings.soniox_stt.endpoint,
+            soniox_keepalive_interval_s=settings.soniox_stt.keepalive_interval_s,
+            soniox_trailing_silence_ms=settings.soniox_stt.trailing_silence_ms,
         )
 
     if provider == STTProviderName.LOCAL_QWEN:

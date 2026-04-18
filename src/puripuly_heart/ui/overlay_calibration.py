@@ -10,7 +10,7 @@ OVERLAY_CALIBRATION_ANCHORS = (OVERLAY_CALIBRATION_ANCHOR_HEAD_LOCKED,)
 class OverlayCalibration:
     anchor: str = OVERLAY_CALIBRATION_ANCHOR_HEAD_LOCKED
     offset_x: float = 0.0
-    offset_y: float = 0.0
+    offset_y: float = -0.45
     distance: float = 1.1
     text_scale: float = 1.0
     background_alpha: float = 0.24
