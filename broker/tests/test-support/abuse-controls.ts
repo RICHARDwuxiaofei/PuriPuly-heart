@@ -1,6 +1,6 @@
 import type { TestBrokerEnv } from './sqlite-d1';
 
-interface StoredAbuseControls {
+export interface StoredAbuseControls {
   trialChallenge: {
     endpoint: string;
     scope: 'ip';
@@ -31,16 +31,146 @@ interface StoredAbuseControls {
     maxCount: number | null;
     windowDays: number;
   };
+  immediateAlerts: {
+    warn1: number;
+    warn2: number;
+    warn3: number;
+    critical: number;
+  };
+  asnFastPath: {
+    enabled: boolean;
+    minIssueSuccess1h: number;
+    minTopAsnSharePct: number;
+  };
+  asnClassifications: Array<{
+    asn: number;
+    kind: 'cloud_or_vps';
+    displayName?: string;
+  }>;
+  retention: {
+    requestEventsDays: number;
+    issueSuccessDays: number;
+    runtimeAuditDays: number;
+  };
+  dailyReport: {
+    enabled: boolean;
+    hourUtc: number;
+    minuteUtc: number;
+    includeZeroActivity: boolean;
+  };
+}
+
+export interface StoredAbuseRuntimeState {
+  brake: {
+    active: boolean;
+    reason: 'global_threshold' | 'asn_fast_path' | 'manual' | null;
+    changedAt: string | null;
+    changedBy: 'system' | 'operator' | null;
+  };
+  alertLatches: {
+    warn1: boolean;
+    warn2: boolean;
+    warn3: boolean;
+    critical: boolean;
+  };
+  dailyReport: {
+    lastDeliveredAt: string | null;
+    lastDeliveredDateUtc: string | null;
+  };
+}
+
+export const TEST_DEFAULT_ABUSE_CONTROLS: StoredAbuseControls = {
+  trialChallenge: {
+    endpoint: 'POST /v1/trial/challenge',
+    scope: 'ip',
+    maxRequests: 10,
+    windowMinutes: 15,
+  },
+  trialChallengeVerify: {
+    endpoint: 'POST /v1/trial/challenge/verify',
+    scope: 'installation_id',
+    maxRequests: 5,
+    windowMinutes: 15,
+  },
+  openrouterIssue: {
+    endpoint: 'POST /v1/providers/openrouter/issue',
+    scope: 'installation_id',
+    maxRequests: 3,
+    windowMinutes: 15,
+  },
+  trialStatus: {
+    endpoint: 'GET /v1/trial/status',
+    scope: 'installation_id',
+    maxRequests: 30,
+    windowMinutes: 15,
+  },
+  newActiveEntitlementsPerDay: {
+    endpoint: 'POST /v1/providers/openrouter/issue',
+    scope: 'global',
+    maxCount: null,
+    windowDays: 1,
+  },
+  immediateAlerts: {
+    warn1: 10,
+    warn2: 25,
+    warn3: 50,
+    critical: 70,
+  },
+  asnFastPath: {
+    enabled: true,
+    minIssueSuccess1h: 20,
+    minTopAsnSharePct: 70,
+  },
+  asnClassifications: [],
+  retention: {
+    requestEventsDays: 30,
+    issueSuccessDays: 30,
+    runtimeAuditDays: 90,
+  },
+  dailyReport: {
+    enabled: true,
+    hourUtc: 13,
+    minuteUtc: 0,
+    includeZeroActivity: false,
+  },
+};
+
+export const TEST_DEFAULT_ABUSE_RUNTIME_STATE: StoredAbuseRuntimeState = {
+  brake: {
+    active: false,
+    reason: null,
+    changedAt: null,
+    changedBy: null,
+  },
+  alertLatches: {
+    warn1: false,
+    warn2: false,
+    warn3: false,
+    critical: false,
+  },
+  dailyReport: {
+    lastDeliveredAt: null,
+    lastDeliveredDateUtc: null,
+  },
+};
+
+export function readAbuseControls(env: TestBrokerEnv): StoredAbuseControls {
+  const row = env.__db
+    .prepare('SELECT value FROM broker_config WHERE key = ?')
+    .get('abuse_controls') as { value: string } | undefined;
+
+  if (!row) {
+    throw new Error('missing broker_config row: abuse_controls');
+  }
+
+  return normalizeAbuseControls(JSON.parse(row.value) as unknown);
 }
 
 export function updateAbuseControls(
   env: TestBrokerEnv,
   mutate: (controls: StoredAbuseControls) => void,
 ): void {
-  const row = env.__db
-    .prepare('SELECT value FROM broker_config WHERE key = ?')
-    .get('abuse_controls') as { value: string };
-  const controls = JSON.parse(row.value) as StoredAbuseControls;
+  const controls = readAbuseControls(env);
   mutate(controls);
   env.__db
     .prepare('UPDATE broker_config SET value = ?, updated_at = ? WHERE key = ?')
@@ -51,6 +181,35 @@ export function replaceAbuseControlsValue(env: TestBrokerEnv, value: unknown): v
   env.__db
     .prepare('UPDATE broker_config SET value = ?, updated_at = ? WHERE key = ?')
     .run(JSON.stringify(value), new Date().toISOString(), 'abuse_controls');
+}
+
+export function readAbuseRuntimeState(env: TestBrokerEnv): StoredAbuseRuntimeState {
+  const row = env.__db
+    .prepare('SELECT value FROM broker_config WHERE key = ?')
+    .get('abuse_runtime_state') as { value: string } | undefined;
+
+  if (!row) {
+    throw new Error('missing broker_config row: abuse_runtime_state');
+  }
+
+  return normalizeAbuseRuntimeState(JSON.parse(row.value) as unknown);
+}
+
+export function updateAbuseRuntimeState(
+  env: TestBrokerEnv,
+  mutate: (state: StoredAbuseRuntimeState) => void,
+): void {
+  const state = readAbuseRuntimeState(env);
+  mutate(state);
+  env.__db
+    .prepare('UPDATE broker_config SET value = ?, updated_at = ? WHERE key = ?')
+    .run(JSON.stringify(state), new Date().toISOString(), 'abuse_runtime_state');
+}
+
+export function replaceAbuseRuntimeStateValue(env: TestBrokerEnv, value: unknown): void {
+  env.__db
+    .prepare('UPDATE broker_config SET value = ?, updated_at = ? WHERE key = ?')
+    .run(JSON.stringify(value), new Date().toISOString(), 'abuse_runtime_state');
 }
 
 export function insertVelocityCapHook(
@@ -130,4 +289,86 @@ export function insertSubjectHook(
       input.reason ?? null,
       input.expires_at ?? null,
     );
+}
+
+function normalizeAbuseControls(value: unknown): StoredAbuseControls {
+  const normalized = cloneJson(TEST_DEFAULT_ABUSE_CONTROLS);
+  if (!isRecord(value)) {
+    return normalized;
+  }
+
+  assignRecord(normalized, value);
+  assignRecord(normalized.trialChallenge, value.trialChallenge);
+  assignRecord(normalized.trialChallengeVerify, value.trialChallengeVerify);
+  assignRecord(normalized.openrouterIssue, value.openrouterIssue);
+  assignRecord(normalized.trialStatus, value.trialStatus);
+  assignRecord(normalized.newActiveEntitlementsPerDay, value.newActiveEntitlementsPerDay);
+  assignRecord(normalized.immediateAlerts, value.immediateAlerts);
+  assignRecord(normalized.asnFastPath, value.asnFastPath);
+  assignRecord(normalized.retention, value.retention);
+  assignRecord(normalized.dailyReport, value.dailyReport);
+
+  if (Array.isArray(value.asnClassifications)) {
+    normalized.asnClassifications = value.asnClassifications
+      .map(normalizeAsnClassification)
+      .filter(
+        (
+          entry,
+        ): entry is {
+          asn: number;
+          kind: 'cloud_or_vps';
+          displayName?: string;
+        } => entry !== null,
+      );
+  }
+
+  return normalized;
+}
+
+function normalizeAbuseRuntimeState(value: unknown): StoredAbuseRuntimeState {
+  const normalized = cloneJson(TEST_DEFAULT_ABUSE_RUNTIME_STATE);
+  if (!isRecord(value)) {
+    return normalized;
+  }
+
+  assignRecord(normalized, value);
+  assignRecord(normalized.brake, value.brake);
+  assignRecord(normalized.alertLatches, value.alertLatches);
+  assignRecord(normalized.dailyReport, value.dailyReport);
+  return normalized;
+}
+
+function normalizeAsnClassification(
+  value: unknown,
+): { asn: number; kind: 'cloud_or_vps'; displayName?: string } | null {
+  if (!isRecord(value) || !Number.isInteger(value.asn) || value.kind !== 'cloud_or_vps') {
+    return null;
+  }
+
+  return typeof value.displayName === 'string'
+    ? {
+        asn: Number(value.asn),
+        kind: 'cloud_or_vps',
+        displayName: value.displayName,
+      }
+    : {
+        asn: Number(value.asn),
+        kind: 'cloud_or_vps',
+      };
+}
+
+function assignRecord<T extends object>(target: T, source: unknown): void {
+  if (!isRecord(source)) {
+    return;
+  }
+
+  Object.assign(target, source);
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

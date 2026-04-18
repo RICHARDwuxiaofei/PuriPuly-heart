@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from puripuly_heart.core.local_qwen_runtime import LOCAL_QWEN_PACKAGED_RUNTIME_RELATIVE_DIR
+from puripuly_heart.core.overlay.openvr_vendor import (
+    OPENVR_VENDOR_DLL_URL,
+    OPENVR_VENDOR_LICENSE_URL,
+    OPENVR_VENDOR_REPOSITORY_REF,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 PINNED_PYTHON_VERSION = 'PYTHON_VERSION: "3.12.10"'
@@ -20,6 +29,12 @@ SOXR_PACKAGED_RUNTIME_RELATIVE_DIR = "soxr"
 SOXR_COMPLIANCE_BUNDLE_RELATIVE_DIR = "third_party\\soxr"
 SOXR_SOURCE_BUNDLE_NAME = "PuriPulyHeart-soxr-third-party-source-bundle.zip"
 SOXR_LICENSE_TEXT_RELATIVE_PATH = "src/puripuly_heart/data/licenses/COPYING.LGPL-2.1.txt"
+OPENVR_VENDOR_DLL_RELATIVE_PATH = "third_party/openvr/win64/openvr_api.dll"
+OPENVR_VENDOR_SHA256_RELATIVE_PATH = "third_party/openvr/win64/openvr_api.dll.sha256"
+OPENVR_VENDOR_LICENSE_RELATIVE_PATH = "third_party/openvr/LICENSE"
+OPENVR_VENDOR_README_RELATIVE_PATH = "third_party/openvr/README.md"
+OPENVR_VENDOR_DLL_SHA256 = "bab8ac6ef64e68a9ca53315b0014d131088584b2efdfa6db511d67ec03cfcb4a"
+OPENVR_VENDOR_SHA256_LINE = f"{OPENVR_VENDOR_DLL_SHA256} *openvr_api.dll"
 PINNED_LIBSOXR_SOURCE_URL = (
     "https://sourceforge.net/projects/soxr/files/soxr-0.1.3-Source.tar.xz/download"
 )
@@ -49,24 +64,27 @@ README_DIRECT_PACKAGING_CAVEATS = {
     "README.md": (
         "This direct executable/manual-installer path is not the release-complete "
         "compliance-packaging path. It also requires the staged overlay executable at "
-        "`build/overlay/PuriPulyHeartOverlay.exe`, as enforced by `build.spec`."
+        "`build/overlay/PuriPulyHeartOverlay.exe` plus the vendored OpenVR bundle under "
+        "`third_party/openvr/`, as enforced by `build.spec`."
     ),
     "README.ko.md": (
         "이 경로는 실행 파일/수동 인스톨러만 만드는 직접 패키징 경로이며, "
         "릴리스 완료(compliance) 패키징 경로가 아닙니다. 또한 `build.spec`가 "
-        "검사하는 스테이징된 오버레이 실행 파일 `build/overlay/PuriPulyHeartOverlay.exe`가 "
-        "필요합니다."
+        "검사하는 스테이징된 오버레이 실행 파일 `build/overlay/PuriPulyHeartOverlay.exe`와 "
+        "벤더링된 OpenVR 번들 `third_party/openvr/`가 필요합니다."
     ),
     "README.ja.md": (
         "この手順は実行ファイル/手動インストーラ向けの直接パッケージング専用で、"
         "リリース完了のコンプライアンスパッケージング手順ではありません。さらに、"
         "`build.spec` が検証するステージ済みオーバーレイ実行ファイル "
-        "`build/overlay/PuriPulyHeartOverlay.exe` が必要です。"
+        "`build/overlay/PuriPulyHeartOverlay.exe` と、ベンダリングされた OpenVR バンドル "
+        "`third_party/openvr/` が必要です。"
     ),
     "README.zh-CN.md": (
         "这一路径只用于直接生成可执行文件 / 手动安装包，不是完整发布所需的合规打包路径。"
         "并且它仍然需要 `build.spec` 会校验的已暂存 overlay 可执行文件 "
-        "`build/overlay/PuriPulyHeartOverlay.exe`。"
+        "`build/overlay/PuriPulyHeartOverlay.exe`，以及 `third_party/openvr/` 下的 "
+        "vendored OpenVR bundle。"
     ),
 }
 BUILD_SPEC_DIRECT_PACKAGING_HEADER = (
@@ -74,9 +92,23 @@ BUILD_SPEC_DIRECT_PACKAGING_HEADER = (
 )
 BUILD_SPEC_DIRECT_PACKAGING_CAVEAT = (
     "This direct path is not the release-complete compliance-packaging path and requires "
-    "the staged overlay executable at build/overlay/PuriPulyHeartOverlay.exe (enforced below)."
+    "the staged overlay executable at build/overlay/PuriPulyHeartOverlay.exe plus the "
+    "vendored OpenVR bundle under third_party/openvr/ (enforced below)."
 )
 BUILD_SPEC_FULL_RELEASE_HEADER = "Full release-complete compliance packaging requires scripts/ci/prepare-soxr-release-inputs.ps1 before scripts/ci/build-release-artifacts.ps1:"
+OPENVR_NOTICE_HEADER = "OpenVR client binding library (openvr_api.dll)"
+OPENVR_NOTICE_SOURCE_BUNDLE_RELATIVE_DIR = "third_party\\openvr\\"
+OPENVR_NOTICE_APP_PRIVATE_EXPLANATION = (
+    "This application bundles the Windows x64 OpenVR client binding library as an app-private "
+    "dependency for the packaged overlay/runtime path."
+)
+OPENVR_NOTICE_PACKAGED_BUILD_EXPLANATION = (
+    "Installed builds load this DLL from the application's own tree. The vendored bundle pinned "
+    f"from {OPENVR_VENDOR_REPOSITORY_REF} under {OPENVR_NOTICE_SOURCE_BUNDLE_RELATIVE_DIR} is the "
+    "packaging source for that app-private DLL, so packaged and installed builds do not depend on "
+    "a shared SteamVR system copy."
+)
+OPENVR_NOTICE_NEXT_SECTION_HEADER = "NanumSquareRound"
 
 
 def _slice_section(text: str, start_marker: str, end_marker: str | None = None) -> str:
@@ -101,6 +133,30 @@ def _workflow_job_block(workflow: str, job_name: str) -> str:
             break
 
     return "\n".join(lines[start_index:end_index])
+
+
+def _expected_openvr_notice_section() -> str:
+    openvr_license_text = (
+        (ROOT / OPENVR_VENDOR_LICENSE_RELATIVE_PATH).read_text(encoding="utf-8").strip()
+    )
+
+    return (
+        f"{OPENVR_NOTICE_HEADER}\n"
+        f"Upstream pin: {OPENVR_VENDOR_REPOSITORY_REF}\n"
+        f"DLL source: {OPENVR_VENDOR_DLL_URL}\n"
+        f"LICENSE source: {OPENVR_VENDOR_LICENSE_URL}\n"
+        "License: BSD-3-Clause\n"
+        "Bundled runtime: openvr_api.dll\n"
+        f"Packaging source bundle: {OPENVR_NOTICE_SOURCE_BUNDLE_RELATIVE_DIR}\n"
+        "Packaging source files: LICENSE ; README.md ; win64\\openvr_api.dll ; "
+        "win64\\openvr_api.dll.sha256\n\n"
+        f"{OPENVR_NOTICE_APP_PRIVATE_EXPLANATION}\n\n"
+        f"{OPENVR_NOTICE_PACKAGED_BUILD_EXPLANATION}\n\n"
+        "----\n\n"
+        "BSD 3-Clause License\n\n"
+        f"{openvr_license_text}\n\n"
+        "----"
+    )
 
 
 def test_pyproject_caps_deepgram_sdk_below_v6() -> None:
@@ -308,20 +364,145 @@ def test_shared_windows_build_script_overrides_local_stt_appdata_for_smoke_and_c
     assert "Local STT provisioning completed successfully." in script
 
 
-def test_shared_windows_build_script_bundles_openvr_runtime_dll_for_overlay() -> None:
+def test_build_spec_bundles_vendored_openvr_runtime_dll() -> None:
+    spec = (ROOT / "build.spec").read_text(encoding="utf-8")
+
+    assert (
+        "from puripuly_heart.core.overlay.openvr_vendor import "
+        "collect_vendored_openvr_runtime_binaries" in spec
+    )
+    assert "runtime_binaries += collect_vendored_openvr_runtime_binaries()" in spec
+    assert "SteamVR\\bin\\win64\\openvr_api.dll" not in spec
+
+
+def test_vendored_openvr_bundle_files_exist_and_sha256_line_is_exact() -> None:
+    dll_path = ROOT / OPENVR_VENDOR_DLL_RELATIVE_PATH
+    sha256_path = ROOT / OPENVR_VENDOR_SHA256_RELATIVE_PATH
+    license_path = ROOT / OPENVR_VENDOR_LICENSE_RELATIVE_PATH
+    readme_path = ROOT / OPENVR_VENDOR_README_RELATIVE_PATH
+
+    assert dll_path.is_file()
+    assert sha256_path.is_file()
+    assert license_path.is_file()
+    assert readme_path.is_file()
+    assert sha256_path.read_text(encoding="utf-8") == f"{OPENVR_VENDOR_SHA256_LINE}\n"
+
+
+def test_shared_windows_build_script_parses_in_powershell() -> None:
+    script_path = ROOT / "scripts" / "ci" / "build-release-artifacts.ps1"
+    powershell_path = shutil.which("pwsh") or shutil.which("powershell.exe")
+    if powershell_path is None:
+        pytest.skip("PowerShell executable not available")
+
+    escaped_script_path = str(script_path).replace("'", "''")
+    parse_command = (
+        "$tokens = $null; "
+        "$errors = $null; "
+        "[System.Management.Automation.Language.Parser]::ParseFile("
+        f"'{escaped_script_path}', [ref]$tokens, [ref]$errors"
+        ") > $null; "
+        "if ($errors.Count -ne 0) { "
+        '$errors | ForEach-Object { "{0}:{1}: {2}" -f $_.Extent.StartLineNumber, $_.Extent.StartColumnNumber, $_.Message }; '
+        "exit 1; "
+        "}"
+    )
+    completed = subprocess.run(
+        [powershell_path, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", parse_command],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, (
+        "PowerShell failed to parse scripts/ci/build-release-artifacts.ps1\n"
+        f"STDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+    )
+
+
+def test_shared_windows_build_script_uses_vendored_openvr_bundle_and_hash_helpers() -> None:
     script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
 
-    assert "openvr_api.dll" in script
-    assert "SteamVR\\bin\\win64\\openvr_api.dll" in script
-    assert '$overlayBundledDllPath = Join-Path $overlayBuildDir "openvr_api.dll"' in script
-    assert '$packagedOverlayDllPath = Join-Path $distDir "openvr_api.dll"' in script
     assert (
-        "Copy-Item -Path $openVrRuntimeDllPath -Destination $overlayBundledDllPath -Force" in script
+        '$openVrVendorDllPath = Join-Path $PWD "third_party/openvr/win64/openvr_api.dll"' in script
     )
     assert (
-        "Copy-Item -Path $openVrRuntimeDllPath -Destination $packagedOverlayDllPath -Force"
+        '$openVrVendorSha256Path = Join-Path $PWD "third_party/openvr/win64/openvr_api.dll.sha256"'
         in script
     )
+    assert f'$PinnedOpenVrVendorDllSha256 = "{OPENVR_VENDOR_DLL_SHA256}"' in script
+    assert "function Get-PinnedSha256FromFile" in script
+    assert "function Assert-FileSha256Equals" in script
+    assert (
+        "$pinnedOpenVrVendorDllSha256FromFile = Get-PinnedSha256FromFile -Path $openVrVendorSha256Path"
+        in script
+    )
+    assert "if ($pinnedOpenVrVendorDllSha256FromFile -ne $PinnedOpenVrVendorDllSha256) {" in script
+    assert "SteamVR\\bin\\win64\\openvr_api.dll" not in script
+    assert (
+        "Copy-Item -Path $openVrRuntimeDllPath -Destination $packagedOverlayDllPath -Force"
+        not in script
+    )
+
+
+def test_shared_windows_build_script_hash_checks_openvr_dll_at_all_release_stages() -> None:
+    script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
+
+    assert (
+        "Copy-Item -Path $openVrVendorDllPath -Destination $overlayBundledDllPath -Force" in script
+    )
+    assert (
+        "Assert-FileSha256Equals -Path $overlayBundledDllPath -ExpectedSha256 "
+        '$PinnedOpenVrVendorDllSha256 -Label "Staged OpenVR runtime DLL"' in script
+    )
+    assert (
+        "Assert-FileSha256Equals -Path $packagedOverlayDllPath -ExpectedSha256 "
+        '$PinnedOpenVrVendorDllSha256 -Label "Packaged OpenVR runtime DLL"' in script
+    )
+    assert '$installedOpenVrDllPath = Join-Path $InstallerSmokeDir "openvr_api.dll"' in script
+    assert (
+        "Assert-FileSha256Equals -Path $installedOpenVrDllPath -ExpectedSha256 "
+        '$PinnedOpenVrVendorDllSha256 -Label "Installed OpenVR runtime DLL"' in script
+    )
+    assert (
+        "Assert-FileSha256Equals -Path $installedOpenVrDllPath -ExpectedSha256 "
+        '$PinnedOpenVrVendorDllSha256 -Label "Reinstalled OpenVR runtime DLL"' in script
+    )
+    assert (
+        "Copy-Item -Path $openVrVendorDllPath -Destination $packagedOverlayDllPath -Force"
+        not in script
+    )
+
+
+def test_shared_windows_build_script_reinstall_smoke_restores_deliberately_mutated_openvr_dll() -> (
+    None
+):
+    script = (ROOT / "scripts" / "ci" / "build-release-artifacts.ps1").read_text(encoding="utf-8")
+
+    assert "[System.IO.File]::WriteAllBytes($installedOpenVrDllPath" in script
+    assert "$mutatedInstalledOpenVrDllHash = Get-FileSha256 -Path $installedOpenVrDllPath" in script
+    assert "Failed to mutate installed OpenVR runtime DLL before reinstall smoke" in script
+    assert "$reinstalledOpenVrDllHash = Get-FileSha256 -Path $installedOpenVrDllPath" in script
+    assert "Installed OpenVR runtime DLL reinstall smoke failed to restore pinned hash" in script
+    assert script.index(
+        "$mutatedInstalledOpenVrDllHash = Get-FileSha256 -Path $installedOpenVrDllPath"
+    ) < script.index("$installerReinstallSmoke = Start-Process -FilePath $smokeInstallerPath")
+
+
+def test_installer_script_documents_vendored_openvr_install_from_packaged_tree_without_steamvr_lookup() -> (
+    None
+):
+    script = (ROOT / "installer.iss").read_text(encoding="utf-8")
+
+    assert (
+        "; Vendored OpenVR runtime DLL comes from dist\\PuriPulyHeart\\openvr_api.dll in the packaged tree built by build.spec."
+        in script
+    )
+    assert "; Installer build/install never resolves SteamVR paths for openvr_api.dll." in script
+    assert (
+        'Source: "{#MyPackagedAppDir}\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs'
+        in script
+    )
+    assert "Steam\\steamapps\\common\\SteamVR\\bin\\win64\\openvr_api.dll" not in script
 
 
 def test_build_spec_local_qwen_runtime_dlls() -> None:
@@ -652,6 +833,18 @@ def test_third_party_notices_cover_soxr_runtime_and_installed_compliance_bundle(
     assert "Installed releases include an LGPL compliance bundle under" in notices
     assert "exact python-soxr 1.0.0 and libsoxr 0.1.3 source archives used to build" in notices
     assert "{app}" not in notices
+
+
+def test_third_party_notices_cover_vendored_openvr_bundle_and_bsd_terms() -> None:
+    notices = (ROOT / "src" / "puripuly_heart" / "data" / "THIRD_PARTY_NOTICES.txt").read_text(
+        encoding="utf-8"
+    )
+    openvr_notice_section = _slice_section(
+        notices, OPENVR_NOTICE_HEADER, OPENVR_NOTICE_NEXT_SECTION_HEADER
+    ).strip()
+
+    assert openvr_notice_section == _expected_openvr_notice_section()
+    assert "{app}" not in openvr_notice_section
 
 
 def test_shared_windows_build_script_runs_local_qwen_runtime_check_smoke() -> None:

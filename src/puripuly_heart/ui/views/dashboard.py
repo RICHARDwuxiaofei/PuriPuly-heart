@@ -1,3 +1,5 @@
+from typing import Callable
+
 import flet as ft
 
 from puripuly_heart.core.language import get_all_language_options
@@ -50,6 +52,8 @@ class DashboardView(ft.Column):
         self._local_stt_notice_percent: int | None = None
         self._managed_trial_visible = False
         self._managed_trial_remaining_percent: int | None = None
+        self._managed_trial_transient_message_key: str | None = None
+        self._managed_trial_transient_message_kwargs: dict[str, object] = {}
         self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
 
         # Current language settings
@@ -70,6 +74,7 @@ class DashboardView(ft.Column):
         self.on_toggle_peer_translation = None
         self.on_language_change = None
         self.on_recent_languages_change = None  # For persistence
+        self.runtime_log_detailed: Callable[..., bool | None] | None = None
 
         self._build_ui()
 
@@ -193,6 +198,21 @@ class DashboardView(ft.Column):
             size=16,
             color=COLOR_ON_BACKGROUND,
         )
+        self._managed_trial_transient_label = ft.Text(
+            t("dashboard.trial.transient_label"),
+            size=13,
+            color=COLOR_SECONDARY,
+        )
+        self._managed_trial_transient_value = ft.Text(
+            "",
+            size=16,
+            color=COLOR_WARNING,
+        )
+        self._managed_trial_transient_container = ft.Column(
+            [self._managed_trial_transient_label, self._managed_trial_transient_value],
+            spacing=6,
+            visible=False,
+        )
         self._managed_trial_usage_bar = ManagedTrialUsageBar()
 
         info_column = ft.Column(
@@ -219,6 +239,7 @@ class DashboardView(ft.Column):
                     spacing=24,
                     vertical_alignment=ft.CrossAxisAlignment.START,
                 ),
+                self._managed_trial_transient_container,
             ],
             spacing=18,
             expand=True,
@@ -263,8 +284,18 @@ class DashboardView(ft.Column):
         self._managed_trial_badge.value = t("dashboard.trial.source.managed")
         self._managed_trial_status_label.value = t("dashboard.trial.lifecycle_label")
         self._managed_trial_message_label.value = t("dashboard.trial.message_label")
+        self._managed_trial_transient_label.value = t("dashboard.trial.transient_label")
         self._managed_trial_status_value.value = t(self._managed_trial_lifecycle_key())
         self._managed_trial_message_value.value = t(self._managed_trial_message_key())
+        transient_key = self._managed_trial_transient_message_key
+        self._managed_trial_transient_value.value = (
+            t(transient_key, **self._managed_trial_transient_message_kwargs)
+            if transient_key is not None
+            else ""
+        )
+        self._managed_trial_transient_container.visible = bool(
+            self._managed_trial_visible and transient_key is not None
+        )
         self._managed_trial_usage_bar.set_percent(
             self._managed_trial_remaining_percent if self._managed_trial_visible else None
         )
@@ -343,6 +374,8 @@ class DashboardView(ft.Column):
         *,
         visible: bool,
         remaining_percent: int | None = None,
+        transient_message_key: str | None = None,
+        transient_message_kwargs: dict[str, object] | None = None,
         **_extra: object,
     ) -> None:
         self._managed_trial_visible = bool(visible)
@@ -350,6 +383,12 @@ class DashboardView(ft.Column):
             self._managed_trial_remaining_percent = max(0, min(100, int(remaining_percent)))
         else:
             self._managed_trial_remaining_percent = None
+        if self._managed_trial_visible and transient_message_key:
+            self._managed_trial_transient_message_key = transient_message_key
+            self._managed_trial_transient_message_kwargs = dict(transient_message_kwargs or {})
+        else:
+            self._managed_trial_transient_message_key = None
+            self._managed_trial_transient_message_kwargs = {}
         self._sync_managed_trial_card()
 
     def _toggle_stt(self):
@@ -561,20 +600,59 @@ class DashboardView(ft.Column):
         *,
         language_code: str | None = None,
         is_error: bool = False,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        utterance_id: object | None = None,
+        channel: str | None = None,
+        source_text_len: int | None = None,
+        transcript_kind: str | None = None,
+        should_log: bool = False,
     ) -> None:
         """Update the display card primary line with new text."""
         font_family = font_for_language(language_code) if language_code else self._ui_font()
-        self.display_card.set_display(text, is_error=is_error, font_family=font_family)
+        self.display_card.set_display(
+            text,
+            is_error=is_error,
+            font_family=font_family,
+            runtime_log_detailed=self.runtime_log_detailed,
+            update_id=update_id,
+            origin_wall_clock_ms=origin_wall_clock_ms,
+            utterance_id=utterance_id,
+            channel=channel,
+            source_text_len=source_text_len,
+            transcript_kind=transcript_kind,
+            should_log=should_log,
+        )
 
     def set_display_translation_text(
         self,
         text: str | None,
         *,
         language_code: str | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        utterance_id: object | None = None,
+        channel: str | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
     ) -> None:
         """Update the display card translation line."""
         font_family = font_for_language(language_code) if language_code else self._ui_font()
-        self.display_card.set_display_translation(text, font_family=font_family)
+        self.display_card.set_display_translation(
+            text,
+            font_family=font_family,
+            runtime_log_detailed=self.runtime_log_detailed,
+            update_id=update_id,
+            origin_wall_clock_ms=origin_wall_clock_ms,
+            utterance_id=utterance_id,
+            channel=channel,
+            session_scope=session_scope,
+            source_text_hash=source_text_hash,
+            source_text_len=source_text_len,
+            logical_turn_key=logical_turn_key,
+        )
 
     def set_managed_auth_pending(self, pending: bool) -> None:
         self._managed_auth_pending = bool(pending)

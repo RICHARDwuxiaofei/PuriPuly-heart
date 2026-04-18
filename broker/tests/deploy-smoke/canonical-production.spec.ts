@@ -29,6 +29,7 @@ const smokeDisallowedModel = normalizeDisallowedModel(
   MANAGED_ALLOWLIST_MODELS,
   process.env.CI === 'true',
 );
+const MANAGED_OPENROUTER_USER_ID_PATTERN = /^ph-or-user-v\d+_[A-Za-z0-9_-]+$/u;
 type JsonRequestOptions = {
   method: string;
   url: URL;
@@ -45,12 +46,12 @@ describe('broker deploy smoke helpers', () => {
       readOpenRouterCurrentKeyMetadata({
         data: {
           limit: ISSUE_BUDGET_USD,
-          expires_at: '2026-10-08T06:00:00.000Z',
+          expires_at: '2026-07-08T06:00:00.000Z',
         },
       }),
     ).toEqual({
       limit: ISSUE_BUDGET_USD,
-      expiresAt: '2026-10-08T06:00:00.000Z',
+      expiresAt: '2026-07-08T06:00:00.000Z',
     });
   });
 
@@ -159,7 +160,7 @@ describeDeploySmoke('broker direct deploy smoke', () => {
       'OpenRouter',
     );
     expect(foundation.body.trialProviderPolicy?.managedFreeTrial?.models).toEqual(
-      expect.arrayContaining(MANAGED_ALLOWLIST_MODELS),
+      expect.arrayContaining([...MANAGED_ALLOWLIST_MODELS]),
     );
 
     const challenge = await requestJson({
@@ -245,6 +246,7 @@ describeDeploySmoke('broker direct deploy smoke', () => {
     expect(typeof issue.body.managed_credential_ref).toBe('string');
     expect(issue.body.managed_credential_ref.length).toBeGreaterThan(0);
     expect(typeof issue.body.expires_at).toBe('string');
+    assertManagedOpenRouterUserId(issue.body.openrouter_user_id);
 
     const issuedKeyMetadata = readOpenRouterCurrentKeyMetadata(
       (
@@ -281,6 +283,17 @@ describeDeploySmoke('broker direct deploy smoke', () => {
     ).toBe(true);
   }, 180_000);
 });
+
+function assertManagedOpenRouterUserId(value: unknown): asserts value is string {
+  expect(typeof value).toBe('string');
+
+  if (typeof value !== 'string') {
+    throw new Error('issue success payload must include openrouter_user_id');
+  }
+
+  expect(value.trim().length).toBeGreaterThan(0);
+  expect(value).toMatch(MANAGED_OPENROUTER_USER_ID_PATTERN);
+}
 
 function normalizeDisallowedModel(
   rawValue: string | undefined,

@@ -501,8 +501,8 @@ class FallbackRacingLLMProvider(LLMProvider):
             getattr(getattr(provider, "release_service", None), "settings", None)
         )
 
-        model = release_model or settings_model or direct_model
-        source = release_source or settings_source or direct_source
+        model = direct_model or settings_model or release_model
+        source = direct_source or settings_source or release_source
         is_openrouter = cls._is_openrouter_provider(provider) or any(
             value is not None
             for value in (release_model, release_source, settings_model, settings_source)

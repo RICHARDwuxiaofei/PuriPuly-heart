@@ -12,6 +12,7 @@ from uuid import UUID
 import httpx
 
 from puripuly_heart.config.settings import OpenRouterRoutingMode
+from puripuly_heart.core.openrouter_credentials import normalize_managed_openrouter_user_identifier
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.models import Translation
 
@@ -156,6 +157,20 @@ def _extract_stream_delta(data: object) -> str:
     return ""
 
 
+def _has_length_finish_reason(data: object) -> bool:
+    if not isinstance(data, dict):
+        return False
+
+    choices = data.get("choices")
+    if not isinstance(choices, list):
+        return False
+
+    for choice in choices:
+        if isinstance(choice, dict) and choice.get("finish_reason") == "length":
+            return True
+    return False
+
+
 def _build_provider_preferences(
     routing_mode: OpenRouterRoutingMode,
 ) -> dict[str, object]:
@@ -206,9 +221,11 @@ def _optional_number(value: object) -> float | None:
 @dataclass(slots=True)
 class OpenRouterLLMProvider:
     api_key: str
+    user_identifier: str | None = None
     base_url: str = "https://openrouter.ai/api/v1"
     model: str = "google/gemma-4-26b-a4b-it"
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
+    max_tokens: int = 100
     timeout: float = 30.0
     runtime_logging: SessionRuntimeLoggingService | None = None
     client: OpenRouterClient | None = None
@@ -220,9 +237,11 @@ class OpenRouterLLMProvider:
         if self._internal_client is None:
             self._internal_client = HttpxOpenRouterClient(
                 api_key=self.api_key,
+                user_identifier=self.user_identifier,
                 model=self.model,
                 base_url=self.base_url,
                 routing_mode=self.routing_mode,
+                max_tokens=self.max_tokens,
                 timeout=self.timeout,
                 runtime_logging=self.runtime_logging,
             )
@@ -323,8 +342,10 @@ class OpenRouterLLMProvider:
 class HttpxOpenRouterClient:
     api_key: str
     model: str
+    user_identifier: str | None = None
     base_url: str = "https://openrouter.ai/api/v1"
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
+    max_tokens: int = 100
     timeout: float = 30.0
     runtime_logging: SessionRuntimeLoggingService | None = None
     _client: httpx.AsyncClient | None = field(init=False, default=None, repr=False)
@@ -364,7 +385,11 @@ class HttpxOpenRouterClient:
             ],
             "reasoning": {"effort": "none"},
             "provider": _build_provider_preferences(self.routing_mode),
+            "max_tokens": self.max_tokens,
         }
+        user_identifier = normalize_managed_openrouter_user_identifier(self.user_identifier)
+        if user_identifier is not None:
+            request_body["user"] = user_identifier
         if stream:
             request_body["stream"] = True
         return request_body
@@ -429,6 +454,8 @@ class HttpxOpenRouterClient:
         choices = data.get("choices", [])
         if not choices:
             raise RuntimeError("OpenRouter response did not contain choices")
+        if _has_length_finish_reason(data):
+            raise RuntimeError("OpenRouter response was truncated by max_tokens limit")
 
         message = choices[0].get("message", {})
         result = _extract_message_content(message.get("content"))
@@ -491,6 +518,7 @@ class HttpxOpenRouterClient:
                 )
 
             saw_text = False
+            saw_length_truncation = False
             async for line in response.aiter_lines():
                 if not line or not line.startswith("data:"):
                     continue
@@ -498,11 +526,15 @@ class HttpxOpenRouterClient:
                 if not payload or payload == "[DONE]":
                     continue
                 data = json.loads(payload)
+                if _has_length_finish_reason(data):
+                    saw_length_truncation = True
                 part = _extract_stream_delta(data)
                 if not part:
                     continue
                 saw_text = True
                 yield part
+            if saw_length_truncation:
+                raise RuntimeError("OpenRouter stream was truncated by max_tokens limit")
             if not saw_text:
                 raise RuntimeError("OpenRouter stream did not contain message content")
 

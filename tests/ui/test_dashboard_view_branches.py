@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 pytest.importorskip("flet")
@@ -47,6 +49,7 @@ class FakeDisplayCard:
         self.statuses: list[tuple[str, str | None]] = []
         self.display_calls: list[tuple[str, bool, str | None]] = []
         self.translation_calls: list[tuple[str | None, str | None]] = []
+        self.translation_metadata_calls: list[dict[str, object]] = []
         self.notice_calls: list[tuple[str | None, str | None]] = []
         self.input_fonts: list[str | None] = []
         self.locale_calls: list[tuple[str | None, str | None]] = []
@@ -55,12 +58,23 @@ class FakeDisplayCard:
         self.statuses.append((status, font_family))
 
     def set_display(
-        self, text: str, *, is_error: bool = False, font_family: str | None = None
+        self,
+        text: str,
+        *,
+        is_error: bool = False,
+        font_family: str | None = None,
+        **_metadata,
     ) -> None:
         self.display_calls.append((text, is_error, font_family))
 
-    def set_display_translation(self, text: str | None, font_family: str | None = None) -> None:
+    def set_display_translation(
+        self,
+        text: str | None,
+        font_family: str | None = None,
+        **metadata,
+    ) -> None:
         self.translation_calls.append((text, font_family))
+        self.translation_metadata_calls.append(dict(metadata))
 
     def set_notice(self, text: str | None, tone: str | None = None) -> None:
         self.notice_calls.append((text, tone))
@@ -221,6 +235,44 @@ def test_dashboard_translation_toggle_controls_power_state(monkeypatch: pytest.M
     )
 
 
+def test_dashboard_translation_visual_commit_forwards_metadata_and_runtime_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+
+    def fake_runtime_log_detailed(message: str, *, level: int = logging.INFO) -> bool:
+        _ = (message, level)
+        return True
+
+    view.runtime_log_detailed = fake_runtime_log_detailed
+
+    view.set_display_translation_text(
+        "dst",
+        language_code="en",
+        update_id="upd-1",
+        origin_wall_clock_ms=1712345678901,
+        utterance_id="utt-1",
+        channel="peer",
+        session_scope="session-1",
+        source_text_hash="src-hash-1",
+        source_text_len=12,
+        logical_turn_key="peer:utt-1",
+    )
+
+    assert view.display_card.translation_calls[-1] == ("dst", "font-en")
+    assert view.display_card.translation_metadata_calls[-1] == {
+        "runtime_log_detailed": fake_runtime_log_detailed,
+        "update_id": "upd-1",
+        "origin_wall_clock_ms": 1712345678901,
+        "utterance_id": "utt-1",
+        "channel": "peer",
+        "session_scope": "session-1",
+        "source_text_hash": "src-hash-1",
+        "source_text_len": 12,
+        "logical_turn_key": "peer:utt-1",
+    }
+
+
 def test_dashboard_submit_and_language_selection_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     view = _make_dashboard(monkeypatch)
     sends: list[tuple[str, str]] = []
@@ -373,6 +425,44 @@ def test_dashboard_managed_trial_row_can_be_shown_without_runtime_wiring(
 
     assert view.managed_trial_state == {"visible": False, "remaining_percent": None}
     assert managed_trial_card.visible is False
+
+
+def test_dashboard_managed_trial_row_renders_brake_transient_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+
+    view.set_managed_trial_state(
+        visible=True,
+        remaining_percent=None,
+        transient_message_key="managed_release.brake",
+        transient_message_kwargs={"retry_after_ms": 5000},
+    )
+
+    assert view._managed_trial_card.visible is True
+    assert view._managed_trial_transient_container.visible is True
+    assert view._managed_trial_transient_label.value == dashboard_module.t(
+        "dashboard.trial.transient_label"
+    )
+    assert view._managed_trial_transient_value.value == dashboard_module.t("managed_release.brake")
+
+
+def test_dashboard_managed_trial_row_renders_revoked_transient_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+
+    view.set_managed_trial_state(
+        visible=True,
+        remaining_percent=None,
+        transient_message_key="managed_release.revoked_contact",
+    )
+
+    assert view._managed_trial_card.visible is True
+    assert view._managed_trial_transient_container.visible is True
+    assert view._managed_trial_transient_value.value == dashboard_module.t(
+        "managed_release.revoked_contact"
+    )
 
 
 def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.MonkeyPatch) -> None:

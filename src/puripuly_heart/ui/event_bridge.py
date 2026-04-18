@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 
 import flet as ft
@@ -27,6 +28,7 @@ class UIEventBridge:
         self.event_queue = event_queue
         self.runtime_logging = runtime_logging
         self._running = False
+        self._primary_first_partial_emitted: set[str] = set()
 
     def _get_language_codes(self) -> tuple[str | None, str | None]:
         controller = getattr(self.app, "controller", None)
@@ -39,6 +41,27 @@ class UIEventBridge:
         controller = getattr(self.app, "controller", None)
         hub = getattr(controller, "hub", None)
         return bool(getattr(hub, "translation_enabled", False))
+
+    def _emit_dashboard_translation_applied_detailed(
+        self,
+        *,
+        translation: Translation,
+        source_label: str,
+        dashboard_target_language: str | None,
+    ) -> None:
+        if self.runtime_logging is None:
+            return
+        message = (
+            "[Detailed][UIEventBridge] dashboard_translation_applied "
+            f"utterance_id={translation.utterance_id} "
+            f"channel={translation.channel} "
+            f"source_label={json.dumps(source_label, ensure_ascii=False)} "
+            f"dashboard_target_language={dashboard_target_language} "
+            f"translation_target_language={translation.target_language} "
+            f"text_len={len(translation.text)}"
+        )
+        with contextlib.suppress(Exception):
+            self.runtime_logging.emit_detailed(message)
 
     def report_overlay_state(
         self,
@@ -90,11 +113,31 @@ class UIEventBridge:
             source = event.source or "Mic"
             source_lang, _ = self._get_language_codes()
 
+            is_final = event.type == UIEventType.TRANSCRIPT_FINAL
+            utterance_key = str(transcript.utterance_id)
+            if is_final:
+                self._primary_first_partial_emitted.discard(utterance_key)
+                should_log = True
+                transcript_kind = "final"
+            else:
+                should_log = utterance_key not in self._primary_first_partial_emitted
+                if should_log:
+                    self._primary_first_partial_emitted.add(utterance_key)
+                transcript_kind = "partial"
+
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
-                dash.set_display_text(transcript.text, language_code=source_lang)
+                dash.set_display_text(
+                    transcript.text,
+                    language_code=source_lang,
+                    utterance_id=transcript.utterance_id,
+                    channel=transcript.channel,
+                    source_text_len=len(transcript.text),
+                    transcript_kind=transcript_kind,
+                    should_log=should_log,
+                )
 
-            if event.type == UIEventType.TRANSCRIPT_FINAL:
+            if is_final:
                 add_history = getattr(self.app, "add_history_entry", None)
                 if add_history is not None:
                     add_history(source, transcript.text, language_code=source_lang)
@@ -108,7 +151,23 @@ class UIEventBridge:
             _, target_lang = self._get_language_codes()
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
-                dash.set_display_translation_text(translation.text, language_code=target_lang)
+                dash.set_display_translation_text(
+                    translation.text,
+                    language_code=target_lang,
+                    update_id=translation.update_id,
+                    origin_wall_clock_ms=translation.origin_wall_clock_ms,
+                    utterance_id=translation.utterance_id,
+                    channel=translation.channel,
+                    session_scope=translation.session_scope,
+                    source_text_hash=translation.source_text_hash,
+                    source_text_len=translation.source_text_len,
+                    logical_turn_key=translation.logical_turn_key,
+                )
+                self._emit_dashboard_translation_applied_detailed(
+                    translation=translation,
+                    source_label=source,
+                    dashboard_target_language=target_lang,
+                )
             add_history = getattr(self.app, "add_history_entry", None)
             if add_history is not None:
                 add_history(source, translation.text, translated=True, language_code=target_lang)

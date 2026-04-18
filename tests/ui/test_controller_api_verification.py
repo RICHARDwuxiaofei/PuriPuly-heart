@@ -93,6 +93,14 @@ async def _start_controller_with_inspected_stt_state(
         async def run(self) -> None:
             await asyncio.sleep(0)
 
+        def report_overlay_state(
+            self,
+            overlay_state: str,
+            *,
+            failure_reason: str | None = None,
+        ) -> None:
+            _ = (overlay_state, failure_reason)
+
     async def fake_init_pipeline(self) -> None:
         self.hub = hub
 
@@ -1037,6 +1045,9 @@ async def test_set_stt_enabled_local_qwen_download_path_does_not_prepare_managed
 
     release.done = True
     await controller._local_stt_download_task
+
+    assert controller._managed_openrouter_release_service.prepare_calls == 0
+    assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
 
 
 @pytest.mark.asyncio

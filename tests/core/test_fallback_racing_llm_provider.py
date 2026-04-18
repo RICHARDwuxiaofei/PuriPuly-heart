@@ -165,6 +165,49 @@ class FakeLLM(LLMProvider):
 
 
 @dataclass(slots=True)
+class _OpenRouterDelegateShapeLLM(LLMProvider):
+    model: str
+    translated_text: str = "translated"
+    close_calls: int = 0
+
+    async def stream_translate(
+        self,
+        *,
+        utterance_id: UUID,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ) -> AsyncIterator[str]:
+        _ = utterance_id, text, system_prompt, source_language, target_language, context
+        if False:
+            yield ""
+
+    async def translate(
+        self,
+        *,
+        utterance_id: UUID,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ) -> Translation:
+        _ = system_prompt, context
+        return Translation(
+            utterance_id=utterance_id,
+            text=self.translated_text,
+            source_text=text,
+            source_language=source_language,
+            target_language=target_language,
+        )
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+
+@dataclass(slots=True)
 class _EquivalentLazyWrapperLLM(LLMProvider):
     factory: Callable[[], LLMProvider]
     _delegate: LLMProvider | None = field(init=False, default=None, repr=False)
@@ -248,6 +291,7 @@ class _ManagedReleaseServiceStub:
     async def ensure_key_for_llm_start(self) -> ManagedOpenRouterReleaseResult:
         return ManagedOpenRouterReleaseResult(
             behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
             api_key=self.api_key,
         )
 
@@ -284,6 +328,51 @@ def test_provider_identity_recovers_managed_wrapper_settings_before_delegate_ini
         OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
         OpenRouterCredentialSource.MANAGED.value,
     )
+
+
+@pytest.mark.asyncio
+async def test_provider_identity_prefers_delegate_model_after_managed_delegate_init() -> None:
+    provider = ManagedOpenRouterLLMProvider(
+        release_service=_ManagedReleaseServiceStub(settings=_managed_openrouter_settings()),
+        delegate_factory=lambda api_key: FakeLLM(
+            translated_text=api_key,
+            model=OpenRouterLLMModel.QWEN_35_FLASH_02_23.value,
+            selected_source="openrouter",
+        ),
+    )
+
+    await provider.translate(**_translation_kwargs(utterance_id=uuid4()))
+
+    identity = FallbackRacingLLMProvider._provider_identity(provider)
+
+    assert identity == (
+        OpenRouterLLMModel.QWEN_35_FLASH_02_23.value,
+        "openrouter",
+    )
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_identity_preserves_wrapper_source_for_openrouter_delegate_shape() -> None:
+    provider = ManagedOpenRouterLLMProvider(
+        release_service=_ManagedReleaseServiceStub(settings=_managed_openrouter_settings()),
+        delegate_factory=lambda api_key: _OpenRouterDelegateShapeLLM(
+            model=OpenRouterLLMModel.QWEN_35_FLASH_02_23.value,
+            translated_text=api_key,
+        ),
+    )
+
+    await provider.translate(**_translation_kwargs(utterance_id=uuid4()))
+
+    identity = FallbackRacingLLMProvider._provider_identity(provider)
+
+    assert identity == (
+        OpenRouterLLMModel.QWEN_35_FLASH_02_23.value,
+        OpenRouterCredentialSource.MANAGED.value,
+    )
+
+    await provider.close()
 
 
 def test_provider_identity_reports_openrouter_source_for_direct_openrouter_provider() -> None:
@@ -336,6 +425,57 @@ async def test_fallback_racer_persists_managed_wrapper_identity_from_release_ser
     payload = _payload_for_event(runtime_logging, event="primary_completed")
     assert payload["primary_model"] == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value
     assert payload["primary_credential_source"] == OpenRouterCredentialSource.MANAGED.value
+    assert payload["fallback_model"] == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
+    assert payload["fallback_credential_source"] == OpenRouterCredentialSource.MANAGED.value
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_fallback_racer_persisted_event_prefers_delegate_model_over_release_settings() -> (
+    None
+):
+    primary = ManagedOpenRouterLLMProvider(
+        release_service=_ManagedReleaseServiceStub(settings=_managed_openrouter_settings()),
+        delegate_factory=lambda api_key: FakeLLM(
+            translated_text=f"primary:{api_key}",
+            model=OpenRouterLLMModel.QWEN_35_FLASH_02_23.value,
+            selected_source="openrouter",
+        ),
+    )
+    fallback = FakeLLM(
+        translated_text="fallback",
+        model=OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value,
+        selected_source=OpenRouterCredentialSource.MANAGED.value,
+    )
+    runtime_logging = _PersistedRuntimeLogging()
+    provider = FallbackRacingLLMProvider(
+        primary=primary,
+        fallback=fallback,
+        runtime_logging=runtime_logging,
+    )
+
+    await primary.translate(**_translation_kwargs(utterance_id=uuid4()))
+
+    provider._emit_event(
+        race_id="race-1",
+        utterance_id=uuid4(),
+        event="primary_completed",
+        primary_elapsed_ms=10,
+        fallback_elapsed_ms=None,
+        fallback_triggered=False,
+        winner="primary",
+        returned_source="primary",
+        total_user_wait_ms=10,
+        primary_error=None,
+        fallback_error=None,
+        fallback_unusable=False,
+        dual_bill_candidate=False,
+    )
+
+    payload = _payload_for_event(runtime_logging, event="primary_completed")
+    assert payload["primary_model"] == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
+    assert payload["primary_credential_source"] == "openrouter"
     assert payload["fallback_model"] == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
     assert payload["fallback_credential_source"] == OpenRouterCredentialSource.MANAGED.value
 

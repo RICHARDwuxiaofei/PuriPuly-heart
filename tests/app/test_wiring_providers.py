@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from puripuly_heart.app import wiring as wiring_module
 from puripuly_heart.app.wiring import (
     _LazyFactoryLLMProvider,
     build_peer_stt_provider_signature,
@@ -42,6 +43,7 @@ from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterLLMProvider,
     ManagedOpenRouterReleaseService,
+    _resolve_managed_issue_model,
 )
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
@@ -291,6 +293,49 @@ def test_create_llm_provider_openrouter_uses_selected_managed_key() -> None:
     assert provider.inner.api_key == "managed-key"
 
 
+def test_create_llm_provider_openrouter_direct_managed_reuse_forwards_cached_user_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_managed_api_key", "managed-key")
+    calls: list[OpenRouterCredentialSource] = []
+
+    def fake_load_managed_openrouter_user_identifier(
+        loaded_settings: AppSettings,
+        *,
+        secrets: InMemorySecretStore,
+    ) -> str:
+        _ = secrets
+        calls.append(loaded_settings.openrouter.selected_source)
+        return "managed-user-123"
+
+    monkeypatch.setattr(
+        wiring_module,
+        "load_managed_openrouter_user_identifier",
+        fake_load_managed_openrouter_user_identifier,
+        raising=False,
+    )
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=object(),
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, OpenRouterLLMProvider)
+    assert provider.inner.api_key == "managed-key"
+    assert provider.inner.user_identifier == "managed-user-123"
+    assert calls == [OpenRouterCredentialSource.MANAGED]
+
+
 def test_create_llm_provider_openrouter_requires_release_service_for_managed_mode() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
@@ -336,6 +381,55 @@ def test_create_llm_provider_openrouter_uses_managed_wrapper_when_release_servic
     assert delegate.runtime_logging is runtime_logging
 
 
+def test_create_llm_provider_openrouter_managed_delegate_factory_loads_user_identifier_lazily(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    current_user_identifier: str | None = None
+    load_calls = 0
+
+    def fake_load_managed_openrouter_user_identifier(
+        loaded_settings: AppSettings,
+        *,
+        secrets: InMemorySecretStore,
+    ) -> str | None:
+        nonlocal load_calls
+        _ = loaded_settings, secrets
+        load_calls += 1
+        return current_user_identifier
+
+    monkeypatch.setattr(
+        wiring_module,
+        "load_managed_openrouter_user_identifier",
+        fake_load_managed_openrouter_user_identifier,
+        raising=False,
+    )
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=object(),
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, ManagedOpenRouterLLMProvider)
+    assert load_calls == 0
+
+    current_user_identifier = "managed-user-123"
+    delegate = provider.inner.delegate_factory("delegate-key")
+
+    assert isinstance(delegate, OpenRouterLLMProvider)
+    assert delegate.user_identifier == "managed-user-123"
+    assert load_calls == 1
+
+
 def test_create_llm_provider_openrouter_wraps_primary_with_source_locked_openrouter_fallback() -> (
     None
 ):
@@ -378,7 +472,54 @@ def test_create_llm_provider_openrouter_wraps_primary_with_source_locked_openrou
     assert fallback_delegate.runtime_logging is runtime_logging
 
 
-def test_create_llm_provider_openrouter_managed_fallback_reuses_primary_managed_service() -> None:
+def test_create_llm_provider_openrouter_byok_paths_omit_managed_user_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source=OpenRouterCredentialSource.BYOK,
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "or-key")
+
+    def unexpected_load_managed_openrouter_user_identifier(
+        loaded_settings: AppSettings,
+        *,
+        secrets: InMemorySecretStore,
+    ) -> str:
+        _ = loaded_settings, secrets
+        raise AssertionError("managed user identifier should not be loaded for BYOK paths")
+
+    monkeypatch.setattr(
+        wiring_module,
+        "load_managed_openrouter_user_identifier",
+        unexpected_load_managed_openrouter_user_identifier,
+        raising=False,
+    )
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.primary, OpenRouterLLMProvider)
+    assert provider.inner.primary.user_identifier is None
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+
+    fallback_delegate = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_delegate, OpenRouterLLMProvider)
+    assert fallback_delegate.user_identifier is None
+
+
+def test_create_llm_provider_openrouter_managed_qwen_fallback_uses_fallback_specific_release_service() -> (
+    None
+):
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
         openrouter=OpenRouterSettings(
@@ -415,12 +556,138 @@ def test_create_llm_provider_openrouter_managed_fallback_reuses_primary_managed_
     fallback_delegate = provider.inner.fallback.factory()
 
     assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
-    assert fallback_delegate.release_service is managed_release_service
+    assert isinstance(fallback_delegate.release_service, ManagedOpenRouterReleaseService)
+    assert fallback_delegate.release_service is not managed_release_service
+    assert fallback_delegate.release_service.settings is not settings
+    assert fallback_delegate.release_service.settings.openrouter is not settings.openrouter
+    assert fallback_delegate.release_service.settings.openrouter.selection_alias is None
+    assert (
+        fallback_delegate.release_service.settings.openrouter.llm_model
+        == OpenRouterLLMModel.QWEN_35_FLASH_02_23
+    )
+    assert (
+        _resolve_managed_issue_model(fallback_delegate.release_service.settings)
+        == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
+    )
+    assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
+    assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
 
     fallback_openrouter_delegate = fallback_delegate.delegate_factory("managed-key")
 
     assert isinstance(fallback_openrouter_delegate, OpenRouterLLMProvider)
     assert fallback_openrouter_delegate.model == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
+    assert fallback_openrouter_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+
+
+def test_create_llm_provider_openrouter_managed_fallback_delegate_factory_loads_user_identifier_lazily(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    current_user_identifier: str | None = None
+    load_calls = 0
+
+    def fake_load_managed_openrouter_user_identifier(
+        loaded_settings: AppSettings,
+        *,
+        secrets: InMemorySecretStore,
+    ) -> str | None:
+        nonlocal load_calls
+        _ = loaded_settings, secrets
+        load_calls += 1
+        return current_user_identifier
+
+    monkeypatch.setattr(
+        wiring_module,
+        "load_managed_openrouter_user_identifier",
+        fake_load_managed_openrouter_user_identifier,
+        raising=False,
+    )
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=object(),
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+    assert load_calls == 0
+
+    fallback_provider = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_provider, ManagedOpenRouterLLMProvider)
+    assert load_calls == 0
+
+    current_user_identifier = "managed-user-456"
+    fallback_delegate = fallback_provider.delegate_factory("delegate-key")
+
+    assert isinstance(fallback_delegate, OpenRouterLLMProvider)
+    assert fallback_delegate.user_identifier == "managed-user-456"
+    assert load_calls == 1
+
+
+def test_create_llm_provider_openrouter_managed_gemini_fallback_clears_primary_alias_for_issue_identity() -> (
+    None
+):
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    managed_release_service = ManagedOpenRouterReleaseService(
+        settings=settings,
+        secrets=secrets,
+        client=object(),
+        persist_settings=lambda _updated: None,
+        app_version="2.0.0",
+        raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
+    )
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=managed_release_service,
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+
+    fallback_delegate = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
+    assert isinstance(fallback_delegate.release_service, ManagedOpenRouterReleaseService)
+    assert fallback_delegate.release_service is not managed_release_service
+    assert fallback_delegate.release_service.settings.openrouter.selection_alias is None
+    assert (
+        fallback_delegate.release_service.settings.openrouter.llm_model
+        == OpenRouterLLMModel.GEMINI_25_FLASH_LITE
+    )
+    assert (
+        _resolve_managed_issue_model(fallback_delegate.release_service.settings)
+        == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
+    )
+    assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
+    assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+
+    fallback_openrouter_delegate = fallback_delegate.delegate_factory("managed-key")
+
+    assert isinstance(fallback_openrouter_delegate, OpenRouterLLMProvider)
+    assert fallback_openrouter_delegate.model == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
     assert fallback_openrouter_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
 
 

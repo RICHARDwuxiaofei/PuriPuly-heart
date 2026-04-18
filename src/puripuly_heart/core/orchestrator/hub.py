@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import time
 import traceback
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -29,13 +30,14 @@ from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.overlay.sink import (
     OverlayEventAdapter,
     OverlaySink,
-    OverlayStreamCoalescer,
 )
 from puripuly_heart.core.runtime_logging import (
+    SessionLoggingMode,
     SessionRuntimeLoggingService,
     format_basic_latency_summary,
     format_detailed_latency_breakdown,
     format_detailed_latency_trace,
+    format_translation_ready_for_output,
 )
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadEvent
 from puripuly_heart.domain.events import (
@@ -160,6 +162,14 @@ class ClientHub:
     )
     _overlay_active_self_text: str | None = field(init=False, default=None)
     _overlay_active_self_secondary_text: str | None = field(init=False, default=None)
+    _overlay_active_self_utterance_id: UUID | None = field(init=False, default=None)
+    _overlay_active_self_occupant_key: str | None = field(init=False, default=None)
+    _overlay_active_self_update_id: str | None = field(init=False, default=None)
+    _overlay_active_self_origin_wall_clock_ms: int | None = field(init=False, default=None)
+    _overlay_active_self_session_scope: str | None = field(init=False, default=None)
+    _overlay_active_self_source_text_hash: str | None = field(init=False, default=None)
+    _overlay_active_self_source_text_len: int | None = field(init=False, default=None)
+    _overlay_active_self_logical_turn_key: str | None = field(init=False, default=None)
     overlay_stream_coalesce_ms: int = 300
     last_error_source: str | None = None
     _last_overlay_secondary_runtime_signature: tuple[object, ...] | None = field(
@@ -273,9 +283,11 @@ class ClientHub:
         level: int = logging.INFO,
         fallback_level: int | None = None,
     ) -> bool:
-        formatted = self._format_log_message(message, *args)
         if self.runtime_logging is not None:
-            return self.runtime_logging.emit_detailed(formatted, level=level)
+            return self.runtime_logging.emit_detailed_lazy(
+                lambda: self._format_log_message(message, *args),
+                level=level,
+            )
         _ = fallback_level
         return False
 
@@ -990,6 +1002,96 @@ class ClientHub:
             self._should_publish_to_chatbox(runtime)
         )
 
+    @staticmethod
+    def _translation_overlay_metadata(translation: Translation) -> dict[str, object]:
+        return {
+            "update_id": translation.update_id,
+            "origin_wall_clock_ms": translation.origin_wall_clock_ms,
+            "session_scope": translation.session_scope,
+            "source_text_hash": translation.source_text_hash,
+            "source_text_len": translation.source_text_len,
+            "logical_turn_key": translation.logical_turn_key,
+        }
+
+    def _overlay_active_self_metadata(self) -> dict[str, object]:
+        return {
+            "update_id": self._overlay_active_self_update_id,
+            "origin_wall_clock_ms": self._overlay_active_self_origin_wall_clock_ms,
+            "session_scope": self._overlay_active_self_session_scope,
+            "source_text_hash": self._overlay_active_self_source_text_hash,
+            "source_text_len": self._overlay_active_self_source_text_len,
+            "logical_turn_key": self._overlay_active_self_logical_turn_key,
+        }
+
+    def _overlay_secondary_translation_metadata(
+        self,
+        *,
+        buffer: _MergeBuffer,
+        source: str,
+        secondary_text: str,
+    ) -> dict[str, object]:
+        if not secondary_text:
+            return self._overlay_active_self_metadata() | {
+                "update_id": None,
+                "origin_wall_clock_ms": None,
+                "session_scope": None,
+                "source_text_hash": None,
+                "source_text_len": None,
+                "logical_turn_key": None,
+            }
+        if source == "spec" and isinstance(buffer.spec_translation, Translation):
+            return self._translation_overlay_metadata(buffer.spec_translation)
+        if source == "sticky_cache" and self._overlay_active_self_utterance_id == buffer.merge_id:
+            return self._overlay_active_self_metadata()
+        return {
+            "update_id": None,
+            "origin_wall_clock_ms": None,
+            "session_scope": None,
+            "source_text_hash": None,
+            "source_text_len": None,
+            "logical_turn_key": None,
+        }
+
+    def _translation_ready_elapsed_ms(
+        self,
+        *,
+        channel: ChannelId,
+        utterance_id: UUID,
+    ) -> int | None:
+        timeline = self._get_latency_timeline(channel=channel, utterance_id=utterance_id)
+        if timeline is None:
+            return None
+        ready_at = timeline.stage_times.get("llm_done")
+        if ready_at is None:
+            return None
+        return self._elapsed_latency_ms(timeline.stage_times.get("speech_end"), ready_at)
+
+    def _emit_translation_ready_for_output(
+        self,
+        *,
+        translation: Translation,
+        runtime: ChannelRuntime,
+    ) -> bool:
+        if self.runtime_logging is None:
+            return False
+        return self.runtime_logging.emit_detailed_lazy(
+            lambda: format_translation_ready_for_output(
+                channel=runtime.channel,
+                utterance_id=str(translation.utterance_id),
+                update_id=translation.update_id,
+                origin_wall_clock_ms=translation.origin_wall_clock_ms,
+                session_scope=translation.session_scope,
+                source_text_hash=translation.source_text_hash,
+                source_text_len=translation.source_text_len,
+                logical_turn_key=translation.logical_turn_key,
+                translation_len=len(translation.text),
+                elapsed_ms=self._translation_ready_elapsed_ms(
+                    channel=runtime.channel,
+                    utterance_id=translation.utterance_id,
+                ),
+            )
+        )
+
     async def _emit_translation_to_overlay(
         self,
         *,
@@ -1014,12 +1116,53 @@ class ClientHub:
                 target_language=self.target_language,
                 applied_context_mode=applied_context_mode,
                 created_at=translation.created_at,
+                **self._translation_overlay_metadata(translation),
+            )
+        )
+
+    async def _emit_peer_translation_to_overlay(
+        self,
+        *,
+        translation: Translation,
+        runtime: ChannelRuntime,
+        applied_context_mode: ContextMode | None,
+    ) -> None:
+        if self.overlay_sink is None:
+            return
+
+        self._record_overlay_emit(
+            event_kind="translation_final",
+            utterance_id=translation.utterance_id,
+            channel=translation.channel,
+            secondary_len=len(translation.text.strip()),
+        )
+        self._record_latency_stage(
+            channel=runtime.channel,
+            utterance_id=translation.utterance_id,
+            stage="peer_overlay_first_emit",
+            overwrite=False,
+        )
+        await self._emit_overlay_event(
+            self.overlay_event_adapter.translation_final(
+                utterance_id=translation.utterance_id,
+                channel=translation.channel,
+                text=translation.text,
+                source_language=self._source_language_for(runtime),
+                target_language=self._target_language_for(runtime),
+                applied_context_mode=applied_context_mode,
+                created_at=translation.created_at,
+                **self._translation_overlay_metadata(translation),
             )
         )
 
     async def _emit_overlay_event(self, event: object) -> None:
         if self.overlay_sink is None:
             return
+        detailed_mode = (
+            self.runtime_logging is not None
+            and self.runtime_logging.mode is SessionLoggingMode.DETAILED
+        )
+        start = time.perf_counter() if detailed_mode else 0.0
         try:
             await self.overlay_sink.emit(event)  # type: ignore[arg-type]
         except Exception as exc:
@@ -1029,15 +1172,62 @@ class ClientHub:
                 exc,
                 level=logging.ERROR,
             )
+            return
+        if detailed_mode:
+            elapsed_ms = max(0, int((time.perf_counter() - start) * 1000))
+            event_type = type(event).__name__
+            channel = getattr(event, "channel", None)
+            utterance_id = getattr(event, "utterance_id", None)
+            update_id = getattr(event, "update_id", None)
+            self.runtime_logging.emit_detailed_lazy(
+                lambda: (
+                    "[Detailed][Hub] overlay_sink_emit_duration "
+                    f"event_type={event_type} "
+                    f"channel={channel} "
+                    f"utterance_id={utterance_id} "
+                    f"update_id={update_id} "
+                    f"elapsed_ms={elapsed_ms}"
+                )
+            )
 
     async def _emit_overlay_active_self_event(self, event: object) -> None:
         await self._emit_overlay_event(event)
         if getattr(event, "type", None) == "self_active_update":
             self._overlay_active_self_text = getattr(event, "text", None)
             self._overlay_active_self_secondary_text = getattr(event, "secondary_text", "")
+            self._overlay_active_self_utterance_id = getattr(event, "utterance_id", None)
+            self._overlay_active_self_occupant_key = getattr(event, "occupant_key", None)
+            if (getattr(event, "secondary_text", "") or "").strip():
+                self._overlay_active_self_update_id = getattr(event, "update_id", None)
+                self._overlay_active_self_origin_wall_clock_ms = getattr(
+                    event, "origin_wall_clock_ms", None
+                )
+                self._overlay_active_self_session_scope = getattr(event, "session_scope", None)
+                self._overlay_active_self_source_text_hash = getattr(
+                    event, "source_text_hash", None
+                )
+                self._overlay_active_self_source_text_len = getattr(event, "source_text_len", None)
+                self._overlay_active_self_logical_turn_key = getattr(
+                    event, "logical_turn_key", None
+                )
+            else:
+                self._overlay_active_self_update_id = None
+                self._overlay_active_self_origin_wall_clock_ms = None
+                self._overlay_active_self_session_scope = None
+                self._overlay_active_self_source_text_hash = None
+                self._overlay_active_self_source_text_len = None
+                self._overlay_active_self_logical_turn_key = None
         elif getattr(event, "type", None) == "self_active_clear":
             self._overlay_active_self_text = None
             self._overlay_active_self_secondary_text = None
+            self._overlay_active_self_utterance_id = None
+            self._overlay_active_self_occupant_key = None
+            self._overlay_active_self_update_id = None
+            self._overlay_active_self_origin_wall_clock_ms = None
+            self._overlay_active_self_session_scope = None
+            self._overlay_active_self_source_text_hash = None
+            self._overlay_active_self_source_text_len = None
+            self._overlay_active_self_logical_turn_key = None
 
     def _overlay_active_self_secondary(self, buffer: _MergeBuffer) -> str:
         secondary_text, _source, _reuse_mode = self._overlay_active_self_secondary_decision(buffer)
@@ -1081,25 +1271,36 @@ class ClientHub:
             source=source,
             reuse_mode=reuse_mode,
         )
-        if active_text == self._overlay_active_self_text and secondary_text == (
-            self._overlay_active_self_secondary_text or ""
+        translation_metadata = self._overlay_secondary_translation_metadata(
+            buffer=buffer,
+            source=source,
+            secondary_text=secondary_text,
+        )
+        current_overlay_metadata = self._overlay_active_self_metadata()
+        occupant_key = self._active_self_occupant_key(buffer)
+        if (
+            buffer.merge_id == self._overlay_active_self_utterance_id
+            and occupant_key == self._overlay_active_self_occupant_key
+            and active_text == self._overlay_active_self_text
+            and secondary_text == (self._overlay_active_self_secondary_text or "")
+            and translation_metadata == current_overlay_metadata
         ):
             return
 
-        utterance_id = buffer.utterance_ids[-1] if buffer.utterance_ids else None
-        if utterance_id is not None:
-            self._record_overlay_emit(
-                event_kind="active_self",
-                utterance_id=utterance_id,
-                channel="self",
-                secondary_len=len(secondary_text),
-            )
+        self._record_overlay_emit(
+            event_kind="active_self",
+            utterance_id=buffer.merge_id,
+            channel="self",
+            secondary_len=len(secondary_text),
+        )
         await self._emit_overlay_active_self_event(
             self.overlay_event_adapter.self_active_update(
                 text=active_text,
+                utterance_id=buffer.merge_id,
                 secondary_text=secondary_text,
-                occupant_key=self._active_self_occupant_key(buffer),
+                occupant_key=occupant_key,
                 created_at=created_at,
+                **translation_metadata,
             )
         )
 
@@ -1109,6 +1310,14 @@ class ClientHub:
         if self.overlay_sink is None:
             self._overlay_active_self_text = None
             self._overlay_active_self_secondary_text = None
+            self._overlay_active_self_utterance_id = None
+            self._overlay_active_self_occupant_key = None
+            self._overlay_active_self_update_id = None
+            self._overlay_active_self_origin_wall_clock_ms = None
+            self._overlay_active_self_session_scope = None
+            self._overlay_active_self_source_text_hash = None
+            self._overlay_active_self_source_text_len = None
+            self._overlay_active_self_logical_turn_key = None
             return
         await self._emit_overlay_active_self_event(self.overlay_event_adapter.self_active_clear())
 
@@ -1768,9 +1977,16 @@ class ClientHub:
             final_text=final_text,
             reuse_mode=reuse_mode,
         ):
+            self._record_overlay_emit(
+                event_kind="active_self",
+                utterance_id=buffer.merge_id,
+                channel="self",
+                secondary_len=0,
+            )
             await self._emit_overlay_active_self_event(
                 self.overlay_event_adapter.self_active_update(
                     text=final_text,
+                    utterance_id=buffer.merge_id,
                     secondary_text="",
                     occupant_key=self._active_self_occupant_key(buffer),
                     created_at=self.clock.now(),
@@ -1800,6 +2016,14 @@ class ClientHub:
         )
         self._overlay_active_self_text = None
         self._overlay_active_self_secondary_text = None
+        self._overlay_active_self_utterance_id = None
+        self._overlay_active_self_occupant_key = None
+        self._overlay_active_self_update_id = None
+        self._overlay_active_self_origin_wall_clock_ms = None
+        self._overlay_active_self_session_scope = None
+        self._overlay_active_self_source_text_hash = None
+        self._overlay_active_self_source_text_len = None
+        self._overlay_active_self_logical_turn_key = None
         await self._handle_transcript(transcript, is_final=True, source="Mic")
 
         if self.llm is None or not self.translation_enabled:
@@ -1839,6 +2063,10 @@ class ClientHub:
                 bundle = self.get_or_create_bundle(buffer.merge_id)
                 bundle.with_translation(translation)
                 bundle.with_translation(translation)
+                self._emit_translation_ready_for_output(
+                    translation=translation,
+                    runtime=self.self_runtime,
+                )
                 self._remember_context_entry(final_text, self.clock.now())
                 await self.ui_events.put(
                     UIEvent(
@@ -2100,6 +2328,12 @@ class ClientHub:
             target_language=self._target_language_for(runtime),
             channel=runtime.channel,
             created_at=translation.created_at,
+            update_id=translation.update_id,
+            origin_wall_clock_ms=translation.origin_wall_clock_ms,
+            session_scope=translation.session_scope,
+            source_text_hash=translation.source_text_hash,
+            source_text_len=translation.source_text_len,
+            logical_turn_key=f"{runtime.channel}:{translation.utterance_id}",
         )
 
     async def _translate_text(
@@ -2174,6 +2408,7 @@ class ClientHub:
             return
         runtime = runtime or self.self_runtime
         applied_mode: ContextMode | None = None
+        peer_overlay_active = runtime.channel == "peer" and self.overlay_sink is not None
         try:
             formatted_prompt, context_str, now, applied_mode = self._prepare_llm_request_with_mode(
                 text,
@@ -2192,34 +2427,24 @@ class ClientHub:
                 stage="llm_request_start",
             )
 
-            if runtime.channel == "peer" and self.overlay_sink is not None:
-                translation = await self._stream_peer_translation_to_overlay(
-                    utterance_id=utterance_id,
-                    text=text,
-                    system_prompt=formatted_prompt,
-                    context=context_str,
-                    runtime=runtime,
-                    applied_mode=applied_mode,
-                )
-            else:
-                raw_translation = await self.llm.translate(
-                    utterance_id=utterance_id,
-                    text=text,
-                    system_prompt=formatted_prompt,
-                    source_language=self._source_language_for(runtime),
-                    target_language=self._target_language_for(runtime),
-                    context=context_str,
-                )
-                translation = self._normalize_translation(
-                    raw_translation,
-                    runtime=runtime,
-                    text=text,
-                )
-                self._record_latency_stage(
-                    channel=runtime.channel,
-                    utterance_id=utterance_id,
-                    stage="llm_done",
-                )
+            raw_translation = await self.llm.translate(
+                utterance_id=utterance_id,
+                text=text,
+                system_prompt=formatted_prompt,
+                source_language=self._source_language_for(runtime),
+                target_language=self._target_language_for(runtime),
+                context=context_str,
+            )
+            translation = self._normalize_translation(
+                raw_translation,
+                runtime=runtime,
+                text=text,
+            )
+            self._record_latency_stage(
+                channel=runtime.channel,
+                utterance_id=utterance_id,
+                stage="llm_done",
+            )
         except asyncio.CancelledError:
             if runtime.channel == "self":
                 await self._emit_overlay_utterance_closed(
@@ -2228,11 +2453,21 @@ class ClientHub:
                     is_final=False,
                     finalize_latency=not self._should_publish_to_chatbox(runtime),
                 )
+            elif peer_overlay_active:
+                await self._emit_overlay_utterance_closed(
+                    utterance_id=utterance_id,
+                    channel=runtime.channel,
+                    is_final=False,
+                    finalize_latency=True,
+                )
             else:
                 self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
             raise
         except Exception as exc:
             self._log_translation_failure(stage="final", runtime=runtime, exc=exc)
+            fallback_to_chatbox = self.fallback_transcript_only and self._should_publish_to_chatbox(
+                runtime
+            )
             payload: object = exc if isinstance(exc, ManagedOpenRouterUserFacingError) else str(exc)
             await self.ui_events.put(
                 UIEvent(
@@ -2252,7 +2487,14 @@ class ClientHub:
                         self.fallback_transcript_only and self._should_publish_to_chatbox(runtime)
                     ),
                 )
-            if self.fallback_transcript_only and self._should_publish_to_chatbox(runtime):
+            elif peer_overlay_active:
+                await self._emit_overlay_utterance_closed(
+                    utterance_id=utterance_id,
+                    channel=runtime.channel,
+                    is_final=False,
+                    finalize_latency=not fallback_to_chatbox,
+                )
+            if fallback_to_chatbox:
                 await self._enqueue_osc(
                     utterance_id,
                     transcript_text=text,
@@ -2264,6 +2506,22 @@ class ClientHub:
 
         bundle = self.get_or_create_bundle(utterance_id, channel=runtime.channel)
         bundle.with_translation(translation)
+        self._emit_translation_ready_for_output(
+            translation=translation,
+            runtime=runtime,
+        )
+        if peer_overlay_active:
+            await self._emit_peer_translation_to_overlay(
+                translation=translation,
+                runtime=runtime,
+                applied_context_mode=applied_mode,
+            )
+            await self._emit_overlay_utterance_closed(
+                utterance_id=utterance_id,
+                channel=runtime.channel,
+                is_final=True,
+                finalize_latency=not self._should_publish_to_chatbox(runtime),
+            )
         await self.ui_events.put(
             UIEvent(
                 type=UIEventType.TRANSLATION_DONE,
@@ -2291,115 +2549,6 @@ class ClientHub:
             )
         else:
             self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
-
-    async def _stream_peer_translation_to_overlay(
-        self,
-        *,
-        utterance_id: UUID,
-        text: str,
-        system_prompt: str,
-        context: str,
-        runtime: ChannelRuntime,
-        applied_mode: ContextMode,
-    ) -> Translation:
-        if self.llm is None:
-            raise RuntimeError("LLM is not configured")
-
-        latest_snapshot = ""
-        coalescer = OverlayStreamCoalescer(interval_ms=self.overlay_stream_coalesce_ms)
-        try:
-            src = self._source_language_for(runtime)
-            tgt = self._target_language_for(runtime)
-            saw_first_chunk = False
-            async for snapshot in self.llm.stream_translate(
-                utterance_id=utterance_id,
-                text=text,
-                system_prompt=system_prompt,
-                source_language=src,
-                target_language=tgt,
-                context=context,
-            ):
-                latest_snapshot = snapshot
-                if not saw_first_chunk:
-                    saw_first_chunk = True
-                    self._record_latency_stage(
-                        channel=runtime.channel,
-                        utterance_id=utterance_id,
-                        stage="llm_first_chunk",
-                        overwrite=False,
-                    )
-                await coalescer.push(
-                    self.overlay_event_adapter.translation_stream_update(
-                        utterance_id=utterance_id,
-                        channel=runtime.channel,
-                        text=snapshot,
-                        source_language=src,
-                        target_language=tgt,
-                        applied_context_mode=applied_mode,
-                    ),
-                    self._emit_overlay_event,
-                )
-
-            await coalescer.flush(self._emit_overlay_event)
-            translation = self._normalize_translation(
-                Translation(
-                    utterance_id=utterance_id,
-                    translated_text=latest_snapshot,
-                    source_text=text,
-                    source_language=src,
-                    target_language=tgt,
-                    channel=runtime.channel,
-                    created_at=self.clock.now(),
-                ),
-                runtime=runtime,
-                text=text,
-            )
-            self._record_latency_stage(
-                channel=runtime.channel,
-                utterance_id=utterance_id,
-                stage="llm_done",
-            )
-            self._record_latency_stage(
-                channel=runtime.channel,
-                utterance_id=utterance_id,
-                stage="peer_overlay_first_emit",
-                overwrite=False,
-            )
-            await self._emit_overlay_event(
-                self.overlay_event_adapter.translation_final(
-                    utterance_id=utterance_id,
-                    channel=runtime.channel,
-                    text=translation.text,
-                    source_language=src,
-                    target_language=tgt,
-                    applied_context_mode=applied_mode,
-                )
-            )
-            await self._emit_overlay_utterance_closed(
-                utterance_id=utterance_id,
-                channel=runtime.channel,
-                is_final=True,
-                finalize_latency=not self._should_publish_to_chatbox(runtime),
-            )
-            return translation
-        except asyncio.CancelledError:
-            await coalescer.cancel()
-            await self._emit_overlay_utterance_closed(
-                utterance_id=utterance_id,
-                channel=runtime.channel,
-                is_final=False,
-                finalize_latency=False,
-            )
-            raise
-        except Exception:
-            await coalescer.flush(self._emit_overlay_event)
-            await self._emit_overlay_utterance_closed(
-                utterance_id=utterance_id,
-                channel=runtime.channel,
-                is_final=False,
-                finalize_latency=False,
-            )
-            raise
 
     async def handle_peer_transcript_final_for_test(
         self,

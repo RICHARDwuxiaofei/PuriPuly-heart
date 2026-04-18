@@ -322,7 +322,7 @@ python -m pytest         # 테스트 (가상환경에서 실행 권장)
 
 실행 파일 전용 / 수동 패키징 단계:
 
-이 경로는 실행 파일/수동 인스톨러만 만드는 직접 패키징 경로이며, 릴리스 완료(compliance) 패키징 경로가 아닙니다. 또한 `build.spec`가 검사하는 스테이징된 오버레이 실행 파일 `build/overlay/PuriPulyHeartOverlay.exe`가 필요합니다.
+이 경로는 실행 파일/수동 인스톨러만 만드는 직접 패키징 경로이며, 릴리스 완료(compliance) 패키징 경로가 아닙니다. 또한 `build.spec`가 검사하는 스테이징된 오버레이 실행 파일 `build/overlay/PuriPulyHeartOverlay.exe`와 벤더링된 OpenVR 번들 `third_party/openvr/`가 필요합니다.
 
 ```bash
 .\scripts\ci\prepare-soxr-release-inputs.ps1

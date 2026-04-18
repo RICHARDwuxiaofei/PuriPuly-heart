@@ -776,7 +776,7 @@ async def test_set_translation_enabled_warms_supported_provider(
 
 
 @pytest.mark.asyncio
-async def test_set_translation_enabled_runs_managed_release_prepare_before_enabling(
+async def test_set_translation_enabled_keeps_managed_translation_disabled_until_local_key_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dash = DummyDashboard()
@@ -816,16 +816,115 @@ async def test_set_translation_enabled_runs_managed_release_prepare_before_enabl
     await controller.set_translation_enabled(True)
 
     assert controller._managed_openrouter_release_service.prepare_calls == 1
-    assert controller.hub.translation_enabled is True
-    assert controller.hub.clear_context_calls == 1
+    assert controller.hub.translation_enabled is False
+    assert controller.hub.clear_context_calls == 0
     assert observed_pending == [True]
-    assert dash.managed_auth_pending is True
-    assert dash.managed_auth_pending_calls == [True, True]
+    assert dash.managed_auth_pending is False
+    assert dash.managed_auth_pending_calls == [True, False]
     assert settings_view.managed_trial_usage_state == {
         "visible": True,
         "remaining_percent": None,
     }
     assert dash.managed_trial_calls == []
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_transitions_pending_true_to_false_after_managed_preissue_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    observed_pending: list[bool | None] = []
+    scheduled_refreshes: list[str] = []
+    controller._managed_openrouter_release_service = InspectingManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+            pending_issue=False,
+        ),
+        on_prepare=lambda: observed_pending.append(dash.managed_auth_pending),
+    )
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_schedule_managed_trial_usage_refresh",
+        lambda self: scheduled_refreshes.append("scheduled"),
+    )
+
+    await controller.set_translation_enabled(True)
+
+    assert controller._managed_openrouter_release_service.prepare_calls == 1
+    assert controller.hub.translation_enabled is True
+    assert controller.hub.clear_context_calls == 1
+    assert observed_pending == [True]
+    assert dash.managed_auth_pending is False
+    assert dash.managed_auth_pending_calls == [True, False]
+    assert scheduled_refreshes == ["scheduled"]
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_rebuild_path_keeps_success_when_managed_usage_refresh_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=None)
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+            pending_issue=False,
+        )
+    )
+
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        GuiController,
+        "_create_managed_openrouter_release_service",
+        lambda self, *, secrets: None,
+    )
+    monkeypatch.setattr(controller_module, "create_llm_provider", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        GuiController,
+        "_refresh_managed_trial_usage_state",
+        lambda self: (_ for _ in ()).throw(RuntimeError("usage refresh boom")),
+    )
+
+    await controller.set_translation_enabled(True)
+
+    assert controller.hub.llm is not None
+    assert controller.hub.translation_enabled is True
+    assert controller.hub.clear_context_calls == 1
+    assert dash.managed_auth_pending_calls == [True, False]
+    assert (
+        logging.WARNING,
+        "[ManagedAuth] Usage refresh failed: usage refresh boom",
+    ) in controller._runtime_logging.basic_messages
+    assert (
+        logging.INFO,
+        "[Settings] LLM provider rebuilt successfully",
+    ) in controller._runtime_logging.basic_messages
+    assert (
+        logging.INFO,
+        "[Translation] Enabled with provider: openrouter",
+    ) in controller._runtime_logging.basic_messages
 
 
 @pytest.mark.asyncio
@@ -899,6 +998,144 @@ async def test_set_translation_enabled_keeps_managed_translation_disabled_on_ret
     assert dash.managed_trial_calls == []
 
 
+@pytest.mark.asyncio
+async def test_set_translation_enabled_keeps_brake_notice_visible_in_managed_trial_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snackbar_calls: list[tuple[str, str]] = []
+    dash = DummyDashboard()
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(
+            _show_snackbar=lambda message, color: snackbar_calls.append((message, color)),
+            view_dashboard=dash,
+            view_settings=settings_view,
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.RETRY,
+            message_key="managed_release.brake",
+            message_kwargs={"retry_after_ms": 5000},
+            diagnostics=ManagedOpenRouterReleaseDiagnostics(
+                operation="issue",
+                code="issuance_suspended",
+                error_class="retryable",
+                subcode="asn_fast_path",
+                retry_after_ms=5000,
+                message="new entitlement issuance is temporarily suspended",
+            ),
+            retry_after_ms=5000,
+        )
+    )
+
+    async def fail_fetch_key_metadata(_api_key: str):
+        raise AssertionError("fetch_key_metadata should not run without a managed key")
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fail_fetch_key_metadata),
+    )
+
+    await controller.set_translation_enabled(True)
+
+    assert controller._managed_openrouter_release_service.prepare_calls == 1
+    assert controller.hub.translation_enabled is False
+    assert dash.managed_auth_pending is False
+    assert controller._managed_trial_transient_message_key == "managed_release.brake"
+    assert controller._managed_trial_transient_message_kwargs == {"retry_after_ms": 5000}
+    assert dash.managed_trial_state == {
+        "visible": True,
+        "remaining_percent": None,
+        "transient_message_key": "managed_release.brake",
+        "transient_message_kwargs": {"retry_after_ms": 5000},
+    }
+    assert snackbar_calls == [(t("managed_release.brake"), ft.Colors.ORANGE_700)]
+    assert settings_view.managed_trial_usage_state == {
+        "visible": True,
+        "remaining_percent": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_keeps_revoked_notice_visible_in_managed_trial_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snackbar_calls: list[tuple[str, str]] = []
+    dash = DummyDashboard()
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(
+            _show_snackbar=lambda message, color: snackbar_calls.append((message, color)),
+            view_dashboard=dash,
+            view_settings=settings_view,
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.STOP,
+            message_key="managed_release.revoked_contact",
+            diagnostics=ManagedOpenRouterReleaseDiagnostics(
+                operation="issue",
+                code="trial_not_eligible",
+                error_class="terminal",
+                subcode=None,
+                retry_after_ms=None,
+                message="revoked by policy",
+            ),
+        )
+    )
+
+    async def fail_fetch_key_metadata(_api_key: str):
+        raise AssertionError("fetch_key_metadata should not run without a managed key")
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fail_fetch_key_metadata),
+    )
+
+    await controller.set_translation_enabled(True)
+
+    assert controller._managed_openrouter_release_service.prepare_calls == 1
+    assert controller.hub.translation_enabled is False
+    assert dash.managed_auth_pending is False
+    assert controller._managed_trial_transient_message_key == "managed_release.revoked_contact"
+    assert controller._managed_trial_transient_message_kwargs == {}
+    assert dash.managed_trial_state == {
+        "visible": True,
+        "remaining_percent": None,
+        "transient_message_key": "managed_release.revoked_contact",
+        "transient_message_kwargs": {},
+    }
+    assert snackbar_calls == [(t("managed_release.revoked_contact"), ft.Colors.ORANGE_700)]
+    assert settings_view.managed_trial_usage_state == {
+        "visible": True,
+        "remaining_percent": None,
+    }
+
+
 def test_on_managed_trial_delegate_ready_clears_dashboard_pending_notice() -> None:
     dash = DummyDashboard()
     controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
@@ -930,6 +1167,186 @@ async def test_set_translation_enabled_false_clears_dashboard_managed_auth_pendi
     assert controller._managed_trial_pending_auth is False
     assert dash.managed_auth_pending is False
     assert dash.managed_auth_pending_calls == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_off_wins_against_inflight_managed_enable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    prepare_started = asyncio.Event()
+    release_prepare = asyncio.Event()
+
+    async def block_prepare() -> None:
+        prepare_started.set()
+        await release_prepare.wait()
+
+    controller._managed_openrouter_release_service = InspectingManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+            pending_issue=False,
+        ),
+        on_prepare=block_prepare,
+    )
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_schedule_managed_trial_usage_refresh",
+        lambda self: None,
+    )
+
+    enable_task = asyncio.create_task(controller.set_translation_enabled(True))
+    await prepare_started.wait()
+
+    await controller.set_translation_enabled(False)
+
+    assert controller.hub.translation_enabled is False
+    assert controller._managed_trial_pending_auth is False
+    assert dash.managed_auth_pending is False
+
+    release_prepare.set()
+    await enable_task
+
+    assert controller._managed_openrouter_release_service.prepare_calls == 1
+    assert controller.hub.translation_enabled is False
+    assert controller.hub.clear_context_calls == 1
+    assert controller._managed_trial_pending_auth is False
+    assert dash.managed_auth_pending is False
+    assert dash.managed_auth_pending_calls[:2] == [True, False]
+    assert dash.managed_auth_pending_calls[-1] is False
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_off_wins_before_stale_ready_rebuild_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=None)
+    prepare_started = asyncio.Event()
+    release_prepare = asyncio.Event()
+    rebuild_calls: list[str] = []
+
+    async def block_prepare() -> None:
+        prepare_started.set()
+        await release_prepare.wait()
+
+    async def fake_rebuild_llm_provider(self) -> None:
+        _ = self
+        rebuild_calls.append("rebuild")
+
+    controller._managed_openrouter_release_service = InspectingManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+            pending_issue=False,
+        ),
+        on_prepare=block_prepare,
+    )
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+
+    enable_task = asyncio.create_task(controller.set_translation_enabled(True))
+    await prepare_started.wait()
+
+    await controller.set_translation_enabled(False)
+
+    release_prepare.set()
+    await enable_task
+
+    assert rebuild_calls == []
+    assert controller.hub.llm is None
+    assert controller.hub.translation_enabled is False
+    assert controller._managed_trial_pending_auth is False
+    assert dash.managed_auth_pending is False
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_off_wins_before_stale_retry_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snackbar_calls: list[tuple[str, str]] = []
+    dash = DummyDashboard()
+    controller = _make_controller(
+        app=SimpleNamespace(
+            _show_snackbar=lambda message, color: snackbar_calls.append((message, color)),
+            view_dashboard=dash,
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    prepare_started = asyncio.Event()
+    release_prepare = asyncio.Event()
+    refresh_calls: list[str] = []
+
+    async def block_prepare() -> None:
+        prepare_started.set()
+        await release_prepare.wait()
+
+    async def fake_refresh_managed_trial_usage_state(self) -> None:
+        _ = self
+        refresh_calls.append("refresh")
+
+    controller._managed_openrouter_release_service = InspectingManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.RETRY,
+            message_key="managed_release.retry_after_ms",
+            message_kwargs={"retry_after_ms": 5000},
+        ),
+        on_prepare=block_prepare,
+    )
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_refresh_managed_trial_usage_state",
+        fake_refresh_managed_trial_usage_state,
+    )
+
+    enable_task = asyncio.create_task(controller.set_translation_enabled(True))
+    await prepare_started.wait()
+
+    await controller.set_translation_enabled(False)
+
+    release_prepare.set()
+    await enable_task
+
+    assert controller.hub.translation_enabled is False
+    assert controller._managed_trial_pending_auth is False
+    assert dash.managed_auth_pending is False
+    assert controller._managed_trial_transient_message_key is None
+    assert controller._managed_trial_transient_message_kwargs == {}
+    assert snackbar_calls == []
+    assert refresh_calls == []
 
 
 @pytest.mark.asyncio
@@ -1013,6 +1430,66 @@ async def test_apply_providers_resyncs_dashboard_pending_notice_when_staying_on_
     assert controller._managed_trial_pending_auth is True
     assert dash.managed_auth_pending is True
     assert dash.managed_auth_pending_calls == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_staying_on_managed_does_not_prepare_managed_translation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=DummyDashboard()))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+
+    class TrackingManagedReleaseService:
+        def __init__(self) -> None:
+            self.prepare_calls = 0
+            self.close_calls = 0
+
+        async def prepare_for_translation(self):
+            self.prepare_calls += 1
+            raise AssertionError("apply_providers must not prepare managed translation")
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    initial_service = TrackingManagedReleaseService()
+    created_services: list[TrackingManagedReleaseService] = []
+    controller._managed_openrouter_release_service = initial_service
+
+    updated = copy.deepcopy(controller.settings)
+    updated.openrouter.routing_mode = OpenRouterRoutingMode.PARASAIL_FIRST
+
+    async def fake_refresh_managed_usage(self) -> None:
+        return None
+
+    def fake_create_managed_release_service(self, *, secrets):
+        _ = (self, secrets)
+        service = TrackingManagedReleaseService()
+        created_services.append(service)
+        return service
+
+    monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "create_llm_provider", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        GuiController,
+        "_create_managed_openrouter_release_service",
+        fake_create_managed_release_service,
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_refresh_managed_trial_usage_state_best_effort",
+        fake_refresh_managed_usage,
+    )
+
+    await controller.apply_providers(updated)
+
+    assert initial_service.close_calls == 1
+    assert len(created_services) == 1
+    assert created_services[0].prepare_calls == 0
+    assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
 
 
 def test_verified_key_and_runtime_signature_depend_on_region_and_settings() -> None:
@@ -1295,6 +1772,37 @@ async def test_set_peer_translation_enabled_routes_through_controller_runtime_ru
 
 
 @pytest.mark.asyncio
+async def test_set_peer_translation_enabled_surfaces_local_notice_for_peer_local_qwen_when_runtime_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=dash,
+            refresh_overlay_peer_contract=lambda: None,
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+    controller._local_stt_install_state = controller_module.LocalSTTInstallState(status="missing")
+
+    async def fake_begin_overlay_start(self: GuiController) -> None:
+        self.overlay_state = "starting"
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_begin_overlay_start", fake_begin_overlay_start)
+    monkeypatch.setattr(
+        GuiController, "_refresh_overlay_runtime_dependencies", lambda self: asyncio.sleep(0)
+    )
+
+    await controller.set_peer_translation_enabled(True)
+
+    assert controller.settings.ui.peer_translation_enabled is True
+    assert dash.local_stt_notice_status == "missing"
+
+
+@pytest.mark.asyncio
 async def test_rebuild_pipeline_closes_previous_peer_runtime_before_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1549,6 +2057,141 @@ async def test_refresh_peer_stt_runtime_does_not_warm_peer_runtime() -> None:
     assert len(controller._peer_runtime.policy_calls) == 1
     assert controller._peer_runtime.policy_calls[0]["desired_active"] is True
     assert controller._peer_runtime.warmup_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_until_local_runtime_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+    controller.overlay_state = "connected"
+    controller._overlay_bridge = object()
+    controller._peer_runtime = DummyPeerRuntime()
+    controller._local_stt_install_state = controller_module.LocalSTTInstallState(status="missing")
+
+    download_requests: list[str] = []
+
+    monkeypatch.setattr(
+        GuiController,
+        "_start_local_stt_download",
+        lambda self, *, origin: download_requests.append(origin) or True,
+    )
+
+    await controller._refresh_peer_stt_runtime()
+
+    assert len(controller._peer_runtime.policy_calls) == 1
+    assert controller._peer_runtime.policy_calls[0]["desired_active"] is False
+    assert download_requests == ["manual"]
+    assert dash.local_stt_notice_status == "missing"
+    assert dash.stt_enabled is None
+    assert dash.stt_needs_key is None
+
+
+@pytest.mark.asyncio
+async def test_peer_local_qwen_download_completion_resumes_peer_runtime_after_refresh_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+    controller.overlay_state = "connected"
+    controller._overlay_bridge = object()
+    controller._peer_runtime = DummyPeerRuntime()
+    controller._local_stt_install_state = controller_module.LocalSTTInstallState(status="missing")
+
+    download_requests: list[str] = []
+
+    monkeypatch.setattr(
+        GuiController,
+        "_start_local_stt_download",
+        lambda self, *, origin: download_requests.append(origin) or True,
+    )
+
+    await controller._refresh_peer_stt_runtime()
+
+    async def fake_install(*, locale: str, on_status, cancel_event) -> object:
+        _ = (locale, on_status, cancel_event)
+        return object()
+
+    class SuccessfulPeerSession:
+        async def close(self) -> None:
+            return None
+
+    class SuccessfulPeerBackend:
+        async def open_session(self):
+            return SuccessfulPeerSession()
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(controller_module, "ensure_local_stt_installed", fake_install)
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        controller_module,
+        "create_peer_stt_backend",
+        lambda *_a, **_k: SuccessfulPeerBackend(),
+    )
+
+    await controller._run_local_stt_download(origin="manual")
+
+    assert download_requests == ["manual"]
+    assert [call["desired_active"] for call in controller._peer_runtime.policy_calls] == [
+        False,
+        True,
+    ]
+    assert dash.local_stt_notice_status is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_when_probe_load_fails_despite_ready_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    controller.settings.ui.peer_translation_enabled = True
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
+    controller.overlay_state = "connected"
+    controller._overlay_bridge = object()
+    controller._peer_runtime = DummyPeerRuntime()
+    controller._local_stt_install_state = controller_module.LocalSTTInstallState(status="ready")
+
+    download_requests: list[str] = []
+
+    class FailingPeerBackend:
+        async def open_session(self):
+            raise controller_module.LocalQwenSherpaLoadError("bootstrap failed")
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        controller_module,
+        "create_peer_stt_backend",
+        lambda *_a, **_k: FailingPeerBackend(),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_start_local_stt_download",
+        lambda self, *, origin: download_requests.append(origin) or True,
+    )
+
+    await controller._refresh_peer_stt_runtime()
+
+    assert len(controller._peer_runtime.policy_calls) == 1
+    assert controller._peer_runtime.policy_calls[0]["desired_active"] is False
+    assert download_requests == ["manual"]
+    assert dash.local_stt_notice_status == "invalid"
 
 
 @pytest.mark.asyncio
@@ -2003,6 +2646,9 @@ async def test_overlay_start_failure_keeps_saved_preferences_but_effective_state
     "failure_reason",
     [
         "stale_overlay_build",
+        "vendored_openvr_dll_missing",
+        "packaged_openvr_dll_missing",
+        "openvr_dll_hash_mismatch",
         "steamvr_not_installed",
         "steamvr_not_running",
         "hmd_not_found",

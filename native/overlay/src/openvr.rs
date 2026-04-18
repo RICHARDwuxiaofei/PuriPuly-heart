@@ -193,6 +193,25 @@ pub trait OverlayFrameSubmitter {
     fn set_overlay_visible(&mut self, _visible: bool) -> Result<(), OpenVrError> {
         Ok(())
     }
+
+    fn sample_frame_timing(&self) -> Option<FrameTimingSample> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrameTimingSample {
+    pub frame_index: u32,
+    pub num_frame_presents: u32,
+    pub num_mis_presented: u32,
+    pub num_dropped_frames: u32,
+    pub system_time_seconds: f64,
+    pub client_frame_interval_ms: f32,
+    pub present_call_cpu_ms: f32,
+    pub wait_for_present_cpu_ms: f32,
+    pub compositor_render_cpu_ms: f32,
+    pub total_render_gpu_ms: f32,
+    pub post_submit_gpu_ms: f32,
 }
 
 pub fn submit_texture<T: OverlayTextureSubmitter>(
@@ -251,6 +270,10 @@ impl OverlayFrameSubmitter for OpenVrOverlay {
 
     fn set_overlay_visible(&mut self, visible: bool) -> Result<(), OpenVrError> {
         self.backend.set_overlay_visible(visible)
+    }
+
+    fn sample_frame_timing(&self) -> Option<FrameTimingSample> {
+        self.backend.sample_frame_timing()
     }
 }
 
@@ -353,12 +376,22 @@ impl OpenVrBackend {
             Self::Test(_) => None,
         }
     }
+
+    fn sample_frame_timing(&self) -> Option<FrameTimingSample> {
+        match self {
+            #[cfg(windows)]
+            Self::Windows(openvr) => openvr.sample_frame_timing(),
+            #[cfg(not(windows))]
+            Self::Test(_) => None,
+        }
+    }
 }
 
 #[cfg(windows)]
 struct WindowsOpenVrOverlay {
     overlay_api: *mut openvr_sys::VR_IVROverlay_FnTable,
     system_api: *mut openvr_sys::VR_IVRSystem_FnTable,
+    compositor_api: Option<*mut openvr_sys::VR_IVRCompositor_FnTable>,
     overlay_handle: openvr_sys::VROverlayHandle_t,
     placement_policy: OverlayPlacementPolicy,
     visible: bool,
@@ -369,11 +402,13 @@ impl WindowsOpenVrOverlay {
     fn new(overlay_instance_id: &str) -> Result<Self, OpenVrError> {
         let overlay_api = initialize_overlay_api()?;
         let system_api = initialize_system_api()?;
+        let compositor_api = initialize_compositor_api().ok();
         let overlay_handle = create_overlay_handle(overlay_api, overlay_instance_id)?;
 
         let instance = Self {
             overlay_api,
             system_api,
+            compositor_api,
             overlay_handle,
             placement_policy: OverlayPlacementPolicy::default(),
             visible: false,
@@ -473,6 +508,30 @@ impl WindowsOpenVrOverlay {
         } else {
             None
         }
+    }
+
+    fn sample_frame_timing(&self) -> Option<FrameTimingSample> {
+        let compositor_api = self.compositor_api?;
+        let get_frame_timing = unsafe { (*compositor_api).GetFrameTiming }?;
+        let mut timing: openvr_sys::Compositor_FrameTiming = unsafe { std::mem::zeroed() };
+        timing.m_nSize = std::mem::size_of::<openvr_sys::Compositor_FrameTiming>() as u32;
+        let ok = unsafe { get_frame_timing(&mut timing, 0) };
+        if !ok {
+            return None;
+        }
+        Some(FrameTimingSample {
+            frame_index: timing.m_nFrameIndex,
+            num_frame_presents: timing.m_nNumFramePresents,
+            num_mis_presented: timing.m_nNumMisPresented,
+            num_dropped_frames: timing.m_nNumDroppedFrames,
+            system_time_seconds: timing.m_flSystemTimeInSeconds,
+            client_frame_interval_ms: timing.m_flClientFrameIntervalMs,
+            present_call_cpu_ms: timing.m_flPresentCallCpuMs,
+            wait_for_present_cpu_ms: timing.m_flWaitForPresentCpuMs,
+            compositor_render_cpu_ms: timing.m_flCompositorRenderCpuMs,
+            total_render_gpu_ms: timing.m_flTotalRenderGpuMs,
+            post_submit_gpu_ms: timing.m_flPostSubmitGpuMs,
+        })
     }
 }
 
@@ -577,6 +636,27 @@ fn initialize_system_api() -> Result<*mut openvr_sys::VR_IVRSystem_FnTable, Open
     }
 
     Ok(system_api as *mut openvr_sys::VR_IVRSystem_FnTable)
+}
+
+#[cfg(windows)]
+fn initialize_compositor_api() -> Result<*mut openvr_sys::VR_IVRCompositor_FnTable, OpenVrError> {
+    let compositor_interface_version =
+        fn_table_interface_version(openvr_sys::IVRCompositor_Version)?;
+    let mut interface_error = openvr_sys::EVRInitError_VRInitError_None;
+    let compositor_api = unsafe {
+        openvr_sys::VR_GetGenericInterface(
+            compositor_interface_version.as_ptr(),
+            &mut interface_error,
+        )
+    };
+    if interface_error != openvr_sys::EVRInitError_VRInitError_None || compositor_api == 0 {
+        return Err(OpenVrError::Init(format!(
+            "VR_GetGenericInterface (compositor) failed: {}",
+            vr_init_error_name(interface_error)
+        )));
+    }
+
+    Ok(compositor_api as *mut openvr_sys::VR_IVRCompositor_FnTable)
 }
 
 #[cfg(any(windows, test))]

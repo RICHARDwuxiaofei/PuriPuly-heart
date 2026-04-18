@@ -48,7 +48,7 @@ describe('POST /v1/providers/openrouter/issue signing contract', () => {
       expect.objectContaining({
         openrouter_api_key: managementApi.childKey.rawKey,
         managed_credential_ref: managementApi.childKey.hash,
-        expires_at: '2026-10-08T06:00:00.000Z',
+        expires_at: '2026-07-08T06:00:00.000Z',
         budget_usd: 0.08,
         model: 'google/gemma-4-26b-a4b-it',
         managed_state: {

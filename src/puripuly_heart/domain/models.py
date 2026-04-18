@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import time
 from dataclasses import dataclass
 from typing import Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 ChannelId = Literal["self", "peer"]
 
@@ -10,6 +12,20 @@ ChannelId = Literal["self", "peer"]
 def _validate_channel(channel: str) -> None:
     if channel not in ("self", "peer"):
         raise ValueError(f"invalid channel: {channel!r}")
+
+
+def _new_update_id() -> str:
+    return uuid4().hex
+
+
+def _wall_clock_ms_now() -> int:
+    return int(time.time() * 1000)
+
+
+def _hash_source_text(source_text: str) -> str | None:
+    if not source_text:
+        return None
+    return hashlib.sha256(source_text.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +49,12 @@ class Translation:
     target_language: str | None
     channel: ChannelId
     created_at: float | None = None  # monotonic seconds (Clock)
+    update_id: str
+    origin_wall_clock_ms: int | None
+    session_scope: str | None
+    source_text_hash: str | None
+    source_text_len: int | None
+    logical_turn_key: str | None
 
     def __init__(
         self,
@@ -45,6 +67,12 @@ class Translation:
         target_language: str | None = None,
         channel: ChannelId = "self",
         created_at: float | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
     ) -> None:
         if text is not None and translated_text is not None and text != translated_text:
             raise ValueError("text and translated_text must match when both are set")
@@ -62,6 +90,32 @@ class Translation:
         object.__setattr__(self, "target_language", target_language)
         object.__setattr__(self, "channel", channel)
         object.__setattr__(self, "created_at", created_at)
+        object.__setattr__(self, "update_id", update_id or _new_update_id())
+        object.__setattr__(
+            self,
+            "origin_wall_clock_ms",
+            origin_wall_clock_ms if origin_wall_clock_ms is not None else _wall_clock_ms_now(),
+        )
+        object.__setattr__(self, "session_scope", session_scope)
+        object.__setattr__(
+            self,
+            "source_text_hash",
+            source_text_hash if source_text_hash is not None else _hash_source_text(source_text),
+        )
+        object.__setattr__(
+            self,
+            "source_text_len",
+            (
+                source_text_len
+                if source_text_len is not None
+                else (len(source_text) if source_text else None)
+            ),
+        )
+        object.__setattr__(
+            self,
+            "logical_turn_key",
+            logical_turn_key if logical_turn_key is not None else f"{channel}:{utterance_id}",
+        )
 
     @property
     def text(self) -> str:

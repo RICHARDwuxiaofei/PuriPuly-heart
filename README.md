@@ -322,7 +322,7 @@ python -m pytest         # Test (recommended within venv)
 
 Direct executable-only / manual packaging steps:
 
-This direct executable/manual-installer path is not the release-complete compliance-packaging path. It also requires the staged overlay executable at `build/overlay/PuriPulyHeartOverlay.exe`, as enforced by `build.spec`.
+This direct executable/manual-installer path is not the release-complete compliance-packaging path. It also requires the staged overlay executable at `build/overlay/PuriPulyHeartOverlay.exe` plus the vendored OpenVR bundle under `third_party/openvr/`, as enforced by `build.spec`.
 
 ```bash
 .\scripts\ci\prepare-soxr-release-inputs.ps1

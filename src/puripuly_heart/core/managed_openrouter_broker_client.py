@@ -15,6 +15,9 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseError,
     ManagedOpenRouterVerifySuccess,
 )
+from puripuly_heart.core.openrouter_credentials import (
+    normalize_managed_openrouter_user_identifier,
+)
 
 RETRYABLE_ERROR_CODE = "trial_unavailable"
 RETRYABLE_ERROR_CLASS = "retryable"
@@ -96,6 +99,9 @@ class HttpManagedOpenRouterBrokerClient:
                 openrouter_api_key=_require_text(payload, "openrouter_api_key"),
                 managed_credential_ref=_require_optional_text(payload, "managed_credential_ref"),
                 expires_at=_require_optional_text(payload, "expires_at"),
+                openrouter_user_id=normalize_managed_openrouter_user_identifier(
+                    payload.get("openrouter_user_id")
+                ),
             )
         except ValueError as exc:
             raise _retryable_error("issue", f"broker returned malformed payload: {exc}") from exc
@@ -155,6 +161,13 @@ def _parse_error_response(
             f"broker returned an unexpected error payload (status={response.status_code})",
         )
 
+    managed_lifecycle = None
+    raw_managed_state = payload.get("managed_state")
+    if isinstance(raw_managed_state, Mapping):
+        lifecycle = raw_managed_state.get("lifecycle")
+        if isinstance(lifecycle, str) and lifecycle:
+            managed_lifecycle = lifecycle
+
     try:
         return ManagedOpenRouterReleaseError(
             operation=operation,
@@ -163,6 +176,7 @@ def _parse_error_response(
             subcode=_require_optional_text(raw_error, "subcode"),
             retry_after_ms=_require_optional_int(raw_error, "retry_after_ms"),
             message=_require_text(raw_error, "message"),
+            managed_lifecycle=managed_lifecycle,
         )
     except ValueError as exc:
         return _retryable_error(operation, f"broker returned malformed error payload: {exc}")

@@ -51,12 +51,20 @@ describe('openrouter entitlement schema', () => {
     expect(columns.map((column) => column.name)).toEqual(OPENROUTER_ENTITLEMENT_COLUMNS);
   });
 
-  it('seeds child-key management bindings in the sqlite D1 test env', () => {
+  it('seeds the exact managed OpenRouter secret bindings in the sqlite D1 test env', () => {
     const env = createTestBrokerEnv() as Record<string, unknown>;
 
-    expect(env.OPENROUTER_MANAGED_API_KEY).toBe('test-managed-api-key');
-    expect(env.OPENROUTER_MANAGEMENT_API_KEY).toBe('test-management-api-key');
-    expect(env.OPENROUTER_MANAGED_GUARDRAIL_ID).toBe('test-managed-guardrail-id');
+    expect({
+      OPENROUTER_MANAGED_API_KEY: env.OPENROUTER_MANAGED_API_KEY,
+      OPENROUTER_MANAGEMENT_API_KEY: env.OPENROUTER_MANAGEMENT_API_KEY,
+      OPENROUTER_MANAGED_GUARDRAIL_ID: env.OPENROUTER_MANAGED_GUARDRAIL_ID,
+      OPENROUTER_MANAGED_USER_HMAC_SECRET: env.OPENROUTER_MANAGED_USER_HMAC_SECRET,
+    }).toEqual({
+      OPENROUTER_MANAGED_API_KEY: 'test-managed-api-key',
+      OPENROUTER_MANAGEMENT_API_KEY: 'test-management-api-key',
+      OPENROUTER_MANAGED_GUARDRAIL_ID: 'test-managed-guardrail-id',
+      OPENROUTER_MANAGED_USER_HMAC_SECRET: 'test-managed-user-hmac-secret',
+    });
   });
 
   it('lets test helpers persist verified hardware snapshots on entitlement rows', () => {

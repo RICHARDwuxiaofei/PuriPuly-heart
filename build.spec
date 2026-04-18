@@ -3,7 +3,7 @@
 """PyInstaller spec file for PuriPuly <3.
 
 Direct Windows PyInstaller packaging (executable-only / manual installer packaging):
-    This direct path is not the release-complete compliance-packaging path and requires the staged overlay executable at build/overlay/PuriPulyHeartOverlay.exe (enforced below).
+    This direct path is not the release-complete compliance-packaging path and requires the staged overlay executable at build/overlay/PuriPulyHeartOverlay.exe plus the vendored OpenVR bundle under third_party/openvr/ (enforced below).
     pwsh -File scripts/ci/prepare-soxr-release-inputs.ps1
     pyinstaller build.spec
     ISCC installer.iss
@@ -34,6 +34,7 @@ if not overlay_staged_path.exists():
     )
 
 from puripuly_heart.core.local_qwen_runtime import LOCAL_QWEN_PACKAGED_RUNTIME_RELATIVE_DIR
+from puripuly_heart.core.overlay.openvr_vendor import collect_vendored_openvr_runtime_binaries
 
 block_cipher = None
 SOXR_RELEASE_INPUTS_MANIFEST_PATH = Path("build/soxr-release-inputs/manifest.json").resolve()
@@ -109,6 +110,7 @@ runtime_binaries = collect_dynamic_libs(
     "onnxruntime", destdir=LOCAL_QWEN_PACKAGED_RUNTIME_RELATIVE_DIR.as_posix()
 )
 runtime_binaries += collect_staged_soxr_runtime_binaries()
+runtime_binaries += collect_vendored_openvr_runtime_binaries()
 
 # Hidden imports for dynamic imports
 hiddenimports = [

@@ -7,6 +7,7 @@ import logging
 import secrets
 import threading
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -113,6 +114,9 @@ _OVERLAY_FAILURE_REASONS = frozenset(
         "bridge_auth_failed",
         "startup_timeout",
         "stale_overlay_build",
+        "vendored_openvr_dll_missing",
+        "packaged_openvr_dll_missing",
+        "openvr_dll_hash_mismatch",
         "steamvr_not_installed",
         "steamvr_not_running",
         "hmd_not_found",
@@ -191,6 +195,7 @@ class GuiController:
         repr=False,
     )
     _local_stt_pending_enable_after_install: bool = field(init=False, default=False)
+    _local_stt_pending_peer_enable_after_install: bool = field(init=False, default=False)
     _overlay_bridge: OverlayBridge | None = None
     _overlay_presenter: OverlayPresenter | None = None
     _overlay_manager: OverlayProcessManager | None = None
@@ -204,6 +209,8 @@ class GuiController:
         default_factory=dict,
     )
     _managed_trial_pending_auth: bool = field(init=False, default=False)
+    _translation_toggle_intent_enabled: bool = field(init=False, default=False)
+    _translation_toggle_generation: int = field(init=False, default=0)
     _runtime_logging: SessionRuntimeLoggingService | None = field(init=False, default=None)
 
     overlay_state: str = "off"
@@ -507,6 +514,16 @@ class GuiController:
     def clear_managed_auth_pending_state(self) -> None:
         self._set_managed_trial_pending_auth(False)
 
+    def _record_translation_toggle_intent(self, enabled: bool) -> int:
+        self._translation_toggle_intent_enabled = bool(enabled)
+        self._translation_toggle_generation += 1
+        return self._translation_toggle_generation
+
+    def _translation_toggle_intent_matches(self, *, enabled: bool, generation: int) -> bool:
+        return generation == self._translation_toggle_generation and (
+            self._translation_toggle_intent_enabled == bool(enabled)
+        )
+
     def _should_show_managed_auth_pending_before_prepare(self) -> bool:
         if self.settings is None:
             return False
@@ -526,8 +543,27 @@ class GuiController:
         message_key: str | None,
         message_kwargs: dict[str, object] | None = None,
     ) -> None:
+        previous_message_key = self._managed_trial_transient_message_key
+        persistent_message_keys = {
+            "managed_release.brake",
+            "managed_release.revoked_contact",
+        }
+        if message_key not in persistent_message_keys:
+            message_key = None
+            message_kwargs = None
+
         self._managed_trial_transient_message_key = message_key
         self._managed_trial_transient_message_kwargs = dict(message_kwargs or {})
+
+        dash = getattr(self.app, "view_dashboard", None)
+        setter = getattr(dash, "set_managed_trial_state", None) if dash is not None else None
+        if callable(setter) and (message_key is not None or previous_message_key is not None):
+            setter(
+                visible=message_key is not None,
+                remaining_percent=None,
+                transient_message_key=message_key,
+                transient_message_kwargs=dict(message_kwargs or {}),
+            )
 
     def _managed_trial_remaining_percent(
         self, usage_metadata: OpenRouterKeyMetadata | None
@@ -543,13 +579,25 @@ class GuiController:
         )
 
     def _schedule_managed_trial_usage_refresh(self) -> None:
+        async def _run_refresh() -> None:
+            await self._refresh_managed_trial_usage_state_best_effort()
+
         with contextlib.suppress(RuntimeError):
-            asyncio.get_running_loop().create_task(self._refresh_managed_trial_usage_state())
+            asyncio.get_running_loop().create_task(_run_refresh())
 
     def _on_managed_trial_delegate_ready(self) -> None:
         self._set_managed_trial_pending_auth(False)
         self._set_managed_trial_transient_message(None)
         self._schedule_managed_trial_usage_refresh()
+
+    async def _refresh_managed_trial_usage_state_best_effort(self) -> None:
+        try:
+            await self._refresh_managed_trial_usage_state()
+        except Exception as exc:
+            self.log_basic(
+                f"[ManagedAuth] Usage refresh failed: {exc}",
+                level=logging.WARNING,
+            )
 
     async def _refresh_managed_trial_usage_state(self) -> None:
         view_settings = getattr(self.app, "view_settings", None)
@@ -779,6 +827,10 @@ class GuiController:
         if enabled and not self.settings.ui.integrated_context_bootstrapped:
             self.settings.ui.integrated_context_enabled = True
             self.settings.ui.integrated_context_bootstrapped = True
+        if enabled:
+            await self._ensure_peer_local_stt_ready()
+        self._clear_local_stt_pending_enable_if_provider_switched_away()
+        self._sync_local_stt_notice()
         self._save_settings()
         self._refresh_overlay_peer_consumers()
 
@@ -831,22 +883,19 @@ class GuiController:
             overlay_instance_id = f"overlay-{secrets.token_hex(8)}"
             diagnostics = OverlayDiagnosticsRecorder(overlay_instance_id=overlay_instance_id)
 
-            def runtime_log_detailed(message: str, *, level: int = logging.INFO) -> bool:
-                return self.log_detailed(message, level=level)
-
             if presenter is None:
                 presenter = OverlayPresenter(
                     calibration=self.overlay_calibration.copy(),
                     clock=self.clock,
                     diagnostics=diagnostics,
-                    runtime_log_detailed=runtime_log_detailed,
+                    runtime_log_detailed=self.log_detailed,
                     show_translation=self.settings.overlay.show_translation,
                     show_peer_original=self.settings.overlay.show_peer_original,
                 )
                 self._overlay_presenter = presenter
             else:
                 presenter.diagnostics = diagnostics
-                presenter.runtime_log_detailed = runtime_log_detailed
+                presenter.runtime_log_detailed = self.log_detailed
             bridge = OverlayBridge(
                 session_token=secrets.token_urlsafe(16),
                 initial_snapshot=presenter.snapshot(),
@@ -1161,6 +1210,7 @@ class GuiController:
         self.cancel_overlay_calibration()
 
     async def set_translation_enabled(self, enabled: bool) -> None:
+        request_generation = self._record_translation_toggle_intent(enabled)
         if not enabled:
             self._set_managed_trial_pending_auth(False)
         if self.hub is None:
@@ -1171,7 +1221,15 @@ class GuiController:
             f"current_enabled={self.hub.translation_enabled} "
             f"llm_available={self.hub.llm is not None}"
         )
-        if enabled and await self._handle_managed_translation_enable() is False:
+        if enabled and await self._handle_managed_translation_enable(request_generation) is False:
+            return
+        if enabled and not self._translation_toggle_intent_matches(
+            enabled=True,
+            generation=request_generation,
+        ):
+            self.log_detailed(
+                "[Translation] Skipping stale enable request after newer toggle intent"
+            )
             return
         if enabled and self.hub.llm is None:
             self.hub.translation_enabled = False
@@ -1239,7 +1297,11 @@ class GuiController:
                 self._show_short_stt_message("local_stt.download_in_progress")
                 return
             if current_status in ("missing", "invalid", "download_failed"):
-                self._handle_local_stt_unavailable(current_status)
+                self._handle_local_stt_unavailable(
+                    current_status,
+                    resume_self=True,
+                    resume_peer=self._peer_local_stt_requested(self.settings),
+                )
                 return
 
         # Mark promo eligible when user explicitly enables STT via button
@@ -1274,7 +1336,7 @@ class GuiController:
                 return
         self._log_error(message)
 
-    async def _handle_managed_translation_enable(self) -> bool:
+    async def _handle_managed_translation_enable(self, request_generation: int) -> bool:
         if self.settings is None or self.hub is None:
             return True
         if self.settings.provider.llm != LLMProviderName.OPENROUTER:
@@ -1293,15 +1355,26 @@ class GuiController:
         except Exception:
             self._set_managed_trial_pending_auth(False)
             raise
-        if result.behavior == ManagedOpenRouterReleaseBehavior.READY:
-            self._set_managed_trial_pending_auth(bool(result.pending_issue and not result.api_key))
-            self._set_managed_trial_transient_message(None)
-            await self._refresh_managed_trial_usage_state()
-            if self.hub.llm is None:
-                await self._rebuild_llm_provider()
-            return True
 
         self._set_managed_trial_pending_auth(False)
+
+        if not self._translation_toggle_intent_matches(
+            enabled=True,
+            generation=request_generation,
+        ):
+            self.log_detailed(
+                "[Translation] Skipping stale managed enable result after newer toggle intent"
+            )
+            return False
+
+        if result.behavior == ManagedOpenRouterReleaseBehavior.READY and result.local_key_available:
+            self._set_managed_trial_transient_message(None)
+            if self.hub.llm is None:
+                await self._rebuild_llm_provider()
+            else:
+                self._schedule_managed_trial_usage_refresh()
+            return True
+
         diagnostics_text = format_managed_openrouter_diagnostics(result.diagnostics)
         if diagnostics_text:
             self.log_basic(f"[ManagedAuth] {diagnostics_text}", level=logging.ERROR)
@@ -1327,14 +1400,27 @@ class GuiController:
             return self._local_stt_runtime_status
         return self._local_stt_install_state.status
 
+    def _peer_local_stt_requested(self, settings: AppSettings | None = None) -> bool:
+        resolved_settings = settings or self.settings
+        return bool(
+            resolved_settings is not None
+            and resolved_settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
+            and resolved_settings.ui.peer_translation_enabled
+        )
+
     def _reset_local_stt_pending_enable_after_install(self) -> None:
         self._local_stt_pending_enable_after_install = False
+
+    def _reset_local_stt_pending_peer_enable_after_install(self) -> None:
+        self._local_stt_pending_peer_enable_after_install = False
 
     def _clear_local_stt_pending_enable_if_provider_switched_away(self) -> None:
         if self.settings is None:
             return
         if self.settings.provider.stt != STTProviderName.LOCAL_QWEN:
             self._reset_local_stt_pending_enable_after_install()
+        if not self._peer_local_stt_requested(self.settings):
+            self._reset_local_stt_pending_peer_enable_after_install()
 
     def _sync_local_stt_notice(self) -> None:
         dash = getattr(self.app, "view_dashboard", None)
@@ -1342,7 +1428,11 @@ class GuiController:
             return
         status = self._current_local_stt_runtime_status()
         should_show = status == "downloading" or (
-            self.settings.provider.stt == STTProviderName.LOCAL_QWEN and status != "ready"
+            (
+                self.settings.provider.stt == STTProviderName.LOCAL_QWEN
+                or self._peer_local_stt_requested(self.settings)
+            )
+            and status != "ready"
         )
         with contextlib.suppress(Exception):
             dash.set_local_stt_notice(
@@ -1403,12 +1493,20 @@ class GuiController:
         self._clear_local_stt_pending_enable_if_provider_switched_away()
         self._sync_local_stt_notice()
 
-        if (
+        should_resume_self_local_stt = (
             origin == "manual"
             and self.settings is not None
             and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
             and self._local_stt_pending_enable_after_install
-        ):
+        )
+        should_resume_peer_local_stt = (
+            origin == "manual"
+            and self.settings is not None
+            and self._peer_local_stt_requested(self.settings)
+            and self._local_stt_pending_peer_enable_after_install
+        )
+
+        if should_resume_self_local_stt:
             self._reset_local_stt_pending_enable_after_install()
             await self._rebuild_stt_provider()
             self._stt_desired = True
@@ -1417,21 +1515,34 @@ class GuiController:
                 dash.set_stt_enabled(True)
             await self._ensure_stt_switch()
 
+        if should_resume_peer_local_stt:
+            self._reset_local_stt_pending_peer_enable_after_install()
+            await self._refresh_overlay_runtime_dependencies()
+
     async def _handle_local_stt_download_status(self, update: RuntimeLocalSTTStatusUpdate) -> None:
         self._local_stt_runtime_status = update.status
         self._local_stt_download_percent = update.percent
         self._sync_local_stt_notice()
 
-    def _handle_local_stt_unavailable(self, status: str) -> bool:
+    def _handle_local_stt_unavailable(
+        self,
+        status: str,
+        *,
+        resume_self: bool,
+        resume_peer: bool,
+    ) -> bool:
         if status in ("missing", "invalid"):
             self._local_stt_install_state = LocalSTTInstallState(status=status)
         if self._local_stt_runtime_status != "downloading":
             self._local_stt_runtime_status = status
             self._local_stt_download_percent = None
-        self._local_stt_pending_enable_after_install = True
-        self._stt_desired = False
+        if resume_self:
+            self._local_stt_pending_enable_after_install = True
+            self._stt_desired = False
+        if resume_peer:
+            self._local_stt_pending_peer_enable_after_install = True
         dash = getattr(self.app, "view_dashboard", None)
-        if dash is not None:
+        if resume_self and dash is not None:
             dash.set_stt_enabled(False)
             dash.set_stt_needs_key(False)
         self._sync_local_stt_notice()
@@ -1444,13 +1555,20 @@ class GuiController:
         current_status = self._current_local_stt_runtime_status()
         if current_status == "downloading":
             self._stt_desired = False
+            self._local_stt_pending_enable_after_install = True
+            if self._peer_local_stt_requested(self.settings):
+                self._local_stt_pending_peer_enable_after_install = True
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 dash.set_stt_enabled(False)
             self._show_short_stt_message("local_stt.download_in_progress")
             return False
         if current_status in ("missing", "invalid", "download_failed"):
-            return self._handle_local_stt_unavailable(current_status)
+            return self._handle_local_stt_unavailable(
+                current_status,
+                resume_self=True,
+                resume_peer=self._peer_local_stt_requested(self.settings),
+            )
         if self.hub is None or self.hub.stt is None:
             self._stt_desired = False
             dash = getattr(self.app, "view_dashboard", None)
@@ -1467,14 +1585,73 @@ class GuiController:
             self._sync_local_stt_notice()
             return True
         except LocalSTTModelMissingError:
-            return self._handle_local_stt_unavailable("missing")
+            return self._handle_local_stt_unavailable(
+                "missing",
+                resume_self=True,
+                resume_peer=self._peer_local_stt_requested(self.settings),
+            )
         except (LocalSTTManifestInvalidError, LocalQwenSherpaLoadError):
-            return self._handle_local_stt_unavailable("invalid")
+            return self._handle_local_stt_unavailable(
+                "invalid",
+                resume_self=True,
+                resume_peer=self._peer_local_stt_requested(self.settings),
+            )
+
+    async def _ensure_peer_local_stt_ready(self) -> bool:
+        if self.settings is None or not self._peer_local_stt_requested(self.settings):
+            return True
+        current_status = self._current_local_stt_runtime_status()
+        if current_status == "downloading":
+            self._local_stt_pending_peer_enable_after_install = True
+            self._sync_local_stt_notice()
+            return False
+        if current_status in ("missing", "invalid", "download_failed"):
+            return self._handle_local_stt_unavailable(
+                current_status,
+                resume_self=False,
+                resume_peer=True,
+            )
+        try:
+            await self._probe_peer_local_stt_runtime_load()
+            self._local_stt_install_state = LocalSTTInstallState(status="ready")
+            if self._local_stt_runtime_status != "downloading":
+                self._local_stt_runtime_status = "ready"
+            self._sync_local_stt_notice()
+            return True
+        except LocalSTTModelMissingError:
+            return self._handle_local_stt_unavailable(
+                "missing",
+                resume_self=False,
+                resume_peer=True,
+            )
+        except (LocalSTTManifestInvalidError, LocalQwenSherpaLoadError):
+            return self._handle_local_stt_unavailable(
+                "invalid",
+                resume_self=False,
+                resume_peer=True,
+            )
+
+    async def _probe_peer_local_stt_runtime_load(self) -> None:
+        assert self.settings is not None
+        secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+        peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
+        session = None
+        try:
+            session = await peer_backend.open_session()
+        finally:
+            if session is not None:
+                with contextlib.suppress(Exception):
+                    await session.close()
+            close_backend = getattr(peer_backend, "close", None)
+            if callable(close_backend):
+                with contextlib.suppress(Exception):
+                    await close_backend()
 
     async def _cancel_local_stt_download(self) -> None:
         task = self._local_stt_download_task
         cancel_event = self._local_stt_download_cancel_event
         self._reset_local_stt_pending_enable_after_install()
+        self._reset_local_stt_pending_peer_enable_after_install()
         if cancel_event is not None:
             cancel_event.set()
         if task is None:
@@ -1839,6 +2016,7 @@ class GuiController:
         self.settings = next_settings
         self._save_settings()
         self._clear_local_stt_pending_enable_if_provider_switched_away()
+        self._sync_local_stt_notice()
         if (
             next_settings.provider.llm != LLMProviderName.OPENROUTER
             or next_settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED
@@ -1927,7 +2105,7 @@ class GuiController:
         if dash is not None:
             dash.set_translation_needs_key(llm is None)
 
-        await self._refresh_managed_trial_usage_state()
+        await self._refresh_managed_trial_usage_state_best_effort()
 
         if llm is None:
             message = "LLM provider not available"
@@ -2017,6 +2195,8 @@ class GuiController:
 
         config = self._build_peer_runtime_config(self.settings)
         desired_active = self._peer_runtime_should_be_active(self.settings)
+        if desired_active and not await self._ensure_peer_local_stt_ready():
+            desired_active = False
         await self._peer_runtime.apply_policy(config=config, desired_active=desired_active)
         self._last_peer_stt_runtime_signature = config.runtime_signature
         self._sync_effective_hub_flags(self.settings)
@@ -2537,6 +2717,29 @@ class GuiController:
             return self.runtime_logging.emit_detailed(rendered_message, level=level)
         except Exception:
             logger.log(level, message, exc_info=exc_info)
+            return True
+
+    def log_detailed_lazy(
+        self,
+        build_message: Callable[[], str],
+        *,
+        level: int = logging.INFO,
+        exception: BaseException | None = None,
+    ) -> bool:
+        exc_info = None
+        if exception is not None:
+            exc_info = (type(exception), exception, exception.__traceback__)
+
+        def render_message() -> str:
+            rendered_message = build_message()
+            if exc_info is None:
+                return rendered_message
+            return f"{rendered_message}\n{''.join(traceback.format_exception(*exc_info)).rstrip()}"
+
+        try:
+            return self.runtime_logging.emit_detailed_lazy(render_message, level=level)
+        except Exception:
+            logger.log(level, build_message(), exc_info=exc_info)
             return True
 
     def _log_error(self, message: str) -> None:

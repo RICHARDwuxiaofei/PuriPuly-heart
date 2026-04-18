@@ -18,7 +18,11 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from puripuly_heart.config.settings import AppSettings
-from puripuly_heart.core.openrouter_credentials import OPENROUTER_MANAGED_API_KEY_SECRET
+from puripuly_heart.core.openrouter_credentials import (
+    OPENROUTER_MANAGED_API_KEY_SECRET,
+    OPENROUTER_MANAGED_USER_ID_SECRET,
+    OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+)
 from puripuly_heart.core.storage.secrets import SecretStore
 
 MANAGED_DEVICE_PRIVATE_KEY_SECRET = "managed_device_private_key"
@@ -277,6 +281,10 @@ def _replace_managed_identity_bundle(
         settings.managed_identity.verified_hardware_hash_salt_version
     )
     previous_managed_api_key = secret_store.get(OPENROUTER_MANAGED_API_KEY_SECRET)
+    previous_managed_user_id = secret_store.get(OPENROUTER_MANAGED_USER_ID_SECRET)
+    previous_managed_user_installation_id = secret_store.get(
+        OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET
+    )
     previous_private_key = secret_store.get(MANAGED_DEVICE_PRIVATE_KEY_SECRET)
     previous_public_key = secret_store.get(MANAGED_DEVICE_PUBLIC_KEY_SECRET)
     previous_binding_value = secret_store.get(MANAGED_IDENTITY_BINDING_SECRET)
@@ -293,6 +301,8 @@ def _replace_managed_identity_bundle(
 
     try:
         secret_store.delete(OPENROUTER_MANAGED_API_KEY_SECRET)
+        secret_store.delete(OPENROUTER_MANAGED_USER_ID_SECRET)
+        secret_store.delete(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET)
         secret_store.set(MANAGED_DEVICE_PRIVATE_KEY_SECRET, private_key_value)
         secret_store.set(MANAGED_DEVICE_PUBLIC_KEY_SECRET, public_key_value)
         secret_store.set(MANAGED_IDENTITY_BINDING_SECRET, binding_value)
@@ -313,6 +323,8 @@ def _replace_managed_identity_bundle(
         rollback_error = _restore_secret_state(
             secret_store,
             managed_api_key=previous_managed_api_key,
+            managed_user_id=previous_managed_user_id,
+            managed_user_installation_id=previous_managed_user_installation_id,
             private_key=previous_private_key,
             public_key=previous_public_key,
             binding_value=previous_binding_value,
@@ -404,12 +416,20 @@ def _restore_secret_state(
     secret_store: SecretStore,
     *,
     managed_api_key: str | None,
+    managed_user_id: str | None,
+    managed_user_installation_id: str | None,
     private_key: str | None,
     public_key: str | None,
     binding_value: str | None,
 ) -> Exception | None:
     try:
         _restore_secret_value(secret_store, OPENROUTER_MANAGED_API_KEY_SECRET, managed_api_key)
+        _restore_secret_value(secret_store, OPENROUTER_MANAGED_USER_ID_SECRET, managed_user_id)
+        _restore_secret_value(
+            secret_store,
+            OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+            managed_user_installation_id,
+        )
         _restore_secret_value(secret_store, MANAGED_DEVICE_PRIVATE_KEY_SECRET, private_key)
         _restore_secret_value(secret_store, MANAGED_DEVICE_PUBLIC_KEY_SECRET, public_key)
         _restore_secret_value(secret_store, MANAGED_IDENTITY_BINDING_SECRET, binding_value)

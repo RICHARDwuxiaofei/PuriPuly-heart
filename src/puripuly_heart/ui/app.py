@@ -61,6 +61,7 @@ class TranslatorApp:
             self.view_settings.runtime_log_basic = runtime_log_basic
         if callable(runtime_log_detailed):
             self.view_settings.runtime_log_detailed = runtime_log_detailed
+        self.view_dashboard.runtime_log_detailed = self._log_detailed
 
         calibration_begin = getattr(self.controller, "begin_overlay_calibration", None)
         calibration_change = getattr(self.controller, "set_overlay_calibration_field", None)

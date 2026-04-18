@@ -34,6 +34,9 @@ from puripuly_heart.core.managed_identity import (
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_BYOK_API_KEY_SECRET,
     OPENROUTER_MANAGED_API_KEY_SECRET,
+    OPENROUTER_MANAGED_USER_ID_SECRET,
+    OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+    load_managed_openrouter_user_identifier,
 )
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 
@@ -141,6 +144,8 @@ def test_regenerate_managed_identity_bundle_rotates_bundle_and_clears_managed_re
     settings.managed_identity.verified_hardware_hash_salt_version = 7
     store.set(OPENROUTER_BYOK_API_KEY_SECRET, "byok-key")
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")
+    store.set(OPENROUTER_MANAGED_USER_ID_SECRET, "user-123")
+    store.set(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET, first.installation_id)
 
     second = regenerate_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
 
@@ -152,6 +157,9 @@ def test_regenerate_managed_identity_bundle_rotates_bundle_and_clears_managed_re
     assert settings.managed_identity.verified_hardware_hash_salt_version is None
     assert store.get(OPENROUTER_BYOK_API_KEY_SECRET) == "byok-key"
     assert store.get(OPENROUTER_MANAGED_API_KEY_SECRET) is None
+    assert store.get(OPENROUTER_MANAGED_USER_ID_SECRET) is None
+    assert store.get(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET) is None
+    assert load_managed_openrouter_user_identifier(settings, secrets=store) is None
 
 
 def test_corrupted_secret_material_regenerates_bundle_and_clears_release_state() -> None:
@@ -274,6 +282,8 @@ def test_regeneration_rolls_back_secret_and_settings_when_persist_fails(tmp_path
     )
     old_private_key = store.get(MANAGED_DEVICE_PRIVATE_KEY_SECRET)
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")
+    store.set(OPENROUTER_MANAGED_USER_ID_SECRET, "user-123")
+    store.set(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET, first.installation_id)
     settings.managed_identity.release_token = "release-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:00:45.000Z"
     save_settings(path, settings)
@@ -292,11 +302,15 @@ def test_regeneration_rolls_back_secret_and_settings_when_persist_fails(tmp_path
     assert settings.managed_identity.release_token_expires_at == "2026-04-08T06:00:45.000Z"
     assert store.get(MANAGED_DEVICE_PRIVATE_KEY_SECRET) == old_private_key
     assert store.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
+    assert store.get(OPENROUTER_MANAGED_USER_ID_SECRET) == "user-123"
+    assert store.get(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET) == first.installation_id
+    assert load_managed_openrouter_user_identifier(settings, secrets=store) == "user-123"
     assert json.loads(path.read_text(encoding="utf-8")) == persisted_before
     restored = load_settings(path)
     restored_bundle = ensure_managed_identity_bundle(restored, store)
     assert restored_bundle.installation_id == first.installation_id
     assert restored_bundle.device_public_key == first.device_public_key
+    assert load_managed_openrouter_user_identifier(restored, secrets=store) == "user-123"
 
 
 @pytest.mark.parametrize(

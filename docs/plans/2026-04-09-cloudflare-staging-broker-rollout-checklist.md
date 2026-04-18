@@ -39,13 +39,15 @@ What it does **not** mean:
   - it also hardcodes `name: "puripuly-heart-broker"`, so direct deploy work targets the canonical worker name unless a deploy-time config overrides it
 - The broker requires these runtime bindings:
   - D1 binding: `BROKER_DB`
-  - Worker secrets: `OPENROUTER_MANAGED_API_KEY` (transitional compatibility only), `OPENROUTER_MANAGEMENT_API_KEY`, `OPENROUTER_MANAGED_GUARDRAIL_ID`
+  - Worker secrets: `OPENROUTER_MANAGED_API_KEY` (transitional compatibility only), `OPENROUTER_MANAGEMENT_API_KEY`, `OPENROUTER_MANAGED_GUARDRAIL_ID`, `OPENROUTER_MANAGED_USER_HMAC_SECRET`, `DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL`, `DISCORD_DAILY_REPORT_WEBHOOK_URL`
 - Current broker deploy command:
   - `pnpm --filter @puripuly-heart/broker run deploy`
 - Broker `pnpm` / `vitest` / `wrangler` verification should run from a Linux-native workspace.
 - The repo now includes a dedicated manual direct-production broker deployment workflow at `.github/workflows/deploy-broker-direct.yml`.
 - The initial broker rollout assumes a single-region D1 deployment with `location_hint` set to `apac`.
 - The initial D1 migration seeds `fingerprint_salt` with a bootstrap placeholder and explicitly requires deployment bootstrap to replace it before `challenge` / `verify` traffic is enabled.
+- The Worker uses a minute-resolution cron trigger, but the daily Discord heartbeat is gated by runtime-configured `dailyReport` timing plus persisted `abuse_runtime_state`, so only one heartbeat should emit per UTC day after the configured due time.
+- Manual revocation is a two-step operator action in the current architecture: revoke the broker-side entitlement **and** disable or delete the upstream OpenRouter child key, because broker-only revocation does not stop already-issued direct OpenRouter traffic.
 
 ## Decisions already made
 
@@ -80,6 +82,8 @@ What it does **not** mean:
 - [ ] production OpenRouter managed key prepared (`OPENROUTER_MANAGED_API_KEY_PRODUCTION`, transitional compatibility only)
 - [ ] production OpenRouter management key prepared (`OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION`)
 - [ ] production OpenRouter managed guardrail id prepared (`OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION`)
+- [ ] production OpenRouter managed user-id HMAC secret prepared (`OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION`)
+- [ ] production Discord operations webhook prepared (`DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION`)
 - [ ] GitHub Environment `production` created if CI automation is used
 - [ ] GitHub secret `CLOUDFLARE_API_TOKEN` registered
 - [ ] GitHub secret `CLOUDFLARE_ACCOUNT_ID` registered if the workflow needs it
@@ -87,8 +91,14 @@ What it does **not** mean:
 - [ ] GitHub secret `OPENROUTER_MANAGED_API_KEY_PRODUCTION` registered (transitional compatibility only)
 - [ ] GitHub secret `OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION` registered
 - [ ] GitHub secret `OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION` registered
+- [ ] GitHub secret `OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION` registered
+- [ ] GitHub secret `DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION` registered
 - [ ] GitHub Environment variable `BROKER_CANONICAL_WORKERS_DEV_URL` registered
 - [ ] GitHub Environment variable `BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION` registered
+
+## Operational safety reminders
+
+- [ ] Manual revocation playbook is documented for operators: broker-side revocation alone is insufficient; the matching upstream OpenRouter child key must also be disabled or deleted.
 
 ## Automation scope we intend to build
 
@@ -180,6 +190,7 @@ The remaining rollout work is operational, not repo-side automation:
 1. register the production Environment secrets / variable
     - `OPENROUTER_MANAGED_API_KEY_PRODUCTION` remains transitional compatibility only
     - `OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION` and `OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION` are required for child-key issuance
+    - `OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION` must be registered so deploy sync can populate runtime `OPENROUTER_MANAGED_USER_HMAC_SECRET` for deterministic managed OpenRouter user ids
     - `BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION` must be set to a model blocked by the configured guardrail
 2. create or confirm the production D1 database and capture its `database_id`
 3. review the manual workflow inputs / guards

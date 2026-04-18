@@ -17,12 +17,12 @@ describe('managed trial policy', () => {
     );
   });
 
-  it('limits issuance to one user-specific managed key per eligible installation with six-month expiry', () => {
+  it('limits issuance to one user-specific managed key per eligible installation with three-month expiry', () => {
     expect(MANAGED_TRIAL_POLICY.entitlement.issuance).toEqual({
       keyScope: 'user-specific',
       maxManagedKeysPerEligibleInstallation: 1,
       expiry: {
-        durationMonths: 6,
+        durationMonths: 3,
         anchor: 'issued_at',
       },
     });

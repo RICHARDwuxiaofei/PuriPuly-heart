@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import * as abuseMonitoring from '../src/abuse-monitoring';
 import { signCanonicalIssueRequest } from './test-support/ed25519';
 import { normalizedErrorEnvelope } from './test-support/errors';
 import {
@@ -8,10 +9,14 @@ import {
 } from './test-support/openrouter-issue';
 import { sha256Base64Url } from './test-support/hash';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
-import { postIssue } from './test-support/trial-api';
+import {
+  postIssue,
+  postIssueWithExecutionContext,
+} from './test-support/trial-api';
 
 describe('POST /v1/providers/openrouter/issue route contract', () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -39,7 +44,20 @@ describe('POST /v1/providers/openrouter/issue route contract', () => {
       signed_at: '2026-04-08T06:00:45.000Z',
     });
 
-    const response = await postIssue(env, requestBody);
+    const queuedSideEffects: Promise<unknown>[] = [];
+    const executionCtx = {
+      props: {},
+      waitUntil(promise: Promise<unknown>) {
+        queuedSideEffects.push(promise);
+      },
+      passThroughOnException() {},
+    };
+
+    const response = await postIssueWithExecutionContext(
+      env,
+      requestBody,
+      executionCtx,
+    );
     expect(response.status).toBe(200);
 
     const payload = (await response.json()) as {
@@ -68,7 +86,7 @@ describe('POST /v1/providers/openrouter/issue route contract', () => {
       lifecycle: 'active',
       managed_availability: true,
     });
-    expect(payload.expires_at).toBe('2026-10-08T06:00:00.000Z');
+    expect(payload.expires_at).toBe('2026-07-08T06:00:00.000Z');
     expect(payload.budget_usd).toBe(0.08);
     expect(payload.model).toBe('google/gemma-4-26b-a4b-it');
     expect(entitlement).toEqual({
@@ -76,7 +94,7 @@ describe('POST /v1/providers/openrouter/issue route contract', () => {
       budget_usd: 0.08,
       managed_credential_ref: managementApi.childKey.hash,
       issued_at: '2026-04-08T06:00:00.000Z',
-      expires_at: '2026-10-08T06:00:00.000Z',
+      expires_at: '2026-07-08T06:00:00.000Z',
       release_session_ref: expect.any(String),
       release_token_hash: expect.any(String),
       release_token_expires_at: release.releaseTokenExpiresAt,
@@ -86,7 +104,115 @@ describe('POST /v1/providers/openrouter/issue route contract', () => {
     await expect(sha256Base64Url(release.releaseToken)).resolves.toBe(
       entitlement.release_token_hash,
     );
+    const issueSuccessCount = env.__db
+      .prepare('SELECT COUNT(*) AS count FROM broker_issue_success_events')
+      .get() as { count: number };
+    expect(issueSuccessCount.count).toBe(1);
+    expect(queuedSideEffects).toHaveLength(1);
+    await Promise.all(queuedSideEffects);
     expect(managementApi.fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails closed and rolls the activation back out when post-activation monitoring cannot update abuse state', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:05:00Z'));
+
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const managementApi = mockOpenRouterManagementApi();
+    const env = createTestBrokerEnv();
+    const release = await createPendingReleaseSession({
+      env,
+      installationId: 'install-issue-monitoring-failure',
+      appVersion: '1.2.3',
+      hardwareHash: 'hardware-hash-issue-monitoring-failure',
+      verifySignedAt: '2026-04-08T06:05:30.000Z',
+    });
+    const requestBody = await signCanonicalIssueRequest(release.keyPair.privateKey, {
+      installation_id: 'install-issue-monitoring-failure',
+      device_public_key: release.keyPair.devicePublicKey,
+      release_token: release.releaseToken,
+      hardware_hash: release.hardwareHash,
+      reason: 'llm_start',
+      budget_usd: 0.08,
+      model: 'google/gemma-4-26b-a4b-it',
+      signed_at: '2026-04-08T06:05:45.000Z',
+    });
+    vi.spyOn(abuseMonitoring, 'recordIssueSuccess').mockRejectedValueOnce(
+      new Error('issue success event insert failed'),
+    );
+
+    const response = await postIssue(env, requestBody);
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'internal_error',
+        class: 'retryable',
+        message: 'broker encountered an unexpected internal error',
+        managedState: {
+          lifecycle: 'pending_release',
+          managed_availability: true,
+        },
+        currentEntitlement: {
+          provider: 'OpenRouter',
+          budget_usd: 0.08,
+          issued_at: null,
+          expires_at: null,
+        },
+      }),
+    );
+
+    const retryResponse = await postIssue(env, requestBody);
+    expect(retryResponse.status).toBe(401);
+    await expect(retryResponse.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'challenge_invalid',
+        class: 'security_fail',
+        subcode: 'release_token_invalid',
+        message: 'release_token does not match the active release session for installation_id',
+        managedState: {
+          lifecycle: 'pending_release',
+          managed_availability: true,
+        },
+        currentEntitlement: {
+          provider: 'OpenRouter',
+          budget_usd: 0.08,
+          issued_at: null,
+          expires_at: null,
+        },
+      }),
+    );
+
+    const entitlement = env.__db
+      .prepare(
+        `SELECT status, managed_credential_ref, issued_at, expires_at,
+                release_session_ref, release_token_hash, release_token_expires_at
+           FROM openrouter_entitlements
+           WHERE installation_id = ?`,
+      )
+      .get('install-issue-monitoring-failure') as Record<string, unknown>;
+    expect(entitlement).toEqual({
+      status: 'pending_release',
+      managed_credential_ref: null,
+      issued_at: null,
+      expires_at: null,
+      release_session_ref: null,
+      release_token_hash: null,
+      release_token_expires_at: null,
+    });
+
+    const issueSuccessCount = env.__db
+      .prepare('SELECT COUNT(*) AS count FROM broker_issue_success_events')
+      .get() as { count: number };
+    expect(issueSuccessCount.count).toBe(0);
+    expect(managementApi.fetchMock).toHaveBeenCalledTimes(4);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      'post_activation_monitoring_failed',
+      expect.objectContaining({
+        installation_id: 'install-issue-monitoring-failure',
+        managed_credential_ref: managementApi.childKey.hash,
+        stage: 'record_or_evaluate',
+      }),
+    );
   });
 
   it('rejects issue when the request hardware_hash does not match the verified snapshot', async () => {

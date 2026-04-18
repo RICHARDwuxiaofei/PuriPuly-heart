@@ -1053,6 +1053,7 @@ async def test_handle_vad_event_forwards_resume_confirming_chunk_before_overlay_
     assert sink.events[-1].type == "self_active_update"
     assert sink.events[-1].text == "hello live"
     assert sink.events[-1].secondary_text == "translated live"
+    assert sink.events[-1].utterance_id == merge_id
 
 
 @pytest.mark.asyncio

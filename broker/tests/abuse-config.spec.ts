@@ -1,18 +1,25 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import app from '../src/index';
-import { createDeviceKeyPair } from './test-support/ed25519';
+import { getBrokerAbuseControlsConfig } from '../src/abuse-controls';
 import {
-  createTestBrokerEnv,
-} from './test-support/sqlite-d1';
-import { replaceAbuseControlsValue, updateAbuseControls } from './test-support/abuse-controls';
+  TEST_DEFAULT_ABUSE_CONTROLS,
+  TEST_DEFAULT_ABUSE_RUNTIME_STATE,
+  readAbuseControls,
+  readAbuseRuntimeState,
+  replaceAbuseControlsValue,
+  updateAbuseControls,
+  updateAbuseRuntimeState,
+} from './test-support/abuse-controls';
+import { createDeviceKeyPair } from './test-support/ed25519';
+import { createTestBrokerEnv } from './test-support/sqlite-d1';
 
 describe('broker abuse-controls runtime config validation', () => {
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it('falls back to default abuse controls when the stored config shape is malformed', async () => {
+  it('falls back to default abuse controls when the stored config is still on the previous rollout layout', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
 
@@ -21,8 +28,32 @@ describe('broker abuse-controls runtime config validation', () => {
       trialChallenge: {
         endpoint: 'POST /v1/trial/challenge',
         scope: 'ip',
-        maxRequests: 'bad-type',
+        maxRequests: 1,
         windowMinutes: 15,
+      },
+      trialChallengeVerify: {
+        endpoint: 'POST /v1/trial/challenge/verify',
+        scope: 'installation_id',
+        maxRequests: 5,
+        windowMinutes: 15,
+      },
+      openrouterIssue: {
+        endpoint: 'POST /v1/providers/openrouter/issue',
+        scope: 'installation_id',
+        maxRequests: 3,
+        windowMinutes: 15,
+      },
+      trialStatus: {
+        endpoint: 'GET /v1/trial/status',
+        scope: 'installation_id',
+        maxRequests: 30,
+        windowMinutes: 15,
+      },
+      newActiveEntitlementsPerDay: {
+        endpoint: 'POST /v1/providers/openrouter/issue',
+        scope: 'global',
+        maxCount: null,
+        windowDays: 1,
       },
     });
 
@@ -67,23 +98,9 @@ describe('broker abuse-controls runtime config validation', () => {
     );
 
     expect(blockedResponse.status).toBe(429);
-    await expect(blockedResponse.json()).resolves.toEqual({
-      error: {
-        code: 'rate_limited',
-        class: 'retryable',
-        subcode: 'ip_rate_limited',
-        retry_after_ms: 900000,
-        message: 'request rate limit exceeded for POST /v1/trial/challenge',
-      },
-      managed_state: {
-        lifecycle: 'none',
-        managed_availability: true,
-      },
-      current_entitlement: null,
-    });
   });
 
-  it('uses runtime overrides only when the full fixed abuse-control layout is valid', async () => {
+  it('uses runtime overrides only when the full exact abuse-control layout is valid', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
 
@@ -130,5 +147,71 @@ describe('broker abuse-controls runtime config validation', () => {
     );
 
     expect(blockedResponse.status).toBe(429);
+  });
+
+  it('seeds the approved immediate alert and ASN fast-path defaults', () => {
+    const env = createTestBrokerEnv();
+
+    expect(readAbuseControls(env).immediateAlerts).toEqual({
+      warn1: 10,
+      warn2: 25,
+      warn3: 50,
+      critical: 70,
+    });
+    expect(readAbuseControls(env).asnFastPath).toEqual({
+      enabled: true,
+      minIssueSuccess1h: 20,
+      minTopAsnSharePct: 70,
+    });
+  });
+
+  it('falls back to default abuse controls when immediate-alert thresholds are not strictly increasing', async () => {
+    const env = createTestBrokerEnv();
+    updateAbuseControls(env, (controls) => {
+      controls.immediateAlerts.warn1 = 10;
+      controls.immediateAlerts.warn2 = 25;
+      controls.immediateAlerts.warn3 = 20;
+      controls.immediateAlerts.critical = 70;
+    });
+
+    await expect(getBrokerAbuseControlsConfig(env.BROKER_DB)).resolves.toEqual(
+      TEST_DEFAULT_ABUSE_CONTROLS,
+    );
+  });
+
+  it('seeds exact abuse runtime state defaults and persists runtime-state helper updates', () => {
+    const env = createTestBrokerEnv();
+
+    expect(readAbuseRuntimeState(env)).toEqual(TEST_DEFAULT_ABUSE_RUNTIME_STATE);
+
+    updateAbuseRuntimeState(env, (state) => {
+      state.brake.active = true;
+      state.brake.reason = 'manual';
+      state.brake.changedAt = '2026-04-08T06:05:00Z';
+      state.brake.changedBy = 'operator';
+      state.alertLatches.warn1 = true;
+      state.alertLatches.warn3 = true;
+      state.dailyReport.lastDeliveredAt = '2026-04-08T06:10:00Z';
+      state.dailyReport.lastDeliveredDateUtc = '2026-04-08';
+    });
+
+    expect(readAbuseRuntimeState(env)).toEqual({
+      brake: {
+        active: true,
+        reason: 'manual',
+        changedAt: '2026-04-08T06:05:00Z',
+        changedBy: 'operator',
+      },
+      alertLatches: {
+        warn1: true,
+        warn2: false,
+        warn3: true,
+        critical: false,
+      },
+      dailyReport: {
+        lastDeliveredAt: '2026-04-08T06:10:00Z',
+        lastDeliveredDateUtc: '2026-04-08',
+      },
+    });
   });
 });

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 import pytest
 from websockets.asyncio.client import connect
@@ -10,6 +11,7 @@ from websockets.exceptions import ConnectionClosedError
 from puripuly_heart.core.overlay.bridge import OverlayBridge
 from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.overlay.protocol import (
+    OverlayPresentationBlock,
     OverlayPresentationCalibration,
     OverlayPresentationSnapshot,
 )
@@ -79,6 +81,17 @@ class _FailingSendConnection:
 
     async def close(self) -> None:
         self.close_calls += 1
+
+
+class _RecordingSendConnection:
+    def __init__(self) -> None:
+        self.sent_payloads: list[dict[str, object]] = []
+
+    async def send(self, payload: str) -> None:
+        self.sent_payloads.append(json.loads(payload))
+
+    async def close(self) -> None:
+        return None
 
 
 @pytest.mark.asyncio
@@ -419,3 +432,90 @@ async def test_overlay_bridge_records_send_failures_and_prunes_stale_connections
 
     assert list(diagnostics.bridge_events) == []
     assert bridge._authenticated_connections == set()
+
+
+@pytest.mark.asyncio
+async def test_overlay_bridge_snapshot_broadcast_logs_only_in_detailed_mode(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    detailed_bridge = OverlayBridge(
+        session_token="expected-token",
+        overlay_instance_id="detailed-overlay",
+        runtime_logging_mode="detailed",
+        initial_snapshot=OverlayPresentationSnapshot(
+            revision=0,
+            calibration=OverlayPresentationCalibration(),
+            blocks=[],
+        ),
+    )
+    basic_bridge = OverlayBridge(
+        session_token="expected-token",
+        overlay_instance_id="basic-overlay",
+        runtime_logging_mode="basic",
+        initial_snapshot=OverlayPresentationSnapshot(
+            revision=0,
+            calibration=OverlayPresentationCalibration(),
+            blocks=[],
+        ),
+    )
+    detailed_connection = _RecordingSendConnection()
+    basic_connection = _RecordingSendConnection()
+    detailed_bridge._authenticated_connections.add(detailed_connection)  # type: ignore[arg-type]
+    basic_bridge._authenticated_connections.add(basic_connection)  # type: ignore[arg-type]
+
+    snapshot = OverlayPresentationSnapshot(
+        revision=1,
+        calibration=OverlayPresentationCalibration(distance=1.5),
+        blocks=[
+            OverlayPresentationBlock(
+                id="peer:one",
+                occupant_key="peer:one",
+                appearance_seq=1,
+                channel="peer",
+                block_variant="finalized",
+                primary_text="peer translation",
+                secondary_text="peer original",
+                secondary_enabled=True,
+                update_id="bridge-upd-1",
+            ),
+            OverlayPresentationBlock(
+                id="self:two",
+                occupant_key="self:two",
+                appearance_seq=2,
+                channel="self",
+                block_variant="finalized",
+                primary_text="self original",
+                secondary_text="self translation",
+                secondary_enabled=True,
+                update_id="bridge-upd-2",
+            ),
+        ],
+    )
+
+    caplog.set_level(logging.INFO, logger="puripuly_heart.core.overlay.bridge")
+
+    await basic_bridge.replace_snapshot(snapshot)
+    await detailed_bridge.replace_snapshot(snapshot)
+
+    broadcast_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "[OverlayBridge][Broadcast]" in record.getMessage()
+    ]
+
+    assert not any("overlay_instance_id=basic-overlay" in message for message in broadcast_messages)
+    assert any(
+        "stage=start" in message
+        and "overlay_instance_id=detailed-overlay" in message
+        and "revision=1" in message
+        and "block_update_ids=['bridge-upd-1', 'bridge-upd-2']" in message
+        for message in broadcast_messages
+    )
+    assert any(
+        "stage=finish" in message
+        and "overlay_instance_id=detailed-overlay" in message
+        and "revision=1" in message
+        and "block_update_ids=['bridge-upd-1', 'bridge-upd-2']" in message
+        and "elapsed_ms=" in message
+        for message in broadcast_messages
+    )
