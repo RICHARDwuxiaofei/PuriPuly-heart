@@ -410,7 +410,7 @@ async def test_overlay_process_manager_consumes_structured_stdout_events_from_de
         await manager.stop()
 
 
-def test_default_overlay_process_runner_prefers_packaged_sibling_over_staged_overlay(
+def test_default_overlay_process_runner_prefers_newer_packaged_sibling_over_staged_overlay(
     tmp_path: Path,
 ) -> None:
     installed_dir = tmp_path / "installed"
@@ -426,12 +426,44 @@ def test_default_overlay_process_runner_prefers_packaged_sibling_over_staged_ove
     staged.parent.mkdir(parents=True)
     staged.write_text("staged", encoding="utf-8")
 
+    base_mtime = 1_700_000_000
+    os.utime(staged, (base_mtime, base_mtime))
+    os.utime(packaged_sibling, (base_mtime + 60, base_mtime + 60))
+
     resolved = DefaultOverlayProcessRunner.resolve_default_executable(
         sys_executable=app_executable,
         repo_root=repo_root,
     )
 
     assert resolved == packaged_sibling
+
+
+def test_default_overlay_process_runner_prefers_newer_staged_overlay_over_packaged_sibling(
+    tmp_path: Path,
+) -> None:
+    installed_dir = tmp_path / "installed"
+    installed_dir.mkdir()
+    app_executable = installed_dir / "PuriPulyHeart.exe"
+    app_executable.write_text("", encoding="utf-8")
+
+    packaged_sibling = installed_dir / "PuriPulyHeartOverlay.exe"
+    packaged_sibling.write_text("packaged", encoding="utf-8")
+
+    repo_root = tmp_path / "repo"
+    staged = repo_root / "build" / "overlay" / "PuriPulyHeartOverlay.exe"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("staged", encoding="utf-8")
+
+    base_mtime = 1_700_000_000
+    os.utime(packaged_sibling, (base_mtime, base_mtime))
+    os.utime(staged, (base_mtime + 60, base_mtime + 60))
+
+    resolved = DefaultOverlayProcessRunner.resolve_default_executable(
+        sys_executable=app_executable,
+        repo_root=repo_root,
+    )
+
+    assert resolved == staged
 
 
 def test_default_overlay_process_runner_uses_staged_overlay_for_local_dev_when_sibling_missing(

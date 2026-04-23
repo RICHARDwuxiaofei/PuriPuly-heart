@@ -226,6 +226,10 @@ class DefaultOverlayProcessRunner:
             sys_executable=sys_executable,
             repo_root=repo_root,
         )
+        if packaged_sibling.exists() and staged.exists():
+            if staged.stat().st_mtime > packaged_sibling.stat().st_mtime:
+                return staged
+            return packaged_sibling
         if packaged_sibling.exists():
             return packaged_sibling
         if staged.exists():
