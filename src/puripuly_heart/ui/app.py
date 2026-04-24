@@ -1,12 +1,25 @@
+import copy
 import logging
 import webbrowser
 
 import flet as ft
 
-from puripuly_heart.config.settings import save_settings
+from puripuly_heart.config.llm_profiles import (
+    get_openrouter_selection_alias_for_model_and_source,
+    profile_for_alias,
+)
+from puripuly_heart.config.settings import (
+    AppSettings,
+    LLMProviderName,
+    OpenRouterCredentialSource,
+    OpenRouterLLMModel,
+    OpenRouterSelectionAlias,
+    save_settings,
+)
 from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.core.updater import check_for_update
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
+from puripuly_heart.ui.components.founder_letter_dialog import FounderLetterDialog
 from puripuly_heart.ui.components.title_bar import TitleBar
 from puripuly_heart.ui.controller import GuiController
 from puripuly_heart.ui.fonts import font_for_language, register_fonts
@@ -33,6 +46,7 @@ DEFAULT_WINDOW_HEIGHT = 850
 MIN_WINDOW_WIDTH = 1024
 MIN_WINDOW_HEIGHT = 760
 APP_CONTENT_PADDING = 16
+FOUNDER_CONTACT_URL = "https://x.com/kapitalismho"
 
 
 class TranslatorApp:
@@ -56,6 +70,7 @@ class TranslatorApp:
         self.view_settings.on_settings_changed = self._on_settings_changed
         self.view_settings.on_prompt_apply_settings = self._on_prompt_apply_settings
         self.view_settings.on_providers_changed = self._on_providers_changed
+        self.view_settings.on_request_openrouter_pkce = self._on_request_openrouter_pkce
         self.view_settings.on_verify_api_key = self._on_verify_api_key
         self.view_settings.on_secret_cleared = self._on_secret_cleared
         self.view_settings.show_snackbar = self._show_snackbar
@@ -404,6 +419,91 @@ class TranslatorApp:
             await self.controller.apply_providers()
 
         self._queue_settings_mutation_task(_task)
+
+    def _on_request_openrouter_pkce(
+        self,
+        target_settings: AppSettings,
+        *,
+        launch_source: str = "settings",
+    ) -> None:
+        async def _task() -> None:
+            ok = await self.controller.connect_openrouter_via_pkce(
+                target_settings=target_settings,
+                launch_source=launch_source,
+            )
+            if ok:
+                refresh_after_openrouter_pkce_success = getattr(
+                    self.view_settings,
+                    "refresh_after_openrouter_pkce_success",
+                    None,
+                )
+                if callable(refresh_after_openrouter_pkce_success):
+                    refresh_after_openrouter_pkce_success(
+                        self.controller.settings,
+                        config_path=self.controller.config_path,
+                    )
+                else:
+                    self.view_settings.load_from_settings(
+                        self.controller.settings,
+                        config_path=self.controller.config_path,
+                        preserve_custom_vocab_draft=True,
+                    )
+
+        self._queue_settings_mutation_task(_task)
+
+    def _build_founder_letter_target_settings(self) -> AppSettings | None:
+        current_settings = getattr(getattr(self, "controller", None), "settings", None)
+        if current_settings is None:
+            return None
+        if current_settings.provider.llm != LLMProviderName.OPENROUTER:
+            return None
+        if current_settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED:
+            return None
+
+        openrouter_model = None
+        selection_alias = current_settings.openrouter.selection_alias
+        if selection_alias is not None:
+            try:
+                profile = profile_for_alias(selection_alias.value)
+            except KeyError:
+                profile = None
+            if profile is not None:
+                openrouter_model = profile.openrouter_model
+        if openrouter_model is None:
+            openrouter_model = current_settings.openrouter.llm_model.value
+
+        alias_value = get_openrouter_selection_alias_for_model_and_source(
+            openrouter_model,
+            OpenRouterCredentialSource.BYOK.value,
+        )
+        if alias_value is None:
+            return None
+
+        target_settings = copy.deepcopy(current_settings)
+        target_settings.provider.llm = LLMProviderName.OPENROUTER
+        target_settings.openrouter.selection_alias = OpenRouterSelectionAlias(alias_value)
+        target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+        target_settings.openrouter.llm_model = OpenRouterLLMModel(openrouter_model)
+        return target_settings
+
+    def _on_founder_letter_connect(self) -> None:
+        target_settings = self._build_founder_letter_target_settings()
+        if target_settings is None:
+            self._show_snackbar(t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)
+            return
+        self._on_request_openrouter_pkce(target_settings, launch_source="letter")
+
+    def _on_founder_letter_contact(self) -> None:
+        webbrowser.open(FOUNDER_CONTACT_URL)
+
+    def show_founder_letter_dialog(self) -> None:
+        dialog = FounderLetterDialog(
+            self.page,
+            on_connect=self._on_founder_letter_connect,
+            on_contact=self._on_founder_letter_contact,
+        )
+        self._founder_letter_dialog = dialog
+        dialog.open()
 
     async def _on_verify_api_key(self, provider: str, key: str) -> tuple[bool, str]:
         success, msg = await self.controller.verify_api_key(provider, key)

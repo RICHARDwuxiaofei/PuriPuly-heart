@@ -104,6 +104,7 @@ def _make_llm_selection_view(
     )
     view._prompt_for_text = SimpleNamespace(value="")
     view._custom_vocab_helper_text = SimpleNamespace(value="")
+    view.on_request_openrouter_pkce = None
     view._prompt_editor.set_provider = lambda provider: setattr(
         view._prompt_editor, "provider", provider
     )
@@ -479,6 +480,7 @@ def test_update_api_visibility_tracks_provider_and_region(monkeypatch: pytest.Mo
 
 
 def test_update_api_visibility_shows_openrouter_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PURIPULY_HEART_OPENROUTER_LEGACY_CONNECT", "1")
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.OPENROUTER
     settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
@@ -745,21 +747,60 @@ def test_on_llm_selected_updates_openrouter_model_and_prompt_state(
     }
     settings.system_prompt = "G"
 
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view = _make_llm_selection_view(monkeypatch, settings)
+    requested: list[AppSettings] = []
+    view.on_request_openrouter_pkce = requested.append
+
     view._on_llm_selected(OpenRouterSelectionAlias.GEMMA4_BYOK.value)
 
-    pending = view.build_provider_apply_settings()
-
     assert settings.provider.llm == LLMProviderName.GEMINI
-    assert pending is not None
-    assert pending.provider.llm == LLMProviderName.OPENROUTER
-    assert pending.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
-    assert pending.openrouter.selected_source == OpenRouterCredentialSource.BYOK
-    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
-    assert view._prompt_editor.value == "O"
+    assert requested[0].provider.llm == LLMProviderName.OPENROUTER
+    assert requested[0].openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    assert requested[0].openrouter.selected_source == OpenRouterCredentialSource.BYOK
+    assert requested[0].openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
+    assert requested[0].system_prompt == "O"
+    assert view._prompt_editor.value == "G"
     assert settings.system_prompt == "G"
-    assert view._openrouter_routing_row.visible is True
+    assert view.has_provider_changes is False
+
+
+def test_on_llm_selected_requests_pkce_for_openrouter_byok_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.system_prompts = {"gemini": "G", "openrouter": "O", "qwen": "Q"}
+    view = _make_llm_selection_view(monkeypatch, settings)
+    requested: list[AppSettings] = []
+    view.on_request_openrouter_pkce = requested.append
+
+    view._on_llm_selected(OpenRouterSelectionAlias.GEMMA4_BYOK.value)
+
+    assert requested[0].provider.llm == LLMProviderName.OPENROUTER
+    assert requested[0].openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
+    assert requested[0].openrouter.selected_source == OpenRouterCredentialSource.BYOK
+    assert view.has_provider_changes is False
+
+
+def test_on_llm_selected_requests_pkce_with_default_openrouter_prompt_when_unsaved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings_view, "load_prompt_for_provider", lambda _provider: "DEFAULT PROMPT"
+    )
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.system_prompts = {"gemini": "G", "qwen": "Q"}
+    settings.system_prompt = "G"
+    view = _make_llm_selection_view(monkeypatch, settings)
+    requested: list[AppSettings] = []
+    view.on_request_openrouter_pkce = requested.append
+
+    view._on_llm_selected(OpenRouterSelectionAlias.GEMMA4_BYOK.value)
+
+    assert requested[0].provider.llm == LLMProviderName.OPENROUTER
+    assert requested[0].system_prompt == "DEFAULT PROMPT"
+    assert requested[0].system_prompts["openrouter"] == "DEFAULT PROMPT"
+    assert view._prompt_editor.value == "G"
 
 
 def test_on_llm_selected_updates_managed_openrouter_label_and_source(
@@ -863,7 +904,7 @@ def test_on_llm_selected_updates_prompt_helper_copy_live_when_mounted(
     ]
 
 
-def test_on_llm_selected_leaving_managed_mode_clears_verified_hardware_hash_fields(
+def test_on_llm_selected_requests_pkce_without_mutating_managed_identity_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -872,17 +913,15 @@ def test_on_llm_selected_leaving_managed_mode_clears_verified_hardware_hash_fiel
     settings.managed_identity.verified_hardware_hash = "hardware-hash"
     settings.managed_identity.verified_hardware_hash_salt_version = 7
 
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view = _make_llm_selection_view(monkeypatch, settings)
+    requested: list[AppSettings] = []
+    view.on_request_openrouter_pkce = requested.append
 
     view._on_llm_selected(OpenRouterSelectionAlias.GEMMA4_BYOK.value)
 
-    pending = view.build_provider_apply_settings()
-
-    assert pending is not None
-    assert pending.openrouter.selected_source == OpenRouterCredentialSource.BYOK
-    assert pending.managed_identity.verified_hardware_hash is None
-    assert pending.managed_identity.verified_hardware_hash_salt_version is None
+    assert requested[0].openrouter.selected_source == OpenRouterCredentialSource.BYOK
+    assert requested[0].managed_identity.verified_hardware_hash == "hardware-hash"
+    assert requested[0].managed_identity.verified_hardware_hash_salt_version == 7
 
 
 def test_on_llm_selected_round_trips_back_to_managed_without_dropping_verified_snapshot(
@@ -1043,6 +1082,7 @@ def test_fallback_card_stays_visible_when_non_openrouter_active(
 def test_update_api_visibility_keeps_openrouter_key_for_openrouter_gemini_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PURIPULY_HEART_OPENROUTER_LEGACY_CONNECT", "1")
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.OPENROUTER
     settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
@@ -1063,6 +1103,7 @@ def test_update_api_visibility_keeps_openrouter_key_for_openrouter_gemini_fallba
 def test_update_api_visibility_keeps_openrouter_key_for_inactive_byok_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PURIPULY_HEART_OPENROUTER_LEGACY_CONNECT", "1")
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.GEMINI
     settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
@@ -1081,6 +1122,7 @@ def test_update_api_visibility_keeps_openrouter_key_for_inactive_byok_fallback(
 def test_update_api_visibility_shows_openrouter_key_for_byok_fallback_when_main_provider_is_gemini(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PURIPULY_HEART_OPENROUTER_LEGACY_CONNECT", "1")
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.GEMINI
     settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
@@ -1092,6 +1134,77 @@ def test_update_api_visibility_shows_openrouter_key_for_byok_fallback_when_main_
 
     assert view._google_key.visible is True
     assert view._openrouter_key.visible is True
+
+
+def test_openrouter_key_field_is_hidden_without_break_glass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PURIPULY_HEART_OPENROUTER_LEGACY_CONNECT", raising=False)
+    view, _store = _make_settings_view(monkeypatch)
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._openrouter_key.visible is False
+
+
+def test_on_llm_selected_requests_pkce_even_when_legacy_openrouter_key_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.system_prompts = {"gemini": "G", "openrouter": "O", "qwen": "Q"}
+    store = DummySecretStore({"openrouter_api_key": "legacy-openrouter-key"})
+    view, _ = _make_settings_view(monkeypatch, store)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    requested: list[AppSettings] = []
+    view.on_request_openrouter_pkce = requested.append
+
+    assert view._openrouter_key.value == "legacy-openrouter-key"
+
+    view._on_llm_selected(OpenRouterSelectionAlias.QWEN35_FLASH_BYOK.value)
+
+    assert requested[0].provider.llm == LLMProviderName.OPENROUTER
+    assert requested[0].openrouter.selection_alias == OpenRouterSelectionAlias.QWEN35_FLASH_BYOK
+
+
+def test_refresh_after_openrouter_pkce_success_preserves_unrelated_drafts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = DummySecretStore({"openrouter_api_key": "pkce-openrouter-key"})
+    initial = AppSettings()
+    initial.provider.llm = LLMProviderName.GEMINI
+    initial.languages.source_language = "ko"
+    initial.system_prompts = {"gemini": "G", "openrouter": "O", "qwen": "Q"}
+    initial.system_prompt = "G"
+
+    view, _ = _make_settings_view(monkeypatch, store)
+    view.load_from_settings(initial, config_path=Path("settings.json"))
+    view._custom_vocab_terms.value = "Puripuly\nVRChat"
+    view._on_custom_vocabulary_terms_change(None)
+    view._google_key.value = "typed-google-draft"
+
+    updated = AppSettings()
+    updated.provider.llm = LLMProviderName.OPENROUTER
+    updated.languages.source_language = "ko"
+    updated.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    updated.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    updated.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    updated.api_key_verified.openrouter = True
+    updated.system_prompts = {"gemini": "G", "openrouter": "O", "qwen": "Q"}
+    updated.system_prompt = "O"
+
+    view.refresh_after_openrouter_pkce_success(updated, config_path=Path("settings.json"))
+
+    assert view._custom_vocab_terms.value == "Puripuly\nVRChat"
+    assert view._google_key.value == "typed-google-draft"
+    assert view._openrouter_key.value == "pkce-openrouter-key"
+    assert view._openrouter_key._current_status == "success"
+    assert view._llm_text.content.value == view._get_llm_display_label(updated)
+    assert view.has_provider_changes is False
+    assert view.has_pending_prompt_changes is False
 
 
 def test_openrouter_fallback_modal_only_lists_none_gemini25_and_qwen35(

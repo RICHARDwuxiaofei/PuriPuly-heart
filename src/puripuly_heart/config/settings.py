@@ -23,7 +23,7 @@ from puripuly_heart.config.llm_profiles import (
 )
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 15
+SETTINGS_SCHEMA_VERSION = 16
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
@@ -460,6 +460,9 @@ class ManagedIdentitySettings:
     release_token_expires_at: str | None = None
     verified_hardware_hash: str | None = None
     verified_hardware_hash_salt_version: int | None = None
+    active_managed_credential_ref: str | None = None
+    active_managed_expires_at: str | None = None
+    founder_letter_seen_credential_ref: str | None = None
 
     def validate(self) -> None:
         if not isinstance(self.installation_id, str):
@@ -479,6 +482,18 @@ class ManagedIdentitySettings:
             and not isinstance(self.verified_hardware_hash_salt_version, int)
         ):
             raise ValueError("managed verified_hardware_hash_salt_version must be an int or None")
+        if self.active_managed_credential_ref is not None and not isinstance(
+            self.active_managed_credential_ref, str
+        ):
+            raise ValueError("managed active_managed_credential_ref must be a string or None")
+        if self.active_managed_expires_at is not None and not isinstance(
+            self.active_managed_expires_at, str
+        ):
+            raise ValueError("managed active_managed_expires_at must be a string or None")
+        if self.founder_letter_seen_credential_ref is not None and not isinstance(
+            self.founder_letter_seen_credential_ref, str
+        ):
+            raise ValueError("managed founder_letter_seen_credential_ref must be a string or None")
 
 
 @dataclass(slots=True)
@@ -681,6 +696,13 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "verified_hardware_hash": settings.managed_identity.verified_hardware_hash,
             "verified_hardware_hash_salt_version": (
                 settings.managed_identity.verified_hardware_hash_salt_version
+            ),
+            "active_managed_credential_ref": (
+                settings.managed_identity.active_managed_credential_ref
+            ),
+            "active_managed_expires_at": settings.managed_identity.active_managed_expires_at,
+            "founder_letter_seen_credential_ref": (
+                settings.managed_identity.founder_letter_seen_credential_ref
             ),
         },
         "system_prompt": settings.system_prompt,
@@ -1364,6 +1386,24 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 15
 
+    if version < 16:
+        managed_identity_data = data.get("managed_identity")
+        if not isinstance(managed_identity_data, dict):
+            managed_identity_data = {}
+            data["managed_identity"] = managed_identity_data
+            changed = True
+
+        for key in (
+            "active_managed_credential_ref",
+            "active_managed_expires_at",
+            "founder_letter_seen_credential_ref",
+        ):
+            if key not in managed_identity_data:
+                managed_identity_data[key] = None
+                changed = True
+
+        version = 16
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -1637,6 +1677,43 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     ):
         managed_identity_data["verified_hardware_hash_salt_version"] = (
             normalized_verified_hardware_hash_salt_version
+        )
+        changed = True
+
+    raw_active_managed_credential_ref = managed_identity_data.get("active_managed_credential_ref")
+    normalized_active_managed_credential_ref = _parse_optional_str(
+        raw_active_managed_credential_ref
+    )
+    if (
+        "active_managed_credential_ref" not in managed_identity_data
+        or raw_active_managed_credential_ref != normalized_active_managed_credential_ref
+    ):
+        managed_identity_data["active_managed_credential_ref"] = (
+            normalized_active_managed_credential_ref
+        )
+        changed = True
+
+    raw_active_managed_expires_at = managed_identity_data.get("active_managed_expires_at")
+    normalized_active_managed_expires_at = _parse_optional_str(raw_active_managed_expires_at)
+    if (
+        "active_managed_expires_at" not in managed_identity_data
+        or raw_active_managed_expires_at != normalized_active_managed_expires_at
+    ):
+        managed_identity_data["active_managed_expires_at"] = normalized_active_managed_expires_at
+        changed = True
+
+    raw_founder_letter_seen_credential_ref = managed_identity_data.get(
+        "founder_letter_seen_credential_ref"
+    )
+    normalized_founder_letter_seen_credential_ref = _parse_optional_str(
+        raw_founder_letter_seen_credential_ref
+    )
+    if (
+        "founder_letter_seen_credential_ref" not in managed_identity_data
+        or raw_founder_letter_seen_credential_ref != normalized_founder_letter_seen_credential_ref
+    ):
+        managed_identity_data["founder_letter_seen_credential_ref"] = (
+            normalized_founder_letter_seen_credential_ref
         )
         changed = True
 
@@ -1919,6 +1996,15 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             ),
             verified_hardware_hash_salt_version=_parse_optional_int(
                 managed_identity_data.get("verified_hardware_hash_salt_version")
+            ),
+            active_managed_credential_ref=_parse_optional_str(
+                managed_identity_data.get("active_managed_credential_ref")
+            ),
+            active_managed_expires_at=_parse_optional_str(
+                managed_identity_data.get("active_managed_expires_at")
+            ),
+            founder_letter_seen_credential_ref=_parse_optional_str(
+                managed_identity_data.get("founder_letter_seen_credential_ref")
             ),
         ),
         system_prompt=legacy_system_prompt,

@@ -27,6 +27,7 @@ from puripuly_heart.core.openrouter_credentials import (
     clear_temporary_managed_release_state,
     resolve_openrouter_credentials,
 )
+from puripuly_heart.core.openrouter_handoff import store_managed_entitlement_snapshot
 from puripuly_heart.core.storage.secrets import SecretStore
 from puripuly_heart.domain.models import Translation
 
@@ -494,6 +495,11 @@ class ManagedOpenRouterReleaseService:
             self.settings,
             secrets=self.secrets,
             openrouter_user_id=issue_response.openrouter_user_id,
+        )
+        store_managed_entitlement_snapshot(
+            self.settings,
+            managed_credential_ref=issue_response.managed_credential_ref,
+            expires_at=issue_response.expires_at,
         )
         clear_temporary_managed_release_state(self.settings)
         self.persist_settings(self.settings)

@@ -21,10 +21,13 @@ from puripuly_heart.app.wiring import (
     create_stt_backend,
     resolve_peer_stt_config,
 )
+from puripuly_heart.config.llm_profiles import profile_for_alias
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
     OpenRouterCredentialSource,
+    OpenRouterLLMModel,
+    OpenRouterSelectionAlias,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
@@ -62,7 +65,16 @@ from puripuly_heart.core.managed_openrouter_release import (
     UnavailableManagedOpenRouterReleaseClient,
     format_managed_openrouter_diagnostics,
 )
-from puripuly_heart.core.openrouter_credentials import resolve_openrouter_credentials
+from puripuly_heart.core.openrouter_credentials import (
+    OPENROUTER_BYOK_API_KEY_SECRET,
+    resolve_openrouter_credentials,
+)
+from puripuly_heart.core.openrouter_handoff import (
+    is_effectively_exhausted,
+    mark_founder_letter_shown,
+    should_auto_show_founder_letter,
+)
+from puripuly_heart.core.openrouter_pkce import OpenRouterPKCEClient
 from puripuly_heart.core.orchestrator.hub import ClientHub
 from puripuly_heart.core.osc.receiver import (
     VRC_OSC_RECEIVER_HOST,
@@ -209,6 +221,11 @@ class GuiController:
         default_factory=dict,
     )
     _managed_trial_pending_auth: bool = field(init=False, default=False)
+    _managed_trial_usage_metadata: OpenRouterKeyMetadata | None = field(init=False, default=None)
+    _managed_trial_usage_metadata_entitlement_ref: str | None = field(
+        init=False,
+        default=None,
+    )
     _translation_toggle_intent_enabled: bool = field(init=False, default=False)
     _translation_toggle_generation: int = field(init=False, default=0)
     _runtime_logging: SessionRuntimeLoggingService | None = field(init=False, default=None)
@@ -349,7 +366,7 @@ class GuiController:
             dash.set_translation_enabled(False)
             dash.set_stt_enabled(False)
             self.hub.translation_enabled = False
-            await self._refresh_managed_trial_usage_state()
+            await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=False)
 
         await self.hub.start(auto_flush_osc=True)
 
@@ -598,6 +615,27 @@ class GuiController:
             )
 
     async def _refresh_managed_trial_usage_state(self) -> None:
+        await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=True)
+
+    def _clear_managed_trial_usage_metadata_cache(self) -> None:
+        self._managed_trial_usage_metadata = None
+        self._managed_trial_usage_metadata_entitlement_ref = None
+
+    def _sync_managed_trial_usage_metadata_scope(self) -> str | None:
+        if self.settings is None:
+            self._clear_managed_trial_usage_metadata_cache()
+            return None
+        entitlement_ref = self.settings.managed_identity.active_managed_credential_ref
+        if entitlement_ref != self._managed_trial_usage_metadata_entitlement_ref:
+            self._managed_trial_usage_metadata = None
+            self._managed_trial_usage_metadata_entitlement_ref = entitlement_ref
+        return entitlement_ref
+
+    async def _refresh_managed_trial_usage_state_impl(
+        self,
+        *,
+        auto_show_founder_letter: bool,
+    ) -> None:
         view_settings = getattr(self.app, "view_settings", None)
         setter = (
             getattr(view_settings, "set_managed_trial_usage_state", None)
@@ -609,11 +647,14 @@ class GuiController:
             or self.settings.provider.llm != LLMProviderName.OPENROUTER
             or self.settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED
         ):
+            self._clear_managed_trial_usage_metadata_cache()
             self._set_managed_trial_pending_auth(False)
             self._set_managed_trial_transient_message(None)
             if callable(setter):
                 setter(visible=False, remaining_percent=None)
             return
+
+        entitlement_ref = self._sync_managed_trial_usage_metadata_scope()
 
         try:
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
@@ -625,14 +666,58 @@ class GuiController:
         api_key = resolution.api_key if resolution is not None else None
         if api_key:
             self._set_managed_trial_pending_auth(False)
-            if callable(setter):
-                usage_metadata = await OpenRouterLLMProvider.fetch_key_metadata(api_key)
+            usage_metadata = await OpenRouterLLMProvider.fetch_key_metadata(api_key)
+
+        self._managed_trial_usage_metadata = usage_metadata
+        self._managed_trial_usage_metadata_entitlement_ref = entitlement_ref
 
         if callable(setter):
             setter(
                 visible=True,
                 remaining_percent=self._managed_trial_remaining_percent(usage_metadata),
             )
+
+        if auto_show_founder_letter and is_effectively_exhausted(usage_metadata):
+            self._disable_translation_for_managed_exhaustion(
+                reopen_founder_letter=should_auto_show_founder_letter(self.settings, usage_metadata)
+            )
+
+    def _show_founder_letter_dialog(self) -> None:
+        if self.settings is None:
+            return
+        show_founder_letter_dialog = getattr(self.app, "show_founder_letter_dialog", None)
+        if not callable(show_founder_letter_dialog):
+            return
+        show_founder_letter_dialog()
+        mark_founder_letter_shown(self.settings)
+        with contextlib.suppress(Exception):
+            self._save_settings()
+
+    def _disable_translation_for_managed_exhaustion(
+        self,
+        *,
+        reopen_founder_letter: bool,
+    ) -> None:
+        self._record_translation_toggle_intent(False)
+        self._set_managed_trial_pending_auth(False)
+        if reopen_founder_letter:
+            self._show_founder_letter_dialog()
+        if self.hub is not None:
+            self.hub.translation_enabled = False
+        dash = getattr(self.app, "view_dashboard", None)
+        if dash is not None:
+            dash.set_translation_enabled(False)
+
+    async def _should_route_managed_trans_to_founder_letter(self) -> bool:
+        if self.settings is None:
+            return False
+        with contextlib.suppress(Exception):
+            await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=False)
+        if not is_effectively_exhausted(self._managed_trial_usage_metadata):
+            return False
+
+        self._disable_translation_for_managed_exhaustion(reopen_founder_letter=True)
+        return True
 
     def _build_llm_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
         return (
@@ -1335,6 +1420,8 @@ class GuiController:
             return True
         if self.settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED:
             return True
+        if await self._should_route_managed_trans_to_founder_letter():
+            return False
         service = self._managed_openrouter_release_service
         if service is None:
             return True
@@ -1371,7 +1458,7 @@ class GuiController:
         if diagnostics_text:
             self.log_basic(f"[ManagedAuth] {diagnostics_text}", level=logging.ERROR)
         self._set_managed_trial_transient_message(result.message_key, dict(result.message_kwargs))
-        await self._refresh_managed_trial_usage_state()
+        await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=False)
         self.hub.translation_enabled = False
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
@@ -2583,6 +2670,76 @@ class GuiController:
         if self.vrc_mic_audio_gate is not None:
             self.vrc_mic_audio_gate.set_receiver_active(False)
 
+    def _create_openrouter_pkce_client(self) -> OpenRouterPKCEClient:
+        return OpenRouterPKCEClient(callback_origin="http://127.0.0.1:43123")
+
+    async def connect_openrouter_via_pkce(
+        self,
+        *,
+        target_settings: AppSettings,
+        launch_source: str,
+    ) -> bool:
+        assert self.settings is not None
+        selection_alias = target_settings.openrouter.selection_alias
+        if selection_alias is None:
+            raise ValueError("PKCE connection requires a BYOK OpenRouter alias")
+
+        profile = profile_for_alias(selection_alias.value)
+        if profile.openrouter_source != OpenRouterCredentialSource.BYOK.value:
+            raise ValueError("PKCE connection requires a BYOK OpenRouter alias")
+        if profile.openrouter_model is None:
+            raise ValueError("PKCE connection requires a BYOK OpenRouter model")
+        previous_settings = copy.deepcopy(self.settings)
+
+        try:
+            result = await self._create_openrouter_pkce_client().run_desktop_flow()
+        except Exception as exc:
+            self._show_short_message("openrouter.pkce.failed")
+            self._log_error(f"OpenRouter PKCE failed: {exc}")
+            if launch_source == "letter":
+                show_founder_letter_dialog = getattr(self.app, "show_founder_letter_dialog", None)
+                if callable(show_founder_letter_dialog):
+                    with contextlib.suppress(Exception):
+                        show_founder_letter_dialog()
+            return False
+
+        try:
+            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+            previous_api_key = secrets.get(OPENROUTER_BYOK_API_KEY_SECRET)
+            secrets.set(OPENROUTER_BYOK_API_KEY_SECRET, result.api_key)
+            updated = copy.deepcopy(target_settings)
+            updated.provider.llm = LLMProviderName.OPENROUTER
+            updated.openrouter.selection_alias = OpenRouterSelectionAlias(profile.alias)
+            updated.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+            updated.openrouter.llm_model = OpenRouterLLMModel(profile.openrouter_model)
+            updated.api_key_verified.openrouter = True
+            try:
+                await self.apply_providers(updated)
+            except Exception:
+                with contextlib.suppress(Exception):
+                    if previous_api_key is None:
+                        secrets.delete(OPENROUTER_BYOK_API_KEY_SECRET)
+                    else:
+                        secrets.set(OPENROUTER_BYOK_API_KEY_SECRET, previous_api_key)
+                try:
+                    await self.apply_providers(previous_settings)
+                except Exception as rollback_exc:
+                    self.settings = previous_settings
+                    with contextlib.suppress(Exception):
+                        self._save_settings()
+                    self._log_error(f"OpenRouter PKCE rollback failed: {rollback_exc}")
+                raise
+        except Exception as exc:
+            self._show_short_message("openrouter.pkce.failed")
+            self._log_error(f"OpenRouter PKCE apply failed: {exc}")
+            if launch_source == "letter":
+                show_founder_letter_dialog = getattr(self.app, "show_founder_letter_dialog", None)
+                if callable(show_founder_letter_dialog):
+                    with contextlib.suppress(Exception):
+                        show_founder_letter_dialog()
+            return False
+        return True
+
     def _save_settings(self) -> None:
         assert self.settings is not None
         try:
@@ -2944,4 +3101,4 @@ class GuiController:
         else:
             dash.set_stt_needs_key(False)
 
-        await self._refresh_managed_trial_usage_state()
+        await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=False)

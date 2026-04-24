@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import logging
+import os
 from pathlib import Path
 from typing import Callable
 
@@ -17,6 +18,7 @@ from puripuly_heart.config.llm_profiles import (
     fallback_profile_for_alias,
     profile_for_alias,
 )
+from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
     MAX_CUSTOM_VOCAB_TERMS,
     AppSettings,
@@ -70,6 +72,7 @@ _CJK_START = 0x3000
 _CENTER_ALIGNMENT = ft.alignment.Alignment(0, 0)
 _CENTER_RIGHT_ALIGNMENT = ft.alignment.Alignment(1, 0)
 _OPENROUTER_MANAGED_OPTION_VALUE = OpenRouterSelectionAlias.GEMMA4_MANAGED.value
+OPENROUTER_LEGACY_CONNECT_ENV = "PURIPULY_HEART_OPENROUTER_LEGACY_CONNECT"
 _SETTINGS_SUBTAB_ORDER = ("api", "general", "prompt", "overlay")
 _OVERLAY_DISTANCE_MIN = 0.5
 _OVERLAY_DISTANCE_MAX = 2.0
@@ -160,6 +163,7 @@ class SettingsView(ft.Column):
         self.on_settings_changed: Callable[[AppSettings], None] | None = None
         self.on_prompt_apply_settings: Callable[[AppSettings], None] | None = None
         self.on_providers_changed: Callable[[], None] | None = None
+        self.on_request_openrouter_pkce: Callable[[AppSettings], None] | None = None
         self.on_verify_api_key: Callable[[str, str], object] | None = None
         self.on_secret_cleared: Callable[[str], None] | None = None  # key name
         self.on_overlay_calibration_begin: Callable[[], OverlayCalibration] | None = None
@@ -1564,6 +1568,14 @@ class SettingsView(ft.Column):
     def _active_prompt_key(self) -> str:
         return self._active_prompt_key_for_settings(self._build_settings_with_provider_draft())
 
+    def _ensure_provider_prompt_value(self, settings: AppSettings, provider_name: str) -> str:
+        prompt = settings.system_prompts.get(provider_name, "").strip()
+        if prompt:
+            return prompt
+        prompt = load_prompt_for_provider(provider_name)
+        settings.system_prompts[provider_name] = prompt
+        return prompt
+
     def _current_source_language(self) -> str:
         if not self._settings:
             return "en"
@@ -1849,6 +1861,54 @@ class SettingsView(ft.Column):
         if self.page:
             self.update()
 
+    def refresh_after_openrouter_pkce_success(
+        self,
+        settings: AppSettings,
+        *,
+        config_path: Path,
+    ) -> None:
+        self._settings = settings
+        self._provider_settings_draft = None
+        self._config_path = config_path
+        self.has_provider_changes = False
+        self.has_pending_prompt_changes = False
+
+        self._set_unit_card_value_text(
+            self._llm_text,
+            self._get_llm_display_label(settings),
+        )
+        self._set_openrouter_routing_text(
+            self._get_openrouter_routing_display_label(settings),
+        )
+        self._sync_openrouter_fallback_card(settings)
+        self._update_api_visibility()
+
+        provider_name = self._active_prompt_key()
+        self._prompt_editor.set_provider(provider_name)
+        stored_prompt = settings.system_prompts.get(provider_name, "").strip()
+        if stored_prompt:
+            self._prompt_editor.value = stored_prompt
+            settings.system_prompt = stored_prompt
+        elif settings.system_prompt.strip():
+            self._prompt_editor.value = settings.system_prompt
+            settings.system_prompts[provider_name] = settings.system_prompt
+        else:
+            self._prompt_editor.load_default_prompt(emit_change=False)
+            settings.system_prompt = self._prompt_editor.value
+            settings.system_prompts[provider_name] = settings.system_prompt
+        self._sync_prompt_tab_copy()
+
+        try:
+            store = create_secret_store(settings.secrets, config_path=config_path)
+        except Exception as exc:
+            self._emit_runtime_basic(f"Failed to load secrets: {exc}", level=logging.WARNING)
+        else:
+            self._openrouter_key.value = store.get("openrouter_api_key") or ""
+            self._restore_api_key_icons(settings)
+
+        if self.page:
+            self.update()
+
     def _load_secrets(self, settings: AppSettings, config_path: Path) -> None:
         """Load secret values into fields."""
         try:
@@ -1921,6 +1981,9 @@ class SettingsView(ft.Column):
             else None
         )
 
+    def _legacy_openrouter_connect_enabled(self) -> bool:
+        return os.getenv(OPENROUTER_LEGACY_CONNECT_ENV, "").strip() == "1"
+
     def _update_api_visibility(self) -> None:
         """Update API key field visibility based on selected providers."""
         settings = self._build_settings_with_provider_draft()
@@ -1937,10 +2000,13 @@ class SettingsView(ft.Column):
 
         self._google_key.visible = llm == LLMProviderName.GEMINI
         self._sync_managed_trial_usage_bar()
-        self._openrouter_key.visible = (
-            llm == LLMProviderName.OPENROUTER
-            and settings.openrouter.selected_source == OpenRouterCredentialSource.BYOK
-        ) or fallback_source == OpenRouterCredentialSource.BYOK
+        self._openrouter_key.visible = self._legacy_openrouter_connect_enabled() and (
+            (
+                llm == LLMProviderName.OPENROUTER
+                and settings.openrouter.selected_source == OpenRouterCredentialSource.BYOK
+            )
+            or fallback_source == OpenRouterCredentialSource.BYOK
+        )
         self._openrouter_routing_row.visible = True
         self._sync_openrouter_fallback_card(settings)
 
@@ -2171,6 +2237,20 @@ class SettingsView(ft.Column):
             openrouter_selected_source = OpenRouterCredentialSource(
                 openrouter_profile.openrouter_source
             )
+        elif openrouter_profile is not None and (
+            openrouter_profile.openrouter_source == OpenRouterCredentialSource.BYOK.value
+        ):
+            pending = copy.deepcopy(self._build_settings_with_provider_draft())
+            assert pending is not None
+            pending.provider.llm = LLMProviderName.OPENROUTER
+            pending.openrouter.selection_alias = OpenRouterSelectionAlias(openrouter_profile.alias)
+            pending.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+            pending.openrouter.llm_model = OpenRouterLLMModel(openrouter_profile.openrouter_model)
+            provider_name = "openrouter"
+            pending.system_prompt = self._ensure_provider_prompt_value(pending, provider_name)
+            if self.on_request_openrouter_pkce is not None:
+                self.on_request_openrouter_pkce(pending)
+            return
         elif openrouter_profile is not None:
             provider = LLMProviderName.OPENROUTER
             gemini_model = old_gemini_model
@@ -2274,13 +2354,8 @@ class SettingsView(ft.Column):
         if old_provider != provider:
             provider_name = self._active_prompt_key()
             self._prompt_editor.set_provider(provider_name)
-            next_prompt = draft.system_prompts.get(provider_name, "").strip()
-            if next_prompt:
-                self._prompt_editor.value = next_prompt
-            else:
-                self._prompt_editor.load_default_prompt(emit_change=False)
-                next_prompt = self._prompt_editor.value
-                draft.system_prompts[provider_name] = next_prompt
+            next_prompt = self._ensure_provider_prompt_value(draft, provider_name)
+            self._prompt_editor.value = next_prompt
             draft.system_prompt = next_prompt
         self._sync_prompt_tab_copy()
 

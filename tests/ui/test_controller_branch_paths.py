@@ -18,6 +18,7 @@ from puripuly_heart.config.settings import (
     LLMProviderName,
     OpenRouterCredentialSource,
     OpenRouterFallbackSelectionAlias,
+    OpenRouterLLMModel,
     OpenRouterRoutingMode,
     OpenRouterSelectionAlias,
     QwenLLMModel,
@@ -36,6 +37,7 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseService,
     UnavailableManagedOpenRouterReleaseClient,
 )
+from puripuly_heart.core.openrouter_pkce import OpenRouterPKCEExchangeResult
 from puripuly_heart.core.osc.receiver import VrcMicState
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
 from puripuly_heart.core.overlay.sink import (
@@ -58,6 +60,7 @@ class DummySecrets:
     def __init__(self, values: dict[str, str]):
         self._values = dict(values)
         self.set_calls: list[tuple[str, str]] = []
+        self.delete_calls: list[str] = []
 
     def get(self, key: str) -> str | None:
         return self._values.get(key)
@@ -65,6 +68,10 @@ class DummySecrets:
     def set(self, key: str, value: str) -> None:
         self.set_calls.append((key, value))
         self._values[key] = value
+
+    def delete(self, key: str) -> None:
+        self.delete_calls.append(key)
+        self._values.pop(key, None)
 
 
 class DummyDashboard:
@@ -925,6 +932,81 @@ async def test_set_translation_enabled_rebuild_path_keeps_success_when_managed_u
         logging.INFO,
         "[Translation] Enabled with provider: openrouter",
     ) in controller._runtime_logging.basic_messages
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_rebuild_path_turns_translation_back_off_when_refresh_discovers_exhaustion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shown: list[str] = []
+    dash = DummyDashboard()
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=dash,
+            view_settings=settings_view,
+            show_founder_letter_dialog=lambda: shown.append("shown"),
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.managed_identity.active_managed_credential_ref = "hash_123"
+    controller.hub = DummyHub(llm=None)
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+            pending_issue=False,
+        )
+    )
+
+    metadata_responses = [
+        controller_module.OpenRouterKeyMetadata(
+            limit_usd=0.08,
+            remaining_usd=0.05,
+            usage_usd=0.03,
+        ),
+        controller_module.OpenRouterKeyMetadata(
+            limit_usd=0.08,
+            remaining_usd=0.0007,
+            usage_usd=0.0793,
+        ),
+    ]
+
+    async def fake_fetch_key_metadata(_api_key: str):
+        return metadata_responses.pop(0)
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_a, **_k: DummySecrets({"openrouter_managed_api_key": "managed-key"}),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_create_managed_openrouter_release_service",
+        lambda self, *, secrets: None,
+    )
+    monkeypatch.setattr(controller_module, "create_llm_provider", lambda *_a, **_k: object())
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fake_fetch_key_metadata),
+    )
+
+    await controller.set_translation_enabled(True)
+
+    assert shown == ["shown"]
+    assert controller.hub.llm is not None
+    assert controller.hub.translation_enabled is False
+    assert controller.hub.clear_context_calls == 0
+    assert dash.translation_enabled is False
+    assert settings_view.managed_trial_usage_state == {
+        "visible": True,
+        "remaining_percent": 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -3450,6 +3532,73 @@ async def test_start_keeps_managed_openrouter_dashboard_toggle_available_without
 
 
 @pytest.mark.asyncio
+async def test_exhausted_managed_start_and_background_verify_do_not_auto_show_founder_letter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.ui.overlay_enabled = False
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.managed_identity.active_managed_credential_ref = "hash_123"
+
+    shown: list[str] = []
+    dash = DummyDashboard()
+    logs = DummyLogsView()
+    settings_view = DummySettingsView()
+    hub = DummyHub(llm=object(), stt=object())
+
+    async def fake_init_pipeline(self) -> None:
+        self.hub = hub
+
+    monkeypatch.setattr(GuiController, "_load_or_init_settings", lambda self, path: settings)
+    monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+    monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({"openrouter_managed_api_key": "managed-key"}),
+    )
+
+    async def fake_fetch_key_metadata(_api_key: str):
+        return controller_module.OpenRouterKeyMetadata(
+            limit_usd=0.08,
+            remaining_usd=0.0007,
+            usage_usd=0.0793,
+        )
+
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fake_fetch_key_metadata),
+    )
+
+    class FakeBridge:
+        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
+            _ = (app, event_queue, runtime_logging)
+
+        async def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
+
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=dash,
+            view_logs=logs,
+            view_settings=settings_view,
+            show_founder_letter_dialog=lambda: shown.append("shown"),
+        )
+    )
+
+    await controller.start()
+    await asyncio.sleep(0)
+    await controller._verify_and_update_status()
+
+    assert shown == []
+
+
+@pytest.mark.asyncio
 async def test_refresh_managed_trial_usage_state_uses_settings_view_live_openrouter_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3651,6 +3800,218 @@ async def test_refresh_managed_trial_usage_state_marks_usage_unavailable_when_li
         "remaining_percent": None,
     }
     assert dash.managed_trial_calls == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_managed_trial_usage_state_auto_shows_founder_letter_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shown: list[str] = []
+    dash = DummyDashboard()
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=dash,
+            view_settings=settings_view,
+            show_founder_letter_dialog=lambda: shown.append("shown"),
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller.settings.managed_identity.active_managed_credential_ref = "hash_123"
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_a, **_k: DummySecrets({"openrouter_managed_api_key": "managed-key"}),
+    )
+
+    async def fake_fetch_key_metadata(_api_key: str):
+        return controller_module.OpenRouterKeyMetadata(
+            limit_usd=0.08,
+            remaining_usd=0.0007,
+            usage_usd=0.0793,
+        )
+
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fake_fetch_key_metadata),
+    )
+
+    await controller._refresh_managed_trial_usage_state()
+    await controller._refresh_managed_trial_usage_state()
+
+    assert shown == ["shown"]
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_reopens_founder_letter_on_exhausted_managed_trans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shown: list[str] = []
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=DummyDashboard(),
+            view_settings=DummySettingsView(),
+            show_founder_letter_dialog=lambda: shown.append("shown"),
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_a, **_k: DummySecrets({"openrouter_managed_api_key": "managed-key"}),
+    )
+
+    async def fake_fetch_key_metadata(_api_key: str):
+        return controller_module.OpenRouterKeyMetadata(
+            limit_usd=0.08,
+            remaining_usd=0.0007,
+            usage_usd=0.0793,
+        )
+
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fake_fetch_key_metadata),
+    )
+
+    await controller.set_translation_enabled(True)
+
+    assert shown == ["shown"]
+    assert controller.hub.translation_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_exhausted_managed_does_not_prepare_release_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=DummyDashboard(),
+            view_settings=DummySettingsView(),
+            show_founder_letter_dialog=lambda: None,
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_a, **_k: DummySecrets({"openrouter_managed_api_key": "managed-key"}),
+    )
+
+    class DummyService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def prepare_for_translation(self):
+            self.calls += 1
+            return ManagedOpenRouterReleaseResult(
+                behavior=ManagedOpenRouterReleaseBehavior.READY,
+                message_key="managed_release.ready",
+                api_key="managed-key",
+                local_key_available=True,
+            )
+
+    service = DummyService()
+    controller._managed_openrouter_release_service = service
+
+    async def fake_fetch_key_metadata(_api_key: str):
+        return controller_module.OpenRouterKeyMetadata(
+            limit_usd=0.08,
+            remaining_usd=0.0007,
+            usage_usd=0.0793,
+        )
+
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fake_fetch_key_metadata),
+    )
+
+    await controller.set_translation_enabled(True)
+
+    assert service.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_set_translation_enabled_does_not_route_stale_exhausted_metadata_across_entitlements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shown: list[str] = []
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=DummyDashboard(),
+            view_settings=DummySettingsView(),
+            show_founder_letter_dialog=lambda: shown.append("shown"),
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller.settings.managed_identity.active_managed_credential_ref = "hash_old"
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_a, **_k: DummySecrets({"openrouter_managed_api_key": "managed-key"}),
+    )
+
+    metadata_calls = 0
+
+    async def fake_fetch_key_metadata(_api_key: str):
+        nonlocal metadata_calls
+        metadata_calls += 1
+        if metadata_calls == 1:
+            return controller_module.OpenRouterKeyMetadata(
+                limit_usd=0.08,
+                remaining_usd=0.0007,
+                usage_usd=0.0793,
+            )
+        raise RuntimeError("metadata boom")
+
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fake_fetch_key_metadata),
+    )
+
+    await controller._refresh_managed_trial_usage_state()
+    assert shown == ["shown"]
+
+    shown.clear()
+    controller.settings.managed_identity.active_managed_credential_ref = "hash_new"
+
+    class DummyService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def prepare_for_translation(self):
+            self.calls += 1
+            return ManagedOpenRouterReleaseResult(
+                behavior=ManagedOpenRouterReleaseBehavior.READY,
+                message_key="managed_release.ready",
+                api_key="managed-key",
+                local_key_available=True,
+            )
+
+    service = DummyService()
+    controller._managed_openrouter_release_service = service
+    monkeypatch.setattr(GuiController, "_schedule_managed_trial_usage_refresh", lambda self: None)
+
+    await controller.set_translation_enabled(True)
+
+    assert shown == []
+    assert service.calls == 1
+    assert controller.hub.translation_enabled is True
 
 
 @pytest.mark.asyncio
@@ -4616,6 +4977,177 @@ async def test_verify_api_key_routes_alibaba_singapore_to_qwen_fallback(
 
     assert outcome == (True, "Verification successful")
     assert calls == [("secret", "https://dashscope-intl.aliyuncs.com/api/v1")]
+
+
+@pytest.mark.asyncio
+async def test_connect_openrouter_via_pkce_stores_key_sets_alias_and_marks_verified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=DummySettingsView())
+    )
+    controller.settings = AppSettings()
+    target_settings = copy.deepcopy(controller.settings)
+    target_settings.provider.llm = LLMProviderName.OPENROUTER
+    target_settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    target_settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    store = DummySecrets({"openrouter_api_key": "legacy-key"})
+
+    class DummyPKCEClient:
+        async def run_desktop_flow(self) -> OpenRouterPKCEExchangeResult:
+            return OpenRouterPKCEExchangeResult(api_key="sk-or-v1-user", user_id="user_123")
+
+    monkeypatch.setattr(
+        GuiController,
+        "_create_openrouter_pkce_client",
+        lambda self: DummyPKCEClient(),
+    )
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: store)
+    applied: list[AppSettings] = []
+
+    async def fake_apply_providers(self, settings: AppSettings | None = None) -> None:
+        _ = self
+        assert settings is not None
+        applied.append(copy.deepcopy(settings))
+
+    monkeypatch.setattr(GuiController, "apply_providers", fake_apply_providers)
+
+    ok = await controller.connect_openrouter_via_pkce(
+        target_settings=target_settings,
+        launch_source="settings",
+    )
+
+    assert ok is True
+    assert store.set_calls[-1] == ("openrouter_api_key", "sk-or-v1-user")
+    assert applied[-1].openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
+    assert applied[-1].openrouter.selected_source == OpenRouterCredentialSource.BYOK
+    assert applied[-1].api_key_verified.openrouter is True
+
+
+@pytest.mark.asyncio
+async def test_connect_openrouter_via_pkce_leaves_settings_unchanged_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=DummySettingsView())
+    )
+    controller.settings = AppSettings()
+    controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_MANAGED
+    target_settings = copy.deepcopy(controller.settings)
+    target_settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    target_settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    store = DummySecrets({})
+
+    class DummyPKCEClient:
+        async def run_desktop_flow(self) -> OpenRouterPKCEExchangeResult:
+            raise RuntimeError("browser failed")
+
+    monkeypatch.setattr(
+        GuiController,
+        "_create_openrouter_pkce_client",
+        lambda self: DummyPKCEClient(),
+    )
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: store)
+
+    ok = await controller.connect_openrouter_via_pkce(
+        target_settings=target_settings,
+        launch_source="settings",
+    )
+
+    assert ok is False
+    assert controller.settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
+    assert store.set_calls == []
+
+
+@pytest.mark.asyncio
+async def test_connect_openrouter_via_pkce_reopens_letter_context_on_letter_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shown: list[str] = []
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=DummyDashboard(),
+            view_settings=DummySettingsView(),
+            show_founder_letter_dialog=lambda: shown.append("shown"),
+        )
+    )
+    controller.settings = AppSettings()
+    target_settings = copy.deepcopy(controller.settings)
+    target_settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    target_settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+
+    class DummyPKCEClient:
+        async def run_desktop_flow(self) -> OpenRouterPKCEExchangeResult:
+            raise RuntimeError("browser failed")
+
+    monkeypatch.setattr(
+        GuiController,
+        "_create_openrouter_pkce_client",
+        lambda self: DummyPKCEClient(),
+    )
+
+    ok = await controller.connect_openrouter_via_pkce(
+        target_settings=target_settings,
+        launch_source="letter",
+    )
+
+    assert ok is False
+    assert shown == ["shown"]
+
+
+@pytest.mark.asyncio
+async def test_connect_openrouter_via_pkce_rolls_back_secret_and_settings_on_apply_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=DummySettingsView())
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_MANAGED
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    previous_settings = copy.deepcopy(controller.settings)
+    target_settings = copy.deepcopy(controller.settings)
+    target_settings.provider.llm = LLMProviderName.OPENROUTER
+    target_settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
+    target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    target_settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    store = DummySecrets({"openrouter_api_key": "legacy-key"})
+
+    class DummyPKCEClient:
+        async def run_desktop_flow(self) -> OpenRouterPKCEExchangeResult:
+            return OpenRouterPKCEExchangeResult(api_key="sk-or-v1-user", user_id="user_123")
+
+    monkeypatch.setattr(
+        GuiController,
+        "_create_openrouter_pkce_client",
+        lambda self: DummyPKCEClient(),
+    )
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: store)
+
+    async def fake_apply_providers(self, settings: AppSettings | None = None) -> None:
+        assert settings is not None
+        self.settings = copy.deepcopy(settings)
+        raise RuntimeError("apply failed after mutation")
+
+    monkeypatch.setattr(GuiController, "apply_providers", fake_apply_providers)
+
+    ok = await controller.connect_openrouter_via_pkce(
+        target_settings=target_settings,
+        launch_source="settings",
+    )
+
+    assert ok is False
+    assert controller.settings == previous_settings
+    assert store.get("openrouter_api_key") == "legacy-key"
+    assert store.set_calls == [
+        ("openrouter_api_key", "sk-or-v1-user"),
+        ("openrouter_api_key", "legacy-key"),
+    ]
+    assert store.delete_calls == []
 
 
 def test_merge_settings_tab_apply_with_current_languages_preserves_all_language_fields() -> None:

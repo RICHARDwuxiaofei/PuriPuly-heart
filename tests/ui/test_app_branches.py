@@ -10,7 +10,13 @@ pytest.importorskip("flet")
 import flet as ft
 
 import puripuly_heart.ui.app as app_module
-from puripuly_heart.config.settings import AppSettings
+from puripuly_heart.config.settings import (
+    AppSettings,
+    LLMProviderName,
+    OpenRouterCredentialSource,
+    OpenRouterLLMModel,
+    OpenRouterSelectionAlias,
+)
 from puripuly_heart.ui.app import TranslatorApp, _check_and_notify_update
 
 
@@ -125,6 +131,7 @@ class ConstructionDummySettingsView(ft.Container):
         self.on_settings_changed = None
         self.on_prompt_apply_settings = None
         self.on_providers_changed = None
+        self.on_request_openrouter_pkce = None
         self.on_verify_api_key = None
         self.on_secret_cleared = None
         self.show_snackbar = None
@@ -293,6 +300,14 @@ def test_translator_app_wires_runtime_log_detailed_into_dashboard_visual_commit_
     app = TranslatorApp(DummyPage(), config_path=Path("settings.json"))
 
     assert app.view_dashboard.runtime_log_detailed == app._log_detailed
+
+
+def test_settings_view_pkce_callback_is_wired(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_app_construction(monkeypatch)
+
+    app = TranslatorApp(DummyPage(), config_path=Path("settings.json"))
+
+    assert app.view_settings.on_request_openrouter_pkce == app._on_request_openrouter_pkce
 
 
 def test_translator_app_4x3_window_keeps_shell_navigation_usable(
@@ -605,6 +620,97 @@ async def test_on_settings_changed_applies_raw_settings_without_prompt_merge() -
     assert len(app.page.tasks) == 1
     await app.page.tasks[0]()
     assert seen == [raw_settings]
+
+
+def test_on_request_openrouter_pkce_uses_settings_mutation_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_app_construction(monkeypatch)
+    app = TranslatorApp(DummyPage(), config_path=Path("settings.json"))
+    target_settings = AppSettings()
+    queued: list[object] = []
+    monkeypatch.setattr(app, "_queue_settings_mutation_task", queued.append)
+
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+
+    assert len(queued) == 1
+
+
+@pytest.mark.asyncio
+async def test_on_request_openrouter_pkce_uses_draft_preserving_refresh_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    target_settings = AppSettings()
+    updated_settings = AppSettings()
+    pkce_calls: list[tuple[AppSettings, str]] = []
+    refresh_calls: list[tuple[AppSettings, Path]] = []
+
+    async def fake_connect_openrouter_via_pkce(
+        *, target_settings: AppSettings, launch_source: str
+    ) -> bool:
+        pkce_calls.append((target_settings, launch_source))
+        return True
+
+    app.controller = SimpleNamespace(
+        connect_openrouter_via_pkce=fake_connect_openrouter_via_pkce,
+        settings=updated_settings,
+        config_path=Path("settings.json"),
+    )
+    app.view_settings = SimpleNamespace(
+        refresh_after_openrouter_pkce_success=lambda settings, *, config_path: refresh_calls.append(
+            (settings, config_path)
+        ),
+        load_from_settings=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("full load_from_settings refresh should not run on PKCE success")
+        ),
+    )
+    queued: list[object] = []
+    monkeypatch.setattr(app, "_queue_settings_mutation_task", queued.append)
+
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+
+    assert len(queued) == 1
+    await queued[0]()
+    assert pkce_calls == [(target_settings, "settings")]
+    assert refresh_calls == [(updated_settings, Path("settings.json"))]
+
+
+@pytest.mark.asyncio
+async def test_on_request_openrouter_pkce_does_not_refresh_settings_view_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    target_settings = AppSettings()
+    refresh_calls: list[tuple[AppSettings, Path]] = []
+
+    async def fake_connect_openrouter_via_pkce(
+        *, target_settings: AppSettings, launch_source: str
+    ) -> bool:
+        _ = (target_settings, launch_source)
+        return False
+
+    app.controller = SimpleNamespace(
+        connect_openrouter_via_pkce=fake_connect_openrouter_via_pkce,
+        settings=AppSettings(),
+        config_path=Path("settings.json"),
+    )
+    app.view_settings = SimpleNamespace(
+        refresh_after_openrouter_pkce_success=lambda settings, *, config_path: refresh_calls.append(
+            (settings, config_path)
+        ),
+        load_from_settings=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("full load_from_settings refresh should not run on PKCE failure")
+        ),
+    )
+    queued: list[object] = []
+    monkeypatch.setattr(app, "_queue_settings_mutation_task", queued.append)
+
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+
+    assert len(queued) == 1
+    await queued[0]()
+    assert refresh_calls == []
 
 
 @pytest.mark.asyncio
@@ -1011,6 +1117,95 @@ def test_show_snackbar_opens_page_snackbar() -> None:
     assert len(app.page.opened) == 1
     snackbar = app.page.opened[0]
     assert snackbar.duration == 1234
+
+
+def test_show_founder_letter_dialog_routes_connect_and_contact_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    settings.openrouter.llm_model = OpenRouterLLMModel.QWEN_35_FLASH_02_23
+    app.controller = SimpleNamespace(settings=settings)
+
+    captured: dict[str, object] = {}
+    pkce_calls: list[tuple[AppSettings, str]] = []
+    opened_urls: list[str] = []
+
+    class FakeFounderLetterDialog:
+        def __init__(self, page, *, on_connect, on_contact):
+            captured["page"] = page
+            captured["on_connect"] = on_connect
+            captured["on_contact"] = on_contact
+
+        def open(self) -> None:
+            captured["opened"] = True
+
+    monkeypatch.setattr(app_module, "FounderLetterDialog", FakeFounderLetterDialog)
+    monkeypatch.setattr(app_module.webbrowser, "open", lambda url: opened_urls.append(url))
+    monkeypatch.setattr(
+        app,
+        "_on_request_openrouter_pkce",
+        lambda target_settings, *, launch_source="settings": pkce_calls.append(
+            (target_settings, launch_source)
+        ),
+    )
+
+    app.show_founder_letter_dialog()
+
+    assert captured["page"] is app.page
+    assert captured["opened"] is True
+
+    captured["on_connect"]()
+    captured["on_contact"]()
+
+    assert pkce_calls[0][1] == "letter"
+    assert pkce_calls[0][0].openrouter.selected_source == OpenRouterCredentialSource.BYOK
+    assert pkce_calls[0][0].openrouter.selection_alias == OpenRouterSelectionAlias.QWEN35_FLASH_BYOK
+    assert opened_urls == ["https://x.com/kapitalismho"]
+
+
+def test_show_founder_letter_dialog_derives_byok_alias_from_managed_model_when_alias_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.openrouter.selection_alias = None
+    settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    app.controller = SimpleNamespace(settings=settings)
+
+    captured: dict[str, object] = {}
+    pkce_calls: list[tuple[AppSettings, str]] = []
+
+    class FakeFounderLetterDialog:
+        def __init__(self, _page, *, on_connect, on_contact):
+            captured["on_connect"] = on_connect
+            captured["on_contact"] = on_contact
+
+        def open(self) -> None:
+            captured["opened"] = True
+
+    monkeypatch.setattr(app_module, "FounderLetterDialog", FakeFounderLetterDialog)
+    monkeypatch.setattr(
+        app,
+        "_on_request_openrouter_pkce",
+        lambda target_settings, *, launch_source="settings": pkce_calls.append(
+            (target_settings, launch_source)
+        ),
+    )
+
+    app.show_founder_letter_dialog()
+    captured["on_connect"]()
+
+    assert captured["opened"] is True
+    assert pkce_calls[0][1] == "letter"
+    assert pkce_calls[0][0].openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
 
 
 @pytest.mark.asyncio

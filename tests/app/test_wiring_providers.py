@@ -232,6 +232,28 @@ def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
     assert provider.semaphore._value == 4  # type: ignore[attr-defined]
 
 
+def test_create_llm_provider_openrouter_byok_still_uses_user_owned_secret_after_pkce_storage() -> (
+    None
+):
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.BYOK,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "pkce-user-key")
+    secrets.set("openrouter_managed_api_key", "managed-key")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, OpenRouterLLMProvider)
+    assert provider.inner.api_key == "pkce-user-key"
+
+
 def test_create_llm_provider_openrouter_passes_runtime_logging() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),

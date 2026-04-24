@@ -245,6 +245,32 @@ async def test_prepare_for_translation_runs_challenge_verify_issue_and_persists_
 
 
 @pytest.mark.asyncio
+async def test_prepare_for_translation_persists_managed_entitlement_snapshot() -> None:
+    client = FakeManagedReleaseClient(
+        challenge_result=ManagedOpenRouterChallengeSuccess(
+            challenge="challenge-1",
+            challenge_expires_at="2026-04-08T06:05:00.000Z",
+            fingerprint_salt=_make_fingerprint_salt(),
+        ),
+        verify_result=ManagedOpenRouterVerifySuccess(
+            release_token="release-token-1",
+            release_token_expires_at="2026-04-08T06:15:00.000Z",
+        ),
+        issue_result=ManagedOpenRouterIssueSuccess(
+            openrouter_api_key="managed-key",
+            managed_credential_ref="hash_abc123",
+            expires_at="2026-10-17T12:34:56Z",
+        ),
+    )
+    service, settings, _secrets = _make_service(client=client)
+
+    await service.prepare_for_translation()
+
+    assert settings.managed_identity.active_managed_credential_ref == "hash_abc123"
+    assert settings.managed_identity.active_managed_expires_at == "2026-10-17T12:34:56Z"
+
+
+@pytest.mark.asyncio
 async def test_issue_persists_managed_user_identifier_after_managed_key_success() -> None:
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
