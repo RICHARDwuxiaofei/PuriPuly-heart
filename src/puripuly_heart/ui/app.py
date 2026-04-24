@@ -19,6 +19,7 @@ from puripuly_heart.config.settings import (
 from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.core.updater import check_for_update
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
+from puripuly_heart.ui.components.debug_preview_panel import DebugPreviewPanel
 from puripuly_heart.ui.components.founder_letter_dialog import FounderLetterDialog
 from puripuly_heart.ui.components.title_bar import TitleBar
 from puripuly_heart.ui.controller import GuiController
@@ -50,12 +51,14 @@ FOUNDER_CONTACT_URL = "https://x.com/kapitalismho"
 
 
 class TranslatorApp:
-    def __init__(self, page: ft.Page, *, config_path):
+    def __init__(self, page: ft.Page, *, config_path, debug_ui_preview: bool = False):
         self.page = page
         self.controller = GuiController(page=page, app=self, config_path=config_path)
         self.overlay_state = "off"
         self.overlay_failure_reason: str | None = None
         self.overlay_peer_contract = None
+        self.debug_ui_preview = bool(debug_ui_preview)
+        self.debug_preview_panel: DebugPreviewPanel | None = None
         self._setup_page()
         self._build_layout()
 
@@ -148,7 +151,96 @@ class TranslatorApp:
             spacing=0,
         )
 
-        self.page.add(ft.Container(content=self.layout, expand=True, padding=0))
+        root_content = ft.Container(content=self.layout, expand=True, padding=0)
+        if self.debug_ui_preview:
+            self.debug_preview_panel = self._build_debug_preview_panel()
+            self.page.add(
+                ft.Container(
+                    content=ft.Stack(
+                        controls=[root_content, self.debug_preview_panel],
+                        fit=ft.StackFit.EXPAND,
+                        expand=True,
+                    ),
+                    expand=True,
+                    padding=0,
+                )
+            )
+        else:
+            self.page.add(root_content)
+
+    def _build_debug_preview_panel(self) -> DebugPreviewPanel:
+        return DebugPreviewPanel(
+            on_managed_normal=self._preview_managed_normal,
+            on_managed_exhausted=self._preview_managed_exhausted,
+            on_brake_notice=self._preview_brake_notice,
+            on_revoked_notice=self._preview_revoked_notice,
+            on_founder_letter=self._preview_founder_letter,
+            on_pkce_failure=self._preview_pkce_failure,
+            on_clear=self._preview_clear,
+        )
+
+    def _set_debug_managed_trial_preview(
+        self,
+        *,
+        visible: bool,
+        remaining_percent: int | None,
+        transient_message_key: str | None = None,
+    ) -> None:
+        self.view_dashboard.set_managed_trial_state(
+            visible=visible,
+            remaining_percent=remaining_percent,
+            transient_message_key=transient_message_key,
+        )
+
+    def _preview_managed_normal(self) -> None:
+        self._set_debug_managed_trial_preview(
+            visible=True,
+            remaining_percent=62,
+            transient_message_key=None,
+        )
+
+    def _preview_managed_exhausted(self) -> None:
+        self._set_debug_managed_trial_preview(
+            visible=True,
+            remaining_percent=0,
+            transient_message_key=None,
+        )
+
+    def _preview_brake_notice(self) -> None:
+        self._set_debug_managed_trial_preview(
+            visible=True,
+            remaining_percent=62,
+            transient_message_key="managed_release.brake",
+        )
+
+    def _preview_revoked_notice(self) -> None:
+        self._set_debug_managed_trial_preview(
+            visible=True,
+            remaining_percent=62,
+            transient_message_key="managed_release.revoked_contact",
+        )
+
+    def _debug_preview_noop(self) -> None:
+        return None
+
+    def _preview_founder_letter(self) -> None:
+        dialog = FounderLetterDialog(
+            self.page,
+            on_connect=self._debug_preview_noop,
+            on_contact=self._debug_preview_noop,
+        )
+        self._founder_letter_dialog = dialog
+        dialog.open()
+
+    def _preview_pkce_failure(self) -> None:
+        self._show_snackbar(t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)
+
+    def _preview_clear(self) -> None:
+        self._set_debug_managed_trial_preview(
+            visible=False,
+            remaining_percent=None,
+            transient_message_key=None,
+        )
 
     def _close_open_dialog_for_navigation(self) -> None:
         dialog = getattr(self.page, "dialog", None)
@@ -249,6 +341,10 @@ class TranslatorApp:
         self.view_settings.apply_locale()
         self.refresh_overlay_peer_contract()
         self.view_logs.apply_locale()
+        debug_preview_panel = getattr(self, "debug_preview_panel", None)
+        apply_debug_locale = getattr(debug_preview_panel, "apply_locale", None)
+        if callable(apply_debug_locale):
+            apply_debug_locale()
         self.page.update()
 
     def refresh_overlay_peer_contract(self) -> None:
@@ -573,8 +669,12 @@ class TranslatorApp:
         self.refresh_overlay_peer_contract()
 
 
-async def main_gui(page: ft.Page, *, config_path):
-    app = TranslatorApp(page, config_path=config_path)
+async def main_gui(page: ft.Page, *, config_path, debug_ui_preview: bool = False):
+    app = TranslatorApp(
+        page,
+        config_path=config_path,
+        debug_ui_preview=debug_ui_preview,
+    )
     await app.controller.start()
 
     # Check for updates in background

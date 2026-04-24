@@ -12,6 +12,11 @@
   - New settings must have defaults so existing `settings.json` continues loading.
   - If a setting key is renamed, accept the old key in `from_dict` for backward compatibility.
 - All new user-facing UI text must go through i18n keys, and all locale bundles must be updated.
+- Debug UI preview mode may exist for hard-to-reproduce UI states.
+  - Verify the exact CLI flag and preview actions in code before use.
+  - Preview actions must not persist settings, mutate secrets, or call external providers/brokers.
+  - Use preview mode for manual QA of hidden UI states instead of forcing real broker/OpenRouter states.
+  - Debug preview controls must remain hidden unless the explicit debug flag is enabled.
 - For documentation lookup and code generation, prefer MCP resources/templates first and use Context7 when available.
 - For browser or website automation tasks, use the `agent-browser` skill first.
 - If a task modifies Rust code, the final step of the overall task must recompile the Rust overlay for Windows.

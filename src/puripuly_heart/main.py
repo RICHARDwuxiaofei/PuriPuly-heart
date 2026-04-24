@@ -28,6 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=default_settings_path(),
         help="Path to settings JSON (default: user config dir)",
     )
+    parser.add_argument(
+        "--debug-ui-preview",
+        action="store_true",
+        default=False,
+        help="Show developer-only GUI preview controls for hidden UI states",
+    )
 
     sub = parser.add_subparsers(dest="command")
 
@@ -63,7 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verify the packaged soxr runtime contract and smoke resample",
     )
 
-    sub.add_parser("run-gui", help="Run the Graphical User Interface (Flet)")
+    run_gui = sub.add_parser("run-gui", help="Run the Graphical User Interface (Flet)")
+    run_gui.add_argument(
+        "--debug-ui-preview",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Show developer-only GUI preview controls for hidden UI states",
+    )
 
     return parser
 
@@ -88,6 +100,23 @@ def _requires_soxr_runtime_startup_check(args: argparse.Namespace) -> bool:
     return args.command == "run-mic"
 
 
+def _run_gui(config_path: Path, *, debug_ui_preview: bool) -> int:
+    import flet as ft
+
+    from puripuly_heart.ui.app import main_gui
+    from puripuly_heart.ui.fonts import assets_dir
+
+    async def _target(page: ft.Page):
+        return await main_gui(
+            page,
+            config_path=config_path,
+            debug_ui_preview=debug_ui_preview,
+        )
+
+    ft.app(target=_target, assets_dir=str(assets_dir()))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_main_logging()
     parser = build_parser()
@@ -106,18 +135,10 @@ def main(argv: list[str] | None = None) -> int:
         return _print_runtime_error("packaged soxr runtime", exc)
 
     if args.command == "run-gui":
-        import flet as ft
-
-        from puripuly_heart.ui.app import main_gui
-        from puripuly_heart.ui.fonts import assets_dir
-
-        config_path = args.config
-
-        async def _target(page: ft.Page):
-            return await main_gui(page, config_path=config_path)
-
-        ft.app(target=_target, assets_dir=str(assets_dir()))
-        return 0
+        return _run_gui(
+            args.config,
+            debug_ui_preview=bool(getattr(args, "debug_ui_preview", False)),
+        )
 
     if args.command == "local-qwen-runtime-check":
         return run_local_qwen_runtime_check()
@@ -168,18 +189,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Default: run GUI when no command specified (e.g., double-clicking EXE)
     if args.command is None:
-        import flet as ft
-
-        from puripuly_heart.ui.app import main_gui
-        from puripuly_heart.ui.fonts import assets_dir
-
-        config_path = args.config
-
-        async def _target(page: ft.Page):
-            return await main_gui(page, config_path=config_path)
-
-        ft.app(target=_target, assets_dir=str(assets_dir()))
-        return 0
+        return _run_gui(
+            args.config,
+            debug_ui_preview=bool(getattr(args, "debug_ui_preview", False)),
+        )
 
     parser.print_help()
     return 2

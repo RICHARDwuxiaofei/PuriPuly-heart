@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -303,8 +305,10 @@ def test_main_run_gui_invokes_flet_app(monkeypatch, tmp_path) -> None:
 
     fake_ui_app = ModuleType("puripuly_heart.ui.app")
 
-    async def main_gui(page, config_path):
-        _ = (page, config_path)
+    async def main_gui(page, *, config_path, debug_ui_preview=False):
+        _ = page
+        calls["config_path"] = config_path
+        calls["debug_ui_preview"] = debug_ui_preview
 
     fake_ui_app.main_gui = main_gui
     monkeypatch.setitem(sys.modules, "puripuly_heart.ui.app", fake_ui_app)
@@ -319,6 +323,9 @@ def test_main_run_gui_invokes_flet_app(monkeypatch, tmp_path) -> None:
     assert result == 0
     assert calls["assets_dir"] == str(tmp_path)
     assert callable(calls["target"])
+    asyncio.run(calls["target"](object()))
+    assert calls["config_path"] == config_path
+    assert calls["debug_ui_preview"] is False
 
 
 def test_main_default_invokes_gui(monkeypatch, tmp_path) -> None:
@@ -335,8 +342,10 @@ def test_main_default_invokes_gui(monkeypatch, tmp_path) -> None:
 
     fake_ui_app = ModuleType("puripuly_heart.ui.app")
 
-    async def main_gui(page, config_path):
-        _ = (page, config_path)
+    async def main_gui(page, *, config_path, debug_ui_preview=False):
+        _ = page
+        calls["config_path"] = config_path
+        calls["debug_ui_preview"] = debug_ui_preview
 
     fake_ui_app.main_gui = main_gui
     monkeypatch.setitem(sys.modules, "puripuly_heart.ui.app", fake_ui_app)
@@ -351,6 +360,92 @@ def test_main_default_invokes_gui(monkeypatch, tmp_path) -> None:
     assert result == 0
     assert calls["assets_dir"] == str(tmp_path)
     assert callable(calls["target"])
+    asyncio.run(calls["target"](object()))
+    assert calls["config_path"] == config_path
+    assert calls["debug_ui_preview"] is False
+
+
+def test_main_run_gui_passes_debug_ui_preview_flag(monkeypatch, tmp_path) -> None:
+    calls: dict[str, object] = {}
+
+    fake_flet = ModuleType("flet")
+
+    def fake_app(*, target, assets_dir):
+        calls["target"] = target
+        calls["assets_dir"] = assets_dir
+
+    fake_flet.app = fake_app
+    monkeypatch.setitem(sys.modules, "flet", fake_flet)
+
+    fake_ui_app = ModuleType("puripuly_heart.ui.app")
+
+    async def main_gui(page, *, config_path, debug_ui_preview=False):
+        _ = page
+        calls["config_path"] = config_path
+        calls["debug_ui_preview"] = debug_ui_preview
+
+    fake_ui_app.main_gui = main_gui
+    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.app", fake_ui_app)
+
+    fake_fonts = ModuleType("puripuly_heart.ui.fonts")
+    fake_fonts.assets_dir = lambda: tmp_path
+    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.fonts", fake_fonts)
+
+    config_path = tmp_path / "settings.json"
+    result = main_module.main(["--config", str(config_path), "run-gui", "--debug-ui-preview"])
+
+    assert result == 0
+    assert calls["assets_dir"] == str(tmp_path)
+    asyncio.run(calls["target"](object()))
+    assert calls["config_path"] == config_path
+    assert calls["debug_ui_preview"] is True
+
+
+def test_main_default_gui_passes_debug_ui_preview_flag(monkeypatch, tmp_path) -> None:
+    calls: dict[str, object] = {}
+
+    fake_flet = ModuleType("flet")
+
+    def fake_app(*, target, assets_dir):
+        calls["target"] = target
+        calls["assets_dir"] = assets_dir
+
+    fake_flet.app = fake_app
+    monkeypatch.setitem(sys.modules, "flet", fake_flet)
+
+    fake_ui_app = ModuleType("puripuly_heart.ui.app")
+
+    async def main_gui(page, *, config_path, debug_ui_preview=False):
+        _ = page
+        calls["config_path"] = config_path
+        calls["debug_ui_preview"] = debug_ui_preview
+
+    fake_ui_app.main_gui = main_gui
+    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.app", fake_ui_app)
+
+    fake_fonts = ModuleType("puripuly_heart.ui.fonts")
+    fake_fonts.assets_dir = lambda: tmp_path
+    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.fonts", fake_fonts)
+
+    config_path = tmp_path / "settings.json"
+    result = main_module.main(["--config", str(config_path), "--debug-ui-preview"])
+
+    assert result == 0
+    assert calls["assets_dir"] == str(tmp_path)
+    asyncio.run(calls["target"](object()))
+    assert calls["config_path"] == config_path
+    assert calls["debug_ui_preview"] is True
+
+
+def test_real_main_gui_accepts_debug_ui_preview_keyword_only() -> None:
+    from puripuly_heart.ui.app import main_gui
+
+    parameters = inspect.signature(main_gui).parameters
+
+    assert "debug_ui_preview" in parameters
+    debug_ui_preview = parameters["debug_ui_preview"]
+    assert debug_ui_preview.kind is inspect.Parameter.KEYWORD_ONLY
+    assert debug_ui_preview.default is False
 
 
 def test_main_local_qwen_runtime_check_dispatches_runner(monkeypatch, tmp_path) -> None:

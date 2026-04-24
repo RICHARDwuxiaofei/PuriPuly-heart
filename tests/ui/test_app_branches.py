@@ -220,6 +220,56 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert app.view_logs.runtime_logging_mode == "detailed"
 
 
+def test_translator_app_does_not_mount_debug_preview_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_app_construction(monkeypatch)
+
+    page = DummyPage()
+    app = TranslatorApp(page, config_path=Path("settings.json"))
+
+    assert app.debug_ui_preview is False
+    assert app.debug_preview_panel is None
+    root = page.added[0]
+    assert not isinstance(root.content, ft.Stack)
+
+
+def test_translator_app_mounts_debug_preview_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_app_construction(monkeypatch)
+    seen: dict[str, object] = {}
+
+    class FakeDebugPreviewPanel(ft.Container):
+        def __init__(self, **callbacks):
+            seen["callbacks"] = callbacks
+            super().__init__(data="fake-debug-preview-panel")
+
+    monkeypatch.setattr(app_module, "DebugPreviewPanel", FakeDebugPreviewPanel)
+
+    page = DummyPage()
+    app = TranslatorApp(
+        page,
+        config_path=Path("settings.json"),
+        debug_ui_preview=True,
+    )
+
+    assert app.debug_ui_preview is True
+    assert app.debug_preview_panel is not None
+    assert set(seen["callbacks"]) == {
+        "on_managed_normal",
+        "on_managed_exhausted",
+        "on_brake_notice",
+        "on_revoked_notice",
+        "on_founder_letter",
+        "on_pkce_failure",
+        "on_clear",
+    }
+    root = page.added[0]
+    assert isinstance(root.content, ft.Stack)
+    assert root.content.controls[-1] is app.debug_preview_panel
+
+
 def test_translator_app_wires_runtime_log_detailed_into_dashboard_visual_commit_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -374,8 +424,8 @@ async def test_main_gui_routes_update_check_through_app_log_helper(
             seen["started"] = True
 
     class FakeApp:
-        def __init__(self, incoming_page, *, config_path):
-            seen["init"] = (incoming_page, config_path)
+        def __init__(self, incoming_page, *, config_path, debug_ui_preview=False):
+            seen["init"] = (incoming_page, config_path, debug_ui_preview)
             seen["app"] = self
             self.page = incoming_page
             self.controller = FakeController()
@@ -395,6 +445,159 @@ async def test_main_gui_routes_update_check_through_app_log_helper(
     assert seen["check"][0] is page
     assert getattr(seen["check"][1], "__self__", None) is seen["app"]
     assert getattr(seen["check"][1], "__func__", None) is FakeApp._log_detailed
+    assert seen["init"] == (page, Path("settings.json"), False)
+
+
+@pytest.mark.asyncio
+async def test_main_gui_forwards_debug_ui_preview_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = DummyPage()
+    seen: dict[str, object] = {}
+
+    class FakeController:
+        async def start(self) -> None:
+            seen["started"] = True
+
+    class FakeApp:
+        def __init__(self, incoming_page, *, config_path, debug_ui_preview=False):
+            seen["init"] = (incoming_page, config_path, debug_ui_preview)
+            self.page = incoming_page
+            self.controller = FakeController()
+
+        def _log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+            _ = (message, level)
+
+    async def fake_check_and_notify_update(incoming_page, *, log_detailed=None) -> None:
+        seen["check"] = (incoming_page, log_detailed)
+
+    monkeypatch.setattr(app_module, "TranslatorApp", FakeApp)
+    monkeypatch.setattr(app_module, "_check_and_notify_update", fake_check_and_notify_update)
+
+    await app_module.main_gui(
+        page,
+        config_path=Path("settings.json"),
+        debug_ui_preview=True,
+    )
+
+    assert seen["started"] is True
+    assert seen["init"] == (page, Path("settings.json"), True)
+    assert seen["check"][0] is page
+
+
+class PreviewDashboard:
+    def __init__(self) -> None:
+        self.managed_trial_calls: list[dict[str, object]] = []
+
+    def set_managed_trial_state(self, **kwargs) -> None:
+        self.managed_trial_calls.append(kwargs)
+
+
+def test_debug_preview_managed_actions_use_dashboard_card_state() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.view_dashboard = PreviewDashboard()
+
+    app._preview_managed_normal()
+    app._preview_managed_exhausted()
+    app._preview_brake_notice()
+    app._preview_revoked_notice()
+    app._preview_clear()
+
+    assert app.view_dashboard.managed_trial_calls == [
+        {
+            "visible": True,
+            "remaining_percent": 62,
+            "transient_message_key": None,
+        },
+        {
+            "visible": True,
+            "remaining_percent": 0,
+            "transient_message_key": None,
+        },
+        {
+            "visible": True,
+            "remaining_percent": 62,
+            "transient_message_key": "managed_release.brake",
+        },
+        {
+            "visible": True,
+            "remaining_percent": 62,
+            "transient_message_key": "managed_release.revoked_contact",
+        },
+        {
+            "visible": False,
+            "remaining_percent": None,
+            "transient_message_key": None,
+        },
+    ]
+
+
+def test_debug_preview_founder_letter_uses_dialog_with_preview_safe_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    captured: dict[str, object] = {}
+
+    def fail_save(*_args, **_kwargs):
+        pytest.fail("debug founder-letter preview must not save settings")
+
+    app.controller = SimpleNamespace(settings=AppSettings(), _save_settings=fail_save)
+    monkeypatch.setattr(
+        app,
+        "_on_request_openrouter_pkce",
+        lambda *_args, **_kwargs: pytest.fail("debug founder-letter preview must not launch PKCE"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module.webbrowser,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug founder-letter preview must not open external URLs"
+        ),
+    )
+
+    class FakeFounderLetterDialog:
+        def __init__(self, page, *, on_connect, on_contact):
+            captured["page"] = page
+            captured["on_connect"] = on_connect
+            captured["on_contact"] = on_contact
+
+        def open(self) -> None:
+            captured["opened"] = True
+
+    monkeypatch.setattr(app_module, "FounderLetterDialog", FakeFounderLetterDialog)
+
+    app._preview_founder_letter()
+
+    assert captured["page"] is app.page
+    assert captured["opened"] is True
+    assert app._founder_letter_dialog is not None
+    captured["on_connect"]()
+    captured["on_contact"]()
+
+
+def test_debug_preview_pkce_failure_only_shows_failure_snackbar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    seen: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        app,
+        "_on_request_openrouter_pkce",
+        lambda *_args, **_kwargs: pytest.fail("debug preview must not launch PKCE"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app,
+        "_show_snackbar",
+        lambda message, bgcolor: seen.append((message, bgcolor)),
+    )
+
+    app._preview_pkce_failure()
+
+    assert seen == [(app_module.t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)]
 
 
 @pytest.mark.asyncio
