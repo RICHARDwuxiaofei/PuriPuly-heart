@@ -7,6 +7,12 @@ from typing import Callable
 
 import flet as ft
 
+from puripuly_heart.config.audio_host_api import (
+    WINDOWS_DIRECTSOUND_HOST_API,
+    WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
+    WINDOWS_WASAPI_HOST_API,
+    normalize_input_host_api,
+)
 from puripuly_heart.ui.components.settings.settings_modal import OptionItem, SettingsModal
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import COLOR_ON_BACKGROUND, COLOR_PRIMARY
@@ -105,6 +111,28 @@ class AudioSettings(ft.Column):
             on_submit=on_change_end,
         )
 
+    def _host_api_label_for(self, value: str) -> str:
+        """Return the localized display label for a persisted host API value."""
+        host_api = str(value or "").strip()
+        if not host_api:
+            return self._default_option_label
+
+        label_key_by_value = {
+            WINDOWS_WASAPI_HOST_API: "settings.audio_host_api.option.windows_wasapi",
+            WINDOWS_WASAPI_COMPATIBILITY_HOST_API: (
+                "settings.audio_host_api.option.windows_wasapi_compatibility"
+            ),
+            WINDOWS_DIRECTSOUND_HOST_API: "settings.audio_host_api.option.windows_directsound",
+        }
+        label_key = label_key_by_value.get(host_api)
+        if label_key is None:
+            return host_api
+        return t(label_key)
+
+    @property
+    def host_api_display_label(self) -> str:
+        return self._host_api_label_for(self._current_host_api)
+
     def _on_text_hover(self, e: ft.ControlEvent) -> None:
         """Handle hover effect on clickable text."""
         container = e.control
@@ -123,7 +151,7 @@ class AudioSettings(ft.Column):
     @host_api.setter
     def host_api(self, val: str) -> None:
         self._current_host_api = val
-        display = val or self._default_option_label
+        display = self._host_api_label_for(val)
         self._host_api_text.content.value = display
         if self._host_api_text.page:
             self._host_api_text.update()
@@ -195,17 +223,38 @@ class AudioSettings(ft.Column):
     def _get_host_api_options(self) -> list[OptionItem]:
         """Get available host API options."""
         options = [OptionItem(value="", label=self._default_option_label)]
-        allowed_apis = {"windows directsound", "windows wasapi"}
 
         try:
             import sounddevice as sd
 
-            for api in sd.query_hostapis():
-                name = str(api.get("name", "") or "").strip()
-                if name and name.lower() in allowed_apis:
-                    options.append(OptionItem(value=name, label=name))
+            available_host_apis = {
+                str(api.get("name", "") or "").strip().casefold() for api in sd.query_hostapis()
+            }
         except Exception as e:
             logger.warning(f"Failed to enumerate host APIs: {e}")
+            return options
+
+        if WINDOWS_WASAPI_HOST_API.casefold() in available_host_apis:
+            options.append(
+                OptionItem(
+                    value=WINDOWS_WASAPI_HOST_API,
+                    label=self._host_api_label_for(WINDOWS_WASAPI_HOST_API),
+                )
+            )
+            options.append(
+                OptionItem(
+                    value=WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
+                    label=self._host_api_label_for(WINDOWS_WASAPI_COMPATIBILITY_HOST_API),
+                )
+            )
+
+        if WINDOWS_DIRECTSOUND_HOST_API.casefold() in available_host_apis:
+            options.append(
+                OptionItem(
+                    value=WINDOWS_DIRECTSOUND_HOST_API,
+                    label=self._host_api_label_for(WINDOWS_DIRECTSOUND_HOST_API),
+                )
+            )
 
         return options
 
@@ -217,17 +266,22 @@ class AudioSettings(ft.Column):
             import sounddevice as sd
 
             hostapi_index: int | None = None
-            if self._current_host_api:
+            profile = normalize_input_host_api(self._current_host_api)
+            actual_host_api = profile.actual_host_api
+            if actual_host_api:
                 for idx, item in enumerate(sd.query_hostapis()):
                     name = str(item.get("name", "") or "")
-                    if name == self._current_host_api:
+                    if name == actual_host_api:
                         hostapi_index = idx
                         break
 
             for dev in sd.query_devices():
                 if int(dev.get("max_input_channels", 0) or 0) <= 0:
                     continue
-                if hostapi_index is not None and int(dev.get("hostapi", -1) or -1) != hostapi_index:
+                device_hostapi = dev.get("hostapi", -1)
+                if device_hostapi is None:
+                    device_hostapi = -1
+                if hostapi_index is not None and int(device_hostapi) != hostapi_index:
                     continue
                 name = str(dev.get("name", "") or "").strip()
                 if name:
@@ -383,19 +437,16 @@ class AudioSettings(ft.Column):
 
     def apply_locale(self) -> None:
         """Update labels when locale changes."""
-        old_default = self._default_option_label
         self._default_option_label = t("settings.default_option")
         self._host_api_label.value = t("settings.audio_host_api")
         self._microphone_label.value = t("settings.microphone")
         self._desktop_output_label.value = t("settings.desktop_audio.output_device")
 
-        # Update display if showing default
-        if self._host_api_text.content.value == old_default:
-            self._host_api_text.content.value = self._default_option_label
-        if self._mic_text.content.value == old_default:
-            self._mic_text.content.value = self._default_option_label
-        if self._desktop_output_text.content.value == old_default:
-            self._desktop_output_text.content.value = self._default_option_label
+        self._host_api_text.content.value = self._host_api_label_for(self._current_host_api)
+        self._mic_text.content.value = self._current_microphone or self._default_option_label
+        self._desktop_output_text.content.value = (
+            self._current_desktop_output_device or self._default_option_label
+        )
 
         if self.page:
             self.update()

@@ -30,6 +30,8 @@ class SoundDeviceAudioSource(AudioSource):
     channels: int = 1
     device: int | str | None = None
     blocksize: int | None = None
+    wasapi_auto_convert: bool = False
+    wasapi_exclusive: bool = False
     max_queue_frames: int = 64
 
     _queue: janus.Queue[np.ndarray | None] = field(init=False, repr=False)
@@ -47,6 +49,11 @@ class SoundDeviceAudioSource(AudioSource):
 
         import sounddevice as sd  # type: ignore
 
+        needs_wasapi_settings = self.wasapi_auto_convert or self.wasapi_exclusive
+        wasapi_settings = getattr(sd, "WasapiSettings", None)
+        if needs_wasapi_settings and wasapi_settings is None:
+            raise RuntimeError("WASAPI settings support is unavailable in sounddevice")
+
         self._queue = janus.Queue(maxsize=self.max_queue_frames)
 
         def _callback(indata, _frames, _time, status):  # called from PortAudio thread
@@ -61,14 +68,21 @@ class SoundDeviceAudioSource(AudioSource):
                 # Drop if the asyncio consumer is too slow; better than blocking audio thread.
                 return
 
-        stream = sd.InputStream(
-            samplerate=self.sample_rate_hz,  # None = use device default
-            channels=self.channels,
-            dtype="float32",
-            callback=_callback,
-            device=self.device,
-            blocksize=self.blocksize or 0,
-        )
+        stream_kwargs = {
+            "samplerate": self.sample_rate_hz,  # None = use device default
+            "channels": self.channels,
+            "dtype": "float32",
+            "callback": _callback,
+            "device": self.device,
+            "blocksize": self.blocksize or 0,
+        }
+        if needs_wasapi_settings:
+            stream_kwargs["extra_settings"] = wasapi_settings(
+                exclusive=self.wasapi_exclusive,
+                auto_convert=self.wasapi_auto_convert,
+            )
+
+        stream = sd.InputStream(**stream_kwargs)
         stream.start()
         self._stream = stream
         self._actual_sample_rate_hz = int(stream.samplerate)

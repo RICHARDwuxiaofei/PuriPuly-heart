@@ -7,6 +7,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from puripuly_heart.config.audio_host_api import (
+    WINDOWS_DIRECTSOUND_HOST_API,
+    WINDOWS_WASAPI_HOST_API,
+)
 from puripuly_heart.config.llm_profiles import (
     OPENROUTER_FALLBACK_SELECTION_ALIAS_GEMINI25_FLASH_LITE,
     OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE,
@@ -23,7 +27,7 @@ from puripuly_heart.config.llm_profiles import (
 )
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 16
+SETTINGS_SCHEMA_VERSION = 17
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
@@ -136,7 +140,7 @@ class AudioSettings:
     internal_sample_rate_hz: int = STT_INTERNAL_SAMPLE_RATE_HZ
     internal_channels: int = 1
     ring_buffer_ms: int = 500
-    input_host_api: str = "Windows DirectSound"
+    input_host_api: str = WINDOWS_WASAPI_HOST_API
     input_device: str = ""
 
     def validate(self) -> None:
@@ -1404,6 +1408,19 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 16
 
+    if version < 17:
+        audio_data = data.get("audio")
+        if isinstance(audio_data, dict):
+            input_host_api = audio_data.get("input_host_api")
+            if (
+                isinstance(input_host_api, str)
+                and input_host_api.strip() == WINDOWS_DIRECTSOUND_HOST_API
+            ):
+                audio_data["input_host_api"] = WINDOWS_WASAPI_HOST_API
+                changed = True
+
+        version = 17
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -1762,7 +1779,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         else STTProviderName.DEEPGRAM.value
     )
 
-    input_host_api_raw = audio_data.get("input_host_api")
+    input_host_api_raw = audio_data.get("input_host_api", WINDOWS_WASAPI_HOST_API)
     input_device_raw = audio_data.get("input_device")
     vad_threshold_raw = stt_data.get("vad_speech_threshold")
     legacy_system_prompt = str(data.get("system_prompt", ""))

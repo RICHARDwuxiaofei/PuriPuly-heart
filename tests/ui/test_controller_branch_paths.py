@@ -13,6 +13,10 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.config.audio_host_api import (
+    WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
+    WINDOWS_WASAPI_HOST_API,
+)
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
@@ -1635,6 +1639,18 @@ def test_stt_runtime_signature_includes_source_language() -> None:
     assert en_signature[0] == "en"
 
 
+def test_stt_runtime_signature_differs_between_plain_wasapi_and_compatibility_mode() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    plain = AppSettings()
+    plain.audio.input_host_api = WINDOWS_WASAPI_HOST_API
+    compat = copy.deepcopy(plain)
+    compat.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+
+    assert controller._build_stt_runtime_signature(
+        plain
+    ) != controller._build_stt_runtime_signature(compat)
+
+
 def test_stt_runtime_signature_ignores_custom_vocabulary_for_qwen_asr() -> None:
     controller = _make_controller(app=SimpleNamespace())
     settings = AppSettings()
@@ -3204,6 +3220,206 @@ async def test_init_pipeline_passes_runtime_logging_to_smart_osc_queue(
     await controller._init_pipeline()
 
     assert created["osc_kwargs"]["runtime_logging"] is controller.runtime_logging
+
+
+@pytest.mark.asyncio
+async def test_start_mic_loop_normalizes_wasapi_compatibility_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    controller.settings.audio.input_device = "Compat Mic"
+    controller.hub = DummyHub()
+    resolve_calls: list[dict[str, object]] = []
+    source_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        async def close(self) -> None:
+            return None
+
+    def fake_resolve(*, host_api: str, device: str) -> int:
+        resolve_calls.append({"host_api": host_api, "device": device})
+        return 7
+
+    def fake_source(*_args, **kwargs) -> FakeSource:
+        source_calls.append(dict(kwargs))
+        return FakeSource()
+
+    async def fake_run_mic_loop(self) -> None:
+        _ = self
+        return None
+
+    monkeypatch.setattr(controller_module, "ensure_silero_vad_onnx", lambda: Path("vad.onnx"))
+    monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", fake_resolve)
+    monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
+    monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
+
+    await controller._start_mic_loop()
+    await asyncio.sleep(0)
+
+    assert resolve_calls == [{"host_api": WINDOWS_WASAPI_HOST_API, "device": "Compat Mic"}]
+    assert source_calls[0]["device"] == 7
+    assert source_calls[0].get("wasapi_auto_convert") is True
+    assert source_calls[0].get("wasapi_exclusive") is False
+
+
+@pytest.mark.asyncio
+async def test_start_mic_loop_does_not_apply_wasapi_flags_to_name_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    controller.settings.audio.input_device = "Compat Mic"
+    controller.hub = DummyHub()
+    resolve_calls: list[dict[str, object]] = []
+    source_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        async def close(self) -> None:
+            return None
+
+    def fake_resolve(*, host_api: str, device: str) -> int:
+        resolve_calls.append({"host_api": host_api, "device": device})
+        if host_api == WINDOWS_WASAPI_HOST_API:
+            return 7
+        if host_api == "":
+            return 8
+        return 99
+
+    def fake_source(*_args, **kwargs) -> FakeSource:
+        source_calls.append(dict(kwargs))
+        if len(source_calls) == 1:
+            raise RuntimeError("first open failed")
+        return FakeSource()
+
+    async def fake_run_mic_loop(self) -> None:
+        _ = self
+        return None
+
+    monkeypatch.setattr(controller_module, "ensure_silero_vad_onnx", lambda: Path("vad.onnx"))
+    monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", fake_resolve)
+    monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
+    monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
+
+    await controller._start_mic_loop()
+    await asyncio.sleep(0)
+
+    assert resolve_calls == [
+        {"host_api": WINDOWS_WASAPI_HOST_API, "device": "Compat Mic"},
+        {"host_api": "", "device": "Compat Mic"},
+    ]
+    assert source_calls[0].get("wasapi_auto_convert") is True
+    assert source_calls[1]["device"] == 8
+    assert source_calls[1].get("wasapi_auto_convert") is False
+    assert source_calls[1].get("wasapi_exclusive") is False
+
+
+@pytest.mark.asyncio
+async def test_start_mic_loop_retries_same_device_name_fallback_without_wasapi_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    controller.settings.audio.input_device = "Compat Mic"
+    controller.hub = DummyHub()
+    resolve_calls: list[dict[str, object]] = []
+    source_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        async def close(self) -> None:
+            return None
+
+    def fake_resolve(*, host_api: str, device: str) -> int:
+        resolve_calls.append({"host_api": host_api, "device": device})
+        return 7
+
+    def fake_source(*_args, **kwargs) -> FakeSource:
+        source_calls.append(dict(kwargs))
+        if len(source_calls) == 1:
+            raise RuntimeError("first open failed")
+        return FakeSource()
+
+    async def fake_run_mic_loop(self) -> None:
+        _ = self
+        return None
+
+    monkeypatch.setattr(controller_module, "ensure_silero_vad_onnx", lambda: Path("vad.onnx"))
+    monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", fake_resolve)
+    monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
+    monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
+
+    await controller._start_mic_loop()
+    await asyncio.sleep(0)
+
+    assert resolve_calls == [
+        {"host_api": WINDOWS_WASAPI_HOST_API, "device": "Compat Mic"},
+        {"host_api": "", "device": "Compat Mic"},
+    ]
+    assert len(source_calls) == 2
+    assert source_calls[0]["device"] == 7
+    assert source_calls[0].get("wasapi_auto_convert") is True
+    assert source_calls[0].get("wasapi_exclusive") is False
+    assert source_calls[1]["device"] == 7
+    assert source_calls[1].get("wasapi_auto_convert") is False
+    assert source_calls[1].get("wasapi_exclusive") is False
+
+
+@pytest.mark.asyncio
+async def test_start_mic_loop_does_not_apply_wasapi_flags_to_system_default_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    controller.settings.audio.input_device = ""
+    controller.hub = DummyHub()
+    resolve_calls: list[dict[str, object]] = []
+    source_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        async def close(self) -> None:
+            return None
+
+    def fake_resolve(*, host_api: str, device: str) -> int:
+        resolve_calls.append({"host_api": host_api, "device": device})
+        if host_api == WINDOWS_WASAPI_HOST_API:
+            return 7
+        return 99
+
+    def fake_source(*_args, **kwargs) -> FakeSource:
+        source_calls.append(dict(kwargs))
+        if len(source_calls) == 1:
+            raise RuntimeError("first open failed")
+        return FakeSource()
+
+    async def fake_run_mic_loop(self) -> None:
+        _ = self
+        return None
+
+    monkeypatch.setattr(controller_module, "ensure_silero_vad_onnx", lambda: Path("vad.onnx"))
+    monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", fake_resolve)
+    monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
+    monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
+
+    await controller._start_mic_loop()
+    await asyncio.sleep(0)
+
+    assert resolve_calls == [{"host_api": WINDOWS_WASAPI_HOST_API, "device": ""}]
+    assert source_calls[0].get("wasapi_auto_convert") is True
+    assert source_calls[1]["device"] is None
+    assert source_calls[1].get("wasapi_auto_convert") is False
+    assert source_calls[1].get("wasapi_exclusive") is False
 
 
 @pytest.mark.asyncio

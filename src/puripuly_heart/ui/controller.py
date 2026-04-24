@@ -21,6 +21,7 @@ from puripuly_heart.app.wiring import (
     create_stt_backend,
     resolve_peer_stt_config,
 )
+from puripuly_heart.config.audio_host_api import normalize_input_host_api
 from puripuly_heart.config.llm_profiles import profile_for_alias
 from puripuly_heart.config.settings import (
     AppSettings,
@@ -2501,14 +2502,26 @@ class GuiController:
                     )
                     return None
 
-            def _open_source(dev_idx: int | None) -> SoundDeviceAudioSource:
+            def _open_source(
+                dev_idx: int | None,
+                *,
+                wasapi_auto_convert: bool = False,
+                wasapi_exclusive: bool = False,
+            ) -> SoundDeviceAudioSource:
                 return SoundDeviceAudioSource(
                     sample_rate_hz=None,
                     channels=self.settings.audio.internal_channels,
                     device=dev_idx,
+                    wasapi_auto_convert=wasapi_auto_convert,
+                    wasapi_exclusive=wasapi_exclusive,
                 )
 
-            host_api = self.settings.audio.input_host_api
+            saved_host_api = self.settings.audio.input_host_api
+            host_api_profile = normalize_input_host_api(saved_host_api)
+            host_api = host_api_profile.actual_host_api
+            first_open_used_wasapi_flags = (
+                host_api_profile.wasapi_auto_convert or host_api_profile.wasapi_exclusive
+            )
             device_name = self.settings.audio.input_device
 
             # 1차 시도: 설정된 Host API + 마이크
@@ -2516,8 +2529,20 @@ class GuiController:
             source: SoundDeviceAudioSource | None = None
 
             try:
-                source = _open_source(device_idx)
-                self.log_detailed(f"[STT] Microphone opened: device_idx={device_idx}")
+                source = _open_source(
+                    device_idx,
+                    wasapi_auto_convert=host_api_profile.wasapi_auto_convert,
+                    wasapi_exclusive=host_api_profile.wasapi_exclusive,
+                )
+                self.log_detailed(
+                    "[STT] Microphone opened: "
+                    f"saved_host_api={saved_host_api!r} "
+                    f"actual_host_api={host_api!r} "
+                    f"device={device_name!r} "
+                    f"device_idx={device_idx} "
+                    f"wasapi_auto_convert={host_api_profile.wasapi_auto_convert} "
+                    f"wasapi_exclusive={host_api_profile.wasapi_exclusive}"
+                )
             except Exception as exc:
                 self.log_detailed(
                     "[STT] Microphone open detail: "
@@ -2528,9 +2553,13 @@ class GuiController:
             # 2차 시도: Host API 무시, 마이크 이름만
             if source is None and device_name:
                 fallback_idx = _resolve_device("", device_name)
-                if fallback_idx != device_idx:
+                if fallback_idx != device_idx or first_open_used_wasapi_flags:
                     try:
-                        source = _open_source(fallback_idx)
+                        source = _open_source(
+                            fallback_idx,
+                            wasapi_auto_convert=False,
+                            wasapi_exclusive=False,
+                        )
                         self.log_detailed(
                             f"[STT] Microphone opened with fallback: device_idx={fallback_idx}"
                         )
@@ -2543,7 +2572,11 @@ class GuiController:
             # 3차 시도: 시스템 기본 장치
             if source is None:
                 try:
-                    source = _open_source(None)
+                    source = _open_source(
+                        None,
+                        wasapi_auto_convert=False,
+                        wasapi_exclusive=False,
+                    )
                     self.log_detailed("[STT] Microphone opened with system default")
                 except Exception as exc:
                     self.log_detailed(

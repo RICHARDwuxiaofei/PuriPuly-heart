@@ -326,7 +326,7 @@ class SettingsView(ft.Column):
         )
         self._set_unit_card_value_text(
             self._audio_host_api_text,
-            self._audio_settings.host_api or default_label,
+            self._audio_settings.host_api_display_label,
         )
         self._set_unit_card_value_text(
             self._loopback_audio_text,

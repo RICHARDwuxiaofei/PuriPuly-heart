@@ -9,6 +9,7 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HOST_API
 from puripuly_heart.config.settings import (
     AppSettings,
     GeminiLLMModel,
@@ -2415,6 +2416,27 @@ def test_general_tab_host_api_card_exposes_host_api_only(
 
     assert t("settings.desktop_audio.output_device") not in host_api_labels
     assert _tree_contains_control(host_api_card, view._audio_host_api_text)
+
+
+def test_general_audio_host_api_card_displays_localized_compatibility_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_locale = i18n_module.get_locale()
+    i18n_module.set_locale("ko")
+    try:
+        settings = AppSettings()
+        settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+        view, _ = _make_settings_view(monkeypatch)
+
+        view.load_from_settings(settings, config_path=Path("settings.json"))
+
+        assert view._audio_settings.host_api == WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+        assert view._audio_host_api_text.content.value == t(
+            "settings.audio_host_api.option.windows_wasapi_compatibility"
+        )
+        assert view._audio_host_api_text.content.value != WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    finally:
+        i18n_module.set_locale(old_locale)
 
 
 def test_general_tab_microphone_audio_card_exposes_microphone_only(

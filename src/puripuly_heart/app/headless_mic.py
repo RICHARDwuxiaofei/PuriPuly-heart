@@ -14,6 +14,7 @@ from puripuly_heart.app.wiring import (
     create_secret_store,
     create_stt_backend,
 )
+from puripuly_heart.config.audio_host_api import normalize_input_host_api
 from puripuly_heart.config.paths import default_vad_model_path
 from puripuly_heart.config.settings import AppSettings
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
@@ -189,14 +190,26 @@ class HeadlessMicRunner:
                 )
                 return None
 
-        def _open_source(dev_idx: int | None) -> SoundDeviceAudioSource:
+        def _open_source(
+            dev_idx: int | None,
+            *,
+            wasapi_auto_convert: bool = False,
+            wasapi_exclusive: bool = False,
+        ) -> SoundDeviceAudioSource:
             return SoundDeviceAudioSource(
                 sample_rate_hz=None,
                 channels=self.settings.audio.internal_channels,
                 device=dev_idx,
+                wasapi_auto_convert=wasapi_auto_convert,
+                wasapi_exclusive=wasapi_exclusive,
             )
 
-        host_api = self.settings.audio.input_host_api
+        saved_host_api = self.settings.audio.input_host_api
+        host_api_profile = normalize_input_host_api(saved_host_api)
+        host_api = host_api_profile.actual_host_api
+        first_open_used_wasapi_flags = (
+            host_api_profile.wasapi_auto_convert or host_api_profile.wasapi_exclusive
+        )
         device_name = self.settings.audio.input_device
 
         # 1차 시도: 설정된 Host API + 마이크
@@ -204,8 +217,22 @@ class HeadlessMicRunner:
         source: AudioSource | None = None
 
         try:
-            source = _open_source(device_idx)
-            logger.info("Microphone opened (device_idx=%s)", device_idx)
+            source = _open_source(
+                device_idx,
+                wasapi_auto_convert=host_api_profile.wasapi_auto_convert,
+                wasapi_exclusive=host_api_profile.wasapi_exclusive,
+            )
+            logger.info(
+                "Microphone opened "
+                "(saved_host_api=%r, actual_host_api=%r, device=%r, device_idx=%s, "
+                "wasapi_auto_convert=%s, wasapi_exclusive=%s)",
+                saved_host_api,
+                host_api,
+                device_name,
+                device_idx,
+                host_api_profile.wasapi_auto_convert,
+                host_api_profile.wasapi_exclusive,
+            )
         except Exception as exc:
             logger.error(
                 "Failed to open microphone (host_api=%r, device=%r): %s", host_api, device_name, exc
@@ -214,9 +241,13 @@ class HeadlessMicRunner:
         # 2차 시도: Host API 무시, 마이크 이름만
         if source is None and device_name:
             fallback_idx = _resolve_device("", device_name)
-            if fallback_idx != device_idx:
+            if fallback_idx != device_idx or first_open_used_wasapi_flags:
                 try:
-                    source = _open_source(fallback_idx)
+                    source = _open_source(
+                        fallback_idx,
+                        wasapi_auto_convert=False,
+                        wasapi_exclusive=False,
+                    )
                     logger.info("Microphone opened with fallback (device_idx=%s)", fallback_idx)
                 except Exception as exc:
                     logger.error("Fallback microphone failed: %s", exc)
@@ -224,7 +255,11 @@ class HeadlessMicRunner:
         # 3차 시도: 시스템 기본 장치
         if source is None:
             try:
-                source = _open_source(None)
+                source = _open_source(
+                    None,
+                    wasapi_auto_convert=False,
+                    wasapi_exclusive=False,
+                )
                 logger.info("Microphone opened with system default")
             except Exception as exc:
                 logger.error("System default microphone failed: %s", exc)
