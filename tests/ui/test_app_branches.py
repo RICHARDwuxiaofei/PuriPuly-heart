@@ -257,13 +257,10 @@ def test_translator_app_mounts_debug_preview_when_enabled(
     assert app.debug_ui_preview is True
     assert app.debug_preview_panel is not None
     assert set(seen["callbacks"]) == {
-        "on_managed_normal",
-        "on_managed_exhausted",
         "on_brake_notice",
         "on_revoked_notice",
         "on_founder_letter",
         "on_pkce_failure",
-        "on_clear",
     }
     root = page.added[0]
     assert isinstance(root.content, ft.Stack)
@@ -491,45 +488,28 @@ class PreviewDashboard:
 
     def set_managed_trial_state(self, **kwargs) -> None:
         self.managed_trial_calls.append(kwargs)
+        raise AssertionError("debug preview must not write removed Dashboard trial-card state")
 
 
-def test_debug_preview_managed_actions_use_dashboard_card_state() -> None:
+def test_debug_preview_surviving_managed_actions_are_snackbar_only() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.view_dashboard = PreviewDashboard()
+    snackbar_calls: list[tuple[str, object]] = []
+    app._show_snackbar = lambda message, bgcolor: snackbar_calls.append((message, bgcolor))
 
-    app._preview_managed_normal()
-    app._preview_managed_exhausted()
+    assert not hasattr(app, "_set_debug_managed_trial_preview")
+    assert not hasattr(app, "_preview_managed_normal")
+    assert not hasattr(app, "_preview_managed_exhausted")
+    assert not hasattr(app, "_preview_clear")
+
     app._preview_brake_notice()
     app._preview_revoked_notice()
-    app._preview_clear()
 
-    assert app.view_dashboard.managed_trial_calls == [
-        {
-            "visible": True,
-            "remaining_percent": 62,
-            "transient_message_key": None,
-        },
-        {
-            "visible": True,
-            "remaining_percent": 0,
-            "transient_message_key": None,
-        },
-        {
-            "visible": True,
-            "remaining_percent": 62,
-            "transient_message_key": "managed_release.brake",
-        },
-        {
-            "visible": True,
-            "remaining_percent": 62,
-            "transient_message_key": "managed_release.revoked_contact",
-        },
-        {
-            "visible": False,
-            "remaining_percent": None,
-            "transient_message_key": None,
-        },
+    assert snackbar_calls == [
+        (app_module.t("managed_release.brake"), ft.Colors.ORANGE_700),
+        (app_module.t("managed_release.revoked_contact"), ft.Colors.ORANGE_700),
     ]
+    assert app.view_dashboard.managed_trial_calls == []
 
 
 def test_debug_preview_founder_letter_uses_dialog_with_preview_safe_callbacks(

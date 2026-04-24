@@ -4,24 +4,13 @@ import flet as ft
 
 from puripuly_heart.core.language import get_all_language_options
 from puripuly_heart.ui.components.display_card import DisplayCard
-from puripuly_heart.ui.components.glow import create_background_glow_stack, create_glow_stack
+from puripuly_heart.ui.components.glow import create_background_glow_stack
 from puripuly_heart.ui.components.language_card import LanguageCard
 from puripuly_heart.ui.components.language_modal import LanguageModal
-from puripuly_heart.ui.components.managed_trial_usage_bar import ManagedTrialUsageBar
 from puripuly_heart.ui.components.power_button import PowerButton
 from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import get_locale, language_name, t
 from puripuly_heart.ui.overlay_peer_contract import OverlayPeerConsumerContract
-from puripuly_heart.ui.theme import (
-    COLOR_DIVIDER,
-    COLOR_NEUTRAL_DARK,
-    COLOR_ON_BACKGROUND,
-    COLOR_PRIMARY,
-    COLOR_SECONDARY,
-    COLOR_SURFACE,
-    COLOR_WARNING,
-    get_card_shadow,
-)
 
 DASHBOARD_LAYOUT_GAP = 12
 DASHBOARD_CONTROL_REGION_EXPAND = 45
@@ -56,10 +45,6 @@ class DashboardView(ft.Column):
         self._managed_auth_pending = False
         self._local_stt_notice_status: str | None = None
         self._local_stt_notice_percent: int | None = None
-        self._managed_trial_visible = False
-        self._managed_trial_remaining_percent: int | None = None
-        self._managed_trial_transient_message_key: str | None = None
-        self._managed_trial_transient_message_kwargs: dict[str, object] = {}
         self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
 
         # Current language settings
@@ -191,150 +176,12 @@ class DashboardView(ft.Column):
             expand=True,
         )
 
-        self._managed_trial_card = self._build_managed_trial_card()
         self.shell_content = ft.Column(
-            [self.main_surface, self._managed_trial_card],
+            [self.main_surface],
             spacing=DASHBOARD_LAYOUT_GAP,
             expand=True,
         )
         self.controls = [create_background_glow_stack(self.shell_content)]
-        self._sync_managed_trial_card(update_ui=False)
-
-    def _build_managed_trial_card(self) -> ft.Container:
-        self._managed_trial_badge = ft.Text(
-            t("dashboard.trial.source.managed"),
-            size=14,
-            weight=ft.FontWeight.BOLD,
-            color=ft.Colors.WHITE,
-        )
-        self._managed_trial_status_label = ft.Text(
-            t("dashboard.trial.lifecycle_label"),
-            size=13,
-            color=COLOR_SECONDARY,
-        )
-        self._managed_trial_status_value = ft.Text(
-            "",
-            size=20,
-            weight=ft.FontWeight.BOLD,
-            color=COLOR_NEUTRAL_DARK,
-        )
-        self._managed_trial_message_label = ft.Text(
-            t("dashboard.trial.message_label"),
-            size=13,
-            color=COLOR_SECONDARY,
-        )
-        self._managed_trial_message_value = ft.Text(
-            "",
-            size=16,
-            color=COLOR_ON_BACKGROUND,
-        )
-        self._managed_trial_transient_label = ft.Text(
-            t("dashboard.trial.transient_label"),
-            size=13,
-            color=COLOR_SECONDARY,
-        )
-        self._managed_trial_transient_value = ft.Text(
-            "",
-            size=16,
-            color=COLOR_WARNING,
-        )
-        self._managed_trial_transient_container = ft.Column(
-            [self._managed_trial_transient_label, self._managed_trial_transient_value],
-            spacing=6,
-            visible=False,
-        )
-        self._managed_trial_usage_bar = ManagedTrialUsageBar()
-
-        info_column = ft.Column(
-            [
-                ft.Container(
-                    content=self._managed_trial_badge,
-                    bgcolor=COLOR_PRIMARY,
-                    border_radius=999,
-                    padding=ft.padding.symmetric(horizontal=12, vertical=8),
-                ),
-                ft.Row(
-                    [
-                        ft.Column(
-                            [self._managed_trial_status_label, self._managed_trial_status_value],
-                            spacing=6,
-                            expand=True,
-                        ),
-                        ft.Column(
-                            [self._managed_trial_message_label, self._managed_trial_message_value],
-                            spacing=6,
-                            expand=True,
-                        ),
-                    ],
-                    spacing=24,
-                    vertical_alignment=ft.CrossAxisAlignment.START,
-                ),
-                self._managed_trial_transient_container,
-            ],
-            spacing=18,
-            expand=True,
-        )
-
-        content = ft.Row(
-            [
-                info_column,
-                ft.Container(content=self._managed_trial_usage_bar, alignment=ft.alignment.center),
-            ],
-            spacing=24,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-
-        return ft.Container(
-            content=create_glow_stack(
-                ft.Container(content=content, padding=24, alignment=ft.alignment.center_left)
-            ),
-            bgcolor=COLOR_SURFACE,
-            border_radius=16,
-            border=ft.border.all(1, ft.Colors.with_opacity(0.4, COLOR_DIVIDER)),
-            clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            shadow=get_card_shadow(),
-            visible=False,
-        )
-
-    def _managed_trial_lifecycle_key(self) -> str:
-        if self._managed_trial_remaining_percent is None:
-            return "dashboard.trial.lifecycle.pre_release"
-        if self._managed_trial_remaining_percent == 0:
-            return "dashboard.trial.lifecycle.exhausted"
-        return "dashboard.trial.lifecycle.active"
-
-    def _managed_trial_message_key(self) -> str:
-        if self._managed_trial_remaining_percent is None:
-            return "dashboard.trial.message.placeholder"
-        if self._managed_trial_remaining_percent == 0:
-            return "dashboard.trial.message.exhausted"
-        return "dashboard.trial.message.live_usage"
-
-    def _sync_managed_trial_card(self, *, update_ui: bool = True) -> None:
-        self._managed_trial_badge.value = t("dashboard.trial.source.managed")
-        self._managed_trial_status_label.value = t("dashboard.trial.lifecycle_label")
-        self._managed_trial_message_label.value = t("dashboard.trial.message_label")
-        self._managed_trial_transient_label.value = t("dashboard.trial.transient_label")
-        self._managed_trial_status_value.value = t(self._managed_trial_lifecycle_key())
-        self._managed_trial_message_value.value = t(self._managed_trial_message_key())
-        transient_key = self._managed_trial_transient_message_key
-        self._managed_trial_transient_value.value = (
-            t(transient_key, **self._managed_trial_transient_message_kwargs)
-            if transient_key is not None
-            else ""
-        )
-        self._managed_trial_transient_container.visible = bool(
-            self._managed_trial_visible and transient_key is not None
-        )
-        self._managed_trial_usage_bar.set_percent(
-            self._managed_trial_remaining_percent if self._managed_trial_visible else None
-        )
-        self._managed_trial_card.visible = self._managed_trial_visible
-        if update_ui and self.page is not None:
-            self._managed_trial_card.update()
-
-    def _noop_control_slot(self) -> None:
-        return None
 
     def _toggle_overlay(self) -> None:
         enabled = True
@@ -379,35 +226,6 @@ class DashboardView(ft.Column):
             needs_key=contract.overlay.state == "warning",
         )
         self._sync_notice()
-
-    @property
-    def managed_trial_state(self) -> dict[str, object]:
-        return {
-            "visible": self._managed_trial_visible,
-            "remaining_percent": self._managed_trial_remaining_percent,
-        }
-
-    def set_managed_trial_state(
-        self,
-        *,
-        visible: bool,
-        remaining_percent: int | None = None,
-        transient_message_key: str | None = None,
-        transient_message_kwargs: dict[str, object] | None = None,
-        **_extra: object,
-    ) -> None:
-        self._managed_trial_visible = bool(visible)
-        if self._managed_trial_visible and remaining_percent is not None:
-            self._managed_trial_remaining_percent = max(0, min(100, int(remaining_percent)))
-        else:
-            self._managed_trial_remaining_percent = None
-        if self._managed_trial_visible and transient_message_key:
-            self._managed_trial_transient_message_key = transient_message_key
-            self._managed_trial_transient_message_kwargs = dict(transient_message_kwargs or {})
-        else:
-            self._managed_trial_transient_message_key = None
-            self._managed_trial_transient_message_kwargs = {}
-        self._sync_managed_trial_card()
 
     def _toggle_stt(self):
         if self.is_stt_on:
@@ -770,8 +588,6 @@ class DashboardView(ft.Column):
             self.set_display_text(t("dashboard.warn_stt_key"))
         elif self._translation_showing_warning:
             self.set_display_text(t("dashboard.warn_llm_key"))
-        self._managed_trial_usage_bar.apply_locale()
-        self._sync_managed_trial_card(update_ui=False)
 
     def set_recent_languages(self, source: list[str], target: list[str]) -> None:
         """Set recent languages from settings (for persistence)."""

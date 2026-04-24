@@ -1081,7 +1081,7 @@ async def test_set_translation_enabled_keeps_managed_translation_disabled_on_ret
 
 
 @pytest.mark.asyncio
-async def test_set_translation_enabled_keeps_brake_notice_visible_in_managed_trial_card(
+async def test_set_translation_enabled_shows_brake_snackbar_without_dashboard_trial_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snackbar_calls: list[tuple[str, str]] = []
@@ -1135,14 +1135,8 @@ async def test_set_translation_enabled_keeps_brake_notice_visible_in_managed_tri
     assert controller._managed_openrouter_release_service.prepare_calls == 1
     assert controller.hub.translation_enabled is False
     assert dash.managed_auth_pending is False
-    assert controller._managed_trial_transient_message_key == "managed_release.brake"
-    assert controller._managed_trial_transient_message_kwargs == {"retry_after_ms": 5000}
-    assert dash.managed_trial_state == {
-        "visible": True,
-        "remaining_percent": None,
-        "transient_message_key": "managed_release.brake",
-        "transient_message_kwargs": {"retry_after_ms": 5000},
-    }
+    assert dash.managed_trial_calls == []
+    assert dash.managed_trial_state is None
     assert snackbar_calls == [(t("managed_release.brake"), ft.Colors.ORANGE_700)]
     assert settings_view.managed_trial_usage_state == {
         "visible": True,
@@ -1151,7 +1145,7 @@ async def test_set_translation_enabled_keeps_brake_notice_visible_in_managed_tri
 
 
 @pytest.mark.asyncio
-async def test_set_translation_enabled_keeps_revoked_notice_visible_in_managed_trial_card(
+async def test_set_translation_enabled_shows_revoked_snackbar_without_dashboard_trial_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snackbar_calls: list[tuple[str, str]] = []
@@ -1203,14 +1197,8 @@ async def test_set_translation_enabled_keeps_revoked_notice_visible_in_managed_t
     assert controller._managed_openrouter_release_service.prepare_calls == 1
     assert controller.hub.translation_enabled is False
     assert dash.managed_auth_pending is False
-    assert controller._managed_trial_transient_message_key == "managed_release.revoked_contact"
-    assert controller._managed_trial_transient_message_kwargs == {}
-    assert dash.managed_trial_state == {
-        "visible": True,
-        "remaining_percent": None,
-        "transient_message_key": "managed_release.revoked_contact",
-        "transient_message_kwargs": {},
-    }
+    assert dash.managed_trial_calls == []
+    assert dash.managed_trial_state is None
     assert snackbar_calls == [(t("managed_release.revoked_contact"), ft.Colors.ORANGE_700)]
     assert settings_view.managed_trial_usage_state == {
         "visible": True,
@@ -1425,8 +1413,8 @@ async def test_set_translation_enabled_off_wins_before_stale_retry_side_effects(
     assert controller.hub.translation_enabled is False
     assert controller._managed_trial_pending_auth is False
     assert dash.managed_auth_pending is False
-    assert controller._managed_trial_transient_message_key is None
-    assert controller._managed_trial_transient_message_kwargs == {}
+    assert dash.managed_trial_calls == []
+    assert dash.managed_trial_state is None
     assert snackbar_calls == []
     assert refresh_calls == []
 

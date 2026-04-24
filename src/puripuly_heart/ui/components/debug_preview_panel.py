@@ -18,6 +18,22 @@ from puripuly_heart.ui.theme import (
 DEBUG_PREVIEW_PANEL_DATA_KEY = "debug-preview-panel"
 
 
+def _make_text_button(label: str, **kwargs) -> ft.TextButton:
+    try:
+        return ft.TextButton(text=label, **kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument 'text'" not in str(exc):
+            raise
+        return ft.TextButton(content=label, **kwargs)
+
+
+def _set_text_button_label(button: ft.TextButton, label: str) -> None:
+    if hasattr(button, "text"):
+        button.text = label
+        return
+    button.content = label
+
+
 @dataclass(frozen=True)
 class _PreviewAction:
     key: str
@@ -29,29 +45,19 @@ class DebugPreviewPanel(ft.Container):
     def __init__(
         self,
         *,
-        on_managed_normal: Callable[[], None],
-        on_managed_exhausted: Callable[[], None],
         on_brake_notice: Callable[[], None],
         on_revoked_notice: Callable[[], None],
         on_founder_letter: Callable[[], None],
         on_pkce_failure: Callable[[], None],
-        on_clear: Callable[[], None],
     ) -> None:
         self._actions = (
-            _PreviewAction("managed_normal", "debug_preview.managed_normal", on_managed_normal),
-            _PreviewAction(
-                "managed_exhausted",
-                "debug_preview.managed_exhausted",
-                on_managed_exhausted,
-            ),
             _PreviewAction("brake_notice", "debug_preview.brake_notice", on_brake_notice),
             _PreviewAction("revoked_notice", "debug_preview.revoked_notice", on_revoked_notice),
             _PreviewAction("founder_letter", "debug_preview.founder_letter", on_founder_letter),
             _PreviewAction("pkce_failure", "debug_preview.pkce_failure", on_pkce_failure),
-            _PreviewAction("clear", "debug_preview.clear", on_clear),
         )
-        self._toggle_button = ft.TextButton(
-            text=t("debug_preview.button"),
+        self._toggle_button = _make_text_button(
+            t("debug_preview.button"),
             tooltip=t("debug_preview.tooltip"),
             on_click=self._toggle,
             style=self._toggle_style(),
@@ -114,8 +120,8 @@ class DebugPreviewPanel(ft.Container):
         )
 
     def _build_action_button(self, action: _PreviewAction) -> ft.TextButton:
-        return ft.TextButton(
-            text=t(action.label_key),
+        return _make_text_button(
+            t(action.label_key),
             on_click=lambda _e, callback=action.callback: self._invoke(callback),
             style=self._action_style(),
         )
@@ -128,12 +134,26 @@ class DebugPreviewPanel(ft.Container):
         callback()
 
     def apply_locale(self) -> None:
-        self._toggle_button.text = t("debug_preview.button")
+        _set_text_button_label(self._toggle_button, t("debug_preview.button"))
         self._toggle_button.tooltip = t("debug_preview.tooltip")
         for action in self._actions:
-            self._action_buttons[action.key].text = t(action.label_key)
+            _set_text_button_label(self._action_buttons[action.key], t(action.label_key))
         self._update_if_mounted()
 
+    def _is_mounted(self) -> bool:
+        try:
+            return self.page is not None
+        except RuntimeError as exc:
+            if "Control must be added to the page first" not in str(exc):
+                raise
+            return False
+
     def _update_if_mounted(self) -> None:
-        if self.page is not None:
+        if not self._is_mounted():
+            return
+        try:
             self.update()
+        except RuntimeError as exc:
+            if "Control must be added to the page first" not in str(exc):
+                raise
+            return

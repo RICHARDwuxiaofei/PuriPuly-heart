@@ -215,11 +215,6 @@ class GuiController:
     _overlay_start_task: asyncio.Task[None] | None = None
     _overlay_monitor_task: asyncio.Task[None] | None = None
     _overlay_lock: asyncio.Lock | None = None
-    _managed_trial_transient_message_key: str | None = field(init=False, default=None)
-    _managed_trial_transient_message_kwargs: dict[str, object] = field(
-        init=False,
-        default_factory=dict,
-    )
     _managed_trial_pending_auth: bool = field(init=False, default=False)
     _managed_trial_usage_metadata: OpenRouterKeyMetadata | None = field(init=False, default=None)
     _managed_trial_usage_metadata_entitlement_ref: str | None = field(
@@ -553,33 +548,6 @@ class GuiController:
             return True
         return resolution.api_key is None
 
-    def _set_managed_trial_transient_message(
-        self,
-        message_key: str | None,
-        message_kwargs: dict[str, object] | None = None,
-    ) -> None:
-        previous_message_key = self._managed_trial_transient_message_key
-        persistent_message_keys = {
-            "managed_release.brake",
-            "managed_release.revoked_contact",
-        }
-        if message_key not in persistent_message_keys:
-            message_key = None
-            message_kwargs = None
-
-        self._managed_trial_transient_message_key = message_key
-        self._managed_trial_transient_message_kwargs = dict(message_kwargs or {})
-
-        dash = getattr(self.app, "view_dashboard", None)
-        setter = getattr(dash, "set_managed_trial_state", None) if dash is not None else None
-        if callable(setter) and (message_key is not None or previous_message_key is not None):
-            setter(
-                visible=message_key is not None,
-                remaining_percent=None,
-                transient_message_key=message_key,
-                transient_message_kwargs=dict(message_kwargs or {}),
-            )
-
     def _managed_trial_remaining_percent(
         self, usage_metadata: OpenRouterKeyMetadata | None
     ) -> int | None:
@@ -602,7 +570,6 @@ class GuiController:
 
     def _on_managed_trial_delegate_ready(self) -> None:
         self._set_managed_trial_pending_auth(False)
-        self._set_managed_trial_transient_message(None)
         self._schedule_managed_trial_usage_refresh()
 
     async def _refresh_managed_trial_usage_state_best_effort(self) -> None:
@@ -649,7 +616,6 @@ class GuiController:
         ):
             self._clear_managed_trial_usage_metadata_cache()
             self._set_managed_trial_pending_auth(False)
-            self._set_managed_trial_transient_message(None)
             if callable(setter):
                 setter(visible=False, remaining_percent=None)
             return
@@ -1447,7 +1413,6 @@ class GuiController:
             return False
 
         if result.behavior == ManagedOpenRouterReleaseBehavior.READY and result.local_key_available:
-            self._set_managed_trial_transient_message(None)
             if self.hub.llm is None:
                 await self._rebuild_llm_provider()
             else:
@@ -1457,7 +1422,6 @@ class GuiController:
         diagnostics_text = format_managed_openrouter_diagnostics(result.diagnostics)
         if diagnostics_text:
             self.log_basic(f"[ManagedAuth] {diagnostics_text}", level=logging.ERROR)
-        self._set_managed_trial_transient_message(result.message_key, dict(result.message_kwargs))
         await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=False)
         self.hub.translation_enabled = False
         dash = getattr(self.app, "view_dashboard", None)

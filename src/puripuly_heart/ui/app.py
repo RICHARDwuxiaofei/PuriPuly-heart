@@ -170,55 +170,17 @@ class TranslatorApp:
 
     def _build_debug_preview_panel(self) -> DebugPreviewPanel:
         return DebugPreviewPanel(
-            on_managed_normal=self._preview_managed_normal,
-            on_managed_exhausted=self._preview_managed_exhausted,
             on_brake_notice=self._preview_brake_notice,
             on_revoked_notice=self._preview_revoked_notice,
             on_founder_letter=self._preview_founder_letter,
             on_pkce_failure=self._preview_pkce_failure,
-            on_clear=self._preview_clear,
-        )
-
-    def _set_debug_managed_trial_preview(
-        self,
-        *,
-        visible: bool,
-        remaining_percent: int | None,
-        transient_message_key: str | None = None,
-    ) -> None:
-        self.view_dashboard.set_managed_trial_state(
-            visible=visible,
-            remaining_percent=remaining_percent,
-            transient_message_key=transient_message_key,
-        )
-
-    def _preview_managed_normal(self) -> None:
-        self._set_debug_managed_trial_preview(
-            visible=True,
-            remaining_percent=62,
-            transient_message_key=None,
-        )
-
-    def _preview_managed_exhausted(self) -> None:
-        self._set_debug_managed_trial_preview(
-            visible=True,
-            remaining_percent=0,
-            transient_message_key=None,
         )
 
     def _preview_brake_notice(self) -> None:
-        self._set_debug_managed_trial_preview(
-            visible=True,
-            remaining_percent=62,
-            transient_message_key="managed_release.brake",
-        )
+        self._show_snackbar(t("managed_release.brake"), ft.Colors.ORANGE_700)
 
     def _preview_revoked_notice(self) -> None:
-        self._set_debug_managed_trial_preview(
-            visible=True,
-            remaining_percent=62,
-            transient_message_key="managed_release.revoked_contact",
-        )
+        self._show_snackbar(t("managed_release.revoked_contact"), ft.Colors.ORANGE_700)
 
     def _debug_preview_noop(self) -> None:
         return None
@@ -234,13 +196,6 @@ class TranslatorApp:
 
     def _preview_pkce_failure(self) -> None:
         self._show_snackbar(t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)
-
-    def _preview_clear(self) -> None:
-        self._set_debug_managed_trial_preview(
-            visible=False,
-            remaining_percent=None,
-            transient_message_key=None,
-        )
 
     def _close_open_dialog_for_navigation(self) -> None:
         dialog = getattr(self.page, "dialog", None)

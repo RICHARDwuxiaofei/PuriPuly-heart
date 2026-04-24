@@ -19,36 +19,33 @@ import puripuly_heart.ui.components.debug_preview_panel as panel_module  # noqa:
 DEBUG_PREVIEW_I18N_KEYS = {
     "debug_preview.button",
     "debug_preview.tooltip",
-    "debug_preview.managed_normal",
-    "debug_preview.managed_exhausted",
     "debug_preview.brake_notice",
     "debug_preview.revoked_notice",
     "debug_preview.founder_letter",
     "debug_preview.pkce_failure",
-    "debug_preview.clear",
 }
 
 ACTION_KEYS = [
-    "managed_normal",
-    "managed_exhausted",
     "brake_notice",
     "revoked_notice",
     "founder_letter",
     "pkce_failure",
-    "clear",
 ]
 
 
 def _callbacks(seen: list[str]):
     return {
-        "on_managed_normal": lambda: seen.append("managed_normal"),
-        "on_managed_exhausted": lambda: seen.append("managed_exhausted"),
         "on_brake_notice": lambda: seen.append("brake_notice"),
         "on_revoked_notice": lambda: seen.append("revoked_notice"),
         "on_founder_letter": lambda: seen.append("founder_letter"),
         "on_pkce_failure": lambda: seen.append("pkce_failure"),
-        "on_clear": lambda: seen.append("clear"),
     }
+
+
+def _button_label(button) -> str:
+    if hasattr(button, "text"):
+        return button.text
+    return button.content
 
 
 def test_debug_preview_panel_starts_collapsed_with_dbg_button() -> None:
@@ -57,7 +54,7 @@ def test_debug_preview_panel_starts_collapsed_with_dbg_button() -> None:
     panel = DebugPreviewPanel(**_callbacks(seen))
 
     assert panel.data == DEBUG_PREVIEW_PANEL_DATA_KEY
-    assert panel._toggle_button.text == "DBG"
+    assert _button_label(panel._toggle_button) == "DBG"
     assert panel._toggle_button.tooltip == "Debug UI preview"
     assert panel._popover.visible is False
     assert list(panel._action_buttons) == ACTION_KEYS
@@ -72,6 +69,23 @@ def test_debug_preview_panel_toggle_shows_and_hides_popover() -> None:
 
     panel._toggle(None)
     assert panel._popover.visible is False
+
+
+def test_debug_preview_panel_skips_update_when_detached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel = DebugPreviewPanel(**_callbacks([]))
+
+    def fail_update(self) -> None:
+        _ = self
+        raise AssertionError("detached debug preview panel should not update")
+
+    monkeypatch.setattr(DebugPreviewPanel, "update", fail_update)
+
+    panel._toggle(None)
+    panel.apply_locale()
+
+    assert panel._popover.visible is True
 
 
 def test_debug_preview_panel_invokes_each_callback_without_auto_collapsing() -> None:
@@ -94,9 +108,42 @@ def test_debug_preview_panel_apply_locale_refreshes_labels(
 
     panel.apply_locale()
 
-    assert panel._toggle_button.text == "label:debug_preview.button"
+    assert _button_label(panel._toggle_button) == "label:debug_preview.button"
     assert panel._toggle_button.tooltip == "label:debug_preview.tooltip"
-    assert panel._action_buttons["clear"].text == "label:debug_preview.clear"
+    assert (
+        _button_label(panel._action_buttons["brake_notice"]) == "label:debug_preview.brake_notice"
+    )
+
+
+def test_debug_preview_panel_uses_text_button_label_api_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[object] = []
+
+    class TextOnlyButton:
+        def __init__(self, *, text, tooltip=None, on_click=None, style=None) -> None:
+            self.text = text
+            self.tooltip = tooltip
+            self.on_click = on_click
+            self.style = style
+            created.append(self)
+
+    monkeypatch.setattr(panel_module.ft, "TextButton", TextOnlyButton)
+    panel = DebugPreviewPanel(**_callbacks([]))
+
+    assert [button.text for button in created] == [
+        "DBG",
+        "Brake notice",
+        "Revoked notice",
+        "Founder letter",
+        "PKCE failure",
+    ]
+
+    monkeypatch.setattr(panel_module, "t", lambda key: f"label:{key}")
+    panel.apply_locale()
+
+    assert panel._toggle_button.text == "label:debug_preview.button"
+    assert panel._action_buttons["brake_notice"].text == "label:debug_preview.brake_notice"
 
 
 def test_debug_preview_i18n_keys_exist_in_all_locale_bundles() -> None:

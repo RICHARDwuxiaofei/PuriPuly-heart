@@ -129,40 +129,12 @@ class FakeLanguageModal:
         self.__class__.opened.append((current, list(recent)))
 
 
-class FakeManagedTrialUsageBar:
-    def __init__(self, percent: int | None = None) -> None:
-        self.percent = percent
-        self.locale_calls = 0
-
-    def set_percent(self, percent: int | None) -> None:
-        self.percent = percent
-
-    def apply_locale(self) -> None:
-        self.locale_calls += 1
-
-
 def _make_dashboard(monkeypatch: pytest.MonkeyPatch):
-    if not hasattr(dashboard_module.ft.alignment, "center"):
-        monkeypatch.setattr(
-            dashboard_module.ft.alignment,
-            "center",
-            dashboard_module.ft.alignment.Alignment(0, 0),
-            raising=False,
-        )
-    if not hasattr(dashboard_module.ft.alignment, "center_left"):
-        monkeypatch.setattr(
-            dashboard_module.ft.alignment,
-            "center_left",
-            dashboard_module.ft.alignment.Alignment(-1, 0),
-            raising=False,
-        )
     monkeypatch.setattr(dashboard_module, "PowerButton", FakePowerButton)
     monkeypatch.setattr(dashboard_module, "DisplayCard", FakeDisplayCard)
     monkeypatch.setattr(dashboard_module, "LanguageCard", FakeLanguageCard)
     monkeypatch.setattr(dashboard_module, "LanguageModal", FakeLanguageModal)
-    monkeypatch.setattr(dashboard_module, "ManagedTrialUsageBar", FakeManagedTrialUsageBar)
     monkeypatch.setattr(dashboard_module, "create_background_glow_stack", lambda content: content)
-    monkeypatch.setattr(dashboard_module, "create_glow_stack", lambda content, **_kwargs: content)
     monkeypatch.setattr(dashboard_module, "font_for_language", lambda code: f"font-{code}")
     monkeypatch.setattr(dashboard_module, "language_name", lambda code: f"name-{code}")
     monkeypatch.setattr(dashboard_module, "get_locale", lambda: "en")
@@ -398,13 +370,13 @@ def test_dashboard_apply_locale_reapplies_managed_auth_pending_notice(
     ]
 
 
-def test_dashboard_builds_4x3_friendly_shell_and_managed_trial_row(
+def test_dashboard_builds_4x3_friendly_shell_without_managed_trial_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view = _make_dashboard(monkeypatch)
 
     assert view.controls[0] is view.shell_content
-    assert view.shell_content.controls == [view.main_surface, view._managed_trial_card]
+    assert view.shell_content.controls == [view.main_surface]
     assert view.shell_content.spacing == dashboard_module.DASHBOARD_LAYOUT_GAP
     assert view.main_surface.controls == [view.control_region, view.info_region]
     assert view.main_surface.spacing == dashboard_module.DASHBOARD_LAYOUT_GAP
@@ -450,7 +422,7 @@ def test_dashboard_builds_4x3_friendly_shell_and_managed_trial_row(
     assert view.language_card_slot.content is view.language_card
     assert dashboard_module.DASHBOARD_LANGUAGE_CARD_EXPAND == 1
     assert view.language_card_slot.expand == 1
-    assert view._managed_trial_card.visible is False
+    assert not hasattr(view, "_managed_trial_card")
 
 
 def test_dashboard_bottom_row_uses_trans_and_subtitles_labels(
@@ -475,62 +447,6 @@ def test_dashboard_peer_trans_overlay_buttons_use_default_on_color(
     assert "color_on" not in view.peer_button.kwargs
     assert "color_on" not in view.trans_button.kwargs
     assert "color_on" not in view.overlay_button.kwargs
-
-
-def test_dashboard_managed_trial_row_can_be_shown_without_runtime_wiring(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    view = _make_dashboard(monkeypatch)
-    shell = view.controls[0]
-    managed_trial_card = shell.controls[1]
-
-    view.set_managed_trial_state(visible=True, remaining_percent=71)
-
-    assert view.managed_trial_state == {"visible": True, "remaining_percent": 71}
-    assert managed_trial_card.visible is True
-
-    view.set_managed_trial_state(visible=False, remaining_percent=12)
-
-    assert view.managed_trial_state == {"visible": False, "remaining_percent": None}
-    assert managed_trial_card.visible is False
-
-
-def test_dashboard_managed_trial_row_renders_brake_transient_notice(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    view = _make_dashboard(monkeypatch)
-
-    view.set_managed_trial_state(
-        visible=True,
-        remaining_percent=None,
-        transient_message_key="managed_release.brake",
-        transient_message_kwargs={"retry_after_ms": 5000},
-    )
-
-    assert view._managed_trial_card.visible is True
-    assert view._managed_trial_transient_container.visible is True
-    assert view._managed_trial_transient_label.value == dashboard_module.t(
-        "dashboard.trial.transient_label"
-    )
-    assert view._managed_trial_transient_value.value == dashboard_module.t("managed_release.brake")
-
-
-def test_dashboard_managed_trial_row_renders_revoked_transient_notice(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    view = _make_dashboard(monkeypatch)
-
-    view.set_managed_trial_state(
-        visible=True,
-        remaining_percent=None,
-        transient_message_key="managed_release.revoked_contact",
-    )
-
-    assert view._managed_trial_card.visible is True
-    assert view._managed_trial_transient_container.visible is True
-    assert view._managed_trial_transient_value.value == dashboard_module.t(
-        "managed_release.revoked_contact"
-    )
 
 
 def test_dashboard_apply_locale_and_dialog_open_paths(monkeypatch: pytest.MonkeyPatch) -> None:
