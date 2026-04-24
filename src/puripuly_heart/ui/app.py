@@ -479,6 +479,13 @@ class TranslatorApp:
         launch_source: str = "settings",
     ) -> None:
         if getattr(self, "_openrouter_pkce_request_active", False):
+            reopen_authorization_url = getattr(
+                self.controller,
+                "reopen_openrouter_pkce_authorization_url",
+                None,
+            )
+            if callable(reopen_authorization_url):
+                reopen_authorization_url()
             return
         self._openrouter_pkce_request_active = True
 
@@ -505,6 +512,7 @@ class TranslatorApp:
                             config_path=self.controller.config_path,
                             preserve_custom_vocab_draft=True,
                         )
+                    self._show_snackbar(t("openrouter.pkce.connected"), COLOR_SUCCESS)
             finally:
                 self._openrouter_pkce_request_active = False
 

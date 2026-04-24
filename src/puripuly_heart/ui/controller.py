@@ -162,6 +162,7 @@ class GuiController:
     settings: AppSettings | None = None
     clock: SystemClock = SystemClock()
     _managed_openrouter_release_service: ManagedOpenRouterReleaseService | None = None
+    _openrouter_pkce_client: OpenRouterPKCEClient | None = None
 
     sender: VrchatOscUdpSender | None = None
     osc: SmartOscQueue | None = None
@@ -2637,6 +2638,11 @@ class GuiController:
     def _create_openrouter_pkce_client(self) -> OpenRouterPKCEClient:
         return OpenRouterPKCEClient(callback_origin="http://localhost:3000")
 
+    def reopen_openrouter_pkce_authorization_url(self) -> bool:
+        if self._openrouter_pkce_client is None:
+            return False
+        return self._openrouter_pkce_client.reopen_authorization_url()
+
     async def connect_openrouter_via_pkce(
         self,
         *,
@@ -2656,7 +2662,12 @@ class GuiController:
         previous_settings = copy.deepcopy(self.settings)
 
         try:
-            result = await self._create_openrouter_pkce_client().run_desktop_flow()
+            pkce_client = self._create_openrouter_pkce_client()
+            self._openrouter_pkce_client = pkce_client
+            try:
+                result = await pkce_client.run_desktop_flow()
+            finally:
+                self._openrouter_pkce_client = None
         except Exception as exc:
             self._show_short_message("openrouter.pkce.failed")
             self._log_error(f"OpenRouter PKCE failed: {exc}")

@@ -97,6 +97,24 @@ def test_extract_callback_code_accepts_missing_state_but_rejects_mismatch() -> N
         client._extract_callback_code("/callback?code=code_123&state=wrong-state", session)
 
 
+def test_reopen_authorization_url_reopens_current_pkce_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[str] = []
+    client = OpenRouterPKCEClient(callback_origin="http://localhost:3000")
+
+    assert client.reopen_authorization_url() is False
+
+    client.current_authorization_url = "https://openrouter.ai/auth?callback_url=callback"
+    monkeypatch.setattr(
+        "puripuly_heart.core.openrouter_pkce.webbrowser.open",
+        lambda url: opened.append(url) or True,
+    )
+
+    assert client.reopen_authorization_url() is True
+    assert opened == ["https://openrouter.ai/auth?callback_url=callback"]
+
+
 @pytest.mark.asyncio
 async def test_run_desktop_flow_binds_listener_before_opening_browser(
     monkeypatch: pytest.MonkeyPatch,

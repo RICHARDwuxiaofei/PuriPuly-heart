@@ -837,6 +837,39 @@ def test_on_request_openrouter_pkce_uses_settings_mutation_queue(
     assert len(queued) == 1
 
 
+def test_on_request_openrouter_pkce_reopens_existing_auth_url_while_flow_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    target_settings = AppSettings()
+    reopen_calls: list[str] = []
+
+    async def fake_connect_openrouter_via_pkce(
+        *, target_settings: AppSettings, launch_source: str
+    ) -> bool:
+        _ = (target_settings, launch_source)
+        return False
+
+    app.controller = SimpleNamespace(
+        connect_openrouter_via_pkce=fake_connect_openrouter_via_pkce,
+        reopen_openrouter_pkce_authorization_url=lambda: reopen_calls.append("reopen") or True,
+        settings=AppSettings(),
+        config_path=Path("settings.json"),
+    )
+    app.view_settings = SimpleNamespace(
+        refresh_after_openrouter_pkce_success=lambda *_args, **_kwargs: None,
+        load_from_settings=lambda *_args, **_kwargs: None,
+    )
+    queued: list[object] = []
+    monkeypatch.setattr(app, "_queue_settings_mutation_task", queued.append)
+
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+
+    assert len(queued) == 1
+    assert reopen_calls == ["reopen"]
+
+
 @pytest.mark.asyncio
 async def test_on_request_openrouter_pkce_ignores_duplicate_while_flow_active(
     monkeypatch: pytest.MonkeyPatch,
@@ -854,6 +887,7 @@ async def test_on_request_openrouter_pkce_ignores_duplicate_while_flow_active(
 
     app.controller = SimpleNamespace(
         connect_openrouter_via_pkce=fake_connect_openrouter_via_pkce,
+        reopen_openrouter_pkce_authorization_url=lambda: False,
         settings=AppSettings(),
         config_path=Path("settings.json"),
     )
@@ -885,6 +919,7 @@ async def test_on_request_openrouter_pkce_uses_draft_preserving_refresh_on_succe
     updated_settings = AppSettings()
     pkce_calls: list[tuple[AppSettings, str]] = []
     refresh_calls: list[tuple[AppSettings, Path]] = []
+    snackbar_calls: list[tuple[str, str]] = []
 
     async def fake_connect_openrouter_via_pkce(
         *, target_settings: AppSettings, launch_source: str
@@ -905,6 +940,7 @@ async def test_on_request_openrouter_pkce_uses_draft_preserving_refresh_on_succe
             AssertionError("full load_from_settings refresh should not run on PKCE success")
         ),
     )
+    app._show_snackbar = lambda message, bgcolor: snackbar_calls.append((message, bgcolor))
     queued: list[object] = []
     monkeypatch.setattr(app, "_queue_settings_mutation_task", queued.append)
 
@@ -914,6 +950,13 @@ async def test_on_request_openrouter_pkce_uses_draft_preserving_refresh_on_succe
     await queued[0]()
     assert pkce_calls == [(target_settings, "settings")]
     assert refresh_calls == [(updated_settings, Path("settings.json"))]
+    assert snackbar_calls == [(app_module.t("openrouter.pkce.connected"), app_module.COLOR_SUCCESS)]
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale("ko")
+        assert i18n_module.t("openrouter.pkce.connected") == "OpenRouter 인증이 완료되었어요."
+    finally:
+        i18n_module.set_locale(previous_locale)
 
 
 @pytest.mark.asyncio

@@ -5026,6 +5026,19 @@ async def test_connect_openrouter_via_pkce_stores_key_sets_alias_and_marks_verif
     assert applied[-1].api_key_verified.openrouter is True
 
 
+def test_reopen_openrouter_pkce_authorization_url_delegates_to_active_client() -> None:
+    reopen_calls: list[str] = []
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=DummySettingsView())
+    )
+    controller._openrouter_pkce_client = SimpleNamespace(
+        reopen_authorization_url=lambda: reopen_calls.append("reopen") or True
+    )
+
+    assert controller.reopen_openrouter_pkce_authorization_url() is True
+    assert reopen_calls == ["reopen"]
+
+
 @pytest.mark.asyncio
 async def test_connect_openrouter_via_pkce_leaves_settings_unchanged_on_failure(
     monkeypatch: pytest.MonkeyPatch,

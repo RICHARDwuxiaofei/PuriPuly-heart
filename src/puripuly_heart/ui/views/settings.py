@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import copy
 import logging
-import os
 from pathlib import Path
 from typing import Callable
 
@@ -62,6 +61,7 @@ from puripuly_heart.ui.overlay_peer_contract import OverlayPeerConsumerContract
 from puripuly_heart.ui.theme import (
     COLOR_DIVIDER,
     COLOR_NEUTRAL,
+    COLOR_NEUTRAL_DARK,
     COLOR_ON_BACKGROUND,
     COLOR_PRIMARY,
 )
@@ -72,7 +72,6 @@ _CJK_START = 0x3000
 _CENTER_ALIGNMENT = ft.alignment.Alignment(0, 0)
 _CENTER_RIGHT_ALIGNMENT = ft.alignment.Alignment(1, 0)
 _OPENROUTER_MANAGED_OPTION_VALUE = OpenRouterSelectionAlias.GEMMA4_MANAGED.value
-OPENROUTER_LEGACY_CONNECT_ENV = "PURIPULY_HEART_OPENROUTER_LEGACY_CONNECT"
 _SETTINGS_SUBTAB_ORDER = ("api", "general", "prompt", "overlay")
 _OVERLAY_DISTANCE_MIN = 0.5
 _OVERLAY_DISTANCE_MAX = 2.0
@@ -457,17 +456,18 @@ class SettingsView(ft.Column):
         *,
         size: int = 20,
         default_color: str = COLOR_NEUTRAL,
+        disabled_color: str | None = None,
     ) -> ft.ButtonStyle:
         """Create a complete ButtonStyle with the specified font."""
+        color = {
+            ft.ControlState.HOVERED: COLOR_PRIMARY,
+            ft.ControlState.DEFAULT: default_color,
+        }
+        if disabled_color is not None:
+            color[ft.ControlState.DISABLED] = disabled_color
         return ft.ButtonStyle(
-            color={
-                ft.ControlState.HOVERED: COLOR_PRIMARY,
-                ft.ControlState.DEFAULT: default_color,
-            },
-            icon_color={
-                ft.ControlState.HOVERED: COLOR_PRIMARY,
-                ft.ControlState.DEFAULT: default_color,
-            },
+            color=color,
+            icon_color=color,
             text_style=ft.TextStyle(
                 size=size,
                 font_family=font_family,
@@ -520,6 +520,7 @@ class SettingsView(ft.Column):
         *,
         size: int = 20,
         default_color: str = COLOR_NEUTRAL,
+        disabled_color: str | None = None,
         width: float | int | None = None,
         height: float | int | None = None,
     ) -> ft.TextButton:
@@ -529,6 +530,7 @@ class SettingsView(ft.Column):
                 font_for_language(get_locale()),
                 size=size,
                 default_color=default_color,
+                disabled_color=disabled_color,
             ),
             on_click=on_click,
             width=width,
@@ -756,6 +758,19 @@ class SettingsView(ft.Column):
                 self.show_snackbar(msg, bg) if self.show_snackbar else None
             ),
         )
+        self._openrouter_pkce_button = self._build_action_button(
+            t("settings.openrouter_authenticate"),
+            self._on_openrouter_pkce_click,
+            size=20,
+            default_color=COLOR_NEUTRAL_DARK,
+            disabled_color=COLOR_NEUTRAL_DARK,
+        )
+        self._openrouter_pkce_button.disabled = False
+        self._openrouter_pkce_button_row = ft.Row(
+            controls=[self._openrouter_pkce_button],
+            alignment=ft.MainAxisAlignment.END,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
         self._managed_trial_usage_bar = ManagedTrialUsageBar()
         self._alibaba_key_beijing = ApiKeyField(
             "settings.alibaba_api_key_beijing",
@@ -786,6 +801,7 @@ class SettingsView(ft.Column):
                 self._google_key,
                 self._managed_trial_usage_bar,
                 self._openrouter_key,
+                self._openrouter_pkce_button_row,
                 self._alibaba_key_beijing,
                 self._alibaba_key_singapore,
             ],
@@ -1674,9 +1690,6 @@ class SettingsView(ft.Column):
             target.managed_identity.verified_hardware_hash_salt_version = (
                 source.managed_identity.verified_hardware_hash_salt_version
             )
-        else:
-            target.managed_identity.verified_hardware_hash = None
-            target.managed_identity.verified_hardware_hash_salt_version = None
         target.system_prompt = source.system_prompt
         target.system_prompts = copy.deepcopy(source.system_prompts)
 
@@ -1965,6 +1978,32 @@ class SettingsView(ft.Column):
             else:
                 field._set_status("error")
                 field._last_verified_hash = ""
+        self._sync_openrouter_pkce_button_state(settings)
+
+    def _sync_openrouter_pkce_button_state(self, settings: AppSettings | None = None) -> None:
+        if settings is None:
+            settings = self._build_settings_with_provider_draft()
+        authenticated = bool(
+            settings is not None
+            and settings.api_key_verified.openrouter
+            and self._openrouter_key.value
+        )
+        _set_text_button_label(
+            self._openrouter_pkce_button,
+            t(
+                "settings.openrouter_authenticated"
+                if authenticated
+                else "settings.openrouter_authenticate"
+            ),
+        )
+        self._openrouter_pkce_button.disabled = authenticated
+        self._openrouter_pkce_button.style = self._get_button_style(
+            font_for_language(get_locale()),
+            default_color=COLOR_NEUTRAL_DARK,
+            disabled_color=COLOR_NEUTRAL_DARK,
+        )
+        if getattr(self._openrouter_pkce_button, "page", None):
+            self._openrouter_pkce_button.update()
 
     # --- Visibility Updates ---
     def _sync_managed_trial_usage_bar(self) -> None:
@@ -1980,9 +2019,6 @@ class SettingsView(ft.Column):
             if managed_selected and self._managed_trial_usage_visible
             else None
         )
-
-    def _legacy_openrouter_connect_enabled(self) -> bool:
-        return os.getenv(OPENROUTER_LEGACY_CONNECT_ENV, "").strip() == "1"
 
     def _update_api_visibility(self) -> None:
         """Update API key field visibility based on selected providers."""
@@ -2000,13 +2036,15 @@ class SettingsView(ft.Column):
 
         self._google_key.visible = llm == LLMProviderName.GEMINI
         self._sync_managed_trial_usage_bar()
-        self._openrouter_key.visible = self._legacy_openrouter_connect_enabled() and (
-            (
-                llm == LLMProviderName.OPENROUTER
-                and settings.openrouter.selected_source == OpenRouterCredentialSource.BYOK
-            )
-            or fallback_source == OpenRouterCredentialSource.BYOK
+        openrouter_byok_selected = bool(
+            llm == LLMProviderName.OPENROUTER
+            and settings.openrouter.selected_source == OpenRouterCredentialSource.BYOK
         )
+        self._openrouter_key.visible = bool(
+            openrouter_byok_selected or fallback_source == OpenRouterCredentialSource.BYOK
+        )
+        self._openrouter_pkce_button_row.visible = openrouter_byok_selected
+        self._sync_openrouter_pkce_button_state(settings)
         self._openrouter_routing_row.visible = True
         self._sync_openrouter_fallback_card(settings)
 
@@ -2240,17 +2278,13 @@ class SettingsView(ft.Column):
         elif openrouter_profile is not None and (
             openrouter_profile.openrouter_source == OpenRouterCredentialSource.BYOK.value
         ):
-            pending = copy.deepcopy(self._build_settings_with_provider_draft())
-            assert pending is not None
-            pending.provider.llm = LLMProviderName.OPENROUTER
-            pending.openrouter.selection_alias = OpenRouterSelectionAlias(openrouter_profile.alias)
-            pending.openrouter.selected_source = OpenRouterCredentialSource.BYOK
-            pending.openrouter.llm_model = OpenRouterLLMModel(openrouter_profile.openrouter_model)
-            provider_name = "openrouter"
-            pending.system_prompt = self._ensure_provider_prompt_value(pending, provider_name)
-            if self.on_request_openrouter_pkce is not None:
-                self.on_request_openrouter_pkce(pending)
-            return
+            provider = LLMProviderName.OPENROUTER
+            gemini_model = old_gemini_model
+            qwen_model = old_qwen_model
+            openrouter_selection_alias = OpenRouterSelectionAlias(openrouter_profile.alias)
+            assert openrouter_profile.openrouter_model is not None
+            openrouter_model = OpenRouterLLMModel(openrouter_profile.openrouter_model)
+            openrouter_selected_source = OpenRouterCredentialSource.BYOK
         elif openrouter_profile is not None:
             provider = LLMProviderName.OPENROUTER
             gemini_model = old_gemini_model
@@ -2560,6 +2594,29 @@ class SettingsView(ft.Column):
         if self.page:
             self._api_keys_column.update()
 
+    def _on_openrouter_pkce_click(self, _e) -> None:
+        settings = self._build_settings_with_provider_draft()
+        if settings is None or self.on_request_openrouter_pkce is None:
+            return
+        if settings.api_key_verified.openrouter and self._openrouter_key.value:
+            return
+        if settings.provider.llm != LLMProviderName.OPENROUTER:
+            return
+        if settings.openrouter.selected_source != OpenRouterCredentialSource.BYOK:
+            return
+        profile = self._openrouter_selection_profile(settings)
+        if profile is None or profile.openrouter_source != OpenRouterCredentialSource.BYOK.value:
+            return
+
+        target = copy.deepcopy(settings)
+        target.provider.llm = LLMProviderName.OPENROUTER
+        target.openrouter.selection_alias = OpenRouterSelectionAlias(profile.alias)
+        target.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+        assert profile.openrouter_model is not None
+        target.openrouter.llm_model = OpenRouterLLMModel(profile.openrouter_model)
+        target.system_prompt = self._ensure_provider_prompt_value(target, "openrouter")
+        self.on_request_openrouter_pkce(target)
+
     def _on_secret_change(self, key: str, value: str) -> None:
         if not self._settings or not self._config_path:
             return
@@ -2573,6 +2630,8 @@ class SettingsView(ft.Column):
                 # Notify app to reset verification status
                 if self.on_secret_cleared:
                     self.on_secret_cleared(key)
+            if key == "openrouter_api_key":
+                self._sync_openrouter_pkce_button_state()
 
     def _on_audio_change(self) -> None:
         if not self._settings:
@@ -3269,7 +3328,10 @@ class SettingsView(ft.Column):
     async def _verify_key(self, provider: str, key: str) -> tuple[bool, str]:
         """Verify API key."""
         if self.on_verify_api_key:
-            return await self.on_verify_api_key(provider, key)
+            result = await self.on_verify_api_key(provider, key)
+            if provider == "openrouter":
+                self._sync_openrouter_pkce_button_state()
+            return result
         return False, "Verification not available"
 
     def _emit_settings_changed(self) -> None:
@@ -3341,12 +3403,15 @@ class SettingsView(ft.Column):
 
         # Update dynamic buttons by replacing the entire style object
         ui_font = font_for_language(get_locale())
+        display_settings = self._build_settings_with_provider_draft()
 
         if self._reset_prompt_btn:
             self._reset_prompt_btn.style = self._get_button_style(ui_font)
 
         if self._qwen_region_btn:
             self._qwen_region_btn.style = self._get_button_style(ui_font)
+        if self._openrouter_pkce_button:
+            self._sync_openrouter_pkce_button_state(display_settings)
         self._sync_clickable_text_control_fonts(ui_font)
         for glyph_text in (
             getattr(self, "_overlay_distance_decrease_glyph", None),
@@ -3360,9 +3425,6 @@ class SettingsView(ft.Column):
                 glyph_text.font_family = ui_font
                 glyph_text.size = 22
         # Update text controls with current selection labels
-
-        # Update text controls with current selection labels
-        display_settings = self._build_settings_with_provider_draft()
         if display_settings:
             self._set_unit_card_value_text(
                 self._stt_text,

@@ -86,6 +86,7 @@ class _OpenRouterPKCECallbackListener:
 class OpenRouterPKCEClient:
     def __init__(self, *, callback_origin: str):
         self.callback_origin = callback_origin.rstrip("/")
+        self.current_authorization_url: str | None = None
 
     def build_session(self) -> OpenRouterPKCESession:
         code_verifier = secrets.token_urlsafe(64)
@@ -192,6 +193,7 @@ class OpenRouterPKCEClient:
 
     async def run_desktop_flow(self) -> OpenRouterPKCEExchangeResult:
         session = self.build_session()
+        self.current_authorization_url = session.authorization_url
         listener = self._create_callback_listener(session)
         try:
             webbrowser.open(session.authorization_url)
@@ -204,3 +206,8 @@ class OpenRouterPKCEClient:
             code_verifier=session.code_verifier,
             code_challenge_method=PKCE_CHALLENGE_METHOD,
         )
+
+    def reopen_authorization_url(self) -> bool:
+        if not self.current_authorization_url:
+            return False
+        return bool(webbrowser.open(self.current_authorization_url))
