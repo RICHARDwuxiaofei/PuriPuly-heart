@@ -203,7 +203,7 @@
   "managed_release.ready": "관리형 OpenRouter 준비가 끝났어요",
   "managed_release.not_eligible": "이 설치에서는 관리형 OpenRouter 체험을 사용할 수 없어요.",
   "managed_release.unavailable": "이번 롤아웃에서는 관리형 OpenRouter를 아직 사용할 수 없어요.",
-  "managed_release.brake": "신규 인증이 잠시 중지된 상태에요.",
+  "managed_release.brake": "신규 인증이 잠시 중지된 상태에요. BYOK 방식으로 이용해주세요.",
   "managed_release.retry": "관리형 OpenRouter 준비에 실패했어요. 다시 시도해주세요.",
   "openrouter.pkce.failed": "OpenRouter 연결에 실패했어요. 다시 시도해주세요.",
   "debug_preview.button": "DBG",

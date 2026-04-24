@@ -203,7 +203,7 @@
     "managed_release.ready": "托管 OpenRouter 已就绪",
     "managed_release.not_eligible": "当前安装不符合托管 OpenRouter 试用资格。",
     "managed_release.unavailable": "当前发布范围内暂不提供托管 OpenRouter。",
-    "managed_release.brake": "新的认证已暂时暂停。",
+    "managed_release.brake": "新的认证已暂时暂停。请改用 BYOK 方式。",
     "managed_release.retry": "托管 OpenRouter 准备失败，请重试。",
     "openrouter.pkce.failed": "OpenRouter 连接失败，请重试。",
     "debug_preview.button": "DBG",

@@ -518,7 +518,10 @@ def test_managed_release_ko_snackbar_copy_matches_requested_wording() -> None:
     try:
         i18n_module.set_locale("ko")
 
-        assert i18n_module.t("managed_release.brake") == "신규 인증이 잠시 중지된 상태에요."
+        assert (
+            i18n_module.t("managed_release.brake")
+            == "신규 인증이 잠시 중지된 상태에요. BYOK 방식으로 이용해주세요."
+        )
         assert (
             i18n_module.t("managed_release.revoked_contact")
             == "엑세스 키가 손상되었어요. 저에게 연락해서 새 키를 받아가세요."

@@ -203,7 +203,7 @@
   "managed_release.ready": "Managed OpenRouter is ready",
   "managed_release.not_eligible": "This installation is not eligible for managed OpenRouter access.",
   "managed_release.unavailable": "Managed OpenRouter access is not available in this rollout.",
-  "managed_release.brake": "New authentication is temporarily paused.",
+  "managed_release.brake": "New authentication is temporarily paused. Please use BYOK instead.",
   "managed_release.retry": "Managed OpenRouter setup failed. Please try again.",
   "openrouter.pkce.failed": "OpenRouter connection failed. Please try again.",
   "debug_preview.button": "DBG",
