@@ -17,6 +17,7 @@ from puripuly_heart.config.settings import (
     OpenRouterLLMModel,
     OpenRouterSelectionAlias,
 )
+from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.app import TranslatorApp, _check_and_notify_update
 
 
@@ -510,6 +511,20 @@ def test_debug_preview_surviving_managed_actions_are_snackbar_only() -> None:
         (app_module.t("managed_release.revoked_contact"), ft.Colors.ORANGE_700),
     ]
     assert app.view_dashboard.managed_trial_calls == []
+
+
+def test_managed_release_ko_snackbar_copy_matches_requested_wording() -> None:
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale("ko")
+
+        assert i18n_module.t("managed_release.brake") == "신규 인증이 잠시 중지된 상태에요."
+        assert (
+            i18n_module.t("managed_release.revoked_contact")
+            == "엑세스 키가 손상되었어요. 저에게 연락해서 새 키를 받아가세요."
+        )
+    finally:
+        i18n_module.set_locale(previous_locale)
 
 
 def test_debug_preview_founder_letter_uses_dialog_with_preview_safe_callbacks(
