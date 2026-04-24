@@ -59,6 +59,7 @@ class TranslatorApp:
         self.overlay_peer_contract = None
         self.debug_ui_preview = bool(debug_ui_preview)
         self.debug_preview_panel: DebugPreviewPanel | None = None
+        self._openrouter_pkce_request_active = False
         self._setup_page()
         self._build_layout()
 
@@ -477,28 +478,35 @@ class TranslatorApp:
         *,
         launch_source: str = "settings",
     ) -> None:
+        if getattr(self, "_openrouter_pkce_request_active", False):
+            return
+        self._openrouter_pkce_request_active = True
+
         async def _task() -> None:
-            ok = await self.controller.connect_openrouter_via_pkce(
-                target_settings=target_settings,
-                launch_source=launch_source,
-            )
-            if ok:
-                refresh_after_openrouter_pkce_success = getattr(
-                    self.view_settings,
-                    "refresh_after_openrouter_pkce_success",
-                    None,
+            try:
+                ok = await self.controller.connect_openrouter_via_pkce(
+                    target_settings=target_settings,
+                    launch_source=launch_source,
                 )
-                if callable(refresh_after_openrouter_pkce_success):
-                    refresh_after_openrouter_pkce_success(
-                        self.controller.settings,
-                        config_path=self.controller.config_path,
+                if ok:
+                    refresh_after_openrouter_pkce_success = getattr(
+                        self.view_settings,
+                        "refresh_after_openrouter_pkce_success",
+                        None,
                     )
-                else:
-                    self.view_settings.load_from_settings(
-                        self.controller.settings,
-                        config_path=self.controller.config_path,
-                        preserve_custom_vocab_draft=True,
-                    )
+                    if callable(refresh_after_openrouter_pkce_success):
+                        refresh_after_openrouter_pkce_success(
+                            self.controller.settings,
+                            config_path=self.controller.config_path,
+                        )
+                    else:
+                        self.view_settings.load_from_settings(
+                            self.controller.settings,
+                            config_path=self.controller.config_path,
+                            preserve_custom_vocab_draft=True,
+                        )
+            finally:
+                self._openrouter_pkce_request_active = False
 
         self._queue_settings_mutation_task(_task)
 

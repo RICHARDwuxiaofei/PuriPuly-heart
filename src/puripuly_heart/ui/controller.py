@@ -2635,7 +2635,7 @@ class GuiController:
             self.vrc_mic_audio_gate.set_receiver_active(False)
 
     def _create_openrouter_pkce_client(self) -> OpenRouterPKCEClient:
-        return OpenRouterPKCEClient(callback_origin="http://127.0.0.1:43123")
+        return OpenRouterPKCEClient(callback_origin="http://localhost:3000")
 
     async def connect_openrouter_via_pkce(
         self,

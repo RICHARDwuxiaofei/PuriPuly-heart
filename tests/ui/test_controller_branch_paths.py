@@ -4968,6 +4968,19 @@ async def test_verify_api_key_routes_alibaba_singapore_to_qwen_fallback(
 
 
 @pytest.mark.asyncio
+async def test_create_openrouter_pkce_client_uses_openrouter_documented_localhost_port() -> None:
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=DummySettingsView())
+    )
+
+    client = controller._create_openrouter_pkce_client()
+    session = client.build_session()
+
+    assert client.callback_origin == "http://localhost:3000"
+    assert "callback_url=http%3A%2F%2Flocalhost%3A3000%2Fcallback" in session.authorization_url
+
+
+@pytest.mark.asyncio
 async def test_connect_openrouter_via_pkce_stores_key_sets_alias_and_marks_verified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -838,6 +838,45 @@ def test_on_request_openrouter_pkce_uses_settings_mutation_queue(
 
 
 @pytest.mark.asyncio
+async def test_on_request_openrouter_pkce_ignores_duplicate_while_flow_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    target_settings = AppSettings()
+    pkce_calls: list[str] = []
+
+    async def fake_connect_openrouter_via_pkce(
+        *, target_settings: AppSettings, launch_source: str
+    ) -> bool:
+        _ = target_settings
+        pkce_calls.append(launch_source)
+        return False
+
+    app.controller = SimpleNamespace(
+        connect_openrouter_via_pkce=fake_connect_openrouter_via_pkce,
+        settings=AppSettings(),
+        config_path=Path("settings.json"),
+    )
+    app.view_settings = SimpleNamespace(
+        refresh_after_openrouter_pkce_success=lambda *_args, **_kwargs: None,
+        load_from_settings=lambda *_args, **_kwargs: None,
+    )
+    queued: list[object] = []
+    monkeypatch.setattr(app, "_queue_settings_mutation_task", queued.append)
+
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+
+    assert len(queued) == 1
+    await queued[0]()
+    assert pkce_calls == ["settings"]
+
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+
+    assert len(queued) == 2
+
+
+@pytest.mark.asyncio
 async def test_on_request_openrouter_pkce_uses_draft_preserving_refresh_on_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
