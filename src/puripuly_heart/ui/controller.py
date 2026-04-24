@@ -2014,7 +2014,12 @@ class GuiController:
             self._log_error(msg)
             return False, str(exc)
 
-    async def apply_providers(self, settings: AppSettings | None = None) -> None:
+    async def apply_providers(
+        self,
+        settings: AppSettings | None = None,
+        *,
+        force_rebuild_llm: bool = False,
+    ) -> None:
         next_settings = (
             self.settings
             if settings is None
@@ -2044,7 +2049,7 @@ class GuiController:
         next_peer_provider_signature = self._build_peer_stt_provider_signature(next_settings)
         next_llm_provider_signature = self._build_llm_provider_signature(next_settings)
 
-        should_rebuild_llm = (
+        should_rebuild_llm = force_rebuild_llm or (
             prev_llm_provider_signature is None
             or next_llm_provider_signature != prev_llm_provider_signature
         )
@@ -2679,6 +2684,8 @@ class GuiController:
             return False
 
         try:
+            if not await OpenRouterLLMProvider.verify_api_key(result.api_key):
+                raise RuntimeError("OpenRouter PKCE key verification failed")
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
             previous_api_key = secrets.get(OPENROUTER_BYOK_API_KEY_SECRET)
             secrets.set(OPENROUTER_BYOK_API_KEY_SECRET, result.api_key)
@@ -2689,7 +2696,9 @@ class GuiController:
             updated.openrouter.llm_model = OpenRouterLLMModel(profile.openrouter_model)
             updated.api_key_verified.openrouter = True
             try:
-                await self.apply_providers(updated)
+                await self.apply_providers(updated, force_rebuild_llm=True)
+                self.settings.api_key_verified.openrouter = True
+                self._save_settings()
             except Exception:
                 with contextlib.suppress(Exception):
                     if previous_api_key is None:
@@ -2697,7 +2706,7 @@ class GuiController:
                     else:
                         secrets.set(OPENROUTER_BYOK_API_KEY_SECRET, previous_api_key)
                 try:
-                    await self.apply_providers(previous_settings)
+                    await self.apply_providers(previous_settings, force_rebuild_llm=True)
                 except Exception as rollback_exc:
                     self.settings = previous_settings
                     with contextlib.suppress(Exception):
