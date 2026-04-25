@@ -1712,6 +1712,52 @@ def test_audio_vad_and_low_latency_handlers_update_state(
     assert view._low_latency_text.content.value == t("toggle.on")
 
 
+def test_audio_change_messages_use_basic_runtime_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    settings.audio.input_device = "Old Mic"
+    settings.desktop_audio.output_device = "Old Speakers"
+    basic_messages: list[str] = []
+    detailed_messages: list[str] = []
+    changed: list[AppSettings] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.runtime_log_basic = lambda message, *, level=logging.INFO: basic_messages.append(message)
+    view.runtime_log_detailed = lambda message, *, level=logging.INFO: detailed_messages.append(
+        message
+    )
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._audio_settings.host_api = "MME"
+    view._audio_settings.microphone = "New Mic"
+    view._audio_settings.desktop_output_device = "New Speakers"
+    view._on_audio_change()
+
+    expected_messages = [
+        f"[Settings] Audio Host changed: {WINDOWS_WASAPI_COMPATIBILITY_HOST_API} -> MME",
+        "[Settings] Microphone changed: Old Mic -> New Mic",
+        "[Settings] Desktop loopback output changed: Old Speakers -> New Speakers",
+    ]
+    audio_change_prefixes = (
+        "[Settings] Audio Host changed:",
+        "[Settings] Microphone changed:",
+        "[Settings] Desktop loopback output changed:",
+    )
+
+    assert all(message in basic_messages for message in expected_messages)
+    assert not any(message.startswith(audio_change_prefixes) for message in detailed_messages)
+    assert settings.audio.input_host_api == "MME"
+    assert settings.audio.input_device == "New Mic"
+    assert settings.desktop_audio.output_device == "New Speakers"
+    assert len(changed) == 1
+    assert changed[0].audio.input_host_api == "MME"
+    assert changed[0].audio.input_device == "New Mic"
+    assert changed[0].desktop_audio.output_device == "New Speakers"
+
+
 def test_immediate_settings_emit_preserves_peer_local_qwen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

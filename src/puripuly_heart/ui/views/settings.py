@@ -2645,13 +2645,11 @@ class SettingsView(ft.Column):
         old_desktop_output = self._settings.desktop_audio.output_device
 
         if old_host != new_host:
-            self._emit_runtime_detailed(f"[Settings] Audio Host changed: {old_host} -> {new_host}")
+            self._emit_runtime_basic(f"[Settings] Audio Host changed: {old_host} -> {new_host}")
         if old_device != new_device:
-            self._emit_runtime_detailed(
-                f"[Settings] Microphone changed: {old_device} -> {new_device}"
-            )
+            self._emit_runtime_basic(f"[Settings] Microphone changed: {old_device} -> {new_device}")
         if old_desktop_output != new_desktop_output:
-            self._emit_runtime_detailed(
+            self._emit_runtime_basic(
                 f"[Settings] Desktop loopback output changed: {old_desktop_output} -> {new_desktop_output}"
             )
 
