@@ -2,9 +2,9 @@
 use super::cache::LayoutCache;
 use super::cache::{CachedBlockLayoutTemplate, CachedLineLayoutTemplate};
 use super::types::{
-    BlockBounds, CaptionBlock, CaptionLayoutResult, CaptionPresentation, LayoutCacheKey, LineRole,
-    ResolvedBlockLayout, ResolvedFrameLayout, ResolvedLineLayout, VisualBounds,
-    DEFAULT_AVERAGE_GLYPH_ADVANCE_PX, DEFAULT_BLOCK_SPACING_PX, DEFAULT_FONT_SIZE_PX,
+    BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionLayoutResult, CaptionPresentation,
+    LayoutCacheKey, LineRole, ResolvedBlockLayout, ResolvedFrameLayout, ResolvedLineLayout,
+    VisualBounds, DEFAULT_AVERAGE_GLYPH_ADVANCE_PX, DEFAULT_BLOCK_SPACING_PX, DEFAULT_FONT_SIZE_PX,
     DEFAULT_HORIZONTAL_PADDING_PX, DEFAULT_PRIMARY_LINE_HEIGHT_PX,
     DEFAULT_SECONDARY_LINE_HEIGHT_PX, DEFAULT_STRIP_HORIZONTAL_PADDING_PX,
     DEFAULT_STRIP_VERTICAL_PADDING_PX, DEFAULT_SURFACE_HEIGHT_PX, DEFAULT_SURFACE_WIDTH_PX,
@@ -240,6 +240,10 @@ impl CaptionLayoutPolicy {
         base_height_px as f32 * text_scale.max(0.1)
     }
 
+    fn reserves_secondary_row(&self, block: &CaptionBlock) -> bool {
+        block_reserves_secondary_row(block)
+    }
+
     fn content_width_px(&self, surface_width_px: u32) -> f32 {
         surface_width_px
             .saturating_sub(self.horizontal_padding_px.saturating_mul(2))
@@ -248,7 +252,7 @@ impl CaptionLayoutPolicy {
     }
 
     fn primary_line_budget(&self, block: &CaptionBlock) -> usize {
-        if block.secondary_enabled {
+        if self.reserves_secondary_row(block) {
             2
         } else {
             3
@@ -262,13 +266,14 @@ impl CaptionLayoutPolicy {
         text_scale: f32,
     ) -> CachedBlockLayoutTemplate {
         let content_width_px = content_width_px.max(1.0);
+        let secondary_row_reserved = self.reserves_secondary_row(block);
         let primary_budget = self.primary_line_budget(block);
         let primary_font_size_px = DEFAULT_FONT_SIZE_PX * text_scale;
         let secondary_font_size_px = primary_font_size_px * SECONDARY_FONT_SCALE;
         let primary_line_height_px = self.primary_line_height_px as f32 * text_scale;
         let vertical_padding_px = self.strip_vertical_padding_px as f32 * text_scale;
         let strip_width_px = content_width_px + self.strip_horizontal_padding_px as f32 * 2.0;
-        let block_height_px = self.stable_block_height_px(block.secondary_enabled, text_scale);
+        let block_height_px = self.stable_block_height_px(secondary_row_reserved, text_scale);
         let local_bounds = BlockBounds::new(0.0, 0.0, strip_width_px, block_height_px);
         let primary_advance_px = self.average_glyph_advance_px as f32 * text_scale;
         let wrapped_primary = wrap_text(&block.primary_text, content_width_px, primary_advance_px);
@@ -328,7 +333,7 @@ impl CaptionLayoutPolicy {
         CachedBlockLayoutTemplate {
             primary_lines,
             secondary_line,
-            secondary_reserved: block.secondary_enabled,
+            secondary_reserved: secondary_row_reserved,
             bounds: local_bounds,
             visual_bounds: local_visual_bounds,
             content_width_px,
@@ -345,12 +350,13 @@ impl CaptionLayoutPolicy {
         content_width_px: f32,
         text_scale: f32,
     ) -> Result<CachedBlockLayoutTemplate, windows::core::Error> {
+        let secondary_row_reserved = self.reserves_secondary_row(block);
         let primary_budget = self.primary_line_budget(block);
         let primary_font_size_px = DEFAULT_FONT_SIZE_PX * text_scale;
         let secondary_font_size_px = primary_font_size_px * SECONDARY_FONT_SCALE;
         let primary_line_height_px = self.primary_line_height_px as f32 * text_scale;
         let vertical_padding_px = self.strip_vertical_padding_px as f32 * text_scale;
-        let block_height_px = self.stable_block_height_px(block.secondary_enabled, text_scale);
+        let block_height_px = self.stable_block_height_px(secondary_row_reserved, text_scale);
         let local_bounds = BlockBounds::new(
             0.0,
             0.0,
@@ -432,7 +438,7 @@ impl CaptionLayoutPolicy {
         Ok(CachedBlockLayoutTemplate {
             primary_lines,
             secondary_line,
-            secondary_reserved: block.secondary_enabled,
+            secondary_reserved: secondary_row_reserved,
             bounds: local_bounds,
             visual_bounds,
             content_width_px,
@@ -875,6 +881,7 @@ fn layout_cache_key_for_block(
         channel: block.channel,
         block_variant: block.block_variant,
         secondary_enabled: block.secondary_enabled,
+        secondary_reserved: block_reserves_secondary_row(block),
         primary_font_size_key: scalar_key(DEFAULT_FONT_SIZE_PX * text_scale),
         secondary_font_size_key: scalar_key(
             DEFAULT_FONT_SIZE_PX * text_scale * SECONDARY_FONT_SCALE,
@@ -882,6 +889,12 @@ fn layout_cache_key_for_block(
         content_width_key: content_width_px.round() as u32,
         text_scale_key: scalar_key(text_scale),
     }
+}
+
+fn block_reserves_secondary_row(block: &CaptionBlock) -> bool {
+    block.secondary_enabled
+        || block.slot_assigned
+        || matches!(block.block_variant, CaptionBlockVariant::ActivePeer)
 }
 
 fn materialize_resolved_block_layout(

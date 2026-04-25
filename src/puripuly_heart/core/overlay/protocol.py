@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 ChannelId = Literal["self", "peer"]
-BlockVariant = Literal["active_self", "finalized"]
+BlockVariant = Literal["active_self", "active_peer", "finalized"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,10 +88,12 @@ class OverlayPresentationBlock:
         if channel not in ("self", "peer"):
             raise ValueError(f"invalid overlay presentation channel: {channel!r}")
         block_variant = data.get("block_variant")
-        if block_variant not in ("active_self", "finalized"):
+        if block_variant not in ("active_self", "active_peer", "finalized"):
             raise ValueError(f"invalid overlay presentation block variant: {block_variant!r}")
         if block_variant == "active_self" and channel != "self":
             raise ValueError("active_self blocks require channel='self'")
+        if block_variant == "active_peer" and channel != "peer":
+            raise ValueError("active_peer blocks require channel='peer'")
         occupant_key = _require_string_field(data, "occupant_key").strip()
         if not occupant_key:
             raise ValueError("occupant_key must be a non-empty string")

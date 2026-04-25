@@ -41,6 +41,7 @@ impl Default for OverlayPresentationCalibration {
 #[serde(rename_all = "snake_case")]
 pub enum OverlayPresentationBlockVariant {
     ActiveSelf,
+    ActivePeer,
     #[default]
     Finalized,
 }

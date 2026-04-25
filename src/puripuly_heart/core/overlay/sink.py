@@ -76,6 +76,22 @@ class SelfActiveUpdate(OverlayEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class PeerActiveUpdate(OverlayEvent):
+    text: str
+    occupant_key: str
+
+    EVENT_TYPE: ClassVar[str] = "peer_active_update"
+
+    def __post_init__(self) -> None:
+        if self.channel != "peer":
+            raise ValueError("PeerActiveUpdate requires channel='peer'")
+        if self.utterance_id is None:
+            raise ValueError("PeerActiveUpdate requires utterance_id")
+        if not self.occupant_key.strip():
+            raise ValueError("PeerActiveUpdate requires non-empty occupant_key")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SelfActiveClear(OverlayEvent):
     EVENT_TYPE: ClassVar[str] = "self_active_clear"
 
@@ -117,6 +133,7 @@ OverlayEventUnion = (
     SelfTranscriptFinal
     | PeerTranscriptFinal
     | SelfActiveUpdate
+    | PeerActiveUpdate
     | SelfActiveClear
     | TranslationStreamUpdate
     | TranslationFinal
@@ -282,6 +299,36 @@ class OverlayEventAdapter:
             ),
             text=text,
             secondary_text=secondary_text,
+            occupant_key=occupant_key,
+        )
+
+    def peer_active_update(
+        self,
+        *,
+        text: str,
+        utterance_id: UUID,
+        occupant_key: str,
+        created_at: float | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
+    ) -> PeerActiveUpdate:
+        return PeerActiveUpdate(
+            **self._common_event_fields(
+                utterance_id=utterance_id,
+                channel="peer",
+                created_at=created_at,
+                update_id=update_id,
+                origin_wall_clock_ms=origin_wall_clock_ms,
+                session_scope=session_scope,
+                source_text_hash=source_text_hash,
+                source_text_len=source_text_len,
+                logical_turn_key=logical_turn_key,
+            ),
+            text=text,
             occupant_key=occupant_key,
         )
 

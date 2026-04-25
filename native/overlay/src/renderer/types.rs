@@ -53,6 +53,7 @@ pub struct CaptionBlock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CaptionBlockVariant {
     ActiveSelf,
+    ActivePeer,
     Finalized,
 }
 
@@ -379,6 +380,7 @@ pub struct LayoutCacheKey {
     pub channel: Option<CaptionChannel>,
     pub block_variant: CaptionBlockVariant,
     pub secondary_enabled: bool,
+    pub secondary_reserved: bool,
     pub primary_font_size_key: u32,
     pub secondary_font_size_key: u32,
     pub content_width_key: u32,

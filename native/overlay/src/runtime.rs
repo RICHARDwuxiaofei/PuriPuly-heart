@@ -815,13 +815,19 @@ fn peer_overlay_first_emit_block_ids_from_snapshot(
     snapshot
         .blocks
         .iter()
-        .filter(|block| {
-            block.channel == "peer"
-                && block.block_variant == OverlayPresentationBlockVariant::Finalized
-                && !block.primary_text.trim().is_empty()
-        })
+        .filter(|block| is_peer_overlay_first_emit_candidate(block))
         .map(|block| block.id.clone())
         .collect()
+}
+
+fn is_peer_overlay_first_emit_candidate(block: &OverlayPresentationBlock) -> bool {
+    block.channel == "peer"
+        && matches!(
+            block.block_variant,
+            OverlayPresentationBlockVariant::ActivePeer
+                | OverlayPresentationBlockVariant::Finalized
+        )
+        && !block.primary_text.trim().is_empty()
 }
 
 fn peer_overlay_first_render_block_ids_from_caption_blocks(
@@ -831,13 +837,19 @@ fn peer_overlay_first_render_block_ids_from_caption_blocks(
     blocks
         .iter()
         .filter(|block| {
-            pending.contains(&block.id)
-                && block.channel == Some(CaptionChannel::PeerChannel)
-                && block.block_variant == CaptionBlockVariant::Finalized
-                && block.has_drawable_text()
+            pending.contains(&block.id) && is_peer_overlay_first_render_candidate(block)
         })
         .map(|block| block.id.clone())
         .collect()
+}
+
+fn is_peer_overlay_first_render_candidate(block: &CaptionBlock) -> bool {
+    block.channel == Some(CaptionChannel::PeerChannel)
+        && matches!(
+            block.block_variant,
+            CaptionBlockVariant::ActivePeer | CaptionBlockVariant::Finalized
+        )
+        && block.has_drawable_text()
 }
 
 fn format_peer_overlay_stage_log(stage: &str, block_id: &str) -> String {
@@ -859,6 +871,7 @@ fn log_runtime_secondary_state(enabled: bool, text: &str) -> String {
 fn overlay_variant_name(variant: OverlayPresentationBlockVariant) -> &'static str {
     match variant {
         OverlayPresentationBlockVariant::ActiveSelf => "active_self",
+        OverlayPresentationBlockVariant::ActivePeer => "active_peer",
         OverlayPresentationBlockVariant::Finalized => "finalized",
     }
 }
@@ -866,6 +879,7 @@ fn overlay_variant_name(variant: OverlayPresentationBlockVariant) -> &'static st
 fn caption_variant_name(variant: CaptionBlockVariant) -> &'static str {
     match variant {
         CaptionBlockVariant::ActiveSelf => "active_self",
+        CaptionBlockVariant::ActivePeer => "active_peer",
         CaptionBlockVariant::Finalized => "finalized",
     }
 }
@@ -1533,6 +1547,9 @@ impl OverlayRuntime {
                     crate::state::OverlayPresentationBlockVariant::ActiveSelf => {
                         CaptionBlockVariant::ActiveSelf
                     }
+                    crate::state::OverlayPresentationBlockVariant::ActivePeer => {
+                        CaptionBlockVariant::ActivePeer
+                    }
                     crate::state::OverlayPresentationBlockVariant::Finalized => {
                         CaptionBlockVariant::Finalized
                     }
@@ -1704,6 +1721,25 @@ mod tests {
     }
 
     #[test]
+    fn runtime_converts_active_peer_snapshot_to_active_peer_caption_block() {
+        let mut active_peer =
+            slot_block("peer:active", "peer:turn-1", 1, "peer", "Can you hear me?");
+        active_peer.block_variant = OverlayPresentationBlockVariant::ActivePeer;
+        active_peer.secondary_enabled = false;
+        let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            revision: 5,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![active_peer],
+        });
+
+        let blocks = runtime.caption_blocks();
+
+        assert_eq!(blocks[0].id, "peer:active");
+        assert_eq!(blocks[0].block_variant, CaptionBlockVariant::ActivePeer);
+        assert_eq!(blocks[0].channel, Some(CaptionChannel::PeerChannel));
+    }
+
+    #[test]
     fn runtime_detects_peer_overlay_first_emit_blocks_from_snapshot() {
         let snapshot = OverlayPresentationSnapshot {
             revision: 4,
@@ -1717,6 +1753,23 @@ mod tests {
         assert_eq!(
             peer_overlay_first_emit_block_ids_from_snapshot(&snapshot),
             vec!["peer:newer".to_string()]
+        );
+    }
+
+    #[test]
+    fn runtime_detects_active_peer_first_emit_blocks_from_snapshot() {
+        let mut active_peer = slot_block("peer:active", "peer:turn-1", 1, "peer", "source");
+        active_peer.block_variant = OverlayPresentationBlockVariant::ActivePeer;
+        active_peer.secondary_enabled = false;
+        let snapshot = OverlayPresentationSnapshot {
+            revision: 6,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![active_peer],
+        };
+
+        assert_eq!(
+            peer_overlay_first_emit_block_ids_from_snapshot(&snapshot),
+            vec!["peer:active".to_string()]
         );
     }
 
@@ -1766,6 +1819,24 @@ mod tests {
                 "peer:11111111-1111-1111-1111-111111111111".to_string(),
                 "peer:22222222-2222-2222-2222-222222222222".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn runtime_detects_active_peer_first_render_for_pending_peer_block_ids() {
+        let pending = HashSet::from([String::from("peer:active")]);
+        let blocks = vec![
+            CaptionBlock::new("peer:active", "source")
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_variant(CaptionBlockVariant::ActivePeer),
+            CaptionBlock::new("peer:not-pending", "source")
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_variant(CaptionBlockVariant::ActivePeer),
+        ];
+
+        assert_eq!(
+            peer_overlay_first_render_block_ids_from_caption_blocks(&blocks, &pending),
+            vec!["peer:active".to_string()]
         );
     }
 

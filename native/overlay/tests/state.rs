@@ -87,6 +87,30 @@ fn overlay_state_preserves_snapshot_slot_correlation_observability_metadata() {
 }
 
 #[test]
+fn overlay_state_deserializes_active_peer_variant() {
+    let snapshot: OverlayPresentationSnapshot = serde_json::from_value(json!({
+        "revision": 1,
+        "calibration": OverlayPresentationCalibration::default(),
+        "blocks": [{
+            "id": "peer:turn-1",
+            "occupant_key": "peer:turn-1",
+            "appearance_seq": 1,
+            "channel": "peer",
+            "block_variant": "active_peer",
+            "primary_text": "Can you hear me?",
+            "secondary_text": "",
+            "secondary_enabled": false
+        }]
+    }))
+    .unwrap();
+
+    assert_eq!(
+        snapshot.blocks[0].block_variant,
+        OverlayPresentationBlockVariant::ActivePeer
+    );
+}
+
+#[test]
 fn overlay_state_keeps_snapshot_blocks_in_order() {
     let mut state = OverlayState::default();
 
@@ -257,6 +281,59 @@ fn overlay_state_promotes_matching_occupant_key_without_reassigning_slot() {
     assert_eq!(slot.slot_entry_order, original_entry_order);
     assert_eq!(slot.occupant_key, "self:merge-1");
     assert_eq!(slot.id, "self:merge-1");
+}
+
+#[test]
+fn overlay_state_promotes_active_peer_matching_occupant_key_without_reassigning_slot() {
+    let mut state = OverlayState::default();
+
+    assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![OverlayPresentationBlock {
+            id: "peer:active".into(),
+            occupant_key: "peer:turn-1".into(),
+            appearance_seq: 1,
+            channel: "peer".into(),
+            block_variant: OverlayPresentationBlockVariant::ActivePeer,
+            primary_text: "Can you hear me?".into(),
+            secondary_text: String::new(),
+            secondary_enabled: false,
+            update_id: None,
+            origin_wall_clock_ms: None,
+            session_scope: None,
+        }],
+    }));
+    let original_slot = state.scene().slots()[0].as_ref().unwrap().slot_index;
+    let original_entry_order = state.scene().slots()[0].as_ref().unwrap().slot_entry_order;
+
+    assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        revision: 2,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![OverlayPresentationBlock {
+            id: "peer:turn-1".into(),
+            occupant_key: "peer:turn-1".into(),
+            appearance_seq: 1,
+            channel: "peer".into(),
+            block_variant: OverlayPresentationBlockVariant::Finalized,
+            primary_text: "들려?".into(),
+            secondary_text: "Can you hear me?".into(),
+            secondary_enabled: true,
+            update_id: None,
+            origin_wall_clock_ms: None,
+            session_scope: None,
+        }],
+    }));
+
+    let slot = state.scene().slots()[0].as_ref().unwrap();
+    assert_eq!(slot.slot_index, original_slot);
+    assert_eq!(slot.slot_entry_order, original_entry_order);
+    assert_eq!(slot.occupant_key, "peer:turn-1");
+    assert_eq!(slot.id, "peer:turn-1");
+    assert_eq!(
+        slot.block_variant,
+        OverlayPresentationBlockVariant::Finalized
+    );
 }
 
 #[test]

@@ -9,7 +9,11 @@ from puripuly_heart.core.overlay.protocol import (
     OverlayPresentationCalibration,
     OverlayPresentationSnapshot,
 )
-from puripuly_heart.core.overlay.sink import OverlayEventAdapter, SelfActiveUpdate
+from puripuly_heart.core.overlay.sink import (
+    OverlayEventAdapter,
+    PeerActiveUpdate,
+    SelfActiveUpdate,
+)
 from puripuly_heart.domain.models import Translation
 
 
@@ -129,6 +133,84 @@ def test_overlay_event_adapter_self_active_update_accepts_secondary_text() -> No
     assert event.utterance_id == utterance_id
     assert event.occupant_key == f"self:{utterance_id}"
     assert event.secondary_text == "translated live"
+
+
+def test_overlay_presentation_snapshot_round_trips_active_peer_block() -> None:
+    block = OverlayPresentationBlock(
+        id="peer:turn-1",
+        occupant_key="peer:turn-1",
+        appearance_seq=3,
+        channel="peer",
+        block_variant="active_peer",
+        primary_text="can you hear me",
+        secondary_text="",
+        secondary_enabled=False,
+    )
+    snapshot = OverlayPresentationSnapshot(blocks=[block])
+
+    restored = OverlayPresentationSnapshot.from_dict(snapshot.to_dict())
+
+    assert restored.blocks == [block]
+
+
+def test_overlay_presentation_block_rejects_self_active_peer_combination() -> None:
+    with pytest.raises(ValueError, match="active_peer blocks require channel='peer'"):
+        OverlayPresentationBlock.from_dict(
+            {
+                "id": "self:active-peer",
+                "occupant_key": "self:active-peer",
+                "appearance_seq": 1,
+                "channel": "self",
+                "block_variant": "active_peer",
+                "primary_text": "hello",
+                "secondary_text": "",
+                "secondary_enabled": False,
+            }
+        )
+
+
+def test_overlay_event_adapter_peer_active_update_carries_occupant_key() -> None:
+    adapter = OverlayEventAdapter()
+    utterance_id = uuid4()
+
+    event = adapter.peer_active_update(
+        text="peer live",
+        utterance_id=utterance_id,
+        occupant_key=f"peer:{utterance_id}",
+        created_at=11.0,
+    )
+
+    assert event.type == "peer_active_update"
+    assert event.channel == "peer"
+    assert event.utterance_id == utterance_id
+    assert event.occupant_key == f"peer:{utterance_id}"
+    assert event.text == "peer live"
+
+
+def test_peer_active_update_requires_peer_channel_and_utterance_id() -> None:
+    utterance_id = uuid4()
+
+    with pytest.raises(ValueError, match="PeerActiveUpdate requires channel='peer'"):
+        PeerActiveUpdate(
+            event_id="evt-1",
+            seq=1,
+            utterance_id=utterance_id,
+            channel="self",
+            created_at=10.0,
+            text="peer live",
+            occupant_key=f"peer:{utterance_id}",
+        )
+
+    with pytest.raises(ValueError, match="PeerActiveUpdate requires utterance_id"):
+        PeerActiveUpdate(
+            event_id="evt-2",
+            seq=2,
+            utterance_id=None,
+            channel="peer",
+            created_at=10.0,
+            text="peer live",
+            occupant_key=f"peer:{utterance_id}",
+        )
 
 
 def test_overlay_event_adapter_repeated_same_utterance_translation_updates_get_distinct_update_id() -> (

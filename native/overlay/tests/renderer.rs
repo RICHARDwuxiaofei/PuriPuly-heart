@@ -1,6 +1,8 @@
 use puripuly_heart_overlay::{
     BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
     CaptionPresentation, CaptionRenderer, DamageBand, OverlayPlacementPolicy,
+    OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
+    OverlayPresentationSnapshot, OverlayState,
 };
 fn assert_close(actual: f32, expected: f32) {
     assert!(
@@ -209,6 +211,172 @@ fn renderer_uses_slot_top_px_instead_of_stacking_input_order() {
 }
 
 #[test]
+fn renderer_active_peer_with_state_generated_slots_does_not_overlap_next_row() {
+    let mut state = OverlayState::default();
+    assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![
+            OverlayPresentationBlock {
+                id: "peer:active".into(),
+                occupant_key: "peer:turn-1".into(),
+                appearance_seq: 1,
+                channel: "peer".into(),
+                block_variant: OverlayPresentationBlockVariant::ActivePeer,
+                primary_text: "Can you hear me?".into(),
+                secondary_text: String::new(),
+                secondary_enabled: false,
+                update_id: None,
+                origin_wall_clock_ms: None,
+                session_scope: None,
+            },
+            OverlayPresentationBlock {
+                id: "self:final".into(),
+                occupant_key: "self:final".into(),
+                appearance_seq: 2,
+                channel: "self".into(),
+                block_variant: OverlayPresentationBlockVariant::Finalized,
+                primary_text: "hello".into(),
+                secondary_text: "안녕".into(),
+                secondary_enabled: true,
+                update_id: None,
+                origin_wall_clock_ms: None,
+                session_scope: None,
+            },
+        ],
+    }));
+
+    let caption_blocks = state
+        .scene()
+        .slots()
+        .iter()
+        .flatten()
+        .map(|slot| {
+            let channel = if slot.channel == "peer" {
+                CaptionChannel::PeerChannel
+            } else {
+                CaptionChannel::SelfChannel
+            };
+            let variant = match slot.block_variant {
+                OverlayPresentationBlockVariant::ActiveSelf => CaptionBlockVariant::ActiveSelf,
+                OverlayPresentationBlockVariant::ActivePeer => CaptionBlockVariant::ActivePeer,
+                OverlayPresentationBlockVariant::Finalized => CaptionBlockVariant::Finalized,
+            };
+            CaptionBlock::new(slot.id.clone(), slot.primary_text.clone())
+                .with_variant(variant)
+                .with_channel(channel)
+                .with_secondary_text(slot.secondary_text.clone(), slot.secondary_enabled)
+                .with_slot(slot.slot_index, slot.anchor_top_px)
+        })
+        .collect::<Vec<_>>();
+
+    let result = CaptionLayoutPolicy::default().layout_blocks(caption_blocks, 3840, 1024);
+
+    let peer = result
+        .visible_blocks
+        .iter()
+        .find(|block| block.id == "peer:active")
+        .unwrap();
+    let self_block = result
+        .visible_blocks
+        .iter()
+        .find(|block| block.id == "self:final")
+        .unwrap();
+
+    assert_eq!(peer.block_variant, CaptionBlockVariant::ActivePeer);
+    assert_eq!(peer.channel, Some(CaptionChannel::PeerChannel));
+    assert!(
+        peer.bounds.bottom_px <= self_block.bounds.top_px,
+        "peer bounds {:?} should not overlap next row {:?}",
+        peer.bounds,
+        self_block.bounds
+    );
+}
+
+#[test]
+fn renderer_source_only_peer_finalized_with_state_generated_slots_does_not_overlap_next_row() {
+    let mut state = OverlayState::default();
+    assert!(state.apply_snapshot(&OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![
+            OverlayPresentationBlock {
+                id: "peer:source-only".into(),
+                occupant_key: "peer:turn-2".into(),
+                appearance_seq: 1,
+                channel: "peer".into(),
+                block_variant: OverlayPresentationBlockVariant::Finalized,
+                primary_text: "translation unavailable, showing original source text".into(),
+                secondary_text: String::new(),
+                secondary_enabled: false,
+                update_id: None,
+                origin_wall_clock_ms: None,
+                session_scope: None,
+            },
+            OverlayPresentationBlock {
+                id: "self:final".into(),
+                occupant_key: "self:final".into(),
+                appearance_seq: 2,
+                channel: "self".into(),
+                block_variant: OverlayPresentationBlockVariant::Finalized,
+                primary_text: "hello".into(),
+                secondary_text: "안녕".into(),
+                secondary_enabled: true,
+                update_id: None,
+                origin_wall_clock_ms: None,
+                session_scope: None,
+            },
+        ],
+    }));
+
+    let caption_blocks = state
+        .scene()
+        .slots()
+        .iter()
+        .flatten()
+        .map(|slot| {
+            let channel = if slot.channel == "peer" {
+                CaptionChannel::PeerChannel
+            } else {
+                CaptionChannel::SelfChannel
+            };
+            let variant = match slot.block_variant {
+                OverlayPresentationBlockVariant::ActiveSelf => CaptionBlockVariant::ActiveSelf,
+                OverlayPresentationBlockVariant::ActivePeer => CaptionBlockVariant::ActivePeer,
+                OverlayPresentationBlockVariant::Finalized => CaptionBlockVariant::Finalized,
+            };
+            CaptionBlock::new(slot.id.clone(), slot.primary_text.clone())
+                .with_variant(variant)
+                .with_channel(channel)
+                .with_secondary_text(slot.secondary_text.clone(), slot.secondary_enabled)
+                .with_slot(slot.slot_index, slot.anchor_top_px)
+        })
+        .collect::<Vec<_>>();
+
+    let result = CaptionLayoutPolicy::default().layout_blocks(caption_blocks, 3840, 1024);
+
+    let peer = result
+        .visible_blocks
+        .iter()
+        .find(|block| block.id == "peer:source-only")
+        .unwrap();
+    let self_block = result
+        .visible_blocks
+        .iter()
+        .find(|block| block.id == "self:final")
+        .unwrap();
+
+    assert_eq!(peer.block_variant, CaptionBlockVariant::Finalized);
+    assert_eq!(peer.channel, Some(CaptionChannel::PeerChannel));
+    assert!(
+        peer.bounds.bottom_px <= self_block.bounds.top_px,
+        "peer source-only bounds {:?} should not overlap next row {:?}",
+        peer.bounds,
+        self_block.bounds
+    );
+}
+
+#[test]
 fn renderer_render_path_expands_damage_band_to_rendered_bounds_overhang() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
     let first = renderer
@@ -349,6 +517,36 @@ fn renderer_layout_cache_key_ignores_animation_only_visual_state() {
     assert_eq!(
         stable_layout.visible_blocks[0].layout_cache_key,
         animated_layout.visible_blocks[0].layout_cache_key
+    );
+}
+
+#[test]
+fn renderer_layout_cache_key_separates_slotted_source_only_peer_geometry() {
+    let policy = CaptionLayoutPolicy::default();
+    let presentation = CaptionPresentation::default();
+    let source_only_peer = CaptionBlock::new("peer:source-only", "showing original source only")
+        .with_channel(CaptionChannel::PeerChannel)
+        .with_variant(CaptionBlockVariant::Finalized)
+        .with_secondary_text("", false);
+    let slotted_source_only_peer = source_only_peer.clone().with_slot(0, 40.0);
+
+    let non_slotted_layout =
+        policy.resolve_blocks_for_presentation(vec![source_only_peer], 3840, 1024, &presentation);
+    let slotted_layout = policy.resolve_blocks_for_presentation(
+        vec![slotted_source_only_peer],
+        3840,
+        1024,
+        &presentation,
+    );
+
+    let non_slotted = &non_slotted_layout.visible_blocks[0];
+    let slotted = &slotted_layout.visible_blocks[0];
+
+    assert!(!non_slotted.secondary_reserved);
+    assert!(slotted.secondary_reserved);
+    assert_ne!(
+        non_slotted.layout_cache_key, slotted.layout_cache_key,
+        "slotted and non-slotted peer source-only rows use different reserved geometry"
     );
 }
 

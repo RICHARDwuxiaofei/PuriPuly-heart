@@ -229,6 +229,33 @@ class SequencedTranslateLLMProvider(LLMProvider):
         return
 
 
+@dataclass(slots=True)
+class RecordingSequencedTranslateLLMProvider(LLMProvider):
+    responses: list[str]
+    delay_s: float = 0.01
+    calls: list[tuple[UUID, str]] = field(default_factory=list)
+
+    async def translate(
+        self,
+        *,
+        utterance_id: UUID,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ):
+        _ = (system_prompt, source_language, target_language, context)
+        self.calls.append((utterance_id, text))
+        await asyncio.sleep(self.delay_s)
+        if not self.responses:
+            raise AssertionError("no translate response configured")
+        return hub_module.Translation(utterance_id=utterance_id, text=self.responses.pop(0))
+
+    async def close(self) -> None:
+        return
+
+
 @pytest.mark.asyncio
 async def test_hub_emits_self_and_peer_finals_to_overlay_sink() -> None:
     sink = RecordingOverlaySink()
@@ -240,10 +267,130 @@ async def test_hub_emits_self_and_peer_finals_to_overlay_sink() -> None:
     assert [event.type for event in sink.events] == [
         "self_transcript_final",
         "utterance_closed",
+        "peer_active_update",
         "peer_transcript_final",
         "utterance_closed",
     ]
-    assert [event.channel for event in sink.events] == ["self", "self", "peer", "peer"]
+    assert [event.channel for event in sink.events] == ["self", "self", "peer", "peer", "peer"]
+
+
+@pytest.mark.asyncio
+async def test_peer_finals_in_one_parent_vad_create_independent_active_turns_and_tasks() -> None:
+    parent_vad_id = uuid4()
+    sink = RecordingOverlaySink()
+    llm = RecordingSequencedTranslateLLMProvider(
+        responses=["첫 번째 번역", "두 번째 번역"],
+        delay_s=0.05,
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=llm,
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        peer_translation_enabled=True,
+    )
+    await hub.handle_peer_vad_event(SpeechEnd(parent_vad_id))
+
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=parent_vad_id,
+            transcript=Transcript(
+                utterance_id=parent_vad_id,
+                text="What about now?",
+                is_final=True,
+                created_at=11.0,
+                channel="peer",
+            ),
+        )
+    )
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=parent_vad_id,
+            transcript=Transcript(
+                utterance_id=parent_vad_id,
+                text="Can you hear me?",
+                is_final=True,
+                created_at=12.0,
+                channel="peer",
+            ),
+        )
+    )
+    await asyncio.sleep(0)
+
+    active_events = [event for event in sink.events if event.type == "peer_active_update"]
+    assert [event.text for event in active_events] == [
+        "What about now?",
+        "Can you hear me?",
+    ]
+    peer_turn_ids = [event.utterance_id for event in active_events]
+    assert len(set(peer_turn_ids)) == 2
+    assert parent_vad_id not in peer_turn_ids
+    assert set(hub.peer_runtime.translation_tasks) == set(peer_turn_ids)
+
+    await asyncio.gather(*hub.peer_runtime.translation_tasks.values(), return_exceptions=True)
+
+    translation_events = [event for event in sink.events if event.type == "translation_final"]
+    close_events = [event for event in sink.events if event.type == "utterance_closed"]
+    assert [event.utterance_id for event in translation_events] == peer_turn_ids
+    assert [event.text for event in translation_events] == ["첫 번째 번역", "두 번째 번역"]
+    assert [event.utterance_id for event in close_events] == peer_turn_ids
+    ui_events = [hub.ui_events.get_nowait() for _ in range(hub.ui_events.qsize())]
+    translation_done_ids = [
+        event.utterance_id for event in ui_events if event.type == UIEventType.TRANSLATION_DONE
+    ]
+    assert translation_done_ids == peer_turn_ids
+    assert parent_vad_id not in translation_done_ids
+    assert llm.calls == [
+        (peer_turn_ids[0], "What about now?"),
+        (peer_turn_ids[1], "Can you hear me?"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_identical_peer_finals_still_create_independent_logical_turns() -> None:
+    parent_vad_id = uuid4()
+    sink = RecordingOverlaySink()
+    llm = RecordingSequencedTranslateLLMProvider(
+        responses=["반복 번역 1", "반복 번역 2"],
+        delay_s=0.05,
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=llm,
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        peer_translation_enabled=True,
+    )
+
+    for created_at in (11.0, 12.0):
+        await hub._handle_stt_event(
+            STTFinalEvent(
+                utterance_id=parent_vad_id,
+                transcript=Transcript(
+                    utterance_id=parent_vad_id,
+                    text="repeat this",
+                    is_final=True,
+                    created_at=created_at,
+                    channel="peer",
+                ),
+            )
+        )
+    await asyncio.sleep(0)
+
+    active_events = [event for event in sink.events if event.type == "peer_active_update"]
+    peer_turn_ids = [event.utterance_id for event in active_events]
+    assert [event.text for event in active_events] == ["repeat this", "repeat this"]
+    assert len(set(peer_turn_ids)) == 2
+    assert parent_vad_id not in peer_turn_ids
+
+    await asyncio.gather(*hub.peer_runtime.translation_tasks.values(), return_exceptions=True)
+
+    close_events = [event for event in sink.events if event.type == "utterance_closed"]
+    assert [event.utterance_id for event in close_events] == peer_turn_ids
+    assert llm.calls == [
+        (peer_turn_ids[0], "repeat this"),
+        (peer_turn_ids[1], "repeat this"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -325,13 +472,17 @@ async def test_peer_overlay_first_emit_latency_summary_and_detailed_trace() -> N
         )
 
         assert "channel=peer" in basic_latency_message
-        assert "e2e_ms=180" in basic_latency_message
+        assert "e2e_ms=30" in basic_latency_message
         assert "final_output_stage=peer_overlay_first_emit" in basic_latency_message
         assert not any("[Detailed][Latency]" in message for message in basic_messages)
         assert not any("[Detailed][LatencyBreakdown]" in message for message in basic_messages)
 
+        detailed_peer_turn_id = detailed_hub.overlay_sink.events[0].utterance_id
         detailed_trace_messages = [
-            message for message in detailed_messages if "[Detailed][Latency]" in message
+            message
+            for message in detailed_messages
+            if "[Detailed][Latency]" in message
+            and f"utterance_id={str(detailed_peer_turn_id)[:8]}" in message
         ]
         detailed_trace_stages = [
             message.split("stage=")[1].split()[0] for message in detailed_trace_messages
@@ -340,15 +491,15 @@ async def test_peer_overlay_first_emit_latency_summary_and_detailed_trace() -> N
         assert detailed_trace_stages == [
             "speech_end",
             "stt_final",
+            "peer_overlay_first_emit",
             "llm_request_start",
             "llm_done",
-            "peer_overlay_first_emit",
         ]
         assert any(
             "[Detailed][LatencyBreakdown]" in message
             and "channel=peer" in message
             and "speech_end_to_stt_final_ms=30" in message
-            and "stt_final_to_final_output_ms=150" in message
+            and "stt_final_to_final_output_ms=0" in message
             and "final_output_stage=peer_overlay_first_emit" in message
             for message in detailed_messages
         )
@@ -365,6 +516,53 @@ async def test_peer_overlay_first_emit_latency_summary_and_detailed_trace() -> N
         detailed_runtime_logging.close()
         await basic_hub.stop()
         await detailed_hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_peer_overlay_first_emit_records_active_source_before_llm_done() -> None:
+    runtime_logging, stream = _make_runtime_logging_capture()
+    clock = FakeClock(_now=100.0)
+    llm = ReleasableTranslateLLMProvider(response_text="hello")
+    sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=llm,
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        peer_translation_enabled=True,
+        runtime_logging=runtime_logging,
+        clock=clock,
+    )
+    parent_vad_id = uuid4()
+
+    try:
+        await hub.handle_peer_vad_event(SpeechEnd(parent_vad_id))
+        clock.advance(0.03)
+        await hub._handle_stt_event(
+            STTFinalEvent(
+                utterance_id=parent_vad_id,
+                transcript=Transcript(
+                    utterance_id=parent_vad_id,
+                    text="안녕",
+                    is_final=True,
+                    created_at=clock.now(),
+                    channel="peer",
+                ),
+            )
+        )
+        await llm.started.wait()
+
+        assert [event.type for event in sink.events] == ["peer_active_update"]
+        assert any(
+            "stage=peer_overlay_first_emit" in message for message in _runtime_log_messages(stream)
+        )
+
+        assert llm.release is not None
+        llm.release.set_result(None)
+        await asyncio.gather(*hub.peer_runtime.translation_tasks.values(), return_exceptions=True)
+    finally:
+        runtime_logging.close()
+        await hub.stop()
 
 
 @pytest.mark.asyncio
@@ -465,7 +663,13 @@ async def test_peer_overlay_translation_defers_bookkeeping_cleanup_until_chatbox
     ):
         nonlocal saw_live_peer_state
         _ = (self, transcript_text, translation_text)
-        assert enqueue_utterance_id == utterance_id
+        peer_turn_id = next(
+            event.utterance_id
+            for event in hub.overlay_sink.events
+            if event.type == "peer_active_update"
+        )
+        assert enqueue_utterance_id == peer_turn_id
+        assert enqueue_utterance_id != utterance_id
         assert enqueue_utterance_id in hub.peer_runtime.utterance_start_times
         assert enqueue_utterance_id in hub.peer_runtime.speech_ended_ids
         saw_live_peer_state = True
@@ -558,6 +762,104 @@ async def test_peer_no_chatbox_terminal_path_clears_latency_bookkeeping() -> Non
 
 
 @pytest.mark.asyncio
+async def test_late_peer_speech_end_after_completed_turn_does_not_resurrect_bookkeeping() -> None:
+    parent_vad_id = uuid4()
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        clock=FakeClock(_now=10.0),
+    )
+
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=parent_vad_id,
+            transcript=Transcript(
+                utterance_id=parent_vad_id,
+                text="안녕",
+                is_final=True,
+                created_at=hub.clock.now(),
+                channel="peer",
+            ),
+        )
+    )
+    peer_turn_id = next(iter(hub.peer_runtime.utterances))
+
+    assert peer_turn_id != parent_vad_id
+    assert hub._peer_turn_parent_ids[peer_turn_id] == parent_vad_id
+    assert hub.peer_runtime.utterance_start_times == {}
+    assert hub.peer_runtime.speech_ended_ids == set()
+
+    hub.clock.advance(0.1)
+    await hub.handle_peer_vad_event(SpeechEnd(parent_vad_id))
+
+    assert parent_vad_id not in hub._peer_parent_turn_ids
+    assert peer_turn_id not in hub._peer_turn_parent_ids
+    assert hub.peer_runtime.utterance_start_times == {}
+    assert hub.peer_runtime.speech_ended_ids == set()
+    assert hub._latency_timelines == {}
+
+
+@pytest.mark.asyncio
+async def test_parent_vad_bookkeeping_survives_source_only_turn_for_later_same_parent_final() -> (
+    None
+):
+    parent_vad_id = uuid4()
+    llm = ReleasableTranslateLLMProvider(response_text="hello")
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        peer_translation_enabled=True,
+        clock=FakeClock(_now=10.0),
+    )
+
+    await hub.handle_peer_vad_event(SpeechEnd(parent_vad_id))
+    hub.clock.advance(0.01)
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=parent_vad_id,
+            transcript=Transcript(
+                utterance_id=parent_vad_id,
+                text="first",
+                is_final=True,
+                created_at=hub.clock.now(),
+                channel="peer",
+            ),
+        )
+    )
+    first_peer_turn_id = next(iter(hub.peer_runtime.utterances))
+
+    hub.llm = llm
+    hub.clock.advance(0.01)
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=parent_vad_id,
+            transcript=Transcript(
+                utterance_id=parent_vad_id,
+                text="second",
+                is_final=True,
+                created_at=hub.clock.now(),
+                channel="peer",
+            ),
+        )
+    )
+    await llm.started.wait()
+    second_peer_turn_id = next(iter(hub.peer_runtime.translation_tasks))
+
+    assert first_peer_turn_id != parent_vad_id
+    assert second_peer_turn_id not in {parent_vad_id, first_peer_turn_id}
+    assert second_peer_turn_id in hub.peer_runtime.utterance_start_times
+    assert second_peer_turn_id in hub.peer_runtime.speech_ended_ids
+    second_timeline = hub._latency_timelines[("peer", second_peer_turn_id)]
+    assert second_timeline.stage_times["speech_end"] == 10.0
+
+    assert llm.release is not None
+    llm.release.set_result(None)
+    await asyncio.gather(*hub.peer_runtime.translation_tasks.values(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_peer_no_overlay_translation_path_keeps_latency_bookkeeping_until_translation_finishes() -> (
     None
 ):
@@ -585,10 +887,12 @@ async def test_peer_no_overlay_translation_path_keeps_latency_bookkeeping_until_
         )
     )
     await llm.started.wait()
+    peer_turn_id = next(iter(hub.peer_runtime.translation_tasks))
 
-    assert utterance_id in hub.peer_runtime.utterance_start_times
-    assert utterance_id in hub.peer_runtime.speech_ended_ids
-    assert ("peer", utterance_id) in hub._latency_timelines
+    assert peer_turn_id != utterance_id
+    assert peer_turn_id in hub.peer_runtime.utterance_start_times
+    assert peer_turn_id in hub.peer_runtime.speech_ended_ids
+    assert ("peer", peer_turn_id) in hub._latency_timelines
     assert llm.calls == ["안녕"]
 
     assert llm.release is not None
@@ -623,17 +927,35 @@ async def test_peer_without_overlay_sink_succeeds_via_translate() -> None:
     assert hub.ui_events.empty()
 
 
+@pytest.mark.asyncio
+async def test_peer_test_helper_returns_new_logical_turn_for_identical_text_without_overlay_sink() -> (
+    None
+):
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+    )
+
+    first_peer_turn_id = await hub.handle_peer_transcript_final_for_test(text="repeat")
+    second_peer_turn_id = await hub.handle_peer_transcript_final_for_test(text="repeat")
+
+    assert second_peer_turn_id != first_peer_turn_id
+    assert second_peer_turn_id in hub.peer_runtime.utterances
+    assert hub.peer_runtime.utterances[second_peer_turn_id].final.text == "repeat"
+
+
 def test_peer_overlay_first_render_latency_contract_is_explicit() -> None:
     first_emit = LATENCY_TRACE_POINT_CONTRACTS["peer_overlay_first_emit"]
     first_render = LATENCY_TRACE_POINT_CONTRACTS["peer_overlay_first_render"]
 
-    assert "final peer overlay output" in first_emit.timing_semantics
+    assert "first peer active source overlay output" in first_emit.timing_semantics
     assert "overlay_sink.emit" in first_emit.acceptance_expectation
-    assert "first local visible peer translation-bearing overlay output" in (
+    assert "first local visible peer source or translation overlay output" in (
         first_render.timing_semantics
     )
     assert "after peer_overlay_first_emit" in first_render.acceptance_expectation
-    assert "once per utterance" in first_render.acceptance_expectation
+    assert "once per peer logical turn" in first_render.acceptance_expectation
     assert "do not wait for lifecycle completion" in first_render.acceptance_expectation
 
 
@@ -652,6 +974,95 @@ async def test_chatbox_stays_self_final_only_while_overlay_sink_receives_peer_fi
 
 
 @pytest.mark.asyncio
+async def test_peer_no_translation_source_only_overlay_close_remains_final() -> None:
+    sink = RecordingOverlaySink()
+    hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), overlay_sink=sink)
+
+    utterance_id = await hub.handle_peer_transcript_final_for_test(text="안녕")
+
+    assert [event.type for event in sink.events] == [
+        "peer_active_update",
+        "peer_transcript_final",
+        "utterance_closed",
+    ]
+    assert sink.events[-1].utterance_id == utterance_id
+    assert sink.events[-1].is_final is True
+
+
+@pytest.mark.asyncio
+async def test_peer_translation_disabled_finalizes_source_only_turn() -> None:
+    sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        peer_translation_enabled=False,
+    )
+    parent_vad_id = uuid4()
+
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=parent_vad_id,
+            transcript=Transcript(
+                utterance_id=parent_vad_id,
+                text="source only",
+                is_final=True,
+                created_at=11.0,
+                channel="peer",
+            ),
+        )
+    )
+
+    assert [event.type for event in sink.events] == [
+        "peer_active_update",
+        "peer_transcript_final",
+        "utterance_closed",
+    ]
+    assert sink.events[0].utterance_id == sink.events[1].utterance_id == sink.events[2].utterance_id
+    assert sink.events[1].text == "source only"
+
+
+@pytest.mark.asyncio
+async def test_peer_translation_failure_finalizes_source_only_turn_and_emits_error() -> None:
+    sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=ImmediateFailingTranslateLLMProvider(RuntimeError("llm boom")),
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        peer_translation_enabled=True,
+    )
+    parent_vad_id = uuid4()
+
+    await hub._handle_stt_event(
+        STTFinalEvent(
+            utterance_id=parent_vad_id,
+            transcript=Transcript(
+                utterance_id=parent_vad_id,
+                text="source after failure",
+                is_final=True,
+                created_at=11.0,
+                channel="peer",
+            ),
+        )
+    )
+    await asyncio.gather(*hub.peer_runtime.translation_tasks.values(), return_exceptions=True)
+
+    assert [event.type for event in sink.events] == [
+        "peer_active_update",
+        "peer_transcript_final",
+        "utterance_closed",
+    ]
+    ui_events = [hub.ui_events.get_nowait() for _ in range(hub.ui_events.qsize())]
+    assert [event.type for event in ui_events] == [
+        UIEventType.TRANSCRIPT_FINAL,
+        UIEventType.ERROR,
+    ]
+    assert ui_events[1].channel == "peer"
+
+
+@pytest.mark.asyncio
 async def test_peer_translation_emits_final_only_overlay_events() -> None:
     sink = RecordingOverlaySink()
     hub = ClientHub(
@@ -665,7 +1076,7 @@ async def test_peer_translation_emits_final_only_overlay_events() -> None:
     await hub.translate_peer_text_for_test("안녕")
 
     assert [event.type for event in sink.events] == [
-        "peer_transcript_final",
+        "peer_active_update",
         "translation_final",
         "utterance_closed",
     ]
@@ -718,20 +1129,44 @@ async def test_peer_overlay_events_arrive_before_translation_done_and_preserve_p
     ]
     assert events[1].payload.text == "hello"
     assert events[2].payload.text == "안녕 (hello)"
+    assert events[2].channel == "peer"
     translation_event_order = [event.type for event in sink.events]
     assert translation_event_order == [
-        "peer_transcript_final",
+        "peer_active_update",
         "translation_final",
         "utterance_closed",
     ]
     assert call_order == [
         "ui:TRANSCRIPT_FINAL",
-        "overlay:peer_transcript_final",
+        "overlay:peer_active_update",
         "overlay:translation_final",
         "overlay:utterance_closed",
         "ui:TRANSLATION_DONE",
         "ui:OSC_SENT",
     ]
+    assert hub.ui_events.empty()
+
+
+@pytest.mark.asyncio
+async def test_self_osc_sent_channel_uses_utterance_runtime_when_peer_chatbox_active() -> None:
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=RecordingOverlaySink(),
+    )
+    hub.active_chatbox_channel = "peer"
+
+    utterance_id = await hub.submit_text("self text", source="You")
+    events = [hub.ui_events.get_nowait() for _ in range(hub.ui_events.qsize())]
+
+    assert [event.type for event in events] == [
+        UIEventType.TRANSCRIPT_FINAL,
+        UIEventType.OSC_SENT,
+    ]
+    assert events[1].utterance_id == utterance_id
+    assert events[1].payload.text == "self text"
+    assert events[1].channel == "self"
     assert hub.ui_events.empty()
 
 
@@ -771,14 +1206,14 @@ async def test_peer_overlay_emit_failures_still_emit_translation_done_and_osc_se
 
     assert call_order == [
         "ui:TRANSCRIPT_FINAL",
-        "overlay:peer_transcript_final",
+        "overlay:peer_active_update",
         "overlay:translation_final",
         "overlay:utterance_closed",
         "ui:TRANSLATION_DONE",
         "ui:OSC_SENT",
     ]
     assert sink.attempted_types == [
-        "peer_transcript_final",
+        "peer_active_update",
         "translation_final",
         "utterance_closed",
     ]
@@ -791,6 +1226,7 @@ async def test_peer_overlay_emit_failures_still_emit_translation_done_and_osc_se
     assert events[1].payload.text == "hello"
     assert events[2].utterance_id == utterance_id
     assert events[2].payload.text == "안녕 (hello)"
+    assert events[2].channel == "peer"
     assert osc.messages[0].text == "안녕 (hello)"
     assert hub.last_error_source == "overlay_sink"
     assert hub.ui_events.empty()
@@ -941,6 +1377,7 @@ async def test_peer_translation_failure_closes_line_as_incomplete() -> None:
     utterance_id = await hub.translate_peer_text_for_test("안녕")
 
     assert [event.type for event in sink.events] == [
+        "peer_active_update",
         "peer_transcript_final",
         "utterance_closed",
     ]
@@ -967,6 +1404,7 @@ async def test_peer_translation_failure_falls_back_to_transcript_for_active_peer
     events = [await hub.ui_events.get() for _ in range(3)]
 
     assert [event.type for event in sink.events] == [
+        "peer_active_update",
         "peer_transcript_final",
         "utterance_closed",
     ]
@@ -979,6 +1417,7 @@ async def test_peer_translation_failure_falls_back_to_transcript_for_active_peer
         UIEventType.ERROR,
         UIEventType.OSC_SENT,
     ]
+    assert events[2].channel == "peer"
     assert hub.ui_events.empty()
 
 
@@ -1000,6 +1439,7 @@ async def test_peer_translation_cancellation_closes_line_as_incomplete() -> None
     await hub.peer_runtime.reset_runtime_state()
 
     assert [event.type for event in sink.events] == [
+        "peer_active_update",
         "peer_transcript_final",
         "utterance_closed",
     ]
