@@ -84,6 +84,23 @@ class RecordingPresenterRemovalDiagnostics:
         return payload
 
 
+@dataclass(slots=True)
+class RecordingPresenterDiagnostics:
+    events: list[tuple[str, dict[str, object]]] = field(default_factory=list)
+
+    def record_presenter(self, event: str, **fields: object) -> dict[str, object]:
+        payload = dict(fields)
+        self.events.append((event, payload))
+        return payload
+
+    def record_presenter_removal(
+        self, event: str = "entry_removed", **fields: object
+    ) -> dict[str, object]:
+        payload = dict(fields)
+        self.events.append((event, payload))
+        return payload
+
+
 class _ExplodingValue:
     def __str__(self) -> str:
         raise AssertionError("formatted eagerly")
@@ -197,9 +214,9 @@ async def test_presenter_peer_turn_first_appears_when_active_source_arrives() ->
 
     assert [block.id for block in presenter.snapshot().blocks] == [f"peer:{peer_turn_id}"]
     assert presenter.snapshot().blocks[0].block_variant == "active_peer"
-    assert presenter.snapshot().blocks[0].primary_text == "peer original"
-    assert presenter.snapshot().blocks[0].secondary_text == ""
-    assert presenter.snapshot().blocks[0].secondary_enabled is False
+    assert presenter.snapshot().blocks[0].primary_text == ""
+    assert presenter.snapshot().blocks[0].secondary_text == "peer original"
+    assert presenter.snapshot().blocks[0].secondary_enabled is True
 
     await presenter.emit(
         adapter.translation_final(
@@ -240,9 +257,89 @@ async def test_presenter_renders_peer_active_source_before_translation() -> None
     assert block.occupant_key == f"peer:{peer_turn_id}"
     assert block.channel == "peer"
     assert block.block_variant == "active_peer"
-    assert block.primary_text == "What about now?"
-    assert block.secondary_text == ""
+    assert block.primary_text == ""
+    assert block.secondary_text == "What about now?"
+    assert block.secondary_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_presenter_hides_peer_source_only_when_peer_original_disabled() -> None:
+    bridge = RecordingPresentationBridge()
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        show_peer_original=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    peer_turn_id = uuid4()
+
+    await presenter.emit(
+        adapter.peer_active_update(
+            text="peer original",
+            utterance_id=peer_turn_id,
+            occupant_key=f"peer:{peer_turn_id}",
+            created_at=10.0,
+        )
+    )
+
+    assert presenter.snapshot().blocks == []
+
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=peer_turn_id,
+            channel="peer",
+            text="상대 번역",
+            source_language="en",
+            target_language="ko",
+            applied_context_mode=None,
+            created_at=10.1,
+        )
+    )
+
+    block = presenter.snapshot().blocks[0]
+    assert block.primary_text == "상대 번역"
+    assert block.secondary_text == "peer original"
     assert block.secondary_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_presenter_hidden_peer_source_waits_past_ttl_for_translation() -> None:
+    clock = FakeClock(_now=10.0)
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        clock=clock,
+        show_peer_original=False,
+    )
+    adapter = OverlayEventAdapter(clock=clock)
+    peer_turn_id = uuid4()
+
+    await presenter.emit(
+        adapter.peer_active_update(
+            text="peer original",
+            utterance_id=peer_turn_id,
+            occupant_key=f"peer:{peer_turn_id}",
+            created_at=clock.now(),
+        )
+    )
+
+    assert presenter.snapshot().blocks == []
+
+    clock.advance(9.0)
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=peer_turn_id,
+            channel="peer",
+            text="상대 번역",
+            source_language="en",
+            target_language="ko",
+            applied_context_mode=None,
+            created_at=clock.now(),
+        )
+    )
+
+    assert [block.id for block in presenter.snapshot().blocks] == [f"peer:{peer_turn_id}"]
+    assert presenter.snapshot().blocks[0].primary_text == "상대 번역"
+    assert presenter.snapshot().blocks[0].secondary_enabled is False
 
 
 @pytest.mark.asyncio
@@ -367,8 +464,9 @@ async def test_presenter_peer_source_only_terminalization_finalizes_before_close
 
     block_before_close = presenter.snapshot().blocks[0]
     assert block_before_close.block_variant == "finalized"
-    assert block_before_close.primary_text == "translation unavailable"
-    assert block_before_close.secondary_text == ""
+    assert block_before_close.primary_text == ""
+    assert block_before_close.secondary_text == "translation unavailable"
+    assert block_before_close.secondary_enabled is True
 
     await presenter.emit(
         adapter.utterance_closed(
@@ -380,6 +478,103 @@ async def test_presenter_peer_source_only_terminalization_finalizes_before_close
     )
 
     assert presenter.snapshot().blocks[0].id == f"peer:{peer_turn_id}"
+
+
+@pytest.mark.asyncio
+async def test_presenter_protects_current_peer_live_row_from_generic_window() -> None:
+    diagnostics = RecordingPresenterDiagnostics()
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        diagnostics=diagnostics,
+        visible_window_target_blocks=2,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    old_turn = uuid4()
+    live_turn = uuid4()
+
+    await presenter.emit(
+        adapter.peer_active_update(
+            text="old source",
+            utterance_id=old_turn,
+            occupant_key=f"peer:{old_turn}",
+            created_at=10.0,
+        )
+    )
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=old_turn,
+            channel="peer",
+            text="이전 번역",
+            source_language="en",
+            target_language="ko",
+            applied_context_mode=None,
+            created_at=10.1,
+        )
+    )
+    await presenter.emit(
+        adapter.peer_active_update(
+            text="current source",
+            utterance_id=live_turn,
+            occupant_key=f"peer:{live_turn}",
+            created_at=10.2,
+        )
+    )
+
+    visible_window_events = [
+        fields for event, fields in diagnostics.events if event == "visible_window"
+    ]
+
+    assert any(
+        f"peer:{live_turn}" in fields.get("protected_selected", [])
+        for fields in visible_window_events
+    )
+    assert presenter.snapshot().blocks[-1].id == f"peer:{live_turn}"
+    assert presenter.snapshot().blocks[-1].block_variant == "active_peer"
+    assert presenter.snapshot().blocks[-1].primary_text == ""
+    assert presenter.snapshot().blocks[-1].secondary_text == "current source"
+
+
+@pytest.mark.asyncio
+async def test_presenter_new_peer_turn_demotes_previous_live_peer_and_protects_new_peer() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        visible_window_target_blocks=2,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    first = uuid4()
+    second = uuid4()
+
+    await presenter.emit(
+        adapter.peer_active_update(
+            text="first source",
+            utterance_id=first,
+            occupant_key=f"peer:{first}",
+            created_at=10.0,
+        )
+    )
+    await presenter.emit(
+        adapter.peer_active_update(
+            text="second source",
+            utterance_id=second,
+            occupant_key=f"peer:{second}",
+            created_at=10.1,
+        )
+    )
+
+    blocks = presenter.snapshot().blocks
+
+    assert [block.id for block in blocks] == [f"peer:{first}", f"peer:{second}"]
+
+    first_block, second_block = blocks
+    assert first_block.block_variant == "finalized"
+    assert first_block.primary_text == ""
+    assert first_block.secondary_text == "first source"
+    assert first_block.secondary_enabled is True
+
+    assert second_block.block_variant == "active_peer"
+    assert second_block.primary_text == ""
+    assert second_block.secondary_text == "second source"
+    assert second_block.secondary_enabled is True
 
 
 @pytest.mark.asyncio
@@ -3010,9 +3205,9 @@ async def test_presenter_pair_state_logs_publish_kind_and_sources_only_in_detail
             and "update_id=None" in message
             and "original_seq=1" in message
             and "translation_seq=None" in message
-            and "rendered_pair_state=original_only" in message
-            and "rendered_primary_source=source" in message
-            and "rendered_secondary_source=blank" in message
+            and "rendered_pair_state=source_only" in message
+            and "rendered_primary_source=blank" in message
+            and "rendered_secondary_source=source" in message
             for message in pair_messages
         )
         assert any(
@@ -3082,7 +3277,7 @@ async def test_presenter_pair_state_logs_hidden_peer_original_as_blank() -> None
         )
 
         assert any(
-            "publish_kind=visible_update" in message
+            "publish_kind=first_visible" in message
             and "update_id=upd-peer-hidden-original" in message
             and "rendered_pair_state=translation_only" in message
             and "rendered_primary_source=translation" in message

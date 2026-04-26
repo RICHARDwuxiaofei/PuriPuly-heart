@@ -127,6 +127,7 @@ class OverlayPresenter(OverlaySink):
         default_factory=OrderedDict,
     )
     _live_self_turn_key: tuple[str, UUID] | None = field(init=False, default=None)
+    _live_peer_turn_key: tuple[str, UUID] | None = field(init=False, default=None)
     _expiration_tasks: dict[tuple[str, UUID], asyncio.Task[None]] = field(
         init=False,
         default_factory=dict,
@@ -287,12 +288,14 @@ class OverlayPresenter(OverlaySink):
         block: OverlayPresentationBlock,
     ) -> tuple[str, str]:
         if entry.channel == "peer" and block.block_variant == "active_peer":
-            return "source", "blank"
+            secondary_visible = block.secondary_enabled and bool(block.secondary_text.strip())
+            return "blank", "source" if secondary_visible else "blank"
         if entry.channel == "peer" and block.block_variant == "finalized":
             if entry.translation_text.strip():
                 secondary_visible = block.secondary_enabled and bool(block.secondary_text.strip())
                 return "translation", "source" if secondary_visible else "blank"
-            return "source", "blank"
+            secondary_visible = block.secondary_enabled and bool(block.secondary_text.strip())
+            return "blank", "source" if secondary_visible else "blank"
 
         secondary_source = "none"
         if block.secondary_enabled and block.secondary_text:
@@ -324,6 +327,8 @@ class OverlayPresenter(OverlaySink):
             if secondary_source == "source":
                 return "translation_with_original"
             return "translation_only"
+        if primary_source == "blank" and secondary_source == "source":
+            return "source_only"
         if secondary_source in {"translation_text", "live_secondary_text"}:
             return "original_with_translation"
         return "original_only"
@@ -397,6 +402,7 @@ class OverlayPresenter(OverlaySink):
         self._scene_terminal_reasons.clear()
         self._retired_preview_self_seqs.clear()
         self._live_self_turn_key = None
+        self._live_peer_turn_key = None
         self._revision = 0
         self._appearance_seq = 0
         self._last_visible_window_signature = None
@@ -414,6 +420,7 @@ class OverlayPresenter(OverlaySink):
         self._scene_terminal_reasons.clear()
         self._retired_preview_self_seqs.clear()
         self._live_self_turn_key = None
+        self._live_peer_turn_key = None
         self._revision += 1
         self._last_visible_window_signature = None
         self._snapshot = OverlayPresentationSnapshot(
@@ -604,6 +611,22 @@ class OverlayPresenter(OverlaySink):
         if self._should_ignore_terminal_update(event.channel, event.utterance_id):
             return False
         key = self._entry_key(event.channel, event.utterance_id)
+        live_peer = self._live_peer_entry()
+        if live_peer is not None:
+            live_key, live_entry = live_peer
+            if live_key != key and event.seq < live_entry.last_updated_seq:
+                self._emit_skip_disposition(
+                    decision="overlay_turn_superseded",
+                    disposition="superseded",
+                    key=key,
+                    entry=live_entry,
+                    extras={
+                        "event_seq": event.seq,
+                        "superseded_by_entry": self._format_entry_key(live_key),
+                        "superseded_by_seq": live_entry.last_updated_seq,
+                    },
+                )
+                return False
         entry = self._entry_for(event.channel, event.utterance_id)
         if event.seq < entry.last_updated_seq:
             self._emit_skip_disposition(
@@ -614,6 +637,8 @@ class OverlayPresenter(OverlaySink):
                 extras={"event_seq": event.seq, "last_updated_seq": entry.last_updated_seq},
             )
             return False
+        if live_peer is not None and live_peer[0] != key:
+            self._clear_live_peer_pointer(reason="live_peer_replaced")
         self._remember_entry_input_seq(entry, event_seq=event.seq)
         if not entry.occupant_key:
             entry.occupant_key = event.occupant_key
@@ -622,14 +647,13 @@ class OverlayPresenter(OverlaySink):
         entry.live_seq = event.seq
         entry.original_seq = event.seq
         entry.last_updated_seq = event.seq
-        if entry.visible_since is None:
-            entry.visible_since = now
         self._refresh_entry_visibility_and_expiration(
             key,
             entry,
             now=now,
             publishable_seq=event.seq,
         )
+        self._live_peer_turn_key = key
         return True
 
     def _apply_self_active_clear(self, event: SelfActiveClear) -> bool:
@@ -913,6 +937,22 @@ class OverlayPresenter(OverlaySink):
             return None
         return self._live_self_turn_key, entry
 
+    def _live_peer_entry(self) -> tuple[tuple[str, UUID], _LogicalTurnEntry] | None:
+        if self._live_peer_turn_key is None:
+            return None
+        entry = self._entries.get(self._live_peer_turn_key)
+        if entry is None:
+            self._live_peer_turn_key = None
+            return None
+        return self._live_peer_turn_key, entry
+
+    def _live_peer_entry_is_drawable(self, entry: _LogicalTurnEntry) -> bool:
+        if entry.translation_text.strip():
+            return True
+        if not self.show_peer_original:
+            return False
+        return bool(entry.live_text.strip() or entry.original_text.strip())
+
     def _clear_live_self_pointer(self, *, reason: str) -> None:
         live_self = self._live_self_entry()
         if live_self is None:
@@ -937,6 +977,24 @@ class OverlayPresenter(OverlaySink):
         )
         if self._should_retire_preview_only_self_entry(entry):
             self._retire_preview_only_self_entry(key, entry, reason=reason, now=self.clock.now())
+
+    def _clear_live_peer_pointer(self, *, reason: str) -> None:
+        _ = reason
+        live_peer = self._live_peer_entry()
+        if live_peer is None:
+            return
+        key, entry = live_peer
+        entry.live_text = ""
+        entry.live_secondary_text = ""
+        entry.live_seq = None
+        self._live_peer_turn_key = None
+        if self._entry_is_publishable(entry):
+            self._refresh_entry_visibility_and_expiration(
+                key,
+                entry,
+                now=self.clock.now(),
+                publishable_seq=entry.last_updated_seq,
+            )
 
     def _should_retire_preview_only_self_entry(self, entry: _LogicalTurnEntry) -> bool:
         return (
@@ -1050,13 +1108,22 @@ class OverlayPresenter(OverlaySink):
         live_self = self._live_self_entry()
         active_self_key = live_self[0] if live_self is not None and live_self[1].live_text else None
         active_self_present = active_self_key is not None
-        finalized_limit = self.visible_window_target_blocks
-        if active_self_present:
-            finalized_limit = max(finalized_limit - 1, 0)
+        live_peer = self._live_peer_entry()
+        active_peer_key = (
+            live_peer[0]
+            if live_peer is not None and self._live_peer_entry_is_drawable(live_peer[1])
+            else None
+        )
+        protected_keys = [key for key in (active_self_key, active_peer_key) if key is not None]
+        protected_key_set = set(protected_keys)
+        finalized_limit = max(
+            self.visible_window_target_blocks - len(protected_keys),
+            0,
+        )
         visible_entry_keys, candidate_keys = self._logical_visible_entry_keys(
             now=now,
             finalized_limit=finalized_limit,
-            excluded_key=active_self_key,
+            excluded_keys=protected_key_set,
         )
         self._mark_entries_visible(visible_entry_keys)
         self._prune_displaced_finalized_entries(
@@ -1068,7 +1135,7 @@ class OverlayPresenter(OverlaySink):
             finalized_limit=finalized_limit,
             candidate_keys=candidate_keys,
             selected_keys=visible_entry_keys,
-            protected_selected=[],
+            protected_selected=protected_keys,
             retained_hidden=[],
         )
         rendered_entries = [
@@ -1077,15 +1144,18 @@ class OverlayPresenter(OverlaySink):
             if (entry := self._entries.get(key)) is not None
             and (block := self._build_presentation_block(entry)) is not None
         ]
-        if active_self_key is not None:
-            active_entry = self._entries.get(active_self_key)
-            if (
-                active_entry is not None
-                and (block := self._build_presentation_block(active_entry, prefer_live_self=True))
-                is not None
-            ):
-                active_entry.ever_visible = True
-                rendered_entries.append((active_self_key, block))
+        for protected_key in protected_keys:
+            active_entry = self._entries.get(protected_key)
+            if active_entry is None:
+                continue
+            block = self._build_presentation_block(
+                active_entry,
+                prefer_live_self=protected_key == active_self_key,
+            )
+            if block is None:
+                continue
+            active_entry.ever_visible = True
+            rendered_entries.append((protected_key, block))
         rendered_entries.sort(key=lambda item: (item[1].appearance_seq, item[1].occupant_key))
         return rendered_entries
 
@@ -1175,7 +1245,7 @@ class OverlayPresenter(OverlaySink):
         *,
         now: float,
         finalized_limit: int,
-        excluded_key: tuple[str, UUID] | None,
+        excluded_keys: set[tuple[str, UUID]],
     ) -> tuple[list[tuple[str, UUID]], list[tuple[str, UUID]]]:
         _ = now
         if finalized_limit == 0:
@@ -1183,7 +1253,7 @@ class OverlayPresenter(OverlaySink):
 
         publishable: list[tuple[int, int, str, str, tuple[str, UUID]]] = []
         for key, entry in self._entries.items():
-            if excluded_key is not None and key == excluded_key:
+            if key in excluded_keys:
                 continue
             if not self._entry_is_selectable(entry):
                 continue
@@ -1270,7 +1340,7 @@ class OverlayPresenter(OverlaySink):
                     block_variant="finalized",
                     primary_text=translated_text,
                     secondary_text=original_text,
-                    secondary_enabled=self.show_peer_original,
+                    secondary_enabled=self.show_peer_original and bool(original_text),
                     update_id=entry.translation_update_id,
                     origin_wall_clock_ms=entry.translation_origin_wall_clock_ms,
                     session_scope=entry.translation_session_scope,
@@ -1280,17 +1350,21 @@ class OverlayPresenter(OverlaySink):
                 )
             active_text = entry.live_text.strip()
             if active_text:
+                if not self.show_peer_original:
+                    return None
                 return OverlayPresentationBlock(
                     id=entry.block_id,
                     occupant_key=entry.occupant_key,
                     appearance_seq=self._block_appearance_seq(entry),
                     channel="peer",
                     block_variant="active_peer",
-                    primary_text=active_text,
-                    secondary_text="",
-                    secondary_enabled=False,
+                    primary_text="",
+                    secondary_text=active_text,
+                    secondary_enabled=True,
                 )
             if original_text:
+                if not self.show_peer_original:
+                    return None
                 return OverlayPresentationBlock(
                     id=entry.block_id,
                     occupant_key=entry.occupant_key,
@@ -1301,9 +1375,9 @@ class OverlayPresenter(OverlaySink):
                     ),
                     channel="peer",
                     block_variant="finalized",
-                    primary_text=original_text,
-                    secondary_text="",
-                    secondary_enabled=False,
+                    primary_text="",
+                    secondary_text=original_text,
+                    secondary_enabled=True,
                 )
             return None
         else:
@@ -1358,8 +1432,10 @@ class OverlayPresenter(OverlaySink):
         if entry.channel == "peer":
             return bool(
                 entry.translation_text.strip()
-                or entry.live_text.strip()
-                or entry.original_text.strip()
+                or (
+                    self.show_peer_original
+                    and (entry.live_text.strip() or entry.original_text.strip())
+                )
             )
         return bool(entry.original_text.strip())
 
@@ -1636,6 +1712,8 @@ class OverlayPresenter(OverlaySink):
             self._cancel_expiration_task(key)
         if self._live_self_turn_key == key:
             self._live_self_turn_key = None
+        if self._live_peer_turn_key == key:
+            self._live_peer_turn_key = None
         entry = self._entries.pop(key, None)
         if entry is None:
             return

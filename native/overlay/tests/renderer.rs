@@ -223,9 +223,9 @@ fn renderer_active_peer_with_state_generated_slots_does_not_overlap_next_row() {
                 appearance_seq: 1,
                 channel: "peer".into(),
                 block_variant: OverlayPresentationBlockVariant::ActivePeer,
-                primary_text: "Can you hear me?".into(),
-                secondary_text: String::new(),
-                secondary_enabled: false,
+                primary_text: String::new(),
+                secondary_text: "Can you hear me?".into(),
+                secondary_enabled: true,
                 update_id: None,
                 origin_wall_clock_ms: None,
                 session_scope: None,
@@ -285,6 +285,12 @@ fn renderer_active_peer_with_state_generated_slots_does_not_overlap_next_row() {
 
     assert_eq!(peer.block_variant, CaptionBlockVariant::ActivePeer);
     assert_eq!(peer.channel, Some(CaptionChannel::PeerChannel));
+    assert!(peer.primary_lines.iter().all(|line| line.text.is_empty()));
+    assert_eq!(
+        peer.secondary_line.as_ref().map(|line| line.text.as_str()),
+        Some("Can you hear me?")
+    );
+    assert!(peer.secondary_reserved);
     assert!(
         peer.bounds.bottom_px <= self_block.bounds.top_px,
         "peer bounds {:?} should not overlap next row {:?}",
@@ -306,9 +312,9 @@ fn renderer_source_only_peer_finalized_with_state_generated_slots_does_not_overl
                 appearance_seq: 1,
                 channel: "peer".into(),
                 block_variant: OverlayPresentationBlockVariant::Finalized,
-                primary_text: "translation unavailable, showing original source text".into(),
-                secondary_text: String::new(),
-                secondary_enabled: false,
+                primary_text: String::new(),
+                secondary_text: "translation unavailable, showing original source text".into(),
+                secondary_enabled: true,
                 update_id: None,
                 origin_wall_clock_ms: None,
                 session_scope: None,
@@ -368,6 +374,12 @@ fn renderer_source_only_peer_finalized_with_state_generated_slots_does_not_overl
 
     assert_eq!(peer.block_variant, CaptionBlockVariant::Finalized);
     assert_eq!(peer.channel, Some(CaptionChannel::PeerChannel));
+    assert!(peer.primary_lines.iter().all(|line| line.text.is_empty()));
+    assert_eq!(
+        peer.secondary_line.as_ref().map(|line| line.text.as_str()),
+        Some("translation unavailable, showing original source text")
+    );
+    assert!(peer.secondary_reserved);
     assert!(
         peer.bounds.bottom_px <= self_block.bounds.top_px,
         "peer source-only bounds {:?} should not overlap next row {:?}",
@@ -747,6 +759,29 @@ fn renderer_windows_first_finalized_bilingual_frame_after_empty_frame_is_rendera
     assert_eq!(
         frame.layout().visible_blocks[0].block_variant,
         CaptionBlockVariant::Finalized
+    );
+    assert!(frame.texture_ptr().is_some());
+    assert!(frame.d3d11_texture().is_some());
+}
+
+#[cfg(windows)]
+#[test]
+fn renderer_windows_secondary_only_finalized_peer_frame_is_renderable() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let source_only_peer = CaptionBlock::new("peer:source-only", "")
+        .with_channel(CaptionChannel::PeerChannel)
+        .with_variant(CaptionBlockVariant::Finalized)
+        .with_secondary_text("Can you hear me?", true);
+
+    let frame = renderer.render_blocks(vec![source_only_peer]).unwrap();
+    let block = &frame.layout().visible_blocks[0];
+
+    assert!(!frame.is_fully_transparent());
+    assert_eq!(block.block_variant, CaptionBlockVariant::Finalized);
+    assert!(block.primary_lines.iter().all(|line| line.text.is_empty()));
+    assert_eq!(
+        block.secondary_line.as_ref().map(|line| line.text.as_str()),
+        Some("Can you hear me?")
     );
     assert!(frame.texture_ptr().is_some());
     assert!(frame.d3d11_texture().is_some());

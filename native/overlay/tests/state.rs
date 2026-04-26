@@ -97,9 +97,9 @@ fn overlay_state_deserializes_active_peer_variant() {
             "appearance_seq": 1,
             "channel": "peer",
             "block_variant": "active_peer",
-            "primary_text": "Can you hear me?",
-            "secondary_text": "",
-            "secondary_enabled": false
+            "primary_text": "",
+            "secondary_text": "Can you hear me?",
+            "secondary_enabled": true
         }]
     }))
     .unwrap();
@@ -108,6 +108,9 @@ fn overlay_state_deserializes_active_peer_variant() {
         snapshot.blocks[0].block_variant,
         OverlayPresentationBlockVariant::ActivePeer
     );
+    assert_eq!(snapshot.blocks[0].primary_text, "");
+    assert_eq!(snapshot.blocks[0].secondary_text, "Can you hear me?");
+    assert!(snapshot.blocks[0].secondary_enabled);
 }
 
 #[test]

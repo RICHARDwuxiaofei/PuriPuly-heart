@@ -38,6 +38,16 @@ class RecordingOverlaySink:
 
 
 @dataclass(slots=True)
+class RecordingHubDiagnostics:
+    hub_events: list[dict[str, object]] = field(default_factory=list)
+
+    def record_hub(self, event: str, **fields: object) -> dict[str, object]:
+        payload = {"event": event, **fields}
+        self.hub_events.append(payload)
+        return payload
+
+
+@dataclass(slots=True)
 class RecordingPresentationBridge:
     snapshots: list[object] = field(default_factory=list)
 
@@ -272,6 +282,29 @@ async def test_hub_emits_self_and_peer_finals_to_overlay_sink() -> None:
         "utterance_closed",
     ]
     assert [event.channel for event in sink.events] == ["self", "self", "peer", "peer", "peer"]
+
+
+@pytest.mark.asyncio
+async def test_peer_active_overlay_emit_records_source_as_secondary_len() -> None:
+    diagnostics = RecordingHubDiagnostics()
+    sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        overlay_diagnostics=diagnostics,  # type: ignore[arg-type]
+    )
+
+    await hub.handle_peer_transcript_final_for_test(text="peer source")
+
+    active_peer_events = [
+        event
+        for event in diagnostics.hub_events
+        if event["event"] == "overlay_emit" and event["event_kind"] == "active_peer"
+    ]
+    assert len(active_peer_events) == 1
+    assert active_peer_events[0]["secondary_len"] == len("peer source")
 
 
 @pytest.mark.asyncio

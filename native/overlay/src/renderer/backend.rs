@@ -586,6 +586,9 @@ impl WindowsCaptionRenderer {
         let mut visual_bounds: Option<super::types::VisualBounds> = None;
         let build_result = (|| {
             for (role, line) in block_lines(block) {
+                if line.text.trim().is_empty() {
+                    continue;
+                }
                 let cached = self.prepared_line_visual(block, line, role)?;
                 let offset = Vector2 {
                     X: policy.strip_horizontal_padding_px() as f32,

@@ -1147,7 +1147,7 @@ class ClientHub:
             event_kind="active_peer",
             utterance_id=transcript.utterance_id,
             channel="peer",
-            secondary_len=0,
+            secondary_len=len(transcript.text.strip()),
         )
         self._record_latency_stage(
             channel="peer",

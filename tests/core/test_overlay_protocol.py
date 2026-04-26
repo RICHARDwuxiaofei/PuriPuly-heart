@@ -142,9 +142,9 @@ def test_overlay_presentation_snapshot_round_trips_active_peer_block() -> None:
         appearance_seq=3,
         channel="peer",
         block_variant="active_peer",
-        primary_text="can you hear me",
-        secondary_text="",
-        secondary_enabled=False,
+        primary_text="",
+        secondary_text="can you hear me",
+        secondary_enabled=True,
     )
     snapshot = OverlayPresentationSnapshot(blocks=[block])
 

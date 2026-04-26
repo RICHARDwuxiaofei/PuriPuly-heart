@@ -827,7 +827,8 @@ fn is_peer_overlay_first_emit_candidate(block: &OverlayPresentationBlock) -> boo
             OverlayPresentationBlockVariant::ActivePeer
                 | OverlayPresentationBlockVariant::Finalized
         )
-        && !block.primary_text.trim().is_empty()
+        && (!block.primary_text.trim().is_empty()
+            || (block.secondary_enabled && !block.secondary_text.trim().is_empty()))
 }
 
 fn peer_overlay_first_render_block_ids_from_caption_blocks(
@@ -1722,10 +1723,10 @@ mod tests {
 
     #[test]
     fn runtime_converts_active_peer_snapshot_to_active_peer_caption_block() {
-        let mut active_peer =
-            slot_block("peer:active", "peer:turn-1", 1, "peer", "Can you hear me?");
+        let mut active_peer = slot_block("peer:active", "peer:turn-1", 1, "peer", "");
         active_peer.block_variant = OverlayPresentationBlockVariant::ActivePeer;
-        active_peer.secondary_enabled = false;
+        active_peer.secondary_text = "Can you hear me?".into();
+        active_peer.secondary_enabled = true;
         let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
             revision: 5,
             calibration: OverlayPresentationCalibration::default(),
@@ -1737,6 +1738,9 @@ mod tests {
         assert_eq!(blocks[0].id, "peer:active");
         assert_eq!(blocks[0].block_variant, CaptionBlockVariant::ActivePeer);
         assert_eq!(blocks[0].channel, Some(CaptionChannel::PeerChannel));
+        assert_eq!(blocks[0].primary_text, "");
+        assert_eq!(blocks[0].secondary_text, "Can you hear me?");
+        assert!(blocks[0].secondary_enabled);
     }
 
     #[test]
@@ -1758,9 +1762,10 @@ mod tests {
 
     #[test]
     fn runtime_detects_active_peer_first_emit_blocks_from_snapshot() {
-        let mut active_peer = slot_block("peer:active", "peer:turn-1", 1, "peer", "source");
+        let mut active_peer = slot_block("peer:active", "peer:turn-1", 1, "peer", "");
         active_peer.block_variant = OverlayPresentationBlockVariant::ActivePeer;
-        active_peer.secondary_enabled = false;
+        active_peer.secondary_text = "source".into();
+        active_peer.secondary_enabled = true;
         let snapshot = OverlayPresentationSnapshot {
             revision: 6,
             calibration: OverlayPresentationCalibration::default(),
