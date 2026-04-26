@@ -8,12 +8,18 @@ import logging
 import flet as ft
 
 from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterUserFacingError
-from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
+from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.domain.events import STTSessionState, UIEvent, UIEventType
 from puripuly_heart.domain.models import OSCMessage, Transcript, Translation
 from puripuly_heart.ui.i18n import t
 
 logger = logging.getLogger(__name__)
+
+
+def _short_visual_debug_token(value: object | None) -> str:
+    text = "" if value is None else str(value).strip()
+    normalized = "".join(char for char in text if char.isalnum())
+    return (normalized[:4] or "none").lower()
 
 
 class UIEventBridge:
@@ -41,6 +47,23 @@ class UIEventBridge:
         controller = getattr(self.app, "controller", None)
         hub = getattr(controller, "hub", None)
         return bool(getattr(hub, "translation_enabled", False))
+
+    def _visual_debug_prefix(
+        self,
+        *,
+        channel: str | None,
+        utterance_id: object | None,
+        update_id: str | None = None,
+    ) -> str | None:
+        if channel != "peer" or utterance_id is None:
+            return None
+        mode = getattr(self.runtime_logging, "mode", None)
+        mode_value = getattr(mode, "value", mode)
+        if mode_value != SessionLoggingMode.DETAILED.value:
+            return None
+        turn_token = _short_visual_debug_token(utterance_id)
+        stage_token = _short_visual_debug_token(update_id) if update_id else "src"
+        return f"[P {turn_token}/{stage_token}]"
 
     def _emit_dashboard_translation_applied_detailed(
         self,
@@ -135,6 +158,10 @@ class UIEventBridge:
                     source_text_len=len(transcript.text),
                     transcript_kind=transcript_kind,
                     should_log=should_log,
+                    debug_prefix=self._visual_debug_prefix(
+                        channel=transcript.channel,
+                        utterance_id=transcript.utterance_id,
+                    ),
                 )
 
             if is_final:
@@ -162,6 +189,11 @@ class UIEventBridge:
                     source_text_hash=translation.source_text_hash,
                     source_text_len=translation.source_text_len,
                     logical_turn_key=translation.logical_turn_key,
+                    debug_prefix=self._visual_debug_prefix(
+                        channel=translation.channel,
+                        utterance_id=translation.utterance_id,
+                        update_id=translation.update_id,
+                    ),
                 )
                 self._emit_dashboard_translation_applied_detailed(
                     translation=translation,

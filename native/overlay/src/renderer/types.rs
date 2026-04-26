@@ -116,7 +116,8 @@ impl CaptionBlock {
     }
 
     pub fn has_drawable_text(&self) -> bool {
-        !self.primary_text.trim().is_empty() || !self.secondary_text.trim().is_empty()
+        !self.primary_text.trim().is_empty()
+            || (self.secondary_enabled && !self.secondary_text.trim().is_empty())
     }
 }
 
@@ -276,6 +277,28 @@ impl Default for CaptionPresentation {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptionDebugOverlay {
+    label: String,
+}
+
+impl CaptionDebugOverlay {
+    pub fn new(label: impl Into<String>) -> Option<Self> {
+        let label = label.into();
+        let trimmed = label.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(Self {
+            label: trimmed.chars().take(96).collect(),
+        })
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LineRole {
     Primary,
@@ -412,6 +435,8 @@ pub struct RenderDiagnostics {
     pub line_cache_misses: u32,
     pub block_cache_hits: u32,
     pub block_cache_misses: u32,
+    pub debug_overlay_draw_count: u32,
+    pub debug_overlay_clear_count: u32,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]

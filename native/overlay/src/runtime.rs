@@ -8,7 +8,7 @@ use tokio::io::{self, AsyncWriteExt};
 use tokio::time::{sleep_until, Instant};
 
 use crate::bridge::{BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEvent};
-use crate::logging::OverlayLogger;
+use crate::logging::{OverlayLogger, OverlayLoggingMode};
 use crate::manifest::{
     load_manifest, validate_manifest, OverlayManifest, EXPECTED_CONTRACT_VERSION,
 };
@@ -19,12 +19,12 @@ use crate::openvr::{
     OpenVrStartupPreflightError, OverlayFrameSubmitter,
 };
 use crate::renderer::{
-    CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutResult, CaptionPresentation,
-    CaptionRenderer, VisibleCaptionBlock,
+    CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionDebugOverlay, CaptionLayoutResult,
+    CaptionPresentation, CaptionRenderer, VisibleCaptionBlock,
 };
 use crate::state::{
     OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationSnapshot,
-    OverlayScene, OverlayState,
+    OverlayScene, OverlaySlot, OverlayState,
 };
 
 const EMPTY_OVERLAY_HIDE_DELAY: Duration = Duration::from_millis(500);
@@ -278,6 +278,21 @@ impl OverlayRuntime {
         self.redraw_requested = false;
     }
 
+    fn apply_runtime_logging_mode(
+        &mut self,
+        logger: &OverlayLogger,
+        mode: OverlayLoggingMode,
+    ) -> bool {
+        let was_detailed = logger.is_detailed();
+        logger.set_mode(mode);
+        let is_detailed = logger.is_detailed();
+        let changed = was_detailed != is_detailed;
+        if changed {
+            self.redraw_requested = true;
+        }
+        changed
+    }
+
     async fn emit_snapshot_slot_correlation_if_changed(
         &mut self,
         logger: &OverlayLogger,
@@ -475,11 +490,14 @@ impl OverlayRuntime {
         openvr
             .apply_calibration(self.state.calibration())
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
-        let blocks = self.caption_blocks();
+        let detailed_logging = logger.is_detailed();
+        let blocks = self.caption_blocks_for_render(detailed_logging);
         self.emit_pending_peer_overlay_first_emit_hooks(logger)
             .await?;
         log_runtime_info(logger, format_caption_blocks_built_log(&blocks)).await?;
         let has_drawable_text = blocks.iter().any(CaptionBlock::has_drawable_text);
+        let debug_overlay =
+            debug_overlay_for_frame(detailed_logging, self.state.snapshot().revision, &blocks);
         let peer_overlay_first_render_ids = peer_overlay_first_render_block_ids_from_caption_blocks(
             &blocks,
             &self.pending_peer_first_render_ids,
@@ -502,7 +520,7 @@ impl OverlayRuntime {
                 .map_err(|error| RuntimeFailure::Render(error.to_string()))?
         } else {
             renderer
-                .render_blocks(blocks)
+                .render_blocks_with_debug_overlay(blocks, debug_overlay)
                 .map_err(|error| RuntimeFailure::Render(error.to_string()))?
         };
         let self_block_count = visible_self_block_count(frame.layout());
@@ -565,7 +583,6 @@ impl OverlayRuntime {
         }
         self.emit_visible_update_rendered_diagnostics(logger, &rendered_diagnostic_rows)
             .await?;
-        let detailed_logging = logger.is_detailed();
         let submit_started = if detailed_logging {
             Some(Instant::now())
         } else {
@@ -665,7 +682,10 @@ impl OverlayRuntime {
         match message {
             Ok(BridgeIncoming::Heartbeat) => Ok(true),
             Ok(BridgeIncoming::Control(control)) => {
-                logger.set_mode(control.logging_mode);
+                if self.apply_runtime_logging_mode(logger, control.logging_mode) {
+                    self.submit_frame_if_needed(renderer, openvr, bridge, logger)
+                        .await?;
+                }
                 Ok(true)
             }
             Ok(BridgeIncoming::Snapshot(snapshot)) => {
@@ -1193,6 +1213,78 @@ fn format_caption_blocks_built_log(blocks: &[CaptionBlock]) -> String {
     )
 }
 
+fn short_tail(value: &str) -> String {
+    let trimmed = value.trim();
+    let without_prefix = trimmed
+        .strip_prefix("peer:")
+        .or_else(|| trimmed.strip_prefix("self:"))
+        .unwrap_or(trimmed);
+    let chars = without_prefix.chars().collect::<Vec<_>>();
+    let start = chars.len().saturating_sub(8);
+    chars[start..].iter().collect()
+}
+
+fn stable_short_hash(value: &str) -> u32 {
+    let mut hash = 0x811c9dc5u32;
+    for byte in value.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    hash
+}
+
+fn debug_watermark_label_for_frame(revision: u64, blocks: &[CaptionBlock]) -> Option<String> {
+    if !blocks.iter().any(CaptionBlock::has_drawable_text) {
+        return None;
+    }
+
+    let active_peer = blocks.iter().find(|block| {
+        block.channel == Some(CaptionChannel::PeerChannel)
+            && block.block_variant == CaptionBlockVariant::ActivePeer
+            && block.has_drawable_text()
+    });
+
+    let active_peer_tail = active_peer
+        .map(|block| short_tail(&block.id))
+        .unwrap_or_else(|| "none".to_string());
+
+    let hash_input = active_peer
+        .map(|block| format!("{}\n{}", block.primary_text, block.secondary_text))
+        .unwrap_or_default();
+    let hash = stable_short_hash(&hash_input) & 0xffff;
+
+    let block_ids = blocks
+        .iter()
+        .filter(|block| block.has_drawable_text())
+        .take(3)
+        .map(|block| {
+            let prefix = if block.channel == Some(CaptionChannel::PeerChannel) {
+                "peer"
+            } else {
+                "self"
+            };
+            format!("{}:{}", prefix, short_tail(&block.id))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    Some(format!(
+        "DBG r{} ap={} h={:04x} b={}",
+        revision, active_peer_tail, hash, block_ids
+    ))
+}
+
+fn debug_overlay_for_frame(
+    detailed_logging: bool,
+    revision: u64,
+    blocks: &[CaptionBlock],
+) -> Option<CaptionDebugOverlay> {
+    if !detailed_logging {
+        return None;
+    }
+    debug_watermark_label_for_frame(revision, blocks).and_then(CaptionDebugOverlay::new)
+}
+
 fn format_visible_block_summary(block: &VisibleCaptionBlock) -> String {
     format!(
         "id={} variant={} secondary_present={} secondary_reserved={} truncated_secondary={}",
@@ -1533,54 +1625,110 @@ fn create_runtime_renderer() -> Result<CaptionRenderer, crate::renderer::Caption
 
 impl OverlayRuntime {
     pub fn caption_blocks(&self) -> Vec<CaptionBlock> {
+        self.caption_blocks_for_render(false)
+    }
+
+    pub fn caption_blocks_for_render(&self, visual_debug_prefixes: bool) -> Vec<CaptionBlock> {
         self.state
             .scene()
             .slots()
             .iter()
             .flatten()
-            .map(|strip| {
-                let channel = if strip.channel == "peer" {
-                    CaptionChannel::PeerChannel
-                } else {
-                    CaptionChannel::SelfChannel
-                };
-                let variant = match strip.block_variant {
-                    crate::state::OverlayPresentationBlockVariant::ActiveSelf => {
-                        CaptionBlockVariant::ActiveSelf
-                    }
-                    crate::state::OverlayPresentationBlockVariant::ActivePeer => {
-                        CaptionBlockVariant::ActivePeer
-                    }
-                    crate::state::OverlayPresentationBlockVariant::Finalized => {
-                        CaptionBlockVariant::Finalized
-                    }
-                };
-                CaptionBlock::new(strip.id.clone(), strip.primary_text.clone())
-                    .with_channel(channel)
-                    .with_variant(variant)
-                    .with_secondary_text(strip.secondary_text.clone(), strip.secondary_enabled)
-                    .with_visual_state(1.0, 0.0, 1.0)
-                    .with_slot(strip.slot_index, strip.anchor_top_px)
-            })
+            .map(|strip| caption_block_for_strip(strip, visual_debug_prefixes))
             .collect()
     }
+}
+
+fn caption_block_for_strip(strip: &OverlaySlot, visual_debug_prefixes: bool) -> CaptionBlock {
+    let channel = if strip.channel == "peer" {
+        CaptionChannel::PeerChannel
+    } else {
+        CaptionChannel::SelfChannel
+    };
+    let variant = match strip.block_variant {
+        crate::state::OverlayPresentationBlockVariant::ActiveSelf => {
+            CaptionBlockVariant::ActiveSelf
+        }
+        crate::state::OverlayPresentationBlockVariant::ActivePeer => {
+            CaptionBlockVariant::ActivePeer
+        }
+        crate::state::OverlayPresentationBlockVariant::Finalized => CaptionBlockVariant::Finalized,
+    };
+    let prefix = if visual_debug_prefixes {
+        peer_visual_debug_prefix_for_strip(strip)
+    } else {
+        None
+    };
+    let primary_text = apply_visual_debug_prefix(&strip.primary_text, prefix.as_deref());
+    let secondary_text = apply_visual_debug_prefix(&strip.secondary_text, prefix.as_deref());
+
+    CaptionBlock::new(strip.id.clone(), primary_text)
+        .with_channel(channel)
+        .with_variant(variant)
+        .with_secondary_text(secondary_text, strip.secondary_enabled)
+        .with_visual_state(1.0, 0.0, 1.0)
+        .with_slot(strip.slot_index, strip.anchor_top_px)
+}
+
+fn peer_visual_debug_prefix_for_strip(strip: &OverlaySlot) -> Option<String> {
+    if strip.channel != "peer" {
+        return None;
+    }
+    let turn_token = short_visual_debug_token(&strip.id);
+    let stage_token = strip
+        .update_id
+        .as_deref()
+        .map(short_visual_debug_token)
+        .unwrap_or_else(|| "src".to_string());
+    Some(format!("[P {}/{}]", turn_token, stage_token))
+}
+
+fn short_visual_debug_token(value: &str) -> String {
+    let trimmed = value.trim();
+    let without_prefix = trimmed
+        .strip_prefix("peer:")
+        .or_else(|| trimmed.strip_prefix("self:"))
+        .unwrap_or(trimmed);
+    let token = without_prefix
+        .chars()
+        .filter(|char| char.is_ascii_alphanumeric())
+        .take(4)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if token.is_empty() {
+        "none".to_string()
+    } else {
+        token
+    }
+}
+
+fn apply_visual_debug_prefix(text: &str, prefix: Option<&str>) -> String {
+    let Some(prefix) = prefix else {
+        return text.to_string();
+    };
+    if text.trim().is_empty() {
+        return text.to_string();
+    }
+    format!("{} {}", prefix, text)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_diagnostic_rows, collect_rendered_diagnostic_rows,
-        diagnostic_row_signature, format_caption_blocks_built_log, format_frame_rendered_log,
-        format_frame_submitted_log, format_overlay_visible_update_rendered_log,
-        format_peer_first_render_visibility_desync_suspected_log,
+        collect_diagnostic_rows, collect_rendered_diagnostic_rows, debug_overlay_for_frame,
+        debug_watermark_label_for_frame, diagnostic_row_signature, format_caption_blocks_built_log,
+        format_frame_rendered_log, format_frame_submitted_log,
+        format_overlay_visible_update_rendered_log,
         format_peer_first_render_visibility_checkpoint_log,
-        format_snapshot_received_log, format_snapshot_slot_correlation_log,
-        format_two_row_window_closed_log, peer_overlay_first_emit_block_ids_from_snapshot,
+        format_peer_first_render_visibility_desync_suspected_log, format_snapshot_received_log,
+        format_snapshot_slot_correlation_log, format_two_row_window_closed_log,
+        peer_overlay_first_emit_block_ids_from_snapshot,
         peer_overlay_first_render_block_ids_from_caption_blocks, prepare_openvr_runtime,
         DiagnosticRow, OverlayRuntime, RenderedDiagnosticRow, SnapshotApplyOutcome, StartupError,
         TwoRowWindowState,
     };
     use crate::openvr::{OpenVrError, OpenVrStartupPreflightError};
+    use crate::logging::{OverlayLogger, OverlayLoggingMode};
     use crate::renderer::{
         CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy, CaptionPresentation,
     };
@@ -1656,6 +1804,58 @@ mod tests {
                 .map(|block| (block.id.as_str(), block.primary_text.as_str()))
                 .collect::<Vec<_>>(),
             vec![("peer:1", "peer one"), ("self:2", "self two"),]
+        );
+    }
+
+    #[test]
+    fn caption_blocks_for_render_prefixes_peer_lines_when_visual_debug_is_enabled() {
+        let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            revision: 3,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![
+                OverlayPresentationBlock {
+                    id: "peer:41c6ffff-1111-2222-3333-444455556666".to_string(),
+                    occupant_key: "peer-active".to_string(),
+                    appearance_seq: 1,
+                    channel: "peer".to_string(),
+                    block_variant: OverlayPresentationBlockVariant::ActivePeer,
+                    primary_text: String::new(),
+                    secondary_text: "peer source".to_string(),
+                    secondary_enabled: true,
+                    update_id: None,
+                    origin_wall_clock_ms: None,
+                    session_scope: None,
+                },
+                OverlayPresentationBlock {
+                    id: "peer:9c27ffff-1111-2222-3333-444455556666".to_string(),
+                    occupant_key: "peer-final".to_string(),
+                    appearance_seq: 2,
+                    channel: "peer".to_string(),
+                    block_variant: OverlayPresentationBlockVariant::Finalized,
+                    primary_text: "peer translation".to_string(),
+                    secondary_text: "peer original".to_string(),
+                    secondary_enabled: true,
+                    update_id: Some("3bd7ffff-1111-2222-3333-444455556666".to_string()),
+                    origin_wall_clock_ms: None,
+                    session_scope: None,
+                },
+            ],
+        });
+
+        let normal_blocks = runtime.caption_blocks_for_render(false);
+        let debug_blocks = runtime.caption_blocks_for_render(true);
+
+        assert_eq!(normal_blocks[0].secondary_text, "peer source");
+        assert_eq!(normal_blocks[1].primary_text, "peer translation");
+        assert_eq!(debug_blocks[0].primary_text, "");
+        assert_eq!(debug_blocks[0].secondary_text, "[P 41c6/src] peer source");
+        assert_eq!(
+            debug_blocks[1].primary_text,
+            "[P 9c27/3bd7] peer translation"
+        );
+        assert_eq!(
+            debug_blocks[1].secondary_text,
+            "[P 9c27/3bd7] peer original"
         );
     }
 
@@ -1859,6 +2059,78 @@ mod tests {
             runtime.state().snapshot().calibration,
             OverlayPresentationCalibration::default()
         );
+    }
+
+    #[test]
+    fn debug_watermark_label_reports_revision_active_peer_and_hash() {
+        let blocks = vec![
+            CaptionBlock::new("peer:11111111-2222-3333-4444-555555555555", "")
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_variant(CaptionBlockVariant::ActivePeer)
+                .with_secondary_text("Can you hear me?", true),
+            CaptionBlock::new("self:active", "hello")
+                .with_channel(CaptionChannel::SelfChannel)
+                .with_variant(CaptionBlockVariant::ActiveSelf),
+        ];
+
+        let label = debug_watermark_label_for_frame(73, &blocks).unwrap();
+
+        assert!(label.starts_with("DBG r73 "));
+        assert!(label.contains("ap=55555555"));
+        assert!(label.contains("h="));
+        assert!(label.contains("b=peer:55555555,self:active"));
+    }
+
+    #[test]
+    fn debug_watermark_label_is_absent_without_drawable_blocks() {
+        assert_eq!(debug_watermark_label_for_frame(73, &[]), None);
+    }
+
+    #[test]
+    fn debug_watermark_label_is_absent_when_only_disabled_secondary_has_text() {
+        let blocks = vec![CaptionBlock::new("peer:hidden", "")
+            .with_channel(CaptionChannel::PeerChannel)
+            .with_variant(CaptionBlockVariant::ActivePeer)
+            .with_secondary_text("hidden source", false)];
+
+        assert_eq!(debug_watermark_label_for_frame(73, &blocks), None);
+    }
+
+    #[test]
+    fn debug_overlay_for_frame_is_absent_in_basic_mode() {
+        let blocks = vec![CaptionBlock::new("self:active", "hello")
+            .with_channel(CaptionChannel::SelfChannel)
+            .with_variant(CaptionBlockVariant::ActiveSelf)];
+
+        assert!(debug_overlay_for_frame(false, 73, &blocks).is_none());
+    }
+
+    #[test]
+    fn debug_overlay_for_frame_is_present_in_detailed_mode_with_drawable_text() {
+        let blocks = vec![CaptionBlock::new("self:active", "hello")
+            .with_channel(CaptionChannel::SelfChannel)
+            .with_variant(CaptionBlockVariant::ActiveSelf)];
+
+        let overlay = debug_overlay_for_frame(true, 73, &blocks).unwrap();
+
+        assert!(overlay.label().starts_with("DBG r73 "));
+    }
+
+    #[tokio::test]
+    async fn runtime_logging_mode_change_requests_redraw_for_watermark_clear() {
+        let logger = OverlayLogger::open(std::env::temp_dir(), OverlayLoggingMode::Detailed)
+            .await
+            .unwrap();
+        let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
+        runtime.clear_redraw_flag();
+
+        assert!(runtime.apply_runtime_logging_mode(&logger, OverlayLoggingMode::Basic));
+        assert!(runtime.redraw_requested());
+
+        runtime.clear_redraw_flag();
+
+        assert!(!runtime.apply_runtime_logging_mode(&logger, OverlayLoggingMode::Basic));
+        assert!(!runtime.redraw_requested());
     }
 
     #[test]

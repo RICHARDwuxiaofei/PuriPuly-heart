@@ -16,9 +16,9 @@ pub use openvr::{
     OverlayPlacementPolicy,
 };
 pub use renderer::{
-    BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
-    CaptionLayoutResult, CaptionLineLayout, CaptionPresentation, CaptionRenderError,
-    CaptionRenderer, DamageBand, RenderedFrame, VisibleCaptionBlock,
+    BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionDebugOverlay,
+    CaptionLayoutPolicy, CaptionLayoutResult, CaptionLineLayout, CaptionPresentation,
+    CaptionRenderError, CaptionRenderer, DamageBand, RenderedFrame, VisibleCaptionBlock,
 };
 pub use runtime::{run_cli, run_with_manifest, OverlayRuntime, RuntimeFailure, StartupError};
 pub use state::{

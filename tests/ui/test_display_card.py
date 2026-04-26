@@ -154,6 +154,30 @@ def test_display_card_display_text_is_always_selectable() -> None:
     assert card._display_secondary.selectable is True
 
 
+def test_display_card_debug_prefix_is_rendered_before_visible_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    card = DisplayCard(on_submit=lambda _text: None)
+    monkeypatch.setattr(type(card._display_primary), "update", lambda self: None)
+    monkeypatch.setattr(type(card._display_secondary), "update", lambda self: None)
+
+    card.set_display("source text", debug_prefix="[P 41c6/src]")
+
+    assert card._display_primary.value == "[P 41c6/src] source text"
+    assert card._display_secondary.visible is False
+
+    card.set_display_translation("translated text", debug_prefix="[P 41c6/3bd7]")
+
+    assert card._display_primary.value == "[P 41c6/3bd7] source text"
+    assert card._display_secondary.value == "[P 41c6/3bd7] translated text"
+    assert card._display_secondary.visible is True
+
+    card.set_status("connected")
+
+    assert card._display_primary.value == display_card_module.t("display.connected")
+    assert "[P 41c6" not in card._display_primary.value
+
+
 def test_display_card_visual_commit_logs_summary_after_updates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

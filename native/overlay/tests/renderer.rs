@@ -1,6 +1,6 @@
 use puripuly_heart_overlay::{
-    BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
-    CaptionPresentation, CaptionRenderer, DamageBand, OverlayPlacementPolicy,
+    BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionDebugOverlay,
+    CaptionLayoutPolicy, CaptionPresentation, CaptionRenderer, DamageBand, OverlayPlacementPolicy,
     OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
     OverlayPresentationSnapshot, OverlayState,
 };
@@ -655,6 +655,47 @@ fn renderer_first_usable_frame_is_fully_transparent_before_real_caption_content(
 }
 
 #[test]
+fn renderer_debug_overlay_is_absent_by_default_and_reported_when_supplied() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+
+    let normal = renderer.render_blocks(vec![test_block("hello")]).unwrap();
+    assert_eq!(normal.debug_overlay_label(), None);
+
+    let empty = renderer
+        .render_blocks_with_debug_overlay(
+            Vec::new(),
+            Some(CaptionDebugOverlay::new("DBG should stay hidden").unwrap()),
+        )
+        .unwrap();
+    assert!(empty.is_fully_transparent());
+    assert_eq!(empty.debug_overlay_label(), None);
+
+    let hidden_secondary = renderer
+        .render_blocks_with_debug_overlay(
+            vec![CaptionBlock::new("peer:hidden", "")
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_variant(CaptionBlockVariant::ActivePeer)
+                .with_secondary_text("hidden source", false)],
+            Some(CaptionDebugOverlay::new("DBG should also stay hidden").unwrap()),
+        )
+        .unwrap();
+    assert!(hidden_secondary.is_fully_transparent());
+    assert_eq!(hidden_secondary.debug_overlay_label(), None);
+
+    let debug = renderer
+        .render_blocks_with_debug_overlay(
+            vec![test_block("hello")],
+            Some(CaptionDebugOverlay::new("DBG r7 ap=peer h=1a2b b=peer").unwrap()),
+        )
+        .unwrap();
+
+    assert_eq!(
+        debug.debug_overlay_label(),
+        Some("DBG r7 ap=peer h=1a2b b=peer")
+    );
+}
+
+#[test]
 fn renderer_presentation_text_scale_changes_block_bounds_height() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
     let default_frame = renderer.render_blocks(vec![test_block("hello")]).unwrap();
@@ -785,6 +826,48 @@ fn renderer_windows_secondary_only_finalized_peer_frame_is_renderable() {
     );
     assert!(frame.texture_ptr().is_some());
     assert!(frame.d3d11_texture().is_some());
+}
+
+#[cfg(windows)]
+#[test]
+fn renderer_windows_debug_overlay_frame_is_renderable() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let frame = renderer
+        .render_blocks_with_debug_overlay(
+            vec![test_block("hello")],
+            Some(CaptionDebugOverlay::new("DBG r7 ap=peer h=1a2b b=peer").unwrap()),
+        )
+        .unwrap();
+
+    assert!(!frame.is_fully_transparent());
+    assert_eq!(
+        frame.debug_overlay_label(),
+        Some("DBG r7 ap=peer h=1a2b b=peer")
+    );
+    assert!(frame.texture_ptr().is_some());
+    assert!(frame.d3d11_texture().is_some());
+    assert_eq!(frame.diagnostics().debug_overlay_draw_count, 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn renderer_windows_clears_debug_overlay_band_when_overlay_is_removed() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let block = test_block("hello");
+
+    let first = renderer
+        .render_blocks_with_debug_overlay(
+            vec![block.clone()],
+            Some(CaptionDebugOverlay::new("DBG r7 ap=peer h=1a2b b=peer").unwrap()),
+        )
+        .unwrap();
+    assert_eq!(first.diagnostics().debug_overlay_draw_count, 1);
+
+    let second = renderer.render_blocks(vec![block]).unwrap();
+
+    assert_eq!(second.debug_overlay_label(), None);
+    assert_eq!(second.diagnostics().debug_overlay_draw_count, 0);
+    assert_eq!(second.diagnostics().debug_overlay_clear_count, 1);
 }
 
 #[cfg(windows)]
