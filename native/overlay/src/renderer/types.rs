@@ -12,9 +12,14 @@ pub(crate) const DEFAULT_SECONDARY_LINE_HEIGHT_PX: u32 = 96;
 pub(crate) const DEFAULT_BLOCK_SPACING_PX: u32 = 36;
 pub(crate) const DEFAULT_STRIP_HORIZONTAL_PADDING_PX: u32 = 24;
 pub(crate) const DEFAULT_STRIP_VERTICAL_PADDING_PX: u32 = 32;
-pub(crate) const DEFAULT_AVERAGE_GLYPH_ADVANCE_PX: u32 = 80;
-pub(crate) const DEFAULT_FONT_SIZE_PX: f32 = 140.0;
-pub(crate) const SECONDARY_FONT_SCALE: f32 = 0.66;
+pub(crate) const DEFAULT_AVERAGE_GLYPH_ADVANCE_RATIO: f32 = 80.0 / 140.0;
+pub(crate) const DEFAULT_FONT_SIZE_PX: f32 = 128.0;
+// 128.0 * (80.0 / 140.0) = 73.14; truncating to 73 keeps fallback wrapping slightly conservative.
+pub(crate) const DEFAULT_AVERAGE_GLYPH_ADVANCE_PX: u32 =
+    (DEFAULT_FONT_SIZE_PX * DEFAULT_AVERAGE_GLYPH_ADVANCE_RATIO) as u32;
+pub(crate) const SECONDARY_FONT_SCALE: f32 = 0.62;
+#[allow(dead_code)]
+pub(crate) const PRIMARY_SECONDARY_GAP_PX: f32 = 28.0;
 pub(crate) const TEXT_OUTLINE_OVERHANG_PX: f32 = 5.0;
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) const SELF_TEXT_FILL_COLOR: (f32, f32, f32, f32) = (1.0, 1.0, 1.0, 1.0);

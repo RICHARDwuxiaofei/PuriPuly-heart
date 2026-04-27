@@ -8,7 +8,8 @@ use super::types::{
     DEFAULT_HORIZONTAL_PADDING_PX, DEFAULT_PRIMARY_LINE_HEIGHT_PX,
     DEFAULT_SECONDARY_LINE_HEIGHT_PX, DEFAULT_STRIP_HORIZONTAL_PADDING_PX,
     DEFAULT_STRIP_VERTICAL_PADDING_PX, DEFAULT_SURFACE_HEIGHT_PX, DEFAULT_SURFACE_WIDTH_PX,
-    DEFAULT_VERTICAL_PADDING_PX, SECONDARY_FONT_SCALE, TEXT_OUTLINE_OVERHANG_PX,
+    DEFAULT_VERTICAL_PADDING_PX, PRIMARY_SECONDARY_GAP_PX, SECONDARY_FONT_SCALE,
+    TEXT_OUTLINE_OVERHANG_PX,
 };
 #[cfg(windows)]
 use windows::core::PCWSTR;
@@ -272,6 +273,11 @@ impl CaptionLayoutPolicy {
         let secondary_font_size_px = primary_font_size_px * SECONDARY_FONT_SCALE;
         let primary_line_height_px = self.primary_line_height_px as f32 * text_scale;
         let vertical_padding_px = self.strip_vertical_padding_px as f32 * text_scale;
+        let primary_secondary_gap_px = if secondary_row_reserved {
+            PRIMARY_SECONDARY_GAP_PX * text_scale
+        } else {
+            0.0
+        };
         let strip_width_px = content_width_px + self.strip_horizontal_padding_px as f32 * 2.0;
         let block_height_px = self.stable_block_height_px(secondary_row_reserved, text_scale);
         let local_bounds = BlockBounds::new(0.0, 0.0, strip_width_px, block_height_px);
@@ -312,7 +318,9 @@ impl CaptionLayoutPolicy {
             let width_px = measure_text_width(&text, primary_advance_px * SECONDARY_FONT_SCALE);
             let origin_x = self.strip_horizontal_padding_px as f32
                 + ((content_width_px - width_px).max(0.0) * 0.5);
-            let origin_y = vertical_padding_px + primary_budget as f32 * primary_line_height_px;
+            let origin_y = vertical_padding_px
+                + primary_budget as f32 * primary_line_height_px
+                + primary_secondary_gap_px;
             CachedLineLayoutTemplate {
                 visual_bounds: line_visual_bounds(0.0, 0.0, width_px, secondary_font_size_px)
                     .translate(origin_x, origin_y),
@@ -356,6 +364,11 @@ impl CaptionLayoutPolicy {
         let secondary_font_size_px = primary_font_size_px * SECONDARY_FONT_SCALE;
         let primary_line_height_px = self.primary_line_height_px as f32 * text_scale;
         let vertical_padding_px = self.strip_vertical_padding_px as f32 * text_scale;
+        let primary_secondary_gap_px = if secondary_row_reserved {
+            PRIMARY_SECONDARY_GAP_PX * text_scale
+        } else {
+            0.0
+        };
         let block_height_px = self.stable_block_height_px(secondary_row_reserved, text_scale);
         let local_bounds = BlockBounds::new(
             0.0,
@@ -412,8 +425,9 @@ impl CaptionLayoutPolicy {
                         secondary_font_size_px,
                     )?;
                     let origin_x = self.strip_horizontal_padding_px as f32 + measured.origin_x_px;
-                    let origin_y =
-                        vertical_padding_px + primary_budget as f32 * primary_line_height_px;
+                    let origin_y = vertical_padding_px
+                        + primary_budget as f32 * primary_line_height_px
+                        + primary_secondary_gap_px;
                     Ok::<CachedLineLayoutTemplate, windows::core::Error>(CachedLineLayoutTemplate {
                         text: text.clone(),
                         role: LineRole::Secondary,
@@ -1201,10 +1215,10 @@ fn utf16_null(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{measure_text_width, wrap_text};
+    use super::{measure_text_width, wrap_text, CaptionLayoutPolicy};
     use crate::renderer::{
         effective_background_alpha, fill_color_for_channel, outline_offsets_px, text_script_bucket,
-        CaptionChannel, CaptionPresentation, TextScriptBucket,
+        CaptionBlock, CaptionChannel, CaptionPresentation, TextScriptBucket,
     };
 
     #[test]
@@ -1216,6 +1230,72 @@ mod tests {
     #[test]
     fn measure_text_width_treats_cjk_as_wider_than_latin() {
         assert!(measure_text_width("안녕", 80.0) > measure_text_width("hi", 80.0));
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.01,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn fallback_layout_uses_scaled_average_glyph_advance_for_128px_primary() {
+        let policy = CaptionLayoutPolicy::default();
+        let template = policy.build_fallback_block_template(
+            &CaptionBlock::new("fallback", "aaaaaaaaaaaaaaa"),
+            691.0,
+            1.0,
+        );
+
+        let primary_texts = template
+            .primary_lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(primary_texts, vec!["aaaaaaaaaaaaaaa"]);
+        assert_close(template.primary_lines[0].font_size_px, 128.0);
+    }
+
+    #[test]
+    fn fallback_layout_secondary_origin_includes_scaled_primary_secondary_gap() {
+        let policy = CaptionLayoutPolicy::default();
+        let block = CaptionBlock::new("peer:translated", "translated peer text")
+            .with_secondary_text("source peer text", true);
+        let template = policy.build_fallback_block_template(&block, 3200.0, 1.25);
+        let secondary = template
+            .secondary_line
+            .as_ref()
+            .expect("secondary line should be present");
+
+        assert_close(secondary.origin_y, (32.0 + 2.0 * 150.0 + 28.0) * 1.25);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directwrite_layout_secondary_origin_includes_scaled_primary_secondary_gap() {
+        let policy = CaptionLayoutPolicy::default();
+        let layout = policy
+            .resolve_blocks_for_presentation_windows_cached(
+                vec![CaptionBlock::new("peer:translated", "translated peer text")
+                    .with_secondary_text("source peer text", true)],
+                3840,
+                1024,
+                &CaptionPresentation::default(),
+                None,
+            )
+            .expect("DirectWrite layout should initialize on Windows");
+        let block = &layout.visible_blocks[0];
+        let secondary = block
+            .secondary_line
+            .as_ref()
+            .expect("secondary line should be present");
+
+        assert_close(
+            secondary.origin_y,
+            block.bounds.top_px + 32.0 + 2.0 * 150.0 + 28.0,
+        );
     }
 
     #[test]

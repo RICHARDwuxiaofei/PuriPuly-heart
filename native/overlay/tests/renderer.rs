@@ -1,3 +1,4 @@
+use puripuly_heart_overlay::renderer::LineRole;
 use puripuly_heart_overlay::{
     BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionDebugOverlay,
     CaptionLayoutPolicy, CaptionPresentation, CaptionRenderer, DamageBand, OverlayPlacementPolicy,
@@ -58,6 +59,32 @@ fn renderer_uses_fixed_surface_defaults_for_mvp_caption_layout() {
     let policy = CaptionLayoutPolicy::default();
     assert_eq!(policy.default_surface_size(), (3840, 1024));
     assert_eq!(policy.visible_window_target_blocks(), 2);
+}
+
+#[test]
+fn renderer_default_typography_resolves_128px_primary_and_79_36px_secondary() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.layout_blocks(
+        vec![bilingual_block(
+            "peer:translated",
+            "translated peer line",
+            "source peer line",
+            true,
+        )],
+        3840,
+        1024,
+    );
+
+    let block = &result.visible_blocks[0];
+    let primary = &block.primary_lines[0];
+    let secondary = block
+        .secondary_line
+        .as_ref()
+        .expect("secondary source line should be present");
+
+    assert_close(primary.font_size_px, 128.0);
+    assert_close(secondary.font_size_px, 79.36);
+    assert!(secondary.font_size_px < primary.font_size_px);
 }
 
 #[test]
@@ -176,6 +203,89 @@ fn renderer_centers_each_line_within_strip_bounds() {
     let line_center_x = line.origin_x + line.width_px * 0.5;
 
     assert!((line_center_x - block.bounds.center_x()).abs() < 1.0);
+}
+
+#[test]
+fn renderer_secondary_origin_includes_28px_gap_after_primary_budget() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.layout_blocks(
+        vec![bilingual_block(
+            "peer:translated",
+            "translated peer line",
+            "source peer line",
+            true,
+        )],
+        3840,
+        1024,
+    );
+
+    let block = &result.visible_blocks[0];
+    let secondary = block
+        .secondary_line
+        .as_ref()
+        .expect("secondary source line should be present");
+
+    assert_close(
+        secondary.origin_y,
+        block.bounds.top_px + 32.0 + 2.0 * 150.0 + 28.0,
+    );
+}
+
+#[test]
+fn renderer_secondary_origin_gap_scales_with_text_scale() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.layout_blocks_for_presentation(
+        vec![bilingual_block(
+            "peer:translated",
+            "translated peer line",
+            "source peer line",
+            true,
+        )],
+        3840,
+        1536,
+        &CaptionPresentation {
+            text_scale: 1.5,
+            ..CaptionPresentation::default()
+        },
+    );
+
+    let block = &result.visible_blocks[0];
+    let secondary = block
+        .secondary_line
+        .as_ref()
+        .expect("secondary source line should be present");
+
+    assert_close(
+        secondary.origin_y,
+        block.bounds.top_px + (32.0 + 2.0 * 150.0 + 28.0) * 1.5,
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn renderer_windows_public_layout_secondary_origin_uses_gap_formula() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.layout_blocks(
+        vec![bilingual_block(
+            "peer:translated",
+            "translated peer line",
+            "source peer line",
+            true,
+        )],
+        3840,
+        1024,
+    );
+
+    let block = &result.visible_blocks[0];
+    let secondary = block
+        .secondary_line
+        .as_ref()
+        .expect("secondary source line should be present");
+
+    assert_close(
+        secondary.origin_y,
+        block.bounds.top_px + 32.0 + 2.0 * 150.0 + 28.0,
+    );
 }
 
 #[test]
@@ -389,6 +499,94 @@ fn renderer_source_only_peer_finalized_with_state_generated_slots_does_not_overl
 }
 
 #[test]
+fn renderer_secondary_reserved_block_height_remains_460px_at_default_scale() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.layout_blocks(
+        vec![bilingual_block(
+            "peer:translated",
+            "translated peer line",
+            "source peer line",
+            true,
+        )],
+        3840,
+        1024,
+    );
+
+    let block = &result.visible_blocks[0];
+    assert_close(block.bounds.bottom_px - block.bounds.top_px, 460.0);
+}
+
+#[test]
+fn renderer_two_secondary_reserved_slots_fit_default_surface_after_typography_spacing_update() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.layout_blocks(
+        vec![
+            bilingual_block(
+                "peer:translated",
+                "translated peer text with enough words to represent a normal two-line HMD row",
+                "source original 안녕하세요 hello こんにちは 你好",
+                true,
+            )
+            .with_variant(CaptionBlockVariant::ActivePeer)
+            .with_channel(CaptionChannel::PeerChannel)
+            .with_slot(0, 40.0),
+            bilingual_block(
+                "self:translated",
+                "self transcript text",
+                "self translated secondary",
+                true,
+            )
+            .with_variant(CaptionBlockVariant::Finalized)
+            .with_channel(CaptionChannel::SelfChannel)
+            .with_slot(1, 536.0),
+        ],
+        3840,
+        1024,
+    );
+
+    assert_eq!(result.visible_blocks.len(), 2);
+    for block in &result.visible_blocks {
+        assert!(
+            block.bounds.top_px >= 0.0 && block.bounds.bottom_px <= 1024.0,
+            "block bounds {:?} should stay inside default surface",
+            block.bounds
+        );
+        assert!(
+            block.visual_bounds.top_px >= 0.0 && block.visual_bounds.bottom_px <= 1024.0,
+            "visual bounds {:?} should stay inside default surface",
+            block.visual_bounds
+        );
+    }
+}
+
+#[test]
+fn renderer_source_only_peer_remains_secondary_only_with_readable_default_size() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.resolve_blocks_for_presentation(
+        vec![CaptionBlock::new("peer:source-only", "")
+            .with_variant(CaptionBlockVariant::Finalized)
+            .with_channel(CaptionChannel::PeerChannel)
+            .with_secondary_text("source-only peer fallback remains readable", true)
+            .with_slot(0, 40.0)],
+        3840,
+        1024,
+        &CaptionPresentation::default(),
+    );
+
+    let block = &result.visible_blocks[0];
+    let secondary = block
+        .secondary_line
+        .as_ref()
+        .expect("source-only peer should render as secondary text");
+
+    assert!(block.primary_lines.iter().all(|line| line.text.is_empty()));
+    assert_eq!(secondary.role, LineRole::Secondary);
+    assert_eq!(secondary.text, "source-only peer fallback remains readable");
+    assert_close(secondary.font_size_px, 79.36);
+    assert!(secondary.origin_y > block.bounds.top_px + 32.0 + 2.0 * 150.0);
+}
+
+#[test]
 fn renderer_render_path_expands_damage_band_to_rendered_bounds_overhang() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
     let first = renderer
@@ -456,6 +654,83 @@ fn renderer_damage_band_includes_same_peer_slot_when_primary_text_arrives() {
 }
 
 #[test]
+fn renderer_damage_band_includes_same_slot_secondary_text_movement() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+
+    let first_frame = renderer
+        .render_blocks(vec![CaptionBlock::new(
+            "peer:turn-1",
+            "translated peer body",
+        )
+        .with_variant(CaptionBlockVariant::ActivePeer)
+        .with_channel(CaptionChannel::PeerChannel)
+        .with_secondary_text("short source", true)
+        .with_slot(0, 40.0)])
+        .unwrap();
+    let first_block = first_frame
+        .layout()
+        .visible_blocks
+        .iter()
+        .find(|block| block.id == "peer:turn-1")
+        .expect("peer block should be visible in first frame");
+    let old_visual_bounds = first_block.visual_bounds;
+    let old_secondary = first_block
+        .secondary_line
+        .as_ref()
+        .expect("first frame should include secondary text")
+        .clone();
+
+    let frame = renderer
+        .render_blocks(vec![CaptionBlock::new(
+            "peer:turn-1",
+            "translated peer body",
+        )
+        .with_variant(CaptionBlockVariant::ActivePeer)
+        .with_channel(CaptionChannel::PeerChannel)
+        .with_secondary_text(
+            "longer source text moves the secondary visual bounds and must stay inside damage",
+            true,
+        )
+        .with_slot(0, 40.0)])
+        .unwrap();
+
+    let damage_band = frame
+        .layout()
+        .damage_band
+        .expect("second frame should have a damage band");
+    let block = frame
+        .layout()
+        .visible_blocks
+        .iter()
+        .find(|block| block.id == "peer:turn-1")
+        .expect("peer block should remain visible");
+    let new_visual_bounds = block.visual_bounds;
+    let new_secondary = block
+        .secondary_line
+        .as_ref()
+        .expect("second frame should include secondary text")
+        .clone();
+
+    assert_ne!(old_secondary.text, new_secondary.text);
+
+    let union_top_px = old_visual_bounds.top_px.min(new_visual_bounds.top_px);
+    let union_bottom_px = old_visual_bounds.bottom_px.max(new_visual_bounds.bottom_px);
+
+    assert!(
+        damage_band.top_px <= union_top_px && damage_band.bottom_px >= union_bottom_px,
+        "damage band [{}, {}] should contain old/new same-slot secondary visual union [{}, {}] from old [{}, {}] and new [{}, {}]",
+        damage_band.top_px,
+        damage_band.bottom_px,
+        union_top_px,
+        union_bottom_px,
+        old_visual_bounds.top_px,
+        old_visual_bounds.bottom_px,
+        new_visual_bounds.top_px,
+        new_visual_bounds.bottom_px
+    );
+}
+
+#[test]
 fn renderer_secondary_line_is_single_line_with_ellipsis() {
     let policy = CaptionLayoutPolicy::default();
     let result = policy.layout_blocks(
@@ -495,6 +770,33 @@ fn renderer_primary_lines_do_not_append_ellipsis_when_over_budget() {
 
     assert!(block.truncated_primary);
     assert!(!last_primary.text.ends_with("..."));
+}
+
+#[test]
+fn renderer_long_translated_peer_remains_two_primary_lines_plus_single_secondary_line() {
+    let policy = CaptionLayoutPolicy::default();
+    let result = policy.layout_blocks(
+        vec![CaptionBlock::new(
+            "peer:long-translated",
+            "this translated peer utterance is deliberately long enough to exceed the fixed two-line primary budget but must not create extra renderer blocks or pages",
+        )
+        .with_variant(CaptionBlockVariant::ActivePeer)
+        .with_channel(CaptionChannel::PeerChannel)
+        .with_secondary_text(
+            "source text also stays one ellipsized secondary row instead of becoming another block",
+            true,
+        )],
+        1100,
+        900,
+    );
+
+    assert_eq!(result.visible_blocks.len(), 1);
+    assert!(result.dropped_block_ids.is_empty());
+    let block = &result.visible_blocks[0];
+    assert_eq!(block.primary_lines.len(), 2);
+    assert!(block.truncated_primary);
+    assert!(block.secondary_line.is_some());
+    assert!(block.truncated_secondary);
 }
 
 #[test]
