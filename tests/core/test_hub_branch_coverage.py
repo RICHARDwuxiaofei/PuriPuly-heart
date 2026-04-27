@@ -219,6 +219,24 @@ def _runtime_log_messages(stream: io.StringIO) -> list[str]:
     return [line for line in stream.getvalue().splitlines() if line]
 
 
+def test_peer_translation_disclosure_enqueues_chatbox_notice_without_context_history() -> None:
+    osc = RecordingOscQueue()
+    hub = ClientHub(stt=None, llm=None, osc=osc, clock=FakeClock(12.0))
+    hub.self_runtime.remember_context(
+        "existing context",
+        timestamp=10.0,
+        source_language="ko",
+        target_language="en",
+    )
+    before_history = list(hub._translation_history)
+
+    hub.enqueue_peer_translation_disclosure("Peer translation is on")
+
+    assert [message.text for message in osc.messages] == ["Peer translation is on"]
+    assert osc.messages[0].created_at == 12.0
+    assert hub._translation_history == before_history
+
+
 @pytest.mark.asyncio
 async def test_hub_drops_stale_partial_and_keeps_final_order() -> None:
     hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), clock=FakeClock())
@@ -614,12 +632,20 @@ def test_prepare_llm_request_routes_context_logs_by_runtime_visibility() -> None
         detailed_messages = _runtime_log_messages(detailed_stream)
 
         assert "[Hub] Context mode: channel=self mode=local" in basic_messages
-        assert "[Hub] Context apply: channel=self text='입력' entries=1" in basic_messages
-        assert '[Hub] Context[0]: [1s ago] "안녕"' in basic_messages
+        assert (
+            "[Hub] Context apply: channel=self mode=local "
+            "request_chars=2 entries=1 self_entries=1 peer_entries=0 context_chars=15"
+        ) in basic_messages
+        assert not any("입력" in message for message in basic_messages)
+        assert not any("안녕" in message for message in basic_messages)
 
         assert "[Hub] Context mode: channel=self mode=local" in detailed_messages
-        assert "[Hub] Context apply: channel=self text='입력' entries=1" in detailed_messages
-        assert '[Hub] Context[0]: [1s ago] "안녕"' in detailed_messages
+        assert (
+            "[Hub] Context apply: channel=self mode=local "
+            "request_chars=2 entries=1 self_entries=1 peer_entries=0 context_chars=15"
+        ) in detailed_messages
+        assert not any("입력" in message for message in detailed_messages)
+        assert not any("안녕" in message for message in detailed_messages)
     finally:
         basic_runtime_logging.close()
         detailed_runtime_logging.close()

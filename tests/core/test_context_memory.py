@@ -500,7 +500,7 @@ class TestContextInternalPaths:
 
 
 class TestContextLogging:
-    def test_prepare_llm_request_without_runtime_logging_includes_context_apply_summary(
+    def test_prepare_llm_request_without_runtime_logging_includes_redacted_context_summary(
         self, caplog: pytest.LogCaptureFixture
     ):
         hub = ClientHub(
@@ -514,9 +514,12 @@ class TestContextLogging:
             hub._prepare_llm_request("입력")
 
         assert "[Hub] Context mode: channel=self mode=local" in caplog.messages
-        assert "[Hub] Context apply: channel=self text='입력' entries=0" in caplog.messages
+        assert (
+            "[Hub] Context apply: channel=self mode=local "
+            "request_chars=2 entries=0 self_entries=0 peer_entries=0 context_chars=0"
+        ) in caplog.messages
 
-    def test_prepare_llm_request_without_runtime_logging_includes_context_entries(
+    def test_prepare_llm_request_without_runtime_logging_redacts_local_context_text(
         self, caplog: pytest.LogCaptureFixture
     ):
         clock = FakeClock(initial_time=20.0)
@@ -527,18 +530,97 @@ class TestContextLogging:
             clock=clock,
         )
         hub.self_runtime.remember_context(
-            "안녕",
+            "secret context",
             timestamp=19.0,
+            source_language="ko",
+            target_language="en",
+        )
+        expected_context = '- [1s ago] "secret context"'
+
+        with caplog.at_level(logging.INFO, logger="puripuly_heart.core.orchestrator.hub"):
+            hub._prepare_llm_request("secret request")
+
+        assert "[Hub] Context mode: channel=self mode=local" in caplog.messages
+        assert not any("secret request" in message for message in caplog.messages)
+        assert not any("secret context" in message for message in caplog.messages)
+        assert (
+            "[Hub] Context apply: channel=self mode=local "
+            f"request_chars=14 entries=1 self_entries=1 peer_entries=0 "
+            f"context_chars={len(expected_context)}"
+        ) in caplog.messages
+
+    def test_prepare_llm_request_counts_peer_local_context_as_peer_entries(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        clock = FakeClock(initial_time=20.0)
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=FakeOscQueue(),
+            clock=clock,
+        )
+        hub.peer_runtime.remember_context(
+            "secret peer context",
+            timestamp=19.0,
+            source_language="ko",
+            target_language="en",
+        )
+        expected_context = '- [1s ago] "secret peer context"'
+
+        with caplog.at_level(logging.INFO, logger="puripuly_heart.core.orchestrator.hub"):
+            hub._prepare_llm_request("secret request", runtime=hub.peer_runtime)
+
+        assert "[Hub] Context mode: channel=peer mode=local" in caplog.messages
+        assert not any("secret request" in message for message in caplog.messages)
+        assert not any("secret peer context" in message for message in caplog.messages)
+        assert (
+            "[Hub] Context apply: channel=peer mode=local "
+            f"request_chars=14 entries=1 self_entries=0 peer_entries=1 "
+            f"context_chars={len(expected_context)}"
+        ) in caplog.messages
+
+    def test_prepare_llm_request_without_runtime_logging_redacts_integrated_context_text(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        clock = FakeClock(initial_time=20.0)
+        hub = ClientHub(
+            stt=None,
+            llm=FakeLLMProvider(),
+            osc=FakeOscQueue(),
+            clock=clock,
+            integrated_context_enabled=True,
+            peer_translation_enabled=True,
+        )
+        hub.self_runtime.remember_context(
+            "secret self text",
+            timestamp=19.0,
+            source_language="ko",
+            target_language="en",
+        )
+        hub.peer_runtime.remember_context(
+            "secret peer text",
+            timestamp=19.5,
             source_language="ko",
             target_language="en",
         )
 
         with caplog.at_level(logging.INFO, logger="puripuly_heart.core.orchestrator.hub"):
-            hub._prepare_llm_request("입력")
+            hub._prepare_llm_request("secret request")
 
-        assert "[Hub] Context mode: channel=self mode=local" in caplog.messages
-        assert "[Hub] Context apply: channel=self text='입력' entries=1" in caplog.messages
-        assert '[Hub] Context[0]: [1s ago] "안녕"' in caplog.messages
+        apply_logs = [
+            message for message in caplog.messages if message.startswith("[Hub] Context apply:")
+        ]
+        assert len(apply_logs) == 1
+        assert "secret request" not in apply_logs[0]
+        assert not any("secret self text" in message for message in caplog.messages)
+        assert not any("secret peer text" in message for message in caplog.messages)
+        assert "channel=self" in apply_logs[0]
+        assert "mode=integrated" in apply_logs[0]
+        assert "request_chars=14" in apply_logs[0]
+        assert "entries=2" in apply_logs[0]
+        assert "self_entries=1" in apply_logs[0]
+        assert "peer_entries=1" in apply_logs[0]
+        assert "context_chars=" in apply_logs[0]
 
     def test_prepare_llm_request_logs_context_mode_only_when_changed(
         self, caplog: pytest.LogCaptureFixture

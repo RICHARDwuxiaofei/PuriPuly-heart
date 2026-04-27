@@ -188,6 +188,7 @@ class GuiController:
     _last_peer_stt_provider_signature: tuple[object, ...] | None = None
     _last_llm_provider_signature: tuple[object, ...] | None = None
     _last_peer_translation_enabled: bool | None = None
+    _last_peer_translation_activation_requested: bool | None = None
     _last_vrc_mic_sync_enabled: bool | None = None
     _vrc_receiver_lock: asyncio.Lock | None = None
     _ui_event_bridge: UIEventBridge | None = None
@@ -253,10 +254,19 @@ class GuiController:
 
     def _effective_peer_translation_enabled_for(self, settings: AppSettings) -> bool:
         return bool(
-            settings.ui.peer_translation_enabled
+            self._peer_translation_activation_requested_for(settings)
             and self._effective_peer_overlay_enabled_for(settings)
             and self.hub is not None
             and getattr(self.hub, "peer_stt", None) is not None
+        )
+
+    def _peer_translation_eula_accepted_for(self, settings: AppSettings) -> bool:
+        return bool(settings.ui.peer_translation_eula_accepted)
+
+    def _peer_translation_activation_requested_for(self, settings: AppSettings) -> bool:
+        return bool(
+            settings.ui.peer_translation_enabled
+            and self._peer_translation_eula_accepted_for(settings)
         )
 
     def _effective_peer_overlay_enabled_for(self, settings: AppSettings) -> bool:
@@ -724,6 +734,9 @@ class GuiController:
         self._last_peer_stt_provider_signature = self._build_peer_stt_provider_signature(settings)
         self._last_llm_provider_signature = self._build_llm_provider_signature(settings)
         self._last_peer_translation_enabled = settings.ui.peer_translation_enabled
+        self._last_peer_translation_activation_requested = (
+            self._peer_translation_activation_requested_for(settings)
+        )
 
     def _copy_provider_prompt_apply_fields(self, source: AppSettings, target: AppSettings) -> None:
         target.provider.stt = source.provider.stt
@@ -773,7 +786,7 @@ class GuiController:
 
     def _peer_runtime_should_be_active(self, settings: AppSettings) -> bool:
         return bool(
-            settings.ui.peer_translation_enabled
+            self._peer_translation_activation_requested_for(settings)
             and self._effective_peer_overlay_enabled_for(settings)
             and self.hub is not None
             and self._overlay_bridge is not None
@@ -846,6 +859,7 @@ class GuiController:
         if not enabled:
             self.settings.ui.peer_translation_enabled = False
             self._last_peer_translation_enabled = False
+            self._last_peer_translation_activation_requested = False
         self._save_settings()
         self._refresh_overlay_peer_consumers()
 
@@ -865,13 +879,26 @@ class GuiController:
             "[Peer] Toggle detail: "
             f"overlay_enabled={self.settings.ui.overlay_enabled} "
             f"overlay_state={self.overlay_state} "
-            f"peer_stt_available={self.hub is not None and getattr(self.hub, 'peer_stt', None) is not None}"
+            f"peer_stt_available={self.hub is not None and getattr(self.hub, 'peer_stt', None) is not None} "
+            f"eula_accepted={self.settings.ui.peer_translation_eula_accepted}"
         )
+
+        if enabled and not self._peer_translation_eula_accepted_for(self.settings):
+            self.settings.ui.peer_translation_enabled = False
+            self._last_peer_translation_enabled = False
+            self._last_peer_translation_activation_requested = False
+            self._sync_effective_hub_flags(self.settings)
+            self._refresh_overlay_peer_consumers()
+            self.log_basic("[Peer] Toggle ignored: eula_accepted=False")
+            return
 
         if enabled and not self.settings.ui.overlay_enabled:
             self.settings.ui.overlay_enabled = True
         self.settings.ui.peer_translation_enabled = enabled
         self._last_peer_translation_enabled = enabled
+        self._last_peer_translation_activation_requested = (
+            self._peer_translation_activation_requested_for(self.settings)
+        )
         if enabled:
             await self._ensure_peer_local_stt_ready()
         self._clear_local_stt_pending_enable_if_provider_switched_away()
@@ -884,7 +911,17 @@ class GuiController:
         else:
             await self._refresh_overlay_runtime_dependencies()
         self._sync_effective_hub_flags(self.settings)
+        if enabled:
+            self._enqueue_peer_translation_disclosure()
         self._refresh_overlay_peer_consumers()
+
+    def _enqueue_peer_translation_disclosure(self) -> None:
+        hub = self.hub
+        if hub is None:
+            return
+        enqueue_disclosure = getattr(hub, "enqueue_peer_translation_disclosure", None)
+        if callable(enqueue_disclosure):
+            enqueue_disclosure(t("peer_translation.disclosure"))
 
     def on_overlay_start_failed(self, failure_reason: str | None) -> None:
         previous_state = self.overlay_state
@@ -1450,7 +1487,7 @@ class GuiController:
         return bool(
             resolved_settings is not None
             and resolved_settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
-            and resolved_settings.ui.peer_translation_enabled
+            and self._peer_translation_activation_requested_for(resolved_settings)
         )
 
     def _reset_local_stt_pending_enable_after_install(self) -> None:
@@ -1804,6 +1841,15 @@ class GuiController:
             if self._last_peer_translation_enabled is not None
             else (self.settings.ui.peer_translation_enabled if self.settings is not None else False)
         )
+        prev_peer_activation_requested = (
+            self._last_peer_translation_activation_requested
+            if self._last_peer_translation_activation_requested is not None
+            else (
+                self._peer_translation_activation_requested_for(self.settings)
+                if self.settings is not None
+                else False
+            )
+        )
         prev_self_signature = (
             self._last_self_stt_runtime_signature or self._last_stt_runtime_signature
         )
@@ -1930,6 +1976,7 @@ class GuiController:
 
         current_self_signature = self._build_self_stt_runtime_signature(settings)
         current_peer_signature = self._build_peer_stt_runtime_signature(settings)
+        next_peer_activation_requested = self._peer_translation_activation_requested_for(settings)
         should_restart_stt = (
             prev_self_signature is not None and current_self_signature != prev_self_signature
         )
@@ -1937,6 +1984,7 @@ class GuiController:
             prev_peer_signature is None
             or current_peer_signature != prev_peer_signature
             or prev_peer_translation_enabled != settings.ui.peer_translation_enabled
+            or prev_peer_activation_requested != next_peer_activation_requested
         )
 
         self._sync_signature_caches(settings)

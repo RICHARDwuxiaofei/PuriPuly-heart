@@ -5,6 +5,20 @@ import json
 from puripuly_heart.config.settings import from_dict, to_dict
 
 
+def test_peer_translation_eula_acceptance_defaults_false() -> None:
+    settings = from_dict({})
+
+    assert settings.ui.peer_translation_eula_accepted is False
+    assert to_dict(settings)["ui"]["peer_translation_eula_accepted"] is False
+
+
+def test_peer_translation_eula_acceptance_round_trips() -> None:
+    settings = from_dict({"ui": {"peer_translation_eula_accepted": True}})
+
+    assert settings.ui.peer_translation_eula_accepted is True
+    assert from_dict(to_dict(settings)).ui.peer_translation_eula_accepted is True
+
+
 def test_overlay_display_preferences_round_trip_in_shared_overlay_section() -> None:
     settings = from_dict(
         {

@@ -676,19 +676,24 @@ class ClientHub:
         context: str,
     ) -> None:
         context_lines = context.splitlines() if context else []
+        applied_mode = self._last_logged_context_modes.get(runtime.channel)
+        if runtime.channel == "peer" and applied_mode in (None, "local"):
+            peer_entries = len(context_lines)
+            self_entries = 0
+        else:
+            peer_entries = sum(1 for line in context_lines if line.startswith("- [peer,"))
+            self_entries = len(context_lines) - peer_entries
         self._emit_basic(
-            "[Hub] Context apply: channel=%s text=%r entries=%s",
+            "[Hub] Context apply: channel=%s mode=%s request_chars=%s "
+            "entries=%s self_entries=%s peer_entries=%s context_chars=%s",
             runtime.channel,
-            text,
+            applied_mode,
+            len(text),
             len(context_lines),
+            self_entries,
+            peer_entries,
+            len(context),
         )
-        for index, line in enumerate(context_lines):
-            display_line = line[2:] if line.startswith("- ") else line
-            self._emit_basic(
-                "[Hub] Context[%s]: %s",
-                index,
-                display_line,
-            )
 
     async def handle_vad_event(self, event: VadEvent) -> None:
         resume_overlay_resync_buffer: _MergeBuffer | None = None
@@ -2632,6 +2637,15 @@ class ClientHub:
             )
         )
         self._clear_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
+
+    def enqueue_peer_translation_disclosure(self, text: str) -> None:
+        msg = OSCMessage(utterance_id=uuid4(), text=text, created_at=self.clock.now())
+        self._emit_detailed(
+            "[Hub] OSC disclosure enqueue: channel=peer text_len=%s",
+            len(text),
+            fallback_level=logging.INFO,
+        )
+        self.osc.enqueue(msg)
 
     async def _run_osc_flush_loop(self) -> None:
         try:

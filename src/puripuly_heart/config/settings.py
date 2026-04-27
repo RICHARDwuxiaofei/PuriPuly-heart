@@ -420,6 +420,7 @@ class UiSettings:
     locale: str = "en"
     overlay_enabled: bool = True
     peer_translation_enabled: bool = False
+    peer_translation_eula_accepted: bool = False
     integrated_context_enabled: bool = False
     integrated_context_bootstrapped: bool = False
 
@@ -682,6 +683,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "locale": settings.ui.locale,
             "overlay_enabled": settings.ui.overlay_enabled,
             "peer_translation_enabled": settings.ui.peer_translation_enabled,
+            "peer_translation_eula_accepted": settings.ui.peer_translation_eula_accepted,
             "integrated_context_enabled": settings.ui.integrated_context_enabled,
             "integrated_context_bootstrapped": settings.ui.integrated_context_bootstrapped,
         },
@@ -1987,6 +1989,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             locale=str(ui_data.get("locale", "en")),
             overlay_enabled=bool(ui_data.get("overlay_enabled", False)),
             peer_translation_enabled=bool(ui_data.get("peer_translation_enabled", False)),
+            peer_translation_eula_accepted=bool(
+                ui_data.get("peer_translation_eula_accepted", False)
+            ),
             integrated_context_enabled=bool(ui_data.get("integrated_context_enabled", False)),
             integrated_context_bootstrapped=bool(
                 ui_data.get("integrated_context_bootstrapped", False)
