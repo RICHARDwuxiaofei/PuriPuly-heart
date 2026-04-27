@@ -262,6 +262,7 @@ def test_translator_app_mounts_debug_preview_when_enabled(
         "on_revoked_notice",
         "on_founder_letter",
         "on_pkce_failure",
+        "on_peer_translation_eula",
     }
     root = page.added[0]
     assert isinstance(root.content, ft.Stack)
@@ -596,6 +597,137 @@ def test_debug_preview_pkce_failure_only_shows_failure_snackbar(
     app._preview_pkce_failure()
 
     assert seen == [(app_module.t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)]
+
+
+def test_debug_preview_peer_translation_eula_opens_preview_safe_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    seen: dict[str, object] = {}
+
+    class FakeDialog:
+        def __init__(self, page, *, on_accept, on_cancel=None):
+            seen["page"] = page
+            seen["on_accept"] = on_accept
+            seen["on_cancel"] = on_cancel
+
+        def open(self):
+            seen["opened"] = True
+
+    monkeypatch.setattr(app_module, "PeerTranslationEulaDialog", FakeDialog)
+
+    app._preview_peer_translation_eula()
+
+    assert seen["page"] is app.page
+    assert seen["opened"] is True
+    seen["on_accept"]()
+    if seen["on_cancel"] is not None:
+        seen["on_cancel"]()
+    assert not hasattr(app, "controller")
+
+
+def test_peer_translation_toggle_first_enable_opens_eula_without_running_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.ui.peer_translation_eula_accepted = False
+    app.controller = SimpleNamespace(settings=settings)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        app,
+        "_show_peer_translation_eula",
+        lambda on_accept: seen.setdefault("on_accept", on_accept),
+    )
+
+    app._on_peer_translation_toggle(True)
+
+    assert "on_accept" in seen
+    assert app.page.tasks == []
+    assert settings.ui.peer_translation_eula_accepted is False
+
+
+@pytest.mark.asyncio
+async def test_peer_translation_toggle_after_eula_acceptance_saves_and_enables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.ui.peer_translation_eula_accepted = False
+    calls: list[bool] = []
+
+    async def fake_enable(enabled: bool):
+        calls.append(enabled)
+
+    app.controller = SimpleNamespace(
+        settings=settings,
+        config_path="settings.json",
+        set_peer_translation_enabled=fake_enable,
+    )
+    saves: list[tuple[str, AppSettings]] = []
+    monkeypatch.setattr(app_module, "save_settings", lambda path, cfg: saves.append((path, cfg)))
+
+    app._accept_peer_translation_eula_and_enable()
+    await app.page.tasks[0]()
+
+    assert settings.ui.peer_translation_eula_accepted is True
+    assert calls == [True]
+    assert saves == [("settings.json", settings)]
+
+
+@pytest.mark.asyncio
+async def test_peer_translation_toggle_with_existing_acceptance_enables_directly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.ui.peer_translation_eula_accepted = True
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        app,
+        "_show_peer_translation_eula",
+        lambda _on_accept: pytest.fail("accepted peer translation should not reopen EULA"),
+    )
+
+    async def fake_enable(enabled: bool):
+        calls.append(enabled)
+
+    app.controller = SimpleNamespace(settings=settings, set_peer_translation_enabled=fake_enable)
+
+    app._on_peer_translation_toggle(True)
+    await app.page.tasks[0]()
+
+    assert calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_peer_translation_disable_does_not_open_eula(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.ui.peer_translation_eula_accepted = False
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        app,
+        "_show_peer_translation_eula",
+        lambda _on_accept: pytest.fail("disabling peer translation should not show EULA"),
+    )
+
+    async def fake_enable(enabled: bool):
+        calls.append(enabled)
+
+    app.controller = SimpleNamespace(settings=settings, set_peer_translation_enabled=fake_enable)
+
+    app._on_peer_translation_toggle(False)
+    await app.page.tasks[0]()
+
+    assert calls == [False]
 
 
 @pytest.mark.asyncio

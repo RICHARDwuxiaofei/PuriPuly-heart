@@ -265,6 +265,15 @@ class DummyHub:
         self.peer_stt = stt
 
 
+class DisclosureDummyHub(DummyHub):
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.disclosures: list[str] = []
+
+    def enqueue_peer_translation_disclosure(self, text: str) -> None:
+        self.disclosures.append(text)
+
+
 class DummyPeerRuntime:
     def __init__(self) -> None:
         self.policy_calls: list[dict[str, object]] = []
@@ -1790,6 +1799,7 @@ async def test_apply_settings_updates_peer_translation_flags_on_hub(
 
     updated = AppSettings()
     updated.ui.peer_translation_enabled = True
+    updated.ui.peer_translation_eula_accepted = True
     updated.ui.integrated_context_enabled = True
 
     await controller.apply_settings(updated)
@@ -1822,6 +1832,7 @@ async def test_apply_settings_routes_peer_activation_toggles_through_peer_runtim
 
     enabled = AppSettings()
     enabled.ui.peer_translation_enabled = True
+    enabled.ui.peer_translation_eula_accepted = True
     await controller.apply_settings(enabled)
 
     disabled = AppSettings()
@@ -1836,6 +1847,109 @@ async def test_apply_settings_routes_peer_activation_toggles_through_peer_runtim
 
 
 @pytest.mark.asyncio
+async def test_apply_settings_keeps_peer_translation_effective_flags_off_until_eula_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    controller.settings = settings
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    controller.overlay_state = "connected"
+    controller._overlay_bridge = object()
+    controller._peer_runtime = DummyPeerRuntime()
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        settings
+    )
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
+    )
+
+    updated = copy.deepcopy(settings)
+    updated.ui.peer_translation_enabled = True
+    updated.ui.peer_translation_eula_accepted = False
+    updated.ui.integrated_context_enabled = True
+
+    await controller.apply_settings(updated)
+
+    assert controller.hub.peer_translation_enabled is False
+    assert controller.hub.integrated_context_enabled is False
+    assert [call["desired_active"] for call in controller._peer_runtime.policy_calls] == [False]
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_deactivates_peer_runtime_when_eula_acceptance_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    settings.ui.peer_translation_enabled = True
+    settings.ui.peer_translation_eula_accepted = True
+    settings.ui.integrated_context_enabled = True
+    controller.settings = settings
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    controller.hub.peer_translation_enabled = True
+    controller.hub.integrated_context_enabled = True
+    controller.overlay_state = "connected"
+    controller._overlay_bridge = object()
+    controller._peer_runtime = DummyPeerRuntime()
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        settings
+    )
+    controller._last_peer_translation_enabled = settings.ui.peer_translation_enabled
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
+    )
+
+    updated = copy.deepcopy(settings)
+    updated.ui.peer_translation_eula_accepted = False
+
+    await controller.apply_settings(updated)
+
+    assert controller.hub.peer_translation_enabled is False
+    assert controller.hub.integrated_context_enabled is False
+    assert [call["desired_active"] for call in controller._peer_runtime.policy_calls] == [False]
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_deactivates_peer_runtime_when_eula_flag_mutates_current_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.SONIOX
+    settings.ui.peer_translation_enabled = True
+    settings.ui.peer_translation_eula_accepted = True
+    controller.settings = settings
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    controller.hub.peer_translation_enabled = True
+    controller.overlay_state = "connected"
+    controller._overlay_bridge = object()
+    controller._peer_runtime = DummyPeerRuntime()
+    controller._sync_signature_caches(settings)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
+    )
+
+    settings.ui.peer_translation_eula_accepted = False
+
+    await controller.apply_settings(settings)
+
+    assert controller.hub.peer_translation_enabled is False
+    assert [call["desired_active"] for call in controller._peer_runtime.policy_calls] == [False]
+
+
+@pytest.mark.asyncio
 async def test_set_peer_translation_enabled_routes_through_controller_runtime_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1844,6 +1958,7 @@ async def test_set_peer_translation_enabled_routes_through_controller_runtime_ru
         app=SimpleNamespace(refresh_overlay_peer_contract=lambda: refresh_calls.append("refresh"))
     )
     controller.settings = AppSettings()
+    controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
 
     async def fake_begin_overlay_start(self: GuiController) -> None:
@@ -1871,6 +1986,66 @@ async def test_set_peer_translation_enabled_routes_through_controller_runtime_ru
 
 
 @pytest.mark.asyncio
+async def test_set_peer_translation_enabled_requires_eula_acceptance_before_persisting_or_activating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refresh_calls: list[str] = []
+    begin_calls: list[str] = []
+    save_calls: list[str] = []
+    controller = _make_controller(
+        app=SimpleNamespace(refresh_overlay_peer_contract=lambda: refresh_calls.append("refresh"))
+    )
+    controller.settings = AppSettings()
+    controller.settings.ui.overlay_enabled = False
+    controller.settings.ui.peer_translation_eula_accepted = False
+    controller.settings.provider.peer_stt = STTProviderName.SONIOX
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    controller.overlay_state = "off"
+
+    async def fake_begin_overlay_start(self: GuiController) -> None:
+        _ = self
+        begin_calls.append("begin")
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: save_calls.append("save"))
+    monkeypatch.setattr(GuiController, "_begin_overlay_start", fake_begin_overlay_start)
+    monkeypatch.setattr(
+        GuiController,
+        "_refresh_overlay_runtime_dependencies",
+        lambda self: asyncio.sleep(0),
+    )
+
+    await controller.set_peer_translation_enabled(True)
+
+    assert controller.settings.ui.overlay_enabled is False
+    assert controller.settings.ui.peer_translation_enabled is False
+    assert controller.hub.peer_translation_enabled is False
+    assert save_calls == []
+    assert begin_calls == []
+    assert refresh_calls == ["refresh"]
+
+
+@pytest.mark.asyncio
+async def test_set_peer_translation_enabled_enqueues_peer_disclosure_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace(refresh_overlay_peer_contract=lambda: None))
+    controller.settings = AppSettings()
+    controller.settings.ui.peer_translation_eula_accepted = True
+    controller.hub = DisclosureDummyHub(llm=object(), stt=object(), peer_stt=object())
+    controller.overlay_state = "connected"
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_refresh_overlay_runtime_dependencies",
+        lambda self: asyncio.sleep(0),
+    )
+
+    await controller.set_peer_translation_enabled(True)
+
+    assert controller.hub.disclosures == [t("peer_translation.disclosure")]
+
+
+@pytest.mark.asyncio
 async def test_set_peer_translation_enabled_surfaces_local_notice_for_peer_local_qwen_when_runtime_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1882,6 +2057,7 @@ async def test_set_peer_translation_enabled_surfaces_local_notice_for_peer_local
         )
     )
     controller.settings = AppSettings()
+    controller.settings.ui.peer_translation_eula_accepted = True
     controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller._local_stt_install_state = controller_module.LocalSTTInstallState(status="missing")
@@ -2146,6 +2322,7 @@ async def test_refresh_peer_stt_runtime_does_not_warm_peer_runtime() -> None:
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller.overlay_state = "connected"
     controller._overlay_bridge = object()
@@ -2167,6 +2344,7 @@ async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_until_local_runti
     controller.settings = AppSettings()
     controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
     controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller.overlay_state = "connected"
     controller._overlay_bridge = object()
@@ -2200,6 +2378,7 @@ async def test_peer_local_qwen_download_completion_resumes_peer_runtime_after_re
     controller.settings = AppSettings()
     controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
     controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller.overlay_state = "connected"
     controller._overlay_bridge = object()
@@ -2258,6 +2437,7 @@ async def test_refresh_peer_stt_runtime_blocks_peer_local_qwen_when_probe_load_f
     controller.settings = AppSettings()
     controller.settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
     controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller.overlay_state = "connected"
     controller._overlay_bridge = object()
@@ -2326,6 +2506,7 @@ async def test_refresh_overlay_runtime_dependencies_applies_peer_runtime_policy(
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller.overlay_state = "connected"
     controller._overlay_bridge = object()
@@ -2346,6 +2527,7 @@ async def test_refresh_overlay_runtime_dependencies_disables_peer_runtime_when_o
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
     controller.overlay_state = "failed"
     controller._overlay_bridge = None
@@ -2481,6 +2663,7 @@ async def test_successful_overlay_start_refreshes_consumers_after_peer_runtime_b
     )
     controller.settings = AppSettings()
     controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(peer_stt=None)
 
     async def fake_refresh_peer_stt_runtime(self: GuiController) -> None:
@@ -2705,6 +2888,7 @@ def test_effective_context_mode_falls_back_to_local_until_peer_translation_is_ef
 
     controller.overlay_state = "connected"
     controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
 
     assert controller.effective_context_mode == "integrated"
 
@@ -2726,6 +2910,7 @@ async def test_overlay_start_failure_keeps_saved_preferences_but_effective_state
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub()
 
     await controller.set_overlay_enabled(True)
@@ -2791,6 +2976,7 @@ async def test_overlay_runtime_disconnect_keeps_saved_preferences_without_auto_r
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(peer_stt=object())
 
     await controller.set_overlay_enabled(True)
@@ -2827,6 +3013,7 @@ async def test_overlay_runtime_crash_keeps_saved_preferences_without_auto_restar
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
     controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(peer_stt=object())
 
     await controller.set_overlay_enabled(True)
@@ -6014,6 +6201,7 @@ async def test_apply_providers_republishes_overlay_peer_contract_after_peer_refr
     controller.settings = AppSettings()
     controller.settings.ui.overlay_enabled = True
     controller.settings.ui.peer_translation_enabled = True
+    controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(peer_stt=None)
     controller.overlay_state = "connected"
     contracts = []
@@ -6028,6 +6216,7 @@ async def test_apply_providers_republishes_overlay_peer_contract_after_peer_refr
     updated = AppSettings()
     updated.ui.overlay_enabled = True
     updated.ui.peer_translation_enabled = True
+    updated.ui.peer_translation_eula_accepted = True
     updated.provider.peer_stt = STTProviderName.SONIOX
 
     monkeypatch.setattr(controller_module, "save_settings", lambda *_args, **_kwargs: None)

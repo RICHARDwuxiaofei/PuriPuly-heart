@@ -21,6 +21,7 @@ from puripuly_heart.core.updater import check_for_update
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
 from puripuly_heart.ui.components.debug_preview_panel import DebugPreviewPanel
 from puripuly_heart.ui.components.founder_letter_dialog import FounderLetterDialog
+from puripuly_heart.ui.components.peer_translation_eula_dialog import PeerTranslationEulaDialog
 from puripuly_heart.ui.components.title_bar import TitleBar
 from puripuly_heart.ui.controller import GuiController
 from puripuly_heart.ui.fonts import font_for_language, register_fonts
@@ -175,6 +176,7 @@ class TranslatorApp:
             on_revoked_notice=self._preview_revoked_notice,
             on_founder_letter=self._preview_founder_letter,
             on_pkce_failure=self._preview_pkce_failure,
+            on_peer_translation_eula=self._preview_peer_translation_eula,
         )
 
     def _preview_brake_notice(self) -> None:
@@ -197,6 +199,30 @@ class TranslatorApp:
 
     def _preview_pkce_failure(self) -> None:
         self._show_snackbar(t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)
+
+    def _preview_peer_translation_eula(self) -> None:
+        self._show_peer_translation_eula(self._debug_preview_noop)
+
+    def _show_peer_translation_eula(self, on_accept) -> None:
+        dialog = PeerTranslationEulaDialog(
+            self.page,
+            on_accept=on_accept,
+            on_cancel=self._debug_preview_noop,
+        )
+        self._peer_translation_eula_dialog = dialog
+        dialog.open()
+
+    def _accept_peer_translation_eula_and_enable(self) -> None:
+        async def _task():
+            settings = getattr(self.controller, "settings", None)
+            if settings is not None:
+                settings.ui.peer_translation_eula_accepted = True
+                config_path = getattr(self.controller, "config_path", None)
+                if config_path is not None:
+                    save_settings(config_path, settings)
+            await self.controller.set_peer_translation_enabled(True)
+
+        self.page.run_task(_task)
 
     def _close_open_dialog_for_navigation(self) -> None:
         dialog = getattr(self.page, "dialog", None)
@@ -389,6 +415,17 @@ class TranslatorApp:
             f"overlay_state={getattr(self, 'overlay_state', 'unknown')} "
             f"failure_reason={getattr(self, 'overlay_failure_reason', None)}"
         )
+
+        controller = getattr(self, "controller", None)
+        settings = getattr(controller, "settings", None)
+        ui_settings = getattr(settings, "ui", None)
+        if (
+            enabled
+            and ui_settings is not None
+            and not getattr(ui_settings, "peer_translation_eula_accepted", False)
+        ):
+            self._show_peer_translation_eula(self._accept_peer_translation_eula_and_enable)
+            return
 
         async def _task():
             await self.controller.set_peer_translation_enabled(enabled)

@@ -23,6 +23,14 @@ DEBUG_PREVIEW_I18N_KEYS = {
     "debug_preview.revoked_notice",
     "debug_preview.founder_letter",
     "debug_preview.pkce_failure",
+    "debug_preview.peer_translation_eula",
+    "peer_translation_eula.title",
+    "peer_translation_eula.body.capture",
+    "peer_translation_eula.body.responsibility",
+    "peer_translation_eula.body.storage",
+    "peer_translation_eula.accept",
+    "peer_translation_eula.cancel",
+    "peer_translation.disclosure",
 }
 
 ACTION_KEYS = [
@@ -30,6 +38,7 @@ ACTION_KEYS = [
     "revoked_notice",
     "founder_letter",
     "pkce_failure",
+    "peer_translation_eula",
 ]
 
 
@@ -39,6 +48,7 @@ def _callbacks(seen: list[str]):
         "on_revoked_notice": lambda: seen.append("revoked_notice"),
         "on_founder_letter": lambda: seen.append("founder_letter"),
         "on_pkce_failure": lambda: seen.append("pkce_failure"),
+        "on_peer_translation_eula": lambda: seen.append("peer_translation_eula"),
     }
 
 
@@ -113,6 +123,10 @@ def test_debug_preview_panel_apply_locale_refreshes_labels(
     assert (
         _button_label(panel._action_buttons["brake_notice"]) == "label:debug_preview.brake_notice"
     )
+    assert (
+        _button_label(panel._action_buttons["peer_translation_eula"])
+        == "label:debug_preview.peer_translation_eula"
+    )
 
 
 def test_debug_preview_panel_uses_text_button_label_api_when_available(
@@ -137,6 +151,7 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
         "Revoked notice",
         "Founder letter",
         "PKCE failure",
+        "Peer translation EULA",
     ]
 
     monkeypatch.setattr(panel_module, "t", lambda key: f"label:{key}")
@@ -144,6 +159,10 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
 
     assert panel._toggle_button.text == "label:debug_preview.button"
     assert panel._action_buttons["brake_notice"].text == "label:debug_preview.brake_notice"
+    assert (
+        panel._action_buttons["peer_translation_eula"].text
+        == "label:debug_preview.peer_translation_eula"
+    )
 
 
 def test_debug_preview_i18n_keys_exist_in_all_locale_bundles() -> None:
