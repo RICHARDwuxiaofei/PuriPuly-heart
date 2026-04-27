@@ -681,7 +681,11 @@ class ClientHub:
             peer_entries = len(context_lines)
             self_entries = 0
         else:
-            peer_entries = sum(1 for line in context_lines if line.startswith("- [peer,"))
+            peer_entries = sum(
+                1
+                for line in context_lines
+                if line.startswith("- [peer,") or line.startswith("- [others,")
+            )
             self_entries = len(context_lines) - peer_entries
         self._emit_basic(
             "[Hub] Context apply: channel=%s mode=%s request_chars=%s "
