@@ -58,6 +58,8 @@ class ContextResolver:
         peer_translation_enabled: bool,
         source_language: str,
         target_language: str,
+        other_source_language: str | None = None,
+        other_target_language: str | None = None,
     ) -> tuple[str, ContextMode]:
         if requested_mode != "integrated" or not peer_translation_enabled:
             return self.resolve_local(
@@ -70,6 +72,8 @@ class ContextResolver:
             other_runtime=other_runtime,
             source_language=source_language,
             target_language=target_language,
+            other_source_language=other_source_language,
+            other_target_language=other_target_language,
         )
         return self.format_integrated(integrated_entries), "integrated"
 
@@ -87,7 +91,7 @@ class ContextResolver:
         for runtime, entry in entries:
             age_text = f"{self._relative_age(entry.timestamp)}s ago"
             if runtime.channel == "peer":
-                prefix = f"peer, {age_text}"
+                prefix = f"others, {age_text}"
             else:
                 prefix = age_text
             lines.append(f'- [{prefix}] "{entry.text}"')
@@ -100,13 +104,24 @@ class ContextResolver:
         other_runtime: ChannelRuntime,
         source_language: str,
         target_language: str,
+        other_source_language: str | None = None,
+        other_target_language: str | None = None,
     ) -> list[tuple[ChannelRuntime, ContextEntry]]:
         combined: list[tuple[ChannelRuntime, ContextEntry]] = []
-        for channel_runtime in (runtime, other_runtime):
+        other_source_language = (
+            source_language if other_source_language is None else other_source_language
+        )
+        other_target_language = (
+            target_language if other_target_language is None else other_target_language
+        )
+        for channel_runtime, entry_source_language, entry_target_language in (
+            (runtime, source_language, target_language),
+            (other_runtime, other_source_language, other_target_language),
+        ):
             for entry in channel_runtime.get_valid_context(
                 now=self.clock.now(),
-                source_language=source_language,
-                target_language=target_language,
+                source_language=entry_source_language,
+                target_language=entry_target_language,
                 time_window_s=self.integrated_time_window_s,
                 max_entries=self.integrated_max_entries,
             ):

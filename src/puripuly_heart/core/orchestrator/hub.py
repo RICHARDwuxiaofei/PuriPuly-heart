@@ -2300,13 +2300,16 @@ class ClientHub:
         runtime = runtime or self.self_runtime
         requested_mode: ContextMode = "integrated" if self.integrated_context_enabled else "local"
         now = self.clock.now()
+        other_runtime = self._other_runtime(runtime)
         context_str, applied_mode = self.context_resolver.resolve_for_request(
             runtime=runtime,
-            other_runtime=self._other_runtime(runtime),
+            other_runtime=other_runtime,
             requested_mode=requested_mode,
             peer_translation_enabled=self.peer_translation_enabled,
             source_language=self._source_language_for(runtime),
             target_language=self._target_language_for(runtime),
+            other_source_language=self._source_language_for(other_runtime),
+            other_target_language=self._target_language_for(other_runtime),
         )
         self._log_context_mode_change(runtime=runtime, applied_mode=applied_mode)
         self._log_context_application(text=text, runtime=runtime, context=context_str)

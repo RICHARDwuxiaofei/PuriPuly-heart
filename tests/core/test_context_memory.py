@@ -444,7 +444,7 @@ class TestContextInternalPaths:
         )
 
         assert mode == "integrated"
-        assert context == ('- [12s ago] "I am ready"\n- [peer, 7s ago] "hello from peer"')
+        assert context == ('- [12s ago] "I am ready"\n- [others, 7s ago] "hello from peer"')
 
     def test_context_resolver_always_uses_integrated_when_peer_enabled(self):
         self_runtime = ClientHub(
@@ -476,7 +476,7 @@ class TestContextInternalPaths:
         )
 
         assert mode == "integrated"
-        assert '- [peer, 7s ago] "peer line"' in context
+        assert '- [others, 7s ago] "peer line"' in context
 
     def test_prepare_llm_request_formats_prompt_and_context(self):
         clock = FakeClock(initial_time=20.0)
