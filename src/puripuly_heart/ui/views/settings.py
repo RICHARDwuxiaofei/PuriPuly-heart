@@ -92,6 +92,17 @@ def _set_text_button_label(button: ft.TextButton, label: str) -> None:
     button.text = label
 
 
+def _update_control_if_mounted(control: ft.Control) -> None:
+    """Update a Flet control only while it is attached to a page."""
+    if control.page is None:
+        return
+    try:
+        control.update()
+    except AssertionError as exc:
+        if "Control must be added" not in str(exc):
+            raise
+
+
 def _make_overlay_anchor_dropdown(value: str, on_change) -> ft.Dropdown:
     return ft.Dropdown(
         value=value,
@@ -3021,7 +3032,7 @@ class SettingsView(ft.Column):
 
     def _handle_vad_visual_change(self, e) -> None:
         self._vad_slider.label = f"{float(e.control.value):.2f}"
-        self._vad_slider.update()
+        _update_control_if_mounted(self._vad_slider)
 
     def _handle_vad_change(self, e) -> None:
         if not self._settings:
@@ -3040,7 +3051,7 @@ class SettingsView(ft.Column):
 
     def _handle_peer_vad_visual_change(self, e) -> None:
         self._peer_vad_slider.label = f"{float(e.control.value):.2f}"
-        self._peer_vad_slider.update()
+        _update_control_if_mounted(self._peer_vad_slider)
 
     def _handle_peer_vad_change(self, e) -> None:
         if not self._settings:
@@ -3057,9 +3068,8 @@ class SettingsView(ft.Column):
         self._settings.desktop_audio.vad_speech_threshold = new_vad
         self._peer_vad_field.value = f"{new_vad:.2f}"
         self._peer_vad_slider.label = f"{new_vad:.2f}"
-        if self.page:
-            self._peer_vad_field.update()
-            self._peer_vad_slider.update()
+        _update_control_if_mounted(self._peer_vad_field)
+        _update_control_if_mounted(self._peer_vad_slider)
         self._emit_settings_changed()
 
     def _on_peer_vad_threshold_change(self, e) -> None:
@@ -3080,8 +3090,7 @@ class SettingsView(ft.Column):
 
         self._settings.desktop_audio.vad_speech_threshold = new_value
         self._peer_vad_field.value = f"{new_value:.2f}"
-        if self.page:
-            self._peer_vad_field.update()
+        _update_control_if_mounted(self._peer_vad_field)
         self._emit_settings_changed()
 
     def _on_peer_hangover_change(self, e) -> None:
@@ -3101,8 +3110,7 @@ class SettingsView(ft.Column):
 
         self._settings.desktop_audio.vad_hangover_ms = new_value
         self._peer_hangover_field.value = str(new_value)
-        if self.page:
-            self._peer_hangover_field.update()
+        _update_control_if_mounted(self._peer_hangover_field)
         self._emit_settings_changed()
 
     def _on_peer_pre_roll_change(self, e) -> None:
@@ -3122,8 +3130,7 @@ class SettingsView(ft.Column):
 
         self._settings.desktop_audio.vad_pre_roll_ms = new_value
         self._peer_pre_roll_field.value = str(new_value)
-        if self.page:
-            self._peer_pre_roll_field.update()
+        _update_control_if_mounted(self._peer_pre_roll_field)
         self._emit_settings_changed()
 
     def _on_vrc_mic_click(self, e) -> None:

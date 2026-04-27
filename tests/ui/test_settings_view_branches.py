@@ -1712,6 +1712,34 @@ def test_audio_vad_and_low_latency_handlers_update_state(
     assert view._low_latency_text.content.value == t("toggle.on")
 
 
+def test_peer_vad_slider_change_skips_hidden_field_update_when_view_is_mounted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UpdateRecorder:
+        def __init__(self) -> None:
+            self.updated: list[object] = []
+
+        def update(self, control: object) -> None:
+            self.updated.append(control)
+
+    settings = AppSettings()
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+    attach_dummy_page(monkeypatch, view)
+    slider_page = UpdateRecorder()
+    view._peer_vad_slider.page = slider_page
+
+    view._handle_peer_vad_change(SimpleNamespace(control=SimpleNamespace(value=0.77)))
+
+    assert settings.desktop_audio.vad_speech_threshold == 0.77
+    assert view._peer_vad_field.value == "0.77"
+    assert view._peer_vad_slider.label == "0.77"
+    assert slider_page.updated == [view._peer_vad_slider]
+    assert changed == [settings]
+
+
 def test_audio_change_messages_use_basic_runtime_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
