@@ -50,9 +50,13 @@ class RecordingHubDiagnostics:
 @dataclass(slots=True)
 class RecordingPresentationBridge:
     snapshots: list[object] = field(default_factory=list)
+    resubmit_requests: list[tuple[int, str]] = field(default_factory=list)
 
     async def replace_snapshot(self, snapshot: object) -> None:
         self.snapshots.append(snapshot)
+
+    async def resubmit_current_frame(self, *, target_revision: int, reason: str) -> None:
+        self.resubmit_requests.append((target_revision, reason))
 
     async def broadcast_shutdown(self) -> None:
         return

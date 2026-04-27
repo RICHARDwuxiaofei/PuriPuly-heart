@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
@@ -7,7 +8,9 @@ use thiserror::Error;
 use tokio::io::{self, AsyncWriteExt};
 use tokio::time::{sleep_until, Instant};
 
-use crate::bridge::{BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEvent};
+use crate::bridge::{
+    BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEvent, OverlayResubmitCurrentFrame,
+};
 use crate::logging::{OverlayLogger, OverlayLoggingMode};
 use crate::manifest::{
     load_manifest, validate_manifest, OverlayManifest, EXPECTED_CONTRACT_VERSION,
@@ -103,6 +106,29 @@ impl RuntimeFailure {
     }
 }
 
+#[derive(Debug, Clone)]
+struct SubmittedFrameRecord {
+    frame: Arc<crate::renderer::RenderedFrame>,
+    revision: u64,
+    fully_transparent: bool,
+    has_drawable_text: bool,
+}
+
+impl PartialEq for SubmittedFrameRecord {
+    fn eq(&self, other: &Self) -> bool {
+        self.revision == other.revision
+            && self.fully_transparent == other.fully_transparent
+            && self.has_drawable_text == other.has_drawable_text
+            && Arc::ptr_eq(&self.frame, &other.frame)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResubmitCurrentFrameOutcome {
+    Submitted,
+    NoOp(&'static str),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OverlayRuntime {
     ready: bool,
@@ -120,6 +146,7 @@ pub struct OverlayRuntime {
     seen_peer_overlay_ids: HashSet<String>,
     last_snapshot_slot_correlation_signature: Option<String>,
     last_submitted_visible_rows: HashMap<u64, String>,
+    last_submitted_frame: Option<SubmittedFrameRecord>,
     two_row_window: Option<TwoRowWindowState>,
     last_frame_timing_sampled_at: Option<Instant>,
 }
@@ -193,6 +220,7 @@ impl OverlayRuntime {
             seen_peer_overlay_ids,
             last_snapshot_slot_correlation_signature: None,
             last_submitted_visible_rows: HashMap::new(),
+            last_submitted_frame: None,
             two_row_window: None,
             last_frame_timing_sampled_at: None,
         };
@@ -218,10 +246,20 @@ impl OverlayRuntime {
         self.ready
     }
 
+    pub fn last_submitted_revision(&self) -> Option<u64> {
+        self.last_submitted_frame
+            .as_ref()
+            .map(|record| record.revision)
+    }
+
     pub async fn submit_first_texture_for_test(&mut self) -> Result<(), RuntimeFailure> {
         self.first_texture_submitted = true;
         self.ready = true;
         Ok(())
+    }
+
+    pub fn hide_overlay_for_test(&mut self) {
+        self.overlay_visible = false;
     }
 
     pub fn apply_snapshot(
@@ -305,7 +343,11 @@ impl OverlayRuntime {
         };
         self.last_snapshot_slot_correlation_signature = Some(signature);
         if should_log {
-            log_runtime_info(logger, format_snapshot_slot_correlation_log(self.state(), &rows)).await?;
+            log_runtime_info(
+                logger,
+                format_snapshot_slot_correlation_log(self.state(), &rows),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -525,7 +567,8 @@ impl OverlayRuntime {
         };
         let self_block_count = visible_self_block_count(frame.layout());
         let fully_transparent = frame.is_fully_transparent();
-        let rendered_diagnostic_rows = collect_rendered_diagnostic_rows(self.state(), frame.layout());
+        let rendered_diagnostic_rows =
+            collect_rendered_diagnostic_rows(self.state(), frame.layout());
         log_runtime_info(
             logger,
             format_frame_rendered_log(frame.layout(), fully_transparent),
@@ -591,8 +634,7 @@ impl OverlayRuntime {
         openvr
             .submit_frame(&frame)
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
-        let submit_duration_us =
-            submit_started.map(|start| start.elapsed().as_micros());
+        let submit_duration_us = submit_started.map(|start| start.elapsed().as_micros());
         if should_show_after_submit {
             openvr
                 .set_overlay_visible(true)
@@ -642,7 +684,70 @@ impl OverlayRuntime {
             self.emit_ready(bridge, logger).await?;
         }
 
+        let submitted_revision = self.state.snapshot().revision;
+        self.last_submitted_frame = Some(SubmittedFrameRecord {
+            frame: Arc::new(frame),
+            revision: submitted_revision,
+            fully_transparent,
+            has_drawable_text,
+        });
+
         Ok(())
+    }
+
+    pub async fn resubmit_current_frame<S: OverlayFrameSubmitter>(
+        &mut self,
+        request: OverlayResubmitCurrentFrame,
+        openvr: &mut S,
+        logger: &OverlayLogger,
+    ) -> Result<ResubmitCurrentFrameOutcome, RuntimeFailure> {
+        let last_submitted_revision = self.last_submitted_revision();
+        let outcome = match self.last_submitted_frame.as_ref() {
+            None => ResubmitCurrentFrameOutcome::NoOp("no_stored_frame"),
+            Some(record) if record.revision < request.target_revision => {
+                ResubmitCurrentFrameOutcome::NoOp("target_revision_not_ready")
+            }
+            Some(record) if record.fully_transparent => {
+                ResubmitCurrentFrameOutcome::NoOp("fully_transparent")
+            }
+            Some(record) if !record.has_drawable_text || !self.has_drawable_text() => {
+                ResubmitCurrentFrameOutcome::NoOp("no_drawable_text")
+            }
+            Some(record) => {
+                openvr
+                    .apply_calibration(self.state.calibration())
+                    .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
+                openvr
+                    .submit_frame(record.frame.as_ref())
+                    .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
+                if !self.overlay_visible {
+                    openvr
+                        .set_overlay_visible(true)
+                        .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
+                    self.overlay_visible = true;
+                    if let Some(message) = openvr.take_visibility_api_call_log() {
+                        log_runtime_info(logger, message).await?;
+                    }
+                    log_runtime_info(
+                        logger,
+                        "overlay_visibility_changed visible=true reason=frame_resubmit_text_visible"
+                            .to_string(),
+                    )
+                    .await?;
+                }
+                ResubmitCurrentFrameOutcome::Submitted
+            }
+        };
+
+        if logger.is_detailed() {
+            log_runtime_info(
+                logger,
+                format_resubmit_current_frame_log(&request, last_submitted_revision, outcome),
+            )
+            .await?;
+        }
+
+        Ok(outcome)
     }
 
     pub async fn run_event_loop<S: OverlayFrameSubmitter>(
@@ -696,11 +801,16 @@ impl OverlayRuntime {
                     format_state_snapshot_log(&outcome, self.state(), self.redraw_requested),
                 )
                 .await?;
-                self.emit_snapshot_slot_correlation_if_changed(logger).await?;
+                self.emit_snapshot_slot_correlation_if_changed(logger)
+                    .await?;
                 self.emit_pending_visible_update_applied_diagnostics(logger)
                     .await?;
                 self.submit_frame_if_needed(renderer, openvr, bridge, logger)
                     .await?;
+                Ok(true)
+            }
+            Ok(BridgeIncoming::ResubmitCurrentFrame(request)) => {
+                self.resubmit_current_frame(request, openvr, logger).await?;
                 Ok(true)
             }
             Ok(BridgeIncoming::Event(event)) => {
@@ -1170,7 +1280,10 @@ fn format_two_row_window_rows(rows: &[RenderedDiagnosticRow]) -> String {
 }
 
 fn two_row_window_slot_signature(rows: &[RenderedDiagnosticRow]) -> Vec<u64> {
-    let mut signature = rows.iter().map(|row| row.row.slot_order).collect::<Vec<_>>();
+    let mut signature = rows
+        .iter()
+        .map(|row| row.row.slot_order)
+        .collect::<Vec<_>>();
     signature.sort_unstable();
     signature
 }
@@ -1343,6 +1456,30 @@ fn format_frame_submitted_log(
     line
 }
 
+fn format_resubmit_current_frame_log(
+    request: &OverlayResubmitCurrentFrame,
+    last_submitted_revision: Option<u64>,
+    outcome: ResubmitCurrentFrameOutcome,
+) -> String {
+    let outcome_name = match outcome {
+        ResubmitCurrentFrameOutcome::Submitted => "submitted",
+        ResubmitCurrentFrameOutcome::NoOp(_) => "no_op",
+    };
+    let mut line = format!(
+        "frame_resubmit target_revision={} last_submitted_revision={} reason={} outcome={}",
+        request.target_revision,
+        last_submitted_revision
+            .map(|revision| revision.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        request.reason.as_deref().unwrap_or("none"),
+        outcome_name,
+    );
+    if let ResubmitCurrentFrameOutcome::NoOp(reason) = outcome {
+        line.push_str(&format!(" no_op_reason={reason}"));
+    }
+    line
+}
+
 fn format_peer_first_render_visibility_checkpoint_log(
     revision: u64,
     peer_ids: &[String],
@@ -1497,7 +1634,9 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
             runtime.redraw_requested(),
         ))
         .await;
-    let _ = runtime.emit_snapshot_slot_correlation_if_changed(&logger).await;
+    let _ = runtime
+        .emit_snapshot_slot_correlation_if_changed(&logger)
+        .await;
     if let Err(error) = runtime
         .submit_frame_if_needed(&renderer, &mut openvr, &mut bridge, &logger)
         .await
@@ -1720,17 +1859,20 @@ mod tests {
         format_frame_rendered_log, format_frame_submitted_log,
         format_overlay_visible_update_rendered_log,
         format_peer_first_render_visibility_checkpoint_log,
-        format_peer_first_render_visibility_desync_suspected_log, format_snapshot_received_log,
+        format_peer_first_render_visibility_desync_suspected_log,
+        format_resubmit_current_frame_log, format_snapshot_received_log,
         format_snapshot_slot_correlation_log, format_two_row_window_closed_log,
         peer_overlay_first_emit_block_ids_from_snapshot,
         peer_overlay_first_render_block_ids_from_caption_blocks, prepare_openvr_runtime,
-        DiagnosticRow, OverlayRuntime, RenderedDiagnosticRow, SnapshotApplyOutcome, StartupError,
-        TwoRowWindowState,
+        DiagnosticRow, OverlayRuntime, RenderedDiagnosticRow, ResubmitCurrentFrameOutcome,
+        SnapshotApplyOutcome, StartupError, SubmittedFrameRecord, TwoRowWindowState,
     };
-    use crate::openvr::{OpenVrError, OpenVrStartupPreflightError};
+    use crate::bridge::OverlayResubmitCurrentFrame;
     use crate::logging::{OverlayLogger, OverlayLoggingMode};
+    use crate::openvr::{OpenVrError, OpenVrStartupPreflightError, OverlayFrameSubmitter};
     use crate::renderer::{
-        CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy, CaptionPresentation,
+        CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
+        CaptionPresentation, CaptionRenderer, RenderedFrame,
     };
     use crate::state::{
         OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
@@ -1738,7 +1880,11 @@ mod tests {
     };
     use std::cell::Cell;
     use std::collections::HashSet;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use std::task::{Context, Poll};
     use std::time::Duration;
+    use tokio::io::AsyncWrite;
     use tokio::time::Instant;
 
     fn block(
@@ -1782,6 +1928,69 @@ mod tests {
             update_id: None,
             origin_wall_clock_ms: None,
             session_scope: None,
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingSink {
+        buffer: Arc<StdMutex<Vec<u8>>>,
+    }
+
+    impl RecordingSink {
+        fn bytes(&self) -> Vec<u8> {
+            self.buffer.lock().unwrap().clone()
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8(self.bytes()).unwrap()
+        }
+    }
+
+    impl AsyncWrite for RecordingSink {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<Result<usize, std::io::Error>> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), std::io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), std::io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn recording_logger() -> (OverlayLogger, RecordingSink) {
+        let stdout = RecordingSink::default();
+        let stderr = RecordingSink::default();
+        let logger = OverlayLogger::from_streams(
+            Box::pin(stdout.clone()),
+            Box::pin(stderr),
+            OverlayLoggingMode::Detailed,
+        );
+        (logger, stdout)
+    }
+
+    #[derive(Default)]
+    struct UnitSubmitter {
+        calls: usize,
+    }
+
+    impl OverlayFrameSubmitter for UnitSubmitter {
+        fn submit_frame(&mut self, _frame: &RenderedFrame) -> Result<(), OpenVrError> {
+            self.calls += 1;
+            Ok(())
         }
     }
 
@@ -1998,16 +2207,10 @@ mod tests {
             CaptionBlock::new("peer:blank", "")
                 .with_channel(CaptionChannel::PeerChannel)
                 .with_variant(CaptionBlockVariant::Finalized),
-            CaptionBlock::new(
-                "peer:11111111-1111-1111-1111-111111111111",
-                "translated",
-            )
+            CaptionBlock::new("peer:11111111-1111-1111-1111-111111111111", "translated")
                 .with_channel(CaptionChannel::PeerChannel)
                 .with_variant(CaptionBlockVariant::Finalized),
-            CaptionBlock::new(
-                "peer:22222222-2222-2222-2222-222222222222",
-                "newer",
-            )
+            CaptionBlock::new("peer:22222222-2222-2222-2222-222222222222", "newer")
                 .with_channel(CaptionChannel::PeerChannel)
                 .with_variant(CaptionBlockVariant::Finalized),
             CaptionBlock::new(
@@ -2287,7 +2490,10 @@ mod tests {
 
         assert!(matches!(outcome, SnapshotApplyOutcome::Applied { .. }));
         assert_eq!(runtime.pending_visible_update_rows.len(), 1);
-        assert_eq!(runtime.pending_visible_update_rows[0].slot_order, slot_order);
+        assert_eq!(
+            runtime.pending_visible_update_rows[0].slot_order,
+            slot_order
+        );
         assert!(runtime
             .pending_visible_update_render_slot_orders
             .contains(&slot_order));
@@ -2385,11 +2591,8 @@ mod tests {
             rows_summary: super::format_two_row_window_rows(&rows),
             update_ids: vec!["upd-self-1".into(), "upd-peer-2".into()],
         };
-        let summary = format_two_row_window_closed_log(
-            9,
-            &window,
-            started_at + Duration::from_millis(420),
-        );
+        let summary =
+            format_two_row_window_closed_log(9, &window, started_at + Duration::from_millis(420));
 
         assert!(summary.contains("two_row_window_closed revision=9"));
         assert!(summary.contains("dwell_ms=420"));
@@ -2463,6 +2666,92 @@ mod tests {
         let summary_with_duration =
             format_frame_submitted_log(&layout, 7, false, false, true, true, Some(421));
         assert!(summary_with_duration.contains("submit_duration_us=421"));
+    }
+
+    #[test]
+    fn frame_resubmit_summary_reports_target_revision_and_noop_reason() {
+        let summary = format_resubmit_current_frame_log(
+            &OverlayResubmitCurrentFrame {
+                target_revision: 7,
+                reason: Some("peer_presentation_refresh".into()),
+            },
+            Some(6),
+            ResubmitCurrentFrameOutcome::NoOp("target_revision_not_ready"),
+        );
+
+        assert!(summary.contains("frame_resubmit target_revision=7"));
+        assert!(summary.contains("last_submitted_revision=6"));
+        assert!(summary.contains("reason=peer_presentation_refresh"));
+        assert!(summary.contains("outcome=no_op"));
+        assert!(summary.contains("no_op_reason=target_revision_not_ready"));
+    }
+
+    #[tokio::test]
+    async fn runtime_resubmit_emits_detailed_submitted_log() {
+        let (logger, stdout) = recording_logger();
+        let renderer = CaptionRenderer::new_for_test().unwrap();
+        let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            revision: 7,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![block("self:1", "self", "hello", "", true)],
+        });
+        let frame = renderer.render_blocks(runtime.caption_blocks()).unwrap();
+        runtime.last_submitted_frame = Some(SubmittedFrameRecord {
+            frame: Arc::new(frame),
+            revision: 7,
+            fully_transparent: false,
+            has_drawable_text: true,
+        });
+        let mut submitter = UnitSubmitter::default();
+
+        let outcome = runtime
+            .resubmit_current_frame(
+                OverlayResubmitCurrentFrame {
+                    target_revision: 7,
+                    reason: Some("peer_presentation_refresh".into()),
+                },
+                &mut submitter,
+                &logger,
+            )
+            .await
+            .unwrap();
+
+        let log_text = stdout.text();
+        assert_eq!(outcome, ResubmitCurrentFrameOutcome::Submitted);
+        assert!(log_text.contains("frame_resubmit target_revision=7"));
+        assert!(log_text.contains("last_submitted_revision=7"));
+        assert!(log_text.contains("reason=peer_presentation_refresh"));
+        assert!(log_text.contains("outcome=submitted"));
+    }
+
+    #[tokio::test]
+    async fn runtime_resubmit_emits_detailed_noop_log() {
+        let (logger, stdout) = recording_logger();
+        let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
+        let mut submitter = UnitSubmitter::default();
+
+        let outcome = runtime
+            .resubmit_current_frame(
+                OverlayResubmitCurrentFrame {
+                    target_revision: 7,
+                    reason: Some("peer_presentation_refresh".into()),
+                },
+                &mut submitter,
+                &logger,
+            )
+            .await
+            .unwrap();
+
+        let log_text = stdout.text();
+        assert_eq!(
+            outcome,
+            ResubmitCurrentFrameOutcome::NoOp("no_stored_frame")
+        );
+        assert!(log_text.contains("frame_resubmit target_revision=7"));
+        assert!(log_text.contains("last_submitted_revision=none"));
+        assert!(log_text.contains("reason=peer_presentation_refresh"));
+        assert!(log_text.contains("outcome=no_op"));
+        assert!(log_text.contains("no_op_reason=no_stored_frame"));
     }
 
     #[test]
