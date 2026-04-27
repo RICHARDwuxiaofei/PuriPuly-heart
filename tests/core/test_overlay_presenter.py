@@ -535,6 +535,37 @@ async def test_presenter_protects_current_peer_live_row_from_generic_window() ->
 
 
 @pytest.mark.asyncio
+async def test_presenter_peer_translation_final_with_source_text_publishes_paired_row() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    peer_turn_id = uuid4()
+
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=peer_turn_id,
+            channel="peer",
+            text="peer translation",
+            source_text="peer source",
+            source_language="en",
+            target_language="ko",
+            applied_context_mode=None,
+            created_at=10.0,
+        )
+    )
+
+    assert len(presenter.snapshot().blocks) == 1
+    block = presenter.snapshot().blocks[0]
+    assert block.channel == "peer"
+    assert block.block_variant == "finalized"
+    assert block.primary_text == "peer translation"
+    assert block.secondary_text == "peer source"
+    assert block.secondary_enabled is True
+
+
+@pytest.mark.asyncio
 async def test_presenter_peer_active_duplicate_uses_shared_coalesced_disposition() -> None:
     runtime_logging, log_stream = _make_runtime_logging_capture()
     runtime_logging.set_mode(SessionLoggingMode.DETAILED)

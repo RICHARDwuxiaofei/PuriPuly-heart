@@ -913,6 +913,9 @@ class OverlayPresenter(OverlaySink):
             self._rendered_self_translation_text(entry) if event.channel == "self" else ""
         )
         self._remember_entry_input_seq(entry, event_seq=event.seq)
+        if event.channel == "peer" and event.source_text.strip():
+            entry.original_text = event.source_text
+            entry.original_seq = event.seq
         if entry.retained_hidden and event.channel == "self" and event.text.strip():
             entry.retained_hidden = False
             entry.window_evicted_at = None

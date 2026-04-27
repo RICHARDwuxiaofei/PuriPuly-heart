@@ -65,8 +65,8 @@ LATENCY_TRACE_POINT_CONTRACTS: dict[str, LatencyTracePointContract] = {
     ),
     "peer_overlay_first_emit": LatencyTracePointContract(
         name="peer_overlay_first_emit",
-        timing_semantics="Recorded at the first peer active source overlay output emitted by the hub.",
-        acceptance_expectation="Use the first overlay_sink.emit call that carries peer source text for that peer logical turn; do not wait for translation completion.",
+        timing_semantics="Recorded at the first peer overlay output emitted by the hub: paired source+translation when translation succeeds, or source-only fallback when translation is unavailable, fails, or is cancelled.",
+        acceptance_expectation="Use the first overlay_sink.emit call that carries peer-visible text for that peer logical turn; when translation is enabled and succeeds, wait for the paired source+translation overlay output.",
     ),
     "peer_overlay_first_render": LatencyTracePointContract(
         name="peer_overlay_first_render",

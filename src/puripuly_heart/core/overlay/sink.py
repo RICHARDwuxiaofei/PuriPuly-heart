@@ -107,6 +107,7 @@ class TranslationStreamUpdate(OverlayEvent):
     target_language: str
     is_final: bool = False
     applied_context_mode: AppliedContextMode | None = None
+    source_text: str = ""
 
     EVENT_TYPE: ClassVar[str] = "translation_stream_update"
 
@@ -240,6 +241,7 @@ class OverlayEventAdapter:
         utterance_id: UUID,
         channel: ChannelId,
         text: str,
+        source_text: str = "",
         source_language: str,
         target_language: str,
         applied_context_mode: AppliedContextMode | None,
@@ -264,6 +266,7 @@ class OverlayEventAdapter:
                 logical_turn_key=logical_turn_key,
             ),
             text=text,
+            source_text=source_text,
             source_language=source_language,
             target_language=target_language,
             is_final=False,
@@ -347,6 +350,7 @@ class OverlayEventAdapter:
         utterance_id: UUID,
         channel: ChannelId,
         text: str,
+        source_text: str = "",
         source_language: str,
         target_language: str,
         applied_context_mode: AppliedContextMode | None,
@@ -371,6 +375,7 @@ class OverlayEventAdapter:
                 logical_turn_key=logical_turn_key,
             ),
             text=text,
+            source_text=source_text,
             source_language=source_language,
             target_language=target_language,
             is_final=True,

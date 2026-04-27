@@ -1056,16 +1056,14 @@ class ClientHub:
             )
         )
         if is_final:
-            await self._emit_final_transcript_to_overlay(transcript)
             if runtime.channel == "peer":
                 peer_terminal_work_will_follow = self._peer_terminal_work_will_follow(runtime)
-                if self.overlay_sink is not None and not self._overlay_translation_will_follow(
-                    runtime
-                ):
-                    await self._emit_overlay_utterance_closed(
-                        utterance_id=transcript.utterance_id,
-                        channel=transcript.channel,
-                        is_final=True,
+                if self._overlay_translation_will_follow(runtime):
+                    await self._ensure_translation(transcript)
+                elif self.overlay_sink is not None:
+                    await self._finalize_peer_source_only(
+                        transcript,
+                        close_is_final=True,
                         finalize_latency=not peer_terminal_work_will_follow,
                     )
                 elif not peer_terminal_work_will_follow:
@@ -1073,7 +1071,9 @@ class ClientHub:
                         channel=transcript.channel,
                         utterance_id=transcript.utterance_id,
                     )
-            elif not self._overlay_translation_will_follow(runtime):
+                return
+            await self._emit_final_transcript_to_overlay(transcript)
+            if not self._overlay_translation_will_follow(runtime):
                 await self._emit_overlay_utterance_closed(
                     utterance_id=transcript.utterance_id,
                     channel=transcript.channel,
@@ -1105,7 +1105,6 @@ class ClientHub:
             utterance_id=transcript.utterance_id,
             stage="stt_final",
         )
-        await self._emit_peer_active_to_overlay(transcript)
         if self.llm is None or not self._translation_enabled_for_runtime(runtime):
             self._log_translation_skipped(
                 stage="final",
@@ -1137,33 +1136,6 @@ class ClientHub:
             )
         )
 
-    def _peer_active_occupant_key(self, utterance_id: UUID) -> str:
-        return f"peer:{utterance_id}"
-
-    async def _emit_peer_active_to_overlay(self, transcript: Transcript) -> None:
-        if self.overlay_sink is None:
-            return
-        self._record_overlay_emit(
-            event_kind="active_peer",
-            utterance_id=transcript.utterance_id,
-            channel="peer",
-            secondary_len=len(transcript.text.strip()),
-        )
-        self._record_latency_stage(
-            channel="peer",
-            utterance_id=transcript.utterance_id,
-            stage="peer_overlay_first_emit",
-            overwrite=False,
-        )
-        await self._emit_overlay_event(
-            self.overlay_event_adapter.peer_active_update(
-                text=transcript.text,
-                utterance_id=transcript.utterance_id,
-                occupant_key=self._peer_active_occupant_key(transcript.utterance_id),
-                created_at=transcript.created_at,
-            )
-        )
-
     async def _finalize_peer_source_only(
         self,
         transcript: Transcript,
@@ -1172,6 +1144,18 @@ class ClientHub:
         finalize_latency: bool,
     ) -> None:
         if self.overlay_sink is not None:
+            self._record_overlay_emit(
+                event_kind="peer_transcript_final",
+                utterance_id=transcript.utterance_id,
+                channel="peer",
+                secondary_len=len(transcript.text.strip()),
+            )
+            self._record_latency_stage(
+                channel="peer",
+                utterance_id=transcript.utterance_id,
+                stage="peer_overlay_first_emit",
+                overwrite=False,
+            )
             await self._emit_overlay_event(
                 self.overlay_event_adapter.transcript_final(
                     transcript,
@@ -1368,6 +1352,7 @@ class ClientHub:
                 utterance_id=translation.utterance_id,
                 channel=translation.channel,
                 text=translation.text,
+                source_text=translation.source_text,
                 source_language=self._source_language_for(runtime),
                 target_language=self._target_language_for(runtime),
                 applied_context_mode=applied_context_mode,
