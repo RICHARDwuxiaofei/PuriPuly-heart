@@ -407,6 +407,55 @@ fn renderer_render_path_expands_damage_band_to_rendered_bounds_overhang() {
 }
 
 #[test]
+fn renderer_damage_band_includes_same_peer_slot_when_primary_text_arrives() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+
+    let _ = renderer
+        .render_blocks(vec![CaptionBlock::new("peer:turn-1", "")
+            .with_variant(CaptionBlockVariant::ActivePeer)
+            .with_channel(CaptionChannel::PeerChannel)
+            .with_secondary_text("peer source", true)
+            .with_slot(0, 40.0)])
+        .unwrap();
+
+    let frame = renderer
+        .render_blocks(vec![
+            CaptionBlock::new("peer:turn-1", "translated peer body")
+                .with_variant(CaptionBlockVariant::ActivePeer)
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_secondary_text("peer source", true)
+                .with_slot(0, 40.0),
+            CaptionBlock::new("self:turn-2", "self transcript")
+                .with_variant(CaptionBlockVariant::Finalized)
+                .with_channel(CaptionChannel::SelfChannel)
+                .with_secondary_text("self translation", true)
+                .with_slot(1, 536.0),
+        ])
+        .unwrap();
+
+    let damage_band = frame
+        .layout()
+        .damage_band
+        .expect("second frame should have a damage band");
+    let peer_block = frame
+        .layout()
+        .visible_blocks
+        .iter()
+        .find(|block| block.id == "peer:turn-1")
+        .expect("peer block should remain visible");
+
+    assert!(
+        peer_block.visual_bounds.bottom_px >= damage_band.top_px
+            && peer_block.visual_bounds.top_px <= damage_band.bottom_px,
+        "damage band [{}, {}] should include changed peer slot [{}, {}] when primary text arrives in-place",
+        damage_band.top_px,
+        damage_band.bottom_px,
+        peer_block.visual_bounds.top_px,
+        peer_block.visual_bounds.bottom_px
+    );
+}
+
+#[test]
 fn renderer_secondary_line_is_single_line_with_ellipsis() {
     let policy = CaptionLayoutPolicy::default();
     let result = policy.layout_blocks(

@@ -1290,26 +1290,43 @@ fn compute_damage_band(
     let previous_bounds = previous_layout
         .visible_blocks
         .iter()
-        .map(|block| (block.id.as_str(), block.visual_bounds.as_block_bounds()))
+        .map(|block| {
+            (
+                block.id.as_str(),
+                (
+                    block.visual_bounds.as_block_bounds(),
+                    &block.layout_cache_key,
+                ),
+            )
+        })
         .collect::<std::collections::HashMap<_, _>>();
     let next_bounds = next_layout
         .visible_blocks
         .iter()
-        .map(|block| (block.id.as_str(), block.visual_bounds.as_block_bounds()))
+        .map(|block| {
+            (
+                block.id.as_str(),
+                (
+                    block.visual_bounds.as_block_bounds(),
+                    &block.layout_cache_key,
+                ),
+            )
+        })
         .collect::<std::collections::HashMap<_, _>>();
 
     let mut changed_bounds = Vec::new();
-    for (id, bounds) in &previous_bounds {
+    for (id, (bounds, layout_key)) in &previous_bounds {
         match next_bounds.get(id) {
-            Some(next_bounds) if next_bounds == bounds => {}
-            Some(next_bounds) => {
+            Some((next_bounds, next_layout_key))
+                if next_bounds == bounds && next_layout_key == layout_key => {}
+            Some((next_bounds, _)) => {
                 changed_bounds.push(*bounds);
                 changed_bounds.push(*next_bounds);
             }
             None => changed_bounds.push(*bounds),
         }
     }
-    for (id, bounds) in &next_bounds {
+    for (id, (bounds, _)) in &next_bounds {
         if !previous_bounds.contains_key(id) {
             changed_bounds.push(*bounds);
         }
