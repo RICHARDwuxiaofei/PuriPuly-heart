@@ -36,6 +36,8 @@ _CLOSED_TOMBSTONE_LIMIT = 64
 LATE_ARRIVAL_WINDOW_SECONDS = 5.0
 VISIBLE_TTL_SECONDS = 8.0
 SELF_TRANSLATION_MIN_VISIBLE_SECONDS = 4.0
+PEER_PRESENTATION_REFRESH_BURST_SECONDS = 2.0
+PEER_PRESENTATION_REFRESH_BURST_INTERVAL_SECONDS = 0.1
 SleepFn = Callable[[float], Awaitable[None]]
 
 
@@ -105,6 +107,7 @@ class OverlayPresenter(OverlaySink):
     visible_window_target_blocks: int = VISIBLE_WINDOW_TARGET_BLOCKS
     show_translation: bool = True
     show_peer_original: bool = True
+    peer_presentation_refresh_burst: bool = True
 
     _entries: dict[tuple[str, UUID], _LogicalTurnEntry] = field(
         init=False,
@@ -136,6 +139,15 @@ class OverlayPresenter(OverlaySink):
     _appearance_seq: int = field(init=False, default=0)
     _snapshot: OverlayPresentationSnapshot = field(init=False)
     _last_visible_window_signature: tuple[object, ...] | None = field(init=False, default=None)
+    _peer_presentation_refresh_burst_task: asyncio.Task[None] | None = field(
+        init=False,
+        default=None,
+    )
+    _peer_presentation_refresh_target_key: tuple[str, UUID] | None = field(
+        init=False,
+        default=None,
+    )
+    _peer_presentation_refresh_nonce: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         self._snapshot = OverlayPresentationSnapshot(
@@ -395,6 +407,7 @@ class OverlayPresenter(OverlaySink):
         return self._snapshot
 
     def reset_scene(self) -> None:
+        self._cancel_peer_presentation_refresh_burst_task()
         self._cancel_all_expiration_tasks()
         self._clear_entries_for_reason("scene_reset")
         self._terminal_registry.clear()
@@ -406,6 +419,8 @@ class OverlayPresenter(OverlaySink):
         self._revision = 0
         self._appearance_seq = 0
         self._last_visible_window_signature = None
+        self._peer_presentation_refresh_target_key = None
+        self._peer_presentation_refresh_nonce = 0
         self._snapshot = OverlayPresentationSnapshot(
             revision=0,
             calibration=_calibration_from_overlay(self.calibration),
@@ -413,6 +428,7 @@ class OverlayPresenter(OverlaySink):
         )
 
     async def clear_for_runtime_detach(self) -> None:
+        await self._cancel_peer_presentation_refresh_burst_task_and_wait()
         self._cancel_all_expiration_tasks()
         self._clear_entries_for_reason("scene_reset")
         self._terminal_registry.clear()
@@ -423,6 +439,8 @@ class OverlayPresenter(OverlaySink):
         self._live_peer_turn_key = None
         self._revision += 1
         self._last_visible_window_signature = None
+        self._peer_presentation_refresh_target_key = None
+        self._peer_presentation_refresh_nonce = 0
         self._snapshot = OverlayPresentationSnapshot(
             revision=self._revision,
             calibration=_calibration_from_overlay(self.calibration),
@@ -433,9 +451,10 @@ class OverlayPresenter(OverlaySink):
 
     async def emit(self, event: OverlayEventUnion) -> None:
         changed = self._apply_event(event)
-        if not changed:
-            return
-        await self._publish_if_changed()
+        if changed:
+            await self._publish_if_changed()
+        if changed or self._peer_presentation_refresh_event_is_current(event):
+            self._start_peer_presentation_refresh_burst_for_event(event)
 
     async def update_calibration(self, calibration: OverlayCalibration) -> None:
         if calibration == self.calibration:
@@ -459,6 +478,17 @@ class OverlayPresenter(OverlaySink):
         self.show_translation = next_show_translation
         self.show_peer_original = next_show_peer_original
         await self._publish_if_changed()
+
+    async def update_peer_presentation_refresh_burst(self, enabled: bool) -> None:
+        next_enabled = bool(enabled)
+        if next_enabled == self.peer_presentation_refresh_burst:
+            return
+        self.peer_presentation_refresh_burst = next_enabled
+        if not next_enabled:
+            await self._cancel_peer_presentation_refresh_burst_task_and_wait()
+            self._peer_presentation_refresh_target_key = None
+            self._peer_presentation_refresh_nonce = 0
+            await self._publish_if_changed()
 
     async def broadcast_shutdown(self) -> None:
         if self.bridge is None:
@@ -500,9 +530,85 @@ class OverlayPresenter(OverlaySink):
             return self._apply_utterance_closed(event, now=now)
         return False
 
-    def _apply_self_active_update(self, event: SelfActiveUpdate, *, now: float) -> bool:
-        if self._should_ignore_terminal_update(event.channel, event.utterance_id):
+    def _active_update_entry_or_none(
+        self,
+        *,
+        channel: str,
+        utterance_id: UUID | None,
+        event_seq: int,
+    ) -> tuple[tuple[str, UUID], _LogicalTurnEntry] | None:
+        if self._should_ignore_terminal_update(channel, utterance_id):
+            return None
+        key = self._entry_key(channel, utterance_id)
+        live_entry = self._live_entry_for_channel(channel)
+        if live_entry is not None:
+            live_key, current_live_entry = live_entry
+            if live_key != key and event_seq < current_live_entry.last_updated_seq:
+                self._emit_skip_disposition(
+                    decision="overlay_turn_superseded",
+                    disposition="superseded",
+                    key=key,
+                    entry=current_live_entry,
+                    extras={
+                        "event_seq": event_seq,
+                        "superseded_by_entry": self._format_entry_key(live_key),
+                        "superseded_by_seq": current_live_entry.last_updated_seq,
+                    },
+                )
+                return None
+
+        entry = self._entry_for(channel, utterance_id)
+        if event_seq < entry.last_updated_seq:
+            self._emit_skip_disposition(
+                decision="overlay_turn_superseded",
+                disposition="superseded",
+                key=key,
+                entry=entry,
+                extras={"event_seq": event_seq, "last_updated_seq": entry.last_updated_seq},
+            )
+            return None
+        if live_entry is not None and live_entry[0] != key:
+            if channel == "self":
+                self._clear_live_self_pointer(reason="live_self_replaced")
+            else:
+                self._clear_live_peer_pointer(reason="live_peer_replaced")
+        return key, entry
+
+    def _active_update_matches_live_payload(
+        self,
+        *,
+        channel: str,
+        key: tuple[str, UUID],
+        entry: _LogicalTurnEntry,
+        text: str,
+        secondary_text: str,
+        occupant_key: str,
+        update_id: str | None,
+        origin_wall_clock_ms: int | None,
+        session_scope: str | None,
+        source_text_hash: str | None,
+        source_text_len: int | None,
+        logical_turn_key: str | None,
+    ) -> bool:
+        if self._live_turn_key_for_channel(channel) != key:
             return False
+        if entry.live_text != text or entry.occupant_key != occupant_key:
+            return False
+        if channel == "peer":
+            return True
+        if channel != "self":
+            raise ValueError(f"invalid overlay channel: {channel!r}")
+        return (
+            entry.live_secondary_text == secondary_text
+            and entry.live_update_id == update_id
+            and entry.live_origin_wall_clock_ms == origin_wall_clock_ms
+            and entry.live_session_scope == session_scope
+            and entry.live_source_text_hash == source_text_hash
+            and entry.live_source_text_len == source_text_len
+            and entry.live_logical_turn_key == logical_turn_key
+        )
+
+    def _apply_self_active_update(self, event: SelfActiveUpdate, *, now: float) -> bool:
         key = self._entry_key(event.channel, event.utterance_id)
         retired_preview_seq = self._retired_preview_self_seqs.get(key)
         if retired_preview_seq is not None and event.seq <= retired_preview_seq:
@@ -513,50 +619,30 @@ class OverlayPresenter(OverlaySink):
                 extras={"event_seq": event.seq, "retired_preview_seq": retired_preview_seq},
             )
             return False
-        live_self = self._live_self_entry()
-        if live_self is not None:
-            live_key, live_entry = live_self
-            if live_key != key and event.seq < live_entry.last_updated_seq:
-                self._emit_skip_disposition(
-                    decision="overlay_turn_superseded",
-                    disposition="superseded",
-                    key=key,
-                    entry=live_entry,
-                    extras={
-                        "event_seq": event.seq,
-                        "superseded_by_entry": self._format_entry_key(live_key),
-                        "superseded_by_seq": live_entry.last_updated_seq,
-                    },
-                )
-                return False
-
-        entry = self._entry_for(event.channel, event.utterance_id)
-        if event.seq < entry.last_updated_seq:
-            self._emit_skip_disposition(
-                decision="overlay_turn_superseded",
-                disposition="superseded",
-                key=key,
-                entry=entry,
-                extras={"event_seq": event.seq, "last_updated_seq": entry.last_updated_seq},
-            )
+        active_entry = self._active_update_entry_or_none(
+            channel=event.channel,
+            utterance_id=event.utterance_id,
+            event_seq=event.seq,
+        )
+        if active_entry is None:
             return False
-
-        if live_self is not None and live_self[0] != key:
-            self._clear_live_self_pointer(reason="live_self_replaced")
+        key, entry = active_entry
 
         previous_rendered_translation_text = self._rendered_self_translation_text(entry)
 
-        if (
-            self._live_self_turn_key == key
-            and entry.live_text == event.text
-            and entry.live_secondary_text == event.secondary_text
-            and entry.occupant_key == event.occupant_key
-            and entry.live_update_id == event.update_id
-            and entry.live_origin_wall_clock_ms == event.origin_wall_clock_ms
-            and entry.live_session_scope == event.session_scope
-            and entry.live_source_text_hash == event.source_text_hash
-            and entry.live_source_text_len == event.source_text_len
-            and entry.live_logical_turn_key == event.logical_turn_key
+        if self._active_update_matches_live_payload(
+            channel=event.channel,
+            key=key,
+            entry=entry,
+            text=event.text,
+            secondary_text=event.secondary_text,
+            occupant_key=event.occupant_key,
+            update_id=event.update_id,
+            origin_wall_clock_ms=event.origin_wall_clock_ms,
+            session_scope=event.session_scope,
+            source_text_hash=event.source_text_hash,
+            source_text_len=event.source_text_len,
+            logical_turn_key=event.logical_turn_key,
         ):
             self._emit_skip_disposition(
                 decision="overlay_turn_coalesced",
@@ -604,41 +690,41 @@ class OverlayPresenter(OverlaySink):
             now=now,
         )
         entry.last_updated_seq = event.seq
-        self._live_self_turn_key = key
+        self._set_live_turn_key_for_channel(event.channel, key)
         return True
 
     def _apply_peer_active_update(self, event: PeerActiveUpdate, *, now: float) -> bool:
-        if self._should_ignore_terminal_update(event.channel, event.utterance_id):
+        active_entry = self._active_update_entry_or_none(
+            channel=event.channel,
+            utterance_id=event.utterance_id,
+            event_seq=event.seq,
+        )
+        if active_entry is None:
             return False
-        key = self._entry_key(event.channel, event.utterance_id)
-        live_peer = self._live_peer_entry()
-        if live_peer is not None:
-            live_key, live_entry = live_peer
-            if live_key != key and event.seq < live_entry.last_updated_seq:
-                self._emit_skip_disposition(
-                    decision="overlay_turn_superseded",
-                    disposition="superseded",
-                    key=key,
-                    entry=live_entry,
-                    extras={
-                        "event_seq": event.seq,
-                        "superseded_by_entry": self._format_entry_key(live_key),
-                        "superseded_by_seq": live_entry.last_updated_seq,
-                    },
-                )
-                return False
-        entry = self._entry_for(event.channel, event.utterance_id)
-        if event.seq < entry.last_updated_seq:
+        key, entry = active_entry
+        if self._active_update_matches_live_payload(
+            channel=event.channel,
+            key=key,
+            entry=entry,
+            text=event.text,
+            secondary_text="",
+            occupant_key=event.occupant_key,
+            update_id=event.update_id,
+            origin_wall_clock_ms=event.origin_wall_clock_ms,
+            session_scope=event.session_scope,
+            source_text_hash=event.source_text_hash,
+            source_text_len=event.source_text_len,
+            logical_turn_key=event.logical_turn_key,
+        ):
             self._emit_skip_disposition(
-                decision="overlay_turn_superseded",
-                disposition="superseded",
+                decision="overlay_turn_coalesced",
+                disposition="coalesced",
                 key=key,
                 entry=entry,
-                extras={"event_seq": event.seq, "last_updated_seq": entry.last_updated_seq},
+                extras={"event_seq": event.seq},
             )
+            entry.last_updated_seq = event.seq
             return False
-        if live_peer is not None and live_peer[0] != key:
-            self._clear_live_peer_pointer(reason="live_peer_replaced")
         self._remember_entry_input_seq(entry, event_seq=event.seq)
         if not entry.occupant_key:
             entry.occupant_key = event.occupant_key
@@ -653,7 +739,7 @@ class OverlayPresenter(OverlaySink):
             now=now,
             publishable_seq=event.seq,
         )
-        self._live_peer_turn_key = key
+        self._set_live_turn_key_for_channel(event.channel, key)
         return True
 
     def _apply_self_active_clear(self, event: SelfActiveClear) -> bool:
@@ -928,23 +1014,44 @@ class OverlayPresenter(OverlaySink):
         key = self._entry_key(channel, utterance_id)
         return key in self._scene_terminal_keys or key in self._terminal_registry
 
-    def _live_self_entry(self) -> tuple[tuple[str, UUID], _LogicalTurnEntry] | None:
-        if self._live_self_turn_key is None:
+    def _live_turn_key_for_channel(self, channel: str) -> tuple[str, UUID] | None:
+        if channel == "self":
+            return self._live_self_turn_key
+        if channel == "peer":
+            return self._live_peer_turn_key
+        raise ValueError(f"invalid overlay channel: {channel!r}")
+
+    def _set_live_turn_key_for_channel(
+        self,
+        channel: str,
+        key: tuple[str, UUID] | None,
+    ) -> None:
+        if channel == "self":
+            self._live_self_turn_key = key
+            return
+        if channel == "peer":
+            self._live_peer_turn_key = key
+            return
+        raise ValueError(f"invalid overlay channel: {channel!r}")
+
+    def _live_entry_for_channel(
+        self,
+        channel: str,
+    ) -> tuple[tuple[str, UUID], _LogicalTurnEntry] | None:
+        live_key = self._live_turn_key_for_channel(channel)
+        if live_key is None:
             return None
-        entry = self._entries.get(self._live_self_turn_key)
+        entry = self._entries.get(live_key)
         if entry is None:
-            self._live_self_turn_key = None
+            self._set_live_turn_key_for_channel(channel, None)
             return None
-        return self._live_self_turn_key, entry
+        return live_key, entry
+
+    def _live_self_entry(self) -> tuple[tuple[str, UUID], _LogicalTurnEntry] | None:
+        return self._live_entry_for_channel("self")
 
     def _live_peer_entry(self) -> tuple[tuple[str, UUID], _LogicalTurnEntry] | None:
-        if self._live_peer_turn_key is None:
-            return None
-        entry = self._entries.get(self._live_peer_turn_key)
-        if entry is None:
-            self._live_peer_turn_key = None
-            return None
-        return self._live_peer_turn_key, entry
+        return self._live_entry_for_channel("peer")
 
     def _live_peer_entry_is_drawable(self, entry: _LogicalTurnEntry) -> bool:
         if entry.translation_text.strip():
@@ -1014,7 +1121,9 @@ class OverlayPresenter(OverlaySink):
         self._remember_retired_preview_self_seq(key, entry.last_updated_seq)
         self._remove_entry(key, reason=reason, now=now)
 
-    async def _publish_if_changed(self) -> None:
+    async def _publish_if_changed(self, *, force_peer_presentation_refresh: bool = False) -> None:
+        if force_peer_presentation_refresh:
+            self._peer_presentation_refresh_nonce += 1
         now = self.clock.now()
         self._expire_closed_entries(now=now)
         rendered_entries = self._visible_block_entries(now=now)
@@ -1343,7 +1452,10 @@ class OverlayPresenter(OverlaySink):
                     secondary_enabled=self.show_peer_original and bool(original_text),
                     update_id=entry.translation_update_id,
                     origin_wall_clock_ms=entry.translation_origin_wall_clock_ms,
-                    session_scope=entry.translation_session_scope,
+                    session_scope=self._peer_session_scope_with_presentation_refresh(
+                        entry,
+                        entry.translation_session_scope,
+                    ),
                     source_text_hash=entry.translation_source_text_hash,
                     source_text_len=entry.translation_source_text_len,
                     logical_turn_key=entry.translation_logical_turn_key,
@@ -1361,6 +1473,7 @@ class OverlayPresenter(OverlaySink):
                     primary_text="",
                     secondary_text=active_text,
                     secondary_enabled=True,
+                    session_scope=self._peer_session_scope_with_presentation_refresh(entry, None),
                 )
             if original_text:
                 if not self.show_peer_original:
@@ -1378,6 +1491,7 @@ class OverlayPresenter(OverlaySink):
                     primary_text="",
                     secondary_text=original_text,
                     secondary_enabled=True,
+                    session_scope=self._peer_session_scope_with_presentation_refresh(entry, None),
                 )
             return None
         else:
@@ -1788,6 +1902,117 @@ class OverlayPresenter(OverlaySink):
             if not task.done():
                 task.cancel()
         self._expiration_tasks.clear()
+
+    def _peer_presentation_refresh_key_for_event(
+        self,
+        event: OverlayEventUnion,
+    ) -> tuple[str, UUID] | None:
+        if event.channel != "peer" or event.utterance_id is None:
+            return None
+        if isinstance(
+            event,
+            (
+                PeerActiveUpdate,
+                PeerTranscriptFinal,
+                TranslationStreamUpdate,
+                TranslationFinal,
+            ),
+        ):
+            return ("peer", event.utterance_id)
+        return None
+
+    def _snapshot_has_refreshable_peer_key(self, key: tuple[str, UUID]) -> bool:
+        block_id = f"{key[0]}:{key[1]}"
+        for block in self._snapshot.blocks:
+            if block.channel != "peer" or block.id != block_id:
+                continue
+            if block.primary_text.strip():
+                return True
+            if block.secondary_enabled and block.secondary_text.strip():
+                return True
+        return False
+
+    def _peer_presentation_refresh_event_is_current(self, event: OverlayEventUnion) -> bool:
+        key = self._peer_presentation_refresh_key_for_event(event)
+        if key is None:
+            return False
+        entry = self._entries.get(key)
+        return entry is not None and entry.last_updated_seq == event.seq
+
+    def _start_peer_presentation_refresh_burst_for_event(
+        self,
+        event: OverlayEventUnion,
+    ) -> None:
+        if not self.peer_presentation_refresh_burst:
+            return
+        key = self._peer_presentation_refresh_key_for_event(event)
+        if key is None or not self._snapshot_has_refreshable_peer_key(key):
+            return
+        self._peer_presentation_refresh_target_key = key
+        self._cancel_peer_presentation_refresh_burst_task()
+        self._peer_presentation_refresh_burst_task = asyncio.create_task(
+            self._run_peer_presentation_refresh_burst(key)
+        )
+
+    async def _run_peer_presentation_refresh_burst(self, key: tuple[str, UUID]) -> None:
+        deadline = self.clock.now() + PEER_PRESENTATION_REFRESH_BURST_SECONDS
+        try:
+            while self.peer_presentation_refresh_burst and self.clock.now() < deadline:
+                await self.sleep(PEER_PRESENTATION_REFRESH_BURST_INTERVAL_SECONDS)
+                if not self.peer_presentation_refresh_burst:
+                    return
+                if self._peer_presentation_refresh_target_key != key:
+                    return
+                if not self._snapshot_has_refreshable_peer_key(key):
+                    return
+                await self._publish_if_changed(force_peer_presentation_refresh=True)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            current_task = self._current_task()
+            if (
+                current_task is not None
+                and self._peer_presentation_refresh_burst_task is current_task
+            ):
+                self._peer_presentation_refresh_burst_task = None
+                had_refresh_metadata = (
+                    self._peer_presentation_refresh_target_key == key
+                    and self._peer_presentation_refresh_nonce > 0
+                )
+                if self._peer_presentation_refresh_target_key == key:
+                    self._peer_presentation_refresh_target_key = None
+                    self._peer_presentation_refresh_nonce = 0
+                if had_refresh_metadata:
+                    await self._publish_if_changed()
+
+    def _peer_session_scope_with_presentation_refresh(
+        self,
+        entry: _LogicalTurnEntry,
+        session_scope: str | None,
+    ) -> str | None:
+        if (
+            not self.peer_presentation_refresh_burst
+            or self._peer_presentation_refresh_nonce <= 0
+            or self._peer_presentation_refresh_target_key != (entry.channel, entry.utterance_id)
+        ):
+            return session_scope
+        marker = f"peer_presentation_refresh={self._peer_presentation_refresh_nonce}"
+        if session_scope:
+            return f"{session_scope}|{marker}"
+        return marker
+
+    def _cancel_peer_presentation_refresh_burst_task(self) -> None:
+        task = self._peer_presentation_refresh_burst_task
+        self._peer_presentation_refresh_burst_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _cancel_peer_presentation_refresh_burst_task_and_wait(self) -> None:
+        task = self._peer_presentation_refresh_burst_task
+        self._peer_presentation_refresh_burst_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     def _current_task(self) -> asyncio.Task[None] | None:
         try:

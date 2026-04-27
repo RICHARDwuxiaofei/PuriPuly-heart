@@ -30,6 +30,7 @@ from puripuly_heart.config.settings import (
     STTProviderName,
 )
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
+from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.managed_openrouter_broker_client import (
     HttpManagedOpenRouterBrokerClient,
@@ -45,6 +46,7 @@ from puripuly_heart.core.openrouter_pkce import OpenRouterPKCEExchangeResult
 from puripuly_heart.core.osc.receiver import VrcMicState
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
 from puripuly_heart.core.overlay.sink import (
+    OverlayEventAdapter,
     PeerTranscriptFinal,
     SelfTranscriptFinal,
     TranslationFinal,
@@ -58,6 +60,7 @@ from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 from puripuly_heart.ui import controller as controller_module
 from puripuly_heart.ui.controller import GuiController
 from puripuly_heart.ui.i18n import t
+from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
 
 class DummySecrets:
@@ -2448,6 +2451,148 @@ async def test_overlay_toggle_starts_and_stops_overlay_runtime(
     assert controller.hub.reset_overlay_preview_calls == 1
     assert bridge.stopped is True
     assert manager.stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_overlay_start_enables_peer_presentation_refresh_for_new_presenter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    assert controller._overlay_presenter is not None
+    assert controller._overlay_presenter.peer_presentation_refresh_burst is True
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_overlay_start_product_enables_existing_peer_presentation_refresh_presenter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+    controller._overlay_presenter = OverlayPresenter(
+        calibration=controller.overlay_calibration.copy(),
+        clock=controller.clock,
+        peer_presentation_refresh_burst=False,
+    )
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    assert controller._overlay_presenter.peer_presentation_refresh_burst is True
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_overlay_start_syncs_bridge_after_preserved_presenter_cleans_refresh_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    bridge_start_released_burst = False
+    clock = FakeClock(_now=10.0)
+    sleep_events: list[asyncio.Event] = []
+
+    async def fake_sleep(delay: float) -> None:
+        release = asyncio.Event()
+        sleep_events.append(release)
+        await release.wait()
+        clock.advance(delay)
+        await asyncio.sleep(0)
+
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        clock=clock,
+        sleep=fake_sleep,
+        peer_presentation_refresh_burst=True,
+    )
+    adapter = OverlayEventAdapter(clock=clock)
+    peer_turn_id = uuid4()
+    await presenter.emit(
+        adapter.peer_active_update(
+            text="peer source preserved across restart",
+            utterance_id=peer_turn_id,
+            occupant_key=f"peer:{peer_turn_id}",
+            created_at=10.0,
+        )
+    )
+    await asyncio.sleep(0)
+    sleep_events[-1].set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await _wait_until(lambda: len(sleep_events) >= 2)
+
+    stale_snapshot = presenter.snapshot()
+    assert stale_snapshot.blocks[0].session_scope == "peer_presentation_refresh=1"
+
+    class CleaningDuringStartOverlayBridge(FakeOverlayBridge):
+        instances: list["CleaningDuringStartOverlayBridge"] = []
+
+        async def start(self) -> None:
+            nonlocal bridge_start_released_burst
+            await super().start()
+            for _ in range(25):
+                if presenter._peer_presentation_refresh_burst_task is None:
+                    break
+                assert sleep_events, "refresh burst should be waiting before bridge attach"
+                sleep_events[-1].set()
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+            bridge_start_released_burst = True
+            assert presenter._peer_presentation_refresh_burst_task is None
+            assert presenter.snapshot().blocks[0].session_scope is None
+
+    class ImmediateConnectedOverlayProcessManager(FakeOverlayProcessManager):
+        instances: list["ImmediateConnectedOverlayProcessManager"] = []
+
+        async def start(self) -> None:
+            self.state = "connected"
+            self.failure_reason = None
+
+    monkeypatch.setattr(controller_module, "OverlayBridge", CleaningDuringStartOverlayBridge)
+    monkeypatch.setattr(
+        controller_module,
+        "OverlayProcessManager",
+        ImmediateConnectedOverlayProcessManager,
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+    controller._overlay_presenter = presenter
+
+    await controller._run_overlay_start()
+
+    bridge = CleaningDuringStartOverlayBridge.instances[0]
+    assert bridge_start_released_burst is True
+    assert bridge.initial_snapshot is stale_snapshot
+    assert bridge.initial_snapshot.blocks[0].session_scope == "peer_presentation_refresh=1"
+    assert presenter.snapshot().blocks[0].session_scope is None
+    assert bridge.current_snapshot == presenter.snapshot()
+    assert bridge.snapshots[-1] == presenter.snapshot()
+
+    await controller._teardown_overlay_runtime(preserve_presenter_state=False)
 
 
 @pytest.mark.asyncio
@@ -6816,6 +6961,7 @@ async def test_apply_settings_updates_overlay_presenter_display_preferences() ->
         bridge=controller._overlay_bridge,
         calibration=controller.overlay_calibration.copy(),
         clock=controller.clock,
+        peer_presentation_refresh_burst=True,
     )
 
     updated = AppSettings()
@@ -6826,6 +6972,8 @@ async def test_apply_settings_updates_overlay_presenter_display_preferences() ->
 
     assert controller._overlay_presenter.show_translation is False
     assert controller._overlay_presenter.show_peer_original is False
+    # The product refresh burst is runtime-only, not a settings knob.
+    assert controller._overlay_presenter.peer_presentation_refresh_burst is True
 
 
 @pytest.mark.asyncio

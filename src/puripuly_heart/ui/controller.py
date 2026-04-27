@@ -936,11 +936,13 @@ class GuiController:
                     runtime_log_detailed=self.log_detailed,
                     show_translation=self.settings.overlay.show_translation,
                     show_peer_original=self.settings.overlay.show_peer_original,
+                    peer_presentation_refresh_burst=True,
                 )
                 self._overlay_presenter = presenter
             else:
                 presenter.diagnostics = diagnostics
                 presenter.runtime_log_detailed = self.log_detailed
+                await presenter.update_peer_presentation_refresh_burst(True)
             bridge = OverlayBridge(
                 session_token=secrets.token_urlsafe(16),
                 initial_snapshot=presenter.snapshot(),
@@ -950,6 +952,9 @@ class GuiController:
             )
             await bridge.start()
             presenter.attach_bridge(bridge)
+            latest_snapshot = presenter.snapshot()
+            if bridge.snapshot() != latest_snapshot:
+                await bridge.replace_snapshot(latest_snapshot)
             self._overlay_bridge = bridge
             self._overlay_diagnostics = diagnostics
             self.hub.overlay_sink = presenter

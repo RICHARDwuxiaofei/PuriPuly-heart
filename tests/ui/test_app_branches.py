@@ -268,14 +268,38 @@ def test_translator_app_mounts_debug_preview_when_enabled(
     assert root.content.controls[-1] is app.debug_preview_panel
 
 
+def test_translator_app_keeps_debug_ui_preview_out_of_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_app_construction(monkeypatch)
+    seen: dict[str, object] = {}
+
+    class RecordingController(ConstructionDummyController):
+        def __init__(self, page, app, config_path):
+            super().__init__(page, app, config_path)
+            seen["controller_args"] = (page, app, config_path)
+
+    monkeypatch.setattr(app_module, "GuiController", RecordingController)
+
+    app = TranslatorApp(
+        DummyPage(),
+        config_path=Path("settings.json"),
+        debug_ui_preview=True,
+    )
+
+    assert app.debug_ui_preview is True
+    assert seen["controller_args"] == (app.page, app, Path("settings.json"))
+
+
 def test_translator_app_wires_runtime_log_detailed_into_dashboard_visual_commit_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class DummyController:
-        def __init__(self, page, app, config_path):
+        def __init__(self, page, app, config_path, debug_ui_preview: bool = False):
             self.page = page
             self.app = app
             self.config_path = config_path
+            self.debug_ui_preview = debug_ui_preview
             self.settings = None
             self.runtime_logging_mode = "basic"
 
