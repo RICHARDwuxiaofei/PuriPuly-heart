@@ -407,6 +407,19 @@ fn renderer_render_path_expands_damage_band_to_rendered_bounds_overhang() {
 }
 
 #[test]
+fn renderer_rendered_frames_have_distinct_texture_identities() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let first = renderer
+        .render_blocks(vec![CaptionBlock::new("self:first", "first text")])
+        .unwrap();
+    let second = renderer
+        .render_blocks(vec![CaptionBlock::new("self:second", "second text")])
+        .unwrap();
+
+    assert_ne!(first.texture_ptr(), second.texture_ptr());
+}
+
+#[test]
 fn renderer_damage_band_includes_same_peer_slot_when_primary_text_arrives() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
 
