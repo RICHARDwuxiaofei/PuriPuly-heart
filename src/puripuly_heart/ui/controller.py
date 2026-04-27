@@ -317,6 +317,8 @@ class GuiController:
 
     async def start(self) -> None:
         self.settings = self._load_or_init_settings(self.config_path)
+        self.settings.ui.overlay_enabled = False
+        self.settings.ui.peer_translation_enabled = False
         self._sync_overlay_calibration_cache(self.settings)
         self._overlay_calibration_draft = None
         set_locale(self.settings.ui.locale)
@@ -384,9 +386,6 @@ class GuiController:
         )
         self._ui_event_bridge = bridge
         self._bridge_task = asyncio.create_task(bridge.run())
-
-        if self.settings.ui.overlay_enabled:
-            await self.set_overlay_enabled(True)
 
     def _get_alibaba_verified_key(self) -> str:
         """Get the api_key_verified field name based on Qwen region."""
@@ -860,7 +859,6 @@ class GuiController:
             self.settings.ui.peer_translation_enabled = False
             self._last_peer_translation_enabled = False
             self._last_peer_translation_activation_requested = False
-        self._save_settings()
         self._refresh_overlay_peer_consumers()
 
         if enabled:
@@ -903,7 +901,6 @@ class GuiController:
             await self._ensure_peer_local_stt_ready()
         self._clear_local_stt_pending_enable_if_provider_switched_away()
         self._sync_local_stt_notice()
-        self._save_settings()
         self._refresh_overlay_peer_consumers()
 
         if enabled and self.overlay_state not in {"starting", "connected"}:

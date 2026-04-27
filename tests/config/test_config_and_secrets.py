@@ -835,7 +835,7 @@ def test_load_settings_backfills_overlay_display_preferences_when_overlay_sectio
     persisted = json.loads(path.read_text(encoding="utf-8"))
     assert persisted["overlay"]["show_translation"] is True
     assert persisted["overlay"]["show_peer_original"] is True
-    assert persisted["ui"]["overlay_enabled"] is True
+    assert "overlay_enabled" not in persisted["ui"]
 
 
 def test_stt_custom_vocabulary_roundtrip(tmp_path):

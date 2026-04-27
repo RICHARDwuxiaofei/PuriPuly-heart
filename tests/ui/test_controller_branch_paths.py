@@ -2633,6 +2633,59 @@ async def test_overlay_toggle_starts_and_stops_overlay_runtime(
 
 
 @pytest.mark.asyncio
+async def test_overlay_toggle_does_not_persist_transient_button_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    save_calls: list[str] = []
+    controller = _make_controller(app=SimpleNamespace(refresh_overlay_peer_contract=lambda: None))
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    async def fake_begin_overlay_start(self: GuiController) -> None:
+        _ = self
+
+    async def fake_shutdown_overlay_runtime(
+        self: GuiController, *, preserve_failure_reason: bool
+    ) -> None:
+        _ = (self, preserve_failure_reason)
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: save_calls.append("save"))
+    monkeypatch.setattr(GuiController, "_begin_overlay_start", fake_begin_overlay_start)
+    monkeypatch.setattr(GuiController, "_shutdown_overlay_runtime", fake_shutdown_overlay_runtime)
+
+    await controller.set_overlay_enabled(True)
+    await controller.set_overlay_enabled(False)
+
+    assert save_calls == []
+    assert controller.settings.ui.overlay_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_peer_translation_toggle_does_not_persist_transient_button_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    save_calls: list[str] = []
+    controller = _make_controller(app=SimpleNamespace(refresh_overlay_peer_contract=lambda: None))
+    controller.settings = AppSettings()
+    controller.settings.ui.peer_translation_eula_accepted = True
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    controller.overlay_state = "connected"
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: save_calls.append("save"))
+    monkeypatch.setattr(
+        GuiController,
+        "_refresh_overlay_runtime_dependencies",
+        lambda self: asyncio.sleep(0),
+    )
+
+    await controller.set_peer_translation_enabled(True)
+    await controller.set_peer_translation_enabled(False)
+
+    assert save_calls == []
+    assert controller.settings.ui.peer_translation_enabled is False
+
+
+@pytest.mark.asyncio
 async def test_successful_overlay_start_refreshes_consumers_after_peer_runtime_becomes_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3824,6 +3877,50 @@ async def test_start_initializes_dashboard_and_bridge(
     assert hub.start_calls == [True]
     assert bridge_events[0] == ("init", app, hub.ui_events, controller.runtime_logging)
     assert "run" in bridge_events
+
+
+@pytest.mark.asyncio
+async def test_start_does_not_auto_restore_transient_overlay_or_peer_toggles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.ui.overlay_enabled = True
+    settings.ui.peer_translation_enabled = True
+    settings.ui.peer_translation_eula_accepted = True
+
+    dash = DummyDashboard()
+    logs = DummyLogsView()
+    hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    overlay_calls: list[bool] = []
+
+    async def fake_init_pipeline(self) -> None:
+        self.hub = hub
+
+    async def fake_set_overlay_enabled(self: GuiController, enabled: bool) -> None:
+        _ = self
+        overlay_calls.append(enabled)
+
+    class FakeBridge:
+        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
+            _ = (app, event_queue, runtime_logging)
+
+        async def run(self) -> None:
+            return None
+
+    monkeypatch.setattr(GuiController, "_load_or_init_settings", lambda self, path: settings)
+    monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+    monkeypatch.setattr(GuiController, "set_overlay_enabled", fake_set_overlay_enabled)
+    monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
+    monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
+
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash, view_logs=logs))
+
+    await controller.start()
+    await asyncio.sleep(0)
+
+    assert overlay_calls == []
+    assert hub.peer_translation_enabled is False
 
 
 @pytest.mark.asyncio
@@ -6459,10 +6556,10 @@ def test_load_or_init_settings_creates_default_file(
     loaded = controller._load_or_init_settings(path)
 
     assert isinstance(loaded, AppSettings)
-    assert loaded.ui.overlay_enabled is True
+    assert loaded.ui.overlay_enabled is False
     assert path.parent.exists() is True
     assert saves == [(path, loaded)]
-    assert saves[0][1].ui.overlay_enabled is True
+    assert saves[0][1].ui.overlay_enabled is False
 
 
 @pytest.mark.asyncio
