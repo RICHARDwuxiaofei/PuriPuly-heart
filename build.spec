@@ -100,6 +100,8 @@ def _is_root_level_auto_collected_soxr_dll(binary) -> bool:
 
 # Collect data files
 datas = [
+    # Project license text for packaged/installed distributions
+    ("LICENSE", "."),
     # VAD model and data files
     (str(src_path / "puripuly_heart" / "data"), "puripuly_heart/data"),
     # Prompt templates

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,12 @@ name = "puripuly-heart"
 version = "2.0.0"
 description = "LLM-based real-time translator for VRChat"
 readme = "README.md"
-license = "MIT"
+license = "AGPL-3.0-or-later"
+license-files = [
+  "LICENSE",
+  "src/puripuly_heart/data/THIRD_PARTY_NOTICES.txt",
+  "src/puripuly_heart/data/licenses/COPYING.LGPL-2.1.txt",
+]
 requires-python = ">=3.12,<3.14"
 dependencies = [
   "numpy>=2.0",

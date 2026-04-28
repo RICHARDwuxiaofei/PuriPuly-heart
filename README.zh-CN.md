@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-2.0.0-blue" alt="Version" />
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
+  <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
 </p>
@@ -345,8 +345,10 @@ $env:APP_VERSION = (& ".\.venv\Scripts\python.exe" scripts/ci/read-project-versi
 
 ---
 
-## 开源协议
+## 许可证
 
-[MIT](LICENSE)
+[AGPL-3.0-or-later](LICENSE)
 
-第三方软件开源协议说明: `THIRD_PARTY_NOTICES.txt`
+此前发布的 MIT 版本仍可按 MIT 许可证使用。
+
+第三方许可证和声明: `src/puripuly_heart/data/THIRD_PARTY_NOTICES.txt`

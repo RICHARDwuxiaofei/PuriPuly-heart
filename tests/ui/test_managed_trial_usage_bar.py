@@ -6,7 +6,7 @@ pytest.importorskip("flet")
 import flet as ft
 
 from puripuly_heart.ui.components.managed_trial_usage_bar import ManagedTrialUsageBar
-from puripuly_heart.ui.i18n import set_locale, t
+from puripuly_heart.ui.i18n import get_locale, set_locale, t
 
 
 def test_managed_trial_usage_bar_renders_inline_placeholder_when_percent_unknown() -> None:
@@ -63,16 +63,20 @@ def test_managed_trial_usage_bar_handles_empty_and_full_states() -> None:
 
 
 def test_managed_trial_usage_bar_apply_locale_refreshes_overlay_text() -> None:
-    set_locale("en")
-    bar = ManagedTrialUsageBar(percent=71)
+    previous_locale = get_locale()
+    try:
+        set_locale("en")
+        bar = ManagedTrialUsageBar(percent=71)
 
-    set_locale("ko")
-    bar.apply_locale()
-    assert bar._remaining_text.value == "사용량 71% 남음"
+        set_locale("ko")
+        bar.apply_locale()
+        assert bar._remaining_text.value == "사용량 71% 남음"
 
-    bar.set_percent(None)
-    bar.apply_locale()
-    assert bar._remaining_text.value == "확인 중"
+        bar.set_percent(None)
+        bar.apply_locale()
+        assert bar._remaining_text.value == "확인 중"
+    finally:
+        set_locale(previous_locale)
 
 
 def test_managed_trial_usage_bar_uses_real_status_icon_for_known_and_unknown_states() -> None:
