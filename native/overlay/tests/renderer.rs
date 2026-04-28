@@ -206,7 +206,7 @@ fn renderer_centers_each_line_within_strip_bounds() {
 }
 
 #[test]
-fn renderer_secondary_origin_includes_28px_gap_after_primary_budget() {
+fn renderer_secondary_origin_includes_30px_gap_after_primary_budget() {
     let policy = CaptionLayoutPolicy::default();
     let result = policy.layout_blocks(
         vec![bilingual_block(
@@ -227,7 +227,7 @@ fn renderer_secondary_origin_includes_28px_gap_after_primary_budget() {
 
     assert_close(
         secondary.origin_y,
-        block.bounds.top_px + 32.0 + 2.0 * 150.0 + 28.0,
+        block.bounds.top_px + 32.0 + 2.0 * 150.0 + 30.0,
     );
 }
 
@@ -257,7 +257,7 @@ fn renderer_secondary_origin_gap_scales_with_text_scale() {
 
     assert_close(
         secondary.origin_y,
-        block.bounds.top_px + (32.0 + 2.0 * 150.0 + 28.0) * 1.5,
+        block.bounds.top_px + (32.0 + 2.0 * 150.0 + 30.0) * 1.5,
     );
 }
 
@@ -284,7 +284,7 @@ fn renderer_windows_public_layout_secondary_origin_uses_gap_formula() {
 
     assert_close(
         secondary.origin_y,
-        block.bounds.top_px + 32.0 + 2.0 * 150.0 + 28.0,
+        block.bounds.top_px + 32.0 + 2.0 * 150.0 + 30.0,
     );
 }
 
