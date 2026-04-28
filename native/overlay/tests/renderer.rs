@@ -57,12 +57,12 @@ fn renderer_preferred_face_resolution_uses_latin_and_cjk_order_before_system_fal
 #[test]
 fn renderer_uses_fixed_surface_defaults_for_mvp_caption_layout() {
     let policy = CaptionLayoutPolicy::default();
-    assert_eq!(policy.default_surface_size(), (4320, 1024));
+    assert_eq!(policy.default_surface_size(), (4096, 1056));
     assert_eq!(policy.visible_window_target_blocks(), 2);
 }
 
 #[test]
-fn renderer_default_typography_resolves_128px_primary_and_79_36px_secondary() {
+fn renderer_default_typography_resolves_132px_primary_and_81_84px_secondary() {
     let policy = CaptionLayoutPolicy::default();
     let result = policy.layout_blocks(
         vec![bilingual_block(
@@ -82,8 +82,8 @@ fn renderer_default_typography_resolves_128px_primary_and_79_36px_secondary() {
         .as_ref()
         .expect("secondary source line should be present");
 
-    assert_close(primary.font_size_px, 128.0);
-    assert_close(secondary.font_size_px, 79.36);
+    assert_close(primary.font_size_px, 132.0);
+    assert_close(secondary.font_size_px, 81.84);
     assert!(secondary.font_size_px < primary.font_size_px);
 }
 
@@ -499,7 +499,7 @@ fn renderer_source_only_peer_finalized_with_state_generated_slots_does_not_overl
 }
 
 #[test]
-fn renderer_secondary_reserved_block_height_remains_460px_at_default_scale() {
+fn renderer_secondary_reserved_block_height_remains_468px_at_default_scale() {
     let policy = CaptionLayoutPolicy::default();
     let result = policy.layout_blocks(
         vec![bilingual_block(
@@ -513,7 +513,7 @@ fn renderer_secondary_reserved_block_height_remains_460px_at_default_scale() {
     );
 
     let block = &result.visible_blocks[0];
-    assert_close(block.bounds.bottom_px - block.bounds.top_px, 460.0);
+    assert_close(block.bounds.bottom_px - block.bounds.top_px, 468.0);
 }
 
 #[test]
@@ -538,21 +538,21 @@ fn renderer_two_secondary_reserved_slots_fit_default_surface_after_typography_sp
             )
             .with_variant(CaptionBlockVariant::Finalized)
             .with_channel(CaptionChannel::SelfChannel)
-            .with_slot(1, 536.0),
+            .with_slot(1, 544.0),
         ],
-        3840,
-        1024,
+        4096,
+        1056,
     );
 
     assert_eq!(result.visible_blocks.len(), 2);
     for block in &result.visible_blocks {
         assert!(
-            block.bounds.top_px >= 0.0 && block.bounds.bottom_px <= 1024.0,
+            block.bounds.top_px >= 0.0 && block.bounds.bottom_px <= 1056.0,
             "block bounds {:?} should stay inside default surface",
             block.bounds
         );
         assert!(
-            block.visual_bounds.top_px >= 0.0 && block.visual_bounds.bottom_px <= 1024.0,
+            block.visual_bounds.top_px >= 0.0 && block.visual_bounds.bottom_px <= 1056.0,
             "visual bounds {:?} should stay inside default surface",
             block.visual_bounds
         );
@@ -582,7 +582,7 @@ fn renderer_source_only_peer_remains_secondary_only_with_readable_default_size()
     assert!(block.primary_lines.iter().all(|line| line.text.is_empty()));
     assert_eq!(secondary.role, LineRole::Secondary);
     assert_eq!(secondary.text, "source-only peer fallback remains readable");
-    assert_close(secondary.font_size_px, 79.36);
+    assert_close(secondary.font_size_px, 81.84);
     assert!(secondary.origin_y > block.bounds.top_px + 32.0 + 2.0 * 150.0);
 }
 
@@ -627,7 +627,7 @@ fn renderer_damage_band_includes_same_peer_slot_when_primary_text_arrives() {
                 .with_variant(CaptionBlockVariant::Finalized)
                 .with_channel(CaptionChannel::SelfChannel)
                 .with_secondary_text("self translation", true)
-                .with_slot(1, 536.0),
+                .with_slot(1, 544.0),
         ])
         .unwrap();
 
@@ -1072,8 +1072,8 @@ fn renderer_returns_a_renderable_d3d11_texture_result() {
 
     assert!(frame.texture_ptr().is_some());
     assert!(frame.d3d11_texture().is_some());
-    assert_eq!(frame.width(), 4320);
-    assert_eq!(frame.height(), 1024);
+    assert_eq!(frame.width(), 4096);
+    assert_eq!(frame.height(), 1056);
 }
 
 #[cfg(windows)]
@@ -1286,8 +1286,8 @@ fn renderer_returns_a_renderable_texture_contract_off_windows() {
     let frame = renderer.render_blocks(vec![test_block("hello")]).unwrap();
 
     assert!(frame.texture_ptr().is_some());
-    assert_eq!(frame.width(), 4320);
-    assert_eq!(frame.height(), 1024);
+    assert_eq!(frame.width(), 4096);
+    assert_eq!(frame.height(), 1056);
 }
 
 #[cfg(not(windows))]
