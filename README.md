@@ -355,6 +355,4 @@ $env:APP_VERSION = (& ".\.venv\Scripts\python.exe" scripts/ci/read-project-versi
 
 [AGPL-3.0-or-later](LICENSE)
 
-Previously published MIT versions remain available under MIT.
-
 Third-party licenses and notices: `src/puripuly_heart/data/THIRD_PARTY_NOTICES.txt`
