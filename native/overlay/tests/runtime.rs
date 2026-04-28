@@ -268,7 +268,7 @@ impl OverlayFrameSubmitter for RecordingSubmitter {
         if self.fail {
             return Err(OpenVrError::Submit("submit failed".into()));
         }
-        assert_eq!(frame.width(), 3840);
+        assert_eq!(frame.width(), 4320);
         assert_eq!(frame.height(), 1024);
         Ok(())
     }

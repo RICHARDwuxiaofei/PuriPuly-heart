@@ -57,7 +57,7 @@ fn renderer_preferred_face_resolution_uses_latin_and_cjk_order_before_system_fal
 #[test]
 fn renderer_uses_fixed_surface_defaults_for_mvp_caption_layout() {
     let policy = CaptionLayoutPolicy::default();
-    assert_eq!(policy.default_surface_size(), (3840, 1024));
+    assert_eq!(policy.default_surface_size(), (4320, 1024));
     assert_eq!(policy.visible_window_target_blocks(), 2);
 }
 
@@ -206,7 +206,7 @@ fn renderer_centers_each_line_within_strip_bounds() {
 }
 
 #[test]
-fn renderer_secondary_origin_includes_28px_gap_after_primary_budget() {
+fn renderer_secondary_origin_includes_30px_gap_after_primary_budget() {
     let policy = CaptionLayoutPolicy::default();
     let result = policy.layout_blocks(
         vec![bilingual_block(
@@ -227,7 +227,7 @@ fn renderer_secondary_origin_includes_28px_gap_after_primary_budget() {
 
     assert_close(
         secondary.origin_y,
-        block.bounds.top_px + 32.0 + 2.0 * 150.0 + 28.0,
+        block.bounds.top_px + 32.0 + 2.0 * 150.0 + 30.0,
     );
 }
 
@@ -257,7 +257,7 @@ fn renderer_secondary_origin_gap_scales_with_text_scale() {
 
     assert_close(
         secondary.origin_y,
-        block.bounds.top_px + (32.0 + 2.0 * 150.0 + 28.0) * 1.5,
+        block.bounds.top_px + (32.0 + 2.0 * 150.0 + 30.0) * 1.5,
     );
 }
 
@@ -284,7 +284,7 @@ fn renderer_windows_public_layout_secondary_origin_uses_gap_formula() {
 
     assert_close(
         secondary.origin_y,
-        block.bounds.top_px + 32.0 + 2.0 * 150.0 + 28.0,
+        block.bounds.top_px + 32.0 + 2.0 * 150.0 + 30.0,
     );
 }
 
@@ -1072,7 +1072,7 @@ fn renderer_returns_a_renderable_d3d11_texture_result() {
 
     assert!(frame.texture_ptr().is_some());
     assert!(frame.d3d11_texture().is_some());
-    assert_eq!(frame.width(), 3840);
+    assert_eq!(frame.width(), 4320);
     assert_eq!(frame.height(), 1024);
 }
 
@@ -1282,7 +1282,7 @@ fn renderer_returns_a_renderable_texture_contract_off_windows() {
     let frame = renderer.render_blocks(vec![test_block("hello")]).unwrap();
 
     assert!(frame.texture_ptr().is_some());
-    assert_eq!(frame.width(), 3840);
+    assert_eq!(frame.width(), 4320);
     assert_eq!(frame.height(), 1024);
 }
 

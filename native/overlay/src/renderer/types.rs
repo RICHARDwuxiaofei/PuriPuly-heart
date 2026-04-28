@@ -3,7 +3,7 @@ use thiserror::Error;
 #[cfg(windows)]
 use windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT;
 
-pub(crate) const DEFAULT_SURFACE_WIDTH_PX: u32 = 3840;
+pub(crate) const DEFAULT_SURFACE_WIDTH_PX: u32 = 4320;
 pub(crate) const DEFAULT_SURFACE_HEIGHT_PX: u32 = 1024;
 pub(crate) const DEFAULT_HORIZONTAL_PADDING_PX: u32 = 48;
 pub(crate) const DEFAULT_VERTICAL_PADDING_PX: u32 = 40;
@@ -19,7 +19,7 @@ pub(crate) const DEFAULT_AVERAGE_GLYPH_ADVANCE_PX: u32 =
     (DEFAULT_FONT_SIZE_PX * DEFAULT_AVERAGE_GLYPH_ADVANCE_RATIO) as u32;
 pub(crate) const SECONDARY_FONT_SCALE: f32 = 0.62;
 #[allow(dead_code)]
-pub(crate) const PRIMARY_SECONDARY_GAP_PX: f32 = 28.0;
+pub(crate) const PRIMARY_SECONDARY_GAP_PX: f32 = 30.0;
 pub(crate) const TEXT_OUTLINE_OVERHANG_PX: f32 = 5.0;
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) const SELF_TEXT_FILL_COLOR: (f32, f32, f32, f32) = (1.0, 1.0, 1.0, 1.0);

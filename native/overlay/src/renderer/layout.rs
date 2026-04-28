@@ -1269,7 +1269,7 @@ mod tests {
             .as_ref()
             .expect("secondary line should be present");
 
-        assert_close(secondary.origin_y, (32.0 + 2.0 * 150.0 + 28.0) * 1.25);
+        assert_close(secondary.origin_y, (32.0 + 2.0 * 150.0 + 30.0) * 1.25);
     }
 
     #[cfg(windows)]
@@ -1294,7 +1294,7 @@ mod tests {
 
         assert_close(
             secondary.origin_y,
-            block.bounds.top_px + 32.0 + 2.0 * 150.0 + 28.0,
+            block.bounds.top_px + 32.0 + 2.0 * 150.0 + 30.0,
         );
     }
 
