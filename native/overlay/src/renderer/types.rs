@@ -3,7 +3,7 @@ use thiserror::Error;
 #[cfg(windows)]
 use windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT;
 
-pub(crate) const DEFAULT_SURFACE_WIDTH_PX: u32 = 3840;
+pub(crate) const DEFAULT_SURFACE_WIDTH_PX: u32 = 4320;
 pub(crate) const DEFAULT_SURFACE_HEIGHT_PX: u32 = 1024;
 pub(crate) const DEFAULT_HORIZONTAL_PADDING_PX: u32 = 48;
 pub(crate) const DEFAULT_VERTICAL_PADDING_PX: u32 = 40;

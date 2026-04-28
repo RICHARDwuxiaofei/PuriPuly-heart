@@ -57,7 +57,7 @@ fn renderer_preferred_face_resolution_uses_latin_and_cjk_order_before_system_fal
 #[test]
 fn renderer_uses_fixed_surface_defaults_for_mvp_caption_layout() {
     let policy = CaptionLayoutPolicy::default();
-    assert_eq!(policy.default_surface_size(), (3840, 1024));
+    assert_eq!(policy.default_surface_size(), (4320, 1024));
     assert_eq!(policy.visible_window_target_blocks(), 2);
 }
 
@@ -1085,7 +1085,7 @@ fn renderer_returns_a_renderable_d3d11_texture_result() {
 
     assert!(frame.texture_ptr().is_some());
     assert!(frame.d3d11_texture().is_some());
-    assert_eq!(frame.width(), 3840);
+    assert_eq!(frame.width(), 4320);
     assert_eq!(frame.height(), 1024);
 }
 
@@ -1295,7 +1295,7 @@ fn renderer_returns_a_renderable_texture_contract_off_windows() {
     let frame = renderer.render_blocks(vec![test_block("hello")]).unwrap();
 
     assert!(frame.texture_ptr().is_some());
-    assert_eq!(frame.width(), 3840);
+    assert_eq!(frame.width(), 4320);
     assert_eq!(frame.height(), 1024);
 }
 
