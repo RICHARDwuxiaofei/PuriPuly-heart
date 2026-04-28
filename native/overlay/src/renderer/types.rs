@@ -3,18 +3,18 @@ use thiserror::Error;
 #[cfg(windows)]
 use windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT;
 
-pub(crate) const DEFAULT_SURFACE_WIDTH_PX: u32 = 4320;
-pub(crate) const DEFAULT_SURFACE_HEIGHT_PX: u32 = 1024;
+pub(crate) const DEFAULT_SURFACE_WIDTH_PX: u32 = 4096;
+pub(crate) const DEFAULT_SURFACE_HEIGHT_PX: u32 = 1056;
 pub(crate) const DEFAULT_HORIZONTAL_PADDING_PX: u32 = 48;
 pub(crate) const DEFAULT_VERTICAL_PADDING_PX: u32 = 40;
 pub(crate) const DEFAULT_PRIMARY_LINE_HEIGHT_PX: u32 = 150;
-pub(crate) const DEFAULT_SECONDARY_LINE_HEIGHT_PX: u32 = 96;
+pub(crate) const DEFAULT_SECONDARY_LINE_HEIGHT_PX: u32 = 104;
 pub(crate) const DEFAULT_BLOCK_SPACING_PX: u32 = 36;
 pub(crate) const DEFAULT_STRIP_HORIZONTAL_PADDING_PX: u32 = 24;
 pub(crate) const DEFAULT_STRIP_VERTICAL_PADDING_PX: u32 = 32;
 pub(crate) const DEFAULT_AVERAGE_GLYPH_ADVANCE_RATIO: f32 = 80.0 / 140.0;
-pub(crate) const DEFAULT_FONT_SIZE_PX: f32 = 128.0;
-// 128.0 * (80.0 / 140.0) = 73.14; truncating to 73 keeps fallback wrapping slightly conservative.
+pub(crate) const DEFAULT_FONT_SIZE_PX: f32 = 132.0;
+// 132.0 * (80.0 / 140.0) = 75.43; truncating keeps fallback metrics close to the baseline ratio.
 pub(crate) const DEFAULT_AVERAGE_GLYPH_ADVANCE_PX: u32 =
     (DEFAULT_FONT_SIZE_PX * DEFAULT_AVERAGE_GLYPH_ADVANCE_RATIO) as u32;
 pub(crate) const SECONDARY_FONT_SCALE: f32 = 0.62;

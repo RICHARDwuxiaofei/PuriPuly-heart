@@ -1240,11 +1240,11 @@ mod tests {
     }
 
     #[test]
-    fn fallback_layout_uses_scaled_average_glyph_advance_for_128px_primary() {
+    fn fallback_layout_uses_scaled_average_glyph_advance_for_132px_primary() {
         let policy = CaptionLayoutPolicy::default();
         let template = policy.build_fallback_block_template(
             &CaptionBlock::new("fallback", "aaaaaaaaaaaaaaa"),
-            691.0,
+            699.0,
             1.0,
         );
 
@@ -1255,7 +1255,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(primary_texts, vec!["aaaaaaaaaaaaaaa"]);
-        assert_close(template.primary_lines[0].font_size_px, 128.0);
+        assert_close(template.primary_lines[0].font_size_px, 132.0);
     }
 
     #[test]
