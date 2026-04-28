@@ -7,8 +7,7 @@ pub mod runtime;
 pub mod state;
 
 pub use bridge::{
-    BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEvent, OverlayResubmitCurrentFrame,
-    OverlayRuntimeControl,
+    BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEvent, OverlayRuntimeControl,
 };
 pub use logging::{OverlayLogger, OverlayLoggingMode};
 pub use manifest::{load_manifest, validate_manifest, OverlayManifest, EXPECTED_CONTRACT_VERSION};
@@ -21,10 +20,7 @@ pub use renderer::{
     CaptionLayoutPolicy, CaptionLayoutResult, CaptionLineLayout, CaptionPresentation,
     CaptionRenderError, CaptionRenderer, DamageBand, RenderedFrame, VisibleCaptionBlock,
 };
-pub use runtime::{
-    run_cli, run_with_manifest, OverlayRuntime, ResubmitCurrentFrameOutcome, RuntimeFailure,
-    StartupError,
-};
+pub use runtime::{run_cli, run_with_manifest, OverlayRuntime, RuntimeFailure, StartupError};
 pub use state::{
     OverlayCalibration, OverlayPresentationBlock, OverlayPresentationBlockVariant,
     OverlayPresentationCalibration, OverlayPresentationSnapshot, OverlayScene, OverlaySlot,

@@ -44,8 +44,6 @@ SleepFn = Callable[[float], Awaitable[None]]
 class OverlayPresentationTransport(Protocol):
     async def replace_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None: ...
 
-    async def resubmit_current_frame(self, *, target_revision: int, reason: str) -> None: ...
-
     async def broadcast_shutdown(self) -> None: ...
 
 
@@ -149,7 +147,7 @@ class OverlayPresenter(OverlaySink):
         init=False,
         default=None,
     )
-    _peer_presentation_refresh_target_revision: int | None = field(init=False, default=None)
+    _peer_presentation_refresh_nonce: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         self._snapshot = OverlayPresentationSnapshot(
@@ -422,7 +420,7 @@ class OverlayPresenter(OverlaySink):
         self._appearance_seq = 0
         self._last_visible_window_signature = None
         self._peer_presentation_refresh_target_key = None
-        self._peer_presentation_refresh_target_revision = None
+        self._peer_presentation_refresh_nonce = 0
         self._snapshot = OverlayPresentationSnapshot(
             revision=0,
             calibration=_calibration_from_overlay(self.calibration),
@@ -442,7 +440,7 @@ class OverlayPresenter(OverlaySink):
         self._revision += 1
         self._last_visible_window_signature = None
         self._peer_presentation_refresh_target_key = None
-        self._peer_presentation_refresh_target_revision = None
+        self._peer_presentation_refresh_nonce = 0
         self._snapshot = OverlayPresentationSnapshot(
             revision=self._revision,
             calibration=_calibration_from_overlay(self.calibration),
@@ -489,7 +487,8 @@ class OverlayPresenter(OverlaySink):
         if not next_enabled:
             await self._cancel_peer_presentation_refresh_burst_task_and_wait()
             self._peer_presentation_refresh_target_key = None
-            self._peer_presentation_refresh_target_revision = None
+            self._peer_presentation_refresh_nonce = 0
+            await self._publish_if_changed()
 
     async def broadcast_shutdown(self) -> None:
         if self.bridge is None:
@@ -1125,7 +1124,9 @@ class OverlayPresenter(OverlaySink):
         self._remember_retired_preview_self_seq(key, entry.last_updated_seq)
         self._remove_entry(key, reason=reason, now=now)
 
-    async def _publish_if_changed(self) -> None:
+    async def _publish_if_changed(self, *, force_peer_presentation_refresh: bool = False) -> None:
+        if force_peer_presentation_refresh:
+            self._peer_presentation_refresh_nonce += 1
         now = self.clock.now()
         self._expire_closed_entries(now=now)
         rendered_entries = self._visible_block_entries(now=now)
@@ -1454,7 +1455,10 @@ class OverlayPresenter(OverlaySink):
                     secondary_enabled=self.show_peer_original and bool(original_text),
                     update_id=entry.translation_update_id,
                     origin_wall_clock_ms=entry.translation_origin_wall_clock_ms,
-                    session_scope=entry.translation_session_scope,
+                    session_scope=self._peer_session_scope_with_presentation_refresh(
+                        entry,
+                        entry.translation_session_scope,
+                    ),
                     source_text_hash=entry.translation_source_text_hash,
                     source_text_len=entry.translation_source_text_len,
                     logical_turn_key=entry.translation_logical_turn_key,
@@ -1472,7 +1476,7 @@ class OverlayPresenter(OverlaySink):
                     primary_text="",
                     secondary_text=active_text,
                     secondary_enabled=True,
-                    session_scope=None,
+                    session_scope=self._peer_session_scope_with_presentation_refresh(entry, None),
                 )
             if original_text:
                 if not self.show_peer_original:
@@ -1490,7 +1494,7 @@ class OverlayPresenter(OverlaySink):
                     primary_text="",
                     secondary_text=original_text,
                     secondary_enabled=True,
-                    session_scope=None,
+                    session_scope=self._peer_session_scope_with_presentation_refresh(entry, None),
                 )
             return None
         else:
@@ -1948,17 +1952,12 @@ class OverlayPresenter(OverlaySink):
         if key is None or not self._snapshot_has_refreshable_peer_key(key):
             return
         self._peer_presentation_refresh_target_key = key
-        self._peer_presentation_refresh_target_revision = self._snapshot.revision
         self._cancel_peer_presentation_refresh_burst_task()
         self._peer_presentation_refresh_burst_task = asyncio.create_task(
-            self._run_peer_presentation_refresh_burst(key, self._snapshot.revision)
+            self._run_peer_presentation_refresh_burst(key)
         )
 
-    async def _run_peer_presentation_refresh_burst(
-        self,
-        key: tuple[str, UUID],
-        target_revision: int,
-    ) -> None:
+    async def _run_peer_presentation_refresh_burst(self, key: tuple[str, UUID]) -> None:
         deadline = self.clock.now() + PEER_PRESENTATION_REFRESH_BURST_SECONDS
         try:
             while self.peer_presentation_refresh_burst and self.clock.now() < deadline:
@@ -1967,15 +1966,9 @@ class OverlayPresenter(OverlaySink):
                     return
                 if self._peer_presentation_refresh_target_key != key:
                     return
-                if self._peer_presentation_refresh_target_revision != target_revision:
-                    return
                 if not self._snapshot_has_refreshable_peer_key(key):
                     return
-                if self.bridge is not None:
-                    await self.bridge.resubmit_current_frame(
-                        target_revision=target_revision,
-                        reason="peer_presentation_refresh",
-                    )
+                await self._publish_if_changed(force_peer_presentation_refresh=True)
         except asyncio.CancelledError:
             raise
         finally:
@@ -1985,9 +1978,31 @@ class OverlayPresenter(OverlaySink):
                 and self._peer_presentation_refresh_burst_task is current_task
             ):
                 self._peer_presentation_refresh_burst_task = None
+                had_refresh_metadata = (
+                    self._peer_presentation_refresh_target_key == key
+                    and self._peer_presentation_refresh_nonce > 0
+                )
                 if self._peer_presentation_refresh_target_key == key:
                     self._peer_presentation_refresh_target_key = None
-                    self._peer_presentation_refresh_target_revision = None
+                    self._peer_presentation_refresh_nonce = 0
+                if had_refresh_metadata:
+                    await self._publish_if_changed()
+
+    def _peer_session_scope_with_presentation_refresh(
+        self,
+        entry: _LogicalTurnEntry,
+        session_scope: str | None,
+    ) -> str | None:
+        if (
+            not self.peer_presentation_refresh_burst
+            or self._peer_presentation_refresh_nonce <= 0
+            or self._peer_presentation_refresh_target_key != (entry.channel, entry.utterance_id)
+        ):
+            return session_scope
+        marker = f"peer_presentation_refresh={self._peer_presentation_refresh_nonce}"
+        if session_scope:
+            return f"{session_scope}|{marker}"
+        return marker
 
     def _cancel_peer_presentation_refresh_burst_task(self) -> None:
         task = self._peer_presentation_refresh_burst_task

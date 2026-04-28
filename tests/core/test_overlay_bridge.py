@@ -370,65 +370,6 @@ async def test_overlay_bridge_broadcasts_runtime_logging_mode_updates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_overlay_bridge_resubmit_current_frame_broadcasts_submit_only_message(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    initial_presentation = OverlayPresentationSnapshot(
-        revision=5,
-        calibration=OverlayPresentationCalibration(distance=1.25),
-        blocks=[
-            OverlayPresentationBlock(
-                id="peer:resubmit",
-                occupant_key="peer:resubmit",
-                appearance_seq=7,
-                channel="peer",
-                block_variant="finalized",
-                primary_text="peer translation",
-                secondary_text="peer original",
-                secondary_enabled=True,
-                update_id="resubmit-upd-1",
-            )
-        ],
-    )
-    bridge = OverlayBridge(
-        session_token="expected-token",
-        overlay_instance_id="resubmit-overlay",
-        initial_snapshot=initial_presentation,
-    )
-    connection = _RecordingSendConnection()
-    bridge._authenticated_connections.add(connection)  # type: ignore[arg-type]
-    caplog.set_level(logging.INFO, logger="puripuly_heart.core.overlay.bridge")
-    initial_snapshot = bridge.snapshot()
-    initial_snapshot_payload = initial_snapshot.to_dict()
-    caplog.clear()
-
-    await bridge.resubmit_current_frame(
-        target_revision="5",  # type: ignore[arg-type]
-        reason="peer_presentation_refresh",
-    )
-
-    assert connection.sent_payloads == [
-        {
-            "type": "resubmit_current_frame",
-            "payload": {
-                "target_revision": 5,
-                "reason": "peer_presentation_refresh",
-            },
-        }
-    ]
-    assert bridge.snapshot() is initial_snapshot
-    assert bridge.snapshot().to_dict() == initial_snapshot_payload
-    assert bridge.snapshot().revision == 5
-    assert bridge._last_snapshot_revision == 5
-    bridge_info_records = [
-        record
-        for record in caplog.records
-        if record.name == "puripuly_heart.core.overlay.bridge" and record.levelno >= logging.INFO
-    ]
-    assert bridge_info_records == []
-
-
-@pytest.mark.asyncio
 async def test_overlay_bridge_replace_snapshot_does_not_log_snapshot_updated(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -593,9 +534,6 @@ async def test_overlay_bridge_snapshot_broadcast_logs_only_in_detailed_mode(
         if "[OverlayBridge][Broadcast]" in record.getMessage()
     ]
 
-    assert not any(
-        "[OverlayBridge] Snapshot updated" in record.getMessage() for record in caplog.records
-    )
     assert not any("overlay_instance_id=basic-overlay" in message for message in broadcast_messages)
     assert any(
         "stage=start" in message

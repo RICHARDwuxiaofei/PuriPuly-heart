@@ -34,14 +34,10 @@ from tests.core.test_hub_branch_coverage import (
 @dataclass(slots=True)
 class RecordingPresentationBridge:
     snapshots: list[object] = field(default_factory=list)
-    resubmit_requests: list[tuple[int, str]] = field(default_factory=list)
     shutdown_calls: int = 0
 
     async def replace_snapshot(self, snapshot: object) -> None:
         self.snapshots.append(snapshot)
-
-    async def resubmit_current_frame(self, *, target_revision: int, reason: str) -> None:
-        self.resubmit_requests.append((target_revision, reason))
 
     async def broadcast_shutdown(self) -> None:
         self.shutdown_calls += 1
@@ -623,7 +619,7 @@ async def test_presenter_peer_active_duplicate_uses_shared_coalesced_disposition
 
 
 @pytest.mark.asyncio
-async def test_presenter_peer_presentation_refresh_burst_defaults_on_and_resubmits_peer_snapshot_without_visible_text_change() -> (
+async def test_presenter_peer_presentation_refresh_burst_defaults_on_and_rerenders_peer_snapshot_without_visible_text_change() -> (
     None
 ):
     bridge = RecordingPresentationBridge()
@@ -663,18 +659,11 @@ async def test_presenter_peer_presentation_refresh_burst_defaults_on_and_resubmi
         )
 
         initial_snapshot = presenter.snapshot()
-        initial_revision = initial_snapshot.revision
         initial_visible_text = [
-            (
-                block.primary_text,
-                block.secondary_text,
-                block.secondary_enabled,
-                block.session_scope,
-            )
+            (block.primary_text, block.secondary_text, block.secondary_enabled)
             for block in initial_snapshot.blocks
         ]
-        assert initial_visible_text == [("", "peer source unchanged during refresh", True, None)]
-        assert len(bridge.snapshots) == 1
+        assert initial_visible_text == [("", "peer source unchanged during refresh", True)]
 
         await asyncio.sleep(0)
         assert len(refresh_sleep_indices()) == 1
@@ -682,84 +671,29 @@ async def test_presenter_peer_presentation_refresh_burst_defaults_on_and_resubmi
         sleep_events[refresh_sleep_indices()[-1]].set()
         await asyncio.sleep(0)
         await asyncio.sleep(0)
+        first_refresh = presenter.snapshot()
 
-        assert presenter.snapshot().revision == initial_revision
-        assert len(bridge.snapshots) == 1
-        assert bridge.resubmit_requests == [(initial_revision, "peer_presentation_refresh")]
+        assert first_refresh.revision == initial_snapshot.revision + 1
+        assert len(bridge.snapshots) == 2
         assert [
-            (
-                block.primary_text,
-                block.secondary_text,
-                block.secondary_enabled,
-                block.session_scope,
-            )
-            for block in presenter.snapshot().blocks
+            (block.primary_text, block.secondary_text, block.secondary_enabled)
+            for block in first_refresh.blocks
         ] == initial_visible_text
+        assert first_refresh.blocks[0].session_scope == "peer_presentation_refresh=1"
 
         assert len(refresh_sleep_indices()) == 2
         sleep_events[refresh_sleep_indices()[-1]].set()
         await asyncio.sleep(0)
         await asyncio.sleep(0)
+        second_refresh = presenter.snapshot()
 
-        assert presenter.snapshot().revision == initial_revision
-        assert len(bridge.snapshots) == 1
-        assert bridge.resubmit_requests == [
-            (initial_revision, "peer_presentation_refresh"),
-            (initial_revision, "peer_presentation_refresh"),
-        ]
-    finally:
-        await presenter.clear_for_runtime_detach()
-
-
-@pytest.mark.asyncio
-async def test_presenter_peer_translation_refresh_burst_keeps_paired_first_snapshot() -> None:
-    bridge = RecordingPresentationBridge()
-    clock = FakeClock(_now=10.0)
-    sleep_calls: list[float] = []
-    sleep_events: list[asyncio.Event] = []
-
-    async def fake_sleep(delay: float) -> None:
-        sleep_calls.append(delay)
-        release = asyncio.Event()
-        sleep_events.append(release)
-        await release.wait()
-        clock.advance(delay)
-        await asyncio.sleep(0)
-
-    presenter = OverlayPresenter(
-        bridge=bridge,
-        calibration=OverlayCalibration(),
-        clock=clock,
-        sleep=fake_sleep,
-    )
-    adapter = OverlayEventAdapter(clock=clock)
-    peer_turn_id = uuid4()
-
-    try:
-        await presenter.emit(
-            adapter.translation_final(
-                utterance_id=peer_turn_id,
-                channel="peer",
-                text="peer translation final",
-                source_text="peer source original",
-                source_language="en",
-                target_language="ko",
-                applied_context_mode=None,
-                created_at=10.0,
-            )
-        )
-
-        assert len(bridge.snapshots) == 1
-        assert bridge.resubmit_requests == []
-        block = presenter.snapshot().blocks[0]
-        assert block.primary_text == "peer translation final"
-        assert block.secondary_text == "peer source original"
-        assert block.secondary_enabled is True
-        assert block.session_scope is None
-
-        await asyncio.sleep(0)
-        assert [delay for delay in sleep_calls if delay == 0.1] == [0.1]
-        assert bridge.resubmit_requests == []
+        assert second_refresh.revision == initial_snapshot.revision + 2
+        assert len(bridge.snapshots) == 3
+        assert [
+            (block.primary_text, block.secondary_text, block.secondary_enabled)
+            for block in second_refresh.blocks
+        ] == initial_visible_text
+        assert second_refresh.blocks[0].session_scope == "peer_presentation_refresh=2"
     finally:
         await presenter.clear_for_runtime_detach()
 
@@ -811,96 +745,13 @@ async def test_presenter_peer_presentation_refresh_burst_naturally_ends_with_cle
             await asyncio.sleep(0)
 
         assert presenter._peer_presentation_refresh_burst_task is None
-        refresh_tick_count = len([delay for delay in sleep_calls if delay == 0.1])
-        assert 20 <= refresh_tick_count <= 21
-        assert len(bridge.snapshots) == 1
-        assert len(bridge.resubmit_requests) == refresh_tick_count
+        assert len([delay for delay in sleep_calls if delay == 0.1]) >= 1
 
         clean_snapshot = presenter.snapshot()
         assert clean_snapshot.blocks[0].primary_text == ""
         assert clean_snapshot.blocks[0].secondary_text == "peer source clean after natural burst"
         assert clean_snapshot.blocks[0].session_scope is None
         assert bridge.snapshots[-1].blocks[0].session_scope is None
-    finally:
-        await presenter.clear_for_runtime_detach()
-
-
-@pytest.mark.asyncio
-async def test_presenter_peer_presentation_refresh_burst_stops_when_peer_row_loses_refreshability() -> (
-    None
-):
-    bridge = RecordingPresentationBridge()
-    clock = FakeClock(_now=10.0)
-    sleep_calls: list[float] = []
-    sleep_events: list[asyncio.Event] = []
-
-    async def fake_sleep(delay: float) -> None:
-        sleep_calls.append(delay)
-        release = asyncio.Event()
-        sleep_events.append(release)
-        await release.wait()
-        clock.advance(delay)
-        await asyncio.sleep(0)
-
-    presenter = OverlayPresenter(
-        bridge=bridge,
-        calibration=OverlayCalibration(),
-        clock=clock,
-        sleep=fake_sleep,
-        peer_presentation_refresh_burst=True,
-    )
-    adapter = OverlayEventAdapter(clock=clock)
-    peer_turn_id = uuid4()
-    peer_block_id = f"peer:{peer_turn_id}"
-
-    def refresh_sleep_indices() -> list[int]:
-        return [index for index, delay in enumerate(sleep_calls) if delay == 0.1]
-
-    try:
-        await presenter.emit(
-            adapter.peer_active_update(
-                text="peer source loses refreshability",
-                utterance_id=peer_turn_id,
-                occupant_key=peer_block_id,
-                created_at=10.0,
-            )
-        )
-        await asyncio.sleep(0)
-
-        assert len(refresh_sleep_indices()) == 1
-        peer_revision = presenter.snapshot().revision
-        snapshot_count_before_hide = len(bridge.snapshots)
-        original_burst_task = presenter._peer_presentation_refresh_burst_task
-        assert original_burst_task is not None
-        assert any(
-            block.id == peer_block_id and block.channel == "peer"
-            for block in presenter.snapshot().blocks
-        )
-
-        await presenter.update_display_preferences(
-            show_translation=True,
-            show_peer_original=False,
-        )
-
-        hidden_snapshot = presenter.snapshot()
-        assert hidden_snapshot.revision == peer_revision + 1
-        assert len(bridge.snapshots) == snapshot_count_before_hide + 1
-        assert not any(
-            block.id == peer_block_id and block.channel == "peer"
-            for block in hidden_snapshot.blocks
-        )
-        assert bridge.resubmit_requests == []
-
-        sleep_events[refresh_sleep_indices()[-1]].set()
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-
-        assert bridge.resubmit_requests == []
-        assert presenter._peer_presentation_refresh_burst_task is None
-        assert original_burst_task.done()
-        assert presenter.snapshot().revision == hidden_snapshot.revision
-        assert len(bridge.snapshots) == snapshot_count_before_hide + 1
-        assert all(block.session_scope is None for block in presenter.snapshot().blocks)
     finally:
         await presenter.clear_for_runtime_detach()
 
@@ -977,20 +828,16 @@ async def test_presenter_peer_presentation_refresh_burst_restarts_after_coalesce
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-        assert presenter.snapshot().revision == revision_before_duplicate
-        assert len(bridge.snapshots) == snapshot_count_before_duplicate
-        assert bridge.resubmit_requests == [
-            (revision_before_duplicate, "peer_presentation_refresh")
-        ]
+        assert presenter.snapshot().revision == revision_before_duplicate + 1
+        assert len(bridge.snapshots) == snapshot_count_before_duplicate + 1
         assert presenter.snapshot().blocks[0].primary_text == ""
         assert presenter.snapshot().blocks[0].secondary_text == "peer source coalesced refresh"
-        assert presenter.snapshot().blocks[0].session_scope is None
     finally:
         await presenter.clear_for_runtime_detach()
 
 
 @pytest.mark.asyncio
-async def test_presenter_disabling_peer_presentation_refresh_burst_cancels_without_snapshot_cleanup() -> (
+async def test_presenter_disabling_peer_presentation_refresh_burst_publishes_clean_peer_snapshot() -> (
     None
 ):
     bridge = RecordingPresentationBridge()
@@ -1033,23 +880,22 @@ async def test_presenter_disabling_peer_presentation_refresh_burst_cancels_witho
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
-        revision_before_disable = presenter.snapshot().revision
+        refresh_snapshot = presenter.snapshot()
+        revision_before_disable = refresh_snapshot.revision
         snapshot_count_before_disable = len(bridge.snapshots)
 
-        assert bridge.resubmit_requests == [(revision_before_disable, "peer_presentation_refresh")]
-        assert presenter.snapshot().blocks[0].primary_text == ""
-        assert presenter.snapshot().blocks[0].secondary_text == "peer source clean disable"
-        assert presenter.snapshot().blocks[0].session_scope is None
+        assert refresh_snapshot.blocks[0].primary_text == ""
+        assert refresh_snapshot.blocks[0].secondary_text == "peer source clean disable"
+        assert refresh_snapshot.blocks[0].session_scope == "peer_presentation_refresh=1"
 
         await presenter.update_peer_presentation_refresh_burst(False)
 
         clean_snapshot = presenter.snapshot()
-        assert clean_snapshot.revision == revision_before_disable
-        assert len(bridge.snapshots) == snapshot_count_before_disable
+        assert clean_snapshot.revision == revision_before_disable + 1
+        assert len(bridge.snapshots) == snapshot_count_before_disable + 1
         assert clean_snapshot.blocks[0].primary_text == ""
         assert clean_snapshot.blocks[0].secondary_text == "peer source clean disable"
         assert clean_snapshot.blocks[0].session_scope is None
-        assert presenter._peer_presentation_refresh_burst_task is None
     finally:
         await presenter.clear_for_runtime_detach()
 

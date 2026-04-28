@@ -361,7 +361,6 @@ class FakeOverlayBridge:
         self.started = False
         self.stopped = False
         self.snapshots: list[object] = []
-        self.resubmit_requests: list[tuple[int, str]] = []
         self.shutdown_calls = 0
         self.runtime_control_messages: list[str] = []
         self.__class__.instances.append(self)
@@ -375,9 +374,6 @@ class FakeOverlayBridge:
     async def replace_snapshot(self, snapshot: object) -> None:
         self.current_snapshot = snapshot
         self.snapshots.append(snapshot)
-
-    async def resubmit_current_frame(self, *, target_revision: int, reason: str) -> None:
-        self.resubmit_requests.append((target_revision, reason))
 
     async def broadcast_shutdown(self) -> None:
         self.shutdown_calls += 1
@@ -2508,12 +2504,13 @@ async def test_overlay_start_product_enables_existing_peer_presentation_refresh_
 
 
 @pytest.mark.asyncio
-async def test_overlay_start_preserves_clean_presenter_snapshot_and_refresh_resubmits(
+async def test_overlay_start_syncs_bridge_after_preserved_presenter_cleans_refresh_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_overlay_runtime(monkeypatch)
     monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
 
+    bridge_start_released_burst = False
     clock = FakeClock(_now=10.0)
     sleep_events: list[asyncio.Event] = []
 
@@ -2546,9 +2543,25 @@ async def test_overlay_start_preserves_clean_presenter_snapshot_and_refresh_resu
     await asyncio.sleep(0)
     await _wait_until(lambda: len(sleep_events) >= 2)
 
-    preserved_snapshot = presenter.snapshot()
-    preserved_revision = preserved_snapshot.revision
-    assert preserved_snapshot.blocks[0].session_scope is None
+    stale_snapshot = presenter.snapshot()
+    assert stale_snapshot.blocks[0].session_scope == "peer_presentation_refresh=1"
+
+    class CleaningDuringStartOverlayBridge(FakeOverlayBridge):
+        instances: list["CleaningDuringStartOverlayBridge"] = []
+
+        async def start(self) -> None:
+            nonlocal bridge_start_released_burst
+            await super().start()
+            for _ in range(25):
+                if presenter._peer_presentation_refresh_burst_task is None:
+                    break
+                assert sleep_events, "refresh burst should be waiting before bridge attach"
+                sleep_events[-1].set()
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+            bridge_start_released_burst = True
+            assert presenter._peer_presentation_refresh_burst_task is None
+            assert presenter.snapshot().blocks[0].session_scope is None
 
     class ImmediateConnectedOverlayProcessManager(FakeOverlayProcessManager):
         instances: list["ImmediateConnectedOverlayProcessManager"] = []
@@ -2557,6 +2570,7 @@ async def test_overlay_start_preserves_clean_presenter_snapshot_and_refresh_resu
             self.state = "connected"
             self.failure_reason = None
 
+    monkeypatch.setattr(controller_module, "OverlayBridge", CleaningDuringStartOverlayBridge)
     monkeypatch.setattr(
         controller_module,
         "OverlayProcessManager",
@@ -2570,23 +2584,13 @@ async def test_overlay_start_preserves_clean_presenter_snapshot_and_refresh_resu
 
     await controller._run_overlay_start()
 
-    bridge = FakeOverlayBridge.instances[0]
-    assert bridge.initial_snapshot is preserved_snapshot
-    assert bridge.initial_snapshot.blocks[0].session_scope is None
-    assert bridge.current_snapshot is preserved_snapshot
-    assert bridge.snapshots == []
-    assert bridge.resubmit_requests == []
+    bridge = CleaningDuringStartOverlayBridge.instances[0]
+    assert bridge_start_released_burst is True
+    assert bridge.initial_snapshot is stale_snapshot
+    assert bridge.initial_snapshot.blocks[0].session_scope == "peer_presentation_refresh=1"
     assert presenter.snapshot().blocks[0].session_scope is None
-    assert presenter.snapshot().revision == preserved_revision
-
-    sleep_events[-1].set()
-    await _wait_until(
-        lambda: bridge.resubmit_requests == [(preserved_revision, "peer_presentation_refresh")]
-    )
-
-    assert presenter.snapshot().revision == preserved_revision
-    assert presenter.snapshot().blocks[0].session_scope is None
-    assert bridge.snapshots == []
+    assert bridge.current_snapshot == presenter.snapshot()
+    assert bridge.snapshots[-1] == presenter.snapshot()
 
     await controller._teardown_overlay_runtime(preserve_presenter_state=False)
 

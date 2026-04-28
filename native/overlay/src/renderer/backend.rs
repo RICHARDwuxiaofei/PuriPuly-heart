@@ -335,6 +335,8 @@ struct WindowsCaptionRenderer {
     cache_outline_brush: ID2D1SolidColorBrush,
     cache_self_text_brush: ID2D1SolidColorBrush,
     cache_peer_text_brush: ID2D1SolidColorBrush,
+    target_bitmap: ID2D1Bitmap1,
+    texture: ID3D11Texture2D,
     caches: WindowsRendererCaches,
     previous_layout: Option<ResolvedFrameLayout>,
     previous_debug_overlay_visible: bool,
@@ -356,8 +358,28 @@ impl WindowsCaptionRenderer {
                 .GetSystemFontFallback()
                 .map_err(|error| CaptionRenderError::Init(error.to_string()))?
         };
+        let texture = create_target_texture(&device)?;
         let d2d_context = create_d2d_context(&device, &d2d_factory)?;
+        let dxgi_surface: IDXGISurface = texture
+            .cast()
+            .map_err(|error| CaptionRenderError::Init(error.to_string()))?;
+        let bitmap_properties = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            colorContext: ManuallyDrop::new(None),
+        };
+        let target_bitmap = unsafe {
+            d2d_context
+                .CreateBitmapFromDxgiSurface(&dxgi_surface, Some(&bitmap_properties))
+                .map_err(|error| CaptionRenderError::Init(error.to_string()))?
+        };
         unsafe {
+            d2d_context.SetTarget(&target_bitmap);
             d2d_context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
         }
         let cache_outline_brush = unsafe {
@@ -390,6 +412,8 @@ impl WindowsCaptionRenderer {
             cache_outline_brush,
             cache_self_text_brush,
             cache_peer_text_brush,
+            target_bitmap,
+            texture,
             caches: WindowsRendererCaches::default(),
             previous_layout: None,
             previous_debug_overlay_visible: false,
@@ -835,22 +859,15 @@ impl WindowsCaptionRenderer {
                 .max(DEBUG_OVERLAY_DAMAGE_BOTTOM_PX.min(layout.surface_height_px as f32));
             diagnostics.debug_overlay_clear_count += 1;
         }
-        let render_band = DamageBand {
-            top_px: 0.0,
-            bottom_px: layout.surface_height_px as f32,
-        };
-        let (texture, target_bitmap) =
-            create_render_target(&self._d3d_device, &self.d2d_context)
-                .map_err(|error| prefix_render_error("target_create", error))?;
         unsafe {
-            self.d2d_context.SetTarget(&target_bitmap);
+            self.d2d_context.SetTarget(&self.target_bitmap);
             self.d2d_context.BeginDraw();
             self.d2d_context.PushAxisAlignedClip(
                 &D2D_RECT_F {
                     left: 0.0,
-                    top: render_band.top_px,
+                    top: damage_band.top_px,
                     right: layout.surface_width_px as f32,
-                    bottom: render_band.bottom_px,
+                    bottom: damage_band.bottom_px,
                 },
                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
             );
@@ -865,7 +882,7 @@ impl WindowsCaptionRenderer {
 
         let render_result = (|| {
             for block in &layout.visible_blocks {
-                if !bounds_intersect_damage_band(block.visual_bounds.as_block_bounds(), render_band)
+                if !bounds_intersect_damage_band(block.visual_bounds.as_block_bounds(), damage_band)
                 {
                     continue;
                 }
@@ -918,7 +935,7 @@ impl WindowsCaptionRenderer {
                 fully_transparent: !layout_has_drawable_text,
                 layout: public_layout,
                 diagnostics,
-                texture: TextureHandle::D3D11(texture),
+                texture: TextureHandle::D3D11(self.texture.clone()),
                 debug_overlay,
             })
         })()
@@ -1173,42 +1190,6 @@ fn create_target_texture(device: &ID3D11Device) -> Result<ID3D11Texture2D, Capti
     }
 
     texture.ok_or_else(|| CaptionRenderError::Init("renderer texture missing".into()))
-}
-
-#[cfg(windows)]
-fn create_target_bitmap(
-    d2d_context: &ID2D1DeviceContext,
-    texture: &ID3D11Texture2D,
-) -> Result<ID2D1Bitmap1, CaptionRenderError> {
-    let dxgi_surface: IDXGISurface = texture
-        .cast()
-        .map_err(|error| CaptionRenderError::Init(error.to_string()))?;
-    let bitmap_properties = D2D1_BITMAP_PROPERTIES1 {
-        pixelFormat: D2D1_PIXEL_FORMAT {
-            format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-        },
-        dpiX: 96.0,
-        dpiY: 96.0,
-        bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-        colorContext: ManuallyDrop::new(None),
-    };
-
-    unsafe {
-        d2d_context
-            .CreateBitmapFromDxgiSurface(&dxgi_surface, Some(&bitmap_properties))
-            .map_err(|error| CaptionRenderError::Init(error.to_string()))
-    }
-}
-
-#[cfg(windows)]
-fn create_render_target(
-    device: &ID3D11Device,
-    d2d_context: &ID2D1DeviceContext,
-) -> Result<(ID3D11Texture2D, ID2D1Bitmap1), CaptionRenderError> {
-    let texture = create_target_texture(device)?;
-    let target_bitmap = create_target_bitmap(d2d_context, &texture)?;
-    Ok((texture, target_bitmap))
 }
 
 #[cfg(windows)]

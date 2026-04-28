@@ -19,19 +19,12 @@ pub struct OverlayRuntimeControl {
     pub logging_mode: OverlayLoggingMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OverlayResubmitCurrentFrame {
-    pub target_revision: u64,
-    pub reason: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum BridgeIncoming {
     Snapshot(OverlayPresentationSnapshot),
     Heartbeat,
     Event(OverlayBridgeEvent),
     Control(OverlayRuntimeControl),
-    ResubmitCurrentFrame(OverlayResubmitCurrentFrame),
 }
 
 #[derive(Debug, Error)]
@@ -153,32 +146,6 @@ impl BridgeClient {
                 Ok(BridgeIncoming::Control(OverlayRuntimeControl {
                     logging_mode,
                 }))
-            }
-            "resubmit_current_frame" => {
-                let payload = map.get("payload").cloned().ok_or_else(|| {
-                    BridgeError::Protocol("resubmit_current_frame payload missing".into())
-                })?;
-                let payload_map = payload.as_object().ok_or_else(|| {
-                    BridgeError::Protocol("resubmit_current_frame payload must be an object".into())
-                })?;
-                let target_revision = payload_map
-                    .get("target_revision")
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| {
-                        BridgeError::Protocol(
-                            "resubmit_current_frame target_revision missing or invalid".into(),
-                        )
-                    })?;
-                let reason = payload_map
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                Ok(BridgeIncoming::ResubmitCurrentFrame(
-                    OverlayResubmitCurrentFrame {
-                        target_revision,
-                        reason,
-                    },
-                ))
             }
             _ => Err(BridgeError::Protocol(format!(
                 "unsupported bridge payload type: {event_type}"

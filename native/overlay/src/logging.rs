@@ -73,11 +73,7 @@ impl OverlayLogger {
             .unwrap_or(false)
     }
 
-    pub(crate) fn from_streams(
-        stdout: LogStream,
-        stderr: LogStream,
-        mode: OverlayLoggingMode,
-    ) -> Self {
+    fn from_streams(stdout: LogStream, stderr: LogStream, mode: OverlayLoggingMode) -> Self {
         Self {
             stdout: Mutex::new(stdout),
             stderr: Mutex::new(stderr),
