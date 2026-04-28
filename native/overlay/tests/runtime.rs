@@ -195,7 +195,9 @@ async fn run_overlay_binary_with_scripted_bridge(
                 }
                 BridgeAction::SendShutdown => {
                     if ws
-                        .send(Message::Text(json!({"type": "shutdown"}).to_string().into()))
+                        .send(Message::Text(
+                            json!({"type": "shutdown"}).to_string().into(),
+                        ))
                         .await
                         .is_err()
                     {
@@ -805,6 +807,83 @@ async fn runtime_does_not_emit_overlay_ready_when_first_texture_submit_fails() {
     assert!(!messages
         .iter()
         .any(|message| message["type"] == "overlay_ready"));
+}
+
+#[tokio::test]
+async fn runtime_submits_same_peer_refresh_target_when_session_scope_nonce_changes() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let logger = test_logger("peer-refresh-nonce-submit").await;
+    let (mut bridge, server) = connect_test_bridge().await;
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
+    let mut submitter = RecordingSubmitter::default();
+
+    runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+
+    let peer_refresh_1 = OverlayPresentationBlock {
+        id: "peer:turn-1".into(),
+        occupant_key: "peer:turn-1".into(),
+        appearance_seq: 1,
+        channel: "peer".into(),
+        block_variant: OverlayPresentationBlockVariant::Finalized,
+        primary_text: "translated peer line".into(),
+        secondary_text: "source peer line".into(),
+        secondary_enabled: true,
+        update_id: Some("peer-update-1".into()),
+        origin_wall_clock_ms: None,
+        session_scope: Some("peer_presentation_refresh=1".into()),
+    };
+    let peer_refresh_2 = OverlayPresentationBlock {
+        session_scope: Some("peer_presentation_refresh=2".into()),
+        ..peer_refresh_1.clone()
+    };
+
+    let first_outcome = runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![peer_refresh_1],
+    });
+    assert!(matches!(
+        first_outcome,
+        puripuly_heart_overlay::runtime::SnapshotApplyOutcome::Applied {
+            visual_changed: true,
+            redraw_requested: true,
+            ..
+        }
+    ));
+    runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+
+    let second_outcome = runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 2,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![peer_refresh_2],
+    });
+    assert!(matches!(
+        second_outcome,
+        puripuly_heart_overlay::runtime::SnapshotApplyOutcome::Applied {
+            visual_changed: true,
+            redraw_requested: true,
+            ..
+        }
+    ));
+    runtime
+        .submit_frame_if_needed(&renderer, &mut submitter, &mut bridge, &logger)
+        .await
+        .unwrap();
+
+    drop(bridge);
+    let _messages = server.await.unwrap();
+
+    assert_eq!(submitter.calls, 3);
+    assert_eq!(
+        submitter.operations,
+        vec!["submit:empty", "submit:text", "show", "submit:text"]
+    );
 }
 
 #[tokio::test]

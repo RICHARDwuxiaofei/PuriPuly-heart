@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 ChannelId = Literal["self", "peer"]
+# `active_peer` remains a reserved compatibility/fallback variant. Normal
+# product peer rows are primary-visible only after translation arrival.
 BlockVariant = Literal["active_self", "active_peer", "finalized"]
 
 

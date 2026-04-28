@@ -1235,6 +1235,10 @@ fn renderer_windows_second_render_hits_layout_and_block_caches() {
     assert!(first.diagnostics().block_cache_misses >= 1);
     assert!(second.diagnostics().layout_cache_hits >= 1);
     assert!(second.diagnostics().block_cache_hits >= 1);
+    assert!(second.diagnostics().text_format_cache_size <= 32);
+    assert!(second.diagnostics().layout_cache_size <= 512);
+    assert!(second.diagnostics().line_cache_size <= 2048);
+    assert!(second.diagnostics().block_cache_size <= 1024);
 }
 
 #[cfg(windows)]

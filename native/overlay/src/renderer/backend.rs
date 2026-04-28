@@ -595,7 +595,7 @@ impl WindowsCaptionRenderer {
     }
 
     fn prepared_line_visual(
-        &self,
+        &mut self,
         block: &ResolvedBlockLayout,
         line: &ResolvedLineLayout,
         role: LineRole,
@@ -804,6 +804,13 @@ impl WindowsCaptionRenderer {
         Ok(())
     }
 
+    fn record_cache_sizes(&self, diagnostics: &mut RenderDiagnostics) {
+        diagnostics.text_format_cache_size = self.caches.text_format_cache.len();
+        diagnostics.layout_cache_size = self.caches.layout_cache.len();
+        diagnostics.line_cache_size = self.caches.line_cache.len();
+        diagnostics.block_cache_size = self.caches.block_cache.len();
+    }
+
     fn render(
         &mut self,
         policy: &CaptionLayoutPolicy,
@@ -816,7 +823,7 @@ impl WindowsCaptionRenderer {
         let mut diagnostics = RenderDiagnostics::default();
         for block in &blocks {
             let key = policy.layout_cache_key_for_block(block, width, presentation);
-            if self.caches.layout_cache.get(&key).is_some() {
+            if self.caches.layout_cache.contains_key(&key) {
                 diagnostics.layout_cache_hits += 1;
             } else {
                 diagnostics.layout_cache_misses += 1;
@@ -888,10 +895,11 @@ impl WindowsCaptionRenderer {
                 }
 
                 if self.cacheable_block(block) {
+                    let cache_key = self.block_cache_key(block);
                     let cached_block = self
                         .caches
                         .block_cache
-                        .get(&self.block_cache_key(block))
+                        .get(&cache_key)
                         .cloned()
                         .ok_or_else(|| {
                             CaptionRenderError::Draw(format!(
@@ -928,6 +936,7 @@ impl WindowsCaptionRenderer {
                 self.draw_debug_overlay_visual(debug_overlay_visual);
                 diagnostics.debug_overlay_draw_count += 1;
             }
+            self.record_cache_sizes(&mut diagnostics);
             let public_layout: CaptionLayoutResult = layout.clone().into();
             Ok(RenderedFrame {
                 width: public_layout.surface_width_px,
@@ -964,7 +973,8 @@ impl WindowsCaptionRenderer {
     ) -> Result<IDWriteTextFormat, CaptionRenderError> {
         let bucket = text_script_bucket(text);
         let font_size_key = (font_size_px * 100.0).round() as u32;
-        if let Some(text_format) = self.caches.text_format_cache.get(&(bucket, font_size_key)) {
+        let text_format_key = (bucket, font_size_key);
+        if let Some(text_format) = self.caches.text_format_cache.get(&text_format_key) {
             return Ok(text_format.clone());
         }
 
@@ -999,7 +1009,7 @@ impl WindowsCaptionRenderer {
         }
         self.caches
             .text_format_cache
-            .insert((bucket, font_size_key), text_format.clone());
+            .insert(text_format_key, text_format.clone());
         Ok(text_format)
     }
 

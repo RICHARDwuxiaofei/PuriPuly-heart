@@ -15,6 +15,7 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterUserFacingError,
 )
 from puripuly_heart.core.orchestrator.hub import ClientHub, ContextEntry, _MergeBuffer
+from puripuly_heart.core.overlay.state import ActiveSelfOverlayMetadata
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd
@@ -157,11 +158,73 @@ class BlockingOverlaySink:
     events: list[object] = field(default_factory=list)
     started: asyncio.Event = field(default_factory=asyncio.Event)
     release: asyncio.Event = field(default_factory=asyncio.Event)
+    active_self_metadata: ActiveSelfOverlayMetadata | None = None
 
     async def emit(self, event: object) -> None:
         self.events.append(event)
+        self._capture_active_self_metadata(event)
         self.started.set()
         await self.release.wait()
+
+    def _capture_active_self_metadata(self, event: object) -> None:
+        if getattr(event, "type", None) != "self_active_update":
+            return
+        utterance_id = getattr(event, "utterance_id", None)
+        if not isinstance(utterance_id, UUID):
+            return
+        self.active_self_metadata = ActiveSelfOverlayMetadata(
+            text=getattr(event, "text", ""),
+            secondary_text=getattr(event, "secondary_text", ""),
+            utterance_id=utterance_id,
+            occupant_key=getattr(event, "occupant_key", ""),
+            update_id=getattr(event, "update_id", None),
+            origin_wall_clock_ms=getattr(event, "origin_wall_clock_ms", None),
+            session_scope=getattr(event, "session_scope", None),
+            source_text_hash=getattr(event, "source_text_hash", None),
+            source_text_len=getattr(event, "source_text_len", None),
+            logical_turn_key=getattr(event, "logical_turn_key", None),
+        )
+
+    def active_self_overlay_metadata(self) -> ActiveSelfOverlayMetadata | None:
+        return self.active_self_metadata
+
+
+@dataclass(slots=True)
+class MetadataOverlaySink:
+    active_self_metadata: ActiveSelfOverlayMetadata | None = None
+    events: list[object] = field(default_factory=list)
+
+    async def emit(self, event: object) -> None:
+        self.events.append(event)
+        event_type = getattr(event, "type", None)
+        if event_type == "self_active_clear":
+            self.active_self_metadata = None
+        elif event_type == "self_transcript_final" and self.active_self_metadata is not None:
+            if self.active_self_metadata.utterance_id == getattr(event, "utterance_id", None):
+                self.active_self_metadata = None
+
+    def active_self_overlay_metadata(self) -> ActiveSelfOverlayMetadata | None:
+        return self.active_self_metadata
+
+
+def active_self_metadata_for_merge(
+    merge_id: UUID,
+    *,
+    text: str,
+    secondary_text: str,
+) -> ActiveSelfOverlayMetadata:
+    return ActiveSelfOverlayMetadata(
+        text=text,
+        secondary_text=secondary_text,
+        utterance_id=merge_id,
+        occupant_key=f"self:{merge_id}",
+        update_id=None,
+        origin_wall_clock_ms=None,
+        session_scope=None,
+        source_text_hash=None,
+        source_text_len=None,
+        logical_turn_key=None,
+    )
 
 
 @dataclass(slots=True)
@@ -368,7 +431,21 @@ async def test_replace_stt_provider_none_stops_event_loop_and_clears_runtime_sta
 async def test_clear_language_runtime_state_self_preserves_stt_task_and_clears_overlay_preview() -> (
     None
 ):
-    hub = ClientHub(stt=None, llm=None, osc=RecordingOscQueue(), clock=FakeClock())
+    preview_merge_id = uuid4()
+    overlay_sink = MetadataOverlaySink(
+        active_self_metadata=active_self_metadata_for_merge(
+            preview_merge_id,
+            text="preview",
+            secondary_text="secondary",
+        )
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=overlay_sink,
+        clock=FakeClock(),
+    )
     self_id = uuid4()
     standalone_id = uuid4()
     peer_id = uuid4()
@@ -402,15 +479,13 @@ async def test_clear_language_runtime_state_self_preserves_stt_task_and_clears_o
     hub.self_runtime.speech_ended_ids.add(standalone_id)
     hub.self_runtime.translation_history.append(ContextEntry("history", "ko", "en", 1.0))
     hub.self_runtime.merge_buffer = _MergeBuffer(
-        merge_id=uuid4(),
+        merge_id=preview_merge_id,
         utterance_ids=[self_id],
         spec_task=spec_task,
         finalize_wait_task=finalize_wait_task,
         awaiting_vad_timeout_task=awaiting_vad_timeout_task,
         resume_end_timeout_task=resume_end_timeout_task,
     )
-    hub._overlay_active_self_text = "preview"
-    hub._overlay_active_self_secondary_text = "secondary"
     hub._record_latency_stage(
         channel="self",
         utterance_id=self_id,
@@ -438,8 +513,7 @@ async def test_clear_language_runtime_state_self_preserves_stt_task_and_clears_o
         assert hub.self_runtime.utterance_start_times == {}
         assert hub.self_runtime.speech_ended_ids == set()
         assert hub.self_runtime.translation_history == [ContextEntry("history", "ko", "en", 1.0)]
-        assert hub._overlay_active_self_text is None
-        assert hub._overlay_active_self_secondary_text is None
+        assert overlay_sink.active_self_overlay_metadata() is None
         assert ("self", self_id) not in hub._latency_timelines
         assert ("peer", peer_id) in hub._latency_timelines
         assert translation_task.cancelled() is True
@@ -1037,8 +1111,11 @@ async def test_handle_vad_event_forwards_resume_confirming_chunk_before_overlay_
         resume_utterance_id=resumed_utterance_id,
         resume_chunk_count=2,
     )
-    hub._overlay_active_self_text = "stale preview"
-    hub._overlay_active_self_secondary_text = "translated live"
+    sink.active_self_metadata = active_self_metadata_for_merge(
+        merge_id,
+        text="stale preview",
+        secondary_text="translated live",
+    )
 
     task = asyncio.create_task(hub.handle_vad_event(chunk))
     await sink.started.wait()

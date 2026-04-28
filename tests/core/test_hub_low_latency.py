@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import numpy as np
 import pytest
 
 from puripuly_heart.core.orchestrator.hub import ClientHub, _MergeBuffer
+from puripuly_heart.core.overlay.state import ActiveSelfOverlayMetadata
 from puripuly_heart.core.runtime_logging import SessionLoggingMode
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
 from puripuly_heart.domain.models import Transcript, Translation
@@ -148,9 +149,55 @@ class FakeOscQueue:
 @dataclass
 class RecordingOverlaySink:
     events: list[object] = field(default_factory=list)
+    active_self_metadata: ActiveSelfOverlayMetadata | None = None
 
     async def emit(self, event: object) -> None:
         self.events.append(event)
+        event_type = getattr(event, "type", None)
+        if event_type == "self_active_update":
+            utterance_id = getattr(event, "utterance_id", None)
+            if not isinstance(utterance_id, UUID):
+                return
+            self.active_self_metadata = ActiveSelfOverlayMetadata(
+                text=getattr(event, "text", ""),
+                secondary_text=getattr(event, "secondary_text", ""),
+                utterance_id=utterance_id,
+                occupant_key=getattr(event, "occupant_key", ""),
+                update_id=getattr(event, "update_id", None),
+                origin_wall_clock_ms=getattr(event, "origin_wall_clock_ms", None),
+                session_scope=getattr(event, "session_scope", None),
+                source_text_hash=getattr(event, "source_text_hash", None),
+                source_text_len=getattr(event, "source_text_len", None),
+                logical_turn_key=getattr(event, "logical_turn_key", None),
+            )
+        elif event_type == "self_active_clear":
+            self.active_self_metadata = None
+        elif event_type == "self_transcript_final" and self.active_self_metadata is not None:
+            if self.active_self_metadata.utterance_id == getattr(event, "utterance_id", None):
+                self.active_self_metadata = None
+
+    def active_self_overlay_metadata(self) -> ActiveSelfOverlayMetadata | None:
+        return self.active_self_metadata
+
+
+def active_self_metadata_for_buffer(
+    buffer: _MergeBuffer,
+    *,
+    text: str,
+    secondary_text: str,
+) -> ActiveSelfOverlayMetadata:
+    return ActiveSelfOverlayMetadata(
+        text=text,
+        secondary_text=secondary_text,
+        utterance_id=buffer.merge_id,
+        occupant_key=f"self:{buffer.merge_id}",
+        update_id=None,
+        origin_wall_clock_ms=None,
+        session_scope=None,
+        source_text_hash=None,
+        source_text_len=None,
+        logical_turn_key=None,
+    )
 
 
 @dataclass
@@ -1259,17 +1306,20 @@ class TestResumeEndTimeout:
             resume_chunk_count=2,
         )
         hub._merge_buffer = buffer
-        hub._overlay_active_self_text = "첫 번째"
-        hub._overlay_active_self_secondary_text = "translated live"
-        hub._overlay_active_self_utterance_id = merge_id
-        hub._overlay_active_self_occupant_key = f"self:{merge_id}"
+        overlay_sink.active_self_metadata = active_self_metadata_for_buffer(
+            buffer,
+            text="첫 번째",
+            secondary_text="translated live",
+        )
 
         await hub.handle_vad_event(SpeechChunk(resumed_utterance_id, chunk=samples(0.5)))
 
         assert buffer.resume_confirmed is True
         assert buffer.spec_translation is None
         assert overlay_sink.events == []
-        assert hub._overlay_active_self_secondary_text == "translated live"
+        metadata = overlay_sink.active_self_overlay_metadata()
+        assert metadata is not None
+        assert metadata.secondary_text == "translated live"
 
 
 class TestSpecCommitPaths:
@@ -1434,7 +1484,7 @@ class TestSpecCommitPaths:
         assert preview_event.update_id != final_event.update_id
 
     @pytest.mark.asyncio
-    async def test_sync_overlay_active_self_records_overlay_emit_with_merge_id(self):
+    async def test_sync_self_active_overlay_records_overlay_emit_with_merge_id(self):
         clock = FakeClock(initial_time=10.0)
         diagnostics = RecordingOverlayDiagnostics()
         overlay_sink = RecordingOverlaySink()
@@ -1468,7 +1518,7 @@ class TestSpecCommitPaths:
         assert active_self_emit["secondary_len"] == len("translated live")
 
     @pytest.mark.asyncio
-    async def test_sync_overlay_active_self_dedupes_only_within_same_logical_turn(self):
+    async def test_sync_self_active_overlay_dedupes_only_within_same_logical_turn(self):
         clock = FakeClock(initial_time=10.0)
         overlay_sink = RecordingOverlaySink()
         hub = ClientHub(
@@ -1506,7 +1556,7 @@ class TestSpecCommitPaths:
         ]
 
     @pytest.mark.asyncio
-    async def test_sync_overlay_active_self_re_emits_same_preview_when_update_id_changes(self):
+    async def test_sync_self_active_overlay_re_emits_same_preview_when_update_id_changes(self):
         clock = FakeClock(initial_time=10.0)
         overlay_sink = RecordingOverlaySink()
         hub = ClientHub(

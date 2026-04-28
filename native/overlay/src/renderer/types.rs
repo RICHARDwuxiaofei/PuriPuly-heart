@@ -58,6 +58,8 @@ pub struct CaptionBlock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CaptionBlockVariant {
     ActiveSelf,
+    // Reserved compatibility/fallback variant; normal peer product rendering is
+    // driven by translated finalized rows rather than source-only active_peer.
     ActivePeer,
     Finalized,
 }
@@ -434,6 +436,10 @@ pub struct BlockCacheKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RenderDiagnostics {
+    pub text_format_cache_size: usize,
+    pub layout_cache_size: usize,
+    pub line_cache_size: usize,
+    pub block_cache_size: usize,
     pub layout_cache_hits: u32,
     pub layout_cache_misses: u32,
     pub line_cache_hits: u32,

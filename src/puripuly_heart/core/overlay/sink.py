@@ -77,6 +77,8 @@ class SelfActiveUpdate(OverlayEvent):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PeerActiveUpdate(OverlayEvent):
+    """Reserved compatibility/fallback; not normal source-only peer product flow."""
+
     text: str
     occupant_key: str
 

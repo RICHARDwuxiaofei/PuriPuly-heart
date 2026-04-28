@@ -15,12 +15,12 @@ use crate::manifest::{
 #[cfg(test)]
 use crate::openvr::OpenVrError;
 use crate::openvr::{
-    format_openvr_visibility_api_call_log, perform_startup_preflight, OpenVrOverlay,
-    OpenVrStartupPreflightError, OverlayFrameSubmitter,
+    format_openvr_visibility_api_call_log, perform_startup_preflight, FrameTimingSample,
+    OpenVrOverlay, OpenVrStartupPreflightError, OverlayFrameSubmitter,
 };
 use crate::renderer::{
     CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionDebugOverlay, CaptionLayoutResult,
-    CaptionPresentation, CaptionRenderer, VisibleCaptionBlock,
+    CaptionPresentation, CaptionRenderer, RenderDiagnostics, VisibleCaptionBlock,
 };
 use crate::state::{
     OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationSnapshot,
@@ -305,7 +305,11 @@ impl OverlayRuntime {
         };
         self.last_snapshot_slot_correlation_signature = Some(signature);
         if should_log {
-            log_runtime_info(logger, format_snapshot_slot_correlation_log(self.state(), &rows)).await?;
+            log_runtime_info(
+                logger,
+                format_snapshot_slot_correlation_log(self.state(), &rows),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -525,7 +529,8 @@ impl OverlayRuntime {
         };
         let self_block_count = visible_self_block_count(frame.layout());
         let fully_transparent = frame.is_fully_transparent();
-        let rendered_diagnostic_rows = collect_rendered_diagnostic_rows(self.state(), frame.layout());
+        let rendered_diagnostic_rows =
+            collect_rendered_diagnostic_rows(self.state(), frame.layout());
         log_runtime_info(
             logger,
             format_frame_rendered_log(frame.layout(), fully_transparent),
@@ -591,8 +596,7 @@ impl OverlayRuntime {
         openvr
             .submit_frame(&frame)
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
-        let submit_duration_us =
-            submit_started.map(|start| start.elapsed().as_micros());
+        let submit_duration_us = submit_started.map(|start| start.elapsed().as_micros());
         if should_show_after_submit {
             openvr
                 .set_overlay_visible(true)
@@ -626,9 +630,16 @@ impl OverlayRuntime {
                 ),
             )
             .await?;
+            log_runtime_info(logger, format_cache_stats_log(frame.diagnostics())).await?;
         }
         if detailed_logging {
-            self.sample_and_log_frame_timing(openvr, logger).await?;
+            self.sample_and_log_frame_timing(
+                openvr,
+                logger,
+                self.state.snapshot().revision,
+                submit_duration_us,
+            )
+            .await?;
         }
         self.last_submitted_had_self = self_block_count > 0;
         self.redraw_requested = false;
@@ -696,7 +707,8 @@ impl OverlayRuntime {
                     format_state_snapshot_log(&outcome, self.state(), self.redraw_requested),
                 )
                 .await?;
-                self.emit_snapshot_slot_correlation_if_changed(logger).await?;
+                self.emit_snapshot_slot_correlation_if_changed(logger)
+                    .await?;
                 self.emit_pending_visible_update_applied_diagnostics(logger)
                     .await?;
                 self.submit_frame_if_needed(renderer, openvr, bridge, logger)
@@ -796,6 +808,8 @@ impl OverlayRuntime {
         &mut self,
         openvr: &S,
         logger: &OverlayLogger,
+        revision: u64,
+        submit_duration_us: Option<u128>,
     ) -> Result<(), RuntimeFailure> {
         const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
         let now = Instant::now();
@@ -810,19 +824,7 @@ impl OverlayRuntime {
         };
         log_runtime_info(
             logger,
-            format!(
-                "openvr_frame_timing frame_index={} num_frame_presents={} num_mis_presented={} num_dropped_frames={} client_frame_interval_ms={:.2} present_call_cpu_ms={:.2} wait_for_present_cpu_ms={:.2} compositor_render_cpu_ms={:.2} total_render_gpu_ms={:.2} post_submit_gpu_ms={:.2}",
-                t.frame_index,
-                t.num_frame_presents,
-                t.num_mis_presented,
-                t.num_dropped_frames,
-                t.client_frame_interval_ms,
-                t.present_call_cpu_ms,
-                t.wait_for_present_cpu_ms,
-                t.compositor_render_cpu_ms,
-                t.total_render_gpu_ms,
-                t.post_submit_gpu_ms,
-            ),
+            format_frame_timing_log(revision, &t, submit_duration_us),
         )
         .await?;
         Ok(())
@@ -1170,7 +1172,10 @@ fn format_two_row_window_rows(rows: &[RenderedDiagnosticRow]) -> String {
 }
 
 fn two_row_window_slot_signature(rows: &[RenderedDiagnosticRow]) -> Vec<u64> {
-    let mut signature = rows.iter().map(|row| row.row.slot_order).collect::<Vec<_>>();
+    let mut signature = rows
+        .iter()
+        .map(|row| row.row.slot_order)
+        .collect::<Vec<_>>();
     signature.sort_unstable();
     signature
 }
@@ -1343,6 +1348,38 @@ fn format_frame_submitted_log(
     line
 }
 
+fn format_frame_timing_log(
+    revision: u64,
+    timing: &FrameTimingSample,
+    submit_duration_us: Option<u128>,
+) -> String {
+    let submit_duration = submit_duration_us
+        .map(|duration| duration.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "frame_timing revision={} dropped_frames={} post_submit_gpu_ms={:.2} total_render_gpu_ms={:.2} submit_duration_us={}",
+        revision,
+        timing.num_dropped_frames,
+        timing.post_submit_gpu_ms,
+        timing.total_render_gpu_ms,
+        submit_duration,
+    )
+}
+
+fn format_cache_stats_log(diagnostics: &RenderDiagnostics) -> String {
+    format!(
+        "cache_stats text_format_size={} layout_size={} line_size={} block_size={} line_hits={} line_misses={} block_hits={} block_misses={}",
+        diagnostics.text_format_cache_size,
+        diagnostics.layout_cache_size,
+        diagnostics.line_cache_size,
+        diagnostics.block_cache_size,
+        diagnostics.line_cache_hits,
+        diagnostics.line_cache_misses,
+        diagnostics.block_cache_hits,
+        diagnostics.block_cache_misses,
+    )
+}
+
 fn format_peer_first_render_visibility_checkpoint_log(
     revision: u64,
     peer_ids: &[String],
@@ -1497,7 +1534,9 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
             runtime.redraw_requested(),
         ))
         .await;
-    let _ = runtime.emit_snapshot_slot_correlation_if_changed(&logger).await;
+    let _ = runtime
+        .emit_snapshot_slot_correlation_if_changed(&logger)
+        .await;
     if let Err(error) = runtime
         .submit_frame_if_needed(&renderer, &mut openvr, &mut bridge, &logger)
         .await
@@ -1716,9 +1755,9 @@ fn apply_visual_debug_prefix(text: &str, prefix: Option<&str>) -> String {
 mod tests {
     use super::{
         collect_diagnostic_rows, collect_rendered_diagnostic_rows, debug_overlay_for_frame,
-        debug_watermark_label_for_frame, diagnostic_row_signature, format_caption_blocks_built_log,
-        format_frame_rendered_log, format_frame_submitted_log,
-        format_overlay_visible_update_rendered_log,
+        debug_watermark_label_for_frame, diagnostic_row_signature, format_cache_stats_log,
+        format_caption_blocks_built_log, format_frame_rendered_log, format_frame_submitted_log,
+        format_frame_timing_log, format_overlay_visible_update_rendered_log,
         format_peer_first_render_visibility_checkpoint_log,
         format_peer_first_render_visibility_desync_suspected_log, format_snapshot_received_log,
         format_snapshot_slot_correlation_log, format_two_row_window_closed_log,
@@ -1727,10 +1766,11 @@ mod tests {
         DiagnosticRow, OverlayRuntime, RenderedDiagnosticRow, SnapshotApplyOutcome, StartupError,
         TwoRowWindowState,
     };
-    use crate::openvr::{OpenVrError, OpenVrStartupPreflightError};
     use crate::logging::{OverlayLogger, OverlayLoggingMode};
+    use crate::openvr::{FrameTimingSample, OpenVrError, OpenVrStartupPreflightError};
     use crate::renderer::{
-        CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy, CaptionPresentation,
+        CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
+        CaptionPresentation, RenderDiagnostics,
     };
     use crate::state::{
         OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
@@ -1998,16 +2038,10 @@ mod tests {
             CaptionBlock::new("peer:blank", "")
                 .with_channel(CaptionChannel::PeerChannel)
                 .with_variant(CaptionBlockVariant::Finalized),
-            CaptionBlock::new(
-                "peer:11111111-1111-1111-1111-111111111111",
-                "translated",
-            )
+            CaptionBlock::new("peer:11111111-1111-1111-1111-111111111111", "translated")
                 .with_channel(CaptionChannel::PeerChannel)
                 .with_variant(CaptionBlockVariant::Finalized),
-            CaptionBlock::new(
-                "peer:22222222-2222-2222-2222-222222222222",
-                "newer",
-            )
+            CaptionBlock::new("peer:22222222-2222-2222-2222-222222222222", "newer")
                 .with_channel(CaptionChannel::PeerChannel)
                 .with_variant(CaptionBlockVariant::Finalized),
             CaptionBlock::new(
@@ -2287,7 +2321,10 @@ mod tests {
 
         assert!(matches!(outcome, SnapshotApplyOutcome::Applied { .. }));
         assert_eq!(runtime.pending_visible_update_rows.len(), 1);
-        assert_eq!(runtime.pending_visible_update_rows[0].slot_order, slot_order);
+        assert_eq!(
+            runtime.pending_visible_update_rows[0].slot_order,
+            slot_order
+        );
         assert!(runtime
             .pending_visible_update_render_slot_orders
             .contains(&slot_order));
@@ -2385,11 +2422,8 @@ mod tests {
             rows_summary: super::format_two_row_window_rows(&rows),
             update_ids: vec!["upd-self-1".into(), "upd-peer-2".into()],
         };
-        let summary = format_two_row_window_closed_log(
-            9,
-            &window,
-            started_at + Duration::from_millis(420),
-        );
+        let summary =
+            format_two_row_window_closed_log(9, &window, started_at + Duration::from_millis(420));
 
         assert!(summary.contains("two_row_window_closed revision=9"));
         assert!(summary.contains("dwell_ms=420"));
@@ -2463,6 +2497,53 @@ mod tests {
         let summary_with_duration =
             format_frame_submitted_log(&layout, 7, false, false, true, true, Some(421));
         assert!(summary_with_duration.contains("submit_duration_us=421"));
+    }
+
+    #[test]
+    fn frame_timing_summary_reports_revision_gpu_and_submit_duration_fields() {
+        let sample = FrameTimingSample {
+            frame_index: 4,
+            num_frame_presents: 2,
+            num_mis_presented: 0,
+            num_dropped_frames: 1,
+            system_time_seconds: 12.5,
+            client_frame_interval_ms: 11.1,
+            present_call_cpu_ms: 0.2,
+            wait_for_present_cpu_ms: 0.3,
+            compositor_render_cpu_ms: 0.4,
+            total_render_gpu_ms: 0.56,
+            post_submit_gpu_ms: 0.23,
+        };
+
+        let summary = format_frame_timing_log(9, &sample, Some(421));
+
+        assert_eq!(
+            summary,
+            "frame_timing revision=9 dropped_frames=1 post_submit_gpu_ms=0.23 total_render_gpu_ms=0.56 submit_duration_us=421"
+        );
+
+        let summary_without_duration = format_frame_timing_log(9, &sample, None);
+        assert!(summary_without_duration.contains("submit_duration_us=none"));
+    }
+
+    #[test]
+    fn cache_stats_summary_reports_cache_sizes_and_hit_miss_counts() {
+        let diagnostics = RenderDiagnostics {
+            text_format_cache_size: 3,
+            layout_cache_size: 4,
+            line_cache_size: 5,
+            block_cache_size: 6,
+            line_cache_hits: 7,
+            line_cache_misses: 8,
+            block_cache_hits: 9,
+            block_cache_misses: 10,
+            ..RenderDiagnostics::default()
+        };
+
+        assert_eq!(
+            format_cache_stats_log(&diagnostics),
+            "cache_stats text_format_size=3 layout_size=4 line_size=5 block_size=6 line_hits=7 line_misses=8 block_hits=9 block_misses=10"
+        );
     }
 
     #[test]

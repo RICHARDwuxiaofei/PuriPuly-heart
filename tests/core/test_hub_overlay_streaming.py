@@ -14,13 +14,14 @@ from puripuly_heart.core.orchestrator import hub as hub_module
 from puripuly_heart.core.orchestrator.hub import ClientHub, _MergeBuffer
 from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
+from puripuly_heart.core.overlay.state import ActiveSelfOverlayMetadata
 from puripuly_heart.core.runtime_logging import (
     LATENCY_TRACE_POINT_CONTRACTS,
     SessionLoggingMode,
 )
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
 from puripuly_heart.domain.events import STTFinalEvent, STTPartialEvent, UIEventType
-from puripuly_heart.domain.models import Transcript
+from puripuly_heart.domain.models import Transcript, Translation
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 from tests.core.test_hub_branch_coverage import (
     _make_runtime_logging_capture,
@@ -28,13 +29,82 @@ from tests.core.test_hub_branch_coverage import (
 )
 from tests.helpers.fakes import RecordingOscQueue
 
+_HUB_ACTIVE_SELF_MIRROR_FIELDS = {
+    "_overlay_" "active_self_text",
+    "_overlay_" "active_self_secondary_text",
+    "_overlay_" "active_self_utterance_id",
+    "_overlay_" "active_self_occupant_key",
+    "_overlay_" "active_self_update_id",
+    "_overlay_" "active_self_origin_wall_clock_ms",
+    "_overlay_" "active_self_session_scope",
+    "_overlay_" "active_self_source_text_hash",
+    "_overlay_" "active_self_source_text_len",
+    "_overlay_" "active_self_logical_turn_key",
+}
+
+
+def test_hub_does_not_declare_active_self_overlay_mirror_fields() -> None:
+    assert _HUB_ACTIVE_SELF_MIRROR_FIELDS.isdisjoint(ClientHub.__dataclass_fields__)
+
 
 @dataclass(slots=True)
 class RecordingOverlaySink:
     events: list[object] = field(default_factory=list)
+    active_self_metadata: ActiveSelfOverlayMetadata | None = None
 
     async def emit(self, event: object) -> None:
         self.events.append(event)
+        event_type = getattr(event, "type", None)
+        if event_type == "self_active_update":
+            utterance_id = getattr(event, "utterance_id", None)
+            if not isinstance(utterance_id, UUID):
+                return
+            self.active_self_metadata = ActiveSelfOverlayMetadata(
+                text=getattr(event, "text", ""),
+                secondary_text=getattr(event, "secondary_text", ""),
+                utterance_id=utterance_id,
+                occupant_key=getattr(event, "occupant_key", ""),
+                update_id=getattr(event, "update_id", None),
+                origin_wall_clock_ms=getattr(event, "origin_wall_clock_ms", None),
+                session_scope=getattr(event, "session_scope", None),
+                source_text_hash=getattr(event, "source_text_hash", None),
+                source_text_len=getattr(event, "source_text_len", None),
+                logical_turn_key=getattr(event, "logical_turn_key", None),
+            )
+        elif event_type == "self_active_clear":
+            self.active_self_metadata = None
+        elif event_type == "self_transcript_final" and self.active_self_metadata is not None:
+            if self.active_self_metadata.utterance_id == getattr(event, "utterance_id", None):
+                self.active_self_metadata = None
+
+    def active_self_overlay_metadata(self) -> ActiveSelfOverlayMetadata | None:
+        return self.active_self_metadata
+
+
+def _active_self_metadata_for_buffer(
+    buffer: _MergeBuffer,
+    *,
+    text: str,
+    secondary_text: str,
+    update_id: str | None = None,
+    origin_wall_clock_ms: int | None = None,
+    session_scope: str | None = None,
+    source_text_hash: str | None = None,
+    source_text_len: int | None = None,
+    logical_turn_key: str | None = None,
+) -> ActiveSelfOverlayMetadata:
+    return ActiveSelfOverlayMetadata(
+        text=text,
+        secondary_text=secondary_text,
+        utterance_id=buffer.merge_id,
+        occupant_key=f"self:{buffer.merge_id}",
+        update_id=update_id,
+        origin_wall_clock_ms=origin_wall_clock_ms,
+        session_scope=session_scope,
+        source_text_hash=source_text_hash,
+        source_text_len=source_text_len,
+        logical_turn_key=logical_turn_key,
+    )
 
 
 @dataclass(slots=True)
@@ -1869,6 +1939,81 @@ async def test_low_latency_self_active_secondary_diagnostics_record_blank_sticky
 
 
 @pytest.mark.asyncio
+async def test_hub_active_self_metadata_flows_through_presenter_accessor() -> None:
+    bridge = RecordingPresentationBridge()
+    clock = FakeClock(_now=10.0)
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=clock,
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=presenter,
+        clock=clock,
+        low_latency_mode=True,
+    )
+    merge_id = uuid4()
+    logical_turn_key = f"self:{merge_id}"
+    expected_metadata = {
+        "update_id": "self-active-update-1",
+        "origin_wall_clock_ms": 123456789,
+        "session_scope": "self-active-session",
+        "source_text_hash": "0123456789abcdef",
+        "source_text_len": len("hello live"),
+        "logical_turn_key": logical_turn_key,
+    }
+    buffer = _MergeBuffer(
+        merge_id=merge_id,
+        parts=["hello live"],
+        utterance_ids=[uuid4()],
+        spec_text="hello live",
+        spec_translation=Translation(
+            utterance_id=merge_id,
+            text="translated live",
+            source_text="hello live",
+            source_language="ko",
+            target_language="en",
+            channel="self",
+            created_at=10.0,
+            **expected_metadata,
+        ),
+    )
+    hub._merge_buffer = buffer
+
+    await hub._sync_overlay_active_self(buffer, created_at=hub.clock.now())
+
+    metadata = presenter.active_self_overlay_metadata()
+    assert metadata == ActiveSelfOverlayMetadata(
+        text="hello live",
+        secondary_text="translated live",
+        utterance_id=merge_id,
+        occupant_key=f"self:{merge_id}",
+        update_id="self-active-update-1",
+        origin_wall_clock_ms=123456789,
+        session_scope="self-active-session",
+        source_text_hash="0123456789abcdef",
+        source_text_len=len("hello live"),
+        logical_turn_key=logical_turn_key,
+    )
+    active_block = presenter.snapshot().blocks[0]
+    assert active_block.id == f"self:{merge_id}"
+    assert active_block.primary_text == "hello live"
+    assert active_block.secondary_text == "translated live"
+    assert active_block.occupant_key == f"self:{merge_id}"
+    assert {
+        "update_id": active_block.update_id,
+        "origin_wall_clock_ms": active_block.origin_wall_clock_ms,
+        "session_scope": active_block.session_scope,
+        "source_text_hash": active_block.source_text_hash,
+        "source_text_len": active_block.source_text_len,
+        "logical_turn_key": active_block.logical_turn_key,
+    } == expected_metadata
+
+
+@pytest.mark.asyncio
 async def test_self_overlay_secondary_decision_logs_only_to_detailed_runtime_log() -> None:
     basic_runtime_logging, basic_stream = _make_runtime_logging_capture()
     detailed_runtime_logging, detailed_stream = _make_runtime_logging_capture()
@@ -1876,11 +2021,13 @@ async def test_self_overlay_secondary_decision_logs_only_to_detailed_runtime_log
 
     # Contract under test: runtime detailed logging must emit the
     # active_self_secondary token even when overlay_diagnostics is absent.
+    basic_sink = RecordingOverlaySink()
+    detailed_sink = RecordingOverlaySink()
     basic_hub = ClientHub(
         stt=None,
         llm=None,
         osc=RecordingOscQueue(),
-        overlay_sink=RecordingOverlaySink(),
+        overlay_sink=basic_sink,
         overlay_diagnostics=None,
         runtime_logging=basic_runtime_logging,
         clock=FakeClock(_now=10.0),
@@ -1890,7 +2037,7 @@ async def test_self_overlay_secondary_decision_logs_only_to_detailed_runtime_log
         stt=None,
         llm=None,
         osc=RecordingOscQueue(),
-        overlay_sink=RecordingOverlaySink(),
+        overlay_sink=detailed_sink,
         overlay_diagnostics=None,
         runtime_logging=detailed_runtime_logging,
         clock=FakeClock(_now=20.0),
@@ -1909,8 +2056,16 @@ async def test_self_overlay_secondary_decision_logs_only_to_detailed_runtime_log
     )
     basic_hub._merge_buffer = basic_buffer
     detailed_hub._merge_buffer = detailed_buffer
-    basic_hub._overlay_active_self_secondary_text = "translated live"
-    detailed_hub._overlay_active_self_secondary_text = "translated live"
+    basic_sink.active_self_metadata = _active_self_metadata_for_buffer(
+        basic_buffer,
+        text="hello live",
+        secondary_text="translated live",
+    )
+    detailed_sink.active_self_metadata = _active_self_metadata_for_buffer(
+        detailed_buffer,
+        text="hello live",
+        secondary_text="translated live",
+    )
 
     try:
         assert basic_hub.overlay_diagnostics is None
@@ -1946,11 +2101,12 @@ async def test_self_overlay_secondary_decision_logs_only_to_detailed_runtime_log
 @pytest.mark.asyncio
 async def test_self_overlay_secondary_decision_emits_after_basic_to_detailed_mode_switch() -> None:
     runtime_logging, log_stream = _make_runtime_logging_capture()
+    sink = RecordingOverlaySink()
     hub = ClientHub(
         stt=None,
         llm=None,
         osc=RecordingOscQueue(),
-        overlay_sink=RecordingOverlaySink(),
+        overlay_sink=sink,
         overlay_diagnostics=None,
         runtime_logging=runtime_logging,
         clock=FakeClock(_now=10.0),
@@ -1962,7 +2118,11 @@ async def test_self_overlay_secondary_decision_emits_after_basic_to_detailed_mod
         utterance_ids=[uuid4()],
     )
     hub._merge_buffer = buffer
-    hub._overlay_active_self_secondary_text = "translated live"
+    sink.active_self_metadata = _active_self_metadata_for_buffer(
+        buffer,
+        text="hello live",
+        secondary_text="translated live",
+    )
 
     try:
         await hub._sync_overlay_active_self(buffer, created_at=hub.clock.now())

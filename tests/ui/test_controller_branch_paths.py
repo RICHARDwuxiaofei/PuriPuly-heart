@@ -51,6 +51,7 @@ from puripuly_heart.core.overlay.sink import (
     SelfTranscriptFinal,
     TranslationFinal,
 )
+from puripuly_heart.domain.models import Transcript
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
@@ -2529,12 +2530,29 @@ async def test_overlay_start_syncs_bridge_after_preserved_presenter_cleans_refre
     )
     adapter = OverlayEventAdapter(clock=clock)
     peer_turn_id = uuid4()
+    transcript = Transcript(
+        utterance_id=peer_turn_id,
+        channel="peer",
+        text="peer source preserved across restart",
+        is_final=True,
+        created_at=10.0,
+    )
     await presenter.emit(
-        adapter.peer_active_update(
-            text="peer source preserved across restart",
+        adapter.transcript_final(
+            transcript,
+            source_language="en",
+            target_language="ko",
+        )
+    )
+    await presenter.emit(
+        adapter.translation_final(
             utterance_id=peer_turn_id,
-            occupant_key=f"peer:{peer_turn_id}",
-            created_at=10.0,
+            channel="peer",
+            text="재시작 중 보존된 번역",
+            source_language="en",
+            target_language="ko",
+            applied_context_mode=None,
+            created_at=10.1,
         )
     )
     await asyncio.sleep(0)

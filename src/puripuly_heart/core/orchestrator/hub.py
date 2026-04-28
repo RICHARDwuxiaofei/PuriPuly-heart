@@ -164,16 +164,6 @@ class ClientHub:
         init=False,
         default_factory=lambda: {"self": None, "peer": None},
     )
-    _overlay_active_self_text: str | None = field(init=False, default=None)
-    _overlay_active_self_secondary_text: str | None = field(init=False, default=None)
-    _overlay_active_self_utterance_id: UUID | None = field(init=False, default=None)
-    _overlay_active_self_occupant_key: str | None = field(init=False, default=None)
-    _overlay_active_self_update_id: str | None = field(init=False, default=None)
-    _overlay_active_self_origin_wall_clock_ms: int | None = field(init=False, default=None)
-    _overlay_active_self_session_scope: str | None = field(init=False, default=None)
-    _overlay_active_self_source_text_hash: str | None = field(init=False, default=None)
-    _overlay_active_self_source_text_len: int | None = field(init=False, default=None)
-    _overlay_active_self_logical_turn_key: str | None = field(init=False, default=None)
     overlay_stream_coalesce_ms: int = 300
     last_error_source: str | None = None
     _last_overlay_secondary_runtime_signature: tuple[object, ...] | None = field(
@@ -1218,15 +1208,37 @@ class ClientHub:
             "logical_turn_key": translation.logical_turn_key,
         }
 
-    def _overlay_active_self_metadata(self) -> dict[str, object]:
+    def _current_active_self_metadata(self) -> object | None:
+        provider = getattr(self.overlay_sink, "active_self_overlay_metadata", None)
+        if not callable(provider):
+            return None
+        return provider()
+
+    @staticmethod
+    def _active_self_translation_metadata(metadata: object | None) -> dict[str, object]:
+        if metadata is None:
+            return {
+                "update_id": None,
+                "origin_wall_clock_ms": None,
+                "session_scope": None,
+                "source_text_hash": None,
+                "source_text_len": None,
+                "logical_turn_key": None,
+            }
         return {
-            "update_id": self._overlay_active_self_update_id,
-            "origin_wall_clock_ms": self._overlay_active_self_origin_wall_clock_ms,
-            "session_scope": self._overlay_active_self_session_scope,
-            "source_text_hash": self._overlay_active_self_source_text_hash,
-            "source_text_len": self._overlay_active_self_source_text_len,
-            "logical_turn_key": self._overlay_active_self_logical_turn_key,
+            "update_id": getattr(metadata, "update_id", None),
+            "origin_wall_clock_ms": getattr(metadata, "origin_wall_clock_ms", None),
+            "session_scope": getattr(metadata, "session_scope", None),
+            "source_text_hash": getattr(metadata, "source_text_hash", None),
+            "source_text_len": getattr(metadata, "source_text_len", None),
+            "logical_turn_key": getattr(metadata, "logical_turn_key", None),
         }
+
+    def _cached_active_self_secondary_text(self) -> str:
+        metadata = self._current_active_self_metadata()
+        if metadata is None:
+            return ""
+        return str(getattr(metadata, "secondary_text", "") or "")
 
     def _overlay_secondary_translation_metadata(
         self,
@@ -1236,26 +1248,17 @@ class ClientHub:
         secondary_text: str,
     ) -> dict[str, object]:
         if not secondary_text:
-            return self._overlay_active_self_metadata() | {
-                "update_id": None,
-                "origin_wall_clock_ms": None,
-                "session_scope": None,
-                "source_text_hash": None,
-                "source_text_len": None,
-                "logical_turn_key": None,
-            }
+            return self._active_self_translation_metadata(None)
         if source == "spec" and isinstance(buffer.spec_translation, Translation):
             return self._translation_overlay_metadata(buffer.spec_translation)
-        if source == "sticky_cache" and self._overlay_active_self_utterance_id == buffer.merge_id:
-            return self._overlay_active_self_metadata()
-        return {
-            "update_id": None,
-            "origin_wall_clock_ms": None,
-            "session_scope": None,
-            "source_text_hash": None,
-            "source_text_len": None,
-            "logical_turn_key": None,
-        }
+        metadata = self._current_active_self_metadata()
+        if (
+            source == "sticky_cache"
+            and metadata is not None
+            and getattr(metadata, "utterance_id", None) == buffer.merge_id
+        ):
+            return self._active_self_translation_metadata(metadata)
+        return self._active_self_translation_metadata(None)
 
     def _translation_ready_elapsed_ms(
         self,
@@ -1396,50 +1399,10 @@ class ClientHub:
                 )
             )
 
-    async def _emit_overlay_active_self_event(self, event: object) -> None:
+    async def _emit_self_active_overlay_event(self, event: object) -> None:
         await self._emit_overlay_event(event)
-        if getattr(event, "type", None) == "self_active_update":
-            self._overlay_active_self_text = getattr(event, "text", None)
-            self._overlay_active_self_secondary_text = getattr(event, "secondary_text", "")
-            self._overlay_active_self_utterance_id = getattr(event, "utterance_id", None)
-            self._overlay_active_self_occupant_key = getattr(event, "occupant_key", None)
-            if (getattr(event, "secondary_text", "") or "").strip():
-                self._overlay_active_self_update_id = getattr(event, "update_id", None)
-                self._overlay_active_self_origin_wall_clock_ms = getattr(
-                    event, "origin_wall_clock_ms", None
-                )
-                self._overlay_active_self_session_scope = getattr(event, "session_scope", None)
-                self._overlay_active_self_source_text_hash = getattr(
-                    event, "source_text_hash", None
-                )
-                self._overlay_active_self_source_text_len = getattr(event, "source_text_len", None)
-                self._overlay_active_self_logical_turn_key = getattr(
-                    event, "logical_turn_key", None
-                )
-            else:
-                self._overlay_active_self_update_id = None
-                self._overlay_active_self_origin_wall_clock_ms = None
-                self._overlay_active_self_session_scope = None
-                self._overlay_active_self_source_text_hash = None
-                self._overlay_active_self_source_text_len = None
-                self._overlay_active_self_logical_turn_key = None
-        elif getattr(event, "type", None) == "self_active_clear":
-            self._overlay_active_self_text = None
-            self._overlay_active_self_secondary_text = None
-            self._overlay_active_self_utterance_id = None
-            self._overlay_active_self_occupant_key = None
-            self._overlay_active_self_update_id = None
-            self._overlay_active_self_origin_wall_clock_ms = None
-            self._overlay_active_self_session_scope = None
-            self._overlay_active_self_source_text_hash = None
-            self._overlay_active_self_source_text_len = None
-            self._overlay_active_self_logical_turn_key = None
 
-    def _overlay_active_self_secondary(self, buffer: _MergeBuffer) -> str:
-        secondary_text, _source, _reuse_mode = self._overlay_active_self_secondary_decision(buffer)
-        return secondary_text
-
-    def _overlay_active_self_secondary_decision(
+    def _active_self_secondary_decision(
         self,
         buffer: _MergeBuffer,
     ) -> tuple[str, str, str | None]:
@@ -1452,7 +1415,7 @@ class ClientHub:
             reuse_mode = self._soft_reuse_mode(buffer.spec_text, active_text)
             if reuse_mode is not None:
                 return translation.text.strip(), "spec", reuse_mode
-        sticky_secondary = (self._overlay_active_self_secondary_text or "").strip()
+        sticky_secondary = self._cached_active_self_secondary_text().strip()
         if sticky_secondary:
             return sticky_secondary, "sticky_cache", reuse_mode
         return "", "blank", reuse_mode
@@ -1469,8 +1432,8 @@ class ClientHub:
         active_text = self._merge_text(buffer.parts)
         if not active_text:
             return
-        secondary_text, source, reuse_mode = self._overlay_active_self_secondary_decision(buffer)
-        self._record_overlay_active_self_secondary_decision(
+        secondary_text, source, reuse_mode = self._active_self_secondary_decision(buffer)
+        self._record_active_self_secondary_decision(
             buffer=buffer,
             active_text=active_text,
             secondary_text=secondary_text,
@@ -1482,14 +1445,16 @@ class ClientHub:
             source=source,
             secondary_text=secondary_text,
         )
-        current_overlay_metadata = self._overlay_active_self_metadata()
+        current_metadata = self._current_active_self_metadata()
+        current_translation_metadata = self._active_self_translation_metadata(current_metadata)
         occupant_key = self._active_self_occupant_key(buffer)
         if (
-            buffer.merge_id == self._overlay_active_self_utterance_id
-            and occupant_key == self._overlay_active_self_occupant_key
-            and active_text == self._overlay_active_self_text
-            and secondary_text == (self._overlay_active_self_secondary_text or "")
-            and translation_metadata == current_overlay_metadata
+            current_metadata is not None
+            and buffer.merge_id == getattr(current_metadata, "utterance_id", None)
+            and occupant_key == getattr(current_metadata, "occupant_key", None)
+            and active_text == getattr(current_metadata, "text", None)
+            and secondary_text == getattr(current_metadata, "secondary_text", "")
+            and translation_metadata == current_translation_metadata
         ):
             return
 
@@ -1499,7 +1464,7 @@ class ClientHub:
             channel="self",
             secondary_len=len(secondary_text),
         )
-        await self._emit_overlay_active_self_event(
+        await self._emit_self_active_overlay_event(
             self.overlay_event_adapter.self_active_update(
                 text=active_text,
                 utterance_id=buffer.merge_id,
@@ -1511,21 +1476,11 @@ class ClientHub:
         )
 
     async def reset_overlay_preview(self) -> None:
-        if self._overlay_active_self_text is None:
+        if self._current_active_self_metadata() is None:
             return
         if self.overlay_sink is None:
-            self._overlay_active_self_text = None
-            self._overlay_active_self_secondary_text = None
-            self._overlay_active_self_utterance_id = None
-            self._overlay_active_self_occupant_key = None
-            self._overlay_active_self_update_id = None
-            self._overlay_active_self_origin_wall_clock_ms = None
-            self._overlay_active_self_session_scope = None
-            self._overlay_active_self_source_text_hash = None
-            self._overlay_active_self_source_text_len = None
-            self._overlay_active_self_logical_turn_key = None
             return
-        await self._emit_overlay_active_self_event(self.overlay_event_adapter.self_active_clear())
+        await self._emit_self_active_overlay_event(self.overlay_event_adapter.self_active_clear())
 
     def _merge_text(self, parts: list[str]) -> str:
         merged = ""
@@ -1630,7 +1585,7 @@ class ClientHub:
             end -= 1
         return text[start:end]
 
-    def _record_overlay_active_self_secondary_decision(
+    def _record_active_self_secondary_decision(
         self,
         *,
         buffer: _MergeBuffer,
@@ -1672,7 +1627,7 @@ class ClientHub:
             secondary_len=len(secondary_text),
             spec_text_len=len((buffer.spec_text or "").strip()),
             spec_translation_len=spec_translation_len,
-            cached_secondary_len=len((self._overlay_active_self_secondary_text or "").strip()),
+            cached_secondary_len=len(self._cached_active_self_secondary_text().strip()),
             reuse_mode=reuse_mode,
             resume_pending=buffer.resume_pending,
             resume_confirmed=buffer.resume_confirmed,
@@ -1701,7 +1656,7 @@ class ClientHub:
             len(secondary_text),
             len((buffer.spec_text or "").strip()),
             spec_translation_len,
-            len((self._overlay_active_self_secondary_text or "").strip()),
+            len(self._cached_active_self_secondary_text().strip()),
             reuse_mode,
             buffer.resume_pending,
             buffer.resume_confirmed,
@@ -1719,11 +1674,13 @@ class ClientHub:
         # Presenter promotion preserves active secondary text for the same occupant.
         # Blank the active row first when speculative reuse is unsafe so stale
         # secondary text cannot be promoted into the finalized row.
+        metadata = self._current_active_self_metadata()
         return (
             reuse_mode is None
             and self.overlay_sink is not None
-            and self._overlay_active_self_text == final_text
-            and (self._overlay_active_self_secondary_text or "").strip() != ""
+            and metadata is not None
+            and getattr(metadata, "text", None) == final_text
+            and str(getattr(metadata, "secondary_text", "") or "").strip() != ""
         )
 
     def _record_overlay_emit(
@@ -2189,7 +2146,7 @@ class ClientHub:
                 channel="self",
                 secondary_len=0,
             )
-            await self._emit_overlay_active_self_event(
+            await self._emit_self_active_overlay_event(
                 self.overlay_event_adapter.self_active_update(
                     text=final_text,
                     utterance_id=buffer.merge_id,
@@ -2220,16 +2177,6 @@ class ClientHub:
             is_final=True,
             created_at=self.clock.now(),
         )
-        self._overlay_active_self_text = None
-        self._overlay_active_self_secondary_text = None
-        self._overlay_active_self_utterance_id = None
-        self._overlay_active_self_occupant_key = None
-        self._overlay_active_self_update_id = None
-        self._overlay_active_self_origin_wall_clock_ms = None
-        self._overlay_active_self_session_scope = None
-        self._overlay_active_self_source_text_hash = None
-        self._overlay_active_self_source_text_len = None
-        self._overlay_active_self_logical_turn_key = None
         await self._handle_transcript(transcript, is_final=True, source="Mic")
 
         if self.llm is None or not self.translation_enabled:
