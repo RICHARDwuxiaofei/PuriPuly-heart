@@ -948,7 +948,7 @@ async function reserveDiscordEntitlement(
 ): Promise<DiscordReservationResult> {
   let identityInserted = false;
   try {
-    await upsertDiscordInstallation(db, input);
+    await insertDiscordInstallationIfAbsent(db, input);
 
     identityInserted = await insertDiscordIdentityReservation(db, input);
     if (!identityInserted) {
@@ -957,6 +957,7 @@ async function reserveDiscordEntitlement(
 
     const reserved = await insertOrUpdateIssuingDiscordEntitlement(db, input);
     if (reserved) {
+      await updateDiscordInstallationBinding(db, input);
       return { ok: true };
     }
 
@@ -992,7 +993,7 @@ async function reserveDiscordEntitlement(
   }
 }
 
-async function upsertDiscordInstallation(
+async function insertDiscordInstallationIfAbsent(
   db: D1Database,
   input: {
     installationId: string;
@@ -1005,7 +1006,7 @@ async function upsertDiscordInstallation(
 ): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO installations (
+      `INSERT OR IGNORE INTO installations (
           installation_id,
           device_public_key,
           hardware_hash,
@@ -1016,16 +1017,7 @@ async function upsertDiscordInstallation(
           challenge_salt_version,
           created_at,
           last_seen_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
-        ON CONFLICT(installation_id) DO UPDATE SET
-          device_public_key = excluded.device_public_key,
-          hardware_hash = excluded.hardware_hash,
-          hardware_hash_salt_version = excluded.hardware_hash_salt_version,
-          app_version = excluded.app_version,
-          challenge = NULL,
-          challenge_expires_at = NULL,
-          challenge_salt_version = NULL,
-          last_seen_at = excluded.last_seen_at`,
+        ) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
     )
     .bind(
       input.installationId,
@@ -1035,6 +1027,41 @@ async function upsertDiscordInstallation(
       input.appVersion,
       input.nowIso,
       input.nowIso,
+    )
+    .run();
+}
+
+async function updateDiscordInstallationBinding(
+  db: D1Database,
+  input: {
+    installationId: string;
+    devicePublicKey: string;
+    hardwareHash: string;
+    hardwareHashSaltVersion: number;
+    appVersion: string;
+    nowIso: string;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE installations
+          SET device_public_key = ?,
+              hardware_hash = ?,
+              hardware_hash_salt_version = ?,
+              app_version = ?,
+              challenge = NULL,
+              challenge_expires_at = NULL,
+              challenge_salt_version = NULL,
+              last_seen_at = ?
+        WHERE installation_id = ?`,
+    )
+    .bind(
+      input.devicePublicKey,
+      input.hardwareHash,
+      input.hardwareHashSaltVersion,
+      input.appVersion,
+      input.nowIso,
+      input.installationId,
     )
     .run();
 }
@@ -1160,7 +1187,11 @@ async function insertOrUpdateIssuingDiscordEntitlement(
       input.discordUserRef,
       input.nowIso,
       input.hardwareHash,
+      input.hardwareHashSaltVersion,
+      input.installationId,
+      input.discordUserRef,
       input.hardwareHash,
+      input.hardwareHashSaltVersion,
       ...(maxCount === null
         ? []
         : [
@@ -1179,9 +1210,19 @@ async function insertOrUpdateIssuingDiscordEntitlement(
 function deliveredHardwareNotExistsPredicate(): string {
   return `NOT EXISTS (
             SELECT 1
-              FROM openrouter_entitlements delivered
-             WHERE delivered.status = 'active'
-               AND delivered.verified_hardware_hash = ?
+              FROM openrouter_entitlements reserved
+             WHERE reserved.verified_hardware_hash = ?
+               AND reserved.verified_hardware_hash_salt_version = ?
+               AND (
+                 reserved.status = 'active'
+                 OR (
+                   reserved.discord_issue_status = 'issuing'
+                   AND NOT (
+                     reserved.installation_id = ?
+                     AND reserved.discord_user_ref = ?
+                   )
+                 )
+               )
           )
           AND NOT EXISTS (
             SELECT 1
@@ -1189,6 +1230,7 @@ function deliveredHardwareNotExistsPredicate(): string {
               JOIN openrouter_entitlements legacy_entitlement
                 ON legacy_entitlement.installation_id = legacy.installation_id
              WHERE legacy.hardware_hash = ?
+               AND legacy.hardware_hash_salt_version = ?
                AND legacy_entitlement.status = 'active'
           )`;
 }
@@ -1198,15 +1240,27 @@ async function hasDeliveredHardwareDuplicate(
   input: {
     installationId: string;
     hardwareHash: string;
+    hardwareHashSaltVersion: number;
+    discordUserRef: string;
   },
 ): Promise<boolean> {
   const row = await db
     .prepare(
       `SELECT EXISTS(
           SELECT 1
-            FROM openrouter_entitlements delivered
-           WHERE delivered.status = 'active'
-             AND delivered.verified_hardware_hash = ?
+            FROM openrouter_entitlements reserved
+           WHERE reserved.verified_hardware_hash = ?
+             AND reserved.verified_hardware_hash_salt_version = ?
+             AND (
+               reserved.status = 'active'
+               OR (
+                 reserved.discord_issue_status = 'issuing'
+                 AND NOT (
+                   reserved.installation_id = ?
+                   AND reserved.discord_user_ref = ?
+                 )
+               )
+             )
         )
         OR EXISTS(
           SELECT 1
@@ -1214,12 +1268,17 @@ async function hasDeliveredHardwareDuplicate(
             JOIN openrouter_entitlements legacy_entitlement
               ON legacy_entitlement.installation_id = legacy.installation_id
            WHERE legacy.hardware_hash = ?
+             AND legacy.hardware_hash_salt_version = ?
              AND legacy_entitlement.status = 'active'
         ) AS duplicate_found`,
     )
     .bind(
       input.hardwareHash,
+      input.hardwareHashSaltVersion,
+      input.installationId,
+      input.discordUserRef,
       input.hardwareHash,
+      input.hardwareHashSaltVersion,
     )
     .first<{ duplicate_found: number }>();
 

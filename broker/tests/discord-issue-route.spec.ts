@@ -534,6 +534,10 @@ describe('Discord issue gate', () => {
       devicePublicKey: 'same-installation-delivered-device-key',
       hardwareHash: 'hardware-hash-same-installation-delivered',
       hardwareHashSaltVersion: 7,
+      appVersion: '1.0-existing-active',
+      challenge: 'existing-active-challenge',
+      challengeExpiresAt: '2026-04-30T06:15:00.000Z',
+      challengeSaltVersion: 7,
     });
     insertEntitlement(env, {
       installation_id: installationId,
@@ -548,6 +552,7 @@ describe('Discord issue gate', () => {
       discord_issue_reserved_at: NOW_ISO,
       discord_issue_delivered_at: NOW_ISO,
     });
+    const installationBefore = await readInstallation(env, installationId);
 
     const started = await startDiscordSession(installationId, env);
     const discordApi = mockDiscordApi({
@@ -582,6 +587,9 @@ describe('Discord issue gate', () => {
         discord_issue_status: 'active',
       }),
     );
+    await expect(readInstallation(env, installationId)).resolves.toEqual(
+      installationBefore,
+    );
   });
 
   it('same installation issuing conflict does not overwrite another Discord reservation or strand identity', async () => {
@@ -599,6 +607,10 @@ describe('Discord issue gate', () => {
       devicePublicKey: 'same-installation-issuing-device-key',
       hardwareHash: 'hardware-hash-same-installation-issuing-old',
       hardwareHashSaltVersion: 7,
+      appVersion: '1.0-existing-issuing',
+      challenge: 'existing-issuing-challenge',
+      challengeExpiresAt: '2026-04-30T06:15:00.000Z',
+      challengeSaltVersion: 7,
     });
     insertDiscordIdentity(env, {
       discordUserRef: existingDiscordUserRef,
@@ -615,6 +627,7 @@ describe('Discord issue gate', () => {
       discord_issue_status: 'issuing',
       discord_issue_reserved_at: NOW_ISO,
     });
+    const installationBefore = await readInstallation(env, installationId);
 
     const started = await startDiscordSession(installationId, env);
     const discordApi = mockDiscordApi({
@@ -657,6 +670,9 @@ describe('Discord issue gate', () => {
         discord_issue_status: 'issuing',
         verified_hardware_hash: 'hardware-hash-same-installation-issuing-old',
       }),
+    );
+    await expect(readInstallation(env, installationId)).resolves.toEqual(
+      installationBefore,
     );
   });
 
@@ -1122,6 +1138,29 @@ async function readEntitlement(
   return row ?? null;
 }
 
+async function readInstallation(
+  env: TestBrokerEnv,
+  installationId: string,
+): Promise<Record<string, unknown> | null> {
+  const row = env.__db
+    .prepare(
+      `SELECT installation_id,
+              device_public_key,
+              hardware_hash,
+              hardware_hash_salt_version,
+              app_version,
+              challenge,
+              challenge_expires_at,
+              challenge_salt_version,
+              created_at,
+              last_seen_at
+         FROM installations
+        WHERE installation_id = ?`,
+    )
+    .get(installationId) as Record<string, unknown> | undefined;
+  return row ?? null;
+}
+
 function insertInstallation(
   env: TestBrokerEnv,
   input: {
@@ -1130,6 +1169,9 @@ function insertInstallation(
     hardwareHash: string | null;
     hardwareHashSaltVersion: number | null;
     appVersion?: string;
+    challenge?: string | null;
+    challengeExpiresAt?: string | null;
+    challengeSaltVersion?: number | null;
   },
 ): void {
   env.__db
@@ -1140,9 +1182,12 @@ function insertInstallation(
           hardware_hash,
           hardware_hash_salt_version,
           app_version,
+          challenge,
+          challenge_expires_at,
+          challenge_salt_version,
           created_at,
           last_seen_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.installationId,
@@ -1150,6 +1195,9 @@ function insertInstallation(
       input.hardwareHash,
       input.hardwareHashSaltVersion,
       input.appVersion ?? APP_VERSION,
+      input.challenge ?? null,
+      input.challengeExpiresAt ?? null,
+      input.challengeSaltVersion ?? null,
       NOW_ISO,
       NOW_ISO,
     );

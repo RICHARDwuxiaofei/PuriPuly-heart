@@ -97,7 +97,91 @@ describe('Discord issue concurrency', () => {
     ).toBe(0);
     expect(countRows(env, 'discord_identities')).toBe(1);
   });
+
+  it('same hardware concurrent reservations allow exactly one key creation and reject the duplicate reservation', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const env = createReservationBarrierEnv();
+    updateAbuseControls(env, (controls) => {
+      controls.newActiveEntitlementsPerDay.maxCount = 5;
+    });
+
+    const first = await startDiscordSession('install-discord-same-hardware-concurrent-a', env);
+    const second = await startDiscordSession('install-discord-same-hardware-concurrent-b', env);
+    const api = mockConcurrentDiscordAndOpenRouterApi({
+      'discord-oauth-code-same-hardware-concurrent-a': {
+        id: discordSnowflakeForAgeDays(31),
+        verified: true,
+      },
+      'discord-oauth-code-same-hardware-concurrent-b': {
+        id: discordSnowflakeForAgeDays(32),
+        verified: true,
+      },
+    });
+
+    const firstBody = await signedIssueRequest(first, {
+      code: 'discord-oauth-code-same-hardware-concurrent-a',
+      hardware_hash: 'hardware-hash-same-hardware-concurrent',
+    });
+    const secondBody = await signedIssueRequest(second, {
+      code: 'discord-oauth-code-same-hardware-concurrent-b',
+      hardware_hash: 'hardware-hash-same-hardware-concurrent',
+    });
+
+    const responses = await Promise.all([
+      postDiscordIssue(env, firstBody),
+      postDiscordIssue(env, secondBody),
+    ]);
+
+    const successResponses = responses.filter((response) => response.status === 200);
+    const duplicateResponses = responses.filter((response) => response.status === 409);
+    expect(successResponses).toHaveLength(1);
+    expect(duplicateResponses).toHaveLength(1);
+    await expect(duplicateResponses[0]!.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'trial_not_eligible',
+        class: 'terminal',
+        subcode: 'hardware_duplicate',
+        message: 'This device has already used a managed trial',
+      }),
+    );
+
+    expect(api.openRouterCreateCalls).toHaveLength(1);
+    expect(countRows(env, "openrouter_entitlements WHERE status = 'active'")).toBe(1);
+    expect(
+      countRows(env, "openrouter_entitlements WHERE discord_issue_status = 'issuing'"),
+    ).toBe(0);
+    expect(countRows(env, 'discord_identities')).toBe(1);
+  });
 });
+
+function createReservationBarrierEnv(): TestBrokerEnv {
+  let reservationAttempts = 0;
+  let releaseReservations: (() => void) | null = null;
+  const bothReservationsReached = new Promise<void>((resolve) => {
+    releaseReservations = resolve;
+  });
+
+  return createTestBrokerEnv({
+    beforeRun: async ({ sql }) => {
+      if (
+        !sql.includes('INSERT INTO openrouter_entitlements') ||
+        !sql.includes('discord_issue_status')
+      ) {
+        return;
+      }
+
+      reservationAttempts += 1;
+      if (reservationAttempts >= 2) {
+        releaseReservations?.();
+        return;
+      }
+
+      await bothReservationsReached;
+    },
+  });
+}
 
 async function startDiscordSession(
   installationId: string,
