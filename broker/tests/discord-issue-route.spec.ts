@@ -93,6 +93,62 @@ describe('Discord issue gate', () => {
     );
   });
 
+  it('returns a restart boundary when Discord token exchange fails after terminalizing the session', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const started = await startDiscordSession('install-discord-issue-token-failure');
+    mockDiscordApi({ tokenStatus: 500 });
+    const requestBody = await signedIssueRequest(started);
+
+    const response = await postDiscordIssue(started.env, requestBody);
+
+    expect(response.status).toBe(410);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'challenge_expired',
+        class: 'retryable',
+        subcode: 'discord_oauth_failed',
+        retryAfterMs: 0,
+        message: 'Discord OAuth verification failed; restart Discord OAuth onboarding',
+      }),
+    );
+    await expect(readSessionByState(started.env, started.state)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'failed',
+        pkce_code_verifier: null,
+      }),
+    );
+  });
+
+  it('returns a restart boundary when Discord user fetch fails after terminalizing the session', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const started = await startDiscordSession('install-discord-issue-user-fetch-failure');
+    mockDiscordApi({ userStatus: 500 });
+    const requestBody = await signedIssueRequest(started);
+
+    const response = await postDiscordIssue(started.env, requestBody);
+
+    expect(response.status).toBe(410);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'challenge_expired',
+        class: 'retryable',
+        subcode: 'discord_oauth_failed',
+        retryAfterMs: 0,
+        message: 'Discord OAuth verification failed; restart Discord OAuth onboarding',
+      }),
+    );
+    await expect(readSessionByState(started.env, started.state)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'failed',
+        pkce_code_verifier: null,
+      }),
+    );
+  });
+
   it('rejects invalid JSON with 400', async () => {
     const env = createTestBrokerEnv();
 
@@ -443,6 +499,8 @@ async function readSessionByState(
 
 function mockDiscordApi(options: {
   user?: Record<string, unknown>;
+  tokenStatus?: number;
+  userStatus?: number;
 } = {}): { fetchMock: ReturnType<typeof vi.fn> } {
   const user = options.user ?? {
     id: discordSnowflakeForAgeDays(31),
@@ -453,6 +511,10 @@ function mockDiscordApi(options: {
     const method = init?.method ?? 'GET';
 
     if (url === DISCORD_TOKEN_URL && method === 'POST') {
+      if (options.tokenStatus !== undefined && options.tokenStatus >= 400) {
+        return jsonResponse({ error: 'token exchange failed' }, options.tokenStatus);
+      }
+
       return jsonResponse({
         access_token: 'discord-access-token',
         token_type: 'Bearer',
@@ -460,6 +522,10 @@ function mockDiscordApi(options: {
     }
 
     if (url === DISCORD_USER_URL && method === 'GET') {
+      if (options.userStatus !== undefined && options.userStatus >= 400) {
+        return jsonResponse({ error: 'user fetch failed' }, options.userStatus);
+      }
+
       return jsonResponse(user);
     }
 

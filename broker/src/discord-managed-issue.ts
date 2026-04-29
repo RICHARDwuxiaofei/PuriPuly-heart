@@ -316,13 +316,7 @@ export async function handleDiscordOpenRouterIssue(
       discordEmailVerified: null,
       discordAccountCreatedAt: null,
     });
-    return publicErrorResponse(c, 503, {
-      code: 'trial_unavailable',
-      class: 'retryable',
-      subcode: 'discord_oauth_failed',
-      message: 'Discord OAuth verification failed',
-      entitlement: null,
-    });
+    return discordOAuthFailedResponse(c);
   }
 
   const eligibility = assertDiscordEligibility(discordUser, now);
@@ -837,6 +831,17 @@ function discordSessionExpiredResponse(c: Context<BrokerEnv>): Response {
     subcode: 'discord_oauth_session_expired',
     retryAfterMs: 0,
     message: 'Discord OAuth session has expired and must be restarted',
+    entitlement: null,
+  });
+}
+
+function discordOAuthFailedResponse(c: Context<BrokerEnv>): Response {
+  return publicErrorResponse(c, 410, {
+    code: 'challenge_expired',
+    class: 'retryable',
+    subcode: 'discord_oauth_failed',
+    retryAfterMs: 0,
+    message: 'Discord OAuth verification failed; restart Discord OAuth onboarding',
     entitlement: null,
   });
 }
