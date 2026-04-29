@@ -106,7 +106,7 @@ async def test_headless_stdin_run_handles_keyboard_interrupt(monkeypatch):
         return None
 
     monkeypatch.setattr(headless_stdin, "VrchatOscUdpSender", FakeSender)
-    monkeypatch.setattr(headless_stdin, "SmartOscQueue", FakeOsc)
+    monkeypatch.setattr(headless_stdin, "ChatboxPaginator", FakeOsc)
     monkeypatch.setattr(HeadlessStdinRunner, "_stdin_loop", fake_stdin_loop)
     monkeypatch.setattr(HeadlessStdinRunner, "_flush_loop", fake_flush_loop)
 

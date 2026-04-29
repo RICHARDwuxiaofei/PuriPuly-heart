@@ -29,8 +29,8 @@ from puripuly_heart.core.audio.streaming_resampler import MonoFirstStreamingResa
 from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.orchestrator.hub import ClientHub
+from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
 from puripuly_heart.core.osc.receiver import VrcMicState, VrcOscReceiver
-from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.storage.secrets import SecretStore
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
@@ -127,12 +127,10 @@ class HeadlessMicRunner:
             chatbox_send=self.settings.osc.chatbox_send,
             chatbox_clear=self.settings.osc.chatbox_clear,
         )
-        osc = SmartOscQueue(
+        osc = ChatboxPaginator(
             sender=sender,
             clock=self.clock,
             max_chars=self.settings.osc.chatbox_max_chars,
-            cooldown_s=self.settings.osc.cooldown_s,
-            ttl_s=self.settings.osc.ttl_s,
         )
 
         hub = ClientHub(

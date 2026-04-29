@@ -60,7 +60,7 @@ LATENCY_TRACE_POINT_CONTRACTS: dict[str, LatencyTracePointContract] = {
     ),
     "self_chatbox_enqueue": LatencyTracePointContract(
         name="self_chatbox_enqueue",
-        timing_semantics="Recorded when the hub enqueues the final self output into SmartOscQueue.",
+        timing_semantics="Recorded when the hub enqueues the final self output into ChatboxPaginator.",
         acceptance_expectation="This is the official self Basic latency end boundary because it is the final self output handoff point owned by the hub.",
     ),
     "peer_overlay_first_emit": LatencyTracePointContract(

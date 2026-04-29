@@ -77,13 +77,13 @@ from puripuly_heart.core.openrouter_handoff import (
 )
 from puripuly_heart.core.openrouter_pkce import OpenRouterPKCEClient
 from puripuly_heart.core.orchestrator.hub import ClientHub
+from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
 from puripuly_heart.core.osc.receiver import (
     VRC_OSC_RECEIVER_HOST,
     VRC_OSC_RECEIVER_PORT,
     VrcMicState,
     VrcOscReceiver,
 )
-from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.overlay.bridge import OverlayBridge
 from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
@@ -166,7 +166,7 @@ class GuiController:
     _openrouter_pkce_client: OpenRouterPKCEClient | None = None
 
     sender: VrchatOscUdpSender | None = None
-    osc: SmartOscQueue | None = None
+    osc: ChatboxPaginator | None = None
     hub: ClientHub | None = None
     _peer_runtime: PeerChannelRuntime | None = None
     receiver: VrcOscReceiver | None = None
@@ -2406,12 +2406,10 @@ class GuiController:
             chatbox_send=self.settings.osc.chatbox_send,
             chatbox_clear=self.settings.osc.chatbox_clear,
         )
-        osc = SmartOscQueue(
+        osc = ChatboxPaginator(
             sender=sender,
             clock=self.clock,
             max_chars=self.settings.osc.chatbox_max_chars,
-            cooldown_s=self.settings.osc.cooldown_s,
-            ttl_s=self.settings.osc.ttl_s,
             runtime_logging=self.runtime_logging,
         )
 

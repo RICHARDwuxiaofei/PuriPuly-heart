@@ -25,7 +25,7 @@ from puripuly_heart.core.orchestrator.channel_runtime import (
     _MergeBuffer,
 )
 from puripuly_heart.core.orchestrator.context import ContextMode, ContextResolver
-from puripuly_heart.core.osc.smart_queue import SmartOscQueue
+from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
 from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.overlay.sink import (
     OverlayEventAdapter,
@@ -104,7 +104,7 @@ class _LatencyTimeline:
 class ClientHub:
     stt: STTProvider | None
     llm: LLMProvider | None
-    osc: SmartOscQueue
+    osc: ChatboxPaginator
     peer_stt: STTProvider | None = None
     overlay_sink: OverlaySink | None = None
     overlay_diagnostics: OverlayDiagnosticsRecorder | None = None

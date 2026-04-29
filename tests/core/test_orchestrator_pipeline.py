@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.orchestrator.hub import ClientHub
-from puripuly_heart.core.osc.smart_queue import SmartOscQueue
+from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart
 from puripuly_heart.domain.models import Translation
@@ -39,7 +39,7 @@ class FakeLLM:
 async def test_client_hub_uses_local_context_when_peer_translation_is_off():
     clock = FakeClock(_now=112.0)
     sender = FakeSender()
-    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    osc = ChatboxPaginator(sender=sender, clock=clock)
     inner = FakeLLM()
     llm = SemaphoreLLMProvider(inner=inner, semaphore=asyncio.Semaphore(1))
     hub = ClientHub(
@@ -66,7 +66,7 @@ async def test_client_hub_uses_local_context_when_peer_translation_is_off():
 async def test_client_hub_uses_integrated_context_when_enabled_and_safe():
     clock = FakeClock(_now=112.0)
     sender = FakeSender()
-    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    osc = ChatboxPaginator(sender=sender, clock=clock)
     inner = FakeLLM()
     llm = SemaphoreLLMProvider(inner=inner, semaphore=asyncio.Semaphore(1))
     hub = ClientHub(
@@ -103,7 +103,7 @@ async def test_client_hub_uses_integrated_context_when_enabled_and_safe():
 async def test_orchestrator_e2e_headless():
     clock = FakeClock()
     sender = FakeSender()
-    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    osc = ChatboxPaginator(sender=sender, clock=clock)
 
     stt = ManagedSTTProvider(
         backend=SpeechAwareFakeBackend(),
@@ -135,7 +135,7 @@ async def test_stt_connected_sends_promo_message():
     """버튼 클릭 시 'PuriPuly ON!' 메시지 전송."""
     clock = FakeClock()
     sender = FakeSender()
-    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    osc = ChatboxPaginator(sender=sender, clock=clock)
     stt = ManagedSTTProvider(
         backend=SpeechAwareFakeBackend(),
         sample_rate_hz=16000,
@@ -162,7 +162,7 @@ async def test_stt_promo_respects_interval():
     """5분 내 버튼 다시 눌러도 메시지 안 보냄."""
     clock = FakeClock()
     sender = FakeSender()
-    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    osc = ChatboxPaginator(sender=sender, clock=clock)
     stt = ManagedSTTProvider(
         backend=SpeechAwareFakeBackend(),
         sample_rate_hz=16000,
@@ -210,7 +210,7 @@ async def test_stt_promo_sends_after_interval():
     """5분 후 버튼 클릭 시 메시지 다시 보냄."""
     clock = FakeClock()
     sender = FakeSender()
-    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    osc = ChatboxPaginator(sender=sender, clock=clock)
     stt = ManagedSTTProvider(
         backend=SpeechAwareFakeBackend(),
         sample_rate_hz=16000,
@@ -257,7 +257,7 @@ async def test_stt_promo_skipped_on_session_reset():
     """세션 자동 리셋 시에는 메시지 안 나감."""
     clock = FakeClock()
     sender = FakeSender()
-    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    osc = ChatboxPaginator(sender=sender, clock=clock)
     stt = ManagedSTTProvider(
         backend=SpeechAwareFakeBackend(),
         sample_rate_hz=16000,

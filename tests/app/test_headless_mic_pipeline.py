@@ -8,7 +8,7 @@ from puripuly_heart.app.headless_mic import run_audio_vad_loop
 from puripuly_heart.core.audio.format import AudioFrameF32
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.orchestrator.hub import ClientHub
-from puripuly_heart.core.osc.smart_queue import SmartOscQueue
+from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.gating import VadGating
 from puripuly_heart.domain.events import STTSessionState
@@ -20,7 +20,7 @@ from tests.helpers.vad import SequenceVadEngine
 async def test_headless_mic_pipeline_smoke():
     clock = FakeClock()
     sender = FakeSender()
-    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    osc = ChatboxPaginator(sender=sender, clock=clock)
 
     stt = ManagedSTTProvider(backend=SpeechAwareFakeBackend(), sample_rate_hz=16000, clock=clock)
     hub = ClientHub(stt=stt, llm=None, osc=osc, clock=clock, fallback_transcript_only=True)
@@ -123,7 +123,7 @@ class _RecordingSpeechBackend:
 async def test_peer_pipeline_drops_short_candidate_before_opening_stt_session():
     clock = FakeClock()
     sender = FakeSender()
-    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    osc = ChatboxPaginator(sender=sender, clock=clock)
     backend = _RecordingSpeechBackend()
     peer_stt = ManagedSTTProvider(
         backend=backend,
@@ -167,7 +167,7 @@ async def test_peer_pipeline_drops_short_candidate_before_opening_stt_session():
 async def test_peer_pipeline_commits_after_candidate_reaches_minimum_length():
     clock = FakeClock()
     sender = FakeSender()
-    osc = SmartOscQueue(sender=sender, clock=clock, ttl_s=100.0)
+    osc = ChatboxPaginator(sender=sender, clock=clock)
     backend = _RecordingSpeechBackend()
     peer_stt = ManagedSTTProvider(
         backend=backend,

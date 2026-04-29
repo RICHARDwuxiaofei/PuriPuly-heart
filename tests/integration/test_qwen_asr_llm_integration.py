@@ -38,7 +38,7 @@ async def test_qwen_asr_llm_pipeline_smoke() -> None:
     from puripuly_heart.core.language import get_llm_language_name
     from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
     from puripuly_heart.core.orchestrator.hub import ClientHub
-    from puripuly_heart.core.osc.smart_queue import SmartOscQueue
+    from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
     from puripuly_heart.core.stt.controller import ManagedSTTProvider
     from puripuly_heart.domain.events import UIEventType
     from puripuly_heart.providers.llm.qwen import QwenLLMProvider
@@ -83,12 +83,10 @@ async def test_qwen_asr_llm_pipeline_smoke() -> None:
     llm = SemaphoreLLMProvider(inner=llm_base, semaphore=asyncio.Semaphore(1))
 
     mock_sender = MockOscSender()
-    osc = SmartOscQueue(
+    osc = ChatboxPaginator(
         sender=mock_sender,
         clock=SimpleClock(),
         max_chars=144,
-        cooldown_s=0.1,
-        ttl_s=10.0,
     )
 
     source_lang = os.getenv("QWEN_LLM_SOURCE_LANGUAGE", "ko")

@@ -27,7 +27,7 @@ from puripuly_heart.config.llm_profiles import (
 )
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 17
+SETTINGS_SCHEMA_VERSION = 18
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
@@ -296,8 +296,6 @@ class OSCSettings:
     chatbox_send: bool = True
     chatbox_clear: bool = False
     chatbox_max_chars: int = 144
-    cooldown_s: float = 1.5
-    ttl_s: float = 7.0
     vrc_mic_intercept: bool = False
     chatbox_include_source: bool = True
 
@@ -310,10 +308,6 @@ class OSCSettings:
             raise ValueError("chatbox_address must start with '/'")
         if self.chatbox_max_chars <= 0:
             raise ValueError("chatbox_max_chars must be > 0")
-        if self.cooldown_s <= 0:
-            raise ValueError("cooldown_s must be > 0")
-        if self.ttl_s <= 0:
-            raise ValueError("ttl_s must be > 0")
 
 
 @dataclass(slots=True)
@@ -670,8 +664,6 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "chatbox_send": settings.osc.chatbox_send,
             "chatbox_clear": settings.osc.chatbox_clear,
             "chatbox_max_chars": settings.osc.chatbox_max_chars,
-            "cooldown_s": settings.osc.cooldown_s,
-            "ttl_s": settings.osc.ttl_s,
             "vrc_mic_intercept": settings.osc.vrc_mic_intercept,
             "chatbox_include_source": settings.osc.chatbox_include_source,
         },
@@ -1421,6 +1413,18 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 17
 
+    if version < 18:
+        osc_data = data.get("osc")
+        if isinstance(osc_data, dict):
+            if "cooldown_s" in osc_data:
+                osc_data.pop("cooldown_s")
+                changed = True
+            if "ttl_s" in osc_data:
+                osc_data.pop("ttl_s")
+                changed = True
+
+        version = 18
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -1976,8 +1980,6 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             chatbox_send=bool(data.get("osc", {}).get("chatbox_send", True)),
             chatbox_clear=bool(data.get("osc", {}).get("chatbox_clear", False)),
             chatbox_max_chars=int(data.get("osc", {}).get("chatbox_max_chars", 144)),
-            cooldown_s=float(data.get("osc", {}).get("cooldown_s", 1.5)),
-            ttl_s=float(data.get("osc", {}).get("ttl_s", 7.0)),
             vrc_mic_intercept=bool(data.get("osc", {}).get("vrc_mic_intercept", False)),
             chatbox_include_source=bool(data.get("osc", {}).get("chatbox_include_source", True)),
         ),

@@ -159,17 +159,30 @@ def test_migrate_v17_strips_directsound_host_api_before_migration_and_preserves_
     assert migrated["audio"]["input_device"] == "Whitespace DirectSound Mic"
 
 
-def test_migrate_v17_preserves_directsound_when_already_current_schema() -> None:
+def test_migrate_v18_preserves_directsound_when_removing_legacy_osc_rate_limits() -> None:
+    assert SETTINGS_SCHEMA_VERSION == 18
+
     raw = to_dict(AppSettings())
     raw["settings_version"] = 17
     raw["audio"]["input_host_api"] = WINDOWS_DIRECTSOUND_HOST_API
     raw["audio"]["input_device"] = "Reselected DirectSound Mic"
+    raw["osc"]["host"] = "192.0.2.10"
+    raw["osc"]["port"] = 9010
+    raw["osc"]["chatbox_max_chars"] = 72
+    raw["osc"]["vrc_mic_intercept"] = True
+    raw["osc"]["cooldown_s"] = 1.5
+    raw["osc"]["ttl_s"] = 7.0
+    expected_osc = dict(raw["osc"])
+    expected_osc.pop("cooldown_s")
+    expected_osc.pop("ttl_s")
 
-    migrated, _changed = _migrate_settings_dict(raw)
+    migrated, changed = _migrate_settings_dict(raw)
 
-    assert migrated["settings_version"] == 17
+    assert changed is True
+    assert migrated["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert migrated["audio"]["input_host_api"] == WINDOWS_DIRECTSOUND_HOST_API
     assert migrated["audio"]["input_device"] == "Reselected DirectSound Mic"
+    assert migrated["osc"] == expected_osc
 
 
 def test_load_settings_persists_v17_directsound_migration(tmp_path) -> None:
@@ -190,8 +203,51 @@ def test_load_settings_persists_v17_directsound_migration(tmp_path) -> None:
     assert stored["audio"]["input_device"] == "Manual DirectSound Mic"
 
 
+def test_load_settings_persists_v18_osc_rate_limit_key_removal(tmp_path) -> None:
+    assert SETTINGS_SCHEMA_VERSION == 18
+
+    path = tmp_path / "settings.json"
+    raw = to_dict(AppSettings())
+    raw["settings_version"] = 17
+    raw["osc"]["host"] = "192.0.2.20"
+    raw["osc"]["port"] = 9011
+    raw["osc"]["chatbox_max_chars"] = 96
+    raw["osc"]["vrc_mic_intercept"] = True
+    raw["osc"]["cooldown_s"] = 1.5
+    raw["osc"]["ttl_s"] = 7.0
+    expected_osc = dict(raw["osc"])
+    expected_osc.pop("cooldown_s")
+    expected_osc.pop("ttl_s")
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = load_settings(path)
+    stored = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
+    assert loaded.osc.host == "192.0.2.20"
+    assert loaded.osc.port == 9011
+    assert loaded.osc.chatbox_max_chars == 96
+    assert loaded.osc.vrc_mic_intercept is True
+    assert stored["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert stored["osc"] == expected_osc
+
+
+def test_from_dict_ignores_legacy_osc_rate_limit_keys() -> None:
+    raw = to_dict(AppSettings())
+    raw["osc"]["cooldown_s"] = "bad"
+    raw["osc"]["ttl_s"] = "bad"
+
+    loaded = from_dict(raw)
+    persisted = to_dict(loaded)
+
+    assert not hasattr(loaded.osc, "cooldown_s")
+    assert not hasattr(loaded.osc, "ttl_s")
+    assert "cooldown_s" not in persisted["osc"]
+    assert "ttl_s" not in persisted["osc"]
+
+
 def test_settings_validation_rejects_invalid_osc():
-    settings = AppSettings(osc=OSCSettings(ttl_s=-1))
+    settings = AppSettings(osc=OSCSettings(chatbox_max_chars=0))
     with pytest.raises(ValueError):
         settings.validate()
 
@@ -319,6 +375,8 @@ def test_peer_stt_provider_roundtrips_through_settings_dict() -> None:
     assert "peer_deepgram_stt" not in persisted
     assert "peer_qwen_asr_stt" not in persisted
     assert "peer_soniox_stt" not in persisted
+    assert "cooldown_s" not in persisted["osc"]
+    assert "ttl_s" not in persisted["osc"]
 
 
 def test_to_dict_persists_peer_local_qwen_without_rewriting_runtime_settings() -> None:

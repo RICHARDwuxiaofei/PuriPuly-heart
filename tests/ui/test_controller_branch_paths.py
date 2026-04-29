@@ -519,7 +519,7 @@ def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[s
         return hub
 
     monkeypatch.setattr(controller_module, "VrchatOscUdpSender", fake_sender)
-    monkeypatch.setattr(controller_module, "SmartOscQueue", fake_osc)
+    monkeypatch.setattr(controller_module, "ChatboxPaginator", fake_osc)
     monkeypatch.setattr(controller_module, "ClientHub", fake_hub)
 
     return created
@@ -2275,7 +2275,7 @@ async def test_init_pipeline_passes_chatbox_and_peer_language_settings_to_hub(
     monkeypatch.setattr(controller_module, "create_stt_backend", lambda *_a, **_k: "backend")
     monkeypatch.setattr(controller_module, "ManagedSTTProvider", lambda *a, **k: "stt")
     monkeypatch.setattr(controller_module, "VrchatOscUdpSender", lambda *a, **k: object())
-    monkeypatch.setattr(controller_module, "SmartOscQueue", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "ChatboxPaginator", lambda *a, **k: object())
 
     def fake_hub(*_args, **kwargs):
         captured.update(kwargs)

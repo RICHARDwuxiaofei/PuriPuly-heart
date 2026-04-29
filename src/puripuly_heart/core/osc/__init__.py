@@ -1,1 +1,1 @@
-__all__ = ["encoding", "sender", "smart_queue", "udp_sender"]
+__all__ = ["chatbox_paginator", "encoding", "sender", "udp_sender"]
