@@ -1135,6 +1135,224 @@ describe('Discord issue gate', () => {
     );
   });
 
+  it('cleanup_required blocks same-installation reservation by a different Discord account without overwriting orphan metadata', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const env = createTestBrokerEnv();
+    const installationId = 'install-discord-cleanup-required-same-installation';
+    const orphanedCredentialRef = 'hash_discord_orphaned_cleanup_required_same_install';
+    const existingDiscordUserRef = await deriveExpectedDiscordUserRef(
+      env.DISCORD_USER_REF_SECRET,
+      discordSnowflakeForAgeDays(45),
+    );
+    const newDiscordUserId = discordSnowflakeForAgeDays(31);
+    const newDiscordUserRef = await deriveExpectedDiscordUserRef(
+      env.DISCORD_USER_REF_SECRET,
+      newDiscordUserId,
+    );
+    insertInstallation(env, {
+      installationId,
+      devicePublicKey: 'cleanup-required-same-installation-device-key',
+      hardwareHash: 'hardware-hash-cleanup-required-existing',
+      hardwareHashSaltVersion: 7,
+    });
+    insertDiscordIdentity(env, {
+      discordUserRef: existingDiscordUserRef,
+      installationId,
+      status: 'cleanup_required',
+    });
+    insertEntitlement(env, {
+      installation_id: installationId,
+      status: 'pending_release',
+      budget_usd: 0.07,
+      managed_credential_ref: orphanedCredentialRef,
+      verified_hardware_hash: 'hardware-hash-cleanup-required-existing',
+      verified_hardware_hash_salt_version: 7,
+      discord_user_ref: existingDiscordUserRef,
+      discord_issue_status: 'cleanup_required',
+      discord_issue_reserved_at: NOW_ISO,
+    });
+    const entitlementBefore = await readEntitlement(env, installationId);
+    const installationBefore = await readInstallation(env, installationId);
+
+    const started = await startDiscordSession(installationId, env);
+    const discordApi = mockDiscordApi({
+      user: {
+        id: newDiscordUserId,
+        verified: true,
+      },
+    });
+    const response = await postDiscordIssue(
+      env,
+      await signedIssueRequest(started, {
+        code: 'discord-oauth-code-cleanup-required-same-installation',
+        hardware_hash: 'hardware-hash-cleanup-required-new-attempt',
+      }),
+    );
+
+    expect(response.status).toBe(410);
+    expect(discordApi.openRouterCreateCalls).toHaveLength(0);
+    await expect(readEntitlement(env, installationId)).resolves.toEqual(entitlementBefore);
+    await expect(readInstallation(env, installationId)).resolves.toEqual(
+      installationBefore,
+    );
+    await expect(readDiscordIdentity(env, existingDiscordUserRef)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'cleanup_required',
+        entitlement_installation_id: installationId,
+      }),
+    );
+    await expect(readDiscordIdentity(env, newDiscordUserRef)).resolves.toBeNull();
+  });
+
+  it('cleanup_required blocks same-hardware reservation from another installation without creating a new key', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const env = createTestBrokerEnv();
+    const existingInstallationId = 'install-discord-cleanup-required-existing-hardware';
+    const newInstallationId = 'install-discord-cleanup-required-same-hardware-new';
+    const cleanupHardwareHash = 'hardware-hash-cleanup-required-shared';
+    const existingDiscordUserRef = await deriveExpectedDiscordUserRef(
+      env.DISCORD_USER_REF_SECRET,
+      discordSnowflakeForAgeDays(46),
+    );
+    insertInstallation(env, {
+      installationId: existingInstallationId,
+      devicePublicKey: 'cleanup-required-existing-hardware-device-key',
+      hardwareHash: cleanupHardwareHash,
+      hardwareHashSaltVersion: 7,
+    });
+    insertDiscordIdentity(env, {
+      discordUserRef: existingDiscordUserRef,
+      installationId: existingInstallationId,
+      status: 'cleanup_required',
+    });
+    insertEntitlement(env, {
+      installation_id: existingInstallationId,
+      status: 'pending_release',
+      budget_usd: 0.07,
+      managed_credential_ref: 'hash_discord_orphaned_cleanup_required_same_hardware',
+      verified_hardware_hash: cleanupHardwareHash,
+      verified_hardware_hash_salt_version: 7,
+      discord_user_ref: existingDiscordUserRef,
+      discord_issue_status: 'cleanup_required',
+      discord_issue_reserved_at: NOW_ISO,
+    });
+    const cleanupRequiredBefore = await readEntitlement(env, existingInstallationId);
+
+    const started = await startDiscordSession(newInstallationId, env);
+    const discordApi = mockDiscordApi({
+      user: {
+        id: discordSnowflakeForAgeDays(31),
+        verified: true,
+      },
+    });
+    const response = await postDiscordIssue(
+      env,
+      await signedIssueRequest(started, {
+        code: 'discord-oauth-code-cleanup-required-same-hardware',
+        hardware_hash: cleanupHardwareHash,
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'trial_not_eligible',
+        class: 'terminal',
+        subcode: 'hardware_duplicate',
+        message: 'This device has already used a managed trial',
+      }),
+    );
+    expect(discordApi.openRouterCreateCalls).toHaveLength(0);
+    await expect(readEntitlement(env, existingInstallationId)).resolves.toEqual(
+      cleanupRequiredBefore,
+    );
+    await expect(readEntitlement(env, newInstallationId)).resolves.toBeNull();
+    expect(countDiscordIdentities(env)).toBe(1);
+  });
+
+  it('local session cleanup failure after child-key creation still attempts remote cleanup and does not leak raw key', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const rawCode = 'discord-oauth-code-local-session-cleanup-redact';
+    const rawDiscordUserId = discordSnowflakeForAgeDays(31);
+    const rawEmail = 'local-session-cleanup@example.test';
+    const rawAccessToken = 'discord-access-token-local-session-cleanup-redact';
+    const rawRefreshToken = 'discord-refresh-token-local-session-cleanup-redact';
+    const rawOpenRouterChildKey = 'or-discord-managed-child-key-local-cleanup-redact';
+    const childKeyHash = 'hash_discord_managed_child_local_cleanup';
+    let rawState = '';
+    let rawPkceVerifier: string | null = null;
+    let failSessionCleanup = false;
+    const env = createTestBrokerEnv({
+      beforeRun: ({ sql }) => {
+        if (
+          failSessionCleanup &&
+          sql.includes('UPDATE discord_oauth_sessions') &&
+          sql.includes("status = 'failed'")
+        ) {
+          throw new Error(
+            `session cleanup failed ${rawCode} ${rawState} ${rawPkceVerifier} ${rawAccessToken} ${rawRefreshToken} ${rawDiscordUserId} ${rawEmail} ${rawOpenRouterChildKey}`,
+          );
+        }
+      },
+    });
+    const started = await startDiscordSession('install-discord-local-session-cleanup', env);
+    rawState = started.state;
+    rawPkceVerifier = (await readSessionByState(env, started.state)).pkce_code_verifier;
+    const sensitiveValues = [
+      rawCode,
+      rawState,
+      rawPkceVerifier,
+      rawAccessToken,
+      rawRefreshToken,
+      rawDiscordUserId,
+      rawEmail,
+      rawOpenRouterChildKey,
+    ].filter((value): value is string => value !== null);
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const discordApi = mockDiscordApi({
+      openRouterMode: 'guardrail_failure',
+      rawChildKey: rawOpenRouterChildKey,
+      childKeyHash,
+      accessToken: rawAccessToken,
+      refreshToken: rawRefreshToken,
+      user: {
+        id: rawDiscordUserId,
+        verified: true,
+        email: rawEmail,
+      },
+    });
+    failSessionCleanup = true;
+
+    const response = await postDiscordIssue(
+      env,
+      await signedIssueRequest(started, {
+        code: rawCode,
+        hardware_hash: 'hardware-hash-local-session-cleanup',
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    const responseText = await response.text();
+    expectTextNotToContainSensitiveValues(responseText, sensitiveValues);
+    expectTextNotToContainSensitiveValues(
+      stringifyConsoleCalls(consoleErrorSpy),
+      sensitiveValues,
+    );
+    expect(discordApi.openRouterCreateCalls).toHaveLength(1);
+    expect(discordApi.openRouterGuardrailCalls).toHaveLength(1);
+    expect(discordApi.openRouterCleanupCalls.map(({ init }) => init?.method)).toEqual([
+      'PATCH',
+      'DELETE',
+    ]);
+    await expect(readEntitlement(env, started.installationId)).resolves.toBeNull();
+  });
+
   it('issue-success recording failure after child-key creation cleans up and releases eligibility without leaking sensitive values', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW_ISO));

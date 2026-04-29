@@ -490,11 +490,19 @@ export async function handleDiscordOpenRouterIssue(
       installationId: input.value.installationId,
     });
   } catch (error) {
-    await failDiscordOAuthSession(c.env.BROKER_DB, {
+    const sensitiveValues = collectDiscordIssueSensitiveValues({
+      input: input.value,
+      session,
+      discordTokenResponse,
+      discordUser,
+      childKey,
+    });
+    await bestEffortFailDiscordOAuthSession(c.env.BROKER_DB, {
       stateHash,
       nowIso,
       discordEmailVerified: eligibility.discordEmailVerified,
       discordAccountCreatedAt: eligibility.discordAccountCreatedAt,
+      sensitiveValues,
     });
     if (!childKey) {
       await releaseDiscordReservation(c.env.BROKER_DB, {
@@ -506,10 +514,11 @@ export async function handleDiscordOpenRouterIssue(
         error instanceof DiscordIssueSuccessMonitoringStateError &&
         error.issueSuccessRecorded
       ) {
-        await deleteDiscordIssueSuccessRecord(c.env.BROKER_DB, {
+        await bestEffortDeleteDiscordIssueSuccessRecord(c.env.BROKER_DB, {
           installationId: input.value.installationId,
           managedCredentialRef: childKey.hash,
           observedAt: issuedAt,
+          sensitiveValues,
         });
       }
       await handleDiscordManagedChildKeyFailure(c, {
@@ -519,13 +528,7 @@ export async function handleDiscordOpenRouterIssue(
         childKey,
         nowIso,
         error,
-        sensitiveValues: collectDiscordIssueSensitiveValues({
-          input: input.value,
-          session,
-          discordTokenResponse,
-          discordUser,
-          childKey,
-        }),
+        sensitiveValues,
       });
     }
     return internalErrorResponseWithEntitlement(
@@ -841,6 +844,30 @@ async function failDiscordOAuthSession(
       input.stateHash,
     )
     .run();
+}
+
+async function bestEffortFailDiscordOAuthSession(
+  db: D1Database,
+  input: {
+    stateHash: string;
+    nowIso: string;
+    discordEmailVerified: 0 | 1 | null;
+    discordAccountCreatedAt: string | null;
+    sensitiveValues: string[];
+  },
+): Promise<void> {
+  try {
+    await failDiscordOAuthSession(db, input);
+  } catch (error) {
+    console.error('discord_oauth_session_fail_cleanup_failed', {
+      state_hash: input.stateHash,
+      failure: redactSensitiveDiagnostics(
+        normalizeFailureForLog(error),
+        input.sensitiveValues,
+      ),
+      broker_timestamp: new Date().toISOString(),
+    });
+  }
 }
 
 async function expireDiscordOAuthSession(
@@ -1236,9 +1263,14 @@ async function insertOrUpdateIssuingDiscordEntitlement(
         WHERE openrouter_entitlements.status <> 'active'
           AND (
             openrouter_entitlements.discord_issue_status IS NULL
-            OR openrouter_entitlements.discord_issue_status <> 'issuing'
-            OR openrouter_entitlements.discord_user_ref IS NULL
-            OR openrouter_entitlements.discord_user_ref = excluded.discord_user_ref
+            OR openrouter_entitlements.discord_issue_status NOT IN ('issuing', 'cleanup_required')
+            OR (
+              openrouter_entitlements.discord_issue_status = 'issuing'
+              AND (
+                openrouter_entitlements.discord_user_ref IS NULL
+                OR openrouter_entitlements.discord_user_ref = excluded.discord_user_ref
+              )
+            )
           )`,
     )
     .bind(
@@ -1278,10 +1310,10 @@ function deliveredHardwareNotExistsPredicate(): string {
                AND (
                  reserved.status = 'active'
                  OR (
-                   reserved.discord_issue_status = 'issuing'
-                   AND NOT (
-                     reserved.installation_id = ?
-                     AND reserved.discord_user_ref = ?
+                  reserved.discord_issue_status IN ('issuing', 'cleanup_required')
+                  AND NOT (
+                    reserved.installation_id = ?
+                    AND reserved.discord_user_ref = ?
                    )
                  )
                )
@@ -1316,10 +1348,10 @@ async function hasDeliveredHardwareDuplicate(
              AND (
                reserved.status = 'active'
                OR (
-                 reserved.discord_issue_status = 'issuing'
-                 AND NOT (
-                   reserved.installation_id = ?
-                   AND reserved.discord_user_ref = ?
+                  reserved.discord_issue_status IN ('issuing', 'cleanup_required')
+                  AND NOT (
+                    reserved.installation_id = ?
+                    AND reserved.discord_user_ref = ?
                  )
                )
              )
@@ -1361,9 +1393,9 @@ async function hasSameInstallationIssuingConflict(
             FROM openrouter_entitlements existing
            WHERE existing.installation_id = ?
              AND existing.status = 'pending_release'
-             AND existing.discord_issue_status = 'issuing'
-             AND existing.discord_user_ref IS NOT NULL
-             AND existing.discord_user_ref <> ?
+              AND existing.discord_issue_status IN ('issuing', 'cleanup_required')
+              AND existing.discord_user_ref IS NOT NULL
+              AND existing.discord_user_ref <> ?
         ) AS conflict_found`,
     )
     .bind(input.installationId, input.discordUserRef)
@@ -1844,6 +1876,31 @@ async function deleteDiscordIssueSuccessRecord(
     )
     .bind(input.installationId, input.managedCredentialRef, input.observedAt)
     .run();
+}
+
+async function bestEffortDeleteDiscordIssueSuccessRecord(
+  db: D1Database,
+  input: {
+    installationId: string;
+    managedCredentialRef: string;
+    observedAt: string;
+    sensitiveValues: string[];
+  },
+): Promise<void> {
+  try {
+    await deleteDiscordIssueSuccessRecord(db, input);
+  } catch (error) {
+    console.error('discord_issue_success_cleanup_failed', {
+      installation_id: input.installationId,
+      managed_credential_ref: input.managedCredentialRef,
+      observed_at: input.observedAt,
+      failure: redactSensitiveDiagnostics(
+        normalizeFailureForLog(error),
+        input.sensitiveValues,
+      ),
+      broker_timestamp: new Date().toISOString(),
+    });
+  }
 }
 
 function resolveExecutionWaitUntil(
