@@ -21,6 +21,7 @@ from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
     MAX_CUSTOM_VOCAB_TERMS,
     AppSettings,
+    DeepSeekLLMModel,
     GeminiLLMModel,
     LLMProviderName,
     OpenRouterCredentialSource,
@@ -769,6 +770,16 @@ class SettingsView(ft.Column):
                 self.show_snackbar(msg, bg) if self.show_snackbar else None
             ),
         )
+        self._deepseek_key = ApiKeyField(
+            "settings.deepseek_api_key",
+            "deepseek_api_key",
+            "deepseek",
+            on_verify=self._verify_key,
+            on_save=self._on_secret_change,
+            show_snackbar=lambda msg, bg: (
+                self.show_snackbar(msg, bg) if self.show_snackbar else None
+            ),
+        )
         self._openrouter_pkce_button = self._build_action_button(
             t("settings.openrouter_authenticate"),
             self._on_openrouter_pkce_click,
@@ -813,6 +824,7 @@ class SettingsView(ft.Column):
                 self._managed_trial_usage_bar,
                 self._openrouter_key,
                 self._openrouter_pkce_button_row,
+                self._deepseek_key,
                 self._alibaba_key_beijing,
                 self._alibaba_key_singapore,
             ],
@@ -1467,6 +1479,8 @@ class SettingsView(ft.Column):
             return settings.gemini.llm_model.value
         if settings.provider.llm == LLMProviderName.OPENROUTER:
             return self._display_openrouter_selection_alias(settings).value
+        if settings.provider.llm == LLMProviderName.DEEPSEEK:
+            return settings.deepseek.llm_model.value
         return settings.qwen.llm_model.value
 
     def _stored_openrouter_selection_alias(
@@ -1541,6 +1555,8 @@ class SettingsView(ft.Column):
             if profile is not None:
                 return self._openrouter_profile_display_label(profile)
             return t("provider.gemma4_26b_a4b_it")
+        if settings.provider.llm == LLMProviderName.DEEPSEEK:
+            return t("provider.deepseek_v4_flash")
         if settings.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS:
             return t("provider.qwen35_plus")
         return t("provider.qwen35_flash")
@@ -1590,6 +1606,8 @@ class SettingsView(ft.Column):
             return "gemini"
         if settings.provider.llm == LLMProviderName.OPENROUTER:
             return "openrouter"
+        if settings.provider.llm == LLMProviderName.DEEPSEEK:
+            return "deepseek"
         return "qwen"
 
     def _active_prompt_key(self) -> str:
@@ -1694,6 +1712,7 @@ class SettingsView(ft.Column):
         target.openrouter.fallback_selection_alias = source.openrouter.fallback_selection_alias
         target.qwen.llm_model = source.qwen.llm_model
         target.qwen.region = source.qwen.region
+        target.deepseek.llm_model = source.deepseek.llm_model
         if source.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
             target.managed_identity.verified_hardware_hash = (
                 source.managed_identity.verified_hardware_hash
@@ -1928,6 +1947,7 @@ class SettingsView(ft.Column):
             self._emit_runtime_basic(f"Failed to load secrets: {exc}", level=logging.WARNING)
         else:
             self._openrouter_key.value = store.get("openrouter_api_key") or ""
+            self._deepseek_key.value = store.get("deepseek_api_key") or ""
             self._restore_api_key_icons(settings)
 
         if self.page:
@@ -1943,6 +1963,7 @@ class SettingsView(ft.Column):
 
         self._google_key.value = store.get("google_api_key") or ""
         self._openrouter_key.value = store.get("openrouter_api_key") or ""
+        self._deepseek_key.value = store.get("deepseek_api_key") or ""
         self._deepgram_key.value = store.get("deepgram_api_key") or ""
         self._soniox_key.value = store.get("soniox_api_key") or ""
 
@@ -1970,6 +1991,7 @@ class SettingsView(ft.Column):
             (self._soniox_key, self._soniox_key.value, verified.soniox),
             (self._google_key, self._google_key.value, verified.google),
             (self._openrouter_key, self._openrouter_key.value, verified.openrouter),
+            (self._deepseek_key, self._deepseek_key.value, verified.deepseek),
             (self._alibaba_key_beijing, self._alibaba_key_beijing.value, verified.alibaba_beijing),
             (
                 self._alibaba_key_singapore,
@@ -2055,6 +2077,7 @@ class SettingsView(ft.Column):
             openrouter_byok_selected or fallback_source == OpenRouterCredentialSource.BYOK
         )
         self._openrouter_pkce_button_row.visible = openrouter_byok_selected
+        self._deepseek_key.visible = llm == LLMProviderName.DEEPSEEK
         self._sync_openrouter_pkce_button_state(settings)
         self._openrouter_routing_row.visible = True
         self._sync_openrouter_fallback_card(settings)
@@ -2210,6 +2233,11 @@ class SettingsView(ft.Column):
                 label=t("provider.gemini31_flash_lite"),
                 description=t("provider.gemini31_flash_lite.description", default=""),
             ),
+            OptionItem(
+                value=DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value,
+                label=t("provider.deepseek_v4_flash"),
+                description=t("provider.deepseek_v4_flash.description", default=""),
+            ),
             *byok_openrouter_options,
             OptionItem(
                 value=QwenLLMModel.QWEN_35_PLUS.value,
@@ -2244,6 +2272,8 @@ class SettingsView(ft.Column):
         old_openrouter_selected_source = current_settings.openrouter.selected_source
         old_openrouter_selection_alias = self._stored_openrouter_selection_alias(current_settings)
         old_qwen_model = current_settings.qwen.llm_model
+        old_deepseek_model = current_settings.deepseek.llm_model
+        deepseek_model = old_deepseek_model
         try:
             openrouter_profile = profile_for_alias(value)
         except KeyError:
@@ -2273,6 +2303,14 @@ class SettingsView(ft.Column):
             gemini_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
             openrouter_model = old_openrouter_model
             qwen_model = old_qwen_model
+            openrouter_selected_source = old_openrouter_selected_source
+            openrouter_selection_alias = old_openrouter_selection_alias
+        elif value in (LLMProviderName.DEEPSEEK.value, DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value):
+            provider = LLMProviderName.DEEPSEEK
+            gemini_model = old_gemini_model
+            openrouter_model = old_openrouter_model
+            qwen_model = old_qwen_model
+            deepseek_model = DeepSeekLLMModel.DEEPSEEK_V4_FLASH
             openrouter_selected_source = old_openrouter_selected_source
             openrouter_selection_alias = old_openrouter_selection_alias
         elif value == LLMProviderName.OPENROUTER.value:
@@ -2363,6 +2401,8 @@ class SettingsView(ft.Column):
             )
         if old_qwen_model != qwen_model:
             changes.append(f"qwen_model={old_qwen_model.value}->{qwen_model.value}")
+        if old_deepseek_model != deepseek_model:
+            changes.append(f"deepseek_model={old_deepseek_model.value}->{deepseek_model.value}")
         if not changes:
             return
         if old_provider != provider:
@@ -2378,6 +2418,8 @@ class SettingsView(ft.Column):
         draft.openrouter.selection_alias = openrouter_selection_alias
         if provider == LLMProviderName.QWEN:
             draft.qwen.llm_model = qwen_model
+        elif provider == LLMProviderName.DEEPSEEK:
+            draft.deepseek.llm_model = deepseek_model
         else:
             draft.gemini.llm_model = gemini_model
         self._update_api_visibility()
@@ -3480,6 +3522,7 @@ class SettingsView(ft.Column):
         self._google_key.apply_locale()
         self._managed_trial_usage_bar.apply_locale()
         self._openrouter_key.apply_locale()
+        self._deepseek_key.apply_locale()
         self._alibaba_key_beijing.apply_locale()
         self._alibaba_key_singapore.apply_locale()
         self._audio_settings.apply_locale()

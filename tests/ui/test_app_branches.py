@@ -1487,7 +1487,7 @@ async def test_on_verify_api_key_persists_and_updates_dashboard_flags(
 
     async def fake_verify(provider: str, key: str):
         _ = key
-        return provider == "deepgram", "ok"
+        return provider in {"deepgram", "deepseek"}, "ok"
 
     settings = SimpleNamespace(
         api_key_verified=SimpleNamespace(
@@ -1495,6 +1495,7 @@ async def test_on_verify_api_key_persists_and_updates_dashboard_flags(
             soniox=False,
             google=False,
             openrouter=False,
+            deepseek=False,
             alibaba_beijing=False,
             alibaba_singapore=False,
         )
@@ -1511,16 +1512,19 @@ async def test_on_verify_api_key_persists_and_updates_dashboard_flags(
     deepgram_result = await app._on_verify_api_key("deepgram", "k")
     google_result = await app._on_verify_api_key("google", "k")
     openrouter_result = await app._on_verify_api_key("openrouter", "k")
+    deepseek_result = await app._on_verify_api_key("deepseek", "k")
 
     assert deepgram_result == (True, "ok")
     assert google_result == (False, "ok")
     assert openrouter_result == (False, "ok")
+    assert deepseek_result == (True, "ok")
     assert settings.api_key_verified.deepgram is True
     assert settings.api_key_verified.google is False
     assert settings.api_key_verified.openrouter is False
+    assert settings.api_key_verified.deepseek is True
     assert app.view_dashboard.stt_calls[-1] == (False, False)
-    assert app.view_dashboard.trans_calls[-1] == (True, False)
-    assert len(saves) == 3
+    assert app.view_dashboard.trans_calls[-1] == (False, False)
+    assert len(saves) == 4
 
 
 def test_show_snackbar_opens_page_snackbar() -> None:

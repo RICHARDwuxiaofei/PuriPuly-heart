@@ -9,6 +9,7 @@ pytest.importorskip("flet")
 from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
     AppSettings,
+    DeepSeekLLMModel,
     GeminiLLMModel,
     LLMProviderName,
     OpenRouterFallbackSelectionAlias,
@@ -294,6 +295,7 @@ def test_settings_view_llm_modal_ends_with_qwen_plus_only(monkeypatch) -> None:
         OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED.value,
         GeminiLLMModel.GEMINI_3_FLASH.value,
         GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
+        DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value,
         OpenRouterSelectionAlias.GEMMA4_BYOK.value,
         OpenRouterSelectionAlias.QWEN35_FLASH_BYOK.value,
         QwenLLMModel.QWEN_35_PLUS.value,

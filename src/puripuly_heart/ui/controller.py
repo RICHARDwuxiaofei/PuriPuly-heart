@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import copy
 import logging
+import os
 import secrets
 import threading
 import traceback
@@ -96,6 +97,7 @@ from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
 from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
+from puripuly_heart.providers.llm.deepseek import DeepSeekLLMProvider
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterKeyMetadata, OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
@@ -361,6 +363,7 @@ class GuiController:
             llm_key_map = {
                 "gemini": "google",
                 "openrouter": "openrouter",
+                "deepseek": "deepseek",
                 "qwen": self._get_alibaba_verified_key(),
             }
             llm_verified_key = llm_key_map.get(llm_provider, llm_provider)
@@ -722,6 +725,11 @@ class GuiController:
             ),
             settings.qwen.llm_model if settings.provider.llm == LLMProviderName.QWEN else None,
             settings.qwen.region if settings.provider.llm == LLMProviderName.QWEN else None,
+            (
+                settings.deepseek.llm_model
+                if settings.provider.llm == LLMProviderName.DEEPSEEK
+                else None
+            ),
         )
 
     def _sync_signature_caches(self, settings: AppSettings) -> None:
@@ -749,6 +757,7 @@ class GuiController:
         target.openrouter.fallback_selection_alias = source.openrouter.fallback_selection_alias
         target.qwen.llm_model = source.qwen.llm_model
         target.qwen.region = source.qwen.region
+        target.deepseek.llm_model = source.deepseek.llm_model
         if source.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
             target.managed_identity.verified_hardware_hash = (
                 source.managed_identity.verified_hardware_hash
@@ -2034,6 +2043,8 @@ class GuiController:
                 success = await GeminiLLMProvider.verify_api_key(key)
             elif provider == "openrouter":
                 success = await OpenRouterLLMProvider.verify_api_key(key)
+            elif provider == "deepseek":
+                success = await DeepSeekLLMProvider.verify_api_key(key)
             elif provider == "alibaba_beijing":
                 return await self._verify_qwen_key_with_model_fallback(
                     key,
@@ -3113,6 +3124,13 @@ class GuiController:
                             else ""
                         )
                         llm_valid = bool(key) and await OpenRouterLLMProvider.verify_api_key(key)
+                elif provider_name == LLMProviderName.DEEPSEEK:
+                    key = (
+                        (secrets.get("deepseek_api_key") if secrets is not None else None)
+                        or os.getenv("DEEPSEEK_API_KEY")
+                        or ""
+                    )
+                    llm_valid = bool(key) and await DeepSeekLLMProvider.verify_api_key(key)
                 elif provider_name == "qwen":
                     llm_valid = await _verify_alibaba_selected()
                 else:

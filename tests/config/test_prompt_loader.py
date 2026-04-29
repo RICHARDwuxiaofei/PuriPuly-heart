@@ -27,6 +27,13 @@ def test_load_prompt_for_openrouter_matches_file() -> None:
     assert prompt
 
 
+def test_load_prompt_for_deepseek_matches_file() -> None:
+    prompt = load_prompt_for_provider("deepseek")
+    raw = Path("prompts/deepseek.md").read_text(encoding="utf-8").strip()
+    assert prompt == raw
+    assert prompt
+
+
 def test_get_prompts_dir_prefers_env(tmp_path, monkeypatch) -> None:
     prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir()

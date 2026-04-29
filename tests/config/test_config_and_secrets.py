@@ -18,6 +18,8 @@ from puripuly_heart.config.settings import (
     SETTINGS_SCHEMA_VERSION,
     AppSettings,
     AudioSettings,
+    DeepSeekLLMModel,
+    DeepSeekSettings,
     GeminiLLMModel,
     LLMProviderName,
     OpenRouterCredentialSource,
@@ -214,6 +216,50 @@ def test_app_settings_defaults_to_managed_openrouter_gemma4_with_gemini25_fallba
         settings.openrouter.fallback_selection_alias
         == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
     )
+
+
+def test_app_settings_accepts_deepseek_llm_provider_defaults() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.DEEPSEEK),
+        deepseek=DeepSeekSettings(),
+    )
+
+    settings.validate()
+
+    assert settings.deepseek.llm_model == DeepSeekLLMModel.DEEPSEEK_V4_FLASH
+    assert to_dict(settings)["provider"]["llm"] == LLMProviderName.DEEPSEEK.value
+    assert to_dict(settings)["deepseek"] == {"llm_model": DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value}
+
+
+def test_from_dict_preserves_deepseek_llm_provider_model_and_verification() -> None:
+    data = to_dict(AppSettings())
+    data["provider"]["llm"] = LLMProviderName.DEEPSEEK.value
+    data["deepseek"] = {"llm_model": DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value}
+    data["api_key_verified"]["deepseek"] = True
+
+    loaded = from_dict(data)
+
+    assert loaded.provider.llm == LLMProviderName.DEEPSEEK
+    assert loaded.deepseek.llm_model == DeepSeekLLMModel.DEEPSEEK_V4_FLASH
+    assert loaded.api_key_verified.deepseek is True
+    persisted = to_dict(loaded)
+    assert persisted["provider"]["llm"] == LLMProviderName.DEEPSEEK.value
+    assert persisted["deepseek"]["llm_model"] == DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value
+    assert persisted["api_key_verified"]["deepseek"] is True
+
+
+def test_from_dict_backfills_missing_deepseek_settings_and_verification() -> None:
+    data = to_dict(AppSettings())
+    data.pop("deepseek", None)
+    data["api_key_verified"].pop("deepseek", None)
+
+    loaded = from_dict(data)
+
+    assert loaded.deepseek.llm_model == DeepSeekLLMModel.DEEPSEEK_V4_FLASH
+    assert loaded.api_key_verified.deepseek is False
+    persisted = to_dict(loaded)
+    assert persisted["deepseek"] == {"llm_model": DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value}
+    assert persisted["api_key_verified"]["deepseek"] is False
 
 
 def test_openrouter_fallback_aliases_only_include_none_gemini25_and_qwen35() -> None:

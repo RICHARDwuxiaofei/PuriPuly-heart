@@ -58,6 +58,7 @@ class LLMProviderName(str, Enum):
     GEMINI = "gemini"
     OPENROUTER = "openrouter"
     QWEN = "qwen"
+    DEEPSEEK = "deepseek"
 
 
 class SecretsBackend(str, Enum):
@@ -78,6 +79,10 @@ class GeminiLLMModel(str, Enum):
 class QwenLLMModel(str, Enum):
     QWEN_35_FLASH = "qwen3.5-flash"
     QWEN_35_PLUS = "qwen3.5-plus"
+
+
+class DeepSeekLLMModel(str, Enum):
+    DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
 
 
 class OpenRouterLLMModel(str, Enum):
@@ -375,6 +380,15 @@ class QwenSettings:
 
 
 @dataclass(slots=True)
+class DeepSeekSettings:
+    llm_model: DeepSeekLLMModel = DeepSeekLLMModel.DEEPSEEK_V4_FLASH
+
+    def validate(self) -> None:
+        if not isinstance(self.llm_model, DeepSeekLLMModel):
+            raise ValueError("invalid deepseek llm model")
+
+
+@dataclass(slots=True)
 class OpenRouterSettings:
     llm_model: OpenRouterLLMModel = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
@@ -451,6 +465,7 @@ class ApiKeyVerificationSettings:
     soniox: bool = False
     google: bool = False
     openrouter: bool = False
+    deepseek: bool = False
     alibaba_beijing: bool = False
     alibaba_singapore: bool = False
 
@@ -518,6 +533,7 @@ class AppSettings:
     gemini: GeminiSettings = field(default_factory=GeminiSettings)
     openrouter: OpenRouterSettings = field(default_factory=OpenRouterSettings)
     qwen: QwenSettings = field(default_factory=QwenSettings)
+    deepseek: DeepSeekSettings = field(default_factory=DeepSeekSettings)
     llm: LLMSettings = field(default_factory=LLMSettings)
     osc: OSCSettings = field(default_factory=OSCSettings)
     secrets: SecretsSettings = field(default_factory=SecretsSettings)
@@ -552,6 +568,7 @@ class AppSettings:
         self.gemini.validate()
         self.openrouter.validate()
         self.qwen.validate()
+        self.deepseek.validate()
         self.llm.validate()
         self.osc.validate()
         self.secrets.validate()
@@ -662,6 +679,9 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "region": settings.qwen.region.value,
             "llm_model": settings.qwen.llm_model.value,
         },
+        "deepseek": {
+            "llm_model": settings.deepseek.llm_model.value,
+        },
         "llm": {"concurrency_limit": settings.llm.concurrency_limit},
         "osc": {
             "host": settings.osc.host,
@@ -690,6 +710,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "soniox": settings.api_key_verified.soniox,
             "google": settings.api_key_verified.google,
             "openrouter": settings.api_key_verified.openrouter,
+            "deepseek": settings.api_key_verified.deepseek,
             "alibaba_beijing": settings.api_key_verified.alibaba_beijing,
             "alibaba_singapore": settings.api_key_verified.alibaba_singapore,
         },
@@ -763,6 +784,18 @@ def _parse_gemini_llm_model(value: object) -> GeminiLLMModel:
         except ValueError:
             pass
     return GeminiLLMModel.GEMINI_31_FLASH_LITE
+
+
+def _parse_deepseek_llm_model(value: object) -> DeepSeekLLMModel:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized == "deepseek-chat":
+            normalized = DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value
+        try:
+            return DeepSeekLLMModel(normalized)
+        except ValueError:
+            pass
+    return DeepSeekLLMModel.DEEPSEEK_V4_FLASH
 
 
 def _parse_openrouter_llm_model(value: object) -> OpenRouterLLMModel:
@@ -1020,6 +1053,8 @@ def _llm_prompt_key(provider: LLMProviderName) -> str:
         return "gemini"
     if provider == LLMProviderName.OPENROUTER:
         return "openrouter"
+    if provider == LLMProviderName.DEEPSEEK:
+        return "deepseek"
     return "qwen"
 
 
@@ -1590,6 +1625,27 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         qwen_data["llm_model"] = normalized_qwen_model
         changed = True
 
+    deepseek_data = data.get("deepseek")
+    if not isinstance(deepseek_data, dict):
+        deepseek_data = {}
+        data["deepseek"] = deepseek_data
+        changed = True
+
+    raw_deepseek_model = deepseek_data.get("llm_model")
+    normalized_deepseek_model = _parse_deepseek_llm_model(raw_deepseek_model).value
+    if raw_deepseek_model != normalized_deepseek_model:
+        deepseek_data["llm_model"] = normalized_deepseek_model
+        changed = True
+
+    api_key_verified_data = data.get("api_key_verified")
+    if not isinstance(api_key_verified_data, dict):
+        api_key_verified_data = {}
+        data["api_key_verified"] = api_key_verified_data
+        changed = True
+    if "deepseek" not in api_key_verified_data:
+        api_key_verified_data["deepseek"] = False
+        changed = True
+
     overlay_data = data.get("overlay")
     if not isinstance(overlay_data, dict):
         overlay_data = {}
@@ -1795,6 +1851,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         custom_vocabulary_enabled = any(bool(terms) for terms in parsed_custom_terms.values())
 
     qwen_raw = data.get("qwen") if isinstance(data.get("qwen"), dict) else {}
+    deepseek_raw = data.get("deepseek") if isinstance(data.get("deepseek"), dict) else {}
     qwen_asr_raw = data.get("qwen_asr_stt") if isinstance(data.get("qwen_asr_stt"), dict) else {}
     openrouter_raw = data.get("openrouter") if isinstance(data.get("openrouter"), dict) else {}
     openrouter_model, openrouter_selected_source, openrouter_selection_alias = (
@@ -1968,6 +2025,11 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             ),
         ),
         qwen=qwen_settings,
+        deepseek=DeepSeekSettings(
+            llm_model=_parse_deepseek_llm_model(
+                deepseek_raw.get("llm_model", DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value)
+            ),
+        ),
         llm=LLMSettings(concurrency_limit=int(data.get("llm", {}).get("concurrency_limit", 5))),
         osc=OSCSettings(
             host=str(data.get("osc", {}).get("host", "127.0.0.1")),
@@ -2004,6 +2066,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             soniox=bool(data.get("api_key_verified", {}).get("soniox", False)),
             google=bool(data.get("api_key_verified", {}).get("google", False)),
             openrouter=bool(data.get("api_key_verified", {}).get("openrouter", False)),
+            deepseek=bool(data.get("api_key_verified", {}).get("deepseek", False)),
             alibaba_beijing=bool(data.get("api_key_verified", {}).get("alibaba_beijing", False)),
             alibaba_singapore=bool(
                 data.get("api_key_verified", {}).get("alibaba_singapore", False)

@@ -12,6 +12,7 @@ pytest.importorskip("flet")
 from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HOST_API
 from puripuly_heart.config.settings import (
     AppSettings,
+    DeepSeekLLMModel,
     GeminiLLMModel,
     LLMProviderName,
     OpenRouterCredentialSource,
@@ -98,6 +99,7 @@ def _make_llm_selection_view(
     view._soniox_key = SimpleNamespace(visible=False)
     view._google_key = SimpleNamespace(visible=False)
     view._openrouter_key = SimpleNamespace(visible=False)
+    view._deepseek_key = SimpleNamespace(visible=False)
     view._openrouter_pkce_button_row = SimpleNamespace(visible=False, update=lambda: None)
     view._openrouter_pkce_button = SimpleNamespace(text="", style=None, update=lambda: None)
     view._alibaba_key_beijing = SimpleNamespace(visible=False)
@@ -501,6 +503,20 @@ def test_update_api_visibility_shows_openrouter_key(monkeypatch: pytest.MonkeyPa
     assert view._openrouter_routing_row.visible is True
 
 
+def test_update_api_visibility_shows_deepseek_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.DEEPSEEK
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._update_api_visibility()
+
+    assert view._google_key.visible is False
+    assert view._openrouter_key.visible is False
+    assert view._deepseek_key.visible is True
+    assert view._alibaba_key_beijing.visible is False
+    assert view._alibaba_key_singapore.visible is False
+
+
 def test_update_api_visibility_hides_openrouter_key_for_managed_trial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -773,6 +789,55 @@ def test_on_llm_selected_updates_openrouter_model_and_prompt_state(
     assert view._prompt_editor.value == "O"
     assert settings.system_prompt == "G"
     assert view.has_provider_changes is True
+
+
+def test_on_llm_selected_updates_deepseek_model_and_prompt_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.system_prompts = {
+        "gemini": "G",
+        "deepseek": "D",
+    }
+    settings.system_prompt = "G"
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view._on_llm_selected(DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value)
+
+    pending = view.build_provider_apply_settings()
+
+    assert settings.provider.llm == LLMProviderName.GEMINI
+    assert pending is not None
+    assert pending.provider.llm == LLMProviderName.DEEPSEEK
+    assert pending.deepseek.llm_model == DeepSeekLLMModel.DEEPSEEK_V4_FLASH
+    assert pending.system_prompt == "D"
+    assert view._prompt_editor.value == "D"
+    assert view._llm_text.content.value == t("provider.deepseek_v4_flash")
+    assert view._deepseek_key.visible is True
+    assert settings.system_prompt == "G"
+    assert view.has_provider_changes is True
+
+
+def test_on_llm_selected_accepts_deepseek_provider_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.system_prompts = {"gemini": "G", "deepseek": "D"}
+    settings.system_prompt = "G"
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view._on_llm_selected(LLMProviderName.DEEPSEEK.value)
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.provider.llm == LLMProviderName.DEEPSEEK
+    assert pending.deepseek.llm_model == DeepSeekLLMModel.DEEPSEEK_V4_FLASH
+    assert view._prompt_editor.value == "D"
 
 
 def test_on_llm_selected_stages_openrouter_byok_alias_without_pkce(
@@ -1435,6 +1500,7 @@ def test_llm_modal_omits_openrouter_descriptions_and_direct_qwen_flash_option(
         OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED.value,
         GeminiLLMModel.GEMINI_3_FLASH.value,
         GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
+        DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value,
         OpenRouterSelectionAlias.GEMMA4_BYOK.value,
         OpenRouterSelectionAlias.QWEN35_FLASH_BYOK.value,
         QwenLLMModel.QWEN_35_PLUS.value,
@@ -2084,6 +2150,19 @@ def test_peer_provider_labels_are_backed_by_i18n(monkeypatch: pytest.MonkeyPatch
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     assert view._peer_stt_label.value == t("settings.peer_stt_provider")
+
+
+@pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
+def test_deepseek_provider_copy_is_backed_by_i18n(locale: str) -> None:
+    bundle = i18n_module._load_bundle(locale)
+
+    for key in (
+        "settings.deepseek_api_key",
+        "provider.deepseek",
+        "provider.deepseek_v4_flash",
+        "provider.deepseek_v4_flash.description",
+    ):
+        assert bundle.get(key) and bundle[key] != key
 
 
 @pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
@@ -3433,6 +3512,20 @@ def test_apply_locale_refreshes_peer_labels_and_inherit_texts(
         i18n_module.set_locale(old_locale)
 
     assert view._peer_stt_label.value == expected_peer_stt_label
+
+
+def test_apply_locale_refreshes_deepseek_api_key_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    calls: list[str] = []
+    view._deepseek_key.apply_locale = lambda: calls.append("deepseek")
+
+    view.apply_locale()
+
+    assert calls == ["deepseek"]
 
 
 @pytest.mark.parametrize(

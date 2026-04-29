@@ -32,6 +32,7 @@ def _make_app_with_verified_state() -> TranslatorApp:
                 soniox=True,
                 google=True,
                 openrouter=True,
+                deepseek=True,
                 alibaba_beijing=True,
                 alibaba_singapore=True,
             )
@@ -113,6 +114,25 @@ def test_on_secret_cleared_resets_openrouter_for_new_secret_key(
     app._on_secret_cleared("openrouter_api_key")
 
     assert app.controller.settings.api_key_verified.openrouter is False
+    assert app.view_dashboard.translation_calls == [(True, False)]
+    assert app.view_dashboard.stt_calls == []
+    assert len(saves) == 1
+
+
+def test_on_secret_cleared_resets_deepseek_for_new_secret_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _make_app_with_verified_state()
+    saves: list[tuple[Path, object]] = []
+
+    def fake_save(path: Path, settings: object) -> None:
+        saves.append((path, settings))
+
+    monkeypatch.setattr(app_module, "save_settings", fake_save)
+
+    app._on_secret_cleared("deepseek_api_key")
+
+    assert app.controller.settings.api_key_verified.deepseek is False
     assert app.view_dashboard.translation_calls == [(True, False)]
     assert app.view_dashboard.stt_calls == []
     assert len(saves) == 1
