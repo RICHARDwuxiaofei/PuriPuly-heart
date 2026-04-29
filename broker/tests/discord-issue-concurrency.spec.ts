@@ -36,6 +36,7 @@ interface StartedDiscordSession {
 
 describe('Discord issue concurrency', () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -91,6 +92,14 @@ describe('Discord issue concurrency', () => {
     );
 
     expect(api.openRouterCreateCalls).toHaveLength(1);
+    expect(api.openRouterGuardrailCalls).toHaveLength(1);
+    await expect(successResponses[0]!.json()).resolves.toEqual(
+      expect.objectContaining({
+        openrouter_api_key: expect.stringMatching(
+          /^or-discord-managed-child-key-concurrent-/u,
+        ),
+      }),
+    );
     expect(countRows(env, "openrouter_entitlements WHERE status = 'active'")).toBe(1);
     expect(
       countRows(env, "openrouter_entitlements WHERE discord_issue_status = 'issuing'"),
@@ -148,11 +157,52 @@ describe('Discord issue concurrency', () => {
     );
 
     expect(api.openRouterCreateCalls).toHaveLength(1);
+    expect(api.openRouterGuardrailCalls).toHaveLength(1);
     expect(countRows(env, "openrouter_entitlements WHERE status = 'active'")).toBe(1);
     expect(
       countRows(env, "openrouter_entitlements WHERE discord_issue_status = 'issuing'"),
     ).toBe(0);
     expect(countRows(env, 'discord_identities')).toBe(1);
+  });
+
+  it('same final issue replayed concurrently creates and returns exactly one managed child key', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const env = createTestBrokerEnv();
+    const started = await startDiscordSession('install-discord-same-state-concurrent', env);
+    const api = mockConcurrentDiscordAndOpenRouterApi({
+      'discord-oauth-code-same-state-concurrent': {
+        id: discordSnowflakeForAgeDays(31),
+        verified: true,
+      },
+    });
+    const body = await signedIssueRequest(started, {
+      code: 'discord-oauth-code-same-state-concurrent',
+      hardware_hash: 'hardware-hash-same-state-concurrent',
+    });
+
+    const responses = await Promise.all([
+      postDiscordIssue(env, body),
+      postDiscordIssue(env, body),
+    ]);
+
+    const successResponses = responses.filter((response) => response.status === 200);
+    const rejectedResponses = responses.filter((response) => response.status === 409);
+    expect(successResponses).toHaveLength(1);
+    expect(rejectedResponses).toHaveLength(1);
+    await expect(successResponses[0]!.json()).resolves.toEqual(
+      expect.objectContaining({
+        openrouter_api_key: 'or-discord-managed-child-key-concurrent-1',
+        managed_credential_ref: 'hash_discord_managed_child_concurrent_1',
+      }),
+    );
+    expect(api.openRouterCreateCalls).toHaveLength(1);
+    expect(api.openRouterGuardrailCalls).toHaveLength(1);
+    expect(countRows(env, "openrouter_entitlements WHERE status = 'active'")).toBe(1);
+    expect(
+      countRows(env, "openrouter_entitlements WHERE discord_issue_status = 'issuing'"),
+    ).toBe(0);
   });
 });
 
@@ -254,8 +304,10 @@ function mockConcurrentDiscordAndOpenRouterApi(
 ): {
   fetchMock: ReturnType<typeof vi.fn>;
   openRouterCreateCalls: Array<{ input: string | URL; init?: RequestInit }>;
+  openRouterGuardrailCalls: Array<{ input: string | URL; init?: RequestInit }>;
 } {
   const openRouterCreateCalls: Array<{ input: string | URL; init?: RequestInit }> = [];
+  const openRouterGuardrailCalls: Array<{ input: string | URL; init?: RequestInit }> = [];
   const tokenToCode = new Map<string, string>();
 
   const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -298,6 +350,7 @@ function mockConcurrentDiscordAndOpenRouterApi(
     }
 
     if (url === OPENROUTER_GUARDRAIL_URL && method === 'POST') {
+      openRouterGuardrailCalls.push({ input, init });
       return jsonResponse({ assigned_count: 1 });
     }
 
@@ -305,7 +358,7 @@ function mockConcurrentDiscordAndOpenRouterApi(
   });
 
   vi.stubGlobal('fetch', fetchMock as typeof fetch);
-  return { fetchMock, openRouterCreateCalls };
+  return { fetchMock, openRouterCreateCalls, openRouterGuardrailCalls };
 }
 
 function discordSnowflakeForAgeDays(days: number): string {

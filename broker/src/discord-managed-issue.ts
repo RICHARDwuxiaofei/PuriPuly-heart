@@ -2,10 +2,16 @@ import type { Context } from 'hono';
 
 import {
   checkEndpointRateLimit,
+  extractRequestNetworkMetadata,
   getBrokerAbuseControlsConfig,
   recordRequestEvent,
   resolveClientIp,
 } from './abuse-controls';
+import {
+  deliverImmediateMonitoringSideEffects,
+  evaluateImmediateAbuseState,
+  recordIssueSuccess,
+} from './abuse-monitoring';
 import {
   errorResponse as publicErrorResponse,
   internalErrorResponseWithEntitlement,
@@ -31,6 +37,7 @@ import type {
 } from './persistence';
 import {
   assignManagedGuardrail,
+  cleanupManagedChildKey,
   createManagedChildKey,
 } from './openrouter-management';
 import { deriveManagedOpenRouterUserId } from './openrouter-user-id';
@@ -329,8 +336,9 @@ export async function handleDiscordOpenRouterIssue(
   }
 
   let discordUser: DiscordUserResponse;
+  let discordTokenResponse: Awaited<ReturnType<typeof exchangeDiscordCode>> | null = null;
   try {
-    const tokenResponse = await exchangeDiscordCode({
+    discordTokenResponse = await exchangeDiscordCode({
       clientId: c.env.DISCORD_CLIENT_ID,
       clientSecret: c.env.DISCORD_CLIENT_SECRET,
       code: input.value.code,
@@ -338,7 +346,7 @@ export async function handleDiscordOpenRouterIssue(
       codeVerifier: session.pkce_code_verifier!,
     });
     discordUser = await fetchDiscordUser({
-      accessToken: tokenResponse.access_token,
+      accessToken: discordTokenResponse.access_token,
     });
   } catch {
     await failDiscordOAuthSession(c.env.BROKER_DB, {
@@ -447,13 +455,20 @@ export async function handleDiscordOpenRouterIssue(
       throw new Error('Discord managed entitlement missing after activation');
     }
 
+    await runDiscordIssueSuccessMonitoring(c, {
+      installationId: input.value.installationId,
+      managedCredentialRef: activeEntitlement.managed_credential_ref!,
+      issuedAt,
+      now,
+    });
+
     return await discordIssueSuccessResponse(c, {
       entitlement: activeEntitlement,
       rawKey: childKey.rawKey,
       model: input.value.model,
       installationId: input.value.installationId,
     });
-  } catch {
+  } catch (error) {
     await failDiscordOAuthSession(c.env.BROKER_DB, {
       stateHash,
       nowIso,
@@ -464,6 +479,22 @@ export async function handleDiscordOpenRouterIssue(
       await releaseDiscordReservation(c.env.BROKER_DB, {
         installationId: input.value.installationId,
         discordUserRef,
+      });
+    } else {
+      await handleDiscordManagedChildKeyFailure(c, {
+        installationId: input.value.installationId,
+        releaseSessionRef: stateHash,
+        discordUserRef,
+        childKey,
+        nowIso,
+        error,
+        sensitiveValues: collectDiscordIssueSensitiveValues({
+          input: input.value,
+          session,
+          discordTokenResponse,
+          discordUser,
+          childKey,
+        }),
       });
     }
     return internalErrorResponseWithEntitlement(
@@ -1400,6 +1431,138 @@ async function releaseDiscordReservation(
     .run();
 }
 
+async function handleDiscordManagedChildKeyFailure(
+  c: Context<BrokerEnv>,
+  input: {
+    installationId: string;
+    releaseSessionRef: string;
+    discordUserRef: string;
+    childKey: {
+      rawKey: string;
+      hash: string;
+    };
+    nowIso: string;
+    error: unknown;
+    sensitiveValues: string[];
+  },
+): Promise<void> {
+  const cleanup = await cleanupManagedChildKey({
+    managementApiKey: c.env.OPENROUTER_MANAGEMENT_API_KEY,
+    keyHash: input.childKey.hash,
+  });
+
+  if (cleanup.ok) {
+    await releaseDiscordReservationAfterManagedCleanup(c.env.BROKER_DB, {
+      installationId: input.installationId,
+      discordUserRef: input.discordUserRef,
+      managedCredentialRef: input.childKey.hash,
+    });
+    return;
+  }
+
+  await markDiscordCleanupRequired(c.env.BROKER_DB, {
+    installationId: input.installationId,
+    discordUserRef: input.discordUserRef,
+    managedCredentialRef: input.childKey.hash,
+    nowIso: input.nowIso,
+  });
+  console.error('discord_managed_child_key_cleanup_required', {
+    installation_id: input.installationId,
+    release_session_ref: input.releaseSessionRef,
+    managed_credential_ref: input.childKey.hash,
+    failure: redactSensitiveDiagnostics(
+      normalizeFailureForLog(input.error),
+      input.sensitiveValues,
+    ),
+    cleanup_outcome: redactSensitiveDiagnostics(cleanup.reason, input.sensitiveValues),
+    broker_timestamp: new Date().toISOString(),
+  });
+}
+
+async function releaseDiscordReservationAfterManagedCleanup(
+  db: D1Database,
+  input: {
+    installationId: string;
+    discordUserRef: string;
+    managedCredentialRef: string;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM openrouter_entitlements
+        WHERE installation_id = ?
+          AND discord_user_ref = ?
+          AND (
+            (
+              status = 'pending_release'
+              AND discord_issue_status = 'issuing'
+              AND managed_credential_ref IS NULL
+            )
+            OR (
+              managed_credential_ref = ?
+              AND discord_issue_status IN ('issuing', 'active', 'cleanup_required')
+            )
+          )`,
+    )
+    .bind(input.installationId, input.discordUserRef, input.managedCredentialRef)
+    .run();
+  await db
+    .prepare(
+      `DELETE FROM discord_identities
+        WHERE discord_user_ref = ?
+          AND entitlement_installation_id = ?
+          AND status IN ('issuing', 'active', 'cleanup_required')`,
+    )
+    .bind(input.discordUserRef, input.installationId)
+    .run();
+}
+
+async function markDiscordCleanupRequired(
+  db: D1Database,
+  input: {
+    installationId: string;
+    discordUserRef: string;
+    managedCredentialRef: string;
+    nowIso: string;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE openrouter_entitlements
+          SET status = 'pending_release',
+              managed_credential_ref = ?,
+              issued_at = NULL,
+              expires_at = NULL,
+              release_session_ref = NULL,
+              release_token_hash = NULL,
+              release_token_expires_at = NULL,
+              discord_issue_status = 'cleanup_required',
+              discord_issue_delivered_at = NULL
+        WHERE installation_id = ?
+          AND discord_user_ref = ?
+          AND discord_issue_status IN ('issuing', 'active')
+          AND (managed_credential_ref IS NULL OR managed_credential_ref = ?)`,
+    )
+    .bind(
+      input.managedCredentialRef,
+      input.installationId,
+      input.discordUserRef,
+      input.managedCredentialRef,
+    )
+    .run();
+  await db
+    .prepare(
+      `UPDATE discord_identities
+          SET status = 'cleanup_required',
+              updated_at = ?
+        WHERE discord_user_ref = ?
+          AND entitlement_installation_id = ?
+          AND status IN ('issuing', 'active')`,
+    )
+    .bind(input.nowIso, input.discordUserRef, input.installationId)
+    .run();
+}
+
 async function activateDiscordReservation(
   db: D1Database,
   input: {
@@ -1531,6 +1694,153 @@ async function discordIssueSuccessResponse(
     budget_usd: input.entitlement.budget_usd,
     model: input.model,
   });
+}
+
+async function runDiscordIssueSuccessMonitoring(
+  c: Context<BrokerEnv>,
+  input: {
+    installationId: string;
+    managedCredentialRef: string;
+    issuedAt: string;
+    now: Date;
+  },
+): Promise<void> {
+  try {
+    const network = await extractRequestNetworkMetadata(c, c.env.BROKER_DB);
+    await recordIssueSuccess(c.env.BROKER_DB, {
+      installationId: input.installationId,
+      managedCredentialRef: input.managedCredentialRef,
+      observedAt: input.issuedAt,
+      network,
+    });
+    const monitoringResult = await evaluateImmediateAbuseState(
+      c.env.BROKER_DB,
+      input.now,
+    );
+    const sideEffectPromise = deliverImmediateMonitoringSideEffects(
+      c.env,
+      monitoringResult,
+    ).catch((error) => {
+      logDiscordIssueMonitoringFailure({
+        installationId: input.installationId,
+        managedCredentialRef: input.managedCredentialRef,
+        stage: 'deliver_side_effects',
+        error,
+      });
+    });
+
+    const waitUntil = resolveExecutionWaitUntil(c);
+    if (waitUntil) {
+      try {
+        waitUntil(sideEffectPromise);
+        return;
+      } catch {
+        // Fall through and await inline when waitUntil is not usable in tests.
+      }
+    }
+
+    await sideEffectPromise;
+  } catch (error) {
+    logDiscordIssueMonitoringFailure({
+      installationId: input.installationId,
+      managedCredentialRef: input.managedCredentialRef,
+      stage: 'record_or_evaluate',
+      error,
+    });
+  }
+}
+
+function logDiscordIssueMonitoringFailure(input: {
+  installationId: string;
+  managedCredentialRef: string;
+  stage: 'record_or_evaluate' | 'deliver_side_effects';
+  error: unknown;
+}): void {
+  console.error('discord_issue_success_monitoring_failed', {
+    installation_id: input.installationId,
+    managed_credential_ref: input.managedCredentialRef,
+    stage: input.stage,
+    error_message: input.error instanceof Error ? input.error.message : String(input.error),
+    broker_timestamp: new Date().toISOString(),
+  });
+}
+
+function resolveExecutionWaitUntil(
+  c: Context<BrokerEnv>,
+): ((promise: Promise<unknown>) => void) | null {
+  try {
+    if (typeof c.executionCtx?.waitUntil !== 'function') {
+      return null;
+    }
+
+    return c.executionCtx.waitUntil.bind(c.executionCtx);
+  } catch {
+    return null;
+  }
+}
+
+function collectDiscordIssueSensitiveValues(input: {
+  input: DiscordOpenRouterIssueInput;
+  session: DiscordOAuthSessionRecord;
+  discordTokenResponse: Awaited<ReturnType<typeof exchangeDiscordCode>> | null;
+  discordUser: DiscordUserResponse;
+  childKey: { rawKey: string; hash: string } | null;
+}): string[] {
+  return [
+    input.input.code,
+    input.input.state,
+    input.session.pkce_code_verifier,
+    input.discordTokenResponse?.access_token ?? null,
+    input.discordTokenResponse?.refresh_token ?? null,
+    input.discordUser.id,
+    typeof input.discordUser.email === 'string' ? input.discordUser.email : null,
+    input.childKey?.rawKey ?? null,
+  ].filter((value): value is string => Boolean(value));
+}
+
+function redactSensitiveDiagnostics(value: unknown, sensitiveValues: string[]): unknown {
+  if (typeof value === 'string') {
+    return redactSensitiveString(value, sensitiveValues);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactSensitiveDiagnostics(entry, sensitiveValues));
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        redactSensitiveDiagnostics(entry, sensitiveValues),
+      ]),
+    );
+  }
+
+  return value;
+}
+
+function redactSensitiveString(value: string, sensitiveValues: string[]): string {
+  let redacted = value;
+  for (const sensitiveValue of [...sensitiveValues].sort(
+    (left, right) => right.length - left.length,
+  )) {
+    redacted = redacted.split(sensitiveValue).join('[REDACTED]');
+  }
+  return redacted;
+}
+
+function normalizeFailureForLog(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+    };
+  }
+
+  return {
+    name: 'UnknownFailure',
+    message: String(error),
+  };
 }
 
 function discordReservationErrorResponse(

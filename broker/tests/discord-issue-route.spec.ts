@@ -51,26 +51,49 @@ interface DiscordSessionRow {
   status: string;
   processing_started_at: string | null;
   eligibility_checked_at: string | null;
+  consumed_at: string | null;
+}
+
+interface DiscordIdentityRow {
+  discord_user_ref: string;
+  entitlement_installation_id: string | null;
+  status: string;
+  updated_at: string;
+}
+
+interface IssueSuccessEventRow {
+  installation_id: string;
+  managed_credential_ref: string;
+  ip_hash: string | null;
+  ip_prefix_hash: string | null;
+  observed_at: string;
 }
 
 describe('Discord issue gate', () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
-  it('reservation success exchanges Discord code with PKCE, activates one managed key, and consumes the session', async () => {
+  it('reservation success exchanges Discord code with PKCE, activates one managed key, monitors success, and consumes the session', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW_ISO));
 
     const started = await startDiscordSession('install-discord-issue-gate-valid');
     const sessionBefore = await readSessionByState(started.env, started.state);
     const code = 'discord-oauth-code-valid';
+    const rawDiscordUserId = discordSnowflakeForAgeDays(31);
+    const rawDiscordEmail = 'verified@example.test';
+    const expectedDiscordUserRef = await deriveExpectedDiscordUserRef(
+      started.env.DISCORD_USER_REF_SECRET,
+      rawDiscordUserId,
+    );
     const discordApi = mockDiscordApi({
       user: {
-        id: discordSnowflakeForAgeDays(31),
+        id: rawDiscordUserId,
         verified: true,
-        email: 'verified@example.test',
+        email: rawDiscordEmail,
       },
     });
     const requestBody = await signedIssueRequest(started, { code });
@@ -78,7 +101,8 @@ describe('Discord issue gate', () => {
     const response = await postDiscordIssue(started.env, requestBody);
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual(
+    const payload = (await response.json()) as Record<string, unknown>;
+    expect(payload).toEqual(
       expect.objectContaining({
         openrouter_api_key: 'or-discord-managed-child-key-test-1',
         managed_credential_ref: 'hash_discord_managed_child_test_1',
@@ -86,6 +110,7 @@ describe('Discord issue gate', () => {
           lifecycle: 'active',
           managed_availability: true,
         },
+        expires_at: '2026-07-30T06:00:00.000Z',
         budget_usd: 0.07,
         model: MODEL,
       }),
@@ -96,23 +121,51 @@ describe('Discord issue gate', () => {
       codeVerifier: sessionBefore.pkce_code_verifier,
     });
     expectDiscordUserFetch(discordApi.fetchMock);
+    expect(discordApi.openRouterCreateCalls).toHaveLength(1);
+    expect(discordApi.openRouterGuardrailCalls).toHaveLength(1);
+    expectCallOrder(discordApi.fetchMock, [
+      `POST ${OPENROUTER_KEYS_URL}`,
+      `POST ${OPENROUTER_GUARDRAIL_URL}`,
+    ]);
     await expect(readSessionByState(started.env, started.state)).resolves.toEqual(
       expect.objectContaining({
         status: 'consumed',
         pkce_code_verifier: null,
         processing_started_at: NOW_ISO,
         eligibility_checked_at: NOW_ISO,
+        consumed_at: NOW_ISO,
       }),
     );
     await expect(readEntitlement(started.env, started.installationId)).resolves.toEqual(
       expect.objectContaining({
         status: 'active',
+        managed_credential_ref: 'hash_discord_managed_child_test_1',
+        issued_at: NOW_ISO,
+        expires_at: '2026-07-30T06:00:00.000Z',
         verified_hardware_hash: 'hardware-hash-discord-issue',
+        discord_user_ref: expectedDiscordUserRef,
         discord_issue_status: 'active',
         discord_issue_reserved_at: NOW_ISO,
         discord_issue_delivered_at: NOW_ISO,
       }),
     );
+    await expect(readDiscordIdentity(started.env, expectedDiscordUserRef)).resolves.toEqual(
+      expect.objectContaining({
+        entitlement_installation_id: started.installationId,
+        status: 'active',
+        updated_at: NOW_ISO,
+      }),
+    );
+    const issueSuccessEvents = readIssueSuccessEvents(started.env);
+    expect(issueSuccessEvents).toEqual([
+      expect.objectContaining({
+        installation_id: started.installationId,
+        managed_credential_ref: 'hash_discord_managed_child_test_1',
+        observed_at: NOW_ISO,
+      }),
+    ]);
+    expect(JSON.stringify(issueSuccessEvents)).not.toContain(rawDiscordUserId);
+    expect(JSON.stringify(issueSuccessEvents)).not.toContain(rawDiscordEmail);
   });
 
   it('returns a restart boundary when Discord token exchange fails after terminalizing the session', async () => {
@@ -120,13 +173,17 @@ describe('Discord issue gate', () => {
     vi.setSystemTime(new Date(NOW_ISO));
 
     const started = await startDiscordSession('install-discord-issue-token-failure');
+    const sessionBefore = await readSessionByState(started.env, started.state);
+    const code = 'discord-oauth-code-token-failure-redact';
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     mockDiscordApi({ tokenStatus: 500 });
-    const requestBody = await signedIssueRequest(started);
+    const requestBody = await signedIssueRequest(started, { code });
 
     const response = await postDiscordIssue(started.env, requestBody);
 
     expect(response.status).toBe(410);
-    await expect(response.json()).resolves.toEqual(
+    const responseText = await response.text();
+    expect(JSON.parse(responseText)).toEqual(
       normalizedErrorEnvelope({
         code: 'challenge_expired',
         class: 'retryable',
@@ -134,6 +191,16 @@ describe('Discord issue gate', () => {
         retryAfterMs: 0,
         message: 'Discord OAuth verification failed; restart Discord OAuth onboarding',
       }),
+    );
+    const sensitiveValues = [
+      code,
+      started.state,
+      sessionBefore.pkce_code_verifier,
+    ].filter((value): value is string => value !== null);
+    expectTextNotToContainSensitiveValues(responseText, sensitiveValues);
+    expectTextNotToContainSensitiveValues(
+      stringifyConsoleCalls(consoleErrorSpy),
+      sensitiveValues,
     );
     await expect(readSessionByState(started.env, started.state)).resolves.toEqual(
       expect.objectContaining({
@@ -874,8 +941,16 @@ describe('Discord issue gate', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW_ISO));
 
-    const started = await startDiscordSession('install-discord-reservation-release');
-    const discordApi = mockDiscordApi({ openRouterMode: 'create_failure' });
+    const discordUserId = discordSnowflakeForAgeDays(31);
+    const env = createTestBrokerEnv();
+    const started = await startDiscordSession('install-discord-reservation-release', env);
+    const discordApi = mockDiscordApi({
+      openRouterMode: 'create_failure',
+      user: {
+        id: discordUserId,
+        verified: true,
+      },
+    });
     const response = await postDiscordIssue(
       started.env,
       await signedIssueRequest(started, {
@@ -885,10 +960,174 @@ describe('Discord issue gate', () => {
     );
 
     expect(response.status).toBe(500);
+    expect(await response.text()).not.toContain('or-discord-managed-child-key-test-1');
     expect(discordApi.openRouterCreateCalls).toHaveLength(1);
     expect(countDiscordIdentities(started.env)).toBe(0);
     expect(countDiscordEntitlements(started.env)).toBe(0);
     await expect(readSessionByState(started.env, started.state)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'failed',
+        pkce_code_verifier: null,
+      }),
+    );
+
+    const retry = await startDiscordSession('install-discord-reservation-release-retry', env);
+    mockDiscordApi({
+      user: {
+        id: discordUserId,
+        verified: true,
+      },
+    });
+    const retryResponse = await postDiscordIssue(
+      env,
+      await signedIssueRequest(retry, {
+        code: 'discord-oauth-code-reservation-release-retry',
+        hardware_hash: 'hardware-hash-reservation-release-retry',
+      }),
+    );
+    expect(retryResponse.status).toBe(200);
+  });
+
+  it('guardrail assignment failure after child-key creation cleans up and releases Discord eligibility for fresh OAuth', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const env = createTestBrokerEnv();
+    const discordUserId = discordSnowflakeForAgeDays(31);
+    const started = await startDiscordSession('install-discord-guardrail-cleanup-success', env);
+    const discordApi = mockDiscordApi({
+      openRouterMode: 'guardrail_failure',
+      user: {
+        id: discordUserId,
+        verified: true,
+      },
+    });
+
+    const response = await postDiscordIssue(
+      env,
+      await signedIssueRequest(started, {
+        code: 'discord-oauth-code-guardrail-cleanup-success',
+        hardware_hash: 'hardware-hash-guardrail-cleanup-success',
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.text()).not.toContain('or-discord-managed-child-key-test-1');
+    expect(discordApi.openRouterCreateCalls).toHaveLength(1);
+    expect(discordApi.openRouterGuardrailCalls).toHaveLength(1);
+    expect(discordApi.openRouterCleanupCalls.map(({ init }) => init?.method)).toEqual([
+      'PATCH',
+      'DELETE',
+    ]);
+    expect(countDiscordIdentities(env)).toBe(0);
+    expect(countDiscordEntitlements(env)).toBe(0);
+    await expect(readSessionByState(env, started.state)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'failed',
+        pkce_code_verifier: null,
+      }),
+    );
+
+    const retry = await startDiscordSession('install-discord-guardrail-cleanup-success-retry', env);
+    mockDiscordApi({
+      user: {
+        id: discordUserId,
+        verified: true,
+      },
+    });
+    const retryResponse = await postDiscordIssue(
+      env,
+      await signedIssueRequest(retry, {
+        code: 'discord-oauth-code-guardrail-cleanup-success-retry',
+        hardware_hash: 'hardware-hash-guardrail-cleanup-success-retry',
+      }),
+    );
+    expect(retryResponse.status).toBe(200);
+  });
+
+  it('guardrail assignment failure with cleanup failure records cleanup_required without leaking sensitive values', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const rawCode = 'discord-oauth-code-guardrail-cleanup-redact';
+    const rawDiscordUserId = discordSnowflakeForAgeDays(31);
+    const rawEmail = 'sensitive-redaction@example.test';
+    const rawAccessToken = 'discord-access-token-sensitive-redact';
+    const rawRefreshToken = 'discord-refresh-token-sensitive-redact';
+    const rawOpenRouterChildKey = 'or-discord-managed-child-key-sensitive-redact';
+    const childKeyHash = 'hash_discord_managed_child_cleanup_required';
+    const env = createTestBrokerEnv();
+    const started = await startDiscordSession('install-discord-guardrail-cleanup-required', env);
+    const sessionBefore = await readSessionByState(env, started.state);
+    const expectedDiscordUserRef = await deriveExpectedDiscordUserRef(
+      env.DISCORD_USER_REF_SECRET,
+      rawDiscordUserId,
+    );
+    const sensitiveValues = [
+      rawCode,
+      started.state,
+      sessionBefore.pkce_code_verifier,
+      rawAccessToken,
+      rawRefreshToken,
+      rawDiscordUserId,
+      rawEmail,
+      rawOpenRouterChildKey,
+    ].filter((value): value is string => value !== null);
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const discordApi = mockDiscordApi({
+      openRouterMode: 'guardrail_failure_cleanup_failure',
+      rawChildKey: rawOpenRouterChildKey,
+      childKeyHash,
+      accessToken: rawAccessToken,
+      refreshToken: rawRefreshToken,
+      user: {
+        id: rawDiscordUserId,
+        verified: true,
+        email: rawEmail,
+      },
+      guardrailFailureMessage: `guardrail failed ${rawCode} ${started.state} ${sessionBefore.pkce_code_verifier} ${rawAccessToken} ${rawRefreshToken} ${rawDiscordUserId} ${rawEmail} ${rawOpenRouterChildKey}`,
+      cleanupFailureMessage: `cleanup failed ${rawCode} ${started.state} ${sessionBefore.pkce_code_verifier} ${rawAccessToken} ${rawRefreshToken} ${rawDiscordUserId} ${rawEmail} ${rawOpenRouterChildKey}`,
+    });
+
+    const response = await postDiscordIssue(
+      env,
+      await signedIssueRequest(started, {
+        code: rawCode,
+        hardware_hash: 'hardware-hash-guardrail-cleanup-required',
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    const responseText = await response.text();
+    expectTextNotToContainSensitiveValues(responseText, sensitiveValues);
+    expectTextNotToContainSensitiveValues(
+      stringifyConsoleCalls(consoleErrorSpy),
+      sensitiveValues,
+    );
+    expect(discordApi.openRouterCreateCalls).toHaveLength(1);
+    expect(discordApi.openRouterGuardrailCalls).toHaveLength(1);
+    expect(discordApi.openRouterCleanupCalls.map(({ init }) => init?.method)).toEqual([
+      'PATCH',
+      'DELETE',
+    ]);
+    await expect(readEntitlement(env, started.installationId)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'pending_release',
+        managed_credential_ref: childKeyHash,
+        issued_at: null,
+        expires_at: null,
+        discord_user_ref: expectedDiscordUserRef,
+        discord_issue_status: 'cleanup_required',
+        discord_issue_delivered_at: null,
+      }),
+    );
+    await expect(readDiscordIdentity(env, expectedDiscordUserRef)).resolves.toEqual(
+      expect.objectContaining({
+        entitlement_installation_id: started.installationId,
+        status: 'cleanup_required',
+      }),
+    );
+    await expect(readSessionByState(env, started.state)).resolves.toEqual(
       expect.objectContaining({
         status: 'failed',
         pkce_code_verifier: null,
@@ -899,6 +1138,7 @@ describe('Discord issue gate', () => {
 
 describe('Discord eligibility', () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -1100,7 +1340,8 @@ async function readSessionByState(
               fingerprint_salt_version,
               status,
               processing_started_at,
-              eligibility_checked_at
+              eligibility_checked_at,
+              consumed_at
          FROM discord_oauth_sessions
         WHERE state_hash = ?`,
     )
@@ -1111,6 +1352,38 @@ async function readSessionByState(
   }
 
   return row;
+}
+
+async function readDiscordIdentity(
+  env: TestBrokerEnv,
+  discordUserRef: string,
+): Promise<DiscordIdentityRow | null> {
+  const row = env.__db
+    .prepare(
+      `SELECT discord_user_ref,
+              entitlement_installation_id,
+              status,
+              updated_at
+         FROM discord_identities
+        WHERE discord_user_ref = ?`,
+    )
+    .get(discordUserRef) as DiscordIdentityRow | undefined;
+
+  return row ?? null;
+}
+
+function readIssueSuccessEvents(env: TestBrokerEnv): IssueSuccessEventRow[] {
+  return env.__db
+    .prepare(
+      `SELECT installation_id,
+              managed_credential_ref,
+              ip_hash,
+              ip_prefix_hash,
+              observed_at
+         FROM broker_issue_success_events
+        ORDER BY observed_at ASC`,
+    )
+    .all() as unknown as IssueSuccessEventRow[];
 }
 
 async function readEntitlement(
@@ -1286,16 +1559,31 @@ function mockDiscordApi(options: {
   user?: Record<string, unknown>;
   tokenStatus?: number;
   userStatus?: number;
-  openRouterMode?: 'success' | 'create_failure';
+  openRouterMode?:
+    | 'success'
+    | 'create_failure'
+    | 'guardrail_failure'
+    | 'guardrail_failure_cleanup_failure';
+  rawChildKey?: string;
+  childKeyHash?: string;
+  accessToken?: string;
+  refreshToken?: string;
+  guardrailFailureMessage?: string;
+  cleanupFailureMessage?: string;
 } = {}): {
   fetchMock: ReturnType<typeof vi.fn>;
   openRouterCreateCalls: Array<{ input: string | URL; init?: RequestInit }>;
+  openRouterGuardrailCalls: Array<{ input: string | URL; init?: RequestInit }>;
+  openRouterCleanupCalls: Array<{ input: string | URL; init?: RequestInit }>;
 } {
   const user = options.user ?? {
     id: discordSnowflakeForAgeDays(31),
     verified: true,
   };
   const openRouterCreateCalls: Array<{ input: string | URL; init?: RequestInit }> = [];
+  const openRouterGuardrailCalls: Array<{ input: string | URL; init?: RequestInit }> = [];
+  const openRouterCleanupCalls: Array<{ input: string | URL; init?: RequestInit }> = [];
+  const childKeyHash = options.childKeyHash ?? 'hash_discord_managed_child_test_1';
   const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? 'GET';
@@ -1306,8 +1594,9 @@ function mockDiscordApi(options: {
       }
 
       return jsonResponse({
-        access_token: 'discord-access-token',
+        access_token: options.accessToken ?? 'discord-access-token',
         token_type: 'Bearer',
+        ...(options.refreshToken ? { refresh_token: options.refreshToken } : {}),
       });
     }
 
@@ -1328,9 +1617,9 @@ function mockDiscordApi(options: {
       const sequence = openRouterCreateCalls.length;
       return jsonResponse(
         {
-          key: `or-discord-managed-child-key-test-${sequence}`,
+          key: options.rawChildKey ?? `or-discord-managed-child-key-test-${sequence}`,
           data: {
-            hash: `hash_discord_managed_child_test_${sequence}`,
+            hash: options.childKeyHash ?? `hash_discord_managed_child_test_${sequence}`,
           },
         },
         201,
@@ -1338,14 +1627,66 @@ function mockDiscordApi(options: {
     }
 
     if (url === OPENROUTER_GUARDRAIL_URL && method === 'POST') {
+      openRouterGuardrailCalls.push({ input, init });
+      if (
+        options.openRouterMode === 'guardrail_failure' ||
+        options.openRouterMode === 'guardrail_failure_cleanup_failure'
+      ) {
+        return jsonResponse(
+          {
+            error: {
+              message: options.guardrailFailureMessage ?? 'guardrail assignment failed',
+            },
+          },
+          500,
+        );
+      }
+
       return jsonResponse({ assigned_count: 1 });
+    }
+
+    if (url === `${OPENROUTER_KEYS_URL}/${childKeyHash}` && method === 'PATCH') {
+      openRouterCleanupCalls.push({ input, init });
+      if (options.openRouterMode === 'guardrail_failure_cleanup_failure') {
+        return jsonResponse(
+          {
+            error: {
+              message: options.cleanupFailureMessage ?? 'disable cleanup failed',
+            },
+          },
+          500,
+        );
+      }
+
+      return jsonResponse({ data: { hash: childKeyHash, disabled: true } });
+    }
+
+    if (url === `${OPENROUTER_KEYS_URL}/${childKeyHash}` && method === 'DELETE') {
+      openRouterCleanupCalls.push({ input, init });
+      if (options.openRouterMode === 'guardrail_failure_cleanup_failure') {
+        return jsonResponse(
+          {
+            error: {
+              message: options.cleanupFailureMessage ?? 'delete cleanup failed',
+            },
+          },
+          500,
+        );
+      }
+
+      return new Response(null, { status: 204 });
     }
 
     throw new Error(`unexpected Discord API request: ${method} ${url}`);
   });
 
   vi.stubGlobal('fetch', fetchMock as typeof fetch);
-  return { fetchMock, openRouterCreateCalls };
+  return {
+    fetchMock,
+    openRouterCreateCalls,
+    openRouterGuardrailCalls,
+    openRouterCleanupCalls,
+  };
 }
 
 function expectTokenExchange(
@@ -1379,6 +1720,44 @@ function expectDiscordUserFetch(fetchMock: ReturnType<typeof vi.fn>): void {
   expect(init.headers).toEqual({
     authorization: 'Bearer discord-access-token',
   });
+}
+
+function expectCallOrder(
+  fetchMock: ReturnType<typeof vi.fn>,
+  expectedOrderedCalls: string[],
+): void {
+  const calls = fetchMock.mock.calls.map(([input, init]) => {
+    const method = (init as RequestInit | undefined)?.method ?? 'GET';
+    return `${method} ${String(input)}`;
+  });
+  const indexes = expectedOrderedCalls.map((expected) => calls.indexOf(expected));
+  for (const index of indexes) {
+    expect(index).toBeGreaterThanOrEqual(0);
+  }
+  expect(indexes).toEqual([...indexes].sort((left, right) => left - right));
+}
+
+function expectTextNotToContainSensitiveValues(text: string, values: string[]): void {
+  for (const value of values) {
+    expect(text).not.toContain(value);
+  }
+}
+
+function stringifyConsoleCalls(spy: { mock: { calls: unknown[][] } }): string {
+  return JSON.stringify(
+    spy.mock.calls.map((call: unknown[]) =>
+      call.map((value: unknown) => {
+        if (value instanceof Error) {
+          return {
+            name: value.name,
+            message: value.message,
+          };
+        }
+
+        return value;
+      }),
+    ),
+  );
 }
 
 function discordSnowflakeForAgeDays(days: number): string {
