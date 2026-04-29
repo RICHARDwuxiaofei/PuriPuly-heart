@@ -20,7 +20,7 @@ export interface PkcePair {
 export interface DiscordTokenResponse {
   access_token: string;
   token_type: string;
-  expires_in: number;
+  expires_in?: number;
   refresh_token?: string;
   scope?: string;
 }
@@ -140,7 +140,7 @@ export async function exchangeDiscordCode(input: {
     throw new Error('Discord token exchange failed');
   }
 
-  return (await response.json()) as DiscordTokenResponse;
+  return parseDiscordTokenResponse(await response.json());
 }
 
 export async function fetchDiscordUser(input: {
@@ -159,7 +159,75 @@ export async function fetchDiscordUser(input: {
     throw new Error('Discord user fetch failed');
   }
 
-  return (await response.json()) as DiscordUserResponse;
+  return parseDiscordUserResponse(await response.json());
+}
+
+function parseDiscordTokenResponse(value: unknown): DiscordTokenResponse {
+  if (!isRecord(value)) {
+    throw new Error('malformed Discord token response');
+  }
+
+  if (typeof value.access_token !== 'string' || typeof value.token_type !== 'string') {
+    throw new Error('malformed Discord token response');
+  }
+
+  if (value.expires_in !== undefined && !isFiniteNumber(value.expires_in)) {
+    throw new Error('malformed Discord token response');
+  }
+
+  if (value.refresh_token !== undefined && typeof value.refresh_token !== 'string') {
+    throw new Error('malformed Discord token response');
+  }
+
+  if (value.scope !== undefined && typeof value.scope !== 'string') {
+    throw new Error('malformed Discord token response');
+  }
+
+  return {
+    access_token: value.access_token,
+    token_type: value.token_type,
+    ...(value.expires_in !== undefined ? { expires_in: value.expires_in } : {}),
+    ...(value.refresh_token !== undefined ? { refresh_token: value.refresh_token } : {}),
+    ...(value.scope !== undefined ? { scope: value.scope } : {}),
+  };
+}
+
+function parseDiscordUserResponse(value: unknown): DiscordUserResponse {
+  if (!isRecord(value) || typeof value.id !== 'string') {
+    throw new Error('malformed Discord user response');
+  }
+
+  if (value.email !== undefined && value.email !== null && typeof value.email !== 'string') {
+    throw new Error('malformed Discord user response');
+  }
+
+  if (value.verified !== undefined && typeof value.verified !== 'boolean') {
+    throw new Error('malformed Discord user response');
+  }
+
+  return {
+    id: value.id,
+    ...(typeof value.username === 'string' ? { username: value.username } : {}),
+    ...(typeof value.discriminator === 'string'
+      ? { discriminator: value.discriminator }
+      : {}),
+    ...(typeof value.global_name === 'string' || value.global_name === null
+      ? { global_name: value.global_name }
+      : {}),
+    ...(typeof value.avatar === 'string' || value.avatar === null
+      ? { avatar: value.avatar }
+      : {}),
+    ...(value.email !== undefined ? { email: value.email } : {}),
+    ...(value.verified !== undefined ? { verified: value.verified } : {}),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
 }
 
 export function deriveDiscordAccountCreatedAt(discordUserId: string): string {

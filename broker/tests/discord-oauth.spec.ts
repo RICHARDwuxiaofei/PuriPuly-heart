@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   buildDiscordAuthorizationUrl,
   deriveDiscordAccountCreatedAt,
+  exchangeDiscordCode,
+  fetchDiscordUser,
   generatePkcePair,
   parseDiscordRedirectAllowlist,
 } from '../src/discord-oauth';
@@ -70,4 +72,44 @@ describe('Discord OAuth helpers', () => {
       'invalid Discord snowflake',
     );
   });
+
+  it('rejects malformed Discord token responses', async () => {
+    await expect(
+      exchangeDiscordCode({
+        clientId: 'test-discord-client-id',
+        clientSecret: 'test-discord-client-secret',
+        code: 'oauth-code',
+        redirectUri: REGISTERED_REDIRECT_URIS[0],
+        codeVerifier: 'pkce-code-verifier',
+        fetcher: jsonFetcher({
+          access_token: 'discord-access-token',
+          token_type: 'Bearer',
+          expires_in: '3600',
+        }),
+      }),
+    ).rejects.toThrow('malformed Discord token response');
+  });
+
+  it('rejects malformed Discord user responses', async () => {
+    await expect(
+      fetchDiscordUser({
+        accessToken: 'discord-access-token',
+        fetcher: jsonFetcher({
+          id: '175928847299117063',
+          email: 123,
+          verified: true,
+        }),
+      }),
+    ).rejects.toThrow('malformed Discord user response');
+  });
 });
+
+function jsonFetcher(payload: unknown): typeof fetch {
+  return (async () =>
+    new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+      },
+    })) as typeof fetch;
+}

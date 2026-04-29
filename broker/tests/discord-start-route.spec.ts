@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import app from '../src/index';
 import { createDeviceKeyPair } from './test-support/ed25519';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
+import { updateAbuseControls } from './test-support/abuse-controls';
 
 const REGISTERED_REDIRECT_URIS = [
   'http://127.0.0.1:62187/discord/callback',
@@ -141,7 +142,74 @@ describe('Discord OAuth start route', () => {
 
     expect(response.status).toBe(400);
   });
+
+  it('atomically enforces max pending sessions per installation under concurrent starts', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-30T06:00:00Z'));
+
+    const pendingCountBarrier = createBarrier(2);
+    const env = createTestBrokerEnv({
+      beforeFirst: async ({ sql }) => {
+        if (
+          sql.includes('FROM discord_oauth_sessions') &&
+          sql.includes("status = 'pending'")
+        ) {
+          await pendingCountBarrier.wait();
+        }
+      },
+    });
+    updateAbuseControls(env, (controls) => {
+      controls.pendingDiscordOAuthSessions.maxPerInstallation = 1;
+    });
+
+    const keyPair = await createDeviceKeyPair();
+    const responses = await Promise.all([
+      postDiscordAuthStart({
+        env,
+        installationId: 'install-discord-concurrent-limit',
+        devicePublicKey: keyPair.devicePublicKey,
+        redirectUri: REGISTERED_REDIRECT_URIS[0],
+        appVersion: '1.2.3',
+      }),
+      postDiscordAuthStart({
+        env,
+        installationId: 'install-discord-concurrent-limit',
+        devicePublicKey: keyPair.devicePublicKey,
+        redirectUri: REGISTERED_REDIRECT_URIS[0],
+        appVersion: '1.2.3',
+      }),
+    ]);
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 429]);
+    const row = env.__db
+      .prepare(
+        `SELECT COUNT(*) AS count
+           FROM discord_oauth_sessions
+          WHERE installation_id = ?
+            AND status = 'pending'`,
+      )
+      .get('install-discord-concurrent-limit') as { count: number };
+    expect(row.count).toBe(1);
+  });
 });
+
+function createBarrier(participantCount: number): { wait: () => Promise<void> } {
+  let waiting = 0;
+  let release: (() => void) | null = null;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  return {
+    async wait(): Promise<void> {
+      waiting += 1;
+      if (waiting >= participantCount) {
+        release?.();
+      }
+      await promise;
+    },
+  };
+}
 
 async function postDiscordAuthStart(options: {
   env: ReturnType<typeof createTestBrokerEnv>;

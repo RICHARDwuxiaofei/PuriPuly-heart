@@ -17,6 +17,7 @@ import {
 import { getFingerprintSaltConfig } from './fingerprint-salt';
 import { normalizeManagedState } from './managed-state';
 import { nonEmptyString, stringValue, validatePublicInput } from './public-input';
+import type { BrokerPendingDiscordOAuthSessionsConfig } from './persistence';
 
 export const DISCORD_OAUTH_SESSION_TTL_SECONDS = 300;
 
@@ -109,9 +110,12 @@ export async function handleDiscordAuthStart(
     });
   }
 
-  const pendingLimitDecision = await checkPendingDiscordOAuthSessionLimits(
+  const controls = await getBrokerAbuseControlsConfig(c.env.BROKER_DB);
+  const pendingControls = controls.pendingDiscordOAuthSessions;
+  const pendingLimitDecision = await checkPendingDiscordOAuthIpLimit(
     c.env.BROKER_DB,
     requestContext,
+    pendingControls,
   );
   if (pendingLimitDecision) {
     return pendingLimitDecision(c);
@@ -125,33 +129,22 @@ export async function handleDiscordAuthStart(
     now.getTime() + DISCORD_OAUTH_SESSION_TTL_SECONDS * 1000,
   ).toISOString();
 
-  await c.env.BROKER_DB
-    .prepare(
-      `INSERT INTO discord_oauth_sessions (
-          state_hash,
-          installation_id,
-          device_public_key,
-          redirect_uri,
-          pkce_code_verifier,
-          issue_nonce_hash,
-          fingerprint_salt_version,
-          status,
-          created_at,
-          expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
-    )
-    .bind(
-      await sha256Base64Url(state),
-      installationId,
-      devicePublicKey,
-      redirectUri,
-      pkce.codeVerifier,
-      await sha256Base64Url(issueNonce),
-      fingerprintSalt.current.version,
-      now.toISOString(),
-      expiresAt,
-    )
-    .run();
+  const insertSucceeded = await insertPendingDiscordOAuthSession(c.env.BROKER_DB, {
+    stateHash: await sha256Base64Url(state),
+    installationId,
+    devicePublicKey,
+    redirectUri,
+    pkceCodeVerifier: pkce.codeVerifier,
+    issueNonceHash: await sha256Base64Url(issueNonce),
+    fingerprintSaltVersion: fingerprintSalt.current.version,
+    nowIso: now.toISOString(),
+    expiresAt,
+    maxPendingPerInstallation: pendingControls.maxPerInstallation,
+  });
+
+  if (!insertSucceeded) {
+    return pendingInstallationLimitResponse(c, pendingControls);
+  }
 
   return c.json({
     authorization_url: buildDiscordAuthorizationUrl({
@@ -187,7 +180,7 @@ export function handleDiscordOpenRouterIssue(c: Context<BrokerEnv>): Response {
   );
 }
 
-async function checkPendingDiscordOAuthSessionLimits(
+async function checkPendingDiscordOAuthIpLimit(
   db: D1Database,
   context: {
     endpoint: string;
@@ -195,32 +188,8 @@ async function checkPendingDiscordOAuthSessionLimits(
     ip: string | null;
     installationId: string;
   },
+  pendingControls: BrokerPendingDiscordOAuthSessionsConfig,
 ): Promise<((c: Context<BrokerEnv>) => Response) | null> {
-  const controls = await getBrokerAbuseControlsConfig(db);
-  const pendingControls = controls.pendingDiscordOAuthSessions;
-  const activePendingCount = await db
-    .prepare(
-      `SELECT COUNT(*) AS count
-         FROM discord_oauth_sessions
-        WHERE installation_id = ?
-          AND status = 'pending'
-          AND expires_at > ?`,
-    )
-    .bind(context.installationId, context.now.toISOString())
-    .first<{ count: number }>();
-
-  if (Number(activePendingCount?.count ?? 0) >= pendingControls.maxPerInstallation) {
-    return (c: Context<BrokerEnv>) =>
-      publicErrorResponse(c, 429, {
-        code: 'rate_limited',
-        class: 'retryable',
-        subcode: 'pending_discord_oauth_installation_limit',
-        retryAfterMs: pendingControls.windowMinutes * 60_000,
-        message: 'pending Discord OAuth session limit exceeded for installation_id',
-        entitlement: null,
-      });
-  }
-
   if (!context.ip) {
     return null;
   }
@@ -252,6 +221,77 @@ async function checkPendingDiscordOAuthSessionLimits(
   }
 
   return null;
+}
+
+async function insertPendingDiscordOAuthSession(
+  db: D1Database,
+  input: {
+    stateHash: string;
+    installationId: string;
+    devicePublicKey: string;
+    redirectUri: string;
+    pkceCodeVerifier: string;
+    issueNonceHash: string;
+    fingerprintSaltVersion: number;
+    nowIso: string;
+    expiresAt: string;
+    maxPendingPerInstallation: number;
+  },
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `INSERT INTO discord_oauth_sessions (
+          state_hash,
+          installation_id,
+          device_public_key,
+          redirect_uri,
+          pkce_code_verifier,
+          issue_nonce_hash,
+          fingerprint_salt_version,
+          status,
+          created_at,
+          expires_at
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?
+         WHERE (
+           SELECT COUNT(*)
+             FROM discord_oauth_sessions
+            WHERE installation_id = ?
+              AND status = 'pending'
+              AND expires_at > ?
+         ) < ?`,
+    )
+    .bind(
+      input.stateHash,
+      input.installationId,
+      input.devicePublicKey,
+      input.redirectUri,
+      input.pkceCodeVerifier,
+      input.issueNonceHash,
+      input.fingerprintSaltVersion,
+      input.nowIso,
+      input.expiresAt,
+      input.installationId,
+      input.nowIso,
+      input.maxPendingPerInstallation,
+    )
+    .run();
+
+  return Number(result.meta.changes ?? 0) === 1;
+}
+
+function pendingInstallationLimitResponse(
+  c: Context<BrokerEnv>,
+  pendingControls: BrokerPendingDiscordOAuthSessionsConfig,
+): Response {
+  return publicErrorResponse(c, 429, {
+    code: 'rate_limited',
+    class: 'retryable',
+    subcode: 'pending_discord_oauth_installation_limit',
+    retryAfterMs: pendingControls.windowMinutes * 60_000,
+    message: 'pending Discord OAuth session limit exceeded for installation_id',
+    entitlement: null,
+  });
 }
 
 async function readJsonBody<T>(
