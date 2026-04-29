@@ -587,12 +587,12 @@ fn renderer_source_only_peer_remains_secondary_only_with_readable_default_size()
 }
 
 #[test]
-fn renderer_render_path_expands_damage_band_to_rendered_bounds_overhang() {
+fn renderer_render_path_expands_damage_band_to_rendered_bounds_with_safety_margin() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
     let first = renderer
         .render_blocks(vec![CaptionBlock::new("self", "hello")])
         .unwrap();
-    let previous_bounds = first.layout().visible_blocks[0].bounds;
+    let previous_visual_bounds = first.layout().visible_blocks[0].visual_bounds;
 
     let second = renderer.render_empty_frame().unwrap();
     let damage = second
@@ -600,8 +600,14 @@ fn renderer_render_path_expands_damage_band_to_rendered_bounds_overhang() {
         .damage_band
         .expect("damage band should be present");
 
-    assert_eq!(damage.top_px, previous_bounds.top_px - 5.0);
-    assert_eq!(damage.bottom_px, previous_bounds.bottom_px + 5.0);
+    assert_eq!(
+        damage.top_px,
+        (previous_visual_bounds.top_px - 32.0).max(0.0)
+    );
+    assert_eq!(
+        damage.bottom_px,
+        (previous_visual_bounds.bottom_px + 32.0).min(first.layout().surface_height_px as f32)
+    );
 }
 
 #[test]

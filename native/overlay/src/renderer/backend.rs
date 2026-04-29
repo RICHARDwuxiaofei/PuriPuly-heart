@@ -66,6 +66,7 @@ use super::types::{
 
 #[cfg(windows)]
 const DEBUG_OVERLAY_DAMAGE_BOTTOM_PX: f32 = 112.0;
+const DAMAGE_BAND_SAFETY_MARGIN_PX: f32 = 32.0;
 
 pub struct CaptionRenderer {
     policy: CaptionLayoutPolicy,
@@ -887,6 +888,17 @@ impl WindowsCaptionRenderer {
             self.d2d_context.PopAxisAlignedClip();
         }
 
+        unsafe {
+            self.d2d_context.PushAxisAlignedClip(
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: damage_band.top_px,
+                    right: layout.surface_width_px as f32,
+                    bottom: damage_band.bottom_px,
+                },
+                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            );
+        }
         let render_result = (|| {
             for block in &layout.visible_blocks {
                 if !bounds_intersect_damage_band(block.visual_bounds.as_block_bounds(), damage_band)
@@ -949,6 +961,9 @@ impl WindowsCaptionRenderer {
             })
         })()
         .map_err(|error| prefix_render_error("frame_compose", error));
+        unsafe {
+            self.d2d_context.PopAxisAlignedClip();
+        }
         let end_draw_result = unsafe {
             self.d2d_context
                 .EndDraw(None, None)
@@ -1342,12 +1357,153 @@ fn compute_damage_band(
         }
     }
 
-    DamageBand::from_bounds(changed_bounds)
+    DamageBand::from_bounds(changed_bounds).map(|damage_band| {
+        expand_damage_band_for_render(damage_band, next_layout.surface_height_px)
+    })
+}
+
+fn expand_damage_band_for_render(damage_band: DamageBand, surface_height_px: u32) -> DamageBand {
+    let surface_bottom_px = surface_height_px as f32;
+    DamageBand {
+        top_px: (damage_band.top_px - DAMAGE_BAND_SAFETY_MARGIN_PX).clamp(0.0, surface_bottom_px),
+        bottom_px: (damage_band.bottom_px + DAMAGE_BAND_SAFETY_MARGIN_PX)
+            .clamp(0.0, surface_bottom_px),
+    }
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
 fn bounds_intersect_damage_band(bounds: BlockBounds, damage_band: DamageBand) -> bool {
     bounds.bottom_px >= damage_band.top_px && bounds.top_px <= damage_band.bottom_px
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_layout_for_render;
+    use crate::renderer::{
+        BlockBounds, CaptionBlockVariant, CaptionChannel, LayoutCacheKey, ResolvedBlockLayout,
+        ResolvedFrameLayout, VisualBounds,
+    };
+
+    fn layout_key(seed: &str) -> LayoutCacheKey {
+        LayoutCacheKey {
+            primary_text: seed.to_string(),
+            secondary_text: String::new(),
+            channel: Some(CaptionChannel::PeerChannel),
+            block_variant: CaptionBlockVariant::Finalized,
+            secondary_enabled: false,
+            secondary_reserved: false,
+            primary_font_size_key: 132,
+            secondary_font_size_key: 82,
+            content_width_key: 1024,
+            text_scale_key: 1000,
+        }
+    }
+
+    fn block(id: &str, top_px: f32, bottom_px: f32, key_seed: &str) -> ResolvedBlockLayout {
+        let bounds = BlockBounds::new(100.0, top_px, 800.0, bottom_px);
+        ResolvedBlockLayout {
+            id: id.to_string(),
+            layout_cache_key: layout_key(key_seed),
+            channel: Some(CaptionChannel::PeerChannel),
+            block_variant: CaptionBlockVariant::Finalized,
+            primary_lines: Vec::new(),
+            secondary_line: None,
+            secondary_reserved: false,
+            bounds,
+            visual_bounds: VisualBounds::new(
+                bounds.left_px,
+                bounds.top_px,
+                bounds.right_px,
+                bounds.bottom_px,
+            ),
+            content_width_px: 700.0,
+            opacity: 1.0,
+            render_offset_y_px: 0.0,
+            render_height_scale: 1.0,
+            truncated_primary: false,
+            truncated_secondary: false,
+        }
+    }
+
+    fn frame(blocks: Vec<ResolvedBlockLayout>, height_px: u32) -> ResolvedFrameLayout {
+        ResolvedFrameLayout {
+            visible_blocks: blocks,
+            dropped_block_ids: Vec::new(),
+            surface_width_px: 1024,
+            surface_height_px: height_px,
+            damage_band: None,
+        }
+    }
+
+    #[test]
+    fn changed_damage_band_expands_by_safety_margin() {
+        let mut previous_layout = Some(frame(vec![block("peer:1", 100.0, 200.0, "old")], 500));
+
+        let rendered = prepare_layout_for_render(
+            &mut previous_layout,
+            frame(vec![block("peer:1", 120.0, 220.0, "new")], 500),
+        );
+
+        let damage_band = rendered.damage_band.expect("changed block should damage");
+        assert_eq!(damage_band.top_px, 68.0);
+        assert_eq!(damage_band.bottom_px, 252.0);
+    }
+
+    #[test]
+    fn expanded_damage_band_clamps_to_surface_bounds() {
+        let mut previous_layout = Some(frame(vec![block("peer:1", 4.0, 16.0, "old")], 40));
+
+        let rendered = prepare_layout_for_render(
+            &mut previous_layout,
+            frame(vec![block("peer:1", 8.0, 24.0, "new")], 40),
+        );
+
+        let damage_band = rendered.damage_band.expect("changed block should damage");
+        assert_eq!(damage_band.top_px, 0.0);
+        assert_eq!(damage_band.bottom_px, 40.0);
+    }
+
+    #[test]
+    fn expanded_damage_band_clamps_fully_offscreen_top_bounds() {
+        let mut previous_layout = Some(frame(vec![block("peer:1", -120.0, -80.0, "old")], 100));
+
+        let rendered = prepare_layout_for_render(
+            &mut previous_layout,
+            frame(vec![block("peer:1", -110.0, -90.0, "new")], 100),
+        );
+
+        let damage_band = rendered.damage_band.expect("changed block should damage");
+        assert_eq!(damage_band.top_px, 0.0);
+        assert_eq!(damage_band.bottom_px, 0.0);
+    }
+
+    #[test]
+    fn expanded_damage_band_clamps_fully_offscreen_bottom_bounds() {
+        let mut previous_layout = Some(frame(vec![block("peer:1", 180.0, 220.0, "old")], 100));
+
+        let rendered = prepare_layout_for_render(
+            &mut previous_layout,
+            frame(vec![block("peer:1", 190.0, 230.0, "new")], 100),
+        );
+
+        let damage_band = rendered.damage_band.expect("changed block should damage");
+        assert_eq!(damage_band.top_px, 100.0);
+        assert_eq!(damage_band.bottom_px, 100.0);
+    }
+
+    #[test]
+    fn first_damage_band_remains_full_surface() {
+        let mut previous_layout = None;
+
+        let rendered = prepare_layout_for_render(
+            &mut previous_layout,
+            frame(vec![block("peer:1", 100.0, 200.0, "new")], 500),
+        );
+
+        let damage_band = rendered.damage_band.expect("first frame should damage");
+        assert_eq!(damage_band.top_px, 0.0);
+        assert_eq!(damage_band.bottom_px, 500.0);
+    }
 }
 
 #[cfg(windows)]
