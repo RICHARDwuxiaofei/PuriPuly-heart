@@ -90,6 +90,19 @@ describe('Discord OAuth helpers', () => {
     ).rejects.toThrow('malformed Discord token response');
   });
 
+  it('rejects OK Discord token responses with invalid JSON using malformed response errors', async () => {
+    await expect(
+      exchangeDiscordCode({
+        clientId: 'test-discord-client-id',
+        clientSecret: 'test-discord-client-secret',
+        code: 'oauth-code',
+        redirectUri: REGISTERED_REDIRECT_URIS[0],
+        codeVerifier: 'pkce-code-verifier',
+        fetcher: invalidJsonFetcher(),
+      }),
+    ).rejects.toThrow('malformed Discord token response');
+  });
+
   it('rejects malformed Discord user responses', async () => {
     await expect(
       fetchDiscordUser({
@@ -102,11 +115,30 @@ describe('Discord OAuth helpers', () => {
       }),
     ).rejects.toThrow('malformed Discord user response');
   });
+
+  it('rejects OK Discord user responses with invalid JSON using malformed response errors', async () => {
+    await expect(
+      fetchDiscordUser({
+        accessToken: 'discord-access-token',
+        fetcher: invalidJsonFetcher(),
+      }),
+    ).rejects.toThrow('malformed Discord user response');
+  });
 });
 
 function jsonFetcher(payload: unknown): typeof fetch {
   return (async () =>
     new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+      },
+    })) as typeof fetch;
+}
+
+function invalidJsonFetcher(): typeof fetch {
+  return (async () =>
+    new Response('not-json', {
       status: 200,
       headers: {
         'content-type': 'application/json',

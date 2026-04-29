@@ -140,7 +140,9 @@ export async function exchangeDiscordCode(input: {
     throw new Error('Discord token exchange failed');
   }
 
-  return parseDiscordTokenResponse(await response.json());
+  return parseDiscordTokenResponse(
+    await readDiscordJsonResponse(response, 'malformed Discord token response'),
+  );
 }
 
 export async function fetchDiscordUser(input: {
@@ -159,7 +161,20 @@ export async function fetchDiscordUser(input: {
     throw new Error('Discord user fetch failed');
   }
 
-  return parseDiscordUserResponse(await response.json());
+  return parseDiscordUserResponse(
+    await readDiscordJsonResponse(response, 'malformed Discord user response'),
+  );
+}
+
+async function readDiscordJsonResponse(
+  response: Response,
+  malformedMessage: string,
+): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    throw new Error(malformedMessage);
+  }
 }
 
 function parseDiscordTokenResponse(value: unknown): DiscordTokenResponse {
