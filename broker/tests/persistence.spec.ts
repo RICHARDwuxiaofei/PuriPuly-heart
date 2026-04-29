@@ -156,14 +156,23 @@ describe('broker persistent state model', () => {
             'release_token_expires_at',
             'verified_hardware_hash',
             'verified_hardware_hash_salt_version',
+            'discord_user_ref',
+            'discord_issue_status',
+            'discord_issue_reserved_at',
+            'discord_issue_delivered_at',
           ],
-          unique: ['managed_credential_ref'],
-          indexed: ['status', 'expires_at'],
+          unique: ['managed_credential_ref', 'discord_user_ref'],
+          indexed: ['status', 'expires_at', 'discord_issue_reserved_at'],
           partialUniqueIndexes: [
             {
               name: 'idx_openrouter_entitlements_release_token_hash',
               columns: ['release_token_hash'],
               predicate: 'release_token_hash IS NOT NULL',
+            },
+            {
+              name: 'idx_openrouter_entitlements_discord_user_ref',
+              columns: ['discord_user_ref'],
+              predicate: 'discord_user_ref IS NOT NULL',
             },
           ],
           updateStrategy: 'in-place',
@@ -183,6 +192,56 @@ describe('broker persistent state model', () => {
               verifyBehavior: 'rotate for existing pending_release row',
             },
           },
+        },
+        discordOAuthSessions: {
+          name: 'discord_oauth_sessions',
+          purpose:
+            'bounded OAuth PKCE/session state for Discord-gated managed OpenRouter issuance',
+          primaryKey: 'state_hash',
+          columns: [
+            'state_hash',
+            'installation_id',
+            'device_public_key',
+            'redirect_uri',
+            'pkce_code_verifier',
+            'issue_nonce_hash',
+            'fingerprint_salt_version',
+            'discord_user_ref',
+            'discord_email_verified',
+            'discord_account_created_at',
+            'eligibility_checked_at',
+            'status',
+            'created_at',
+            'expires_at',
+            'processing_started_at',
+            'consumed_at',
+          ],
+          storedStatuses: [
+            'pending',
+            'processing',
+            'consumed',
+            'canceled',
+            'failed',
+            'expired',
+          ],
+          retention:
+            'expires_at cleanup only; durable entitlement and identity evidence is separate',
+          indexed: ['installation_id + status + created_at', 'expires_at'],
+        },
+        discordIdentities: {
+          name: 'discord_identities',
+          purpose: 'durable HMAC Discord user reference uniqueness for managed issuance',
+          primaryKey: 'discord_user_ref',
+          columns: [
+            'discord_user_ref',
+            'entitlement_installation_id',
+            'status',
+            'ref_secret_version',
+            'created_at',
+            'updated_at',
+          ],
+          storedStatuses: ['issuing', 'active', 'failed', 'cleanup_required'],
+          foreignKeys: ['entitlement_installation_id -> installations.installation_id'],
         },
         brokerRequestEvents: {
           name: 'broker_request_events',
@@ -294,6 +353,7 @@ describe('broker persistent state model', () => {
       '0001_harden_installation_public_inputs.sql',
       '0002_add_entitlement_verified_hardware_snapshot.sql',
       '0003_add_abuse_runtime_state_and_issue_success_events.sql',
+      '0004_add_discord_oauth_managed_issue.sql',
     ]);
     expect(existsSync(FIRST_BROKER_MIGRATION)).toBe(true);
     expect(existsSync(LATEST_BROKER_MIGRATION)).toBe(true);
@@ -311,7 +371,10 @@ describe('broker persistent state model', () => {
     const verifiedSnapshotMigration = readBrokerMigrationSql(
       '0002_add_entitlement_verified_hardware_snapshot.sql',
     );
-    const latestMigration = readFileSync(LATEST_BROKER_MIGRATION, 'utf8');
+    const abuseRuntimeMigration = readBrokerMigrationSql(
+      '0003_add_abuse_runtime_state_and_issue_success_events.sql',
+    );
+    const discordManagedIssueMigration = readFileSync(LATEST_BROKER_MIGRATION, 'utf8');
 
     expect(migration).toContain('CREATE TABLE broker_config');
     expect(migration).toContain('CREATE TABLE installations');
@@ -358,21 +421,31 @@ describe('broker persistent state model', () => {
     expect(verifiedSnapshotMigration).toContain(
       'verified_hardware_hash_salt_version INTEGER',
     );
-    expect(latestMigration).toContain('CREATE TABLE broker_config_v2');
-    expect(latestMigration).toContain('abuse_runtime_state');
-    expect(latestMigration).toContain('CREATE TABLE broker_issue_success_events');
-    expect(latestMigration).toContain('managed_credential_ref TEXT');
-    expect(latestMigration).toContain('ip_hash TEXT');
-    expect(latestMigration).toContain('ip_prefix_hash TEXT');
-    expect(latestMigration).toContain('country TEXT');
-    expect(latestMigration).toContain('http_protocol TEXT');
-    expect(latestMigration).toContain('tls_version TEXT');
-    expect(latestMigration).toContain('tls_cipher TEXT');
-    expect(latestMigration).toContain('risk_label TEXT');
-    expect(latestMigration).toContain('CREATE TABLE broker_abuse_runtime_audit');
-    expect(latestMigration).toContain('payload_json TEXT NOT NULL CHECK (json_valid(payload_json))');
-    expect(latestMigration).toContain('created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP');
-    expect(latestMigration).not.toContain('legacy_installation_id_mapping');
-    expect(latestMigration).not.toContain('legacy-invalid-app-version');
+    expect(abuseRuntimeMigration).toContain('CREATE TABLE broker_config_v2');
+    expect(abuseRuntimeMigration).toContain('abuse_runtime_state');
+    expect(abuseRuntimeMigration).toContain('CREATE TABLE broker_issue_success_events');
+    expect(abuseRuntimeMigration).toContain('managed_credential_ref TEXT');
+    expect(abuseRuntimeMigration).toContain('ip_hash TEXT');
+    expect(abuseRuntimeMigration).toContain('ip_prefix_hash TEXT');
+    expect(abuseRuntimeMigration).toContain('country TEXT');
+    expect(abuseRuntimeMigration).toContain('http_protocol TEXT');
+    expect(abuseRuntimeMigration).toContain('tls_version TEXT');
+    expect(abuseRuntimeMigration).toContain('tls_cipher TEXT');
+    expect(abuseRuntimeMigration).toContain('risk_label TEXT');
+    expect(abuseRuntimeMigration).toContain('CREATE TABLE broker_abuse_runtime_audit');
+    expect(abuseRuntimeMigration).toContain('payload_json TEXT NOT NULL CHECK (json_valid(payload_json))');
+    expect(abuseRuntimeMigration).toContain('created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP');
+    expect(discordManagedIssueMigration).toContain('CREATE TABLE discord_oauth_sessions');
+    expect(discordManagedIssueMigration).toContain('CREATE TABLE discord_identities');
+    expect(discordManagedIssueMigration).toContain('discord_user_ref TEXT');
+    expect(discordManagedIssueMigration).toContain('discord_issue_status TEXT');
+    expect(discordManagedIssueMigration).toContain(
+      'CREATE UNIQUE INDEX idx_openrouter_entitlements_discord_user_ref',
+    );
+    expect(discordManagedIssueMigration).toContain(
+      'POST /v1/providers/openrouter/discord/issue',
+    );
+    expect(discordManagedIssueMigration).not.toContain('legacy_installation_id_mapping');
+    expect(discordManagedIssueMigration).not.toContain('legacy-invalid-app-version');
   });
 });

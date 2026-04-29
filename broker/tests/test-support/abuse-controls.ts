@@ -25,6 +25,35 @@ export interface StoredAbuseControls {
     maxRequests: number;
     windowMinutes: number;
   };
+  discordAuthStartIp: {
+    endpoint: string;
+    scope: 'ip';
+    maxRequests: number;
+    windowMinutes: number;
+  };
+  discordAuthStartInstallation: {
+    endpoint: string;
+    scope: 'installation_id';
+    maxRequests: number;
+    windowMinutes: number;
+  };
+  discordOpenrouterIssueIp: {
+    endpoint: string;
+    scope: 'ip';
+    maxRequests: number;
+    windowMinutes: number;
+  };
+  discordOpenrouterIssueInstallation: {
+    endpoint: string;
+    scope: 'installation_id';
+    maxRequests: number;
+    windowMinutes: number;
+  };
+  pendingDiscordOAuthSessions: {
+    maxPerInstallation: number;
+    maxPerIp: number;
+    windowMinutes: number;
+  };
   newActiveEntitlementsPerDay: {
     endpoint: string;
     scope: 'global';
@@ -104,10 +133,39 @@ export const TEST_DEFAULT_ABUSE_CONTROLS: StoredAbuseControls = {
     maxRequests: 30,
     windowMinutes: 15,
   },
+  discordAuthStartIp: {
+    endpoint: 'POST /v1/auth/discord/start',
+    scope: 'ip',
+    maxRequests: 20,
+    windowMinutes: 15,
+  },
+  discordAuthStartInstallation: {
+    endpoint: 'POST /v1/auth/discord/start',
+    scope: 'installation_id',
+    maxRequests: 5,
+    windowMinutes: 15,
+  },
+  discordOpenrouterIssueIp: {
+    endpoint: 'POST /v1/providers/openrouter/discord/issue',
+    scope: 'ip',
+    maxRequests: 10,
+    windowMinutes: 15,
+  },
+  discordOpenrouterIssueInstallation: {
+    endpoint: 'POST /v1/providers/openrouter/discord/issue',
+    scope: 'installation_id',
+    maxRequests: 3,
+    windowMinutes: 15,
+  },
+  pendingDiscordOAuthSessions: {
+    maxPerInstallation: 2,
+    maxPerIp: 20,
+    windowMinutes: 15,
+  },
   newActiveEntitlementsPerDay: {
-    endpoint: 'POST /v1/providers/openrouter/issue',
+    endpoint: 'POST /v1/providers/openrouter/discord/issue',
     scope: 'global',
-    maxCount: null,
+    maxCount: 500,
     windowDays: 1,
   },
   immediateAlerts: {
@@ -302,6 +360,17 @@ function normalizeAbuseControls(value: unknown): StoredAbuseControls {
   assignRecord(normalized.trialChallengeVerify, value.trialChallengeVerify);
   assignRecord(normalized.openrouterIssue, value.openrouterIssue);
   assignRecord(normalized.trialStatus, value.trialStatus);
+  assignRecord(normalized.discordAuthStartIp, value.discordAuthStartIp);
+  assignRecord(
+    normalized.discordAuthStartInstallation,
+    value.discordAuthStartInstallation,
+  );
+  assignRecord(normalized.discordOpenrouterIssueIp, value.discordOpenrouterIssueIp);
+  assignRecord(
+    normalized.discordOpenrouterIssueInstallation,
+    value.discordOpenrouterIssueInstallation,
+  );
+  assignRecord(normalized.pendingDiscordOAuthSessions, value.pendingDiscordOAuthSessions);
   assignRecord(normalized.newActiveEntitlementsPerDay, value.newActiveEntitlementsPerDay);
   assignRecord(normalized.immediateAlerts, value.immediateAlerts);
   assignRecord(normalized.asnFastPath, value.asnFastPath);

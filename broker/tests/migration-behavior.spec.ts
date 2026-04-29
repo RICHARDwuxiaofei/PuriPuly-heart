@@ -571,6 +571,7 @@ describe('broker migration behavior', () => {
 
       applyBrokerMigrations(db, {
         after: '0002_add_entitlement_verified_hardware_snapshot.sql',
+        through: '0003_add_abuse_runtime_state_and_issue_success_events.sql',
       });
 
       const configKeys = db
@@ -673,14 +674,23 @@ describe('broker migration behavior', () => {
 
       applyBrokerMigrations(db, {
         after: '0002_add_entitlement_verified_hardware_snapshot.sql',
+        through: '0003_add_abuse_runtime_state_and_issue_success_events.sql',
       });
 
       const migratedRow = db
         .prepare('SELECT value FROM broker_config WHERE key = ?')
         .get('abuse_controls') as { value: string };
+      const {
+        discordAuthStartIp: _discordAuthStartIp,
+        discordAuthStartInstallation: _discordAuthStartInstallation,
+        discordOpenrouterIssueIp: _discordOpenrouterIssueIp,
+        discordOpenrouterIssueInstallation: _discordOpenrouterIssueInstallation,
+        pendingDiscordOAuthSessions: _pendingDiscordOAuthSessions,
+        ...defaultsThrough0003
+      } = TEST_DEFAULT_ABUSE_CONTROLS;
 
       expect(JSON.parse(migratedRow.value)).toEqual({
-        ...TEST_DEFAULT_ABUSE_CONTROLS,
+        ...defaultsThrough0003,
         ...tunedLegacyControls,
       });
     } finally {

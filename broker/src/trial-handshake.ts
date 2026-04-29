@@ -1,11 +1,11 @@
 import type { Context } from 'hono';
 
 import type {
-  FingerprintSaltConfigValue,
   InstallationRecord,
   OpenRouterEntitlementRecord,
 } from './persistence';
 import type { BrokerEnv } from './contract';
+import { getFingerprintSaltConfig } from './fingerprint-salt';
 import { deleteExpiredChallengePreflightInstallations } from './preflight-retention';
 import { nonEmptyString, stringValue, validatePublicInput } from './public-input';
 import {
@@ -1419,21 +1419,6 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
     bytes.byteOffset,
     bytes.byteOffset + bytes.byteLength,
   ) as ArrayBuffer;
-}
-
-async function getFingerprintSaltConfig(
-  db: D1Database,
-): Promise<FingerprintSaltConfigValue> {
-  const row = await db
-    .prepare('SELECT value FROM broker_config WHERE key = ?')
-    .bind('fingerprint_salt')
-    .first<{ value: string }>();
-
-  if (!row) {
-    throw new Error('missing fingerprint_salt config');
-  }
-
-  return JSON.parse(row.value) as FingerprintSaltConfigValue;
 }
 
 async function getInstallation(
