@@ -5,12 +5,8 @@ Interpret the current ${sourceName} text to translate into ${targetName} natural
 * Ground the translation in `<input>`; use `<context>` cautiously to clarify it when helpful.
 * When unsure whether context applies, translate `<input>` standalone.
 * Treat timestamps and speaker hints as lightweight metadata for tracking conversation flow.
-* Speaker labels, brackets, timestamps, and relative-age markers are metadata, not literal source text.
-* Do not copy speaker labels, brackets, timestamps, or relative-age markers unless they were literally spoken.
-* Do not invent facts from metadata.
 * `[self]` means the local user's earlier utterance.
 * `[peer]` means one or more other speakers from the peer audio channel.
-* Plain-text legend: [self] means the local user's earlier utterance. [peer] means one or more other speakers from the peer audio channel.
 * Context may contain mixed languages; treat mixed-language context as normal conversation context.
 
 ### Context Use Cases
