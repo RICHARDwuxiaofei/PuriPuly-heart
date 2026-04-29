@@ -64,6 +64,7 @@ type DiscordReservationErrorSubcode =
   | 'discord_lifetime_used'
   | 'hardware_duplicate'
   | 'global_cap_reached'
+  | 'discord_installation_already_issuing'
   | 'entitlement_reservation_failed';
 
 type DiscordReservationResult =
@@ -965,6 +966,12 @@ async function reserveDiscordEntitlement(
       return { ok: false, subcode: 'hardware_duplicate' };
     }
 
+    const issuingConflict = await hasSameInstallationIssuingConflict(db, input);
+    if (issuingConflict) {
+      await releaseDiscordReservation(db, input);
+      return { ok: false, subcode: 'discord_installation_already_issuing' };
+    }
+
     const cap = await getDiscordDailyIssuanceCapState(db, input.now);
     if (cap.reached) {
       await releaseDiscordReservation(db, input);
@@ -1137,7 +1144,13 @@ async function insertOrUpdateIssuingDiscordEntitlement(
           discord_issue_status = excluded.discord_issue_status,
           discord_issue_reserved_at = excluded.discord_issue_reserved_at,
           discord_issue_delivered_at = NULL
-        WHERE openrouter_entitlements.status <> 'active'`,
+        WHERE openrouter_entitlements.status <> 'active'
+          AND (
+            openrouter_entitlements.discord_issue_status IS NULL
+            OR openrouter_entitlements.discord_issue_status <> 'issuing'
+            OR openrouter_entitlements.discord_user_ref IS NULL
+            OR openrouter_entitlements.discord_user_ref = excluded.discord_user_ref
+          )`,
     )
     .bind(
       input.installationId,
@@ -1146,9 +1159,7 @@ async function insertOrUpdateIssuingDiscordEntitlement(
       input.hardwareHashSaltVersion,
       input.discordUserRef,
       input.nowIso,
-      input.installationId,
       input.hardwareHash,
-      input.installationId,
       input.hardwareHash,
       ...(maxCount === null
         ? []
@@ -1169,8 +1180,7 @@ function deliveredHardwareNotExistsPredicate(): string {
   return `NOT EXISTS (
             SELECT 1
               FROM openrouter_entitlements delivered
-             WHERE delivered.installation_id <> ?
-               AND delivered.status = 'active'
+             WHERE delivered.status = 'active'
                AND delivered.verified_hardware_hash = ?
           )
           AND NOT EXISTS (
@@ -1178,8 +1188,7 @@ function deliveredHardwareNotExistsPredicate(): string {
               FROM installations legacy
               JOIN openrouter_entitlements legacy_entitlement
                 ON legacy_entitlement.installation_id = legacy.installation_id
-             WHERE legacy.installation_id <> ?
-               AND legacy.hardware_hash = ?
+             WHERE legacy.hardware_hash = ?
                AND legacy_entitlement.status = 'active'
           )`;
 }
@@ -1196,8 +1205,7 @@ async function hasDeliveredHardwareDuplicate(
       `SELECT EXISTS(
           SELECT 1
             FROM openrouter_entitlements delivered
-           WHERE delivered.installation_id <> ?
-             AND delivered.status = 'active'
+           WHERE delivered.status = 'active'
              AND delivered.verified_hardware_hash = ?
         )
         OR EXISTS(
@@ -1205,20 +1213,42 @@ async function hasDeliveredHardwareDuplicate(
             FROM installations legacy
             JOIN openrouter_entitlements legacy_entitlement
               ON legacy_entitlement.installation_id = legacy.installation_id
-           WHERE legacy.installation_id <> ?
-             AND legacy.hardware_hash = ?
+           WHERE legacy.hardware_hash = ?
              AND legacy_entitlement.status = 'active'
         ) AS duplicate_found`,
     )
     .bind(
-      input.installationId,
       input.hardwareHash,
-      input.installationId,
       input.hardwareHash,
     )
     .first<{ duplicate_found: number }>();
 
   return Number(row?.duplicate_found ?? 0) === 1;
+}
+
+async function hasSameInstallationIssuingConflict(
+  db: D1Database,
+  input: {
+    installationId: string;
+    discordUserRef: string;
+  },
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT EXISTS(
+          SELECT 1
+            FROM openrouter_entitlements existing
+           WHERE existing.installation_id = ?
+             AND existing.status = 'pending_release'
+             AND existing.discord_issue_status = 'issuing'
+             AND existing.discord_user_ref IS NOT NULL
+             AND existing.discord_user_ref <> ?
+        ) AS conflict_found`,
+    )
+    .bind(input.installationId, input.discordUserRef)
+    .first<{ conflict_found: number }>();
+
+  return Number(row?.conflict_found ?? 0) === 1;
 }
 
 async function getDiscordDailyIssuanceCapState(
@@ -1472,6 +1502,16 @@ function discordReservationErrorResponse(
         subcode: reservation.subcode,
         retryAfterMs: reservation.retryAfterMs ?? null,
         message: 'Daily managed issuance cap reached',
+        entitlement: null,
+      });
+    case 'discord_installation_already_issuing':
+      return publicErrorResponse(c, 410, {
+        code: 'challenge_expired',
+        class: 'retryable',
+        subcode: reservation.subcode,
+        retryAfterMs: 0,
+        message:
+          'Discord managed entitlement is already issuing for this installation; restart Discord OAuth onboarding',
         entitlement: null,
       });
     case 'entitlement_reservation_failed':

@@ -523,6 +523,143 @@ describe('Discord issue gate', () => {
     expect(countDiscordEntitlements(env)).toBe(1);
   });
 
+  it('same installation hardware duplicate rejects a previously delivered entitlement before creating a child key', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const env = createTestBrokerEnv();
+    const installationId = 'install-discord-same-installation-delivered-hardware';
+    insertInstallation(env, {
+      installationId,
+      devicePublicKey: 'same-installation-delivered-device-key',
+      hardwareHash: 'hardware-hash-same-installation-delivered',
+      hardwareHashSaltVersion: 7,
+    });
+    insertEntitlement(env, {
+      installation_id: installationId,
+      status: 'active',
+      budget_usd: 0.07,
+      managed_credential_ref: 'same-installation-delivered-managed-key',
+      issued_at: NOW_ISO,
+      expires_at: '2026-07-30T06:00:00.000Z',
+      verified_hardware_hash: 'hardware-hash-same-installation-delivered',
+      verified_hardware_hash_salt_version: 7,
+      discord_issue_status: 'active',
+      discord_issue_reserved_at: NOW_ISO,
+      discord_issue_delivered_at: NOW_ISO,
+    });
+
+    const started = await startDiscordSession(installationId, env);
+    const discordApi = mockDiscordApi({
+      user: {
+        id: discordSnowflakeForAgeDays(32),
+        verified: true,
+      },
+    });
+    const response = await postDiscordIssue(
+      env,
+      await signedIssueRequest(started, {
+        code: 'discord-oauth-code-same-installation-delivered-hardware',
+        hardware_hash: 'hardware-hash-same-installation-delivered',
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'trial_not_eligible',
+        class: 'terminal',
+        subcode: 'hardware_duplicate',
+        message: 'This device has already used a managed trial',
+      }),
+    );
+    expect(discordApi.openRouterCreateCalls).toHaveLength(0);
+    expect(countDiscordIdentities(env)).toBe(0);
+    await expect(readEntitlement(env, installationId)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'active',
+        managed_credential_ref: 'same-installation-delivered-managed-key',
+        discord_issue_status: 'active',
+      }),
+    );
+  });
+
+  it('same installation issuing conflict does not overwrite another Discord reservation or strand identity', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const env = createTestBrokerEnv();
+    const installationId = 'install-discord-same-installation-issuing-conflict';
+    const existingDiscordUserRef = await deriveExpectedDiscordUserRef(
+      env.DISCORD_USER_REF_SECRET,
+      discordSnowflakeForAgeDays(35),
+    );
+    insertInstallation(env, {
+      installationId,
+      devicePublicKey: 'same-installation-issuing-device-key',
+      hardwareHash: 'hardware-hash-same-installation-issuing-old',
+      hardwareHashSaltVersion: 7,
+    });
+    insertDiscordIdentity(env, {
+      discordUserRef: existingDiscordUserRef,
+      installationId,
+      status: 'issuing',
+    });
+    insertEntitlement(env, {
+      installation_id: installationId,
+      status: 'pending_release',
+      budget_usd: 0.07,
+      verified_hardware_hash: 'hardware-hash-same-installation-issuing-old',
+      verified_hardware_hash_salt_version: 7,
+      discord_user_ref: existingDiscordUserRef,
+      discord_issue_status: 'issuing',
+      discord_issue_reserved_at: NOW_ISO,
+    });
+
+    const started = await startDiscordSession(installationId, env);
+    const discordApi = mockDiscordApi({
+      user: {
+        id: discordSnowflakeForAgeDays(31),
+        verified: true,
+      },
+    });
+    const response = await postDiscordIssue(
+      env,
+      await signedIssueRequest(started, {
+        code: 'discord-oauth-code-same-installation-issuing-conflict',
+        hardware_hash: 'hardware-hash-same-installation-issuing-new',
+      }),
+    );
+
+    expect(response.status).toBe(410);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'challenge_expired',
+        class: 'retryable',
+        subcode: 'discord_installation_already_issuing',
+        retryAfterMs: 0,
+        message:
+          'Discord managed entitlement is already issuing for this installation; restart Discord OAuth onboarding',
+      }),
+    );
+    expect(discordApi.openRouterCreateCalls).toHaveLength(0);
+    expect(countDiscordIdentities(env)).toBe(1);
+    await expect(readSessionByState(env, started.state)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'failed',
+        pkce_code_verifier: null,
+      }),
+    );
+    await expect(readEntitlement(env, installationId)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'pending_release',
+        discord_user_ref: existingDiscordUserRef,
+        discord_issue_status: 'issuing',
+        verified_hardware_hash: 'hardware-hash-same-installation-issuing-old',
+      }),
+    );
+  });
+
   it('cap rejects final issue when the UTC daily managed issuance cap is reached', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW_ISO));
@@ -1013,6 +1150,34 @@ function insertInstallation(
       input.hardwareHash,
       input.hardwareHashSaltVersion,
       input.appVersion ?? APP_VERSION,
+      NOW_ISO,
+      NOW_ISO,
+    );
+}
+
+function insertDiscordIdentity(
+  env: TestBrokerEnv,
+  input: {
+    discordUserRef: string;
+    installationId: string;
+    status: 'issuing' | 'active' | 'failed' | 'cleanup_required';
+  },
+): void {
+  env.__db
+    .prepare(
+      `INSERT INTO discord_identities (
+          discord_user_ref,
+          entitlement_installation_id,
+          status,
+          ref_secret_version,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, 1, ?, ?)`,
+    )
+    .run(
+      input.discordUserRef,
+      input.installationId,
+      input.status,
       NOW_ISO,
       NOW_ISO,
     );
