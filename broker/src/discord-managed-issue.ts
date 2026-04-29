@@ -6,7 +6,10 @@ import {
   recordRequestEvent,
   resolveClientIp,
 } from './abuse-controls';
-import { errorResponse as publicErrorResponse } from './broker-error';
+import {
+  errorResponse as publicErrorResponse,
+  internalErrorResponseWithEntitlement,
+} from './broker-error';
 import type { BrokerEnv } from './contract';
 import {
   assertRedirectAllowed,
@@ -24,9 +27,16 @@ import { nonEmptyString, stringValue, validatePublicInput } from './public-input
 import type {
   BrokerPendingDiscordOAuthSessionsConfig,
   DiscordOAuthSessionRecord,
+  OpenRouterEntitlementRecord,
 } from './persistence';
 import {
+  assignManagedGuardrail,
+  createManagedChildKey,
+} from './openrouter-management';
+import { deriveManagedOpenRouterUserId } from './openrouter-user-id';
+import {
   MANAGED_TRIAL_BUDGET_POLICY,
+  MANAGED_TRIAL_POLICY,
   TRIAL_PROVIDER_POLICY,
 } from './trial-policy';
 
@@ -46,6 +56,23 @@ const MANAGED_TRIAL_ALLOWED_MODEL_LIST =
 const STRICT_ISO_8601_TIMESTAMP =
   /^(?<year>\d{4})-(?<month>0[1-9]|1[0-2])-(?<day>0[1-9]|[12]\d|3[01])T(?<hour>[01]\d|2[0-3]):(?<minute>[0-5]\d):(?<second>[0-5]\d)(?:\.(?<millisecond>\d{3}))?(?:(?<utc>Z)|(?<offsetSign>[+-])(?<offsetHour>[01]\d|2[0-3]):(?<offsetMinute>[0-5]\d))$/u;
 const textEncoder = new TextEncoder();
+const DISCORD_USER_REF_VERSION = 1;
+const DISCORD_USER_REF_PREFIX = `ph-discord-user-v${DISCORD_USER_REF_VERSION}_`;
+const DISCORD_USER_REF_PAYLOAD_PREFIX = `puripuly-heart:discord-user:v${DISCORD_USER_REF_VERSION}`;
+
+type DiscordReservationErrorSubcode =
+  | 'discord_lifetime_used'
+  | 'hardware_duplicate'
+  | 'global_cap_reached'
+  | 'entitlement_reservation_failed';
+
+type DiscordReservationResult =
+  | { ok: true }
+  | {
+      ok: false;
+      subcode: DiscordReservationErrorSubcode;
+      retryAfterMs?: number | null;
+    };
 
 interface DiscordAuthStartRequestBody {
   installation_id?: unknown;
@@ -255,11 +282,14 @@ export async function handleDiscordOpenRouterIssue(
     return discordStateUnknownResponse(c);
   }
 
-  const sessionGateResponse = validateDiscordSessionGate(c, {
+  const sessionGateResponse = await validateDiscordSessionGate(c, {
+    db: c.env.BROKER_DB,
+    stateHash,
     session,
     input: input.value,
     issueNonceHash,
     now,
+    nowIso,
   });
   if (sessionGateResponse) {
     return sessionGateResponse;
@@ -334,14 +364,112 @@ export async function handleDiscordOpenRouterIssue(
     );
   }
 
+  const discordUserRef = await deriveDiscordUserRef({
+    discordUserId: discordUser.id,
+    secret: c.env.DISCORD_USER_REF_SECRET,
+  });
+  if (!discordUserRef) {
+    await failDiscordOAuthSession(c.env.BROKER_DB, {
+      stateHash,
+      nowIso,
+      discordEmailVerified: eligibility.discordEmailVerified,
+      discordAccountCreatedAt: eligibility.discordAccountCreatedAt,
+    });
+    return internalErrorResponseWithEntitlement(c, null);
+  }
+
   await markDiscordOAuthSessionEligible(c.env.BROKER_DB, {
     stateHash,
     nowIso,
+    discordUserRef,
     discordEmailVerified: eligibility.discordEmailVerified,
     discordAccountCreatedAt: eligibility.discordAccountCreatedAt,
   });
 
-  return discordActivationPlaceholderResponse(c);
+  const reservation = await reserveDiscordEntitlement(c.env.BROKER_DB, {
+    installationId: input.value.installationId,
+    devicePublicKey: input.value.devicePublicKey,
+    hardwareHash: input.value.hardwareHash,
+    hardwareHashSaltVersion: input.value.hardwareHashSaltVersion,
+    appVersion: input.value.appVersion,
+    discordUserRef,
+    now,
+    nowIso,
+  });
+  if (!reservation.ok) {
+    await failDiscordOAuthSession(c.env.BROKER_DB, {
+      stateHash,
+      nowIso,
+      discordEmailVerified: eligibility.discordEmailVerified,
+      discordAccountCreatedAt: eligibility.discordAccountCreatedAt,
+    });
+    return discordReservationErrorResponse(c, reservation);
+  }
+
+  const issuedAt = nowIso;
+  const expiresAt = addMonthsUtc(
+    now,
+    MANAGED_TRIAL_POLICY.entitlement.issuance.expiry.durationMonths,
+  ).toISOString();
+  let childKey: { rawKey: string; hash: string } | null = null;
+  try {
+    childKey = await createManagedChildKey({
+      managementApiKey: c.env.OPENROUTER_MANAGEMENT_API_KEY,
+      installationId: input.value.installationId,
+      releaseSessionRef: stateHash,
+      expiresAt,
+    });
+    await assignManagedGuardrail({
+      managementApiKey: c.env.OPENROUTER_MANAGEMENT_API_KEY,
+      guardrailId: c.env.OPENROUTER_MANAGED_GUARDRAIL_ID,
+      keyHash: childKey.hash,
+    });
+
+    const activationSucceeded = await activateDiscordReservation(c.env.BROKER_DB, {
+      stateHash,
+      installationId: input.value.installationId,
+      discordUserRef,
+      managedCredentialRef: childKey.hash,
+      issuedAt,
+      expiresAt,
+      deliveredAt: nowIso,
+    });
+    if (!activationSucceeded) {
+      throw new Error('Discord managed entitlement activation failed');
+    }
+
+    const activeEntitlement = await getEntitlement(
+      c.env.BROKER_DB,
+      input.value.installationId,
+    );
+    if (!activeEntitlement) {
+      throw new Error('Discord managed entitlement missing after activation');
+    }
+
+    return await discordIssueSuccessResponse(c, {
+      entitlement: activeEntitlement,
+      rawKey: childKey.rawKey,
+      model: input.value.model,
+      installationId: input.value.installationId,
+    });
+  } catch {
+    await failDiscordOAuthSession(c.env.BROKER_DB, {
+      stateHash,
+      nowIso,
+      discordEmailVerified: eligibility.discordEmailVerified,
+      discordAccountCreatedAt: eligibility.discordAccountCreatedAt,
+    });
+    if (!childKey) {
+      await releaseDiscordReservation(c.env.BROKER_DB, {
+        installationId: input.value.installationId,
+        discordUserRef,
+      });
+    }
+    return internalErrorResponseWithEntitlement(
+      c,
+      await getEntitlement(c.env.BROKER_DB, input.value.installationId),
+    );
+  }
 }
 
 function validateDiscordIssuePublicInput(
@@ -515,21 +643,28 @@ function validateDiscordIssueTextField(field: string, value: string): string | n
   return null;
 }
 
-function validateDiscordSessionGate(
+async function validateDiscordSessionGate(
   c: Context<BrokerEnv>,
   input: {
+    db: D1Database;
+    stateHash: string;
     session: DiscordOAuthSessionRecord;
     input: DiscordOpenRouterIssueInput;
     issueNonceHash: string;
     now: Date;
+    nowIso: string;
   },
-): Response | null {
+): Promise<Response | null> {
   const expiresAt = parseIsoDate(input.session.expires_at);
   if (
     input.session.status === 'expired' ||
     !expiresAt ||
     expiresAt.getTime() < input.now.getTime()
   ) {
+    await expireDiscordOAuthSession(input.db, {
+      stateHash: input.stateHash,
+      nowIso: input.nowIso,
+    });
     return discordSessionExpiredResponse(c);
   }
 
@@ -538,6 +673,9 @@ function validateDiscordSessionGate(
   }
 
   if (input.session.status !== 'pending') {
+    await clearTerminalDiscordOAuthSessionVerifier(input.db, {
+      stateHash: input.stateHash,
+    });
     return discordSessionTerminalResponse(c, input.session.status);
   }
 
@@ -642,11 +780,49 @@ async function failDiscordOAuthSession(
     .run();
 }
 
+async function expireDiscordOAuthSession(
+  db: D1Database,
+  input: {
+    stateHash: string;
+    nowIso: string;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE discord_oauth_sessions
+          SET status = 'expired',
+              pkce_code_verifier = NULL
+        WHERE state_hash = ?
+          AND status IN ('pending', 'expired')`,
+    )
+    .bind(input.stateHash)
+    .run();
+  void input.nowIso;
+}
+
+async function clearTerminalDiscordOAuthSessionVerifier(
+  db: D1Database,
+  input: {
+    stateHash: string;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE discord_oauth_sessions
+          SET pkce_code_verifier = NULL
+        WHERE state_hash = ?
+          AND status IN ('consumed', 'canceled', 'failed', 'expired')`,
+    )
+    .bind(input.stateHash)
+    .run();
+}
+
 async function markDiscordOAuthSessionEligible(
   db: D1Database,
   input: {
     stateHash: string;
     nowIso: string;
+    discordUserRef: string;
     discordEmailVerified: 0 | 1 | null;
     discordAccountCreatedAt: string | null;
   },
@@ -655,6 +831,7 @@ async function markDiscordOAuthSessionEligible(
     .prepare(
       `UPDATE discord_oauth_sessions
           SET pkce_code_verifier = NULL,
+              discord_user_ref = ?,
               discord_email_verified = ?,
               discord_account_created_at = ?,
               eligibility_checked_at = ?
@@ -662,6 +839,7 @@ async function markDiscordOAuthSessionEligible(
           AND status = 'processing'`,
     )
     .bind(
+      input.discordUserRef,
       input.discordEmailVerified,
       input.discordAccountCreatedAt,
       input.nowIso,
@@ -723,6 +901,594 @@ function assertDiscordEligibility(
     discordAccountCreatedAt,
     discordEmailVerified: 1,
   };
+}
+
+async function deriveDiscordUserRef(input: {
+  discordUserId: string;
+  secret: string;
+}): Promise<string | null> {
+  const discordUserId = input.discordUserId.trim();
+  const secret = input.secret.trim();
+  if (!discordUserId || !secret) {
+    return null;
+  }
+
+  const key = await crypto.subtle.importKey(
+    'raw',
+    textEncoder.encode(secret),
+    {
+      name: 'HMAC',
+      hash: 'SHA-256',
+    },
+    false,
+    ['sign'],
+  );
+  const signature = await crypto.subtle.sign(
+    'HMAC',
+    key,
+    textEncoder.encode(`${DISCORD_USER_REF_PAYLOAD_PREFIX}\n${discordUserId}`),
+  );
+
+  return `${DISCORD_USER_REF_PREFIX}${encodeBase64Url(new Uint8Array(signature))}`;
+}
+
+async function reserveDiscordEntitlement(
+  db: D1Database,
+  input: {
+    installationId: string;
+    devicePublicKey: string;
+    hardwareHash: string;
+    hardwareHashSaltVersion: number;
+    appVersion: string;
+    discordUserRef: string;
+    now: Date;
+    nowIso: string;
+  },
+): Promise<DiscordReservationResult> {
+  let identityInserted = false;
+  try {
+    await upsertDiscordInstallation(db, input);
+
+    identityInserted = await insertDiscordIdentityReservation(db, input);
+    if (!identityInserted) {
+      return { ok: false, subcode: 'discord_lifetime_used' };
+    }
+
+    const reserved = await insertOrUpdateIssuingDiscordEntitlement(db, input);
+    if (reserved) {
+      return { ok: true };
+    }
+
+    const duplicateHardware = await hasDeliveredHardwareDuplicate(db, input);
+    if (duplicateHardware) {
+      await releaseDiscordReservation(db, input);
+      return { ok: false, subcode: 'hardware_duplicate' };
+    }
+
+    const cap = await getDiscordDailyIssuanceCapState(db, input.now);
+    if (cap.reached) {
+      await releaseDiscordReservation(db, input);
+      return {
+        ok: false,
+        subcode: 'global_cap_reached',
+        retryAfterMs: cap.retryAfterMs,
+      };
+    }
+
+    await releaseDiscordReservation(db, input);
+    return { ok: false, subcode: 'entitlement_reservation_failed' };
+  } catch {
+    if (identityInserted) {
+      await releaseDiscordReservation(db, input);
+    }
+    return { ok: false, subcode: 'entitlement_reservation_failed' };
+  }
+}
+
+async function upsertDiscordInstallation(
+  db: D1Database,
+  input: {
+    installationId: string;
+    devicePublicKey: string;
+    hardwareHash: string;
+    hardwareHashSaltVersion: number;
+    appVersion: string;
+    nowIso: string;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO installations (
+          installation_id,
+          device_public_key,
+          hardware_hash,
+          hardware_hash_salt_version,
+          app_version,
+          challenge,
+          challenge_expires_at,
+          challenge_salt_version,
+          created_at,
+          last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+        ON CONFLICT(installation_id) DO UPDATE SET
+          device_public_key = excluded.device_public_key,
+          hardware_hash = excluded.hardware_hash,
+          hardware_hash_salt_version = excluded.hardware_hash_salt_version,
+          app_version = excluded.app_version,
+          challenge = NULL,
+          challenge_expires_at = NULL,
+          challenge_salt_version = NULL,
+          last_seen_at = excluded.last_seen_at`,
+    )
+    .bind(
+      input.installationId,
+      input.devicePublicKey,
+      input.hardwareHash,
+      input.hardwareHashSaltVersion,
+      input.appVersion,
+      input.nowIso,
+      input.nowIso,
+    )
+    .run();
+}
+
+async function insertDiscordIdentityReservation(
+  db: D1Database,
+  input: {
+    installationId: string;
+    discordUserRef: string;
+    nowIso: string;
+  },
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `INSERT INTO discord_identities (
+          discord_user_ref,
+          entitlement_installation_id,
+          status,
+          ref_secret_version,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, 'issuing', ?, ?, ?)
+        ON CONFLICT(discord_user_ref) DO NOTHING`,
+    )
+    .bind(
+      input.discordUserRef,
+      input.installationId,
+      DISCORD_USER_REF_VERSION,
+      input.nowIso,
+      input.nowIso,
+    )
+    .run();
+
+  return Number(result.meta.changes ?? 0) === 1;
+}
+
+async function insertOrUpdateIssuingDiscordEntitlement(
+  db: D1Database,
+  input: {
+    installationId: string;
+    hardwareHash: string;
+    hardwareHashSaltVersion: number;
+    discordUserRef: string;
+    now: Date;
+    nowIso: string;
+  },
+): Promise<boolean> {
+  const controls = await getBrokerAbuseControlsConfig(db);
+  const maxCount = controls.newActiveEntitlementsPerDay.maxCount;
+  const capWindow = getDailyCapWindow(
+    input.now,
+    controls.newActiveEntitlementsPerDay.windowDays,
+  );
+  const capPredicate =
+    maxCount === null
+      ? '1 = 1'
+      : `(
+          SELECT COUNT(*)
+            FROM openrouter_entitlements capped
+           WHERE (
+             capped.discord_issue_status = 'issuing'
+             AND capped.discord_issue_reserved_at >= ?
+             AND capped.discord_issue_reserved_at < ?
+           )
+           OR (
+             capped.status = 'active'
+             AND COALESCE(capped.discord_issue_delivered_at, capped.issued_at) IS NOT NULL
+             AND COALESCE(capped.discord_issue_delivered_at, capped.issued_at) >= ?
+             AND COALESCE(capped.discord_issue_delivered_at, capped.issued_at) < ?
+           )
+        ) < ?`;
+  const result = await db
+    .prepare(
+      `INSERT INTO openrouter_entitlements (
+          installation_id,
+          status,
+          budget_usd,
+          managed_credential_ref,
+          issued_at,
+          expires_at,
+          release_session_ref,
+          release_token_hash,
+          release_token_expires_at,
+          verified_hardware_hash,
+          verified_hardware_hash_salt_version,
+          discord_user_ref,
+          discord_issue_status,
+          discord_issue_reserved_at,
+          discord_issue_delivered_at
+        )
+        SELECT ?, 'pending_release', ?, NULL, NULL, NULL, NULL, NULL, NULL,
+               ?, ?, ?, 'issuing', ?, NULL
+         WHERE ${deliveredHardwareNotExistsPredicate()}
+           AND ${capPredicate}
+        ON CONFLICT(installation_id) DO UPDATE SET
+          status = 'pending_release',
+          budget_usd = excluded.budget_usd,
+          managed_credential_ref = NULL,
+          issued_at = NULL,
+          expires_at = NULL,
+          release_session_ref = NULL,
+          release_token_hash = NULL,
+          release_token_expires_at = NULL,
+          verified_hardware_hash = excluded.verified_hardware_hash,
+          verified_hardware_hash_salt_version = excluded.verified_hardware_hash_salt_version,
+          discord_user_ref = excluded.discord_user_ref,
+          discord_issue_status = excluded.discord_issue_status,
+          discord_issue_reserved_at = excluded.discord_issue_reserved_at,
+          discord_issue_delivered_at = NULL
+        WHERE openrouter_entitlements.status <> 'active'`,
+    )
+    .bind(
+      input.installationId,
+      MANAGED_TRIAL_BUDGET_POLICY.hardLimit,
+      input.hardwareHash,
+      input.hardwareHashSaltVersion,
+      input.discordUserRef,
+      input.nowIso,
+      input.installationId,
+      input.hardwareHash,
+      input.installationId,
+      input.hardwareHash,
+      ...(maxCount === null
+        ? []
+        : [
+            capWindow.startIso,
+            capWindow.endIso,
+            capWindow.startIso,
+            capWindow.endIso,
+            maxCount,
+          ]),
+    )
+    .run();
+
+  return Number(result.meta.changes ?? 0) === 1;
+}
+
+function deliveredHardwareNotExistsPredicate(): string {
+  return `NOT EXISTS (
+            SELECT 1
+              FROM openrouter_entitlements delivered
+             WHERE delivered.installation_id <> ?
+               AND delivered.status = 'active'
+               AND delivered.verified_hardware_hash = ?
+          )
+          AND NOT EXISTS (
+            SELECT 1
+              FROM installations legacy
+              JOIN openrouter_entitlements legacy_entitlement
+                ON legacy_entitlement.installation_id = legacy.installation_id
+             WHERE legacy.installation_id <> ?
+               AND legacy.hardware_hash = ?
+               AND legacy_entitlement.status = 'active'
+          )`;
+}
+
+async function hasDeliveredHardwareDuplicate(
+  db: D1Database,
+  input: {
+    installationId: string;
+    hardwareHash: string;
+  },
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT EXISTS(
+          SELECT 1
+            FROM openrouter_entitlements delivered
+           WHERE delivered.installation_id <> ?
+             AND delivered.status = 'active'
+             AND delivered.verified_hardware_hash = ?
+        )
+        OR EXISTS(
+          SELECT 1
+            FROM installations legacy
+            JOIN openrouter_entitlements legacy_entitlement
+              ON legacy_entitlement.installation_id = legacy.installation_id
+           WHERE legacy.installation_id <> ?
+             AND legacy.hardware_hash = ?
+             AND legacy_entitlement.status = 'active'
+        ) AS duplicate_found`,
+    )
+    .bind(
+      input.installationId,
+      input.hardwareHash,
+      input.installationId,
+      input.hardwareHash,
+    )
+    .first<{ duplicate_found: number }>();
+
+  return Number(row?.duplicate_found ?? 0) === 1;
+}
+
+async function getDiscordDailyIssuanceCapState(
+  db: D1Database,
+  now: Date,
+): Promise<{ reached: boolean; retryAfterMs: number | null }> {
+  const controls = await getBrokerAbuseControlsConfig(db);
+  const maxCount = controls.newActiveEntitlementsPerDay.maxCount;
+  if (maxCount === null) {
+    return { reached: false, retryAfterMs: null };
+  }
+
+  const capWindow = getDailyCapWindow(
+    now,
+    controls.newActiveEntitlementsPerDay.windowDays,
+  );
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS count
+         FROM openrouter_entitlements capped
+        WHERE (
+          capped.discord_issue_status = 'issuing'
+          AND capped.discord_issue_reserved_at >= ?
+          AND capped.discord_issue_reserved_at < ?
+        )
+        OR (
+          capped.status = 'active'
+          AND COALESCE(capped.discord_issue_delivered_at, capped.issued_at) IS NOT NULL
+          AND COALESCE(capped.discord_issue_delivered_at, capped.issued_at) >= ?
+          AND COALESCE(capped.discord_issue_delivered_at, capped.issued_at) < ?
+        )`,
+    )
+    .bind(
+      capWindow.startIso,
+      capWindow.endIso,
+      capWindow.startIso,
+      capWindow.endIso,
+    )
+    .first<{ count: number }>();
+  const count = Number(row?.count ?? 0);
+  return {
+    reached: count >= maxCount,
+    retryAfterMs: Math.max(capWindow.end.getTime() - now.getTime(), 0),
+  };
+}
+
+function getDailyCapWindow(
+  now: Date,
+  windowDays: number,
+): { startIso: string; endIso: string; end: Date } {
+  const start = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+  );
+  start.setUTCDate(start.getUTCDate() - (windowDays - 1));
+  const end = new Date(start.getTime());
+  end.setUTCDate(end.getUTCDate() + windowDays);
+  return {
+    startIso: start.toISOString(),
+    endIso: end.toISOString(),
+    end,
+  };
+}
+
+async function releaseDiscordReservation(
+  db: D1Database,
+  input: {
+    installationId: string;
+    discordUserRef: string;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM openrouter_entitlements
+        WHERE installation_id = ?
+          AND discord_user_ref = ?
+          AND status = 'pending_release'
+          AND discord_issue_status = 'issuing'
+          AND managed_credential_ref IS NULL`,
+    )
+    .bind(input.installationId, input.discordUserRef)
+    .run();
+  await db
+    .prepare(
+      `DELETE FROM discord_identities
+        WHERE discord_user_ref = ?
+          AND entitlement_installation_id = ?
+          AND status = 'issuing'`,
+    )
+    .bind(input.discordUserRef, input.installationId)
+    .run();
+}
+
+async function activateDiscordReservation(
+  db: D1Database,
+  input: {
+    stateHash: string;
+    installationId: string;
+    discordUserRef: string;
+    managedCredentialRef: string;
+    issuedAt: string;
+    expiresAt: string;
+    deliveredAt: string;
+  },
+): Promise<boolean> {
+  const entitlementResult = await db
+    .prepare(
+      `UPDATE openrouter_entitlements
+          SET status = 'active',
+              managed_credential_ref = ?,
+              issued_at = ?,
+              expires_at = ?,
+              release_session_ref = NULL,
+              release_token_hash = NULL,
+              release_token_expires_at = NULL,
+              discord_issue_status = 'active',
+              discord_issue_delivered_at = ?
+        WHERE installation_id = ?
+          AND discord_user_ref = ?
+          AND status = 'pending_release'
+          AND discord_issue_status = 'issuing'
+          AND managed_credential_ref IS NULL`,
+    )
+    .bind(
+      input.managedCredentialRef,
+      input.issuedAt,
+      input.expiresAt,
+      input.deliveredAt,
+      input.installationId,
+      input.discordUserRef,
+    )
+    .run();
+  if (Number(entitlementResult.meta.changes ?? 0) !== 1) {
+    return false;
+  }
+
+  const identityResult = await db
+    .prepare(
+      `UPDATE discord_identities
+          SET status = 'active',
+              updated_at = ?
+        WHERE discord_user_ref = ?
+          AND entitlement_installation_id = ?
+          AND status = 'issuing'`,
+    )
+    .bind(input.deliveredAt, input.discordUserRef, input.installationId)
+    .run();
+  if (Number(identityResult.meta.changes ?? 0) !== 1) {
+    return false;
+  }
+
+  const sessionResult = await db
+    .prepare(
+      `UPDATE discord_oauth_sessions
+          SET status = 'consumed',
+              pkce_code_verifier = NULL,
+              consumed_at = ?
+        WHERE state_hash = ?
+          AND status = 'processing'`,
+    )
+    .bind(input.deliveredAt, input.stateHash)
+    .run();
+
+  return Number(sessionResult.meta.changes ?? 0) === 1;
+}
+
+async function getEntitlement(
+  db: D1Database,
+  installationId: string,
+): Promise<OpenRouterEntitlementRecord | null> {
+  return db
+    .prepare(
+      `SELECT installation_id, status, budget_usd, managed_credential_ref, issued_at,
+              expires_at, release_session_ref, release_token_hash, release_token_expires_at,
+              verified_hardware_hash, verified_hardware_hash_salt_version,
+              discord_user_ref, discord_issue_status, discord_issue_reserved_at,
+              discord_issue_delivered_at
+         FROM openrouter_entitlements
+        WHERE installation_id = ?`,
+    )
+    .bind(installationId)
+    .first<OpenRouterEntitlementRecord>();
+}
+
+async function discordIssueSuccessResponse(
+  c: Context<BrokerEnv>,
+  input: {
+    entitlement: OpenRouterEntitlementRecord;
+    rawKey: string;
+    model: string;
+    installationId: string;
+  },
+): Promise<Response> {
+  if (!input.entitlement.managed_credential_ref || !input.entitlement.expires_at) {
+    throw new Error('active Discord entitlement missing managed release metadata');
+  }
+
+  const managedUserHmacSecret = nonEmptyString(
+    c.env.OPENROUTER_MANAGED_USER_HMAC_SECRET,
+  );
+  let openRouterUserId: string | null = null;
+  if (managedUserHmacSecret) {
+    try {
+      openRouterUserId = await deriveManagedOpenRouterUserId({
+        installationId: input.installationId,
+        secret: managedUserHmacSecret,
+      });
+    } catch {
+      openRouterUserId = null;
+    }
+  }
+
+  return c.json({
+    openrouter_api_key: input.rawKey,
+    ...(openRouterUserId ? { openrouter_user_id: openRouterUserId } : {}),
+    managed_credential_ref: input.entitlement.managed_credential_ref,
+    managed_state: {
+      lifecycle: 'active',
+      managed_availability: true,
+    },
+    expires_at: input.entitlement.expires_at,
+    budget_usd: input.entitlement.budget_usd,
+    model: input.model,
+  });
+}
+
+function discordReservationErrorResponse(
+  c: Context<BrokerEnv>,
+  reservation: Exclude<DiscordReservationResult, { ok: true }>,
+): Response {
+  switch (reservation.subcode) {
+    case 'discord_lifetime_used':
+      return publicErrorResponse(c, 409, {
+        code: 'trial_not_eligible',
+        class: 'terminal',
+        subcode: reservation.subcode,
+        message: 'Discord account has already used a managed trial',
+        entitlement: null,
+      });
+    case 'hardware_duplicate':
+      return publicErrorResponse(c, 409, {
+        code: 'trial_not_eligible',
+        class: 'terminal',
+        subcode: reservation.subcode,
+        message: 'This device has already used a managed trial',
+        entitlement: null,
+      });
+    case 'global_cap_reached':
+      return publicErrorResponse(c, 503, {
+        code: 'issuance_suspended',
+        class: 'retryable',
+        subcode: reservation.subcode,
+        retryAfterMs: reservation.retryAfterMs ?? null,
+        message: 'Daily managed issuance cap reached',
+        entitlement: null,
+      });
+    case 'entitlement_reservation_failed':
+      return publicErrorResponse(c, 500, {
+        code: 'internal_error',
+        class: 'retryable',
+        subcode: reservation.subcode,
+        message: 'Managed entitlement reservation failed',
+        entitlement: null,
+      });
+  }
+}
+
+function addMonthsUtc(value: Date, months: number): Date {
+  const next = new Date(value.getTime());
+  next.setUTCMonth(next.getUTCMonth() + months);
+  return next;
 }
 
 function buildCanonicalDiscordIssuePayload(input: {
