@@ -43,6 +43,7 @@ from puripuly_heart.core.storage.secrets import (
 from puripuly_heart.core.stt.backend import STTBackend
 from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.domain.models import Translation
+from puripuly_heart.providers.llm.deepseek import DeepSeekLLMProvider
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
@@ -508,6 +509,17 @@ def create_llm_provider(
                 model=settings.qwen.llm_model.value,
                 runtime_logging=runtime_logging,
             )
+    elif settings.provider.llm == LLMProviderName.DEEPSEEK:
+        api_key = require_secret(
+            secrets,
+            key="deepseek_api_key",
+            env_var="DEEPSEEK_API_KEY",
+        )
+        base = DeepSeekLLMProvider(
+            api_key=api_key,
+            model=settings.deepseek.llm_model.value,
+            runtime_logging=runtime_logging,
+        )
     else:
         raise ValueError(f"Unsupported LLM provider: {settings.provider.llm}")
 
