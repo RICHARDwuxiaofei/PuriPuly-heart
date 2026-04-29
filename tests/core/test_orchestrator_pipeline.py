@@ -60,7 +60,7 @@ async def test_client_hub_uses_local_context_when_peer_translation_is_off():
     await hub.submit_text("world")
     await asyncio.gather(*hub._translation_tasks.values(), return_exceptions=True)
 
-    assert inner.calls[0]["context"] == '- [12s ago] "hello there"'
+    assert inner.calls[0]["context"] == '- [self, 12s ago] "hello there"'
 
 
 async def test_client_hub_uses_integrated_context_when_enabled_and_safe():
@@ -96,7 +96,7 @@ async def test_client_hub_uses_integrated_context_when_enabled_and_safe():
     await asyncio.gather(*hub.self_runtime.translation_tasks.values(), return_exceptions=True)
 
     assert inner.calls[0]["context"] == (
-        '- [12s ago] "I am ready"\n' '- [others, 7s ago] "hello from peer"'
+        '- [self, 12s ago] "I am ready"\n- [peer, 7s ago] "hello from peer"'
     )
 
 

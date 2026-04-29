@@ -249,7 +249,9 @@ async def test_httpx_deepseek_client_builds_non_thinking_request(monkeypatch) ->
     assert body["messages"][0] == {"role": "system", "content": "SYSTEM"}
     assert body["messages"][1]["role"] == "user"
     assert "<context>" in body["messages"][1]["content"]
-    assert "Input: hello" in body["messages"][1]["content"]
+    assert "</context>" in body["messages"][1]["content"]
+    assert "<input>\nhello\n</input>" in body["messages"][1]["content"]
+    assert "Input: hello" not in body["messages"][1]["content"]
 
 
 @pytest.mark.asyncio

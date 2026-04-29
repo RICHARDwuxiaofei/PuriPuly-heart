@@ -167,7 +167,9 @@ async def test_qwen_client_translates_with_options(monkeypatch):
     assert "Translate naturally" in messages[0]["content"]
     assert messages[1]["role"] == "user"
     assert "<context>" in messages[1]["content"]
-    assert "Input: hello" in messages[1]["content"]
+    assert "</context>" in messages[1]["content"]
+    assert "<input>\nhello\n</input>" in messages[1]["content"]
+    assert "Input: hello" not in messages[1]["content"]
 
 
 @pytest.mark.asyncio
@@ -289,6 +291,9 @@ async def test_qwen_client_uses_compatible_mode_for_qwen35(monkeypatch):
     assert body["messages"][0]["role"] == "system"
     assert body["messages"][1]["role"] == "user"
     assert "<context>" in body["messages"][1]["content"]
+    assert "</context>" in body["messages"][1]["content"]
+    assert "<input>\nhello\n</input>" in body["messages"][1]["content"]
+    assert "Input: hello" not in body["messages"][1]["content"]
 
 
 @pytest.mark.asyncio

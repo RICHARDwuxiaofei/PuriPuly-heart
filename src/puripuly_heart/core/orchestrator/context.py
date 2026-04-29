@@ -14,8 +14,8 @@ class ContextResolver:
     clock: Clock = SystemClock()
     local_time_window_s: float = 30.0
     local_max_entries: int = 3
-    integrated_time_window_s: float = 60.0
-    integrated_max_entries: int = 6
+    integrated_time_window_s: float = 40.0
+    integrated_max_entries: int = 4
 
     def get_local_entries(
         self,
@@ -80,22 +80,16 @@ class ContextResolver:
     def _format_entries(self, entries: list[ContextEntry]) -> str:
         if not entries:
             return ""
-        return "\n".join(
-            f'- [{self._relative_age(entry.timestamp)}s ago] "{entry.text}"' for entry in entries
-        )
+        return "\n".join(self._format_entry(entry) for entry in entries)
+
+    def _format_entry(self, entry: ContextEntry) -> str:
+        label = "peer" if entry.channel == "peer" else "self"
+        return f'- [{label}, {self._relative_age(entry.timestamp)}s ago] "{entry.text}"'
 
     def format_integrated(self, entries: list[tuple[ChannelRuntime, ContextEntry]]) -> str:
         if not entries:
             return ""
-        lines: list[str] = []
-        for runtime, entry in entries:
-            age_text = f"{self._relative_age(entry.timestamp)}s ago"
-            if runtime.channel == "peer":
-                prefix = f"others, {age_text}"
-            else:
-                prefix = age_text
-            lines.append(f'- [{prefix}] "{entry.text}"')
-        return "\n".join(lines)
+        return "\n".join(self._format_entry(entry) for _, entry in entries)
 
     def _get_integrated_entries(
         self,

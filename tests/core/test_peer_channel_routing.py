@@ -211,7 +211,7 @@ def test_integrated_context_includes_opposite_direction_peer_entries() -> None:
     hub.peer_source_language = "en"
     hub.peer_target_language = "ko"
     hub._remember_context_entry("self previous", timestamp=100.0, runtime=hub.self_runtime)
-    hub._remember_context_entry("others previous", timestamp=105.0, runtime=hub.peer_runtime)
+    hub._remember_context_entry("peer previous", timestamp=105.0, runtime=hub.peer_runtime)
 
     _, self_context, _, self_mode = hub._prepare_llm_request_with_mode(
         "self current",
@@ -224,8 +224,8 @@ def test_integrated_context_includes_opposite_direction_peer_entries() -> None:
 
     assert self_mode == "integrated"
     assert peer_mode == "integrated"
-    assert self_context == ('- [12s ago] "self previous"\n- [others, 7s ago] "others previous"')
-    assert peer_context == ('- [12s ago] "self previous"\n- [others, 7s ago] "others previous"')
+    assert self_context == ('- [self, 12s ago] "self previous"\n- [peer, 7s ago] "peer previous"')
+    assert peer_context == ('- [self, 12s ago] "self previous"\n- [peer, 7s ago] "peer previous"')
 
 
 @pytest.mark.asyncio

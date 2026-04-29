@@ -17,6 +17,7 @@ from puripuly_heart.config.audio_host_api import (
     WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
     WINDOWS_WASAPI_HOST_API,
 )
+from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
@@ -6717,12 +6718,18 @@ def test_load_or_init_settings_creates_default_file(
     monkeypatch.setattr(controller_module, "save_settings", fake_save)
 
     loaded = controller._load_or_init_settings(path)
+    shared_prompt = load_prompt_for_provider("gemini")
+    expected_prompts = {provider.value: shared_prompt for provider in LLMProviderName}
 
     assert isinstance(loaded, AppSettings)
     assert loaded.ui.overlay_enabled is False
+    assert loaded.system_prompt == shared_prompt
+    assert loaded.system_prompts == expected_prompts
     assert path.parent.exists() is True
     assert saves == [(path, loaded)]
     assert saves[0][1].ui.overlay_enabled is False
+    assert saves[0][1].system_prompt == shared_prompt
+    assert saves[0][1].system_prompts == expected_prompts
 
 
 @pytest.mark.asyncio

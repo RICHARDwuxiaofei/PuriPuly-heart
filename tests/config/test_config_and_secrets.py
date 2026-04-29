@@ -15,7 +15,9 @@ from puripuly_heart.config.llm_profiles import (
     openrouter_alias_for_fields,
     resolve_openrouter_fallback_model,
 )
+from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
+    LEGACY_QWEN_DEFAULT_PROMPT,
     SETTINGS_SCHEMA_VERSION,
     AppSettings,
     AudioSettings,
@@ -52,6 +54,9 @@ def test_settings_roundtrip(tmp_path):
     expected = AppSettings()
     expected.languages.recent_source_languages = ["en", "zh-CN", "ja", "ko", "es", "fr"]
     expected.languages.recent_target_languages = ["en", "zh-CN", "ja", "ko", "es", "fr"]
+    shared_prompt = load_prompt_for_provider("gemini")
+    expected.system_prompt = shared_prompt
+    expected.system_prompts = {provider.value: shared_prompt for provider in LLMProviderName}
 
     assert loaded == expected
 
@@ -163,7 +168,7 @@ def test_migrate_v17_strips_directsound_host_api_before_migration_and_preserves_
 
 
 def test_migrate_v18_preserves_directsound_when_removing_legacy_osc_rate_limits() -> None:
-    assert SETTINGS_SCHEMA_VERSION == 18
+    assert SETTINGS_SCHEMA_VERSION == 19
 
     raw = to_dict(AppSettings())
     raw["settings_version"] = 17
@@ -207,7 +212,7 @@ def test_load_settings_persists_v17_directsound_migration(tmp_path) -> None:
 
 
 def test_load_settings_persists_v18_osc_rate_limit_key_removal(tmp_path) -> None:
-    assert SETTINGS_SCHEMA_VERSION == 18
+    assert SETTINGS_SCHEMA_VERSION == 19
 
     path = tmp_path / "settings.json"
     raw = to_dict(AppSettings())
@@ -1481,6 +1486,69 @@ def test_from_dict_backfills_legacy_system_prompt_to_selected_provider():
     loaded = from_dict(data)
     assert loaded.system_prompts["gemini"] == "legacy prompt"
     assert loaded.system_prompt == "legacy prompt"
+
+
+def test_load_settings_schema_migration_resets_all_prompt_values(tmp_path) -> None:
+    pre_unified_prompt_schema_version = 18
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["settings_version"] = pre_unified_prompt_schema_version
+    legacy["system_prompt"] = "old custom prompt"
+    legacy["system_prompts"] = {
+        "gemini": "old gemini prompt",
+        "openrouter": "old openrouter prompt",
+        "qwen": "old qwen prompt",
+        "deepseek": "old deepseek prompt",
+    }
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    shared_prompt = load_prompt_for_provider("gemini")
+    expected_prompts = {provider.value: shared_prompt for provider in LLMProviderName}
+
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert loaded.system_prompt == shared_prompt
+    assert persisted["system_prompt"] == shared_prompt
+    assert loaded.system_prompts == expected_prompts
+    assert persisted["system_prompts"] == expected_prompts
+
+
+def test_from_dict_initializes_empty_prompt_fields_to_shared_default() -> None:
+    data = to_dict(AppSettings())
+    data["system_prompt"] = "  "
+    data["system_prompts"] = {}
+
+    loaded = from_dict(data)
+    shared_prompt = load_prompt_for_provider("gemini")
+    expected_prompts = {provider.value: shared_prompt for provider in LLMProviderName}
+
+    assert loaded.system_prompt == shared_prompt
+    assert loaded.system_prompts == expected_prompts
+
+
+def test_prompt_customized_after_migration_survives_save_load(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    shared_prompt = load_prompt_for_provider("gemini")
+    custom_qwen_prompt = LEGACY_QWEN_DEFAULT_PROMPT
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.QWEN
+    settings.system_prompt = custom_qwen_prompt
+    settings.system_prompts = {provider.value: shared_prompt for provider in LLMProviderName}
+    settings.system_prompts["qwen"] = custom_qwen_prompt
+
+    save_settings(path, settings)
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert loaded.system_prompt == custom_qwen_prompt
+    assert loaded.system_prompts["qwen"] == custom_qwen_prompt
+    assert persisted["system_prompt"] == custom_qwen_prompt
+    assert persisted["system_prompts"]["qwen"] == custom_qwen_prompt
 
 
 def test_load_settings_migrates_legacy_soniox_model_and_persists(tmp_path):

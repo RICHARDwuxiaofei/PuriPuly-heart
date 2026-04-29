@@ -704,20 +704,20 @@ def test_prepare_llm_request_routes_context_logs_by_runtime_visibility() -> None
 
         basic_messages = _runtime_log_messages(basic_stream)
         detailed_messages = _runtime_log_messages(detailed_stream)
+        expected_context_chars = len('- [self, 1s ago] "안녕"')
+        expected_context_apply_log = (
+            "[Hub] Context apply: channel=self mode=local "
+            "request_chars=2 entries=1 self_entries=1 peer_entries=0 "
+            f"context_chars={expected_context_chars}"
+        )
 
         assert "[Hub] Context mode: channel=self mode=local" in basic_messages
-        assert (
-            "[Hub] Context apply: channel=self mode=local "
-            "request_chars=2 entries=1 self_entries=1 peer_entries=0 context_chars=15"
-        ) in basic_messages
+        assert expected_context_apply_log in basic_messages
         assert not any("입력" in message for message in basic_messages)
         assert not any("안녕" in message for message in basic_messages)
 
         assert "[Hub] Context mode: channel=self mode=local" in detailed_messages
-        assert (
-            "[Hub] Context apply: channel=self mode=local "
-            "request_chars=2 entries=1 self_entries=1 peer_entries=0 context_chars=15"
-        ) in detailed_messages
+        assert expected_context_apply_log in detailed_messages
         assert not any("입력" in message for message in detailed_messages)
         assert not any("안녕" in message for message in detailed_messages)
     finally:

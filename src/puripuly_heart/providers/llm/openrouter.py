@@ -15,6 +15,7 @@ from puripuly_heart.config.settings import OpenRouterRoutingMode
 from puripuly_heart.core.openrouter_credentials import normalize_managed_openrouter_user_identifier
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.models import Translation
+from puripuly_heart.providers.llm.messages import build_translation_user_message
 
 logger = logging.getLogger(__name__)
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
@@ -88,9 +89,7 @@ def _build_system_prompt(
 
 
 def _build_user_message(*, text: str, context: str) -> str:
-    if context:
-        return f"<context>\n{context}\n</context>\nInput: {text}"
-    return text
+    return build_translation_user_message(text=text, context=context)
 
 
 def _extract_message_content(content: object) -> str:

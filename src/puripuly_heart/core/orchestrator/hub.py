@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 
 logger = logging.getLogger(__name__)
 
+from puripuly_heart.config.prompts import render_translation_prompt_template, warm_prompt_cache
 from puripuly_heart.core.clock import Clock, SystemClock
 from puripuly_heart.core.language import get_llm_language_name
 from puripuly_heart.core.llm.provider import LLMProvider
@@ -126,8 +127,8 @@ class ClientHub:
     # Context memory settings
     context_time_window_s: float = 30.0  # Only include entries within this time window
     context_max_entries: int = 3  # Maximum number of context entries to include
-    integrated_context_time_window_s: float = 60.0
-    integrated_context_max_entries: int = 6
+    integrated_context_time_window_s: float = 40.0
+    integrated_context_max_entries: int = 4
     low_latency_mode: bool = False
     low_latency_merge_gap_ms: int = 600
     low_latency_spec_retry_max: int = 1
@@ -202,6 +203,7 @@ class ClientHub:
             integrated_time_window_s=self.integrated_context_time_window_s,
             integrated_max_entries=self.integrated_context_max_entries,
         )
+        warm_prompt_cache()
         self._sync_self_runtime_aliases()
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -2420,14 +2422,11 @@ class ClientHub:
 
     def _format_system_prompt(self, runtime: ChannelRuntime | None = None) -> str:
         runtime = runtime or self.self_runtime
-        formatted_prompt = self.system_prompt
-        formatted_prompt = formatted_prompt.replace(
-            "${sourceName}", get_llm_language_name(self._source_language_for(runtime))
+        return render_translation_prompt_template(
+            self.system_prompt,
+            source_name=get_llm_language_name(self._source_language_for(runtime)),
+            target_name=get_llm_language_name(self._target_language_for(runtime)),
         )
-        formatted_prompt = formatted_prompt.replace(
-            "${targetName}", get_llm_language_name(self._target_language_for(runtime))
-        )
-        return formatted_prompt
 
     def _other_runtime(self, runtime: ChannelRuntime) -> ChannelRuntime:
         return self.peer_runtime if runtime is self.self_runtime else self.self_runtime

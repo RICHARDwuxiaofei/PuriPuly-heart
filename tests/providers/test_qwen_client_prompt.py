@@ -43,7 +43,9 @@ async def test_qwen_client_builds_prompt_with_context(monkeypatch) -> None:
     assert "PROMPT" in messages[0]["content"]
     assert messages[1]["role"] == "user"
     assert "<context>" in messages[1]["content"]
-    assert "Input: hello" in messages[1]["content"]
+    assert "</context>" in messages[1]["content"]
+    assert "<input>\nhello\n</input>" in messages[1]["content"]
+    assert "Input: hello" not in messages[1]["content"]
 
 
 @pytest.mark.asyncio
@@ -64,5 +66,5 @@ async def test_qwen_client_builds_prompt_without_context(monkeypatch) -> None:
     assert DummyGeneration.last_call is not None
     assert DummyGeneration.last_call.get("messages") == [
         {"role": "system", "content": "PROMPT"},
-        {"role": "user", "content": "hello"},
+        {"role": "user", "content": "<input>\nhello\n</input>"},
     ]

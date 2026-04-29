@@ -8,6 +8,7 @@ from uuid import UUID
 
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.models import Translation
+from puripuly_heart.providers.llm.messages import build_translation_user_message
 
 logger = logging.getLogger(__name__)
 
@@ -215,11 +216,7 @@ class GoogleGenaiGeminiClient:
             context=context,
         )
 
-        if context:
-            user_message = f"<context>\n{context}\n</context>\nInput: {text}"
-        else:
-            user_message = text
-        return formatted_system_prompt, user_message
+        return formatted_system_prompt, build_translation_user_message(text=text, context=context)
 
     async def translate(
         self,

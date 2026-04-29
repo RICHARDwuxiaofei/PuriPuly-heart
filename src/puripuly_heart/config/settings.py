@@ -31,7 +31,7 @@ from puripuly_heart.config.llm_profiles import (
 )
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 18
+SETTINGS_SCHEMA_VERSION = 19
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
@@ -63,6 +63,9 @@ class LLMProviderName(str, Enum):
     OPENROUTER = "openrouter"
     QWEN = "qwen"
     DEEPSEEK = "deepseek"
+
+
+_PROMPT_PROVIDER_KEYS = tuple(provider.value for provider in LLMProviderName)
 
 
 class SecretsBackend(str, Enum):
@@ -1068,6 +1071,26 @@ def _parse_system_prompts(value: object) -> dict[str, str]:
     return out
 
 
+def _shared_default_prompt() -> str:
+    from puripuly_heart.config.prompts import load_prompt_for_provider
+
+    return load_prompt_for_provider(LLMProviderName.GEMINI.value)
+
+
+def _shared_default_system_prompts(prompt: str) -> dict[str, str]:
+    return {provider_key: prompt for provider_key in _PROMPT_PROVIDER_KEYS}
+
+
+def ensure_prompt_defaults(settings: AppSettings) -> AppSettings:
+    system_prompt_empty = not settings.system_prompt.strip()
+    system_prompts_empty = all(not prompt.strip() for prompt in settings.system_prompts.values())
+    if system_prompt_empty and system_prompts_empty:
+        prompt = _shared_default_prompt()
+        settings.system_prompt = prompt
+        settings.system_prompts = _shared_default_system_prompts(prompt)
+    return settings
+
+
 def _parse_custom_terms(value: object) -> dict[str, list[str]]:
     if value is None:
         return {}
@@ -1468,6 +1491,13 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 18
 
+    if version < 19:
+        prompt = _shared_default_prompt()
+        data["system_prompt"] = prompt
+        data["system_prompts"] = _shared_default_system_prompts(prompt)
+        changed = True
+        version = 19
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -1856,6 +1886,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     vad_threshold_raw = stt_data.get("vad_speech_threshold")
     legacy_system_prompt = str(data.get("system_prompt", ""))
     system_prompts = _parse_system_prompts(data.get("system_prompts"))
+    settings_version = _coerce_int(data.get("settings_version"), SETTINGS_SCHEMA_VERSION)
     parsed_custom_terms = _parse_custom_terms(stt_data.get("custom_terms", _default_custom_terms()))
     if "custom_vocabulary_enabled" in stt_data:
         custom_vocabulary_enabled = bool(stt_data.get("custom_vocabulary_enabled"))
@@ -1878,7 +1909,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     )
 
     settings = AppSettings(
-        settings_version=_coerce_int(data.get("settings_version"), SETTINGS_SCHEMA_VERSION),
+        settings_version=settings_version,
         provider=ProviderSettings(
             stt=_parse_stt_provider(str(stt_provider_value)),
             peer_stt=_parse_peer_stt_provider(str(raw_peer_provider)),
@@ -2112,7 +2143,10 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     if legacy_system_prompt and selected_prompt_key not in settings.system_prompts:
         settings.system_prompts[selected_prompt_key] = legacy_system_prompt
 
-    if settings.system_prompts.get("qwen", "").strip() == LEGACY_QWEN_DEFAULT_PROMPT:
+    if (
+        settings_version < 19
+        and settings.system_prompts.get("qwen", "").strip() == LEGACY_QWEN_DEFAULT_PROMPT
+    ):
         from puripuly_heart.config.prompts import load_prompt_for_provider
 
         settings.system_prompts["qwen"] = load_prompt_for_provider("qwen")
@@ -2120,6 +2154,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     selected_prompt = settings.system_prompts.get(selected_prompt_key, "").strip()
     if selected_prompt:
         settings.system_prompt = selected_prompt
+    ensure_prompt_defaults(settings)
     settings.validate()
     return settings
 

@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from puripuly_heart.core.orchestrator.channel_runtime import ChannelRuntime
 from puripuly_heart.core.orchestrator.context import ContextResolver
 from puripuly_heart.core.orchestrator.hub import (
     ClientHub,
@@ -274,7 +275,7 @@ class TestContextPassedToLLM:
         # Verify LLM was called with context
         assert len(fake_llm.calls) == 1
         call = fake_llm.calls[0]
-        assert call["context"] == '- [2s ago] "hello"'
+        assert call["context"] == '- [self, 2s ago] "hello"'
 
     @pytest.mark.asyncio
     async def test_empty_context_when_no_history(self):
@@ -350,7 +351,7 @@ class TestContextFormatting:
         ]
         result = hub._format_context_for_llm(entries)
 
-        assert result == '- [12s ago] "안녕"'
+        assert result == '- [self, 12s ago] "안녕"'
 
     def test_format_context_multiple_entries(self):
         """Multiple entries should all be included."""
@@ -367,8 +368,8 @@ class TestContextFormatting:
         ]
         result = hub._format_context_for_llm(entries)
 
-        assert '- [12s ago] "a"' in result
-        assert '- [11s ago] "b"' in result
+        assert '- [self, 12s ago] "a"' in result
+        assert '- [self, 11s ago] "b"' in result
 
 
 class TestContextInternalPaths:
@@ -389,7 +390,7 @@ class TestContextInternalPaths:
         )
 
         assert mode == "local"
-        assert context == '- [12s ago] "hello there"'
+        assert context == '- [self, 12s ago] "hello there"'
 
     def test_client_hub_uses_local_context_when_peer_translation_is_off(self):
         hub = ClientHub(
@@ -412,7 +413,7 @@ class TestContextInternalPaths:
         )
 
         assert mode == "local"
-        assert context == '- [12s ago] "self only"'
+        assert context == '- [self, 12s ago] "self only"'
 
     def test_context_resolver_formats_integrated_with_channel_prefix_and_relative_age(self):
         self_runtime = ClientHub(
@@ -444,7 +445,7 @@ class TestContextInternalPaths:
         )
 
         assert mode == "integrated"
-        assert context == ('- [12s ago] "I am ready"\n- [others, 7s ago] "hello from peer"')
+        assert context == ('- [self, 12s ago] "I am ready"\n- [peer, 7s ago] "hello from peer"')
 
     def test_context_resolver_always_uses_integrated_when_peer_enabled(self):
         self_runtime = ClientHub(
@@ -476,7 +477,139 @@ class TestContextInternalPaths:
         )
 
         assert mode == "integrated"
-        assert '- [others, 7s ago] "peer line"' in context
+        assert '- [peer, 7s ago] "peer line"' in context
+
+    def test_integrated_context_uses_40_second_window_before_entry_budget(self):
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=100.0),
+            integrated_context_enabled=True,
+            peer_translation_enabled=True,
+        )
+        hub.self_runtime.remember_context(
+            "41 seconds old", timestamp=59.0, source_language="en", target_language="ko"
+        )
+        hub.self_runtime.remember_context(
+            "self recent", timestamp=70.0, source_language="en", target_language="ko"
+        )
+        hub.peer_runtime.remember_context(
+            "peer recent", timestamp=71.0, source_language="en", target_language="ko"
+        )
+        hub.self_runtime.remember_context(
+            "self newest", timestamp=72.0, source_language="en", target_language="ko"
+        )
+
+        context, mode = hub.context_resolver.resolve_for_request(
+            runtime=hub.self_runtime,
+            other_runtime=hub.peer_runtime,
+            requested_mode="integrated",
+            peer_translation_enabled=True,
+            source_language="en",
+            target_language="ko",
+            other_source_language="en",
+            other_target_language="ko",
+        )
+
+        assert mode == "integrated"
+        assert "41 seconds old" not in context
+        assert context == (
+            '- [self, 30s ago] "self recent"\n'
+            '- [peer, 29s ago] "peer recent"\n'
+            '- [self, 28s ago] "self newest"'
+        )
+
+    def test_integrated_context_uses_latest_4_combined_entries_after_timestamp_merge(self):
+        hub = ClientHub(
+            stt=None,
+            llm=None,
+            osc=FakeOscQueue(),
+            clock=FakeClock(initial_time=100.0),
+            integrated_context_enabled=True,
+            peer_translation_enabled=True,
+        )
+        hub.self_runtime.remember_context(
+            "self 1", timestamp=70.0, source_language="en", target_language="ko"
+        )
+        hub.peer_runtime.remember_context(
+            "peer 1", timestamp=71.0, source_language="en", target_language="ko"
+        )
+        hub.self_runtime.remember_context(
+            "self 2", timestamp=72.0, source_language="en", target_language="ko"
+        )
+        hub.peer_runtime.remember_context(
+            "peer 2", timestamp=73.0, source_language="en", target_language="ko"
+        )
+        hub.self_runtime.remember_context(
+            "self 3", timestamp=74.0, source_language="en", target_language="ko"
+        )
+
+        context, mode = hub.context_resolver.resolve_for_request(
+            runtime=hub.self_runtime,
+            other_runtime=hub.peer_runtime,
+            requested_mode="integrated",
+            peer_translation_enabled=True,
+            source_language="en",
+            target_language="ko",
+            other_source_language="en",
+            other_target_language="ko",
+        )
+
+        assert mode == "integrated"
+        assert "self 1" not in context
+        assert context == (
+            '- [peer, 29s ago] "peer 1"\n'
+            '- [self, 28s ago] "self 2"\n'
+            '- [peer, 27s ago] "peer 2"\n'
+            '- [self, 26s ago] "self 3"'
+        )
+
+    def test_context_resolver_default_integrated_context_uses_40_second_window_and_latest_4_entries(
+        self,
+    ):
+        self_runtime = ChannelRuntime(channel="self")
+        peer_runtime = ChannelRuntime(channel="peer")
+        self_runtime.remember_context(
+            "41 seconds old", timestamp=59.0, source_language="en", target_language="ko"
+        )
+        self_runtime.remember_context(
+            "recent 1", timestamp=61.0, source_language="en", target_language="ko"
+        )
+        peer_runtime.remember_context(
+            "recent 2", timestamp=62.0, source_language="en", target_language="ko"
+        )
+        self_runtime.remember_context(
+            "recent 3", timestamp=63.0, source_language="en", target_language="ko"
+        )
+        peer_runtime.remember_context(
+            "recent 4", timestamp=64.0, source_language="en", target_language="ko"
+        )
+        self_runtime.remember_context(
+            "recent 5", timestamp=65.0, source_language="en", target_language="ko"
+        )
+        resolver = ContextResolver(clock=FakeClock(initial_time=100.0))
+
+        context, mode = resolver.resolve_for_request(
+            runtime=self_runtime,
+            other_runtime=peer_runtime,
+            requested_mode="integrated",
+            peer_translation_enabled=True,
+            source_language="en",
+            target_language="ko",
+            other_source_language="en",
+            other_target_language="ko",
+        )
+
+        assert mode == "integrated"
+        assert "41 seconds old" not in context
+        assert "recent 1" not in context
+        assert context == (
+            '- [peer, 38s ago] "recent 2"\n'
+            '- [self, 37s ago] "recent 3"\n'
+            '- [peer, 36s ago] "recent 4"\n'
+            '- [self, 35s ago] "recent 5"'
+        )
 
     def test_prepare_llm_request_formats_prompt_and_context(self):
         clock = FakeClock(initial_time=20.0)
@@ -495,7 +628,7 @@ class TestContextInternalPaths:
 
         assert "${sourceName}" not in prompt
         assert "${targetName}" not in prompt
-        assert context == '- [1s ago] "안녕"'
+        assert context == '- [self, 1s ago] "안녕"'
         assert now == 20.0
 
 
@@ -535,7 +668,7 @@ class TestContextLogging:
             source_language="ko",
             target_language="en",
         )
-        expected_context = '- [1s ago] "secret context"'
+        expected_context = '- [self, 1s ago] "secret context"'
 
         with caplog.at_level(logging.INFO, logger="puripuly_heart.core.orchestrator.hub"):
             hub._prepare_llm_request("secret request")
@@ -565,11 +698,12 @@ class TestContextLogging:
             source_language="ko",
             target_language="en",
         )
-        expected_context = '- [1s ago] "secret peer context"'
+        expected_context = '- [peer, 1s ago] "secret peer context"'
 
         with caplog.at_level(logging.INFO, logger="puripuly_heart.core.orchestrator.hub"):
-            hub._prepare_llm_request("secret request", runtime=hub.peer_runtime)
+            _, context, _ = hub._prepare_llm_request("secret request", runtime=hub.peer_runtime)
 
+        assert context == expected_context
         assert "[Hub] Context mode: channel=peer mode=local" in caplog.messages
         assert not any("secret request" in message for message in caplog.messages)
         assert not any("secret peer context" in message for message in caplog.messages)

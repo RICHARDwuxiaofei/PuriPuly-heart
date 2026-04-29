@@ -33,6 +33,7 @@ from puripuly_heart.config.settings import (
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
+    ensure_prompt_defaults,
     load_settings,
     save_settings,
 )
@@ -2172,7 +2173,7 @@ class GuiController:
     def _load_or_init_settings(self, path: Path) -> AppSettings:
         if path.exists():
             return load_settings(path)
-        settings = AppSettings()
+        settings = ensure_prompt_defaults(AppSettings())
         path.parent.mkdir(parents=True, exist_ok=True)
         save_settings(path, settings)
         return settings
