@@ -97,6 +97,22 @@ class SqliteD1Database {
   prepare(sql: string): SqliteD1PreparedStatement {
     return new SqliteD1PreparedStatement(this.db, sql, [], this.hooks);
   }
+
+  async batch(statements: SqliteD1PreparedStatement[]): Promise<D1Result[]> {
+    const results: D1Result[] = [];
+
+    this.db.exec('BEGIN');
+    try {
+      for (const statement of statements) {
+        results.push(await statement.run());
+      }
+      this.db.exec('COMMIT');
+      return results;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
 }
 
 export interface TestBrokerEnv extends Record<string, unknown> {

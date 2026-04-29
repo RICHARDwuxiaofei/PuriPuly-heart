@@ -1,0 +1,170 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import app from '../src/index';
+import { createDeviceKeyPair } from './test-support/ed25519';
+import { createTestBrokerEnv } from './test-support/sqlite-d1';
+
+const REGISTERED_REDIRECT_URIS = [
+  'http://127.0.0.1:62187/discord/callback',
+  'http://127.0.0.1:62188/discord/callback',
+  'http://127.0.0.1:62189/discord/callback',
+];
+
+describe('Discord OAuth start route', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('starts a pending Discord OAuth session', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-30T06:00:00Z'));
+
+    const env = createTestBrokerEnv();
+    const keyPair = await createDeviceKeyPair();
+    const response = await postDiscordAuthStart({
+      env,
+      installationId: 'install-discord-start',
+      devicePublicKey: keyPair.devicePublicKey,
+      redirectUri: REGISTERED_REDIRECT_URIS[0],
+      appVersion: '1.2.3',
+    });
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as {
+      authorization_url: string;
+      redirect_uri: string;
+      oauth_session_expires_at: string;
+      issue_nonce: string;
+      fingerprint_salt: { version: number; salt: string };
+      fingerprint_salt_version: number;
+    };
+
+    expect(payload.redirect_uri).toBe(REGISTERED_REDIRECT_URIS[0]);
+    expect(payload.oauth_session_expires_at).toBe('2026-04-30T06:05:00.000Z');
+    expect(payload.issue_nonce).toEqual(expect.any(String));
+    expect(payload.fingerprint_salt).toEqual({
+      version: 7,
+      salt: 'shared-server-fingerprint-salt',
+    });
+    expect(payload.fingerprint_salt_version).toBe(7);
+
+    const authorizationUrl = new URL(payload.authorization_url);
+    expect(authorizationUrl.origin).toBe('https://discord.com');
+    expect(authorizationUrl.pathname).toBe('/oauth2/authorize');
+    expect(authorizationUrl.searchParams.get('client_id')).toBe(
+      'test-discord-client-id',
+    );
+    expect(authorizationUrl.searchParams.get('redirect_uri')).toBe(
+      REGISTERED_REDIRECT_URIS[0],
+    );
+    expect(authorizationUrl.searchParams.get('scope')).toBe('identify email');
+    expect(authorizationUrl.searchParams.get('response_type')).toBe('code');
+    expect(authorizationUrl.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(authorizationUrl.searchParams.get('state')).toEqual(expect.any(String));
+
+    const rows = env.__db
+      .prepare('SELECT * FROM discord_oauth_sessions')
+      .all() as Array<{
+        installation_id: string;
+        device_public_key: string;
+        redirect_uri: string;
+        pkce_code_verifier: string;
+        fingerprint_salt_version: number;
+        status: string;
+        created_at: string;
+        expires_at: string;
+      }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      installation_id: 'install-discord-start',
+      device_public_key: keyPair.devicePublicKey,
+      redirect_uri: REGISTERED_REDIRECT_URIS[0],
+      fingerprint_salt_version: 7,
+      status: 'pending',
+      created_at: '2026-04-30T06:00:00.000Z',
+      expires_at: '2026-04-30T06:05:00.000Z',
+    });
+    expect(rows[0]?.pkce_code_verifier).toHaveLength(86);
+  });
+
+  it('rejects a localhost redirect URI', async () => {
+    const env = createTestBrokerEnv();
+    const keyPair = await createDeviceKeyPair();
+
+    const response = await postDiscordAuthStart({
+      env,
+      installationId: 'install-discord-localhost',
+      devicePublicKey: keyPair.devicePublicKey,
+      redirectUri: 'http://localhost:62187/discord/callback',
+      appVersion: '1.2.3',
+    });
+
+    expect(response.status).toBe(400);
+  });
+
+  it.each(REGISTERED_REDIRECT_URIS)(
+    'accepts exact registered redirect URI %s',
+    async (redirectUri) => {
+      const env = createTestBrokerEnv();
+      const keyPair = await createDeviceKeyPair();
+
+      const response = await postDiscordAuthStart({
+        env,
+        installationId: `install-discord-${new URL(redirectUri).port}`,
+        devicePublicKey: keyPair.devicePublicKey,
+        redirectUri,
+        appVersion: '1.2.3',
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        redirect_uri: redirectUri,
+      });
+    },
+  );
+
+  it.each([
+    'http://127.0.0.1:62190/discord/callback',
+    'http://127.0.0.1:62187/discord/callback/',
+    'http://localhost:62187/discord/callback',
+  ])('rejects near-miss redirect URI %s', async (redirectUri) => {
+    const env = createTestBrokerEnv();
+    const keyPair = await createDeviceKeyPair();
+
+    const response = await postDiscordAuthStart({
+      env,
+      installationId: 'install-discord-near-miss',
+      devicePublicKey: keyPair.devicePublicKey,
+      redirectUri,
+      appVersion: '1.2.3',
+    });
+
+    expect(response.status).toBe(400);
+  });
+});
+
+async function postDiscordAuthStart(options: {
+  env: ReturnType<typeof createTestBrokerEnv>;
+  installationId: string;
+  devicePublicKey: string;
+  redirectUri: string;
+  appVersion: string;
+}): Promise<Response> {
+  return app.request(
+    'http://broker.test/v1/auth/discord/start',
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'cf-connecting-ip': '203.0.113.20',
+      },
+      body: JSON.stringify({
+        installation_id: options.installationId,
+        device_public_key: options.devicePublicKey,
+        redirect_uri: options.redirectUri,
+        app_version: options.appVersion,
+      }),
+    },
+    options.env,
+  );
+}
