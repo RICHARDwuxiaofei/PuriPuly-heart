@@ -399,7 +399,7 @@ jobs:
           cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
           Direct broker smoke passed.
 
-          Verified issued child-key metadata, positive Qwen/Gemini routing, and disallowed-model guardrail enforcement.
+          Verified issued child-key metadata, positive Qwen/DeepSeek/Gemini routing, and disallowed-model guardrail enforcement.
 
           Do not connect app / public traffic to the broker until this run has been reviewed and an explicit cutover is approved.
           EOF

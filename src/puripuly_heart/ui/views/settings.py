@@ -159,6 +159,10 @@ def _derive_openrouter_selection_alias(
         if selected_source == OpenRouterCredentialSource.MANAGED:
             return OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
         return OpenRouterSelectionAlias.QWEN35_FLASH_BYOK
+    if llm_model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH:
+        if selected_source == OpenRouterCredentialSource.MANAGED:
+            return OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
+        return OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_BYOK
     if selected_source == OpenRouterCredentialSource.MANAGED:
         return OpenRouterSelectionAlias.GEMMA4_MANAGED
     return OpenRouterSelectionAlias.GEMMA4_BYOK
@@ -1512,6 +1516,8 @@ class SettingsView(ft.Column):
             return stored_alias
         if settings.openrouter.llm_model == OpenRouterLLMModel.QWEN_35_FLASH_02_23:
             return OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+        if settings.openrouter.llm_model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH:
+            return OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
         return OpenRouterSelectionAlias.GEMMA4_MANAGED
 
     def _openrouter_selection_profile(self, settings: AppSettings | None):

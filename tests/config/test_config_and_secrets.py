@@ -12,6 +12,7 @@ from puripuly_heart.config.audio_host_api import (
 )
 from puripuly_heart.config.llm_profiles import (
     OPENROUTER_FALLBACK_SELECTION_ALIASES,
+    openrouter_alias_for_fields,
     resolve_openrouter_fallback_model,
 )
 from puripuly_heart.config.settings import (
@@ -318,16 +319,21 @@ def test_from_dict_backfills_missing_deepseek_settings_and_verification() -> Non
     assert persisted["api_key_verified"]["deepseek"] is False
 
 
-def test_openrouter_fallback_aliases_only_include_none_gemini25_and_qwen35() -> None:
+def test_openrouter_fallback_aliases_include_curated_openrouter_models() -> None:
+    deepseek_fallback = getattr(OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH", None)
+    assert deepseek_fallback is not None
+
     assert tuple(alias.value for alias in OpenRouterFallbackSelectionAlias) == (
         OpenRouterFallbackSelectionAlias.NONE.value,
         OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value,
         OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value,
+        deepseek_fallback.value,
     )
     assert OPENROUTER_FALLBACK_SELECTION_ALIASES == (
         OpenRouterFallbackSelectionAlias.NONE.value,
         OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value,
         OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value,
+        deepseek_fallback.value,
     )
 
 
@@ -1181,6 +1187,98 @@ def test_openrouter_gemini25_flash_lite_fallback_uses_stable_slug() -> None:
         )
         == expected
     )
+
+
+def test_openrouter_deepseek_v4_flash_aliases_use_stable_slug() -> None:
+    expected = "deepseek/deepseek-v4-flash"
+    deepseek_model = getattr(OpenRouterLLMModel, "DEEPSEEK_V4_FLASH", None)
+    deepseek_managed = getattr(OpenRouterSelectionAlias, "DEEPSEEK_V4_FLASH_MANAGED", None)
+    deepseek_byok = getattr(OpenRouterSelectionAlias, "DEEPSEEK_V4_FLASH_BYOK", None)
+    deepseek_fallback = getattr(OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH", None)
+
+    assert deepseek_model is not None
+    assert deepseek_managed is not None
+    assert deepseek_byok is not None
+    assert deepseek_fallback is not None
+
+    assert deepseek_model.value == expected
+    assert (
+        openrouter_alias_for_fields(
+            model=expected,
+            source=OpenRouterCredentialSource.MANAGED.value,
+        )
+        == deepseek_managed.value
+    )
+    assert (
+        openrouter_alias_for_fields(
+            model=expected,
+            source=OpenRouterCredentialSource.BYOK.value,
+        )
+        == deepseek_byok.value
+    )
+    assert resolve_openrouter_fallback_model(deepseek_fallback.value) == expected
+
+
+def test_openrouter_settings_roundtrip_persists_deepseek_selection_and_fallback(
+    tmp_path,
+) -> None:
+    path = tmp_path / "settings.json"
+    deepseek_model = getattr(OpenRouterLLMModel, "DEEPSEEK_V4_FLASH", None)
+    deepseek_managed = getattr(OpenRouterSelectionAlias, "DEEPSEEK_V4_FLASH_MANAGED", None)
+    deepseek_fallback = getattr(OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH", None)
+
+    assert deepseek_model is not None
+    assert deepseek_managed is not None
+    assert deepseek_fallback is not None
+
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=deepseek_model,
+            routing_mode=OpenRouterRoutingMode.LATENCY,
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            selection_alias=deepseek_managed,
+            fallback_selection_alias=deepseek_fallback,
+        ),
+    )
+
+    serialized = to_dict(settings)
+
+    assert serialized["openrouter"]["selection_alias"] == deepseek_managed.value
+    assert serialized["openrouter"]["llm_model"] == deepseek_model.value
+    assert serialized["openrouter"]["selected_source"] == OpenRouterCredentialSource.MANAGED.value
+    assert serialized["openrouter"]["fallback_selection_alias"] == deepseek_fallback.value
+
+    save_settings(path, settings)
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.openrouter.selection_alias == deepseek_managed
+    assert loaded.openrouter.llm_model == deepseek_model
+    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert loaded.openrouter.fallback_selection_alias == deepseek_fallback
+    assert persisted["openrouter"]["selection_alias"] == deepseek_managed.value
+    assert persisted["openrouter"]["llm_model"] == deepseek_model.value
+    assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.MANAGED.value
+    assert persisted["openrouter"]["fallback_selection_alias"] == deepseek_fallback.value
+
+
+def test_openrouter_settings_derives_deepseek_byok_alias_without_explicit_alias() -> None:
+    deepseek_model = getattr(OpenRouterLLMModel, "DEEPSEEK_V4_FLASH", None)
+    deepseek_byok = getattr(OpenRouterSelectionAlias, "DEEPSEEK_V4_FLASH_BYOK", None)
+
+    assert deepseek_model is not None
+    assert deepseek_byok is not None
+
+    settings = OpenRouterSettings(
+        llm_model=deepseek_model,
+        selected_source=OpenRouterCredentialSource.BYOK,
+    )
+
+    assert settings.llm_model == deepseek_model
+    assert settings.selected_source == OpenRouterCredentialSource.BYOK
+    assert settings.selection_alias == deepseek_byok
 
 
 def test_openrouter_settings_roundtrip_persists_selection_and_fallback_aliases(tmp_path) -> None:

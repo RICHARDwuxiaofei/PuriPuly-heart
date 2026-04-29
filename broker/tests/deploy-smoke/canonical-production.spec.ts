@@ -118,11 +118,19 @@ describe('broker deploy smoke helpers', () => {
         true,
       ),
     ).toThrow(/must differ from the managed allowlisted models/i);
+    expect(() =>
+      normalizeDisallowedModel(
+        'deepseek/deepseek-v4-flash',
+        MANAGED_ALLOWLIST_MODELS,
+        true,
+      ),
+    ).toThrow(/must differ from the managed allowlisted models/i);
   });
 
-  it('keeps the positive routing probes pinned to Qwen and Gemini', () => {
+  it('keeps the positive routing probes pinned to the managed secondary models', () => {
     expect(POSITIVE_ROUTING_PROBE_MODELS).toEqual([
       'qwen/qwen3.5-flash-02-23',
+      'deepseek/deepseek-v4-flash',
       'google/gemini-2.5-flash-lite',
     ]);
     expect(MANAGED_ALLOWLIST_MODELS).toEqual(MANAGED_TRIAL_ALLOWED_MODELS);

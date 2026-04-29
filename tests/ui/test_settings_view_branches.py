@@ -1427,7 +1427,7 @@ def test_refresh_after_openrouter_pkce_success_preserves_unrelated_drafts(
     assert view.has_pending_prompt_changes is False
 
 
-def test_openrouter_fallback_modal_only_lists_none_gemini25_and_qwen35(
+def test_openrouter_fallback_modal_lists_curated_openrouter_fallbacks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -1453,15 +1453,20 @@ def test_openrouter_fallback_modal_only_lists_none_gemini25_and_qwen35(
 
     assert captured["show_description"] is True
     options = captured["options"]
+    deepseek_fallback = getattr(OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH", None)
+    assert deepseek_fallback is not None
+
     assert [option.value for option in options] == [
         OpenRouterFallbackSelectionAlias.NONE.value,
         OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value,
         OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value,
+        deepseek_fallback.value,
     ]
     assert [option.label for option in options] == [
         t("settings.openrouter_fallback.none"),
         t("provider.gemini25_flash_lite"),
         t("provider.qwen35_flash_fallback"),
+        t("provider.deepseek_v4_flash_fallback"),
     ]
 
 
@@ -1492,27 +1497,44 @@ def test_llm_modal_omits_openrouter_descriptions_and_direct_qwen_flash_option(
 
     options = captured["options"]
     option_by_value = {option.value: option for option in options}
+    deepseek_managed = getattr(OpenRouterSelectionAlias, "DEEPSEEK_V4_FLASH_MANAGED", None)
+    deepseek_byok = getattr(OpenRouterSelectionAlias, "DEEPSEEK_V4_FLASH_BYOK", None)
+
+    assert deepseek_managed is not None
+    assert deepseek_byok is not None
 
     assert captured["title"] == t("settings.section.translation")
     assert captured["show_description"] is True
     assert [option.value for option in options] == [
         OpenRouterSelectionAlias.GEMMA4_MANAGED.value,
         OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED.value,
+        deepseek_managed.value,
         GeminiLLMModel.GEMINI_3_FLASH.value,
         GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
         DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value,
         OpenRouterSelectionAlias.GEMMA4_BYOK.value,
         OpenRouterSelectionAlias.QWEN35_FLASH_BYOK.value,
+        deepseek_byok.value,
         QwenLLMModel.QWEN_35_PLUS.value,
     ]
     assert QwenLLMModel.QWEN_35_FLASH.value not in option_by_value
     assert option_by_value[OpenRouterSelectionAlias.GEMMA4_MANAGED.value].description == ""
     assert option_by_value[OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED.value].description == ""
+    assert option_by_value[deepseek_managed.value].description == ""
     assert option_by_value[OpenRouterSelectionAlias.GEMMA4_BYOK.value].description == ""
     assert option_by_value[OpenRouterSelectionAlias.QWEN35_FLASH_BYOK.value].description == ""
+    assert option_by_value[deepseek_byok.value].description == ""
     assert option_by_value[OpenRouterSelectionAlias.QWEN35_FLASH_BYOK.value].label == t(
         "provider.qwen35_flash_openrouter"
     )
+    assert option_by_value[deepseek_managed.value].label == t("provider.deepseek_v4_flash_managed")
+    assert option_by_value[deepseek_byok.value].label == t("provider.deepseek_v4_flash_openrouter")
+    direct_deepseek_label = option_by_value[DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value].label
+    deepseek_byok_label = option_by_value[deepseek_byok.value].label
+    assert direct_deepseek_label == t("provider.deepseek_v4_flash")
+    assert deepseek_byok_label != direct_deepseek_label
+    assert "OpenRouter" in deepseek_byok_label
+    assert "BYOK" in deepseek_byok_label
 
 
 def test_openrouter_routing_modal_only_lists_latency_option(
@@ -1570,12 +1592,16 @@ def test_openrouter_fallback_modal_hides_provider_descriptions_for_active_option
     view._on_openrouter_fallback_click(None)
 
     options = {option.value: option for option in captured["options"]}
+    deepseek_fallback = getattr(OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH", None)
+    assert deepseek_fallback is not None
+
     assert captured["show_description"] is True
     assert options[OpenRouterFallbackSelectionAlias.NONE.value].description == t(
         "settings.openrouter_fallback.none.description"
     )
     assert options[OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value].description == ""
     assert options[OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value].description == ""
+    assert options[deepseek_fallback.value].description == ""
 
 
 def test_openrouter_fallback_off_does_not_show_active_helper_copy(

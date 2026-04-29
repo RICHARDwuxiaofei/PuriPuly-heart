@@ -290,14 +290,22 @@ def test_settings_view_llm_modal_ends_with_qwen_plus_only(monkeypatch) -> None:
     assert captured["show_description"] is True
     options = captured["options"]
     values = [option.value for option in options]
+    deepseek_managed = getattr(OpenRouterSelectionAlias, "DEEPSEEK_V4_FLASH_MANAGED", None)
+    deepseek_byok = getattr(OpenRouterSelectionAlias, "DEEPSEEK_V4_FLASH_BYOK", None)
+
+    assert deepseek_managed is not None
+    assert deepseek_byok is not None
+
     assert values == [
         settings_view._OPENROUTER_MANAGED_OPTION_VALUE,
         OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED.value,
+        deepseek_managed.value,
         GeminiLLMModel.GEMINI_3_FLASH.value,
         GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
         DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value,
         OpenRouterSelectionAlias.GEMMA4_BYOK.value,
         OpenRouterSelectionAlias.QWEN35_FLASH_BYOK.value,
+        deepseek_byok.value,
         QwenLLMModel.QWEN_35_PLUS.value,
     ]
 

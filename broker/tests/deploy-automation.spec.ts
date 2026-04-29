@@ -280,7 +280,7 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toContain('transitional runtime compatibility');
     expect(workflow).toContain('managed child-key creation and cleanup');
     expect(workflow).toContain('assign the canonical production guardrail');
-    expect(workflow).toContain('positive Qwen/Gemini routing');
+    expect(workflow).toContain('positive Qwen/DeepSeek/Gemini routing');
     expect(smokeSpec).toContain("process.env.CI === 'true'");
     expect(smokeSpec).toContain('/api/v1/key');
     expect(smokeSpec).toContain('/api/v1/chat/completions');
@@ -294,6 +294,7 @@ describe('broker direct deploy automation', () => {
     expect(smokeSpec).toContain('ph-or-user-v');
     expect(smokeSpec).toContain('MANAGED_TRIAL_ALLOWED_MODELS');
     expect(smokeSpec).toContain('qwen/qwen3.5-flash-02-23');
+    expect(smokeSpec).toContain('deepseek/deepseek-v4-flash');
     expect(smokeSpec).toContain('google/gemini-2.5-flash-lite');
     expect(smokeSpec).toContain('MANAGED_TRIAL_ALLOWED_MODELS');
     expect(smokeSpec).toContain('must differ from the managed allowlisted models');
@@ -312,6 +313,7 @@ describe('broker direct deploy automation', () => {
     expect(readme).not.toContain('six-month expiry');
     expect(readme).toContain('optional `openrouter_user_id`');
     expect(readme).toContain('qwen/qwen3.5-flash-02-23');
+    expect(readme).toContain('deepseek/deepseek-v4-flash');
     expect(readme).toContain('google/gemini-2.5-flash-lite');
     expect(checklist).toContain('OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION');
     expect(checklist).toContain('OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION');

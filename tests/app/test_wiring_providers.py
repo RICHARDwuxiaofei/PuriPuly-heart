@@ -634,6 +634,70 @@ def test_create_llm_provider_openrouter_managed_qwen_fallback_uses_fallback_spec
     assert fallback_openrouter_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
 
 
+def test_create_llm_provider_openrouter_managed_deepseek_fallback_uses_fallback_specific_release_service() -> (
+    None
+):
+    deepseek_model = getattr(OpenRouterLLMModel, "DEEPSEEK_V4_FLASH", None)
+    deepseek_fallback = getattr(OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH", None)
+
+    assert deepseek_model is not None
+    assert deepseek_fallback is not None
+
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_MANAGED,
+            fallback_selection_alias=deepseek_fallback,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    managed_release_service = ManagedOpenRouterReleaseService(
+        settings=settings,
+        secrets=secrets,
+        client=object(),
+        persist_settings=lambda _updated: None,
+        app_version="2.0.0",
+        raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
+    )
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=managed_release_service,
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.primary, ManagedOpenRouterLLMProvider)
+    assert provider.inner.primary.release_service is managed_release_service
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+
+    fallback_delegate = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
+    assert isinstance(fallback_delegate.release_service, ManagedOpenRouterReleaseService)
+    assert fallback_delegate.release_service is not managed_release_service
+    assert fallback_delegate.release_service.settings is not settings
+    assert fallback_delegate.release_service.settings.openrouter is not settings.openrouter
+    assert fallback_delegate.release_service.settings.openrouter.selection_alias is None
+    assert fallback_delegate.release_service.settings.openrouter.llm_model == deepseek_model
+    assert (
+        _resolve_managed_issue_model(fallback_delegate.release_service.settings)
+        == deepseek_model.value
+    )
+    assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
+    assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+
+    fallback_openrouter_delegate = fallback_delegate.delegate_factory("managed-key")
+
+    assert isinstance(fallback_openrouter_delegate, OpenRouterLLMProvider)
+    assert fallback_openrouter_delegate.model == deepseek_model.value
+    assert fallback_openrouter_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+
+
 def test_create_llm_provider_openrouter_managed_fallback_delegate_factory_loads_user_identifier_lazily(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
