@@ -413,7 +413,7 @@ describe('broker migration behavior', () => {
       ).run(
         'legacy-installation',
         'active',
-        0.08,
+        0.07,
         'managed-credential-legacy-installation',
         '2026-04-08T06:00:00.000Z',
         '2026-10-08T06:00:00.000Z',
@@ -514,7 +514,7 @@ describe('broker migration behavior', () => {
       ).run(
         'already-migrated-installation',
         'active',
-        0.08,
+        0.07,
         'managed-credential-already-migrated',
         '2026-04-08T06:00:00.000Z',
         '2026-10-08T06:00:00.000Z',
@@ -851,7 +851,7 @@ describe('broker migration behavior', () => {
         insertEntitlement.run(
           'install-a',
           'pending_release',
-          0.08,
+          0.07,
           null,
           null,
           null,
@@ -864,7 +864,7 @@ describe('broker migration behavior', () => {
       insertEntitlement.run(
         'install-a',
         'pending_release',
-        0.08,
+        0.07,
         null,
         null,
         null,
@@ -877,7 +877,7 @@ describe('broker migration behavior', () => {
         insertEntitlement.run(
           'install-b',
           'pending_release',
-          0.08,
+          0.07,
           null,
           null,
           null,

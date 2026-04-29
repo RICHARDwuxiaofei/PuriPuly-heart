@@ -96,7 +96,7 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
   - success response returns `openrouter_api_key`, distinct `managed_credential_ref`, optional `openrouter_user_id`, normalized `managed_state`, `expires_at`, `budget_usd`, and `model`
   - `openrouter_api_key` is a newly created per-installation OpenRouter child key, not the shared worker secret
   - when `OPENROUTER_MANAGED_USER_HMAC_SECRET` is configured, `openrouter_user_id` carries the deterministic versioned managed OpenRouter user id for that installation; otherwise the field is omitted
-  - the child key is created with the managed-trial limit (`0.08` USD), a three-month expiry anchored to `issued_at`, and the configured managed guardrail before the broker returns it
+  - the child key is created with the managed-trial limit (`0.07` USD), a three-month expiry anchored to `issued_at`, and the configured managed guardrail before the broker returns it
   - live remaining budget and usage stay upstream in OpenRouter metadata and are not mirrored into the issue response
   - manual broker revocation is only a broker-local stop for future onboarding; because the app calls OpenRouter directly after issue succeeds, operators must also disable or delete the upstream OpenRouter child key when they need a revocation to stop existing direct use
 

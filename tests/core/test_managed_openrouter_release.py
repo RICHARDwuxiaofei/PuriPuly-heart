@@ -230,7 +230,7 @@ async def test_prepare_for_translation_runs_challenge_verify_issue_and_persists_
     assert verify_payload["app_version"] == "2.0.0"
     issue_payload = client.calls[2][1]
     assert issue_payload["reason"] == "llm_start"
-    assert issue_payload["budget_usd"] == 0.08
+    assert issue_payload["budget_usd"] == 0.07
     assert issue_payload["hardware_hash"] == _expected_hardware_hash(
         fingerprint_salt="fingerprint-salt-test",
         raw_hardware_fingerprint="raw-hardware-fingerprint-test",
@@ -408,7 +408,7 @@ async def test_prepare_for_translation_reuses_verified_pending_release_state_and
     assert prepare_result.pending_issue is False
     assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
     issue_payload = client.calls[0][1]
-    assert issue_payload["budget_usd"] == 0.08
+    assert issue_payload["budget_usd"] == 0.07
     assert issue_payload["hardware_hash"] == expected_hardware_hash
     assert settings.managed_identity.verified_hardware_hash is None
     assert settings.managed_identity.verified_hardware_hash_salt_version is None

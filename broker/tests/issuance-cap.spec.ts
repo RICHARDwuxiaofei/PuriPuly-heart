@@ -98,7 +98,7 @@ describe('broker daily issuance cap enforcement', () => {
       },
       current_entitlement: {
         provider: 'OpenRouter',
-        budget_usd: 0.08,
+        budget_usd: 0.07,
         issued_at: '2026-04-08T06:00:00.000Z',
         expires_at: '2026-07-08T06:00:00.000Z',
       },
@@ -188,7 +188,7 @@ describe('broker daily issuance cap enforcement', () => {
         release_token: pendingRelease.releaseToken,
         hardware_hash: pendingRelease.hardwareHash,
         reason: 'llm_start',
-        budget_usd: 0.08,
+        budget_usd: 0.07,
         model: 'google/gemma-4-26b-a4b-it',
         signed_at: '2026-04-08T06:00:45.000Z',
       },
@@ -203,7 +203,7 @@ describe('broker daily issuance cap enforcement', () => {
           managed_availability: true,
         },
         expires_at: '2026-07-08T06:00:00.000Z',
-        budget_usd: 0.08,
+        budget_usd: 0.07,
       }),
     );
   });
@@ -392,7 +392,7 @@ describe('broker daily issuance cap enforcement', () => {
       },
       current_entitlement: {
         provider: 'OpenRouter',
-        budget_usd: 0.08,
+        budget_usd: 0.07,
         issued_at: '2026-04-08T06:00:00.000Z',
         expires_at: '2026-07-08T06:00:00.000Z',
       },
@@ -461,7 +461,7 @@ describe('broker daily issuance cap enforcement', () => {
         release_token: pendingRelease.releaseToken,
         hardware_hash: pendingRelease.hardwareHash,
         reason: 'llm_start',
-        budget_usd: 0.08,
+        budget_usd: 0.07,
         model: 'google/gemma-4-26b-a4b-it',
         signed_at: '2026-04-08T06:00:45.000Z',
       },
@@ -481,7 +481,7 @@ describe('broker daily issuance cap enforcement', () => {
         },
         currentEntitlement: {
           provider: 'OpenRouter',
-          budget_usd: 0.08,
+          budget_usd: 0.07,
           issued_at: null,
           expires_at: null,
         },

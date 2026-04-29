@@ -17,7 +17,7 @@ export const TRIAL_PROVIDER_POLICY = {
 
 export const MANAGED_TRIAL_BUDGET_POLICY = {
   currency: 'USD',
-  hardLimit: 0.08,
+  hardLimit: 0.07,
   limitReset: null,
 } as const;
 

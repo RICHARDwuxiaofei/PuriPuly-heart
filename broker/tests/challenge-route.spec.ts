@@ -431,7 +431,7 @@ describe('POST /v1/trial/challenge', () => {
       release_token: release.releaseToken,
       hardware_hash: 'hardware-hash-before-reissue-race',
       reason: 'llm_start',
-      budget_usd: 0.08,
+      budget_usd: 0.07,
       model: 'google/gemma-4-26b-a4b-it',
       signed_at: '2026-04-08T06:01:00.000Z',
     });
@@ -927,7 +927,7 @@ describe('POST /v1/trial/challenge', () => {
       },
       current_entitlement: {
         provider: 'OpenRouter',
-        budget_usd: 0.08,
+        budget_usd: 0.07,
         issued_at: null,
         expires_at: null,
       },

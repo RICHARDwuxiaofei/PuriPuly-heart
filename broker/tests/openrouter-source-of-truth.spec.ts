@@ -53,7 +53,7 @@ describe('managed OpenRouter live usage source of truth', () => {
       release_token: release.releaseToken,
       hardware_hash: release.hardwareHash,
       reason: 'llm_start',
-      budget_usd: 0.08,
+      budget_usd: 0.07,
       model: 'google/gemma-4-26b-a4b-it',
       signed_at: '2026-04-08T06:00:45.000Z',
     });

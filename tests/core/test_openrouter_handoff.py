@@ -12,16 +12,16 @@ from puripuly_heart.providers.llm.openrouter import OpenRouterKeyMetadata
 
 
 def test_is_effectively_exhausted_uses_raw_remaining_usd_floor() -> None:
-    assert MANAGED_EFFECTIVE_EXHAUSTION_USD == 0.0008
+    assert MANAGED_EFFECTIVE_EXHAUSTION_USD == 0.0007
     assert (
         is_effectively_exhausted(
-            OpenRouterKeyMetadata(limit_usd=0.08, remaining_usd=0.0008, usage_usd=0.0792)
+            OpenRouterKeyMetadata(limit_usd=0.07, remaining_usd=0.0007, usage_usd=0.0693)
         )
         is True
     )
     assert (
         is_effectively_exhausted(
-            OpenRouterKeyMetadata(limit_usd=0.08, remaining_usd=0.00081, usage_usd=0.07919)
+            OpenRouterKeyMetadata(limit_usd=0.07, remaining_usd=0.00071, usage_usd=0.06929)
         )
         is False
     )
@@ -50,7 +50,7 @@ def test_should_auto_show_founder_letter_is_true_once_per_entitlement() -> None:
         expires_at=None,
     )
 
-    metadata = OpenRouterKeyMetadata(limit_usd=0.08, remaining_usd=0.0007, usage_usd=0.0793)
+    metadata = OpenRouterKeyMetadata(limit_usd=0.07, remaining_usd=0.0007, usage_usd=0.0693)
     assert should_auto_show_founder_letter(settings, metadata) is True
 
     mark_founder_letter_shown(settings)
@@ -72,7 +72,7 @@ def test_store_managed_entitlement_snapshot_preserves_existing_ref_on_partial_re
         expires_at="2026-11-01T00:00:00Z",
     )
 
-    metadata = OpenRouterKeyMetadata(limit_usd=0.08, remaining_usd=0.0007, usage_usd=0.0793)
+    metadata = OpenRouterKeyMetadata(limit_usd=0.07, remaining_usd=0.0007, usage_usd=0.0693)
     assert settings.managed_identity.active_managed_credential_ref == "hash_real"
     assert settings.managed_identity.active_managed_expires_at == "2026-11-01T00:00:00Z"
     assert settings.managed_identity.founder_letter_seen_credential_ref == "hash_real"

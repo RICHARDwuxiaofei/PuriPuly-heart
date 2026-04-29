@@ -982,14 +982,14 @@ async def test_set_translation_enabled_rebuild_path_turns_translation_back_off_w
 
     metadata_responses = [
         controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.08,
+            limit_usd=0.07,
             remaining_usd=0.05,
-            usage_usd=0.03,
+            usage_usd=0.02,
         ),
         controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.08,
+            limit_usd=0.07,
             remaining_usd=0.0007,
-            usage_usd=0.0793,
+            usage_usd=0.0693,
         ),
     ]
 
@@ -4213,9 +4213,9 @@ async def test_exhausted_managed_start_and_background_verify_do_not_auto_show_fo
 
     async def fake_fetch_key_metadata(_api_key: str):
         return controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.08,
+            limit_usd=0.07,
             remaining_usd=0.0007,
-            usage_usd=0.0793,
+            usage_usd=0.0693,
         )
 
     monkeypatch.setattr(
@@ -4271,7 +4271,7 @@ async def test_refresh_managed_trial_usage_state_uses_settings_view_live_openrou
 
     async def fake_fetch_key_metadata(_api_key: str):
         return controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.08,
+            limit_usd=0.07,
             remaining_usd=0.05,
             usage_usd=0.02,
         )
@@ -4291,7 +4291,7 @@ async def test_refresh_managed_trial_usage_state_uses_settings_view_live_openrou
 
     assert settings_view.managed_trial_usage_state == {
         "visible": True,
-        "remaining_percent": 62,
+        "remaining_percent": 71,
     }
     assert dash.managed_trial_calls == []
 
@@ -4318,7 +4318,7 @@ async def test_refresh_managed_trial_usage_state_computes_remaining_percent_with
 
     async def fake_fetch_key_metadata(_api_key: str):
         return controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.08,
+            limit_usd=0.07,
             remaining_usd=0.05,
             usage_usd=None,
         )
@@ -4338,7 +4338,7 @@ async def test_refresh_managed_trial_usage_state_computes_remaining_percent_with
 
     assert settings_view.managed_trial_usage_state == {
         "visible": True,
-        "remaining_percent": 62,
+        "remaining_percent": 71,
     }
     assert dash.managed_trial_calls == []
 
@@ -4365,7 +4365,7 @@ async def test_refresh_managed_trial_usage_state_marks_usage_unavailable_when_me
 
     metadata_responses = [
         controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.08,
+            limit_usd=0.07,
             remaining_usd=0.05,
             usage_usd=0.02,
         ),
@@ -4418,12 +4418,12 @@ async def test_refresh_managed_trial_usage_state_marks_usage_unavailable_when_li
 
     metadata_responses = [
         controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.08,
+            limit_usd=0.07,
             remaining_usd=0.05,
             usage_usd=0.02,
         ),
         controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.08,
+            limit_usd=0.07,
             remaining_usd=None,
             usage_usd=0.02,
         ),
@@ -4480,9 +4480,9 @@ async def test_refresh_managed_trial_usage_state_auto_shows_founder_letter_once(
 
     async def fake_fetch_key_metadata(_api_key: str):
         return controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.08,
+            limit_usd=0.07,
             remaining_usd=0.0007,
-            usage_usd=0.0793,
+            usage_usd=0.0693,
         )
 
     monkeypatch.setattr(
@@ -4521,9 +4521,9 @@ async def test_set_translation_enabled_reopens_founder_letter_on_exhausted_manag
 
     async def fake_fetch_key_metadata(_api_key: str):
         return controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.08,
+            limit_usd=0.07,
             remaining_usd=0.0007,
-            usage_usd=0.0793,
+            usage_usd=0.0693,
         )
 
     monkeypatch.setattr(
@@ -4577,9 +4577,9 @@ async def test_set_translation_enabled_exhausted_managed_does_not_prepare_releas
 
     async def fake_fetch_key_metadata(_api_key: str):
         return controller_module.OpenRouterKeyMetadata(
-            limit_usd=0.08,
+            limit_usd=0.07,
             remaining_usd=0.0007,
-            usage_usd=0.0793,
+            usage_usd=0.0693,
         )
 
     monkeypatch.setattr(
@@ -4623,9 +4623,9 @@ async def test_set_translation_enabled_does_not_route_stale_exhausted_metadata_a
         metadata_calls += 1
         if metadata_calls == 1:
             return controller_module.OpenRouterKeyMetadata(
-                limit_usd=0.08,
+                limit_usd=0.07,
                 remaining_usd=0.0007,
-                usage_usd=0.0793,
+                usage_usd=0.0693,
             )
         raise RuntimeError("metadata boom")
 

@@ -34,7 +34,7 @@ describe('POST /v1/providers/openrouter/issue response payload', () => {
       release_token: release.releaseToken,
       hardware_hash: release.hardwareHash,
       reason: 'llm_start',
-      budget_usd: 0.08,
+      budget_usd: 0.07,
       model: 'google/gemma-4-26b-a4b-it',
       signed_at: '2026-04-08T06:00:45.000Z',
     });
@@ -59,7 +59,7 @@ describe('POST /v1/providers/openrouter/issue response payload', () => {
         managed_availability: true,
       },
       expires_at: '2026-07-08T06:00:00.000Z',
-      budget_usd: 0.08,
+      budget_usd: 0.07,
       model: 'google/gemma-4-26b-a4b-it',
     });
     expect(payload.openrouter_api_key).not.toBe(payload.managed_credential_ref);
@@ -95,7 +95,7 @@ describe('POST /v1/providers/openrouter/issue response payload', () => {
       release_token: release.releaseToken,
       hardware_hash: release.hardwareHash,
       reason: 'llm_start',
-      budget_usd: 0.08,
+      budget_usd: 0.07,
       model: 'google/gemma-4-26b-a4b-it',
       signed_at: '2026-04-08T06:10:45.000Z',
     });
@@ -112,7 +112,7 @@ describe('POST /v1/providers/openrouter/issue response payload', () => {
         managed_availability: true,
       },
       expires_at: '2026-07-08T06:10:00.000Z',
-      budget_usd: 0.08,
+      budget_usd: 0.07,
       model: 'google/gemma-4-26b-a4b-it',
     });
     expect(deriveManagedOpenRouterUserIdSpy).not.toHaveBeenCalled();

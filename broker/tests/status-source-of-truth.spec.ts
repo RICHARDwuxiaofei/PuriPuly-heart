@@ -26,7 +26,7 @@ describe('GET /v1/trial/status source of truth boundary', () => {
     insertEntitlement(env, {
       installation_id: 'install-status-source-of-truth',
       status: 'active',
-      budget_usd: 0.08,
+      budget_usd: 0.07,
       issued_at: '2026-04-01T00:00:00Z',
       expires_at: '2026-10-01T00:00:00Z',
     });
@@ -49,7 +49,7 @@ describe('GET /v1/trial/status source of truth boundary', () => {
     expect(payload).toMatchObject({
       current_entitlement: {
         provider: 'OpenRouter',
-        budget_usd: 0.08,
+        budget_usd: 0.07,
         expires_at: '2026-10-01T00:00:00Z',
       },
     });

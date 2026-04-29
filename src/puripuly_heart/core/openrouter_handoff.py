@@ -3,7 +3,7 @@ from __future__ import annotations
 from puripuly_heart.config.settings import AppSettings
 from puripuly_heart.providers.llm.openrouter import OpenRouterKeyMetadata
 
-MANAGED_EFFECTIVE_EXHAUSTION_USD = 0.0008
+MANAGED_EFFECTIVE_EXHAUSTION_USD = 0.0007
 
 
 def is_effectively_exhausted(metadata: OpenRouterKeyMetadata | None) -> bool:

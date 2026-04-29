@@ -265,7 +265,7 @@ async def test_openrouter_fetch_key_metadata_uses_key_endpoint(monkeypatch) -> N
         def json(self):
             return {
                 "data": {
-                    "limit": 0.08,
+                    "limit": 0.07,
                     "limit_remaining": 0.05,
                     "usage": 0.02,
                 }
@@ -293,7 +293,7 @@ async def test_openrouter_fetch_key_metadata_uses_key_endpoint(monkeypatch) -> N
 
     metadata = await OpenRouterLLMProvider.fetch_key_metadata("secret")
 
-    assert metadata == OpenRouterKeyMetadata(limit_usd=0.08, remaining_usd=0.05, usage_usd=0.02)
+    assert metadata == OpenRouterKeyMetadata(limit_usd=0.07, remaining_usd=0.05, usage_usd=0.02)
     assert seen["url"] == "https://openrouter.ai/api/v1/key"
     assert seen["headers"]["Authorization"] == "Bearer secret"
 

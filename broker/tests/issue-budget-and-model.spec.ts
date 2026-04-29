@@ -41,7 +41,7 @@ describe('POST /v1/providers/openrouter/issue policy enforcement', () => {
       overrides: {
         budget_usd: 0.06,
       },
-      message: 'budget_usd must equal 0.08',
+      message: 'budget_usd must equal 0.07',
     },
     {
       name: 'model',
@@ -70,7 +70,7 @@ describe('POST /v1/providers/openrouter/issue policy enforcement', () => {
         release_token: release.releaseToken,
         hardware_hash: release.hardwareHash,
         reason: 'llm_start',
-        budget_usd: 0.08,
+        budget_usd: 0.07,
         model: 'google/gemma-4-26b-a4b-it',
         signed_at: '2026-04-08T06:00:45.000Z',
         ...testCase.overrides,
@@ -127,7 +127,7 @@ describe('POST /v1/providers/openrouter/issue policy enforcement', () => {
         release_token: release.releaseToken,
         hardware_hash: release.hardwareHash,
         reason: 'llm_start',
-        budget_usd: 0.08,
+        budget_usd: 0.07,
         model,
         signed_at: '2026-04-08T06:00:45.000Z',
       });
@@ -136,7 +136,7 @@ describe('POST /v1/providers/openrouter/issue policy enforcement', () => {
 
       expect(response.status).toBe(200);
       await expect(response.json()).resolves.toMatchObject({
-        budget_usd: 0.08,
+        budget_usd: 0.07,
         model,
       });
     },
