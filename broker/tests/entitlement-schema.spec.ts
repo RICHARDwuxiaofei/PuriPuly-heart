@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import { BROKER_PERSISTENCE_MODEL } from '../src/contract';
@@ -16,6 +18,13 @@ const OPENROUTER_ENTITLEMENT_COLUMNS = [
   'release_token_expires_at',
   'verified_hardware_hash',
   'verified_hardware_hash_salt_version',
+  'discord_user_ref',
+  'discord_issue_status',
+  'discord_issue_reserved_at',
+  'discord_issue_delivered_at',
+];
+
+const DISCORD_ENTITLEMENT_COLUMNS = [
   'discord_user_ref',
   'discord_issue_status',
   'discord_issue_reserved_at',
@@ -53,6 +62,23 @@ describe('openrouter entitlement schema', () => {
       .all() as Array<{ name: string }>;
 
     expect(columns.map((column) => column.name)).toEqual(OPENROUTER_ENTITLEMENT_COLUMNS);
+  });
+
+  it('selects Discord issue columns for full OpenRouter entitlement records', () => {
+    for (const sourceFileName of ['trial-handshake.ts', 'openrouter-issue.ts']) {
+      const source = readFileSync(
+        new URL(`../src/${sourceFileName}`, import.meta.url),
+        'utf8',
+      );
+      const fullRecordSelect = source.match(
+        /SELECT installation_id, status, budget_usd, managed_credential_ref, issued_at,[\s\S]*?FROM openrouter_entitlements/u,
+      )?.[0];
+
+      expect(fullRecordSelect, `${sourceFileName} full entitlement SELECT`).toBeDefined();
+      for (const column of DISCORD_ENTITLEMENT_COLUMNS) {
+        expect(fullRecordSelect).toContain(column);
+      }
+    }
   });
 
   it('seeds the exact managed OpenRouter and Discord secret bindings in the sqlite D1 test env', () => {

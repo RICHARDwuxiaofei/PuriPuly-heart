@@ -1445,7 +1445,9 @@ async function getEntitlement(
     .prepare(
       `SELECT installation_id, status, budget_usd, managed_credential_ref, issued_at,
               expires_at, release_session_ref, release_token_hash, release_token_expires_at,
-              verified_hardware_hash, verified_hardware_hash_salt_version
+              verified_hardware_hash, verified_hardware_hash_salt_version,
+              discord_user_ref, discord_issue_status, discord_issue_reserved_at,
+              discord_issue_delivered_at
          FROM openrouter_entitlements
          WHERE installation_id = ?`,
     )

@@ -61,7 +61,12 @@ UPDATE broker_config
            '$.pendingDiscordOAuthSessions', json('{"maxPerInstallation":2,"maxPerIp":20,"windowMinutes":15}')
          ),
          '$.newActiveEntitlementsPerDay.endpoint', 'POST /v1/providers/openrouter/discord/issue',
-         '$.newActiveEntitlementsPerDay.maxCount', 500
+         '$.newActiveEntitlementsPerDay.maxCount', CASE
+           WHEN json_type(value, '$.newActiveEntitlementsPerDay.maxCount') = 'integer'
+                AND json_extract(value, '$.newActiveEntitlementsPerDay.maxCount') > 0
+             THEN json_extract(value, '$.newActiveEntitlementsPerDay.maxCount')
+           ELSE 500
+         END
        ),
        updated_at = CURRENT_TIMESTAMP
  WHERE key = 'abuse_controls';
