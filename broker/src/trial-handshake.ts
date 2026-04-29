@@ -242,6 +242,10 @@ export async function handleTrialChallenge(
     });
   }
 
+  if (entitlement && isDiscordManagedPendingRelease(entitlement)) {
+    return releaseNotAllowedResponse(c, entitlement);
+  }
+
   const issuanceCapDecision = await checkDailyIssuanceCap(
     c.env.BROKER_DB,
     now,
@@ -614,6 +618,10 @@ export async function handleTrialChallengeVerify(
     return respondVerifyFailure(releaseNotAllowedResponse(c, entitlement));
   }
 
+  if (entitlement && isDiscordManagedPendingRelease(entitlement)) {
+    return respondVerifyFailure(releaseNotAllowedResponse(c, entitlement));
+  }
+
   const fingerprintSalt = await getFingerprintSaltConfig(c.env.BROKER_DB);
   const duplicateHardware = await hasConflictingHardwareDuplicate(c.env.BROKER_DB, {
     installationId,
@@ -693,7 +701,11 @@ export async function handleTrialChallengeVerify(
               verified_hardware_hash = ?,
               verified_hardware_hash_salt_version = ?
         WHERE installation_id = ?
-          AND status = ?`,
+          AND status = ?
+          AND (
+            discord_issue_status IS NULL
+            OR discord_issue_status NOT IN ('issuing', 'cleanup_required')
+          )`,
     )
       .bind(
         releaseSessionRef,
@@ -986,6 +998,16 @@ function releaseNotAllowedResponse(
   });
 }
 
+function isDiscordManagedPendingRelease(
+  entitlement: OpenRouterEntitlementRecord | null,
+): boolean {
+  return (
+    entitlement?.status === 'pending_release' &&
+    (entitlement.discord_issue_status === 'issuing' ||
+      entitlement.discord_issue_status === 'cleanup_required')
+  );
+}
+
 async function recordVerifyOutcomeEvent(
   db: D1Database,
   context: {
@@ -1258,8 +1280,16 @@ async function clearPendingReleaseSessionTokenState(
     | 'release_session_ref'
     | 'release_token_hash'
     | 'release_token_expires_at'
+    | 'discord_issue_status'
   >,
 ): Promise<void> {
+  if (
+    entitlement.discord_issue_status === 'issuing' ||
+    entitlement.discord_issue_status === 'cleanup_required'
+  ) {
+    return;
+  }
+
   await db
     .prepare(
       `UPDATE openrouter_entitlements
@@ -1285,6 +1315,10 @@ async function clearPendingReleaseSessionTokenState(
                )
         WHERE installation_id = ?
           AND status = 'pending_release'
+          AND (
+            discord_issue_status IS NULL
+            OR discord_issue_status NOT IN ('issuing', 'cleanup_required')
+          )
           AND release_session_ref IS ?
           AND release_token_hash IS ?
           AND release_token_expires_at IS ?

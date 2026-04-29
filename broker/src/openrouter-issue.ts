@@ -269,6 +269,10 @@ export async function handleOpenRouterIssue(
     return releaseTokenInvalidResponse(c, entitlement);
   }
 
+  if (isDiscordManagedPendingRelease(entitlement)) {
+    return releaseTokenInvalidResponse(c, entitlement);
+  }
+
   if (!entitlement.release_session_ref || !entitlement.release_token_expires_at) {
     return releaseTokenInvalidResponse(c, entitlement);
   }
@@ -446,7 +450,11 @@ async function activatePendingEntitlement(
            AND status = ?
            AND release_token_hash = ?
            AND release_token_expires_at = ?
-           AND managed_credential_ref = ?`,
+           AND managed_credential_ref = ?
+           AND (
+             discord_issue_status IS NULL
+             OR discord_issue_status NOT IN ('issuing', 'cleanup_required')
+           )`,
      )
      .bind(
        'active',
@@ -492,7 +500,11 @@ async function acquireIssueSingleFlight(
           AND release_session_ref = ?
           AND release_token_hash = ?
           AND release_token_expires_at = ?
-          AND managed_credential_ref IS NULL`,
+          AND managed_credential_ref IS NULL
+          AND (
+            discord_issue_status IS NULL
+            OR discord_issue_status NOT IN ('issuing', 'cleanup_required')
+          )`,
     )
     .bind(
       lockValue,
@@ -546,7 +558,11 @@ async function invalidatePendingRelease(
                 )
               )
         WHERE installation_id = ?
-          AND status = 'pending_release'`,
+          AND status = 'pending_release'
+          AND (
+            discord_issue_status IS NULL
+            OR discord_issue_status NOT IN ('issuing', 'cleanup_required')
+          )`,
     )
     .bind(input.installationId)
     .run();
@@ -994,6 +1010,16 @@ function validateReleaseTokenWindow(
   }
 
   return null;
+}
+
+function isDiscordManagedPendingRelease(
+  entitlement: OpenRouterEntitlementRecord | null,
+): boolean {
+  return (
+    entitlement?.status === 'pending_release' &&
+    (entitlement.discord_issue_status === 'issuing' ||
+      entitlement.discord_issue_status === 'cleanup_required')
+  );
 }
 
 async function readJsonBody<T>(
