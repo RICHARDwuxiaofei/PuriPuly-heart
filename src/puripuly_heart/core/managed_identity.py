@@ -28,6 +28,8 @@ from puripuly_heart.core.storage.secrets import SecretStore
 MANAGED_DEVICE_PRIVATE_KEY_SECRET = "managed_device_private_key"
 MANAGED_DEVICE_PUBLIC_KEY_SECRET = "managed_device_public_key"
 MANAGED_IDENTITY_BINDING_SECRET = "managed_identity_binding"
+DISCORD_OPENROUTER_ISSUE_METHOD = "POST"
+DISCORD_OPENROUTER_ISSUE_PATH = "/v1/providers/openrouter/discord/issue"
 PersistSettings = Callable[[AppSettings], None]
 
 
@@ -123,6 +125,54 @@ class ManagedIdentityBundle:
             "signature": _sign_payload(self._private_key, payload),
         }
 
+    def sign_discord_issue_request(
+        self,
+        *,
+        code: str,
+        state: str,
+        redirect_uri: str,
+        hardware_hash: str,
+        hardware_hash_salt_version: int,
+        app_version: str,
+        reason: str,
+        budget_usd: int | float,
+        model: str,
+        issue_nonce: str,
+        signed_at: str,
+    ) -> dict[str, str | int | float]:
+        payload = canonical_discord_issue_payload(
+            installation_id=self.installation_id,
+            device_public_key=self.device_public_key,
+            state=state,
+            code=code,
+            redirect_uri=redirect_uri,
+            hardware_hash=hardware_hash,
+            hardware_hash_salt_version=hardware_hash_salt_version,
+            app_version=app_version,
+            reason=reason,
+            budget_usd=budget_usd,
+            model=model,
+            issue_nonce=issue_nonce,
+            signed_at=signed_at,
+        )
+        return {
+            "code": code,
+            "state": state,
+            "installation_id": self.installation_id,
+            "device_public_key": self.device_public_key,
+            "redirect_uri": redirect_uri,
+            "hardware_hash": hardware_hash,
+            "hardware_hash_salt_version": hardware_hash_salt_version,
+            "app_version": app_version,
+            "reason": reason,
+            "budget_usd": budget_usd,
+            "model": model,
+            "issue_nonce": issue_nonce,
+            "signed_at": signed_at,
+            "signature_alg": "ed25519",
+            "signature": _sign_payload(self._private_key, payload),
+        }
+
 
 def canonical_verify_payload(
     *,
@@ -168,6 +218,42 @@ def canonical_issue_payload(
         reason,
         _canonical_number_string(budget_usd),
         model,
+        signed_at,
+    )
+
+
+def canonical_discord_issue_payload(
+    *,
+    installation_id: str,
+    device_public_key: str,
+    state: str,
+    code: str,
+    redirect_uri: str,
+    hardware_hash: str,
+    hardware_hash_salt_version: int,
+    app_version: str,
+    reason: str,
+    budget_usd: int | float,
+    model: str,
+    issue_nonce: str,
+    signed_at: str,
+) -> bytes:
+    code_hash = encode_base64url(hashlib.sha256(code.encode("utf-8")).digest())
+    return _canonical_payload(
+        DISCORD_OPENROUTER_ISSUE_METHOD,
+        DISCORD_OPENROUTER_ISSUE_PATH,
+        installation_id,
+        device_public_key,
+        state,
+        code_hash,
+        redirect_uri,
+        hardware_hash,
+        str(hardware_hash_salt_version),
+        app_version,
+        reason,
+        _canonical_number_string(budget_usd),
+        model,
+        issue_nonce,
         signed_at,
     )
 

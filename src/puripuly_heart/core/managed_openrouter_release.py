@@ -112,6 +112,16 @@ class ManagedOpenRouterChallengeSuccess:
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedOpenRouterDiscordStartSuccess:
+    authorization_url: str
+    redirect_uri: str
+    oauth_session_expires_at: str
+    issue_nonce: str
+    fingerprint_salt: ManagedOpenRouterFingerprintSalt
+    fingerprint_salt_version: int
+
+
+@dataclass(frozen=True, slots=True)
 class ManagedOpenRouterVerifySuccess:
     release_token: str
     release_token_expires_at: str
@@ -167,6 +177,20 @@ class ManagedOpenRouterReleaseClient(Protocol):
 
     async def issue(self, request: dict[str, object]) -> ManagedOpenRouterIssueSuccess: ...
 
+    async def start_discord_oauth(
+        self,
+        *,
+        installation_id: str,
+        device_public_key: str,
+        redirect_uri: str,
+        app_version: str,
+    ) -> ManagedOpenRouterDiscordStartSuccess: ...
+
+    async def issue_discord_managed_key(
+        self,
+        request: dict[str, object],
+    ) -> ManagedOpenRouterIssueSuccess: ...
+
 
 @dataclass(slots=True)
 class UnavailableManagedOpenRouterReleaseClient:
@@ -189,6 +213,32 @@ class UnavailableManagedOpenRouterReleaseClient:
         )
 
     async def issue(self, request: dict[str, object]) -> ManagedOpenRouterIssueSuccess:
+        _ = request
+        raise ManagedOpenRouterReleaseError(
+            code="trial_unavailable",
+            error_class="retryable",
+            message="managed OpenRouter release is unavailable",
+        )
+
+    async def start_discord_oauth(
+        self,
+        *,
+        installation_id: str,
+        device_public_key: str,
+        redirect_uri: str,
+        app_version: str,
+    ) -> ManagedOpenRouterDiscordStartSuccess:
+        _ = installation_id, device_public_key, redirect_uri, app_version
+        raise ManagedOpenRouterReleaseError(
+            code="trial_unavailable",
+            error_class="retryable",
+            message="managed OpenRouter release is unavailable",
+        )
+
+    async def issue_discord_managed_key(
+        self,
+        request: dict[str, object],
+    ) -> ManagedOpenRouterIssueSuccess:
         _ = request
         raise ManagedOpenRouterReleaseError(
             code="trial_unavailable",

@@ -9,6 +9,7 @@ import httpx
 
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterChallengeSuccess,
+    ManagedOpenRouterDiscordStartSuccess,
     ManagedOpenRouterFingerprintSalt,
     ManagedOpenRouterIssueSuccess,
     ManagedOpenRouterPreflightStop,
@@ -67,11 +68,43 @@ class HttpManagedOpenRouterBrokerClient:
             return ManagedOpenRouterChallengeSuccess(
                 challenge=_require_text(payload, "challenge"),
                 challenge_expires_at=_require_text(payload, "challenge_expires_at"),
-                fingerprint_salt=_parse_fingerprint_salt(payload),
+                fingerprint_salt=_parse_fingerprint_salt(payload, operation="challenge"),
             )
         except ValueError as exc:
             raise _retryable_error(
                 "challenge", f"broker returned malformed payload: {exc}"
+            ) from exc
+
+    async def start_discord_oauth(
+        self,
+        *,
+        installation_id: str,
+        device_public_key: str,
+        redirect_uri: str,
+        app_version: str,
+    ) -> ManagedOpenRouterDiscordStartSuccess:
+        payload = await self._post_json(
+            path="/v1/auth/discord/start",
+            request_body={
+                "installation_id": installation_id,
+                "device_public_key": device_public_key,
+                "redirect_uri": redirect_uri,
+                "app_version": app_version,
+            },
+            operation="discord_start",
+        )
+        try:
+            return ManagedOpenRouterDiscordStartSuccess(
+                authorization_url=_require_text(payload, "authorization_url"),
+                redirect_uri=_require_text(payload, "redirect_uri"),
+                oauth_session_expires_at=_require_text(payload, "oauth_session_expires_at"),
+                issue_nonce=_require_text(payload, "issue_nonce"),
+                fingerprint_salt=_parse_fingerprint_salt(payload, operation="discord_start"),
+                fingerprint_salt_version=_require_int(payload, "fingerprint_salt_version"),
+            )
+        except ValueError as exc:
+            raise _retryable_error(
+                "discord_start", f"broker returned malformed payload: {exc}"
             ) from exc
 
     async def verify(self, request: dict[str, str]) -> ManagedOpenRouterVerifySuccess:
@@ -105,6 +138,29 @@ class HttpManagedOpenRouterBrokerClient:
             )
         except ValueError as exc:
             raise _retryable_error("issue", f"broker returned malformed payload: {exc}") from exc
+
+    async def issue_discord_managed_key(
+        self,
+        request: dict[str, object],
+    ) -> ManagedOpenRouterIssueSuccess:
+        payload = await self._post_json(
+            path="/v1/providers/openrouter/discord/issue",
+            request_body=request,
+            operation="discord_issue",
+        )
+        try:
+            return ManagedOpenRouterIssueSuccess(
+                openrouter_api_key=_require_text(payload, "openrouter_api_key"),
+                managed_credential_ref=_require_optional_text(payload, "managed_credential_ref"),
+                expires_at=_require_optional_text(payload, "expires_at"),
+                openrouter_user_id=normalize_managed_openrouter_user_identifier(
+                    payload.get("openrouter_user_id")
+                ),
+            )
+        except ValueError as exc:
+            raise _retryable_error(
+                "discord_issue", f"broker returned malformed payload: {exc}"
+            ) from exc
 
     async def close(self) -> None:
         async with self._client_lock:
@@ -192,10 +248,14 @@ def _parse_json_mapping(response: httpx.Response, *, operation: str) -> Mapping[
     return payload
 
 
-def _parse_fingerprint_salt(payload: Mapping[str, object]) -> ManagedOpenRouterFingerprintSalt:
+def _parse_fingerprint_salt(
+    payload: Mapping[str, object],
+    *,
+    operation: str,
+) -> ManagedOpenRouterFingerprintSalt:
     raw_fingerprint_salt = payload.get("fingerprint_salt")
     if not isinstance(raw_fingerprint_salt, Mapping):
-        raise _retryable_error("challenge", "broker returned malformed fingerprint_salt payload")
+        raise _retryable_error(operation, "broker returned malformed fingerprint_salt payload")
     return ManagedOpenRouterFingerprintSalt(
         version=_require_int(raw_fingerprint_salt, "version"),
         salt=_require_text(raw_fingerprint_salt, "salt"),

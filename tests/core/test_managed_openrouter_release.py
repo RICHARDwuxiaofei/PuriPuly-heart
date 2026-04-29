@@ -30,6 +30,7 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseService,
     ManagedOpenRouterUserFacingError,
     ManagedOpenRouterVerifySuccess,
+    UnavailableManagedOpenRouterReleaseClient,
 )
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_MANAGED_API_KEY_SECRET,
@@ -634,6 +635,28 @@ async def test_close_closes_underlying_client_transport_when_available() -> None
     await service.close()
 
     assert client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unavailable_client_discord_methods_raise_release_error_not_attribute_error() -> None:
+    client = UnavailableManagedOpenRouterReleaseClient()
+
+    with pytest.raises(ManagedOpenRouterReleaseError) as start_exc:
+        await client.start_discord_oauth(
+            installation_id="install-discord-123",
+            device_public_key="device-public-key-123",
+            redirect_uri="http://127.0.0.1:62187/discord/callback",
+            app_version="2.0.0",
+        )
+    assert start_exc.value.code == "trial_unavailable"
+    assert start_exc.value.error_class == "retryable"
+    assert start_exc.value.message == "managed OpenRouter release is unavailable"
+
+    with pytest.raises(ManagedOpenRouterReleaseError) as issue_exc:
+        await client.issue_discord_managed_key({"code": "discord-oauth-code"})
+    assert issue_exc.value.code == "trial_unavailable"
+    assert issue_exc.value.error_class == "retryable"
+    assert issue_exc.value.message == "managed OpenRouter release is unavailable"
 
 
 @pytest.mark.asyncio
