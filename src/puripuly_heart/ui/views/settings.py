@@ -3184,29 +3184,11 @@ class SettingsView(ft.Column):
         self._emit_settings_changed()
 
     def _on_vrc_mic_click(self, e) -> None:
-        """打开 VRC 闭麦同步选项框
-
-        Open VRC mic intercept selection modal.
-        """
-        if not self.page:
+        """Toggle VRC mic intercept immediately from the unit card."""
+        if not self._settings:
             return
-        options = [
-            OptionItem(
-                value="on",
-                label=t("settings.vrc_mic.on"),
-                description=t("settings.vrc_mic.on.description", default=""),
-            ),
-            OptionItem(value="off", label=t("settings.vrc_mic.off")),
-        ]
-        current = "on" if self._settings.osc.vrc_mic_intercept else "off"
-        modal = SettingsModal(
-            self.page,
-            t("settings.vrc_mic_intercept"),
-            options,
-            self._on_vrc_mic_selected,
-            show_description=True,
-        )
-        modal.open(current)
+        next_value = "off" if self._settings.osc.vrc_mic_intercept else "on"
+        self._on_vrc_mic_selected(next_value)
 
     def _on_vrc_mic_selected(self, value: str) -> None:
         """处理选项卡的选择结果

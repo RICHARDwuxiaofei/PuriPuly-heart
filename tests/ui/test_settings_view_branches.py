@@ -2731,6 +2731,40 @@ def test_chatbox_source_card_title_uses_chatbox_output_format_wording(
         i18n_module.set_locale(old_locale)
 
 
+@pytest.mark.parametrize(
+    ("locale", "expected_on", "expected_off"),
+    [
+        ("ko", "켜기", "끄기"),
+        ("zh-CN", "开启", "关闭"),
+    ],
+)
+def test_vrc_mic_sync_card_uses_localized_on_off_labels(
+    monkeypatch: pytest.MonkeyPatch,
+    locale: str,
+    expected_on: str,
+    expected_off: str,
+) -> None:
+    settings = AppSettings()
+    settings.ui.locale = locale
+    view, _ = _make_settings_view(monkeypatch)
+
+    old_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale(locale)
+
+        settings.osc.vrc_mic_intercept = True
+        view.load_from_settings(settings, config_path=Path("settings.json"))
+        view.apply_locale()
+        assert view._vrc_mic_text.content.value == expected_on
+
+        settings.osc.vrc_mic_intercept = False
+        view.load_from_settings(settings, config_path=Path("settings.json"))
+        view.apply_locale()
+        assert view._vrc_mic_text.content.value == expected_off
+    finally:
+        i18n_module.set_locale(old_locale)
+
+
 @pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
 def test_overlay_failure_reason_keys_are_localized(locale: str) -> None:
     bundle = i18n_module._load_bundle(locale)
@@ -3627,10 +3661,13 @@ def test_load_from_settings_updates_vrc_mic_toggle_label(
     assert view._vrc_mic_text.content.value == t("settings.vrc_mic.off")
 
 
-def test_on_vrc_mic_click_returns_when_page_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_on_vrc_mic_click_toggles_without_page(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = AppSettings()
+    settings.osc.vrc_mic_intercept = False
+    changed: list[AppSettings] = []
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
     modal_calls: list[str] = []
 
     class DummyModal:
@@ -3641,42 +3678,41 @@ def test_on_vrc_mic_click_returns_when_page_is_missing(monkeypatch: pytest.Monke
 
     view._on_vrc_mic_click(None)
 
+    assert settings.osc.vrc_mic_intercept is True
+    assert view._vrc_mic_text.content.value == t("settings.vrc_mic.on")
+    assert changed == [settings]
     assert modal_calls == []
 
 
-def test_on_vrc_mic_click_opens_modal_with_current_selection(
+def test_on_vrc_mic_click_toggles_immediately_without_modal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
     settings.osc.vrc_mic_intercept = True
+    changed: list[AppSettings] = []
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
     attach_dummy_page(monkeypatch, view)
 
-    captured: dict[str, object] = {}
+    modal_calls: list[str] = []
 
     class DummyModal:
-        def __init__(self, _page, title, options, _on_select, *, show_description=False):
-            captured["title"] = title
-            captured["options"] = options
-            captured["show_description"] = show_description
+        def __init__(self, *_args, **_kwargs) -> None:
+            modal_calls.append("created")
 
         def open(self, current: str) -> None:
-            captured["current"] = current
+            modal_calls.append(f"opened:{current}")
 
     monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
+    monkeypatch.setattr(type(view._vrc_mic_text), "update", lambda self: None)
 
     view._on_vrc_mic_click(None)
 
-    options = captured["options"]
-    assert captured["title"] == t("settings.vrc_mic_intercept")
-    assert captured["show_description"] is True
-    assert [option.value for option in options] == ["on", "off"]
-    assert [option.label for option in options] == [
-        t("settings.vrc_mic.on"),
-        t("settings.vrc_mic.off"),
-    ]
-    assert captured["current"] == "on"
+    assert settings.osc.vrc_mic_intercept is False
+    assert view._vrc_mic_text.content.value == t("settings.vrc_mic.off")
+    assert changed == [settings]
+    assert modal_calls == []
 
 
 def test_on_vrc_mic_selected_updates_setting_label_and_emits_change(
