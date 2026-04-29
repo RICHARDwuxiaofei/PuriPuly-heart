@@ -133,6 +133,20 @@ interface DiscordEligibilityDecision {
   message?: string;
 }
 
+class DiscordIssueSuccessMonitoringStateError extends Error {
+  readonly issueSuccessRecorded: boolean;
+
+  constructor(input: { cause: unknown; issueSuccessRecorded: boolean }) {
+    super(
+      input.cause instanceof Error
+        ? input.cause.message
+        : 'Discord issue-success monitoring state update failed',
+    );
+    this.name = 'DiscordIssueSuccessMonitoringStateError';
+    this.issueSuccessRecorded = input.issueSuccessRecorded;
+  }
+}
+
 export async function handleDiscordAuthStart(
   c: Context<BrokerEnv>,
 ): Promise<Response> {
@@ -460,6 +474,13 @@ export async function handleDiscordOpenRouterIssue(
       managedCredentialRef: activeEntitlement.managed_credential_ref!,
       issuedAt,
       now,
+      sensitiveValues: collectDiscordIssueSensitiveValues({
+        input: input.value,
+        session,
+        discordTokenResponse,
+        discordUser,
+        childKey,
+      }),
     });
 
     return await discordIssueSuccessResponse(c, {
@@ -481,6 +502,16 @@ export async function handleDiscordOpenRouterIssue(
         discordUserRef,
       });
     } else {
+      if (
+        error instanceof DiscordIssueSuccessMonitoringStateError &&
+        error.issueSuccessRecorded
+      ) {
+        await deleteDiscordIssueSuccessRecord(c.env.BROKER_DB, {
+          installationId: input.value.installationId,
+          managedCredentialRef: childKey.hash,
+          observedAt: issuedAt,
+        });
+      }
       await handleDiscordManagedChildKeyFailure(c, {
         installationId: input.value.installationId,
         releaseSessionRef: stateHash,
@@ -1703,20 +1734,41 @@ async function runDiscordIssueSuccessMonitoring(
     managedCredentialRef: string;
     issuedAt: string;
     now: Date;
+    sensitiveValues: string[];
   },
 ): Promise<void> {
   try {
-    const network = await extractRequestNetworkMetadata(c, c.env.BROKER_DB);
-    await recordIssueSuccess(c.env.BROKER_DB, {
-      installationId: input.installationId,
-      managedCredentialRef: input.managedCredentialRef,
-      observedAt: input.issuedAt,
-      network,
-    });
-    const monitoringResult = await evaluateImmediateAbuseState(
-      c.env.BROKER_DB,
-      input.now,
-    );
+    let issueSuccessRecorded = false;
+    let monitoringResult: Awaited<ReturnType<typeof evaluateImmediateAbuseState>> | null =
+      null;
+
+    try {
+      const network = await extractRequestNetworkMetadata(c, c.env.BROKER_DB);
+      await recordIssueSuccess(c.env.BROKER_DB, {
+        installationId: input.installationId,
+        managedCredentialRef: input.managedCredentialRef,
+        observedAt: input.issuedAt,
+        network,
+      });
+      issueSuccessRecorded = true;
+      monitoringResult = await evaluateImmediateAbuseState(
+        c.env.BROKER_DB,
+        input.now,
+      );
+    } catch (error) {
+      logDiscordIssueMonitoringFailure({
+        installationId: input.installationId,
+        managedCredentialRef: input.managedCredentialRef,
+        stage: 'record_or_evaluate',
+        error,
+        sensitiveValues: input.sensitiveValues,
+      });
+      throw new DiscordIssueSuccessMonitoringStateError({
+        cause: error,
+        issueSuccessRecorded,
+      });
+    }
+
     const sideEffectPromise = deliverImmediateMonitoringSideEffects(
       c.env,
       monitoringResult,
@@ -1726,6 +1778,7 @@ async function runDiscordIssueSuccessMonitoring(
         managedCredentialRef: input.managedCredentialRef,
         stage: 'deliver_side_effects',
         error,
+        sensitiveValues: input.sensitiveValues,
       });
     });
 
@@ -1741,11 +1794,16 @@ async function runDiscordIssueSuccessMonitoring(
 
     await sideEffectPromise;
   } catch (error) {
+    if (error instanceof DiscordIssueSuccessMonitoringStateError) {
+      throw error;
+    }
+
     logDiscordIssueMonitoringFailure({
       installationId: input.installationId,
       managedCredentialRef: input.managedCredentialRef,
-      stage: 'record_or_evaluate',
+      stage: 'unexpected',
       error,
+      sensitiveValues: input.sensitiveValues,
     });
   }
 }
@@ -1753,16 +1811,39 @@ async function runDiscordIssueSuccessMonitoring(
 function logDiscordIssueMonitoringFailure(input: {
   installationId: string;
   managedCredentialRef: string;
-  stage: 'record_or_evaluate' | 'deliver_side_effects';
+  stage: 'record_or_evaluate' | 'deliver_side_effects' | 'unexpected';
   error: unknown;
+  sensitiveValues: string[];
 }): void {
   console.error('discord_issue_success_monitoring_failed', {
     installation_id: input.installationId,
     managed_credential_ref: input.managedCredentialRef,
     stage: input.stage,
-    error_message: input.error instanceof Error ? input.error.message : String(input.error),
+    error_message: redactSensitiveString(
+      input.error instanceof Error ? input.error.message : String(input.error),
+      input.sensitiveValues,
+    ),
     broker_timestamp: new Date().toISOString(),
   });
+}
+
+async function deleteDiscordIssueSuccessRecord(
+  db: D1Database,
+  input: {
+    installationId: string;
+    managedCredentialRef: string;
+    observedAt: string;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM broker_issue_success_events
+         WHERE installation_id = ?
+           AND managed_credential_ref = ?
+           AND observed_at = ?`,
+    )
+    .bind(input.installationId, input.managedCredentialRef, input.observedAt)
+    .run();
 }
 
 function resolveExecutionWaitUntil(

@@ -1134,6 +1134,215 @@ describe('Discord issue gate', () => {
       }),
     );
   });
+
+  it('issue-success recording failure after child-key creation cleans up and releases eligibility without leaking sensitive values', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const rawCode = 'discord-oauth-code-monitoring-record-redact';
+    const rawDiscordUserId = discordSnowflakeForAgeDays(31);
+    const rawEmail = 'monitoring-record-redaction@example.test';
+    const rawAccessToken = 'discord-access-token-monitoring-record-redact';
+    const rawRefreshToken = 'discord-refresh-token-monitoring-record-redact';
+    const rawOpenRouterChildKey = 'or-discord-managed-child-key-monitoring-record-redact';
+    const childKeyHash = 'hash_discord_managed_child_monitoring_record';
+    let rawState = '';
+    let rawPkceVerifier: string | null = null;
+    const env = createTestBrokerEnv({
+      beforeRun: ({ sql }) => {
+        if (sql.includes('INSERT INTO broker_issue_success_events')) {
+          throw new Error(
+            `record failed ${rawCode} ${rawState} ${rawPkceVerifier} ${rawAccessToken} ${rawRefreshToken} ${rawDiscordUserId} ${rawEmail} ${rawOpenRouterChildKey}`,
+          );
+        }
+      },
+    });
+    const started = await startDiscordSession('install-discord-monitoring-record-release', env);
+    rawState = started.state;
+    rawPkceVerifier = (await readSessionByState(env, started.state)).pkce_code_verifier;
+    const sensitiveValues = [
+      rawCode,
+      rawState,
+      rawPkceVerifier,
+      rawAccessToken,
+      rawRefreshToken,
+      rawDiscordUserId,
+      rawEmail,
+      rawOpenRouterChildKey,
+    ].filter((value): value is string => value !== null);
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const discordApi = mockDiscordApi({
+      rawChildKey: rawOpenRouterChildKey,
+      childKeyHash,
+      accessToken: rawAccessToken,
+      refreshToken: rawRefreshToken,
+      user: {
+        id: rawDiscordUserId,
+        verified: true,
+        email: rawEmail,
+      },
+    });
+
+    const response = await postDiscordIssue(
+      env,
+      await signedIssueRequest(started, {
+        code: rawCode,
+        hardware_hash: 'hardware-hash-monitoring-record-release',
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    const responseText = await response.text();
+    expectTextNotToContainSensitiveValues(responseText, sensitiveValues);
+    expectTextNotToContainSensitiveValues(
+      stringifyConsoleCalls(consoleErrorSpy),
+      sensitiveValues,
+    );
+    expect(discordApi.openRouterCreateCalls).toHaveLength(1);
+    expect(discordApi.openRouterGuardrailCalls).toHaveLength(1);
+    expect(discordApi.openRouterCleanupCalls.map(({ init }) => init?.method)).toEqual([
+      'PATCH',
+      'DELETE',
+    ]);
+    expect(readIssueSuccessEvents(env)).toEqual([]);
+    expect(countDiscordIdentities(env)).toBe(0);
+    expect(countDiscordEntitlements(env)).toBe(0);
+    await expect(readSessionByState(env, started.state)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'failed',
+        pkce_code_verifier: null,
+      }),
+    );
+  });
+
+  it('issue-success monitoring failure with cleanup failure records cleanup_required without leaking sensitive values', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const rawCode = 'discord-oauth-code-monitoring-evaluate-redact';
+    const rawDiscordUserId = discordSnowflakeForAgeDays(31);
+    const rawEmail = 'monitoring-evaluate-redaction@example.test';
+    const rawAccessToken = 'discord-access-token-monitoring-evaluate-redact';
+    const rawRefreshToken = 'discord-refresh-token-monitoring-evaluate-redact';
+    const rawOpenRouterChildKey = 'or-discord-managed-child-key-monitoring-evaluate-redact';
+    const childKeyHash = 'hash_discord_managed_child_monitoring_cleanup_required';
+    let rawState = '';
+    let rawPkceVerifier: string | null = null;
+    let failRuntimeStateUpdate = false;
+    const env = createTestBrokerEnv({
+      beforeRun: ({ sql }) => {
+        if (failRuntimeStateUpdate && sql.includes('UPDATE broker_config')) {
+          throw new Error(
+            `evaluate failed ${rawCode} ${rawState} ${rawPkceVerifier} ${rawAccessToken} ${rawRefreshToken} ${rawDiscordUserId} ${rawEmail} ${rawOpenRouterChildKey}`,
+          );
+        }
+      },
+    });
+    updateAbuseControls(env, (controls) => {
+      controls.immediateAlerts.warn1 = 1;
+      controls.immediateAlerts.warn2 = 2;
+      controls.immediateAlerts.warn3 = 3;
+      controls.immediateAlerts.critical = 4;
+      controls.asnFastPath.enabled = false;
+    });
+    insertInstallation(env, {
+      installationId: 'install-discord-monitoring-existing',
+      devicePublicKey: 'monitoring-existing-device-public-key',
+      hardwareHash: 'hardware-hash-monitoring-existing',
+      hardwareHashSaltVersion: 7,
+    });
+    env.__db
+      .prepare(
+        `INSERT INTO broker_issue_success_events (
+            installation_id,
+            managed_credential_ref,
+            observed_at
+          ) VALUES (?, ?, ?)`,
+      )
+      .run('install-discord-monitoring-existing', 'existing-monitoring-event', NOW_ISO);
+    const started = await startDiscordSession('install-discord-monitoring-cleanup-required', env);
+    rawState = started.state;
+    rawPkceVerifier = (await readSessionByState(env, started.state)).pkce_code_verifier;
+    const expectedDiscordUserRef = await deriveExpectedDiscordUserRef(
+      env.DISCORD_USER_REF_SECRET,
+      rawDiscordUserId,
+    );
+    const sensitiveValues = [
+      rawCode,
+      rawState,
+      rawPkceVerifier,
+      rawAccessToken,
+      rawRefreshToken,
+      rawDiscordUserId,
+      rawEmail,
+      rawOpenRouterChildKey,
+    ].filter((value): value is string => value !== null);
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const discordApi = mockDiscordApi({
+      openRouterMode: 'cleanup_failure',
+      rawChildKey: rawOpenRouterChildKey,
+      childKeyHash,
+      accessToken: rawAccessToken,
+      refreshToken: rawRefreshToken,
+      user: {
+        id: rawDiscordUserId,
+        verified: true,
+        email: rawEmail,
+      },
+      cleanupFailureMessage: `cleanup failed ${rawCode} ${rawState} ${rawPkceVerifier} ${rawAccessToken} ${rawRefreshToken} ${rawDiscordUserId} ${rawEmail} ${rawOpenRouterChildKey}`,
+    });
+    failRuntimeStateUpdate = true;
+
+    const response = await postDiscordIssue(
+      env,
+      await signedIssueRequest(started, {
+        code: rawCode,
+        hardware_hash: 'hardware-hash-monitoring-cleanup-required',
+      }),
+    );
+
+    expect(response.status).toBe(500);
+    const responseText = await response.text();
+    expectTextNotToContainSensitiveValues(responseText, sensitiveValues);
+    expectTextNotToContainSensitiveValues(
+      stringifyConsoleCalls(consoleErrorSpy),
+      sensitiveValues,
+    );
+    expect(discordApi.openRouterCreateCalls).toHaveLength(1);
+    expect(discordApi.openRouterGuardrailCalls).toHaveLength(1);
+    expect(discordApi.openRouterCleanupCalls.map(({ init }) => init?.method)).toEqual([
+      'PATCH',
+      'DELETE',
+    ]);
+    expect(
+      readIssueSuccessEvents(env).some(
+        (event) => event.managed_credential_ref === childKeyHash,
+      ),
+    ).toBe(false);
+    await expect(readEntitlement(env, started.installationId)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'pending_release',
+        managed_credential_ref: childKeyHash,
+        issued_at: null,
+        expires_at: null,
+        discord_user_ref: expectedDiscordUserRef,
+        discord_issue_status: 'cleanup_required',
+        discord_issue_delivered_at: null,
+      }),
+    );
+    await expect(readDiscordIdentity(env, expectedDiscordUserRef)).resolves.toEqual(
+      expect.objectContaining({
+        entitlement_installation_id: started.installationId,
+        status: 'cleanup_required',
+      }),
+    );
+    await expect(readSessionByState(env, started.state)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'failed',
+        pkce_code_verifier: null,
+      }),
+    );
+  });
 });
 
 describe('Discord eligibility', () => {
@@ -1563,7 +1772,8 @@ function mockDiscordApi(options: {
     | 'success'
     | 'create_failure'
     | 'guardrail_failure'
-    | 'guardrail_failure_cleanup_failure';
+    | 'guardrail_failure_cleanup_failure'
+    | 'cleanup_failure';
   rawChildKey?: string;
   childKeyHash?: string;
   accessToken?: string;
@@ -1647,7 +1857,10 @@ function mockDiscordApi(options: {
 
     if (url === `${OPENROUTER_KEYS_URL}/${childKeyHash}` && method === 'PATCH') {
       openRouterCleanupCalls.push({ input, init });
-      if (options.openRouterMode === 'guardrail_failure_cleanup_failure') {
+      if (
+        options.openRouterMode === 'guardrail_failure_cleanup_failure' ||
+        options.openRouterMode === 'cleanup_failure'
+      ) {
         return jsonResponse(
           {
             error: {
@@ -1663,7 +1876,10 @@ function mockDiscordApi(options: {
 
     if (url === `${OPENROUTER_KEYS_URL}/${childKeyHash}` && method === 'DELETE') {
       openRouterCleanupCalls.push({ input, init });
-      if (options.openRouterMode === 'guardrail_failure_cleanup_failure') {
+      if (
+        options.openRouterMode === 'guardrail_failure_cleanup_failure' ||
+        options.openRouterMode === 'cleanup_failure'
+      ) {
         return jsonResponse(
           {
             error: {
