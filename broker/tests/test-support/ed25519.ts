@@ -1,3 +1,5 @@
+import { sha256Base64Url } from './hash';
+
 const encoder = new TextEncoder();
 
 export interface DeviceKeyPair {
@@ -28,6 +30,22 @@ export interface SignedIssueRequestInput {
   reason: string;
   budget_usd: number;
   model: string;
+  signed_at: string;
+}
+
+export interface SignedDiscordIssueRequestInput {
+  installation_id: string;
+  device_public_key: string;
+  state: string;
+  code: string;
+  redirect_uri: string;
+  hardware_hash: string;
+  hardware_hash_salt_version: number;
+  app_version: string;
+  reason: string;
+  budget_usd: number;
+  model: string;
+  issue_nonce: string;
   signed_at: string;
 }
 
@@ -91,6 +109,25 @@ export async function signCanonicalIssueRequest(
   return {
     ...input,
     signature: await signPayload(privateKey, canonicalIssuePayload(input)),
+  };
+}
+
+export async function signCanonicalDiscordIssueRequest(
+  privateKey: CryptoKey,
+  input: SignedDiscordIssueRequestInput,
+): Promise<
+  SignedDiscordIssueRequestInput & {
+    signature_alg: 'ed25519';
+    signature: string;
+  }
+> {
+  return {
+    ...input,
+    signature_alg: 'ed25519',
+    signature: await signPayload(
+      privateKey,
+      await canonicalDiscordIssuePayload(input),
+    ),
   };
 }
 
@@ -170,6 +207,30 @@ function nonCanonicalIssuePayload(input: SignedIssueRequestInput): Uint8Array {
   );
 }
 
+async function canonicalDiscordIssuePayload(
+  input: SignedDiscordIssueRequestInput,
+): Promise<Uint8Array> {
+  return encoder.encode(
+    [
+      'POST',
+      '/v1/providers/openrouter/discord/issue',
+      input.installation_id,
+      input.device_public_key,
+      input.state,
+      await sha256Base64Url(input.code),
+      input.redirect_uri,
+      input.hardware_hash,
+      String(input.hardware_hash_salt_version),
+      input.app_version,
+      input.reason,
+      String(input.budget_usd),
+      input.model,
+      input.issue_nonce,
+      input.signed_at,
+    ].join('\n'),
+  );
+}
+
 async function signPayload(
   privateKey: CryptoKey,
   payload: Uint8Array,
@@ -182,7 +243,7 @@ async function signPayload(
   return encodeBase64Url(new Uint8Array(signature));
 }
 
-function encodeBase64Url(bytes: Uint8Array): string {
+export function encodeBase64Url(bytes: Uint8Array): string {
   const binary = Array.from(bytes, (value) => String.fromCharCode(value)).join('');
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/u, '');
 }
