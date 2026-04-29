@@ -13,7 +13,8 @@ pub(crate) use types::{
 };
 pub use types::{
     BlockBounds, BlockCacheKey, CaptionBlock, CaptionBlockVariant, CaptionChannel,
-    CaptionLayoutResult, CaptionLineLayout, CaptionPresentation, CaptionRenderError, DamageBand,
-    LayoutCacheKey, LineCacheKey, LineRole, RenderDiagnostics, ResolvedBlockLayout,
-    ResolvedFrameLayout, ResolvedLineLayout, VisibleCaptionBlock, VisualBounds,
+    CaptionDebugOverlay, CaptionLayoutResult, CaptionLineLayout, CaptionPresentation,
+    CaptionRenderError, DamageBand, LayoutCacheKey, LineCacheKey, LineRole, RenderDiagnostics,
+    ResolvedBlockLayout, ResolvedFrameLayout, ResolvedLineLayout, VisibleCaptionBlock,
+    VisualBounds,
 };

@@ -238,6 +238,11 @@ Installer_output/
 .agents/
 docs/plans/
 docs/superpowers
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/specs/
+docs/superpowers/specs/*
+!docs/superpowers/specs/2026-04-28-peer-burst-as-product-permanent.md
 .worktrees/
 .superpowers/
 /settings.json

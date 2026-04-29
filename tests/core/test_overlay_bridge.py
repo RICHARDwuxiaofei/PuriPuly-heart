@@ -370,6 +370,37 @@ async def test_overlay_bridge_broadcasts_runtime_logging_mode_updates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_overlay_bridge_replace_snapshot_does_not_log_snapshot_updated(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bridge = OverlayBridge(
+        session_token="expected-token",
+        overlay_instance_id="quiet-overlay",
+        initial_snapshot=OverlayPresentationSnapshot(
+            revision=0,
+            calibration=OverlayPresentationCalibration(),
+            blocks=[],
+        ),
+    )
+    connection = _RecordingSendConnection()
+    bridge._authenticated_connections.add(connection)  # type: ignore[arg-type]
+    caplog.set_level(logging.INFO, logger="puripuly_heart.core.overlay.bridge")
+
+    await bridge.replace_snapshot(
+        OverlayPresentationSnapshot(
+            revision=1,
+            calibration=OverlayPresentationCalibration(distance=1.5),
+            blocks=[],
+        )
+    )
+
+    assert connection.sent_payloads[-1]["type"] == "snapshot"
+    assert not any(
+        "[OverlayBridge] Snapshot updated" in record.getMessage() for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_overlay_bridge_records_disconnect_code_and_reason(
     tmp_path,
 ) -> None:

@@ -8,23 +8,23 @@ use tokio::io::{self, AsyncWriteExt};
 use tokio::time::{sleep_until, Instant};
 
 use crate::bridge::{BridgeClient, BridgeError, BridgeIncoming, OverlayBridgeEvent};
-use crate::logging::OverlayLogger;
+use crate::logging::{OverlayLogger, OverlayLoggingMode};
 use crate::manifest::{
     load_manifest, validate_manifest, OverlayManifest, EXPECTED_CONTRACT_VERSION,
 };
 #[cfg(test)]
 use crate::openvr::OpenVrError;
 use crate::openvr::{
-    format_openvr_visibility_api_call_log, perform_startup_preflight, OpenVrOverlay,
-    OpenVrStartupPreflightError, OverlayFrameSubmitter,
+    format_openvr_visibility_api_call_log, perform_startup_preflight, FrameTimingSample,
+    OpenVrOverlay, OpenVrStartupPreflightError, OverlayFrameSubmitter,
 };
 use crate::renderer::{
-    CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutResult, CaptionPresentation,
-    CaptionRenderer, VisibleCaptionBlock,
+    CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionDebugOverlay, CaptionLayoutResult,
+    CaptionPresentation, CaptionRenderer, RenderDiagnostics, VisibleCaptionBlock,
 };
 use crate::state::{
     OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationSnapshot,
-    OverlayScene, OverlayState,
+    OverlayScene, OverlaySlot, OverlayState,
 };
 
 const EMPTY_OVERLAY_HIDE_DELAY: Duration = Duration::from_millis(500);
@@ -278,6 +278,21 @@ impl OverlayRuntime {
         self.redraw_requested = false;
     }
 
+    fn apply_runtime_logging_mode(
+        &mut self,
+        logger: &OverlayLogger,
+        mode: OverlayLoggingMode,
+    ) -> bool {
+        let was_detailed = logger.is_detailed();
+        logger.set_mode(mode);
+        let is_detailed = logger.is_detailed();
+        let changed = was_detailed != is_detailed;
+        if changed {
+            self.redraw_requested = true;
+        }
+        changed
+    }
+
     async fn emit_snapshot_slot_correlation_if_changed(
         &mut self,
         logger: &OverlayLogger,
@@ -290,7 +305,11 @@ impl OverlayRuntime {
         };
         self.last_snapshot_slot_correlation_signature = Some(signature);
         if should_log {
-            log_runtime_info(logger, format_snapshot_slot_correlation_log(self.state(), &rows)).await?;
+            log_runtime_info(
+                logger,
+                format_snapshot_slot_correlation_log(self.state(), &rows),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -475,11 +494,14 @@ impl OverlayRuntime {
         openvr
             .apply_calibration(self.state.calibration())
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
-        let blocks = self.caption_blocks();
+        let detailed_logging = logger.is_detailed();
+        let blocks = self.caption_blocks_for_render(detailed_logging);
         self.emit_pending_peer_overlay_first_emit_hooks(logger)
             .await?;
         log_runtime_info(logger, format_caption_blocks_built_log(&blocks)).await?;
         let has_drawable_text = blocks.iter().any(CaptionBlock::has_drawable_text);
+        let debug_overlay =
+            debug_overlay_for_frame(detailed_logging, self.state.snapshot().revision, &blocks);
         let peer_overlay_first_render_ids = peer_overlay_first_render_block_ids_from_caption_blocks(
             &blocks,
             &self.pending_peer_first_render_ids,
@@ -502,12 +524,13 @@ impl OverlayRuntime {
                 .map_err(|error| RuntimeFailure::Render(error.to_string()))?
         } else {
             renderer
-                .render_blocks(blocks)
+                .render_blocks_with_debug_overlay(blocks, debug_overlay)
                 .map_err(|error| RuntimeFailure::Render(error.to_string()))?
         };
         let self_block_count = visible_self_block_count(frame.layout());
         let fully_transparent = frame.is_fully_transparent();
-        let rendered_diagnostic_rows = collect_rendered_diagnostic_rows(self.state(), frame.layout());
+        let rendered_diagnostic_rows =
+            collect_rendered_diagnostic_rows(self.state(), frame.layout());
         log_runtime_info(
             logger,
             format_frame_rendered_log(frame.layout(), fully_transparent),
@@ -565,7 +588,6 @@ impl OverlayRuntime {
         }
         self.emit_visible_update_rendered_diagnostics(logger, &rendered_diagnostic_rows)
             .await?;
-        let detailed_logging = logger.is_detailed();
         let submit_started = if detailed_logging {
             Some(Instant::now())
         } else {
@@ -574,8 +596,7 @@ impl OverlayRuntime {
         openvr
             .submit_frame(&frame)
             .map_err(|error| RuntimeFailure::OpenVr(error.to_string()))?;
-        let submit_duration_us =
-            submit_started.map(|start| start.elapsed().as_micros());
+        let submit_duration_us = submit_started.map(|start| start.elapsed().as_micros());
         if should_show_after_submit {
             openvr
                 .set_overlay_visible(true)
@@ -609,9 +630,16 @@ impl OverlayRuntime {
                 ),
             )
             .await?;
+            log_runtime_info(logger, format_cache_stats_log(frame.diagnostics())).await?;
         }
         if detailed_logging {
-            self.sample_and_log_frame_timing(openvr, logger).await?;
+            self.sample_and_log_frame_timing(
+                openvr,
+                logger,
+                self.state.snapshot().revision,
+                submit_duration_us,
+            )
+            .await?;
         }
         self.last_submitted_had_self = self_block_count > 0;
         self.redraw_requested = false;
@@ -665,7 +693,10 @@ impl OverlayRuntime {
         match message {
             Ok(BridgeIncoming::Heartbeat) => Ok(true),
             Ok(BridgeIncoming::Control(control)) => {
-                logger.set_mode(control.logging_mode);
+                if self.apply_runtime_logging_mode(logger, control.logging_mode) {
+                    self.submit_frame_if_needed(renderer, openvr, bridge, logger)
+                        .await?;
+                }
                 Ok(true)
             }
             Ok(BridgeIncoming::Snapshot(snapshot)) => {
@@ -676,7 +707,8 @@ impl OverlayRuntime {
                     format_state_snapshot_log(&outcome, self.state(), self.redraw_requested),
                 )
                 .await?;
-                self.emit_snapshot_slot_correlation_if_changed(logger).await?;
+                self.emit_snapshot_slot_correlation_if_changed(logger)
+                    .await?;
                 self.emit_pending_visible_update_applied_diagnostics(logger)
                     .await?;
                 self.submit_frame_if_needed(renderer, openvr, bridge, logger)
@@ -776,6 +808,8 @@ impl OverlayRuntime {
         &mut self,
         openvr: &S,
         logger: &OverlayLogger,
+        revision: u64,
+        submit_duration_us: Option<u128>,
     ) -> Result<(), RuntimeFailure> {
         const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
         let now = Instant::now();
@@ -790,19 +824,7 @@ impl OverlayRuntime {
         };
         log_runtime_info(
             logger,
-            format!(
-                "openvr_frame_timing frame_index={} num_frame_presents={} num_mis_presented={} num_dropped_frames={} client_frame_interval_ms={:.2} present_call_cpu_ms={:.2} wait_for_present_cpu_ms={:.2} compositor_render_cpu_ms={:.2} total_render_gpu_ms={:.2} post_submit_gpu_ms={:.2}",
-                t.frame_index,
-                t.num_frame_presents,
-                t.num_mis_presented,
-                t.num_dropped_frames,
-                t.client_frame_interval_ms,
-                t.present_call_cpu_ms,
-                t.wait_for_present_cpu_ms,
-                t.compositor_render_cpu_ms,
-                t.total_render_gpu_ms,
-                t.post_submit_gpu_ms,
-            ),
+            format_frame_timing_log(revision, &t, submit_duration_us),
         )
         .await?;
         Ok(())
@@ -815,13 +837,20 @@ fn peer_overlay_first_emit_block_ids_from_snapshot(
     snapshot
         .blocks
         .iter()
-        .filter(|block| {
-            block.channel == "peer"
-                && block.block_variant == OverlayPresentationBlockVariant::Finalized
-                && !block.primary_text.trim().is_empty()
-        })
+        .filter(|block| is_peer_overlay_first_emit_candidate(block))
         .map(|block| block.id.clone())
         .collect()
+}
+
+fn is_peer_overlay_first_emit_candidate(block: &OverlayPresentationBlock) -> bool {
+    block.channel == "peer"
+        && matches!(
+            block.block_variant,
+            OverlayPresentationBlockVariant::ActivePeer
+                | OverlayPresentationBlockVariant::Finalized
+        )
+        && (!block.primary_text.trim().is_empty()
+            || (block.secondary_enabled && !block.secondary_text.trim().is_empty()))
 }
 
 fn peer_overlay_first_render_block_ids_from_caption_blocks(
@@ -831,13 +860,19 @@ fn peer_overlay_first_render_block_ids_from_caption_blocks(
     blocks
         .iter()
         .filter(|block| {
-            pending.contains(&block.id)
-                && block.channel == Some(CaptionChannel::PeerChannel)
-                && block.block_variant == CaptionBlockVariant::Finalized
-                && block.has_drawable_text()
+            pending.contains(&block.id) && is_peer_overlay_first_render_candidate(block)
         })
         .map(|block| block.id.clone())
         .collect()
+}
+
+fn is_peer_overlay_first_render_candidate(block: &CaptionBlock) -> bool {
+    block.channel == Some(CaptionChannel::PeerChannel)
+        && matches!(
+            block.block_variant,
+            CaptionBlockVariant::ActivePeer | CaptionBlockVariant::Finalized
+        )
+        && block.has_drawable_text()
 }
 
 fn format_peer_overlay_stage_log(stage: &str, block_id: &str) -> String {
@@ -859,6 +894,7 @@ fn log_runtime_secondary_state(enabled: bool, text: &str) -> String {
 fn overlay_variant_name(variant: OverlayPresentationBlockVariant) -> &'static str {
     match variant {
         OverlayPresentationBlockVariant::ActiveSelf => "active_self",
+        OverlayPresentationBlockVariant::ActivePeer => "active_peer",
         OverlayPresentationBlockVariant::Finalized => "finalized",
     }
 }
@@ -866,6 +902,7 @@ fn overlay_variant_name(variant: OverlayPresentationBlockVariant) -> &'static st
 fn caption_variant_name(variant: CaptionBlockVariant) -> &'static str {
     match variant {
         CaptionBlockVariant::ActiveSelf => "active_self",
+        CaptionBlockVariant::ActivePeer => "active_peer",
         CaptionBlockVariant::Finalized => "finalized",
     }
 }
@@ -1135,7 +1172,10 @@ fn format_two_row_window_rows(rows: &[RenderedDiagnosticRow]) -> String {
 }
 
 fn two_row_window_slot_signature(rows: &[RenderedDiagnosticRow]) -> Vec<u64> {
-    let mut signature = rows.iter().map(|row| row.row.slot_order).collect::<Vec<_>>();
+    let mut signature = rows
+        .iter()
+        .map(|row| row.row.slot_order)
+        .collect::<Vec<_>>();
     signature.sort_unstable();
     signature
 }
@@ -1176,6 +1216,78 @@ fn format_caption_blocks_built_log(blocks: &[CaptionBlock]) -> String {
             .collect::<Vec<_>>()
             .join("; ")
     )
+}
+
+fn short_tail(value: &str) -> String {
+    let trimmed = value.trim();
+    let without_prefix = trimmed
+        .strip_prefix("peer:")
+        .or_else(|| trimmed.strip_prefix("self:"))
+        .unwrap_or(trimmed);
+    let chars = without_prefix.chars().collect::<Vec<_>>();
+    let start = chars.len().saturating_sub(8);
+    chars[start..].iter().collect()
+}
+
+fn stable_short_hash(value: &str) -> u32 {
+    let mut hash = 0x811c9dc5u32;
+    for byte in value.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    hash
+}
+
+fn debug_watermark_label_for_frame(revision: u64, blocks: &[CaptionBlock]) -> Option<String> {
+    if !blocks.iter().any(CaptionBlock::has_drawable_text) {
+        return None;
+    }
+
+    let active_peer = blocks.iter().find(|block| {
+        block.channel == Some(CaptionChannel::PeerChannel)
+            && block.block_variant == CaptionBlockVariant::ActivePeer
+            && block.has_drawable_text()
+    });
+
+    let active_peer_tail = active_peer
+        .map(|block| short_tail(&block.id))
+        .unwrap_or_else(|| "none".to_string());
+
+    let hash_input = active_peer
+        .map(|block| format!("{}\n{}", block.primary_text, block.secondary_text))
+        .unwrap_or_default();
+    let hash = stable_short_hash(&hash_input) & 0xffff;
+
+    let block_ids = blocks
+        .iter()
+        .filter(|block| block.has_drawable_text())
+        .take(3)
+        .map(|block| {
+            let prefix = if block.channel == Some(CaptionChannel::PeerChannel) {
+                "peer"
+            } else {
+                "self"
+            };
+            format!("{}:{}", prefix, short_tail(&block.id))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    Some(format!(
+        "DBG r{} ap={} h={:04x} b={}",
+        revision, active_peer_tail, hash, block_ids
+    ))
+}
+
+fn debug_overlay_for_frame(
+    detailed_logging: bool,
+    revision: u64,
+    blocks: &[CaptionBlock],
+) -> Option<CaptionDebugOverlay> {
+    if !detailed_logging {
+        return None;
+    }
+    debug_watermark_label_for_frame(revision, blocks).and_then(CaptionDebugOverlay::new)
 }
 
 fn format_visible_block_summary(block: &VisibleCaptionBlock) -> String {
@@ -1234,6 +1346,38 @@ fn format_frame_submitted_log(
         line.push_str(&format!(" submit_duration_us={duration_us}"));
     }
     line
+}
+
+fn format_frame_timing_log(
+    revision: u64,
+    timing: &FrameTimingSample,
+    submit_duration_us: Option<u128>,
+) -> String {
+    let submit_duration = submit_duration_us
+        .map(|duration| duration.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "frame_timing revision={} dropped_frames={} post_submit_gpu_ms={:.2} total_render_gpu_ms={:.2} submit_duration_us={}",
+        revision,
+        timing.num_dropped_frames,
+        timing.post_submit_gpu_ms,
+        timing.total_render_gpu_ms,
+        submit_duration,
+    )
+}
+
+fn format_cache_stats_log(diagnostics: &RenderDiagnostics) -> String {
+    format!(
+        "cache_stats text_format_size={} layout_size={} line_size={} block_size={} line_hits={} line_misses={} block_hits={} block_misses={}",
+        diagnostics.text_format_cache_size,
+        diagnostics.layout_cache_size,
+        diagnostics.line_cache_size,
+        diagnostics.block_cache_size,
+        diagnostics.line_cache_hits,
+        diagnostics.line_cache_misses,
+        diagnostics.block_cache_hits,
+        diagnostics.block_cache_misses,
+    )
 }
 
 fn format_peer_first_render_visibility_checkpoint_log(
@@ -1390,7 +1534,9 @@ pub async fn run_with_manifest(manifest: OverlayManifest) -> i32 {
             runtime.redraw_requested(),
         ))
         .await;
-    let _ = runtime.emit_snapshot_slot_correlation_if_changed(&logger).await;
+    let _ = runtime
+        .emit_snapshot_slot_correlation_if_changed(&logger)
+        .await;
     if let Err(error) = runtime
         .submit_frame_if_needed(&renderer, &mut openvr, &mut bridge, &logger)
         .await
@@ -1518,53 +1664,113 @@ fn create_runtime_renderer() -> Result<CaptionRenderer, crate::renderer::Caption
 
 impl OverlayRuntime {
     pub fn caption_blocks(&self) -> Vec<CaptionBlock> {
+        self.caption_blocks_for_render(false)
+    }
+
+    pub fn caption_blocks_for_render(&self, visual_debug_prefixes: bool) -> Vec<CaptionBlock> {
         self.state
             .scene()
             .slots()
             .iter()
             .flatten()
-            .map(|strip| {
-                let channel = if strip.channel == "peer" {
-                    CaptionChannel::PeerChannel
-                } else {
-                    CaptionChannel::SelfChannel
-                };
-                let variant = match strip.block_variant {
-                    crate::state::OverlayPresentationBlockVariant::ActiveSelf => {
-                        CaptionBlockVariant::ActiveSelf
-                    }
-                    crate::state::OverlayPresentationBlockVariant::Finalized => {
-                        CaptionBlockVariant::Finalized
-                    }
-                };
-                CaptionBlock::new(strip.id.clone(), strip.primary_text.clone())
-                    .with_channel(channel)
-                    .with_variant(variant)
-                    .with_secondary_text(strip.secondary_text.clone(), strip.secondary_enabled)
-                    .with_visual_state(1.0, 0.0, 1.0)
-                    .with_slot(strip.slot_index, strip.anchor_top_px)
-            })
+            .map(|strip| caption_block_for_strip(strip, visual_debug_prefixes))
             .collect()
     }
+}
+
+fn caption_block_for_strip(strip: &OverlaySlot, visual_debug_prefixes: bool) -> CaptionBlock {
+    let channel = if strip.channel == "peer" {
+        CaptionChannel::PeerChannel
+    } else {
+        CaptionChannel::SelfChannel
+    };
+    let variant = match strip.block_variant {
+        crate::state::OverlayPresentationBlockVariant::ActiveSelf => {
+            CaptionBlockVariant::ActiveSelf
+        }
+        crate::state::OverlayPresentationBlockVariant::ActivePeer => {
+            CaptionBlockVariant::ActivePeer
+        }
+        crate::state::OverlayPresentationBlockVariant::Finalized => CaptionBlockVariant::Finalized,
+    };
+    let prefix = if visual_debug_prefixes {
+        peer_visual_debug_prefix_for_strip(strip)
+    } else {
+        None
+    };
+    let primary_text = apply_visual_debug_prefix(&strip.primary_text, prefix.as_deref());
+    let secondary_text = apply_visual_debug_prefix(&strip.secondary_text, prefix.as_deref());
+
+    CaptionBlock::new(strip.id.clone(), primary_text)
+        .with_channel(channel)
+        .with_variant(variant)
+        .with_secondary_text(secondary_text, strip.secondary_enabled)
+        .with_visual_state(1.0, 0.0, 1.0)
+        .with_slot(strip.slot_index, strip.anchor_top_px)
+}
+
+fn peer_visual_debug_prefix_for_strip(strip: &OverlaySlot) -> Option<String> {
+    if strip.channel != "peer" {
+        return None;
+    }
+    let turn_token = short_visual_debug_token(&strip.id);
+    let stage_token = strip
+        .update_id
+        .as_deref()
+        .map(short_visual_debug_token)
+        .unwrap_or_else(|| "src".to_string());
+    Some(format!("[P {}/{}]", turn_token, stage_token))
+}
+
+fn short_visual_debug_token(value: &str) -> String {
+    let trimmed = value.trim();
+    let without_prefix = trimmed
+        .strip_prefix("peer:")
+        .or_else(|| trimmed.strip_prefix("self:"))
+        .unwrap_or(trimmed);
+    let token = without_prefix
+        .chars()
+        .filter(|char| char.is_ascii_alphanumeric())
+        .take(4)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if token.is_empty() {
+        "none".to_string()
+    } else {
+        token
+    }
+}
+
+fn apply_visual_debug_prefix(text: &str, prefix: Option<&str>) -> String {
+    let Some(prefix) = prefix else {
+        return text.to_string();
+    };
+    if text.trim().is_empty() {
+        return text.to_string();
+    }
+    format!("{} {}", prefix, text)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_diagnostic_rows, collect_rendered_diagnostic_rows,
-        diagnostic_row_signature, format_caption_blocks_built_log, format_frame_rendered_log,
-        format_frame_submitted_log, format_overlay_visible_update_rendered_log,
-        format_peer_first_render_visibility_desync_suspected_log,
+        collect_diagnostic_rows, collect_rendered_diagnostic_rows, debug_overlay_for_frame,
+        debug_watermark_label_for_frame, diagnostic_row_signature, format_cache_stats_log,
+        format_caption_blocks_built_log, format_frame_rendered_log, format_frame_submitted_log,
+        format_frame_timing_log, format_overlay_visible_update_rendered_log,
         format_peer_first_render_visibility_checkpoint_log,
-        format_snapshot_received_log, format_snapshot_slot_correlation_log,
-        format_two_row_window_closed_log, peer_overlay_first_emit_block_ids_from_snapshot,
+        format_peer_first_render_visibility_desync_suspected_log, format_snapshot_received_log,
+        format_snapshot_slot_correlation_log, format_two_row_window_closed_log,
+        peer_overlay_first_emit_block_ids_from_snapshot,
         peer_overlay_first_render_block_ids_from_caption_blocks, prepare_openvr_runtime,
         DiagnosticRow, OverlayRuntime, RenderedDiagnosticRow, SnapshotApplyOutcome, StartupError,
         TwoRowWindowState,
     };
-    use crate::openvr::{OpenVrError, OpenVrStartupPreflightError};
+    use crate::logging::{OverlayLogger, OverlayLoggingMode};
+    use crate::openvr::{FrameTimingSample, OpenVrError, OpenVrStartupPreflightError};
     use crate::renderer::{
-        CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy, CaptionPresentation,
+        CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
+        CaptionPresentation, RenderDiagnostics,
     };
     use crate::state::{
         OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
@@ -1642,6 +1848,58 @@ mod tests {
     }
 
     #[test]
+    fn caption_blocks_for_render_prefixes_peer_lines_when_visual_debug_is_enabled() {
+        let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            revision: 3,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![
+                OverlayPresentationBlock {
+                    id: "peer:41c6ffff-1111-2222-3333-444455556666".to_string(),
+                    occupant_key: "peer-active".to_string(),
+                    appearance_seq: 1,
+                    channel: "peer".to_string(),
+                    block_variant: OverlayPresentationBlockVariant::ActivePeer,
+                    primary_text: String::new(),
+                    secondary_text: "peer source".to_string(),
+                    secondary_enabled: true,
+                    update_id: None,
+                    origin_wall_clock_ms: None,
+                    session_scope: None,
+                },
+                OverlayPresentationBlock {
+                    id: "peer:9c27ffff-1111-2222-3333-444455556666".to_string(),
+                    occupant_key: "peer-final".to_string(),
+                    appearance_seq: 2,
+                    channel: "peer".to_string(),
+                    block_variant: OverlayPresentationBlockVariant::Finalized,
+                    primary_text: "peer translation".to_string(),
+                    secondary_text: "peer original".to_string(),
+                    secondary_enabled: true,
+                    update_id: Some("3bd7ffff-1111-2222-3333-444455556666".to_string()),
+                    origin_wall_clock_ms: None,
+                    session_scope: None,
+                },
+            ],
+        });
+
+        let normal_blocks = runtime.caption_blocks_for_render(false);
+        let debug_blocks = runtime.caption_blocks_for_render(true);
+
+        assert_eq!(normal_blocks[0].secondary_text, "peer source");
+        assert_eq!(normal_blocks[1].primary_text, "peer translation");
+        assert_eq!(debug_blocks[0].primary_text, "");
+        assert_eq!(debug_blocks[0].secondary_text, "[P 41c6/src] peer source");
+        assert_eq!(
+            debug_blocks[1].primary_text,
+            "[P 9c27/3bd7] peer translation"
+        );
+        assert_eq!(
+            debug_blocks[1].secondary_text,
+            "[P 9c27/3bd7] peer original"
+        );
+    }
+
+    #[test]
     fn apply_snapshot_replaces_snapshot_blocks_and_calibration_without_retaining_removed_rows() {
         let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
             revision: 1,
@@ -1704,6 +1962,28 @@ mod tests {
     }
 
     #[test]
+    fn runtime_converts_active_peer_snapshot_to_active_peer_caption_block() {
+        let mut active_peer = slot_block("peer:active", "peer:turn-1", 1, "peer", "");
+        active_peer.block_variant = OverlayPresentationBlockVariant::ActivePeer;
+        active_peer.secondary_text = "Can you hear me?".into();
+        active_peer.secondary_enabled = true;
+        let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            revision: 5,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![active_peer],
+        });
+
+        let blocks = runtime.caption_blocks();
+
+        assert_eq!(blocks[0].id, "peer:active");
+        assert_eq!(blocks[0].block_variant, CaptionBlockVariant::ActivePeer);
+        assert_eq!(blocks[0].channel, Some(CaptionChannel::PeerChannel));
+        assert_eq!(blocks[0].primary_text, "");
+        assert_eq!(blocks[0].secondary_text, "Can you hear me?");
+        assert!(blocks[0].secondary_enabled);
+    }
+
+    #[test]
     fn runtime_detects_peer_overlay_first_emit_blocks_from_snapshot() {
         let snapshot = OverlayPresentationSnapshot {
             revision: 4,
@@ -1717,6 +1997,24 @@ mod tests {
         assert_eq!(
             peer_overlay_first_emit_block_ids_from_snapshot(&snapshot),
             vec!["peer:newer".to_string()]
+        );
+    }
+
+    #[test]
+    fn runtime_detects_active_peer_first_emit_blocks_from_snapshot() {
+        let mut active_peer = slot_block("peer:active", "peer:turn-1", 1, "peer", "");
+        active_peer.block_variant = OverlayPresentationBlockVariant::ActivePeer;
+        active_peer.secondary_text = "source".into();
+        active_peer.secondary_enabled = true;
+        let snapshot = OverlayPresentationSnapshot {
+            revision: 6,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![active_peer],
+        };
+
+        assert_eq!(
+            peer_overlay_first_emit_block_ids_from_snapshot(&snapshot),
+            vec!["peer:active".to_string()]
         );
     }
 
@@ -1740,16 +2038,10 @@ mod tests {
             CaptionBlock::new("peer:blank", "")
                 .with_channel(CaptionChannel::PeerChannel)
                 .with_variant(CaptionBlockVariant::Finalized),
-            CaptionBlock::new(
-                "peer:11111111-1111-1111-1111-111111111111",
-                "translated",
-            )
+            CaptionBlock::new("peer:11111111-1111-1111-1111-111111111111", "translated")
                 .with_channel(CaptionChannel::PeerChannel)
                 .with_variant(CaptionBlockVariant::Finalized),
-            CaptionBlock::new(
-                "peer:22222222-2222-2222-2222-222222222222",
-                "newer",
-            )
+            CaptionBlock::new("peer:22222222-2222-2222-2222-222222222222", "newer")
                 .with_channel(CaptionChannel::PeerChannel)
                 .with_variant(CaptionBlockVariant::Finalized),
             CaptionBlock::new(
@@ -1770,6 +2062,24 @@ mod tests {
     }
 
     #[test]
+    fn runtime_detects_active_peer_first_render_for_pending_peer_block_ids() {
+        let pending = HashSet::from([String::from("peer:active")]);
+        let blocks = vec![
+            CaptionBlock::new("peer:active", "source")
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_variant(CaptionBlockVariant::ActivePeer),
+            CaptionBlock::new("peer:not-pending", "source")
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_variant(CaptionBlockVariant::ActivePeer),
+        ];
+
+        assert_eq!(
+            peer_overlay_first_render_block_ids_from_caption_blocks(&blocks, &pending),
+            vec!["peer:active".to_string()]
+        );
+    }
+
+    #[test]
     fn runtime_starts_empty_when_snapshot_has_no_blocks() {
         let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
             revision: 0,
@@ -1783,6 +2093,78 @@ mod tests {
             runtime.state().snapshot().calibration,
             OverlayPresentationCalibration::default()
         );
+    }
+
+    #[test]
+    fn debug_watermark_label_reports_revision_active_peer_and_hash() {
+        let blocks = vec![
+            CaptionBlock::new("peer:11111111-2222-3333-4444-555555555555", "")
+                .with_channel(CaptionChannel::PeerChannel)
+                .with_variant(CaptionBlockVariant::ActivePeer)
+                .with_secondary_text("Can you hear me?", true),
+            CaptionBlock::new("self:active", "hello")
+                .with_channel(CaptionChannel::SelfChannel)
+                .with_variant(CaptionBlockVariant::ActiveSelf),
+        ];
+
+        let label = debug_watermark_label_for_frame(73, &blocks).unwrap();
+
+        assert!(label.starts_with("DBG r73 "));
+        assert!(label.contains("ap=55555555"));
+        assert!(label.contains("h="));
+        assert!(label.contains("b=peer:55555555,self:active"));
+    }
+
+    #[test]
+    fn debug_watermark_label_is_absent_without_drawable_blocks() {
+        assert_eq!(debug_watermark_label_for_frame(73, &[]), None);
+    }
+
+    #[test]
+    fn debug_watermark_label_is_absent_when_only_disabled_secondary_has_text() {
+        let blocks = vec![CaptionBlock::new("peer:hidden", "")
+            .with_channel(CaptionChannel::PeerChannel)
+            .with_variant(CaptionBlockVariant::ActivePeer)
+            .with_secondary_text("hidden source", false)];
+
+        assert_eq!(debug_watermark_label_for_frame(73, &blocks), None);
+    }
+
+    #[test]
+    fn debug_overlay_for_frame_is_absent_in_basic_mode() {
+        let blocks = vec![CaptionBlock::new("self:active", "hello")
+            .with_channel(CaptionChannel::SelfChannel)
+            .with_variant(CaptionBlockVariant::ActiveSelf)];
+
+        assert!(debug_overlay_for_frame(false, 73, &blocks).is_none());
+    }
+
+    #[test]
+    fn debug_overlay_for_frame_is_present_in_detailed_mode_with_drawable_text() {
+        let blocks = vec![CaptionBlock::new("self:active", "hello")
+            .with_channel(CaptionChannel::SelfChannel)
+            .with_variant(CaptionBlockVariant::ActiveSelf)];
+
+        let overlay = debug_overlay_for_frame(true, 73, &blocks).unwrap();
+
+        assert!(overlay.label().starts_with("DBG r73 "));
+    }
+
+    #[tokio::test]
+    async fn runtime_logging_mode_change_requests_redraw_for_watermark_clear() {
+        let logger = OverlayLogger::open(std::env::temp_dir(), OverlayLoggingMode::Detailed)
+            .await
+            .unwrap();
+        let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot::default());
+        runtime.clear_redraw_flag();
+
+        assert!(runtime.apply_runtime_logging_mode(&logger, OverlayLoggingMode::Basic));
+        assert!(runtime.redraw_requested());
+
+        runtime.clear_redraw_flag();
+
+        assert!(!runtime.apply_runtime_logging_mode(&logger, OverlayLoggingMode::Basic));
+        assert!(!runtime.redraw_requested());
     }
 
     #[test]
@@ -1939,7 +2321,10 @@ mod tests {
 
         assert!(matches!(outcome, SnapshotApplyOutcome::Applied { .. }));
         assert_eq!(runtime.pending_visible_update_rows.len(), 1);
-        assert_eq!(runtime.pending_visible_update_rows[0].slot_order, slot_order);
+        assert_eq!(
+            runtime.pending_visible_update_rows[0].slot_order,
+            slot_order
+        );
         assert!(runtime
             .pending_visible_update_render_slot_orders
             .contains(&slot_order));
@@ -2037,11 +2422,8 @@ mod tests {
             rows_summary: super::format_two_row_window_rows(&rows),
             update_ids: vec!["upd-self-1".into(), "upd-peer-2".into()],
         };
-        let summary = format_two_row_window_closed_log(
-            9,
-            &window,
-            started_at + Duration::from_millis(420),
-        );
+        let summary =
+            format_two_row_window_closed_log(9, &window, started_at + Duration::from_millis(420));
 
         assert!(summary.contains("two_row_window_closed revision=9"));
         assert!(summary.contains("dwell_ms=420"));
@@ -2115,6 +2497,53 @@ mod tests {
         let summary_with_duration =
             format_frame_submitted_log(&layout, 7, false, false, true, true, Some(421));
         assert!(summary_with_duration.contains("submit_duration_us=421"));
+    }
+
+    #[test]
+    fn frame_timing_summary_reports_revision_gpu_and_submit_duration_fields() {
+        let sample = FrameTimingSample {
+            frame_index: 4,
+            num_frame_presents: 2,
+            num_mis_presented: 0,
+            num_dropped_frames: 1,
+            system_time_seconds: 12.5,
+            client_frame_interval_ms: 11.1,
+            present_call_cpu_ms: 0.2,
+            wait_for_present_cpu_ms: 0.3,
+            compositor_render_cpu_ms: 0.4,
+            total_render_gpu_ms: 0.56,
+            post_submit_gpu_ms: 0.23,
+        };
+
+        let summary = format_frame_timing_log(9, &sample, Some(421));
+
+        assert_eq!(
+            summary,
+            "frame_timing revision=9 dropped_frames=1 post_submit_gpu_ms=0.23 total_render_gpu_ms=0.56 submit_duration_us=421"
+        );
+
+        let summary_without_duration = format_frame_timing_log(9, &sample, None);
+        assert!(summary_without_duration.contains("submit_duration_us=none"));
+    }
+
+    #[test]
+    fn cache_stats_summary_reports_cache_sizes_and_hit_miss_counts() {
+        let diagnostics = RenderDiagnostics {
+            text_format_cache_size: 3,
+            layout_cache_size: 4,
+            line_cache_size: 5,
+            block_cache_size: 6,
+            line_cache_hits: 7,
+            line_cache_misses: 8,
+            block_cache_hits: 9,
+            block_cache_misses: 10,
+            ..RenderDiagnostics::default()
+        };
+
+        assert_eq!(
+            format_cache_stats_log(&diagnostics),
+            "cache_stats text_format_size=3 layout_size=4 line_size=5 block_size=6 line_hits=7 line_misses=8 block_hits=9 block_misses=10"
+        );
     }
 
     #[test]

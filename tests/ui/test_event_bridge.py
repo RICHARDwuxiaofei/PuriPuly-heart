@@ -16,7 +16,7 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseDiagnostics,
     ManagedOpenRouterUserFacingError,
 )
-from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
+from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.domain.events import STTSessionState, UIEvent, UIEventType
 from puripuly_heart.domain.models import OSCMessage, Transcript, Translation
 from puripuly_heart.ui import event_bridge as event_bridge_module
@@ -29,6 +29,7 @@ class DummyDashboard:
     def __init__(self) -> None:
         self.statuses: list[str] = []
         self.display_calls: list[tuple[str, str | None, bool]] = []
+        self.display_debug_prefixes: list[str | None] = []
         self.translation_calls: list[tuple[str, str | None]] = []
         self.translation_metadata_calls: list[dict[str, object]] = []
         self.notice_calls: list[str | None] = []
@@ -49,8 +50,10 @@ class DummyDashboard:
         source_text_len: int | None = None,
         transcript_kind: str | None = None,
         should_log: bool = False,
+        debug_prefix: str | None = None,
     ) -> None:
         self.display_calls.append((text, language_code, is_error))
+        self.display_debug_prefixes.append(debug_prefix)
 
     def set_display_translation_text(
         self,
@@ -65,6 +68,7 @@ class DummyDashboard:
         source_text_hash: str | None = None,
         source_text_len: int | None = None,
         logical_turn_key: str | None = None,
+        debug_prefix: str | None = None,
     ) -> None:
         self.translation_calls.append((text, language_code))
         self.translation_metadata_calls.append(
@@ -77,6 +81,7 @@ class DummyDashboard:
                 "source_text_hash": source_text_hash,
                 "source_text_len": source_text_len,
                 "logical_turn_key": logical_turn_key,
+                "debug_prefix": debug_prefix,
             }
         )
 
@@ -98,6 +103,7 @@ class FailingTranslationDashboard(DummyDashboard):
         source_text_hash: str | None = None,
         source_text_len: int | None = None,
         logical_turn_key: str | None = None,
+        debug_prefix: str | None = None,
     ) -> None:
         _ = (
             text,
@@ -110,6 +116,7 @@ class FailingTranslationDashboard(DummyDashboard):
             source_text_hash,
             source_text_len,
             logical_turn_key,
+            debug_prefix,
         )
         raise RuntimeError("dashboard setter failed")
 
@@ -369,8 +376,55 @@ async def test_event_bridge_passes_dashboard_translation_visual_commit_metadata_
             "source_text_hash": "src-hash-42",
             "source_text_len": 17,
             "logical_turn_key": "peer:turn-42",
+            "debug_prefix": None,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_event_bridge_passes_peer_debug_prefix_when_runtime_logging_is_detailed() -> None:
+    app = DummyApp()
+    runtime_logging = RuntimeLoggingCapture()
+    runtime_logging.mode = SessionLoggingMode.DETAILED
+    bridge = UIEventBridge(
+        app=app,
+        event_queue=asyncio.Queue(),
+        runtime_logging=runtime_logging,
+    )
+    utterance_id = uuid4()
+
+    await bridge._handle_event(
+        UIEvent(
+            type=UIEventType.TRANSCRIPT_FINAL,
+            payload=Transcript(
+                utterance_id=utterance_id,
+                text="peer source",
+                is_final=True,
+                channel="peer",
+            ),
+            source="Peer Mic",
+        )
+    )
+
+    await bridge._handle_event(
+        UIEvent(
+            type=UIEventType.TRANSLATION_DONE,
+            payload=Translation(
+                utterance_id=utterance_id,
+                text="peer translation",
+                channel="peer",
+                target_language="en",
+                update_id="3bd7ffff-1111-2222-3333-444455556666",
+            ),
+            source="Peer Mic",
+        )
+    )
+
+    turn_tail = str(utterance_id).replace("-", "")[:4]
+    assert app.view_dashboard.display_debug_prefixes[-1] == f"[P {turn_tail}/src]"
+    assert app.view_dashboard.translation_metadata_calls[-1]["debug_prefix"] == (
+        f"[P {turn_tail}/3bd7]"
+    )
 
 
 @pytest.mark.asyncio

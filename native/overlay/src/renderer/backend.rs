@@ -60,9 +60,13 @@ use super::types::{
     DEFAULT_SURFACE_HEIGHT_PX, DEFAULT_SURFACE_WIDTH_PX, TEXT_OUTLINE_COLOR,
 };
 use super::types::{
-    BlockBounds, CaptionLayoutResult, CaptionPresentation, CaptionRenderError, DamageBand,
-    RenderDiagnostics, ResolvedFrameLayout,
+    BlockBounds, CaptionDebugOverlay, CaptionLayoutResult, CaptionPresentation, CaptionRenderError,
+    DamageBand, RenderDiagnostics, ResolvedFrameLayout,
 };
+
+#[cfg(windows)]
+const DEBUG_OVERLAY_DAMAGE_BOTTOM_PX: f32 = 112.0;
+const DAMAGE_BAND_SAFETY_MARGIN_PX: f32 = 32.0;
 
 pub struct CaptionRenderer {
     policy: CaptionLayoutPolicy,
@@ -80,18 +84,38 @@ impl CaptionRenderer {
     }
 
     pub fn render_empty_frame(&self) -> Result<RenderedFrame, CaptionRenderError> {
-        self.render_blocks(Vec::new())
+        self.render_empty_frame_with_debug_overlay(None)
+    }
+
+    pub fn render_empty_frame_with_debug_overlay(
+        &self,
+        debug_overlay: Option<CaptionDebugOverlay>,
+    ) -> Result<RenderedFrame, CaptionRenderError> {
+        self.render_blocks_with_debug_overlay(Vec::new(), debug_overlay)
     }
 
     pub fn render_blocks(
         &self,
         blocks: Vec<super::types::CaptionBlock>,
     ) -> Result<RenderedFrame, CaptionRenderError> {
+        self.render_blocks_with_debug_overlay(blocks, None)
+    }
+
+    pub fn render_blocks_with_debug_overlay(
+        &self,
+        blocks: Vec<super::types::CaptionBlock>,
+        debug_overlay: Option<CaptionDebugOverlay>,
+    ) -> Result<RenderedFrame, CaptionRenderError> {
         let (width, height) = self.policy.default_surface_size();
         let presentation = self.presentation.borrow().clone();
-        self.backend
-            .borrow_mut()
-            .render(&self.policy, &presentation, blocks, width, height)
+        self.backend.borrow_mut().render(
+            &self.policy,
+            &presentation,
+            blocks,
+            width,
+            height,
+            debug_overlay,
+        )
     }
 
     fn with_policy(
@@ -126,6 +150,7 @@ pub struct RenderedFrame {
     layout: CaptionLayoutResult,
     diagnostics: RenderDiagnostics,
     texture: TextureHandle,
+    debug_overlay: Option<CaptionDebugOverlay>,
 }
 
 impl RenderedFrame {
@@ -151,6 +176,10 @@ impl RenderedFrame {
 
     pub fn diagnostics(&self) -> &RenderDiagnostics {
         &self.diagnostics
+    }
+
+    pub fn debug_overlay_label(&self) -> Option<&str> {
+        self.debug_overlay.as_ref().map(CaptionDebugOverlay::label)
     }
 
     #[cfg(windows)]
@@ -245,16 +274,19 @@ impl RenderBackend {
         blocks: Vec<super::types::CaptionBlock>,
         width: u32,
         height: u32,
+        debug_overlay: Option<CaptionDebugOverlay>,
     ) -> Result<RenderedFrame, CaptionRenderError> {
         match self {
             #[cfg(windows)]
-            Self::Windows(renderer) => renderer.render(policy, presentation, blocks, width, height),
+            Self::Windows(renderer) => {
+                renderer.render(policy, presentation, blocks, width, height, debug_overlay)
+            }
             #[cfg(not(windows))]
             Self::Test(renderer) => {
                 let _ = presentation;
                 let layout =
                     policy.resolve_blocks_for_presentation(blocks, width, height, presentation);
-                renderer.render(layout)
+                renderer.render(layout, debug_overlay)
             }
         }
     }
@@ -268,9 +300,18 @@ struct TestCaptionRenderer {
 
 #[cfg(not(windows))]
 impl TestCaptionRenderer {
-    fn render(&mut self, layout: ResolvedFrameLayout) -> Result<RenderedFrame, CaptionRenderError> {
+    fn render(
+        &mut self,
+        layout: ResolvedFrameLayout,
+        debug_overlay: Option<CaptionDebugOverlay>,
+    ) -> Result<RenderedFrame, CaptionRenderError> {
         let layout = prepare_layout_for_render(&mut self.previous_layout, layout);
         let fully_transparent = !resolved_layout_has_drawable_text(&layout);
+        let debug_overlay = if fully_transparent {
+            None
+        } else {
+            debug_overlay
+        };
         let public_layout: CaptionLayoutResult = layout.clone().into();
 
         Ok(RenderedFrame {
@@ -280,6 +321,7 @@ impl TestCaptionRenderer {
             layout: public_layout,
             diagnostics: RenderDiagnostics::default(),
             texture: TextureHandle::Test(TestTextureHandle::new()),
+            debug_overlay,
         })
     }
 }
@@ -298,6 +340,7 @@ struct WindowsCaptionRenderer {
     texture: ID3D11Texture2D,
     caches: WindowsRendererCaches,
     previous_layout: Option<ResolvedFrameLayout>,
+    previous_debug_overlay_visible: bool,
     _d3d_device: ID3D11Device,
 }
 
@@ -374,6 +417,7 @@ impl WindowsCaptionRenderer {
             texture,
             caches: WindowsRendererCaches::default(),
             previous_layout: None,
+            previous_debug_overlay_visible: false,
             _d3d_device: device,
         })
     }
@@ -552,7 +596,7 @@ impl WindowsCaptionRenderer {
     }
 
     fn prepared_line_visual(
-        &self,
+        &mut self,
         block: &ResolvedBlockLayout,
         line: &ResolvedLineLayout,
         role: LineRole,
@@ -586,6 +630,9 @@ impl WindowsCaptionRenderer {
         let mut visual_bounds: Option<super::types::VisualBounds> = None;
         let build_result = (|| {
             for (role, line) in block_lines(block) {
+                if line.text.trim().is_empty() {
+                    continue;
+                }
                 let cached = self.prepared_line_visual(block, line, role)?;
                 let offset = Vector2 {
                     X: policy.strip_horizontal_padding_px() as f32,
@@ -662,6 +709,66 @@ impl WindowsCaptionRenderer {
         Ok(cached)
     }
 
+    fn build_debug_overlay_visual(
+        &mut self,
+        policy: &CaptionLayoutPolicy,
+        overlay: &CaptionDebugOverlay,
+    ) -> Result<CachedLineVisual, CaptionRenderError> {
+        let label = overlay.label();
+        let font_size_px = 34.0;
+        let content_width_px = DEFAULT_SURFACE_WIDTH_PX as f32 - 96.0;
+        let line_height_px = 44.0;
+
+        let text_layout = self.create_text_layout(
+            policy,
+            label,
+            font_size_px,
+            content_width_px,
+            line_height_px,
+        )?;
+
+        unsafe {
+            self.cache_self_text_brush.SetOpacity(0.72);
+            self.cache_outline_brush.SetOpacity(0.85);
+        }
+
+        let visual = render_text_layout_to_command_list(
+            &self.d2d_context,
+            &self.d2d_factory,
+            &text_layout,
+            &self.cache_self_text_brush,
+            &self.cache_outline_brush,
+            outline_offsets_px()[0]
+                .0
+                .abs()
+                .max(outline_offsets_px()[2].1.abs())
+                * 2.0,
+        );
+        unsafe {
+            self.cache_self_text_brush.SetOpacity(1.0);
+            self.cache_outline_brush.SetOpacity(1.0);
+        }
+        let visual = visual?;
+
+        Ok(CachedLineVisual {
+            command_list: visual.command_list,
+            visual_bounds: visual.visual_bounds,
+        })
+    }
+
+    fn draw_debug_overlay_visual(&self, visual: &CachedLineVisual) {
+        let offset = Vector2 { X: 32.0, Y: 24.0 };
+        unsafe {
+            self.d2d_context.DrawImage(
+                &visual.command_list,
+                Some(&offset),
+                None,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                D2D1_COMPOSITE_MODE_SOURCE_OVER,
+            );
+        }
+    }
+
     fn prepare_line_visuals(
         &mut self,
         policy: &CaptionLayoutPolicy,
@@ -698,6 +805,13 @@ impl WindowsCaptionRenderer {
         Ok(())
     }
 
+    fn record_cache_sizes(&self, diagnostics: &mut RenderDiagnostics) {
+        diagnostics.text_format_cache_size = self.caches.text_format_cache.len();
+        diagnostics.layout_cache_size = self.caches.layout_cache.len();
+        diagnostics.line_cache_size = self.caches.line_cache.len();
+        diagnostics.block_cache_size = self.caches.block_cache.len();
+    }
+
     fn render(
         &mut self,
         policy: &CaptionLayoutPolicy,
@@ -705,11 +819,12 @@ impl WindowsCaptionRenderer {
         blocks: Vec<super::types::CaptionBlock>,
         width: u32,
         height: u32,
+        debug_overlay: Option<CaptionDebugOverlay>,
     ) -> Result<RenderedFrame, CaptionRenderError> {
         let mut diagnostics = RenderDiagnostics::default();
         for block in &blocks {
             let key = policy.layout_cache_key_for_block(block, width, presentation);
-            if self.caches.layout_cache.get(&key).is_some() {
+            if self.caches.layout_cache.contains_key(&key) {
                 diagnostics.layout_cache_hits += 1;
             } else {
                 diagnostics.layout_cache_misses += 1;
@@ -726,14 +841,32 @@ impl WindowsCaptionRenderer {
             Err(_) => policy.resolve_blocks_for_presentation(blocks, width, height, presentation),
         };
         let layout = prepare_layout_for_render(&mut self.previous_layout, layout);
+        let layout_has_drawable_text = resolved_layout_has_drawable_text(&layout);
+        let debug_overlay = if layout_has_drawable_text {
+            debug_overlay
+        } else {
+            None
+        };
         self.prepare_line_visuals(policy, &layout, &mut diagnostics)?;
         self.prepare_block_visuals(policy, &layout, &mut diagnostics)?;
-        let clear_alpha =
-            effective_background_alpha(resolved_layout_has_drawable_text(&layout), presentation);
-        let damage_band = layout.damage_band.unwrap_or(DamageBand {
+        let debug_overlay_visual = debug_overlay
+            .as_ref()
+            .map(|overlay| self.build_debug_overlay_visual(policy, overlay))
+            .transpose()?;
+        let clear_alpha = effective_background_alpha(layout_has_drawable_text, presentation);
+        let mut damage_band = layout.damage_band.unwrap_or(DamageBand {
             top_px: 0.0,
             bottom_px: layout.surface_height_px as f32,
         });
+        let should_clear_debug_overlay_band =
+            debug_overlay.is_some() || self.previous_debug_overlay_visible;
+        if should_clear_debug_overlay_band {
+            damage_band.top_px = damage_band.top_px.min(0.0);
+            damage_band.bottom_px = damage_band
+                .bottom_px
+                .max(DEBUG_OVERLAY_DAMAGE_BOTTOM_PX.min(layout.surface_height_px as f32));
+            diagnostics.debug_overlay_clear_count += 1;
+        }
         unsafe {
             self.d2d_context.SetTarget(&self.target_bitmap);
             self.d2d_context.BeginDraw();
@@ -755,6 +888,17 @@ impl WindowsCaptionRenderer {
             self.d2d_context.PopAxisAlignedClip();
         }
 
+        unsafe {
+            self.d2d_context.PushAxisAlignedClip(
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: damage_band.top_px,
+                    right: layout.surface_width_px as f32,
+                    bottom: damage_band.bottom_px,
+                },
+                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            );
+        }
         let render_result = (|| {
             for block in &layout.visible_blocks {
                 if !bounds_intersect_damage_band(block.visual_bounds.as_block_bounds(), damage_band)
@@ -763,10 +907,11 @@ impl WindowsCaptionRenderer {
                 }
 
                 if self.cacheable_block(block) {
+                    let cache_key = self.block_cache_key(block);
                     let cached_block = self
                         .caches
                         .block_cache
-                        .get(&self.block_cache_key(block))
+                        .get(&cache_key)
                         .cloned()
                         .ok_or_else(|| {
                             CaptionRenderError::Draw(format!(
@@ -799,17 +944,26 @@ impl WindowsCaptionRenderer {
                     )?;
                 }
             }
+            if let Some(debug_overlay_visual) = debug_overlay_visual.as_ref() {
+                self.draw_debug_overlay_visual(debug_overlay_visual);
+                diagnostics.debug_overlay_draw_count += 1;
+            }
+            self.record_cache_sizes(&mut diagnostics);
             let public_layout: CaptionLayoutResult = layout.clone().into();
             Ok(RenderedFrame {
                 width: public_layout.surface_width_px,
                 height: public_layout.surface_height_px,
-                fully_transparent: !resolved_layout_has_drawable_text(&layout),
+                fully_transparent: !layout_has_drawable_text,
                 layout: public_layout,
                 diagnostics,
                 texture: TextureHandle::D3D11(self.texture.clone()),
+                debug_overlay,
             })
         })()
         .map_err(|error| prefix_render_error("frame_compose", error));
+        unsafe {
+            self.d2d_context.PopAxisAlignedClip();
+        }
         let end_draw_result = unsafe {
             self.d2d_context
                 .EndDraw(None, None)
@@ -819,7 +973,10 @@ impl WindowsCaptionRenderer {
         match (render_result, end_draw_result) {
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error),
-            (Ok(frame), Ok(())) => Ok(frame),
+            (Ok(frame), Ok(())) => {
+                self.previous_debug_overlay_visible = frame.debug_overlay.is_some();
+                Ok(frame)
+            }
         }
     }
 
@@ -831,7 +988,8 @@ impl WindowsCaptionRenderer {
     ) -> Result<IDWriteTextFormat, CaptionRenderError> {
         let bucket = text_script_bucket(text);
         let font_size_key = (font_size_px * 100.0).round() as u32;
-        if let Some(text_format) = self.caches.text_format_cache.get(&(bucket, font_size_key)) {
+        let text_format_key = (bucket, font_size_key);
+        if let Some(text_format) = self.caches.text_format_cache.get(&text_format_key) {
             return Ok(text_format.clone());
         }
 
@@ -866,7 +1024,7 @@ impl WindowsCaptionRenderer {
         }
         self.caches
             .text_format_cache
-            .insert((bucket, font_size_key), text_format.clone());
+            .insert(text_format_key, text_format.clone());
         Ok(text_format)
     }
 
@@ -1157,37 +1315,195 @@ fn compute_damage_band(
     let previous_bounds = previous_layout
         .visible_blocks
         .iter()
-        .map(|block| (block.id.as_str(), block.visual_bounds.as_block_bounds()))
+        .map(|block| {
+            (
+                block.id.as_str(),
+                (
+                    block.visual_bounds.as_block_bounds(),
+                    &block.layout_cache_key,
+                ),
+            )
+        })
         .collect::<std::collections::HashMap<_, _>>();
     let next_bounds = next_layout
         .visible_blocks
         .iter()
-        .map(|block| (block.id.as_str(), block.visual_bounds.as_block_bounds()))
+        .map(|block| {
+            (
+                block.id.as_str(),
+                (
+                    block.visual_bounds.as_block_bounds(),
+                    &block.layout_cache_key,
+                ),
+            )
+        })
         .collect::<std::collections::HashMap<_, _>>();
 
     let mut changed_bounds = Vec::new();
-    for (id, bounds) in &previous_bounds {
+    for (id, (bounds, layout_key)) in &previous_bounds {
         match next_bounds.get(id) {
-            Some(next_bounds) if next_bounds == bounds => {}
-            Some(next_bounds) => {
+            Some((next_bounds, next_layout_key))
+                if next_bounds == bounds && next_layout_key == layout_key => {}
+            Some((next_bounds, _)) => {
                 changed_bounds.push(*bounds);
                 changed_bounds.push(*next_bounds);
             }
             None => changed_bounds.push(*bounds),
         }
     }
-    for (id, bounds) in &next_bounds {
+    for (id, (bounds, _)) in &next_bounds {
         if !previous_bounds.contains_key(id) {
             changed_bounds.push(*bounds);
         }
     }
 
-    DamageBand::from_bounds(changed_bounds)
+    DamageBand::from_bounds(changed_bounds).map(|damage_band| {
+        expand_damage_band_for_render(damage_band, next_layout.surface_height_px)
+    })
+}
+
+fn expand_damage_band_for_render(damage_band: DamageBand, surface_height_px: u32) -> DamageBand {
+    let surface_bottom_px = surface_height_px as f32;
+    DamageBand {
+        top_px: (damage_band.top_px - DAMAGE_BAND_SAFETY_MARGIN_PX).clamp(0.0, surface_bottom_px),
+        bottom_px: (damage_band.bottom_px + DAMAGE_BAND_SAFETY_MARGIN_PX)
+            .clamp(0.0, surface_bottom_px),
+    }
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
 fn bounds_intersect_damage_band(bounds: BlockBounds, damage_band: DamageBand) -> bool {
     bounds.bottom_px >= damage_band.top_px && bounds.top_px <= damage_band.bottom_px
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_layout_for_render;
+    use crate::renderer::{
+        BlockBounds, CaptionBlockVariant, CaptionChannel, LayoutCacheKey, ResolvedBlockLayout,
+        ResolvedFrameLayout, VisualBounds,
+    };
+
+    fn layout_key(seed: &str) -> LayoutCacheKey {
+        LayoutCacheKey {
+            primary_text: seed.to_string(),
+            secondary_text: String::new(),
+            channel: Some(CaptionChannel::PeerChannel),
+            block_variant: CaptionBlockVariant::Finalized,
+            secondary_enabled: false,
+            secondary_reserved: false,
+            primary_font_size_key: 132,
+            secondary_font_size_key: 82,
+            content_width_key: 1024,
+            text_scale_key: 1000,
+        }
+    }
+
+    fn block(id: &str, top_px: f32, bottom_px: f32, key_seed: &str) -> ResolvedBlockLayout {
+        let bounds = BlockBounds::new(100.0, top_px, 800.0, bottom_px);
+        ResolvedBlockLayout {
+            id: id.to_string(),
+            layout_cache_key: layout_key(key_seed),
+            channel: Some(CaptionChannel::PeerChannel),
+            block_variant: CaptionBlockVariant::Finalized,
+            primary_lines: Vec::new(),
+            secondary_line: None,
+            secondary_reserved: false,
+            bounds,
+            visual_bounds: VisualBounds::new(
+                bounds.left_px,
+                bounds.top_px,
+                bounds.right_px,
+                bounds.bottom_px,
+            ),
+            content_width_px: 700.0,
+            opacity: 1.0,
+            render_offset_y_px: 0.0,
+            render_height_scale: 1.0,
+            truncated_primary: false,
+            truncated_secondary: false,
+        }
+    }
+
+    fn frame(blocks: Vec<ResolvedBlockLayout>, height_px: u32) -> ResolvedFrameLayout {
+        ResolvedFrameLayout {
+            visible_blocks: blocks,
+            dropped_block_ids: Vec::new(),
+            surface_width_px: 1024,
+            surface_height_px: height_px,
+            damage_band: None,
+        }
+    }
+
+    #[test]
+    fn changed_damage_band_expands_by_safety_margin() {
+        let mut previous_layout = Some(frame(vec![block("peer:1", 100.0, 200.0, "old")], 500));
+
+        let rendered = prepare_layout_for_render(
+            &mut previous_layout,
+            frame(vec![block("peer:1", 120.0, 220.0, "new")], 500),
+        );
+
+        let damage_band = rendered.damage_band.expect("changed block should damage");
+        assert_eq!(damage_band.top_px, 68.0);
+        assert_eq!(damage_band.bottom_px, 252.0);
+    }
+
+    #[test]
+    fn expanded_damage_band_clamps_to_surface_bounds() {
+        let mut previous_layout = Some(frame(vec![block("peer:1", 4.0, 16.0, "old")], 40));
+
+        let rendered = prepare_layout_for_render(
+            &mut previous_layout,
+            frame(vec![block("peer:1", 8.0, 24.0, "new")], 40),
+        );
+
+        let damage_band = rendered.damage_band.expect("changed block should damage");
+        assert_eq!(damage_band.top_px, 0.0);
+        assert_eq!(damage_band.bottom_px, 40.0);
+    }
+
+    #[test]
+    fn expanded_damage_band_clamps_fully_offscreen_top_bounds() {
+        let mut previous_layout = Some(frame(vec![block("peer:1", -120.0, -80.0, "old")], 100));
+
+        let rendered = prepare_layout_for_render(
+            &mut previous_layout,
+            frame(vec![block("peer:1", -110.0, -90.0, "new")], 100),
+        );
+
+        let damage_band = rendered.damage_band.expect("changed block should damage");
+        assert_eq!(damage_band.top_px, 0.0);
+        assert_eq!(damage_band.bottom_px, 0.0);
+    }
+
+    #[test]
+    fn expanded_damage_band_clamps_fully_offscreen_bottom_bounds() {
+        let mut previous_layout = Some(frame(vec![block("peer:1", 180.0, 220.0, "old")], 100));
+
+        let rendered = prepare_layout_for_render(
+            &mut previous_layout,
+            frame(vec![block("peer:1", 190.0, 230.0, "new")], 100),
+        );
+
+        let damage_band = rendered.damage_band.expect("changed block should damage");
+        assert_eq!(damage_band.top_px, 100.0);
+        assert_eq!(damage_band.bottom_px, 100.0);
+    }
+
+    #[test]
+    fn first_damage_band_remains_full_surface() {
+        let mut previous_layout = None;
+
+        let rendered = prepare_layout_for_render(
+            &mut previous_layout,
+            frame(vec![block("peer:1", 100.0, 200.0, "new")], 500),
+        );
+
+        let damage_band = rendered.damage_band.expect("first frame should damage");
+        assert_eq!(damage_band.top_px, 0.0);
+        assert_eq!(damage_band.bottom_px, 500.0);
+    }
 }
 
 #[cfg(windows)]

@@ -91,6 +91,26 @@ def test_overlay_enabled_false_stays_separate_from_overlay_display_serialization
     assert round_tripped.overlay.show_translation is False
 
 
+def test_overlay_peer_presentation_refresh_burst_is_not_persisted_in_settings() -> None:
+    settings = from_dict(
+        {
+            "overlay": {
+                "debug_peer_refresh_burst": True,
+                "peer_presentation_refresh_burst": False,
+            }
+        }
+    )
+    data = to_dict(settings)
+
+    assert not hasattr(settings.overlay, "debug_peer_refresh_burst")
+    assert not hasattr(settings.overlay, "peer_presentation_refresh_burst")
+    assert "debug_peer_refresh_burst" not in data["overlay"]
+    assert "peer_presentation_refresh_burst" not in data["overlay"]
+    round_tripped = to_dict(from_dict(data))["overlay"]
+    assert "debug_peer_refresh_burst" not in round_tripped
+    assert "peer_presentation_refresh_burst" not in round_tripped
+
+
 def test_desktop_audio_settings_round_trip_with_defaults() -> None:
     settings = from_dict({})
 

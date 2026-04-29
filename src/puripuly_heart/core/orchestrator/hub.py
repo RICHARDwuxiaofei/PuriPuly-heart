@@ -153,6 +153,10 @@ class ClientHub:
     _merge_buffer: _MergeBuffer | None = None
     self_runtime: ChannelRuntime = field(init=False)
     peer_runtime: ChannelRuntime = field(init=False)
+    _peer_turn_parent_ids: dict[UUID, UUID] = field(default_factory=dict)
+    _peer_parent_turn_ids: dict[UUID, set[UUID]] = field(default_factory=dict)
+    _peer_completed_turn_ids: set[UUID] = field(default_factory=set)
+    _peer_parent_speech_end_times: dict[UUID, float] = field(default_factory=dict)
     context_resolver: ContextResolver = field(init=False)
     active_chatbox_channel: ChannelId = field(init=False, default="self")
     overlay_event_adapter: OverlayEventAdapter = field(init=False)
@@ -160,16 +164,6 @@ class ClientHub:
         init=False,
         default_factory=lambda: {"self": None, "peer": None},
     )
-    _overlay_active_self_text: str | None = field(init=False, default=None)
-    _overlay_active_self_secondary_text: str | None = field(init=False, default=None)
-    _overlay_active_self_utterance_id: UUID | None = field(init=False, default=None)
-    _overlay_active_self_occupant_key: str | None = field(init=False, default=None)
-    _overlay_active_self_update_id: str | None = field(init=False, default=None)
-    _overlay_active_self_origin_wall_clock_ms: int | None = field(init=False, default=None)
-    _overlay_active_self_session_scope: str | None = field(init=False, default=None)
-    _overlay_active_self_source_text_hash: str | None = field(init=False, default=None)
-    _overlay_active_self_source_text_len: int | None = field(init=False, default=None)
-    _overlay_active_self_logical_turn_key: str | None = field(init=False, default=None)
     overlay_stream_coalesce_ms: int = 300
     last_error_source: str | None = None
     _last_overlay_secondary_runtime_signature: tuple[object, ...] | None = field(
@@ -484,6 +478,103 @@ class ClientHub:
         self._clear_runtime_latency_bookkeeping(channel=channel, utterance_id=utterance_id)
         self._clear_latency_timeline(channel=channel, utterance_id=utterance_id)
 
+    def _clear_peer_logical_turn_state(self) -> None:
+        self._peer_turn_parent_ids.clear()
+        self._peer_parent_turn_ids.clear()
+        self._peer_completed_turn_ids.clear()
+        self._peer_parent_speech_end_times.clear()
+
+    def _peer_parent_speech_end_time(self, parent_utterance_id: UUID) -> float | None:
+        parent_end_time = self.peer_runtime.utterance_start_times.get(parent_utterance_id)
+        if parent_end_time is not None:
+            return parent_end_time
+        return self._peer_parent_speech_end_times.get(parent_utterance_id)
+
+    def _peer_parent_speech_ended(self, parent_utterance_id: UUID) -> bool:
+        return (
+            parent_utterance_id in self.peer_runtime.speech_ended_ids
+            or parent_utterance_id in self._peer_parent_speech_end_times
+        )
+
+    def _register_peer_logical_turn(
+        self,
+        *,
+        parent_utterance_id: UUID,
+        peer_turn_id: UUID,
+    ) -> None:
+        self._peer_turn_parent_ids[peer_turn_id] = parent_utterance_id
+        self._peer_parent_turn_ids.setdefault(parent_utterance_id, set()).add(peer_turn_id)
+        self._inherit_peer_parent_vad_bookkeeping(
+            parent_utterance_id=parent_utterance_id,
+            peer_turn_id=peer_turn_id,
+        )
+
+    def _inherit_peer_parent_vad_bookkeeping(
+        self,
+        *,
+        parent_utterance_id: UUID,
+        peer_turn_id: UUID,
+    ) -> None:
+        runtime = self.peer_runtime
+        parent_end_time = self._peer_parent_speech_end_time(parent_utterance_id)
+        if parent_end_time is not None:
+            runtime.utterance_start_times[peer_turn_id] = parent_end_time
+            self._record_latency_stage(
+                channel="peer",
+                utterance_id=peer_turn_id,
+                stage="speech_end",
+                timestamp=parent_end_time,
+                overwrite=False,
+            )
+        if self._peer_parent_speech_ended(parent_utterance_id):
+            runtime.speech_ended_ids.add(peer_turn_id)
+        self._inherit_latency_for_output(
+            channel="peer",
+            output_utterance_id=peer_turn_id,
+            source_utterance_ids=[parent_utterance_id],
+        )
+
+    def _clear_peer_parent_vad_bookkeeping(self, parent_utterance_id: UUID) -> None:
+        peer_turn_ids = self._peer_parent_turn_ids.pop(parent_utterance_id, set())
+        for peer_turn_id in peer_turn_ids:
+            self._peer_turn_parent_ids.pop(peer_turn_id, None)
+            self._peer_completed_turn_ids.discard(peer_turn_id)
+        self.peer_runtime.utterance_start_times.pop(parent_utterance_id, None)
+        self.peer_runtime.speech_ended_ids.discard(parent_utterance_id)
+        self._clear_latency_timeline(channel="peer", utterance_id=parent_utterance_id)
+
+    def _maybe_clear_completed_peer_parent(self, parent_utterance_id: UUID) -> None:
+        peer_turn_ids = self._peer_parent_turn_ids.get(parent_utterance_id)
+        if not peer_turn_ids:
+            self._clear_peer_parent_vad_bookkeeping(parent_utterance_id)
+            return
+        if not self._peer_parent_speech_ended(parent_utterance_id):
+            return
+        if peer_turn_ids.issubset(self._peer_completed_turn_ids):
+            self._clear_peer_parent_vad_bookkeeping(parent_utterance_id)
+
+    def _complete_peer_logical_turn(self, peer_turn_id: UUID) -> None:
+        parent_utterance_id = self._peer_turn_parent_ids.get(peer_turn_id)
+        if parent_utterance_id is None:
+            return
+        self._peer_completed_turn_ids.add(peer_turn_id)
+        self._maybe_clear_completed_peer_parent(parent_utterance_id)
+
+    def _peer_logical_turn_transcript(self, transcript: Transcript) -> tuple[UUID, Transcript]:
+        parent_utterance_id = transcript.utterance_id
+        peer_turn_id = uuid4()
+        self._register_peer_logical_turn(
+            parent_utterance_id=parent_utterance_id,
+            peer_turn_id=peer_turn_id,
+        )
+        return parent_utterance_id, Transcript(
+            utterance_id=peer_turn_id,
+            text=transcript.text,
+            is_final=True,
+            created_at=transcript.created_at,
+            channel="peer",
+        )
+
     def _emit_exception_summary(
         self,
         message: str,
@@ -608,6 +699,7 @@ class ClientHub:
         old_stt = self.peer_stt
         await self._stop_stt_task("_peer_stt_task")
         await self.peer_runtime.reset_runtime_state()
+        self._clear_peer_logical_turn_state()
         self._clear_latency_state(channel="peer")
 
         if old_stt is not None:
@@ -742,12 +834,22 @@ class ClientHub:
             speech_end_at = self.clock.now()
             self.peer_runtime.utterance_start_times[event.utterance_id] = speech_end_at
             self.peer_runtime.speech_ended_ids.add(event.utterance_id)
+            self._peer_parent_speech_end_times[event.utterance_id] = speech_end_at
             self._record_latency_stage(
                 channel="peer",
                 utterance_id=event.utterance_id,
                 stage="speech_end",
                 timestamp=speech_end_at,
             )
+            for peer_turn_id in tuple(self._peer_parent_turn_ids.get(event.utterance_id, set())):
+                if peer_turn_id in self._peer_completed_turn_ids:
+                    continue
+                self._inherit_peer_parent_vad_bookkeeping(
+                    parent_utterance_id=event.utterance_id,
+                    peer_turn_id=peer_turn_id,
+                )
+            if event.utterance_id in self._peer_parent_turn_ids:
+                self._maybe_clear_completed_peer_parent(event.utterance_id)
         if self.peer_stt is not None:
             await self.peer_stt.handle_vad_event(event)
 
@@ -780,6 +882,8 @@ class ClientHub:
     async def clear_language_runtime_state(self, *, channel: ChannelId) -> None:
         runtime = self._runtime_for_channel(channel)
         await runtime.clear_live_translation_state()
+        if channel == "peer":
+            self._clear_peer_logical_turn_state()
         self._clear_latency_state(channel=channel)
         if channel == "self":
             await self.reset_overlay_preview()
@@ -830,6 +934,7 @@ class ClientHub:
     async def _reset_stt_runtime_state(self) -> None:
         await self.self_runtime.reset_runtime_state()
         await self.peer_runtime.reset_runtime_state()
+        self._clear_peer_logical_turn_state()
         self._clear_latency_state()
         self._sync_self_runtime_aliases()
 
@@ -879,6 +984,16 @@ class ClientHub:
         if isinstance(event, STTFinalEvent):
             runtime = self._runtime_for_channel(event.channel)
             source = "Peer" if runtime.channel == "peer" else "Mic"
+            if runtime.channel == "peer":
+                parent_utterance_id, peer_transcript = self._peer_logical_turn_transcript(
+                    event.transcript
+                )
+                await self._handle_peer_final_transcript(
+                    peer_transcript,
+                    parent_utterance_id=parent_utterance_id,
+                    source=source,
+                )
+                return
             if runtime.channel == "self":
                 self._send_stt_connected_notification()
             if self.low_latency_mode and runtime.channel == "self":
@@ -940,16 +1055,14 @@ class ClientHub:
             )
         )
         if is_final:
-            await self._emit_final_transcript_to_overlay(transcript)
             if runtime.channel == "peer":
                 peer_terminal_work_will_follow = self._peer_terminal_work_will_follow(runtime)
-                if self.overlay_sink is not None and not self._overlay_translation_will_follow(
-                    runtime
-                ):
-                    await self._emit_overlay_utterance_closed(
-                        utterance_id=transcript.utterance_id,
-                        channel=transcript.channel,
-                        is_final=True,
+                if self._overlay_translation_will_follow(runtime):
+                    await self._ensure_translation(transcript)
+                elif self.overlay_sink is not None:
+                    await self._finalize_peer_source_only(
+                        transcript,
+                        close_is_final=True,
                         finalize_latency=not peer_terminal_work_will_follow,
                     )
                 elif not peer_terminal_work_will_follow:
@@ -957,12 +1070,59 @@ class ClientHub:
                         channel=transcript.channel,
                         utterance_id=transcript.utterance_id,
                     )
-            elif not self._overlay_translation_will_follow(runtime):
+                return
+            await self._emit_final_transcript_to_overlay(transcript)
+            if not self._overlay_translation_will_follow(runtime):
                 await self._emit_overlay_utterance_closed(
                     utterance_id=transcript.utterance_id,
                     channel=transcript.channel,
                     is_final=True,
                 )
+
+    async def _handle_peer_final_transcript(
+        self,
+        transcript: Transcript,
+        *,
+        parent_utterance_id: UUID,
+        source: str,
+    ) -> None:
+        _ = parent_utterance_id
+        runtime = self.peer_runtime
+        bundle = runtime.get_or_create_bundle(transcript.utterance_id)
+        bundle.with_transcript(transcript)
+        self._remember_source(transcript.utterance_id, source, channel="peer")
+        await self.ui_events.put(
+            UIEvent(
+                type=UIEventType.TRANSCRIPT_FINAL,
+                utterance_id=transcript.utterance_id,
+                payload=transcript,
+                source=source,
+            )
+        )
+        self._record_latency_stage(
+            channel="peer",
+            utterance_id=transcript.utterance_id,
+            stage="stt_final",
+        )
+        if self.llm is None or not self._translation_enabled_for_runtime(runtime):
+            self._log_translation_skipped(
+                stage="final",
+                runtime=runtime,
+                publish_chatbox=self._should_publish_to_chatbox(runtime),
+            )
+            await self._finalize_peer_source_only(
+                transcript,
+                close_is_final=True,
+                finalize_latency=not self._should_publish_to_chatbox(runtime),
+            )
+            if self._should_publish_to_chatbox(runtime):
+                await self._enqueue_osc(
+                    transcript.utterance_id,
+                    transcript_text=transcript.text,
+                    translation_text=None,
+                )
+            return
+        await self._ensure_translation(transcript)
 
     async def _emit_final_transcript_to_overlay(self, transcript: Transcript) -> None:
         if self.overlay_sink is None:
@@ -974,6 +1134,41 @@ class ClientHub:
                 target_language=self.target_language,
             )
         )
+
+    async def _finalize_peer_source_only(
+        self,
+        transcript: Transcript,
+        *,
+        close_is_final: bool,
+        finalize_latency: bool,
+    ) -> None:
+        if self.overlay_sink is not None:
+            self._record_overlay_emit(
+                event_kind="peer_transcript_final",
+                utterance_id=transcript.utterance_id,
+                channel="peer",
+                secondary_len=len(transcript.text.strip()),
+            )
+            self._record_latency_stage(
+                channel="peer",
+                utterance_id=transcript.utterance_id,
+                stage="peer_overlay_first_emit",
+                overwrite=False,
+            )
+            await self._emit_overlay_event(
+                self.overlay_event_adapter.transcript_final(
+                    transcript,
+                    source_language=self._source_language_for(self.peer_runtime),
+                    target_language=self._target_language_for(self.peer_runtime),
+                )
+            )
+        await self._emit_overlay_utterance_closed(
+            utterance_id=transcript.utterance_id,
+            channel="peer",
+            is_final=close_is_final,
+            finalize_latency=finalize_latency,
+        )
+        self._complete_peer_logical_turn(transcript.utterance_id)
 
     async def _emit_overlay_utterance_closed(
         self,
@@ -1022,15 +1217,37 @@ class ClientHub:
             "logical_turn_key": translation.logical_turn_key,
         }
 
-    def _overlay_active_self_metadata(self) -> dict[str, object]:
+    def _current_active_self_metadata(self) -> object | None:
+        provider = getattr(self.overlay_sink, "active_self_overlay_metadata", None)
+        if not callable(provider):
+            return None
+        return provider()
+
+    @staticmethod
+    def _active_self_translation_metadata(metadata: object | None) -> dict[str, object]:
+        if metadata is None:
+            return {
+                "update_id": None,
+                "origin_wall_clock_ms": None,
+                "session_scope": None,
+                "source_text_hash": None,
+                "source_text_len": None,
+                "logical_turn_key": None,
+            }
         return {
-            "update_id": self._overlay_active_self_update_id,
-            "origin_wall_clock_ms": self._overlay_active_self_origin_wall_clock_ms,
-            "session_scope": self._overlay_active_self_session_scope,
-            "source_text_hash": self._overlay_active_self_source_text_hash,
-            "source_text_len": self._overlay_active_self_source_text_len,
-            "logical_turn_key": self._overlay_active_self_logical_turn_key,
+            "update_id": getattr(metadata, "update_id", None),
+            "origin_wall_clock_ms": getattr(metadata, "origin_wall_clock_ms", None),
+            "session_scope": getattr(metadata, "session_scope", None),
+            "source_text_hash": getattr(metadata, "source_text_hash", None),
+            "source_text_len": getattr(metadata, "source_text_len", None),
+            "logical_turn_key": getattr(metadata, "logical_turn_key", None),
         }
+
+    def _cached_active_self_secondary_text(self) -> str:
+        metadata = self._current_active_self_metadata()
+        if metadata is None:
+            return ""
+        return str(getattr(metadata, "secondary_text", "") or "")
 
     def _overlay_secondary_translation_metadata(
         self,
@@ -1040,26 +1257,17 @@ class ClientHub:
         secondary_text: str,
     ) -> dict[str, object]:
         if not secondary_text:
-            return self._overlay_active_self_metadata() | {
-                "update_id": None,
-                "origin_wall_clock_ms": None,
-                "session_scope": None,
-                "source_text_hash": None,
-                "source_text_len": None,
-                "logical_turn_key": None,
-            }
+            return self._active_self_translation_metadata(None)
         if source == "spec" and isinstance(buffer.spec_translation, Translation):
             return self._translation_overlay_metadata(buffer.spec_translation)
-        if source == "sticky_cache" and self._overlay_active_self_utterance_id == buffer.merge_id:
-            return self._overlay_active_self_metadata()
-        return {
-            "update_id": None,
-            "origin_wall_clock_ms": None,
-            "session_scope": None,
-            "source_text_hash": None,
-            "source_text_len": None,
-            "logical_turn_key": None,
-        }
+        metadata = self._current_active_self_metadata()
+        if (
+            source == "sticky_cache"
+            and metadata is not None
+            and getattr(metadata, "utterance_id", None) == buffer.merge_id
+        ):
+            return self._active_self_translation_metadata(metadata)
+        return self._active_self_translation_metadata(None)
 
     def _translation_ready_elapsed_ms(
         self,
@@ -1156,6 +1364,7 @@ class ClientHub:
                 utterance_id=translation.utterance_id,
                 channel=translation.channel,
                 text=translation.text,
+                source_text=translation.source_text,
                 source_language=self._source_language_for(runtime),
                 target_language=self._target_language_for(runtime),
                 applied_context_mode=applied_context_mode,
@@ -1199,50 +1408,10 @@ class ClientHub:
                 )
             )
 
-    async def _emit_overlay_active_self_event(self, event: object) -> None:
+    async def _emit_self_active_overlay_event(self, event: object) -> None:
         await self._emit_overlay_event(event)
-        if getattr(event, "type", None) == "self_active_update":
-            self._overlay_active_self_text = getattr(event, "text", None)
-            self._overlay_active_self_secondary_text = getattr(event, "secondary_text", "")
-            self._overlay_active_self_utterance_id = getattr(event, "utterance_id", None)
-            self._overlay_active_self_occupant_key = getattr(event, "occupant_key", None)
-            if (getattr(event, "secondary_text", "") or "").strip():
-                self._overlay_active_self_update_id = getattr(event, "update_id", None)
-                self._overlay_active_self_origin_wall_clock_ms = getattr(
-                    event, "origin_wall_clock_ms", None
-                )
-                self._overlay_active_self_session_scope = getattr(event, "session_scope", None)
-                self._overlay_active_self_source_text_hash = getattr(
-                    event, "source_text_hash", None
-                )
-                self._overlay_active_self_source_text_len = getattr(event, "source_text_len", None)
-                self._overlay_active_self_logical_turn_key = getattr(
-                    event, "logical_turn_key", None
-                )
-            else:
-                self._overlay_active_self_update_id = None
-                self._overlay_active_self_origin_wall_clock_ms = None
-                self._overlay_active_self_session_scope = None
-                self._overlay_active_self_source_text_hash = None
-                self._overlay_active_self_source_text_len = None
-                self._overlay_active_self_logical_turn_key = None
-        elif getattr(event, "type", None) == "self_active_clear":
-            self._overlay_active_self_text = None
-            self._overlay_active_self_secondary_text = None
-            self._overlay_active_self_utterance_id = None
-            self._overlay_active_self_occupant_key = None
-            self._overlay_active_self_update_id = None
-            self._overlay_active_self_origin_wall_clock_ms = None
-            self._overlay_active_self_session_scope = None
-            self._overlay_active_self_source_text_hash = None
-            self._overlay_active_self_source_text_len = None
-            self._overlay_active_self_logical_turn_key = None
 
-    def _overlay_active_self_secondary(self, buffer: _MergeBuffer) -> str:
-        secondary_text, _source, _reuse_mode = self._overlay_active_self_secondary_decision(buffer)
-        return secondary_text
-
-    def _overlay_active_self_secondary_decision(
+    def _active_self_secondary_decision(
         self,
         buffer: _MergeBuffer,
     ) -> tuple[str, str, str | None]:
@@ -1255,7 +1424,7 @@ class ClientHub:
             reuse_mode = self._soft_reuse_mode(buffer.spec_text, active_text)
             if reuse_mode is not None:
                 return translation.text.strip(), "spec", reuse_mode
-        sticky_secondary = (self._overlay_active_self_secondary_text or "").strip()
+        sticky_secondary = self._cached_active_self_secondary_text().strip()
         if sticky_secondary:
             return sticky_secondary, "sticky_cache", reuse_mode
         return "", "blank", reuse_mode
@@ -1272,8 +1441,8 @@ class ClientHub:
         active_text = self._merge_text(buffer.parts)
         if not active_text:
             return
-        secondary_text, source, reuse_mode = self._overlay_active_self_secondary_decision(buffer)
-        self._record_overlay_active_self_secondary_decision(
+        secondary_text, source, reuse_mode = self._active_self_secondary_decision(buffer)
+        self._record_active_self_secondary_decision(
             buffer=buffer,
             active_text=active_text,
             secondary_text=secondary_text,
@@ -1285,14 +1454,16 @@ class ClientHub:
             source=source,
             secondary_text=secondary_text,
         )
-        current_overlay_metadata = self._overlay_active_self_metadata()
+        current_metadata = self._current_active_self_metadata()
+        current_translation_metadata = self._active_self_translation_metadata(current_metadata)
         occupant_key = self._active_self_occupant_key(buffer)
         if (
-            buffer.merge_id == self._overlay_active_self_utterance_id
-            and occupant_key == self._overlay_active_self_occupant_key
-            and active_text == self._overlay_active_self_text
-            and secondary_text == (self._overlay_active_self_secondary_text or "")
-            and translation_metadata == current_overlay_metadata
+            current_metadata is not None
+            and buffer.merge_id == getattr(current_metadata, "utterance_id", None)
+            and occupant_key == getattr(current_metadata, "occupant_key", None)
+            and active_text == getattr(current_metadata, "text", None)
+            and secondary_text == getattr(current_metadata, "secondary_text", "")
+            and translation_metadata == current_translation_metadata
         ):
             return
 
@@ -1302,7 +1473,7 @@ class ClientHub:
             channel="self",
             secondary_len=len(secondary_text),
         )
-        await self._emit_overlay_active_self_event(
+        await self._emit_self_active_overlay_event(
             self.overlay_event_adapter.self_active_update(
                 text=active_text,
                 utterance_id=buffer.merge_id,
@@ -1314,21 +1485,11 @@ class ClientHub:
         )
 
     async def reset_overlay_preview(self) -> None:
-        if self._overlay_active_self_text is None:
+        if self._current_active_self_metadata() is None:
             return
         if self.overlay_sink is None:
-            self._overlay_active_self_text = None
-            self._overlay_active_self_secondary_text = None
-            self._overlay_active_self_utterance_id = None
-            self._overlay_active_self_occupant_key = None
-            self._overlay_active_self_update_id = None
-            self._overlay_active_self_origin_wall_clock_ms = None
-            self._overlay_active_self_session_scope = None
-            self._overlay_active_self_source_text_hash = None
-            self._overlay_active_self_source_text_len = None
-            self._overlay_active_self_logical_turn_key = None
             return
-        await self._emit_overlay_active_self_event(self.overlay_event_adapter.self_active_clear())
+        await self._emit_self_active_overlay_event(self.overlay_event_adapter.self_active_clear())
 
     def _merge_text(self, parts: list[str]) -> str:
         merged = ""
@@ -1433,7 +1594,7 @@ class ClientHub:
             end -= 1
         return text[start:end]
 
-    def _record_overlay_active_self_secondary_decision(
+    def _record_active_self_secondary_decision(
         self,
         *,
         buffer: _MergeBuffer,
@@ -1475,7 +1636,7 @@ class ClientHub:
             secondary_len=len(secondary_text),
             spec_text_len=len((buffer.spec_text or "").strip()),
             spec_translation_len=spec_translation_len,
-            cached_secondary_len=len((self._overlay_active_self_secondary_text or "").strip()),
+            cached_secondary_len=len(self._cached_active_self_secondary_text().strip()),
             reuse_mode=reuse_mode,
             resume_pending=buffer.resume_pending,
             resume_confirmed=buffer.resume_confirmed,
@@ -1504,7 +1665,7 @@ class ClientHub:
             len(secondary_text),
             len((buffer.spec_text or "").strip()),
             spec_translation_len,
-            len((self._overlay_active_self_secondary_text or "").strip()),
+            len(self._cached_active_self_secondary_text().strip()),
             reuse_mode,
             buffer.resume_pending,
             buffer.resume_confirmed,
@@ -1522,11 +1683,13 @@ class ClientHub:
         # Presenter promotion preserves active secondary text for the same occupant.
         # Blank the active row first when speculative reuse is unsafe so stale
         # secondary text cannot be promoted into the finalized row.
+        metadata = self._current_active_self_metadata()
         return (
             reuse_mode is None
             and self.overlay_sink is not None
-            and self._overlay_active_self_text == final_text
-            and (self._overlay_active_self_secondary_text or "").strip() != ""
+            and metadata is not None
+            and getattr(metadata, "text", None) == final_text
+            and str(getattr(metadata, "secondary_text", "") or "").strip() != ""
         )
 
     def _record_overlay_emit(
@@ -1992,7 +2155,7 @@ class ClientHub:
                 channel="self",
                 secondary_len=0,
             )
-            await self._emit_overlay_active_self_event(
+            await self._emit_self_active_overlay_event(
                 self.overlay_event_adapter.self_active_update(
                     text=final_text,
                     utterance_id=buffer.merge_id,
@@ -2023,16 +2186,6 @@ class ClientHub:
             is_final=True,
             created_at=self.clock.now(),
         )
-        self._overlay_active_self_text = None
-        self._overlay_active_self_secondary_text = None
-        self._overlay_active_self_utterance_id = None
-        self._overlay_active_self_occupant_key = None
-        self._overlay_active_self_update_id = None
-        self._overlay_active_self_origin_wall_clock_ms = None
-        self._overlay_active_self_session_scope = None
-        self._overlay_active_self_source_text_hash = None
-        self._overlay_active_self_source_text_len = None
-        self._overlay_active_self_logical_turn_key = None
         await self._handle_transcript(transcript, is_final=True, source="Mic")
 
         if self.llm is None or not self.translation_enabled:
@@ -2465,11 +2618,16 @@ class ClientHub:
                     is_final=False,
                     finalize_latency=not self._should_publish_to_chatbox(runtime),
                 )
-            elif peer_overlay_active:
-                await self._emit_overlay_utterance_closed(
-                    utterance_id=utterance_id,
-                    channel=runtime.channel,
-                    is_final=False,
+            elif runtime.channel == "peer":
+                await self._finalize_peer_source_only(
+                    Transcript(
+                        utterance_id=utterance_id,
+                        text=text,
+                        is_final=True,
+                        created_at=self.clock.now(),
+                        channel="peer",
+                    ),
+                    close_is_final=False,
                     finalize_latency=True,
                 )
             else:
@@ -2487,6 +2645,7 @@ class ClientHub:
                     utterance_id=utterance_id,
                     payload=payload,
                     source=self._get_source(utterance_id, channel=runtime.channel),
+                    channel=runtime.channel,
                     runtime_log_handled=True,
                 )
             )
@@ -2499,11 +2658,16 @@ class ClientHub:
                         self.fallback_transcript_only and self._should_publish_to_chatbox(runtime)
                     ),
                 )
-            elif peer_overlay_active:
-                await self._emit_overlay_utterance_closed(
-                    utterance_id=utterance_id,
-                    channel=runtime.channel,
-                    is_final=False,
+            elif runtime.channel == "peer":
+                await self._finalize_peer_source_only(
+                    Transcript(
+                        utterance_id=utterance_id,
+                        text=text,
+                        is_final=True,
+                        created_at=self.clock.now(),
+                        channel="peer",
+                    ),
+                    close_is_final=False,
                     finalize_latency=not fallback_to_chatbox,
                 )
             if fallback_to_chatbox:
@@ -2512,7 +2676,7 @@ class ClientHub:
                     transcript_text=text,
                     translation_text=None,
                 )
-            else:
+            elif runtime.channel != "peer":
                 self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
             return
 
@@ -2534,6 +2698,7 @@ class ClientHub:
                 is_final=True,
                 finalize_latency=not self._should_publish_to_chatbox(runtime),
             )
+            self._complete_peer_logical_turn(utterance_id)
         await self.ui_events.put(
             UIEvent(
                 type=UIEventType.TRANSLATION_DONE,
@@ -2561,25 +2726,43 @@ class ClientHub:
             )
         else:
             self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
+        if runtime.channel == "peer" and not peer_overlay_active:
+            self._complete_peer_logical_turn(utterance_id)
 
     async def handle_peer_transcript_final_for_test(
         self,
-        *,
         text: str,
         source: str = "Peer",
     ) -> UUID:
-        utterance_id = uuid4()
-        transcript = Transcript(
-            utterance_id=utterance_id,
-            text=text,
-            is_final=True,
-            created_at=self.clock.now(),
-            channel="peer",
+        _ = source
+        parent_utterance_id = uuid4()
+        before_event_count = 0
+        if hasattr(self.overlay_sink, "events"):
+            before_event_count = len(self.overlay_sink.events)  # type: ignore[attr-defined]
+        existing_peer_utterance_ids = set(self.peer_runtime.utterances)
+        await self._handle_stt_event(
+            STTFinalEvent(
+                utterance_id=parent_utterance_id,
+                transcript=Transcript(
+                    utterance_id=parent_utterance_id,
+                    text=text,
+                    is_final=True,
+                    created_at=self.clock.now(),
+                    channel="peer",
+                ),
+            )
         )
-        await self._handle_transcript(transcript, is_final=True, source=source)
-        if self.llm is not None and self.peer_translation_enabled:
-            await self._ensure_translation(transcript)
-        return utterance_id
+        if hasattr(self.overlay_sink, "events"):
+            new_events = self.overlay_sink.events[before_event_count:]  # type: ignore[attr-defined]
+            for event in new_events:
+                if getattr(event, "type", None) == "peer_active_update":
+                    return event.utterance_id
+        for utterance_id, bundle in self.peer_runtime.utterances.items():
+            if utterance_id in existing_peer_utterance_ids:
+                continue
+            if bundle.final is not None and bundle.final.text == text:
+                return utterance_id
+        raise AssertionError("peer test helper did not produce a peer logical turn")
 
     async def translate_peer_text_for_test(
         self,
@@ -2638,6 +2821,7 @@ class ClientHub:
                 utterance_id=utterance_id,
                 payload=msg,
                 source=self._get_source(utterance_id),
+                channel=runtime.channel,
             )
         )
         self._clear_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)

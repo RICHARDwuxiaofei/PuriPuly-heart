@@ -41,6 +41,10 @@ impl Default for OverlayPresentationCalibration {
 #[serde(rename_all = "snake_case")]
 pub enum OverlayPresentationBlockVariant {
     ActiveSelf,
+    // Reserved compatibility/fallback variant. Normal product peer rows become
+    // primary-visible through translated finalized blocks, not source-only
+    // active_peer rows.
+    ActivePeer,
     #[default]
     Finalized,
 }

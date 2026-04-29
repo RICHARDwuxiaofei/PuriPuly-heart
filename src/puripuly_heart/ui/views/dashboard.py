@@ -443,6 +443,7 @@ class DashboardView(ft.Column):
         source_text_len: int | None = None,
         transcript_kind: str | None = None,
         should_log: bool = False,
+        debug_prefix: str | None = None,
     ) -> None:
         """Update the display card primary line with new text."""
         font_family = font_for_language(language_code) if language_code else self._ui_font()
@@ -458,6 +459,7 @@ class DashboardView(ft.Column):
             source_text_len=source_text_len,
             transcript_kind=transcript_kind,
             should_log=should_log,
+            debug_prefix=debug_prefix,
         )
 
     def set_display_translation_text(
@@ -473,6 +475,7 @@ class DashboardView(ft.Column):
         source_text_hash: str | None = None,
         source_text_len: int | None = None,
         logical_turn_key: str | None = None,
+        debug_prefix: str | None = None,
     ) -> None:
         """Update the display card translation line."""
         font_family = font_for_language(language_code) if language_code else self._ui_font()
@@ -488,6 +491,7 @@ class DashboardView(ft.Column):
             source_text_hash=source_text_hash,
             source_text_len=source_text_len,
             logical_turn_key=logical_turn_key,
+            debug_prefix=debug_prefix,
         )
 
     def set_managed_auth_pending(self, pending: bool) -> None:

@@ -76,6 +76,24 @@ class SelfActiveUpdate(OverlayEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class PeerActiveUpdate(OverlayEvent):
+    """Reserved compatibility/fallback; not normal source-only peer product flow."""
+
+    text: str
+    occupant_key: str
+
+    EVENT_TYPE: ClassVar[str] = "peer_active_update"
+
+    def __post_init__(self) -> None:
+        if self.channel != "peer":
+            raise ValueError("PeerActiveUpdate requires channel='peer'")
+        if self.utterance_id is None:
+            raise ValueError("PeerActiveUpdate requires utterance_id")
+        if not self.occupant_key.strip():
+            raise ValueError("PeerActiveUpdate requires non-empty occupant_key")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SelfActiveClear(OverlayEvent):
     EVENT_TYPE: ClassVar[str] = "self_active_clear"
 
@@ -91,6 +109,7 @@ class TranslationStreamUpdate(OverlayEvent):
     target_language: str
     is_final: bool = False
     applied_context_mode: AppliedContextMode | None = None
+    source_text: str = ""
 
     EVENT_TYPE: ClassVar[str] = "translation_stream_update"
 
@@ -117,6 +136,7 @@ OverlayEventUnion = (
     SelfTranscriptFinal
     | PeerTranscriptFinal
     | SelfActiveUpdate
+    | PeerActiveUpdate
     | SelfActiveClear
     | TranslationStreamUpdate
     | TranslationFinal
@@ -223,6 +243,7 @@ class OverlayEventAdapter:
         utterance_id: UUID,
         channel: ChannelId,
         text: str,
+        source_text: str = "",
         source_language: str,
         target_language: str,
         applied_context_mode: AppliedContextMode | None,
@@ -247,6 +268,7 @@ class OverlayEventAdapter:
                 logical_turn_key=logical_turn_key,
             ),
             text=text,
+            source_text=source_text,
             source_language=source_language,
             target_language=target_language,
             is_final=False,
@@ -285,6 +307,36 @@ class OverlayEventAdapter:
             occupant_key=occupant_key,
         )
 
+    def peer_active_update(
+        self,
+        *,
+        text: str,
+        utterance_id: UUID,
+        occupant_key: str,
+        created_at: float | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
+    ) -> PeerActiveUpdate:
+        return PeerActiveUpdate(
+            **self._common_event_fields(
+                utterance_id=utterance_id,
+                channel="peer",
+                created_at=created_at,
+                update_id=update_id,
+                origin_wall_clock_ms=origin_wall_clock_ms,
+                session_scope=session_scope,
+                source_text_hash=source_text_hash,
+                source_text_len=source_text_len,
+                logical_turn_key=logical_turn_key,
+            ),
+            text=text,
+            occupant_key=occupant_key,
+        )
+
     def self_active_clear(self, *, created_at: float | None = None) -> SelfActiveClear:
         return SelfActiveClear(
             **self._common_event_fields(
@@ -300,6 +352,7 @@ class OverlayEventAdapter:
         utterance_id: UUID,
         channel: ChannelId,
         text: str,
+        source_text: str = "",
         source_language: str,
         target_language: str,
         applied_context_mode: AppliedContextMode | None,
@@ -324,6 +377,7 @@ class OverlayEventAdapter:
                 logical_turn_key=logical_turn_key,
             ),
             text=text,
+            source_text=source_text,
             source_language=source_language,
             target_language=target_language,
             is_final=True,

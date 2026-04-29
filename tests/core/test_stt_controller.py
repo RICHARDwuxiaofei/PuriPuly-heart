@@ -258,6 +258,19 @@ class TerminalFailureBackend:
         return session
 
 
+class TerminalThenHealthyBackend:
+    def __init__(self) -> None:
+        self.sessions: list[object] = []
+
+    async def open_session(self):
+        if not self.sessions:
+            session = TerminalFailureSession()
+        else:
+            session = FakeSession()
+        self.sessions.append(session)
+        return session
+
+
 async def _next_event(stream, *, timeout_s: float = 0.2):
     return await asyncio.wait_for(stream.__anext__(), timeout=timeout_s)
 
@@ -746,5 +759,27 @@ async def test_stt_controller_closes_failed_session_after_consumer_error() -> No
     assert stt._active_session is None
     assert stt._consumer_task is None
     assert backend.sessions[0].closed is True
+
+
+async def test_managed_stt_provider_reopens_on_next_speech_after_terminal_failure() -> None:
+    backend = TerminalThenHealthyBackend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        channel="peer",
+        reset_deadline_s=90.0,
+        drain_timeout_s=0.05,
+    )
+    stream = stt.events()
+
+    await stt.handle_vad_event(SpeechStart(uuid4(), pre_roll=samples(0.0), chunk=samples(1.0)))
+    await _next_state(stream, STTSessionState.STREAMING)
+    await _next_state(stream, STTSessionState.DISCONNECTED, max_events=10)
+
+    await stt.handle_vad_event(SpeechStart(uuid4(), pre_roll=samples(0.0), chunk=samples(1.0)))
+
+    assert len(backend.sessions) == 2
+    assert stt.state == STTSessionState.STREAMING
+    assert stt._active_session is backend.sessions[1]
 
     await stt.close()

@@ -99,13 +99,6 @@ class OverlayBridge:
                 return
             self._snapshot = snapshot
             self._last_snapshot_revision = snapshot.revision
-            logger.info(
-                "[OverlayBridge] Snapshot updated: overlay_instance_id=%s revision=%s block_count=%s authenticated_connections=%s",
-                self.overlay_instance_id,
-                snapshot.revision,
-                len(snapshot.blocks),
-                len(self._authenticated_connections),
-            )
             await self._broadcast_json({"type": "snapshot", "payload": snapshot.to_dict()})
 
     async def broadcast_shutdown(self) -> None:

@@ -54,7 +54,11 @@ FOUNDER_CONTACT_URL = "https://x.com/kapitalismho"
 class TranslatorApp:
     def __init__(self, page: ft.Page, *, config_path, debug_ui_preview: bool = False):
         self.page = page
-        self.controller = GuiController(page=page, app=self, config_path=config_path)
+        self.controller = GuiController(
+            page=page,
+            app=self,
+            config_path=config_path,
+        )
         self.overlay_state = "off"
         self.overlay_failure_reason: str | None = None
         self.overlay_peer_contract = None

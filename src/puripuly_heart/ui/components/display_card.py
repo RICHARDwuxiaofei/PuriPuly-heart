@@ -46,6 +46,13 @@ def _status_label(status: str) -> str:
     return t("display.disconnected")
 
 
+def _apply_debug_prefix(text: str, debug_prefix: str | None) -> str:
+    prefix = (debug_prefix or "").strip()
+    if not prefix or not text:
+        return text
+    return f"{prefix} {text}"
+
+
 class DisplayCard(ft.Container):
     """Multi-purpose display card with input field and decorative gradient."""
 
@@ -57,6 +64,7 @@ class DisplayCard(ft.Container):
         self._secondary_value: str | None = None
         self._primary_font_family: str | None = None
         self._secondary_font_family: str | None = None
+        self._debug_prefix: str | None = None
         self._notice_value: str | None = None
         self._notice_tone: str | None = None
 
@@ -195,6 +203,7 @@ class DisplayCard(ft.Container):
         source_text_len: int | None = None,
         transcript_kind: str | None = None,
         should_log: bool = False,
+        debug_prefix: str | None = None,
     ):
         """Update the primary display text and clear any secondary text."""
         self._showing_status = False
@@ -202,6 +211,7 @@ class DisplayCard(ft.Container):
         self._primary_font_family = font_family
         self._secondary_value = None
         self._secondary_font_family = None
+        self._debug_prefix = debug_prefix
         measure = should_log and runtime_log_detailed is not None
         primary_update_issued, _, flet_update_elapsed_us = self._sync_display(
             is_error=is_error, measure_flet_update=measure
@@ -233,11 +243,13 @@ class DisplayCard(ft.Container):
         source_text_hash: str | None = None,
         source_text_len: int | None = None,
         logical_turn_key: str | None = None,
+        debug_prefix: str | None = None,
     ) -> None:
         """Update the secondary display text and emit a post-update visual commit marker."""
         self._showing_status = False
         self._secondary_value = text or None
         self._secondary_font_family = font_family if text else None
+        self._debug_prefix = debug_prefix
         measure = runtime_log_detailed is not None
         (
             primary_update_issued,
@@ -267,6 +279,7 @@ class DisplayCard(ft.Container):
         self._primary_font_family = font_family
         self._secondary_value = None
         self._secondary_font_family = None
+        self._debug_prefix = None
         self._sync_display()
 
     def set_notice(self, text: str | None, tone: str | None = None) -> None:
@@ -416,8 +429,14 @@ class DisplayCard(ft.Container):
     def _sync_display(
         self, *, is_error: bool = False, measure_flet_update: bool = False
     ) -> tuple[bool, bool, int | None]:
-        primary_text = self._notice_value or self._primary_value or ""
-        secondary_text = "" if self._notice_value else self._secondary_value or ""
+        primary_text = self._notice_value or _apply_debug_prefix(
+            self._primary_value or "", self._debug_prefix
+        )
+        secondary_text = (
+            ""
+            if self._notice_value
+            else _apply_debug_prefix(self._secondary_value or "", self._debug_prefix)
+        )
         max_len = max(_weighted_len(primary_text), _weighted_len(secondary_text))
         new_size = _display_size_for_length(max_len)
 
