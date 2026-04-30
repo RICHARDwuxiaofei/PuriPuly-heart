@@ -33,8 +33,8 @@ from puripuly_heart.config.settings import (
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
-    ensure_prompt_defaults,
     load_settings,
+    new_settings_for_first_run,
     save_settings,
 )
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
@@ -2279,7 +2279,7 @@ class GuiController:
     def _load_or_init_settings(self, path: Path) -> AppSettings:
         if path.exists():
             return load_settings(path)
-        settings = ensure_prompt_defaults(AppSettings())
+        settings = new_settings_for_first_run()
         path.parent.mkdir(parents=True, exist_ok=True)
         save_settings(path, settings)
         return settings

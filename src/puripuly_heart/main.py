@@ -9,7 +9,7 @@ from puripuly_heart.app.local_qwen_runtime_check import run_local_qwen_runtime_c
 from puripuly_heart.app.soxr_runtime_check import run_soxr_runtime_check
 from puripuly_heart.app.wiring import create_llm_provider, create_secret_store
 from puripuly_heart.config.paths import default_settings_path, default_vad_model_path
-from puripuly_heart.config.settings import AppSettings, load_settings
+from puripuly_heart.config.settings import AppSettings, load_settings, new_settings_for_first_run
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.runtime_logging import configure_main_logging
 from puripuly_heart.core.soxr_runtime import (
@@ -201,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
 def _load_settings_or_default(path: Path) -> AppSettings:
     if path.exists():
         return load_settings(path)
-    return AppSettings()
+    return new_settings_for_first_run()
 
 
 if __name__ == "__main__":
