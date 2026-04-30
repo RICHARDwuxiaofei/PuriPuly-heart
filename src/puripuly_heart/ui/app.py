@@ -1,4 +1,5 @@
 import copy
+import inspect
 import logging
 import webbrowser
 
@@ -20,6 +21,7 @@ from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.core.updater import check_for_update
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
 from puripuly_heart.ui.components.debug_preview_panel import DebugPreviewPanel
+from puripuly_heart.ui.components.discord_managed_auth_dialog import DiscordManagedAuthDialog
 from puripuly_heart.ui.components.founder_letter_dialog import FounderLetterDialog
 from puripuly_heart.ui.components.peer_translation_eula_dialog import PeerTranslationEulaDialog
 from puripuly_heart.ui.components.title_bar import TitleBar
@@ -180,6 +182,7 @@ class TranslatorApp:
             on_revoked_notice=self._preview_revoked_notice,
             on_founder_letter=self._preview_founder_letter,
             on_pkce_failure=self._preview_pkce_failure,
+            on_discord_auth=self._preview_discord_auth,
             on_peer_translation_eula=self._preview_peer_translation_eula,
         )
 
@@ -203,6 +206,9 @@ class TranslatorApp:
 
     def _preview_pkce_failure(self) -> None:
         self._show_snackbar(t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)
+
+    def _preview_discord_auth(self) -> None:
+        self.show_discord_managed_auth_dialog(preview=True)
 
     def _preview_peer_translation_eula(self) -> None:
         self._show_peer_translation_eula(self._debug_preview_noop)
@@ -559,7 +565,64 @@ class TranslatorApp:
 
         self._queue_settings_mutation_task(_task)
 
-    def _build_founder_letter_target_settings(self) -> AppSettings | None:
+    def _close_discord_managed_auth_dialog(self) -> None:
+        dialog = getattr(self, "_discord_managed_auth_dialog", None)
+        close = getattr(dialog, "close", None)
+        if callable(close):
+            close()
+
+    def show_discord_managed_auth_dialog(self, preview: bool = False) -> None:
+        if preview:
+            on_continue = self._close_discord_managed_auth_dialog
+            on_byok = self._close_discord_managed_auth_dialog
+            on_close = self._close_discord_managed_auth_dialog
+            on_reopen_browser = self._close_discord_managed_auth_dialog
+            on_cancel = self._close_discord_managed_auth_dialog
+        else:
+            on_continue = self._start_discord_managed_auth
+            on_byok = self._on_discord_managed_auth_byok
+            on_close = self._close_discord_managed_auth_dialog
+            on_reopen_browser = self._reopen_discord_managed_auth_browser
+            on_cancel = self._cancel_discord_managed_auth
+
+        dialog = DiscordManagedAuthDialog(
+            self.page,
+            on_continue=on_continue,
+            on_byok=on_byok,
+            on_close=on_close,
+            on_reopen_browser=on_reopen_browser,
+            on_cancel=on_cancel,
+        )
+        self._discord_managed_auth_dialog = dialog
+        dialog.open()
+
+    def _run_optional_discord_auth_controller_hook(self, hook_name: str) -> None:
+        controller = getattr(self, "controller", None)
+        hook = getattr(controller, hook_name, None)
+        if not callable(hook):
+            return
+        result = hook()
+        if inspect.isawaitable(result):
+
+            async def _task() -> None:
+                await result
+
+            self.page.run_task(_task)
+
+    def _start_discord_managed_auth(self) -> None:
+        dialog = getattr(self, "_discord_managed_auth_dialog", None)
+        set_waiting = getattr(dialog, "set_waiting", None)
+        if callable(set_waiting):
+            set_waiting()
+        self._run_optional_discord_auth_controller_hook("start_discord_managed_auth")
+
+    def _reopen_discord_managed_auth_browser(self) -> None:
+        self._run_optional_discord_auth_controller_hook("reopen_discord_managed_auth_browser")
+
+    def _cancel_discord_managed_auth(self) -> None:
+        self._run_optional_discord_auth_controller_hook("cancel_discord_managed_auth")
+
+    def _build_managed_openrouter_byok_target_settings(self) -> AppSettings | None:
         current_settings = getattr(getattr(self, "controller", None), "settings", None)
         if current_settings is None:
             return None
@@ -593,6 +656,16 @@ class TranslatorApp:
         target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
         target_settings.openrouter.llm_model = OpenRouterLLMModel(openrouter_model)
         return target_settings
+
+    def _build_founder_letter_target_settings(self) -> AppSettings | None:
+        return self._build_managed_openrouter_byok_target_settings()
+
+    def _on_discord_managed_auth_byok(self) -> None:
+        target_settings = self._build_managed_openrouter_byok_target_settings()
+        if target_settings is None:
+            self._show_snackbar(t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)
+            return
+        self._on_request_openrouter_pkce(target_settings, launch_source="discord_auth")
 
     def _on_founder_letter_connect(self) -> None:
         target_settings = self._build_founder_letter_target_settings()

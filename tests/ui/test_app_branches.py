@@ -262,8 +262,20 @@ def test_translator_app_mounts_debug_preview_when_enabled(
         "on_revoked_notice",
         "on_founder_letter",
         "on_pkce_failure",
+        "on_discord_auth",
         "on_peer_translation_eula",
     }
+    discord_callback = seen["callbacks"]["on_discord_auth"]
+    assert getattr(discord_callback, "__self__", None) is app
+    assert getattr(discord_callback, "__func__", None) is TranslatorApp._preview_discord_auth
+    preview_calls: list[bool] = []
+    monkeypatch.setattr(
+        app,
+        "show_discord_managed_auth_dialog",
+        lambda *, preview=False: preview_calls.append(preview),
+    )
+    discord_callback()
+    assert preview_calls == [True]
     root = page.added[0]
     assert isinstance(root.content, ft.Stack)
     assert root.content.controls[-1] is app.debug_preview_panel
@@ -649,6 +661,119 @@ def test_debug_preview_peer_translation_eula_opens_preview_safe_dialog(
     if seen["on_cancel"] is not None:
         seen["on_cancel"]()
     assert not hasattr(app, "controller")
+
+
+def test_debug_preview_discord_auth_opens_dialog_with_close_only_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    app.controller = SimpleNamespace(
+        settings=settings,
+        config_path=Path("settings.json"),
+        start_discord_managed_auth=lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not start broker OAuth"
+        ),
+        reopen_discord_managed_auth_browser=lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not reopen broker OAuth"
+        ),
+        cancel_discord_managed_auth=lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not cancel broker OAuth"
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "_start_discord_managed_auth",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not call OAuth start hook"
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app,
+        "_on_discord_managed_auth_byok",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not launch BYOK PKCE"
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app,
+        "_on_request_openrouter_pkce",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not launch OpenRouter PKCE"
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "save_settings",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not save settings"
+        ),
+    )
+    monkeypatch.setattr(
+        app_module.webbrowser,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not open external URLs"
+        ),
+    )
+
+    def open_preview_dialog():
+        app._preview_discord_auth()
+        dialog = app._discord_managed_auth_dialog
+        assert dialog._dialog is app.page.opened[-1]
+        return dialog, dialog._dialog
+
+    for button_attr in ("_continue_button", "_byok_button", "_close_button"):
+        dialog, opened_dialog = open_preview_dialog()
+        getattr(dialog, button_attr).on_click(None)
+        assert app.page.closed[-1] is opened_dialog
+
+    for button_attr in ("_reopen_browser_button", "_cancel_button"):
+        dialog, opened_dialog = open_preview_dialog()
+        dialog.set_waiting()
+        getattr(dialog, button_attr).on_click(None)
+        assert app.page.closed[-1] is opened_dialog
+
+    assert app.page.tasks == []
+    assert settings.openrouter.selected_source is OpenRouterCredentialSource.MANAGED
+
+
+def test_discord_managed_auth_byok_launches_openrouter_pkce_with_byok_target() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    settings.openrouter.llm_model = OpenRouterLLMModel.QWEN_35_FLASH_02_23
+    app.controller = SimpleNamespace(settings=settings)
+    pkce_calls: list[tuple[AppSettings, str]] = []
+    app._on_request_openrouter_pkce = (
+        lambda target_settings, *, launch_source="settings": pkce_calls.append(
+            (target_settings, launch_source)
+        )
+    )
+    app._show_snackbar = lambda *_args, **_kwargs: pytest.fail(
+        "managed Discord auth BYOK should build a valid OpenRouter target"
+    )
+
+    app._on_discord_managed_auth_byok()
+
+    assert len(pkce_calls) == 1
+    target_settings, launch_source = pkce_calls[0]
+    assert launch_source == "discord_auth"
+    assert target_settings is not settings
+    assert target_settings.provider.llm is LLMProviderName.OPENROUTER
+    assert target_settings.openrouter.selected_source is OpenRouterCredentialSource.BYOK
+    assert target_settings.openrouter.selection_alias is OpenRouterSelectionAlias.QWEN35_FLASH_BYOK
+    assert target_settings.openrouter.llm_model is OpenRouterLLMModel.QWEN_35_FLASH_02_23
+    assert settings.openrouter.selected_source is OpenRouterCredentialSource.MANAGED
 
 
 def test_peer_translation_toggle_first_enable_opens_eula_without_running_task(
