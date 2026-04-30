@@ -191,7 +191,7 @@ def _build_provider_preferences(
         return {"order": ["Parasail", "Novita"], "allow_fallbacks": True}
     if routing_mode == OpenRouterRoutingMode.NOVITA_FIRST:
         return {"order": ["Novita", "Parasail"], "allow_fallbacks": True}
-    return {"sort": "latency", "allow_fallbacks": True, "ignore": ["venice"]}
+    return {"sort": "latency", "allow_fallbacks": True, "ignore": ["venice", "deepinfra"]}
 
 
 class OpenRouterClient(Protocol):

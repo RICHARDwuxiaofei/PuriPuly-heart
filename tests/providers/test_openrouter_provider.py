@@ -333,7 +333,7 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_la
     assert body["provider"] == {
         "sort": "latency",
         "allow_fallbacks": True,
-        "ignore": ["venice"],
+        "ignore": ["venice", "deepinfra"],
     }
     assert body["messages"][0] == {"role": "system", "content": "SYSTEM"}
     assert body["messages"][1]["role"] == "user"
@@ -344,7 +344,7 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_la
 
 
 @pytest.mark.asyncio
-async def test_httpx_openrouter_client_latency_routing_ignores_venice_provider(
+async def test_httpx_openrouter_client_latency_routing_ignores_venice_and_deepinfra_providers_and_preserves_latency_sort(
     monkeypatch,
 ) -> None:
     fake_client = FakeAsyncClient()
@@ -363,7 +363,11 @@ async def test_httpx_openrouter_client_latency_routing_ignores_venice_provider(
     )
 
     body = fake_client.last_request["json"]
-    assert body["provider"]["ignore"] == ["venice"]
+    assert body["provider"] == {
+        "sort": "latency",
+        "allow_fallbacks": True,
+        "ignore": ["venice", "deepinfra"],
+    }
 
 
 @pytest.mark.asyncio
@@ -428,7 +432,7 @@ async def test_httpx_openrouter_client_stream_translate_builds_streaming_request
     assert request["json"]["provider"] == {
         "sort": "latency",
         "allow_fallbacks": True,
-        "ignore": ["venice"],
+        "ignore": ["venice", "deepinfra"],
     }
 
 
