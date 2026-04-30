@@ -94,7 +94,6 @@ def test_discord_managed_auth_dialog_declares_initial_action_labels() -> None:
     dialog = _dialog(page)
 
     assert dialog.action_labels == [
-        "discord_auth.byok",
         "discord_auth.close",
         "discord_auth.continue",
     ]
@@ -126,6 +125,7 @@ def test_discord_managed_auth_dialog_uses_warm_document_layout(
     modal_content = _modal_content(page)
     assert "discord_auth.title" not in requested_keys
     assert "discord_auth.requirements" not in requested_keys
+    assert "discord_auth.byok" not in requested_keys
     assert modal_content.width == 720
     assert modal_content.height is None
 
@@ -140,25 +140,21 @@ def test_discord_managed_auth_dialog_uses_warm_document_layout(
     assert [button.__class__.__name__ for button in action_row.controls] == [
         "TextButton",
         "TextButton",
-        "TextButton",
     ]
     assert [button.text for button in action_row.controls] == [
-        "value:discord_auth.byok",
         "value:discord_auth.close",
         "value:discord_auth.continue",
     ]
-    assert [_button_text_size(button) for button in action_row.controls] == [26, 26, 26]
+    assert [_button_text_size(button) for button in action_row.controls] == [26, 26]
     assert [button.style.color[ft.ControlState.DEFAULT] for button in action_row.controls] == [
-        COLOR_NEUTRAL_DARK,
         COLOR_NEUTRAL_DARK,
         COLOR_NEUTRAL_DARK,
     ]
     assert [button.style.color[ft.ControlState.HOVERED] for button in action_row.controls] == [
         COLOR_PRIMARY,
         COLOR_PRIMARY,
-        COLOR_PRIMARY,
     ]
-    assert [button.style.animation_duration for button in action_row.controls] == [0, 0, 0]
+    assert [button.style.animation_duration for button in action_row.controls] == [0, 0]
 
 
 def test_discord_managed_auth_dialog_waiting_state_uses_waiting_labels() -> None:
@@ -195,12 +191,11 @@ def test_discord_managed_auth_dialog_opens_one_modal_dialog_on_page() -> None:
     assert dialog._dialog is not None
     assert dialog._dialog.modal is True
     assert dialog._continue_button is not None
-    assert dialog._byok_button is not None
+    assert dialog._byok_button is None
     assert dialog._close_button is not None
     assert dialog._actions is not None
-    assert dialog._byok_button is dialog._actions.controls[0]
-    assert dialog._close_button is dialog._actions.controls[1]
-    assert dialog._continue_button is dialog._actions.controls[2]
+    assert dialog._close_button is dialog._actions.controls[0]
+    assert dialog._continue_button is dialog._actions.controls[1]
 
 
 def test_discord_managed_auth_dialog_open_is_idempotent() -> None:
@@ -231,25 +226,9 @@ def test_discord_managed_auth_dialog_continue_does_not_close_before_callback() -
     assert page.dialog is dialog._dialog
 
 
-def test_discord_managed_auth_dialog_byok_and_close_close_then_invoke_callbacks() -> None:
+def test_discord_managed_auth_dialog_close_closes_then_invokes_callback() -> None:
     page = DummyPage()
     events: list[str] = []
-    byok_dialog = DiscordManagedAuthDialog(
-        page,
-        on_continue=lambda: events.append("continue"),
-        on_byok=lambda: events.append(f"byok_closed={page.dialog is None}"),
-        on_close=lambda: events.append(f"close_closed={page.dialog is None}"),
-        on_reopen_browser=lambda: events.append("reopen"),
-    )
-    byok_dialog.open()
-
-    assert byok_dialog._byok_button is not None
-    byok_dialog._byok_button.on_click(None)
-
-    assert events == ["byok_closed=True"]
-    assert page.closed == [byok_dialog._dialog]
-    assert page.dialog is None
-
     close_dialog = DiscordManagedAuthDialog(
         page,
         on_continue=lambda: events.append("continue"),
@@ -262,7 +241,7 @@ def test_discord_managed_auth_dialog_byok_and_close_close_then_invoke_callbacks(
     assert close_dialog._close_button is not None
     close_dialog._close_button.on_click(None)
 
-    assert events == ["byok_closed=True", "close_closed=True"]
+    assert events == ["close_closed=True"]
     assert page.closed[-1] == close_dialog._dialog
     assert page.dialog is None
 

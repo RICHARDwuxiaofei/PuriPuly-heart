@@ -14,13 +14,15 @@ class FounderLetterDialog:
         self,
         page: ft.Page,
         *,
-        on_connect: Callable[[], None],
-        on_contact: Callable[[], None],
+        on_connect: Callable[[], None] | None = None,
+        on_contact: Callable[[], None] | None = None,
     ) -> None:
+        # Legacy callbacks are accepted for older call sites; both actions now only close.
+        del on_connect, on_contact
         self._page = page
-        self._on_connect = on_connect
-        self._on_contact = on_contact
         self._dialog: ft.AlertDialog | None = None
+        self._acknowledge_button: ft.TextButton | None = None
+        self._cancel_button: ft.TextButton | None = None
         self._connect_button: ft.TextButton | None = None
         self._contact_button: ft.TextButton | None = None
 
@@ -33,12 +35,12 @@ class FounderLetterDialog:
         result = open_warm_document_dialog(
             self._page,
             body_paragraphs=paragraphs,
-            primary_label=t("openrouter.handoff.connect"),
-            primary_action=self._on_connect,
-            secondary_label=t("openrouter.handoff.contact"),
-            secondary_action=self._on_contact,
+            primary_label=t("openrouter.handoff.acknowledge"),
+            secondary_label=t("openrouter.handoff.cancel"),
             glow_factory=create_glow_stack,
         )
         self._dialog = result.dialog
-        self._connect_button = result.primary_button
-        self._contact_button = result.secondary_button
+        self._acknowledge_button = result.primary_button
+        self._cancel_button = result.secondary_button
+        self._connect_button = self._acknowledge_button
+        self._contact_button = self._cancel_button

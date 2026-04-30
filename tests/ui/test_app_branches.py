@@ -567,7 +567,7 @@ def test_managed_release_ko_snackbar_copy_matches_requested_wording() -> None:
         i18n_module.set_locale(previous_locale)
 
 
-def test_debug_preview_founder_letter_uses_dialog_with_preview_safe_callbacks(
+def test_debug_preview_founder_letter_opens_dialog_without_actions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = TranslatorApp.__new__(TranslatorApp)
@@ -593,10 +593,8 @@ def test_debug_preview_founder_letter_uses_dialog_with_preview_safe_callbacks(
     )
 
     class FakeFounderLetterDialog:
-        def __init__(self, page, *, on_connect, on_contact):
+        def __init__(self, page):
             captured["page"] = page
-            captured["on_connect"] = on_connect
-            captured["on_contact"] = on_contact
 
         def open(self) -> None:
             captured["opened"] = True
@@ -608,8 +606,6 @@ def test_debug_preview_founder_letter_uses_dialog_with_preview_safe_callbacks(
     assert captured["page"] is app.page
     assert captured["opened"] is True
     assert app._founder_letter_dialog is not None
-    captured["on_connect"]()
-    captured["on_contact"]()
 
 
 def test_debug_preview_pkce_failure_only_shows_failure_snackbar(
@@ -712,9 +708,7 @@ def test_debug_preview_discord_auth_opens_dialog_with_close_only_actions(
     monkeypatch.setattr(
         app_module,
         "save_settings",
-        lambda *_args, **_kwargs: pytest.fail(
-            "debug Discord-auth preview must not save settings"
-        ),
+        lambda *_args, **_kwargs: pytest.fail("debug Discord-auth preview must not save settings"),
     )
     monkeypatch.setattr(
         app_module.webbrowser,
@@ -730,7 +724,7 @@ def test_debug_preview_discord_auth_opens_dialog_with_close_only_actions(
         assert dialog._dialog is app.page.opened[-1]
         return dialog, dialog._dialog
 
-    for button_attr in ("_continue_button", "_byok_button", "_close_button"):
+    for button_attr in ("_continue_button", "_close_button"):
         dialog, opened_dialog = open_preview_dialog()
         getattr(dialog, button_attr).on_click(None)
         assert app.page.closed[-1] is opened_dialog
@@ -1891,7 +1885,7 @@ def test_show_snackbar_opens_page_snackbar() -> None:
     assert snackbar.duration == 1234
 
 
-def test_show_founder_letter_dialog_routes_connect_and_contact_actions(
+def test_show_founder_letter_dialog_opens_without_external_actions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = TranslatorApp.__new__(TranslatorApp)
@@ -1908,10 +1902,8 @@ def test_show_founder_letter_dialog_routes_connect_and_contact_actions(
     opened_urls: list[str] = []
 
     class FakeFounderLetterDialog:
-        def __init__(self, page, *, on_connect, on_contact):
+        def __init__(self, page):
             captured["page"] = page
-            captured["on_connect"] = on_connect
-            captured["on_contact"] = on_contact
 
         def open(self) -> None:
             captured["opened"] = True
@@ -1930,17 +1922,11 @@ def test_show_founder_letter_dialog_routes_connect_and_contact_actions(
 
     assert captured["page"] is app.page
     assert captured["opened"] is True
-
-    captured["on_connect"]()
-    captured["on_contact"]()
-
-    assert pkce_calls[0][1] == "letter"
-    assert pkce_calls[0][0].openrouter.selected_source == OpenRouterCredentialSource.BYOK
-    assert pkce_calls[0][0].openrouter.selection_alias == OpenRouterSelectionAlias.QWEN35_FLASH_BYOK
-    assert opened_urls == ["https://x.com/kapitalismho"]
+    assert pkce_calls == []
+    assert opened_urls == []
 
 
-def test_show_founder_letter_dialog_derives_byok_alias_from_managed_model_when_alias_missing(
+def test_show_founder_letter_dialog_does_not_prepare_byok_alias_when_opened(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = TranslatorApp.__new__(TranslatorApp)
@@ -1956,9 +1942,8 @@ def test_show_founder_letter_dialog_derives_byok_alias_from_managed_model_when_a
     pkce_calls: list[tuple[AppSettings, str]] = []
 
     class FakeFounderLetterDialog:
-        def __init__(self, _page, *, on_connect, on_contact):
-            captured["on_connect"] = on_connect
-            captured["on_contact"] = on_contact
+        def __init__(self, _page):
+            captured["page"] = _page
 
         def open(self) -> None:
             captured["opened"] = True
@@ -1973,11 +1958,10 @@ def test_show_founder_letter_dialog_derives_byok_alias_from_managed_model_when_a
     )
 
     app.show_founder_letter_dialog()
-    captured["on_connect"]()
 
     assert captured["opened"] is True
-    assert pkce_calls[0][1] == "letter"
-    assert pkce_calls[0][0].openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
+    assert captured["page"] is app.page
+    assert pkce_calls == []
 
 
 @pytest.mark.asyncio

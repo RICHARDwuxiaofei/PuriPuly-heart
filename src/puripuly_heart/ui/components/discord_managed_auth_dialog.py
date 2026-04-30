@@ -17,7 +17,6 @@ from puripuly_heart.ui.i18n import t
 
 class DiscordManagedAuthDialog:
     action_labels = [
-        "discord_auth.byok",
         "discord_auth.close",
         "discord_auth.continue",
     ]
@@ -65,11 +64,6 @@ class DiscordManagedAuthDialog:
             body_paragraphs=split_body_paragraphs(t("discord_auth.body")),
             actions=[
                 WarmDocumentDialogAction(
-                    label=t("discord_auth.byok"),
-                    on_select=lambda: self._close_then(self._on_byok),
-                    close_before_action=False,
-                ),
-                WarmDocumentDialogAction(
                     label=t("discord_auth.close"),
                     on_select=lambda: self._close_then(self._on_close),
                     close_before_action=False,
@@ -86,10 +80,10 @@ class DiscordManagedAuthDialog:
         self._body_text = self._dialog_result.body_text
         self._actions = self._dialog_result.action_row
         (
-            self._byok_button,
             self._close_button,
             self._continue_button,
-        ) = self._dialog_result.initial_action_buttons[0:3]
+        ) = self._dialog_result.initial_action_buttons[0:2]
+        self._byok_button = None
         self._reopen_browser_button = None
         self._cancel_button = None
         self._is_open = True

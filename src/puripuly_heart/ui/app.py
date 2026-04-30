@@ -201,11 +201,7 @@ class TranslatorApp:
         return None
 
     def _preview_founder_letter(self) -> None:
-        dialog = FounderLetterDialog(
-            self.page,
-            on_connect=self._debug_preview_noop,
-            on_contact=self._debug_preview_noop,
-        )
+        dialog = FounderLetterDialog(self.page)
         self._founder_letter_dialog = dialog
         dialog.open()
 
@@ -671,8 +667,7 @@ class TranslatorApp:
         hub = getattr(controller, "hub", None)
         if hub is not None:
             return bool(
-                getattr(hub, "llm", None) is not None
-                and getattr(hub, "translation_enabled", False)
+                getattr(hub, "llm", None) is not None and getattr(hub, "translation_enabled", False)
             )
         return result is True
 
@@ -782,11 +777,7 @@ class TranslatorApp:
         webbrowser.open(FOUNDER_CONTACT_URL)
 
     def show_founder_letter_dialog(self) -> None:
-        dialog = FounderLetterDialog(
-            self.page,
-            on_connect=self._on_founder_letter_connect,
-            on_contact=self._on_founder_letter_contact,
-        )
+        dialog = FounderLetterDialog(self.page)
         self._founder_letter_dialog = dialog
         dialog.open()
 
