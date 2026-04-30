@@ -4,6 +4,21 @@ import { createDeviceKeyPair, signCanonicalStatusRequest } from './test-support/
 import { createTestBrokerEnv, insertEntitlement } from './test-support/sqlite-d1';
 import { getTrialStatus, issueChallenge } from './test-support/trial-api';
 
+function collectResponseKeys(value: unknown): string[] {
+  if (!value || typeof value !== 'object') {
+    return [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => collectResponseKeys(entry));
+  }
+
+  return Object.entries(value).flatMap(([key, nested]) => [
+    key,
+    ...collectResponseKeys(nested),
+  ]);
+}
+
 describe('GET /v1/trial/status response contract', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -58,8 +73,53 @@ describe('GET /v1/trial/status response contract', () => {
       onboarding_eligibility: {
         eligible: false,
         reason: 'active',
+        requires_discord_oauth: false,
       },
     });
+  });
+
+  it('returns Discord-required eligibility without silent browser launch fields when no entitlement exists', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const env = createTestBrokerEnv();
+    const keyPair = await createDeviceKeyPair();
+    await issueChallenge({
+      env,
+      installationId: 'install-status-discord-required',
+      devicePublicKey: keyPair.devicePublicKey,
+      appVersion: '1.2.3',
+    });
+    const signedRequest = await signCanonicalStatusRequest(keyPair.privateKey, {
+      installation_id: 'install-status-discord-required',
+      timestamp: '2026-04-08T06:00:30.000Z',
+    });
+
+    const response = await getTrialStatus({
+      env,
+      installationId: 'install-status-discord-required',
+      headers: {
+        'X-Puripuly-Timestamp': signedRequest.timestamp,
+        'X-Puripuly-Signature': signedRequest.signature,
+      },
+    });
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as Record<string, unknown>;
+    expect(payload).toEqual({
+      managed_state: {
+        lifecycle: 'none',
+        managed_availability: true,
+      },
+      current_entitlement: null,
+      onboarding_eligibility: {
+        eligible: true,
+        reason: 'discord_required',
+        requires_discord_oauth: true,
+      },
+    });
+    expect(payload).not.toHaveProperty('authorization_url');
+    expect(payload).not.toHaveProperty('redirect_uri');
   });
 
   it('keeps status responses free of challenge, release-session, and credential storage fields', async () => {
@@ -74,6 +134,25 @@ describe('GET /v1/trial/status response contract', () => {
       devicePublicKey: keyPair.devicePublicKey,
       appVersion: '1.2.3',
     });
+    env.__db
+      .prepare(
+        `INSERT INTO discord_identities (
+            discord_user_ref,
+            entitlement_installation_id,
+            status,
+            ref_secret_version,
+            created_at,
+            updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'raw-discord-user-123456789012345678:user@example.test',
+        'install-status-hidden-fields',
+        'issuing',
+        1,
+        '2026-04-08T06:00:00Z',
+        '2026-04-08T06:00:00Z',
+      );
     insertEntitlement(env, {
       installation_id: 'install-status-hidden-fields',
       status: 'pending_release',
@@ -82,6 +161,10 @@ describe('GET /v1/trial/status response contract', () => {
       release_session_ref: 'release-session',
       release_token_hash: 'release-token-hash',
       release_token_expires_at: '2026-04-08T06:15:00Z',
+      discord_user_ref: 'raw-discord-user-123456789012345678:user@example.test',
+      discord_issue_status: 'issuing',
+      discord_issue_reserved_at: '2026-04-08T06:00:00Z',
+      discord_issue_delivered_at: '2026-04-08T06:01:00Z',
     });
     const signedRequest = await signCanonicalStatusRequest(keyPair.privateKey, {
       installation_id: 'install-status-hidden-fields',
@@ -106,6 +189,30 @@ describe('GET /v1/trial/status response contract', () => {
     expect(payload).not.toHaveProperty('release_session_ref');
     expect(payload).not.toHaveProperty('release_token_hash');
     expect(payload).not.toHaveProperty('managed_credential_ref');
+    expect(payload).not.toHaveProperty('authorization_url');
+
+    const responseKeys = collectResponseKeys(payload);
+    expect(responseKeys).not.toEqual(
+      expect.arrayContaining([
+        'discord_user_ref',
+        'discord_user_id',
+        'discord_id',
+        'discord_email',
+        'discord_email_verified',
+        'discord_account_created_at',
+        'discord_issue_status',
+        'discord_issue_reserved_at',
+        'discord_issue_delivered_at',
+        'state_hash',
+        'redirect_uri',
+        'pkce_code_verifier',
+        'issue_nonce_hash',
+        'authorization_url',
+      ]),
+    );
+    const serializedPayload = JSON.stringify(payload);
+    expect(serializedPayload).not.toContain('raw-discord-user-123456789012345678');
+    expect(serializedPayload).not.toContain('user@example.test');
   });
 
   it('treats pending_release as broker-side onboarding continuation rather than a terminal state', async () => {
@@ -146,8 +253,9 @@ describe('GET /v1/trial/status response contract', () => {
         managed_availability: true,
       },
       onboarding_eligibility: {
-        eligible: true,
+        eligible: false,
         reason: 'pending_release',
+        requires_discord_oauth: false,
       },
     });
   });

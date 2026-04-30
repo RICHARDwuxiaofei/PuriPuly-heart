@@ -105,6 +105,7 @@ describe('broker daily issuance cap enforcement', () => {
       onboarding_eligibility: {
         eligible: false,
         reason: 'active',
+        requires_discord_oauth: false,
       },
     });
   });
@@ -399,6 +400,7 @@ describe('broker daily issuance cap enforcement', () => {
       onboarding_eligibility: {
         eligible: false,
         reason: 'active',
+        requires_discord_oauth: false,
       },
     });
   });

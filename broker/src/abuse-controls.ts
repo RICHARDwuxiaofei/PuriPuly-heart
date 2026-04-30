@@ -1148,17 +1148,11 @@ function getCloudflareMetadata(c: Context<BrokerEnv>): {
   const cf = rawRequest.cf ?? {};
 
   return {
-    asn:
-      cf.asn ??
-      nonEmptyString(c.req.header('x-test-cf-asn')) ??
-      nonEmptyString(c.req.header('cf-asn')),
+    asn: cf.asn,
     country: cf.country ?? nonEmptyString(c.req.header('cf-ipcountry')),
-    httpProtocol:
-      cf.httpProtocol ?? nonEmptyString(c.req.header('x-test-cf-http-protocol')),
-    tlsVersion:
-      cf.tlsVersion ?? nonEmptyString(c.req.header('x-test-cf-tls-version')),
-    tlsCipher:
-      cf.tlsCipher ?? nonEmptyString(c.req.header('x-test-cf-tls-cipher')),
+    httpProtocol: cf.httpProtocol,
+    tlsVersion: cf.tlsVersion,
+    tlsCipher: cf.tlsCipher,
   };
 }
 
