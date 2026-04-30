@@ -47,10 +47,21 @@ def _action_button_style() -> ft.ButtonStyle:
 
 
 @dataclass(frozen=True)
+class WarmDocumentDialogAction:
+    label: str
+    on_select: Callable[[], None] | None = None
+    close_before_action: bool = True
+
+
+@dataclass(frozen=True)
 class WarmDocumentDialogResult:
     dialog: ft.AlertDialog
     primary_button: ft.TextButton
     secondary_button: ft.TextButton
+    body_text: ft.Text
+    action_row: ft.Row
+    initial_action_buttons: tuple[ft.TextButton, ...]
+    set_actions: Callable[[Sequence[WarmDocumentDialogAction]], tuple[ft.TextButton, ...]]
 
 
 def split_body_paragraphs(body: str) -> list[str]:
@@ -65,49 +76,89 @@ def open_warm_document_dialog(
     page: ft.Page,
     *,
     body_paragraphs: Sequence[str],
-    primary_label: str,
-    primary_action: Callable[[], None] | None,
-    secondary_label: str,
-    secondary_action: Callable[[], None] | None,
+    primary_label: str | None = None,
+    primary_action: Callable[[], None] | None = None,
+    secondary_label: str | None = None,
+    secondary_action: Callable[[], None] | None = None,
+    actions: Sequence[WarmDocumentDialogAction] | None = None,
     glow_factory: Callable[[ft.Control], ft.Control] = create_glow_stack,
 ) -> WarmDocumentDialogResult:
     dialog: ft.AlertDialog | None = None
 
-    def select(action: Callable[[], None] | None) -> None:
-        if dialog is not None:
+    def select(action: WarmDocumentDialogAction) -> None:
+        if action.close_before_action and dialog is not None:
             page.close(dialog)
-        if action is not None:
-            action()
+        if action.on_select is not None:
+            action.on_select()
 
-    body = ft.Column(
-        controls=[
-            ft.Text(
-                join_body_paragraphs(body_paragraphs),
-                size=BODY_TEXT_SIZE,
-                color=COLOR_ON_BACKGROUND,
-                selectable=True,
+    def normalize_actions(
+        action_specs: Sequence[WarmDocumentDialogAction],
+    ) -> tuple[WarmDocumentDialogAction, ...]:
+        normalized = tuple(action_specs)
+        if len(normalized) not in {1, 2, 3}:
+            raise ValueError("warm document dialogs support one to three actions")
+        return normalized
+
+    if actions is None:
+        if primary_label is None or secondary_label is None:
+            raise ValueError("primary_label and secondary_label are required")
+        initial_actions = normalize_actions(
+            (
+                WarmDocumentDialogAction(
+                    label=secondary_label,
+                    on_select=secondary_action,
+                ),
+                WarmDocumentDialogAction(
+                    label=primary_label,
+                    on_select=primary_action,
+                ),
             )
-        ],
+        )
+    else:
+        initial_actions = normalize_actions(actions)
+
+    def make_action_buttons(
+        action_specs: Sequence[WarmDocumentDialogAction],
+    ) -> tuple[ft.TextButton, ...]:
+        return tuple(
+            ft.TextButton(
+                text=action.label,
+                on_click=lambda _, selected_action=action: select(selected_action),
+                style=_action_button_style(),
+            )
+            for action in normalize_actions(action_specs)
+        )
+
+    body_text = ft.Text(
+        join_body_paragraphs(body_paragraphs),
+        size=BODY_TEXT_SIZE,
+        color=COLOR_ON_BACKGROUND,
+        selectable=True,
+    )
+    body = ft.Column(
+        controls=[body_text],
         spacing=PARAGRAPH_SPACING,
         tight=True,
     )
 
-    secondary_button = ft.TextButton(
-        text=secondary_label,
-        on_click=lambda _: select(secondary_action),
-        style=_action_button_style(),
-    )
-    primary_button = ft.TextButton(
-        text=primary_label,
-        on_click=lambda _: select(primary_action),
-        style=_action_button_style(),
-    )
-    actions = ft.Row(
-        controls=[secondary_button, primary_button],
+    initial_action_buttons = make_action_buttons(initial_actions)
+
+    action_row = ft.Row(
+        controls=list(initial_action_buttons),
         spacing=ACTION_SPACING,
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         wrap=True,
     )
+
+    def set_actions(
+        replacement_actions: Sequence[WarmDocumentDialogAction],
+    ) -> tuple[ft.TextButton, ...]:
+        replacement_buttons = make_action_buttons(replacement_actions)
+        action_row.controls = list(replacement_buttons)
+        return replacement_buttons
+
+    secondary_button = initial_action_buttons[0]
+    primary_button = initial_action_buttons[-1]
 
     modal_content = ft.Container(
         width=DIALOG_WIDTH,
@@ -123,7 +174,7 @@ def open_warm_document_dialog(
             controls=[
                 body,
                 ft.Container(height=ACTION_TOP_MARGIN),
-                actions,
+                action_row,
             ],
             spacing=0,
             alignment=ft.MainAxisAlignment.CENTER,
@@ -143,4 +194,8 @@ def open_warm_document_dialog(
         dialog=dialog,
         primary_button=primary_button,
         secondary_button=secondary_button,
+        body_text=body_text,
+        action_row=action_row,
+        initial_action_buttons=initial_action_buttons,
+        set_actions=set_actions,
     )
