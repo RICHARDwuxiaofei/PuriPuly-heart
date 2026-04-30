@@ -121,6 +121,9 @@ logger = logging.getLogger(__name__)
 STT_RESET_DEADLINE_S = 300.0
 OVERLAY_STARTUP_TIMEOUT_MS = 3000
 OVERLAY_SHUTDOWN_GRACE_S = 0.05
+PEER_TRANSLATION_DISCLOSURE_TEXT = (
+    "Puri Puly Peer translation is on.\n" "Voice audio around me may be picked up and translated."
+)
 _OVERLAY_FAILURE_REASONS = frozenset(
     {
         "missing_executable",
@@ -928,7 +931,7 @@ class GuiController:
             return
         enqueue_disclosure = getattr(hub, "enqueue_peer_translation_disclosure", None)
         if callable(enqueue_disclosure):
-            enqueue_disclosure(t("peer_translation.disclosure"))
+            enqueue_disclosure(PEER_TRANSLATION_DISCLOSURE_TEXT)
 
     def on_overlay_start_failed(self, failure_reason: str | None) -> None:
         previous_state = self.overlay_state

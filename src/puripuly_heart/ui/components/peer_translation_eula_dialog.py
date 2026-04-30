@@ -33,17 +33,7 @@ class PeerTranslationEulaDialog:
         body = ft.Column(
             controls=[
                 ft.Text(
-                    t("peer_translation_eula.body.capture"),
-                    size=15,
-                    color=COLOR_ON_BACKGROUND,
-                ),
-                ft.Text(
-                    t("peer_translation_eula.body.responsibility"),
-                    size=15,
-                    color=COLOR_ON_BACKGROUND,
-                ),
-                ft.Text(
-                    t("peer_translation_eula.body.storage"),
+                    t("peer_translation_eula.body"),
                     size=15,
                     color=COLOR_ON_BACKGROUND,
                 ),

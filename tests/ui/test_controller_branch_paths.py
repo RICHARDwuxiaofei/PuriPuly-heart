@@ -61,8 +61,12 @@ from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
 from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 from puripuly_heart.ui import controller as controller_module
 from puripuly_heart.ui.controller import GuiController
-from puripuly_heart.ui.i18n import t
+from puripuly_heart.ui.i18n import set_locale, t
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
+
+EXPECTED_PEER_DISCLOSURE = (
+    "Puri Puly Peer translation is on.\n" "Voice audio around me may be picked up and translated."
+)
 
 
 class DummySecrets:
@@ -2033,21 +2037,27 @@ async def test_set_peer_translation_enabled_requires_eula_acceptance_before_pers
 async def test_set_peer_translation_enabled_enqueues_peer_disclosure_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    controller = _make_controller(app=SimpleNamespace(refresh_overlay_peer_contract=lambda: None))
-    controller.settings = AppSettings()
-    controller.settings.ui.peer_translation_eula_accepted = True
-    controller.hub = DisclosureDummyHub(llm=object(), stt=object(), peer_stt=object())
-    controller.overlay_state = "connected"
-    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
-    monkeypatch.setattr(
-        GuiController,
-        "_refresh_overlay_runtime_dependencies",
-        lambda self: asyncio.sleep(0),
-    )
+    set_locale("ko")
+    try:
+        controller = _make_controller(
+            app=SimpleNamespace(refresh_overlay_peer_contract=lambda: None)
+        )
+        controller.settings = AppSettings()
+        controller.settings.ui.peer_translation_eula_accepted = True
+        controller.hub = DisclosureDummyHub(llm=object(), stt=object(), peer_stt=object())
+        controller.overlay_state = "connected"
+        monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+        monkeypatch.setattr(
+            GuiController,
+            "_refresh_overlay_runtime_dependencies",
+            lambda self: asyncio.sleep(0),
+        )
 
-    await controller.set_peer_translation_enabled(True)
+        await controller.set_peer_translation_enabled(True)
 
-    assert controller.hub.disclosures == [t("peer_translation.disclosure")]
+        assert controller.hub.disclosures == [EXPECTED_PEER_DISCLOSURE]
+    finally:
+        set_locale("en")
 
 
 @pytest.mark.asyncio
