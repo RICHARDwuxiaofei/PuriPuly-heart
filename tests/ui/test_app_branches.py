@@ -776,6 +776,72 @@ def test_discord_managed_auth_byok_launches_openrouter_pkce_with_byok_target() -
     assert settings.openrouter.selected_source is OpenRouterCredentialSource.MANAGED
 
 
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_uses_run_task_and_success_enables_translation() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(set_waiting_calls=0, close_calls=0)
+    dialog.set_waiting = lambda: setattr(dialog, "set_waiting_calls", dialog.set_waiting_calls + 1)
+    dialog.close = lambda: setattr(dialog, "close_calls", dialog.close_calls + 1)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    start_calls: list[str] = []
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        start_calls.append("start")
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> None:
+        enable_calls.append(enabled)
+
+    app.controller = SimpleNamespace(
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+
+    assert dialog.set_waiting_calls == 1
+    assert start_calls == []
+    assert len(app.page.tasks) == 1
+
+    await app.page.tasks[0]()
+
+    assert start_calls == ["start"]
+    assert dialog.close_calls == 1
+    assert snackbar_calls == [(app_module.t("discord_auth.success"), app_module.COLOR_SUCCESS)]
+    assert enable_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_failure_does_not_show_success_snackbar() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._discord_managed_auth_dialog = SimpleNamespace(set_waiting=lambda: None, close=lambda: None)
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        return False
+
+    async def fake_set_translation_enabled(enabled: bool) -> None:
+        enable_calls.append(enabled)
+
+    app.controller = SimpleNamespace(
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    await app.page.tasks[0]()
+
+    assert snackbar_calls == []
+    assert enable_calls == []
+
+
 def test_peer_translation_toggle_first_enable_opens_eula_without_running_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

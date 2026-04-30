@@ -143,6 +143,15 @@ _OVERLAY_FAILURE_REASONS = frozenset(
         "unknown",
     }
 )
+DISCORD_AUTH_ERROR_KEY_BY_SUBCODE = {
+    "discord_email_unverified": "discord_auth.error.email_unverified",
+    "discord_account_too_new": "discord_auth.error.account_too_new",
+    "discord_lifetime_used": "discord_auth.error.lifetime_used",
+    "hardware_duplicate": "discord_auth.error.hardware_duplicate",
+    "global_cap_reached": "discord_auth.error.daily_cap",
+    "oauth_session_expired": "discord_auth.error.expired",
+    "loopback_unavailable": "discord_auth.error.loopback_unavailable",
+}
 
 
 @dataclass(slots=True)
@@ -222,6 +231,7 @@ class GuiController:
     _overlay_monitor_task: asyncio.Task[None] | None = None
     _overlay_lock: asyncio.Lock | None = None
     _managed_trial_pending_auth: bool = field(init=False, default=False)
+    _discord_managed_auth_in_progress: bool = field(init=False, default=False)
     _managed_trial_usage_metadata: OpenRouterKeyMetadata | None = field(init=False, default=None)
     _managed_trial_usage_metadata_entitlement_ref: str | None = field(
         init=False,
@@ -246,6 +256,10 @@ class GuiController:
     @property
     def managed_auth_pending(self) -> bool:
         return self._managed_trial_pending_auth
+
+    @property
+    def discord_managed_auth_in_progress(self) -> bool:
+        return self._discord_managed_auth_in_progress
 
     @property
     def effective_context_mode(self) -> str:
@@ -562,6 +576,90 @@ class GuiController:
         except Exception:
             return True
         return resolution.api_key is None
+
+    def _managed_openrouter_selected(self) -> bool:
+        return bool(
+            self.settings is not None
+            and self.settings.provider.llm == LLMProviderName.OPENROUTER
+            and self.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+        )
+
+    def _managed_openrouter_local_key_available(self) -> bool:
+        if self.settings is None:
+            return False
+        try:
+            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+            resolution = resolve_openrouter_credentials(
+                self.settings,
+                secrets=secrets,
+                request_intent="TRANS",
+            )
+        except Exception:
+            return False
+        return resolution.api_key is not None
+
+    def dashboard_managed_auth_action(self) -> str:
+        if not self._managed_openrouter_selected():
+            return "continue"
+        if self._discord_managed_auth_in_progress or self._managed_trial_pending_auth:
+            return "in_progress"
+        if self._managed_openrouter_local_key_available():
+            return "continue"
+        return "prompt"
+
+    def _discord_auth_message_key(self, result) -> str:  # noqa: ANN001
+        diagnostics = getattr(result, "diagnostics", None)
+        subcode = getattr(diagnostics, "subcode", None)
+        if subcode is not None:
+            mapped_key = DISCORD_AUTH_ERROR_KEY_BY_SUBCODE.get(subcode)
+            if mapped_key is not None:
+                return mapped_key
+        if getattr(diagnostics, "code", None) == "discord_loopback_unavailable":
+            return DISCORD_AUTH_ERROR_KEY_BY_SUBCODE["loopback_unavailable"]
+        return getattr(result, "message_key", "discord_auth.error.retry")
+
+    async def start_discord_managed_auth_from_dialog(self) -> bool:
+        service = self._managed_openrouter_release_service
+        if service is None:
+            self._discord_managed_auth_in_progress = False
+            self._set_managed_trial_pending_auth(False)
+            self._show_short_message("discord_auth.error.retry")
+            return False
+
+        self._discord_managed_auth_in_progress = True
+        self._set_managed_trial_pending_auth(True)
+        try:
+            try:
+                result = await service.prepare_for_translation()
+            except Exception as exc:
+                self.log_basic(
+                    f"[ManagedAuth] Discord auth start failed: {exc}",
+                    level=logging.ERROR,
+                )
+                self._show_short_message("discord_auth.error.retry")
+                return False
+
+            if (
+                result.behavior == ManagedOpenRouterReleaseBehavior.READY
+                and result.local_key_available
+            ):
+                if self.hub is not None and self.hub.llm is None:
+                    await self._rebuild_llm_provider()
+                else:
+                    self._schedule_managed_trial_usage_refresh()
+                return True
+
+            diagnostics_text = format_managed_openrouter_diagnostics(result.diagnostics)
+            if diagnostics_text:
+                self.log_basic(f"[ManagedAuth] {diagnostics_text}", level=logging.ERROR)
+            self._show_short_message(
+                self._discord_auth_message_key(result),
+                **dict(result.message_kwargs),
+            )
+            return False
+        finally:
+            self._discord_managed_auth_in_progress = False
+            self._set_managed_trial_pending_auth(False)
 
     def _managed_trial_remaining_percent(
         self, usage_metadata: OpenRouterKeyMetadata | None

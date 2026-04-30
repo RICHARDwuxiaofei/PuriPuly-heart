@@ -379,18 +379,45 @@ class TranslatorApp:
             return
         logger.log(level, message)
 
-    def _on_translation_toggle(self, enabled: bool) -> None:
+    def _revert_dashboard_translation_toggle(self) -> None:
+        dash = getattr(self, "view_dashboard", None)
+        set_translation_enabled = getattr(dash, "set_translation_enabled", None)
+        if callable(set_translation_enabled):
+            try:
+                set_translation_enabled(False)
+            except Exception:
+                logger.exception("Failed to revert dashboard translation toggle")
+
+    def _dashboard_managed_auth_action(self) -> str:
+        action = getattr(self.controller, "dashboard_managed_auth_action", None)
+        if not callable(action):
+            return "continue"
+        try:
+            return str(action())
+        except Exception:
+            logger.exception("Failed to evaluate managed auth dashboard gate")
+            return "prompt"
+
+    def _on_translation_toggle(self, enabled: bool) -> bool:
         self._log_basic(f"[Dashboard] Translation toggle requested: enabled={enabled}")
         self._log_detailed(
             "[Dashboard] Translation toggle detail: "
             f"dashboard_state={getattr(getattr(self, 'view_dashboard', None), 'is_translation_on', None)} "
             f"overlay_state={getattr(self, 'overlay_state', 'unknown')}"
         )
+        if enabled:
+            managed_auth_action = self._dashboard_managed_auth_action()
+            if managed_auth_action in {"prompt", "in_progress"}:
+                self._revert_dashboard_translation_toggle()
+                if managed_auth_action == "prompt":
+                    self.show_discord_managed_auth_dialog(preview=False)
+                return False
 
         async def _task():
             await self.controller.set_translation_enabled(enabled)
 
         self.page.run_task(_task)
+        return True
 
     def _on_stt_toggle(self, enabled: bool) -> None:
         self._log_basic(f"[Dashboard] STT toggle requested: enabled={enabled}")
@@ -614,7 +641,20 @@ class TranslatorApp:
         set_waiting = getattr(dialog, "set_waiting", None)
         if callable(set_waiting):
             set_waiting()
-        self._run_optional_discord_auth_controller_hook("start_discord_managed_auth")
+
+        async def _task() -> None:
+            controller = getattr(self, "controller", None)
+            start_auth = getattr(controller, "start_discord_managed_auth_from_dialog", None)
+            if not callable(start_auth):
+                return
+            ok = await start_auth()
+            if not ok:
+                return
+            self._close_discord_managed_auth_dialog()
+            self._show_snackbar(t("discord_auth.success"), COLOR_SUCCESS)
+            await controller.set_translation_enabled(True)
+
+        self.page.run_task(_task)
 
     def _reopen_discord_managed_auth_browser(self) -> None:
         self._run_optional_discord_auth_controller_hook("reopen_discord_managed_auth_browser")
