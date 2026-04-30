@@ -192,24 +192,26 @@ describe('GET /v1/trial/status response contract', () => {
     expect(payload).not.toHaveProperty('authorization_url');
 
     const responseKeys = collectResponseKeys(payload);
-    expect(responseKeys).not.toEqual(
-      expect.arrayContaining([
-        'discord_user_ref',
-        'discord_user_id',
-        'discord_id',
-        'discord_email',
-        'discord_email_verified',
-        'discord_account_created_at',
-        'discord_issue_status',
-        'discord_issue_reserved_at',
-        'discord_issue_delivered_at',
-        'state_hash',
-        'redirect_uri',
-        'pkce_code_verifier',
-        'issue_nonce_hash',
-        'authorization_url',
-      ]),
+    const forbiddenResponseKeys = [
+      'discord_user_ref',
+      'discord_user_id',
+      'discord_id',
+      'discord_email',
+      'discord_email_verified',
+      'discord_account_created_at',
+      'discord_issue_status',
+      'discord_issue_reserved_at',
+      'discord_issue_delivered_at',
+      'state_hash',
+      'redirect_uri',
+      'pkce_code_verifier',
+      'issue_nonce_hash',
+      'authorization_url',
+    ];
+    const leakedResponseKeys = forbiddenResponseKeys.filter((key) =>
+      responseKeys.includes(key),
     );
+    expect(leakedResponseKeys).toEqual([]);
     const serializedPayload = JSON.stringify(payload);
     expect(serializedPayload).not.toContain('raw-discord-user-123456789012345678');
     expect(serializedPayload).not.toContain('user@example.test');

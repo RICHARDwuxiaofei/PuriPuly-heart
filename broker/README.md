@@ -72,8 +72,9 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
     2. `timestamp`
   - enforces signed clock skew within `±60` seconds
   - status requests are verified against the already registered `device_public_key` for the installation; unknown `installation_id` values return `installation_not_found`
-  - response: normalized `managed_state`, `current_entitlement`, and lifecycle-derived `onboarding_eligibility`
-  - onboarding eligibility is broker-side metadata only: `none` => eligible, `pending_release` => eligible continuation, `active` / `expired` / `revoked` => ineligible
+  - response: normalized `managed_state`, `current_entitlement`, and `onboarding_eligibility`
+  - onboarding eligibility is broker-side metadata only: no entitlement returns `{ eligible: true, reason: "discord_required", requires_discord_oauth: true }` so the app can show the Discord dialog without a silent browser launch or `authorization_url`
+  - current entitlements are ineligible for new Discord onboarding and return `{ eligible: false, reason: <stored entitlement status>, requires_discord_oauth: false }`; `pending_release`, `active`, `expired`, and `revoked` reasons come from the stored entitlement status rather than lifecycle derivation
   - `expired` and `revoked` are returned as `200` lifecycle data, not public error codes
   - live remaining budget stays upstream in OpenRouter metadata instead of being mirrored into broker status
 - `POST /v1/providers/openrouter/issue`
