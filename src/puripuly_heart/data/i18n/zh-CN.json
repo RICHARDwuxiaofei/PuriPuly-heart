@@ -223,7 +223,7 @@
     "debug_preview.pkce_failure": "PKCE failure",
     "debug_preview.peer_translation_eula": "对方翻译 EULA",
     "peer_translation_eula.title": "使用对方翻译前",
-    "peer_translation_eula.body": "Puri Puly Hearts 为了翻译对方的声音，会通过环回内录截取桌面音频。\n这就意味着，在没有经过他人同意的情况下，甚至是你自己没有参与的对话，里面的声音也可能会被处理。\n这种行为根据不同的国家和地区，可能会违反相关法律。\n\nPuriPuly Hearts 不会存储对方的音频、转写文本或翻译结果。\n但你配置的外部语音识别和翻译服务商可能会处理这些数据。\n\n使用时产生的法律责任得由使用者自己承担。\n所以请尽量在你参与的对话里，并在对方同意的情况下去使用。",
+    "peer_translation_eula.body": "PuriPuly 为了翻译对方的声音，会通过环回内录截取桌面音频。\n这就意味着，在没有经过他人同意的情况下，甚至是你自己没有参与的对话，里面的声音也可能会被处理。\n这种行为根据不同的国家和地区，可能会违反相关法律。\n\n使用时产生的法律责任得由使用者自己承担。\n所以请尽量在你参与的对话里，并在对方同意的情况下去使用。\n\nPuriPuly 不会存储对方的音频、转写文本或翻译结果。\n但你配置的外部语音识别和翻译服务商可能会处理这些数据。",
     "peer_translation_eula.accept": "我理解",
     "peer_translation_eula.cancel": "取消",
     "peer_translation.disclosure": "Puri Puly Peer translation is on.\nVoice audio around me may be picked up and translated.",

@@ -223,7 +223,7 @@
   "debug_preview.pkce_failure": "PKCE failure",
   "debug_preview.peer_translation_eula": "Peer translation EULA",
   "peer_translation_eula.title": "Before using peer translation",
-  "peer_translation_eula.body": "Puri Puly Hearts captures desktop audio via loopback to translate the other person's voice.\nThis means it might process audio from conversations you aren't involved in, without the speakers' consent.\nDepending on your region, this could violate local laws.\n\nPuriPuly Hearts does not store the other person's audio, transcripts, or translation results.\nHowever, your configured external speech recognition and translation providers may process the data.\n\nYou are legally responsible for how you use this tool.\nWhenever possible, please use it only in conversations you're actively participating in, and make sure you have the other person's consent.",
+  "peer_translation_eula.body": "PuriPuly captures desktop audio via loopback to translate the other person's voice.\nThis means it might process audio from conversations you aren't involved in, without the speakers' consent.\nDepending on your region, this could violate local laws.\n\nYou are legally responsible for how you use this tool.\nWhenever possible, please use it only in conversations you're actively participating in, and make sure you have the other person's consent.\n\nPuriPuly does not store the other person's audio, transcripts, or translation results.\nHowever, your configured external speech recognition and translation providers may process the data.",
   "peer_translation_eula.accept": "I understand",
   "peer_translation_eula.cancel": "Cancel",
   "peer_translation.disclosure": "Puri Puly Peer translation is on.\nVoice audio around me may be picked up and translated.",

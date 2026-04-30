@@ -1,0 +1,191 @@
+from __future__ import annotations
+
+import pytest
+
+pytest.importorskip("flet")
+
+import flet as ft  # noqa: E402
+
+import puripuly_heart.ui.components.founder_letter_dialog as founder_module  # noqa: E402
+import puripuly_heart.ui.components.peer_translation_eula_dialog as eula_module  # noqa: E402
+from puripuly_heart.ui.components.founder_letter_dialog import (  # noqa: E402
+    FounderLetterDialog,
+)
+from puripuly_heart.ui.components.peer_translation_eula_dialog import (  # noqa: E402
+    PeerTranslationEulaDialog,
+)
+from puripuly_heart.ui.theme import (  # noqa: E402
+    COLOR_BACKGROUND,
+    COLOR_NEUTRAL_DARK,
+    COLOR_PRIMARY,
+)
+
+
+class FakePage:
+    def __init__(self) -> None:
+        self.dialog = None
+
+    def open(self, dialog) -> None:
+        self.dialog = dialog
+
+    def close(self, dialog) -> None:
+        _ = dialog
+
+
+def _open_founder_letter(monkeypatch: pytest.MonkeyPatch) -> tuple[FakePage, list[str]]:
+    requested_keys: list[str] = []
+
+    def fake_t(key: str) -> str:
+        requested_keys.append(key)
+        return f"value:{key}"
+
+    monkeypatch.setattr(founder_module, "t", fake_t)
+    monkeypatch.setattr(founder_module, "create_glow_stack", lambda content: content)
+
+    page = FakePage()
+    FounderLetterDialog(
+        page,
+        on_connect=lambda: None,
+        on_contact=lambda: None,
+    ).open()
+    return page, requested_keys
+
+
+def _open_eula(monkeypatch: pytest.MonkeyPatch) -> tuple[FakePage, list[str]]:
+    requested_keys: list[str] = []
+
+    def fake_t(key: str) -> str:
+        requested_keys.append(key)
+        return f"value:{key}"
+
+    monkeypatch.setattr(eula_module, "t", fake_t)
+    monkeypatch.setattr(eula_module, "create_glow_stack", lambda content: content)
+
+    page = FakePage()
+    PeerTranslationEulaDialog(page, on_accept=lambda: None).open()
+    return page, requested_keys
+
+
+def _modal_content(page: FakePage):
+    return page.dialog.content
+
+
+def _content_column(page: FakePage):
+    return _modal_content(page).content
+
+
+def _first_nested_column(page: FakePage):
+    for control in _content_column(page).controls:
+        if control.__class__.__name__ == "Column":
+            return control
+    raise AssertionError("dialog content did not include a body column")
+
+
+def _button_vertical_padding(button) -> tuple[int, int]:
+    padding = next(iter(button.style.padding.values()))
+    return padding.top, padding.bottom
+
+
+def _button_text_size(button) -> int:
+    text_style = next(iter(button.style.text_style.values()))
+    return text_style.size
+
+
+def _button_color(button, state: ft.ControlState) -> str:
+    return button.style.color[state]
+
+
+@pytest.mark.parametrize("dialog_opener", [_open_founder_letter, _open_eula])
+def test_document_dialogs_use_large_vr_readable_body_type(
+    monkeypatch: pytest.MonkeyPatch,
+    dialog_opener,
+) -> None:
+    page, _requested_keys = dialog_opener(monkeypatch)
+
+    modal_content = _modal_content(page)
+    body_column = _first_nested_column(page)
+
+    assert modal_content.width == 720
+    assert modal_content.height is None
+    assert body_column.spacing == 22
+    assert [control.size for control in body_column.controls] == [24]
+
+
+@pytest.mark.parametrize("dialog_opener", [_open_founder_letter, _open_eula])
+def test_document_dialog_content_is_vertically_centered(
+    monkeypatch: pytest.MonkeyPatch,
+    dialog_opener,
+) -> None:
+    page, _requested_keys = dialog_opener(monkeypatch)
+
+    content_column = _content_column(page)
+
+    assert content_column.alignment.name == "CENTER"
+
+
+@pytest.mark.parametrize("dialog_opener", [_open_founder_letter, _open_eula])
+def test_document_dialog_body_text_is_selectable(
+    monkeypatch: pytest.MonkeyPatch,
+    dialog_opener,
+) -> None:
+    page, _requested_keys = dialog_opener(monkeypatch)
+
+    body_column = _first_nested_column(page)
+
+    assert len(body_column.controls) == 1
+    assert body_column.controls[0].selectable is True
+
+
+def test_founder_letter_body_text_is_one_selectable_text_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page, _requested_keys = _open_founder_letter(monkeypatch)
+
+    body_column = _first_nested_column(page)
+
+    assert len(body_column.controls) == 1
+    assert body_column.controls[0].value == (
+        "value:openrouter.handoff.letter.p1\n\n"
+        "value:openrouter.handoff.letter.p2\n\n"
+        "value:openrouter.handoff.letter.p3"
+    )
+
+
+def test_document_dialogs_do_not_render_title_or_status_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _founder_page, founder_keys = _open_founder_letter(monkeypatch)
+    _eula_page, eula_keys = _open_eula(monkeypatch)
+
+    assert "openrouter.handoff.status" not in founder_keys
+    assert "peer_translation_eula.title" not in eula_keys
+
+
+@pytest.mark.parametrize("dialog_opener", [_open_founder_letter, _open_eula])
+def test_document_dialogs_use_large_standalone_action_buttons(
+    monkeypatch: pytest.MonkeyPatch,
+    dialog_opener,
+) -> None:
+    page, _requested_keys = dialog_opener(monkeypatch)
+
+    action_row = _content_column(page).controls[-1]
+
+    assert action_row.__class__.__name__ == "Row"
+    assert [button.__class__.__name__ for button in action_row.controls] == [
+        "TextButton",
+        "TextButton",
+    ]
+    assert action_row.spacing == 14
+    assert _button_vertical_padding(action_row.controls[0]) == (20, 20)
+    assert _button_vertical_padding(action_row.controls[1]) == (20, 20)
+    assert _button_text_size(action_row.controls[0]) == 26
+    assert _button_text_size(action_row.controls[1]) == 26
+    assert _button_color(action_row.controls[0], ft.ControlState.DEFAULT) == COLOR_NEUTRAL_DARK
+    assert _button_color(action_row.controls[0], ft.ControlState.HOVERED) == COLOR_PRIMARY
+    assert _button_color(action_row.controls[1], ft.ControlState.DEFAULT) == COLOR_NEUTRAL_DARK
+    assert _button_color(action_row.controls[1], ft.ControlState.HOVERED) == COLOR_PRIMARY
+    assert action_row.controls[0].style.bgcolor == ft.Colors.TRANSPARENT
+    assert action_row.controls[1].style.bgcolor == ft.Colors.TRANSPARENT
+    assert action_row.controls[0].style.animation_duration == 0
+    assert action_row.controls[1].style.animation_duration == 0
+    assert getattr(action_row, "bgcolor", None) != COLOR_BACKGROUND
