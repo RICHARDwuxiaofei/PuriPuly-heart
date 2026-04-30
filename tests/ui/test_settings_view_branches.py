@@ -18,11 +18,13 @@ from puripuly_heart.config.settings import (
     OpenRouterCredentialSource,
     OpenRouterFallbackSelectionAlias,
     OpenRouterLLMModel,
-    OpenRouterRoutingMode,
     OpenRouterSelectionAlias,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
+    TranslationConnection,
+    TranslationModel,
+    TranslationSettings,
 )
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.components import subtab_shell as subtab_shell_module
@@ -77,7 +79,7 @@ def _make_llm_selection_view(
     view._managed_trial_usage_visible = False
     view._managed_trial_usage_remaining_percent = None
     view._llm_text = SimpleNamespace(content=SimpleNamespace(value=""), update=lambda: None)
-    view._openrouter_routing_text = SimpleNamespace(
+    view._translation_connection_text = SimpleNamespace(
         content=SimpleNamespace(value="", size=None),
         update=lambda: None,
     )
@@ -86,7 +88,8 @@ def _make_llm_selection_view(
         update=lambda: None,
     )
     view._openrouter_fallback_helper_text = SimpleNamespace(value="", update=lambda: None)
-    view._openrouter_routing_row = SimpleNamespace(visible=False, update=lambda: None)
+    view._translation_connection_row = SimpleNamespace(visible=False, update=lambda: None)
+    view._openrouter_routing_row = view._translation_connection_row
     view._managed_trial_usage_bar = SimpleNamespace(
         visible=False, percent=None, update=lambda: None
     )
@@ -500,7 +503,7 @@ def test_update_api_visibility_shows_openrouter_key(monkeypatch: pytest.MonkeyPa
     assert view._alibaba_key_singapore.visible is False
     assert view._openrouter_key.visible is True
     assert view._openrouter_pkce_button_row.visible is True
-    assert view._openrouter_routing_row.visible is True
+    assert view._translation_connection_row.visible is True
 
 
 def test_update_api_visibility_shows_deepseek_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -530,7 +533,7 @@ def test_update_api_visibility_hides_openrouter_key_for_managed_trial(
     assert view._openrouter_key.visible is False
     assert view._openrouter_pkce_button_row.visible is False
     assert view._managed_trial_usage_bar.visible is True
-    assert view._openrouter_routing_row.visible is True
+    assert view._translation_connection_row.visible is True
 
 
 def test_load_from_settings_shows_managed_usage_bar_in_api_keys_column(
@@ -588,7 +591,7 @@ def test_update_api_visibility_keeps_openrouter_cards_visible_for_inactive_fallb
     view._settings = settings
     view._update_api_visibility()
 
-    assert view._openrouter_routing_row.visible is True
+    assert view._translation_connection_row.visible is True
     assert view._openrouter_fallback_helper_text.value == t(
         "settings.openrouter_fallback.inactive_helper"
     )
@@ -612,6 +615,36 @@ def test_update_api_visibility_treats_peer_local_qwen_as_local_provider(
     assert view._alibaba_key_beijing.visible is False
     assert view._alibaba_key_singapore.visible is False
     assert view._google_key.visible is True
+
+
+def test_deepseek_connection_selection_controls_api_key_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PURIPULY_HEART_OPENROUTER_LEGACY_CONNECT", raising=False)
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.NONE
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view._on_llm_selected(TranslationModel.DEEPSEEK_V4_FLASH.value)
+    assert view._managed_trial_usage_bar.visible is True
+    assert view._openrouter_key.visible is False
+    assert view._deepseek_key.visible is False
+
+    view._on_translation_connection_selected(TranslationConnection.OPENROUTER.value)
+    assert view._managed_trial_usage_bar.visible is False
+    assert view._openrouter_key.visible is True
+    assert view._deepseek_key.visible is False
+
+    view._on_translation_connection_selected(TranslationConnection.OFFICIAL_BYOK.value)
+    assert view._managed_trial_usage_bar.visible is False
+    assert view._openrouter_key.visible is False
+    assert view._deepseek_key.visible is True
 
 
 def test_on_stt_selected_updates_provider_and_pipeline_flags(
@@ -737,31 +770,41 @@ def test_settings_view_omits_legacy_overlay_peer_toggle_api(
 
 def test_on_llm_selected_updates_model_and_prompt_state(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.GEMINI
     settings.system_prompts = {"gemini": "G", "qwen": "Q"}
     settings.system_prompt = "G"
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+    view._on_llm_selected(TranslationModel.QWEN_35_PLUS.value)
 
     pending = view.build_provider_apply_settings()
 
     assert settings.provider.llm == LLMProviderName.GEMINI
     assert pending is not None
+    assert pending.translation.model == TranslationModel.QWEN_35_PLUS
+    assert pending.translation.connection == TranslationConnection.OFFICIAL_BYOK
     assert pending.provider.llm == LLMProviderName.QWEN
     assert pending.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS
     assert view._prompt_editor.value == "Q"
     assert settings.system_prompt == "G"
 
-    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+    view._on_llm_selected(TranslationModel.QWEN_35_PLUS.value)
     assert view.has_provider_changes is True
 
 
-def test_on_llm_selected_updates_openrouter_model_and_prompt_state(
+def test_on_translation_connection_selected_updates_openrouter_model_and_prompt_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.GEMINI
     settings.system_prompts = {
         "gemini": "G",
@@ -775,12 +818,15 @@ def test_on_llm_selected_updates_openrouter_model_and_prompt_state(
         AssertionError("BYOK selection should not launch PKCE immediately")
     )
 
-    view._on_llm_selected(OpenRouterSelectionAlias.GEMMA4_BYOK.value)
+    view._on_llm_selected(TranslationModel.GEMMA4.value)
+    view._on_translation_connection_selected(TranslationConnection.OPENROUTER.value)
 
     pending = view.build_provider_apply_settings()
 
     assert settings.provider.llm == LLMProviderName.GEMINI
     assert pending is not None
+    assert pending.translation.model == TranslationModel.GEMMA4
+    assert pending.translation.connection == TranslationConnection.OPENROUTER
     assert pending.provider.llm == LLMProviderName.OPENROUTER
     assert pending.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     assert pending.openrouter.selected_source == OpenRouterCredentialSource.BYOK
@@ -791,53 +837,110 @@ def test_on_llm_selected_updates_openrouter_model_and_prompt_state(
     assert view.has_provider_changes is True
 
 
-def test_on_llm_selected_updates_deepseek_model_and_prompt_state(
+def test_on_llm_selected_updates_deepseek_model_with_default_managed_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.GEMINI
     settings.system_prompts = {
         "gemini": "G",
+        "openrouter": "O",
         "deepseek": "D",
     }
     settings.system_prompt = "G"
 
     view = _make_llm_selection_view(monkeypatch, settings)
 
-    view._on_llm_selected(DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value)
+    view._on_llm_selected(TranslationModel.DEEPSEEK_V4_FLASH.value)
 
     pending = view.build_provider_apply_settings()
 
     assert settings.provider.llm == LLMProviderName.GEMINI
     assert pending is not None
-    assert pending.provider.llm == LLMProviderName.DEEPSEEK
-    assert pending.deepseek.llm_model == DeepSeekLLMModel.DEEPSEEK_V4_FLASH
-    assert pending.system_prompt == "D"
-    assert view._prompt_editor.value == "D"
+    assert pending.translation.model == TranslationModel.DEEPSEEK_V4_FLASH
+    assert pending.translation.connection == TranslationConnection.MANAGED
+    assert pending.provider.llm == LLMProviderName.OPENROUTER
+    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
+    assert pending.system_prompt == "O"
+    assert view._prompt_editor.value == "O"
     assert view._llm_text.content.value == t("provider.deepseek_v4_flash")
-    assert view._deepseek_key.visible is True
+    assert view._translation_connection_text.content.value == t(
+        "settings.translation_connection.managed"
+    )
+    assert view._managed_trial_usage_bar.visible is True
     assert settings.system_prompt == "G"
     assert view.has_provider_changes is True
 
 
-def test_on_llm_selected_accepts_deepseek_provider_value(
+def test_on_llm_selected_restores_saved_connection_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMMA4,
+        connection=TranslationConnection.MANAGED,
+        connection_history={
+            TranslationModel.GEMMA4.value: TranslationConnection.MANAGED,
+            TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.OFFICIAL_BYOK,
+        },
+    )
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_MANAGED
+    settings.system_prompts = {"openrouter": "O", "deepseek": "D"}
+    settings.system_prompt = "O"
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view._on_llm_selected(TranslationModel.DEEPSEEK_V4_FLASH.value)
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.translation.model == TranslationModel.DEEPSEEK_V4_FLASH
+    assert pending.translation.connection == TranslationConnection.OFFICIAL_BYOK
+    assert pending.provider.llm == LLMProviderName.DEEPSEEK
+    assert pending.deepseek.llm_model == DeepSeekLLMModel.DEEPSEEK_V4_FLASH
+    assert view._llm_text.content.value == t("provider.deepseek_v4_flash")
+    assert view._translation_connection_text.content.value == t(
+        "settings.translation_connection.official_byok"
+    )
+    assert view._prompt_editor.value == "D"
+
+
+def test_on_llm_selected_invalid_value_is_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.GEMINI
-    settings.system_prompts = {"gemini": "G", "deepseek": "D"}
+    settings.system_prompts = {"gemini": "G", "openrouter": "O"}
     settings.system_prompt = "G"
 
     view = _make_llm_selection_view(monkeypatch, settings)
+    view._llm_text.content.value = "Gemini 3 Flash"
+    view._translation_connection_text.content.value = "Official BYOK"
 
     view._on_llm_selected(LLMProviderName.DEEPSEEK.value)
 
     pending = view.build_provider_apply_settings()
 
-    assert pending is not None
-    assert pending.provider.llm == LLMProviderName.DEEPSEEK
-    assert pending.deepseek.llm_model == DeepSeekLLMModel.DEEPSEEK_V4_FLASH
-    assert view._prompt_editor.value == "D"
+    assert pending is settings
+    assert view._provider_settings_draft is None
+    assert pending.translation.model == TranslationModel.GEMINI_3_FLASH
+    assert pending.translation.connection == TranslationConnection.OFFICIAL_BYOK
+    assert pending.provider.llm == LLMProviderName.GEMINI
+    assert view._llm_text.content.value == "Gemini 3 Flash"
+    assert view._translation_connection_text.content.value == "Official BYOK"
+    assert view._prompt_editor.value == "G"
+    assert view.has_provider_changes is False
 
 
 def test_on_llm_selected_stages_openrouter_byok_alias_without_pkce(
@@ -850,11 +953,13 @@ def test_on_llm_selected_stages_openrouter_byok_alias_without_pkce(
         AssertionError("BYOK selection should not launch PKCE immediately")
     )
 
-    view._on_llm_selected(OpenRouterSelectionAlias.GEMMA4_BYOK.value)
+    view._on_translation_connection_selected(TranslationConnection.OPENROUTER.value)
 
     pending = view.build_provider_apply_settings()
 
     assert pending is not None
+    assert pending.translation.model == TranslationModel.GEMMA4
+    assert pending.translation.connection == TranslationConnection.OPENROUTER
     assert pending.provider.llm == LLMProviderName.OPENROUTER
     assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
     assert pending.openrouter.selected_source == OpenRouterCredentialSource.BYOK
@@ -868,6 +973,10 @@ def test_on_llm_selected_stages_byok_with_default_openrouter_prompt_when_unsaved
         settings_view, "load_prompt_for_provider", lambda _provider: "DEFAULT PROMPT"
     )
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.GEMINI
     settings.system_prompts = {"gemini": "G", "qwen": "Q"}
     settings.system_prompt = "G"
@@ -876,7 +985,8 @@ def test_on_llm_selected_stages_byok_with_default_openrouter_prompt_when_unsaved
         AssertionError("BYOK selection should not launch PKCE immediately")
     )
 
-    view._on_llm_selected(OpenRouterSelectionAlias.GEMMA4_BYOK.value)
+    view._on_llm_selected(TranslationModel.GEMMA4.value)
+    view._on_translation_connection_selected(TranslationConnection.OPENROUTER.value)
 
     pending = view.build_provider_apply_settings()
 
@@ -891,6 +1001,10 @@ def test_on_llm_selected_updates_managed_openrouter_label_and_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.GEMINI
     settings.system_prompts = {
         "gemini": "G",
@@ -900,7 +1014,7 @@ def test_on_llm_selected_updates_managed_openrouter_label_and_source(
     settings.system_prompt = "G"
 
     view = _make_llm_selection_view(monkeypatch, settings)
-    view._on_llm_selected(settings_view._OPENROUTER_MANAGED_OPTION_VALUE)
+    view._on_llm_selected(TranslationModel.GEMMA4.value)
 
     pending = view.build_provider_apply_settings()
 
@@ -909,7 +1023,10 @@ def test_on_llm_selected_updates_managed_openrouter_label_and_source(
     assert pending.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     assert pending.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
-    assert view._llm_text.content.value == t("provider.gemma4_managed")
+    assert view._llm_text.content.value == t("provider.gemma4_26b_a4b_it")
+    assert view._translation_connection_text.content.value == t(
+        "settings.translation_connection.managed"
+    )
     assert view._openrouter_key.visible is False
     assert view._prompt_editor.value == "O"
 
@@ -918,6 +1035,10 @@ def test_on_llm_selected_openrouter_provider_value_defaults_to_gemma_managed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.GEMINI
 
     view = _make_llm_selection_view(monkeypatch, settings)
@@ -929,13 +1050,17 @@ def test_on_llm_selected_openrouter_provider_value_defaults_to_gemma_managed(
     assert pending.provider.llm == LLMProviderName.OPENROUTER
     assert pending.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
-    assert view._llm_text.content.value == t("provider.gemma4_managed")
+    assert view._llm_text.content.value == t("provider.gemma4_26b_a4b_it")
 
 
-def test_on_llm_selected_sets_qwen_managed_alias_and_label(
+def test_on_llm_selected_sets_deepseek_managed_connection_and_label(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.GEMINI
     settings.system_prompts = {
         "gemini": "G",
@@ -945,16 +1070,21 @@ def test_on_llm_selected_sets_qwen_managed_alias_and_label(
     settings.system_prompt = "G"
 
     view = _make_llm_selection_view(monkeypatch, settings)
-    view._on_llm_selected(OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED.value)
+    view._on_llm_selected(TranslationModel.DEEPSEEK_V4_FLASH.value)
 
     pending = view.build_provider_apply_settings()
 
     assert pending is not None
+    assert pending.translation.model == TranslationModel.DEEPSEEK_V4_FLASH
+    assert pending.translation.connection == TranslationConnection.MANAGED
     assert pending.provider.llm == LLMProviderName.OPENROUTER
-    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
-    assert pending.openrouter.llm_model == OpenRouterLLMModel.QWEN_35_FLASH_02_23
+    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
+    assert pending.openrouter.llm_model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH
     assert pending.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
-    assert view._llm_text.content.value == t("provider.qwen35_flash_managed")
+    assert view._llm_text.content.value == t("provider.deepseek_v4_flash")
+    assert view._translation_connection_text.content.value == t(
+        "settings.translation_connection.managed"
+    )
     assert view._prompt_editor.value == "O"
 
 
@@ -962,6 +1092,10 @@ def test_on_llm_selected_updates_prompt_helper_copy_live_when_mounted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.GEMINI
     settings.system_prompts = {"gemini": "G", "qwen": "Q"}
     settings.system_prompt = "G"
@@ -974,7 +1108,7 @@ def test_on_llm_selected_updates_prompt_helper_copy_live_when_mounted(
         update=lambda: prompt_copy_updates.append(view._prompt_for_text.value),
     )
 
-    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+    view._on_llm_selected(TranslationModel.QWEN_35_PLUS.value)
 
     assert view._prompt_for_text.value == t(
         "settings.prompt_for",
@@ -1002,7 +1136,7 @@ def test_on_llm_selected_stages_byok_without_mutating_managed_identity_snapshot(
         AssertionError("BYOK selection should not launch PKCE immediately")
     )
 
-    view._on_llm_selected(OpenRouterSelectionAlias.GEMMA4_BYOK.value)
+    view._on_translation_connection_selected(TranslationConnection.OPENROUTER.value)
 
     pending = view.build_provider_apply_settings()
 
@@ -1024,8 +1158,8 @@ def test_on_llm_selected_round_trips_back_to_managed_without_dropping_verified_s
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    view._on_llm_selected(OpenRouterSelectionAlias.GEMMA4_BYOK.value)
-    view._on_llm_selected(settings_view._OPENROUTER_MANAGED_OPTION_VALUE)
+    view._on_translation_connection_selected(TranslationConnection.OPENROUTER.value)
+    view._on_translation_connection_selected(TranslationConnection.MANAGED.value)
 
     pending = view.build_provider_apply_settings()
 
@@ -1039,6 +1173,10 @@ def test_on_llm_selected_switching_away_from_openrouter_preserves_saved_selectio
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMMA4,
+        connection=TranslationConnection.OPENROUTER,
+    )
     settings.provider.llm = LLMProviderName.OPENROUTER
     settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
     settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
@@ -1048,7 +1186,7 @@ def test_on_llm_selected_switching_away_from_openrouter_preserves_saved_selectio
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+    view._on_llm_selected(TranslationModel.QWEN_35_PLUS.value)
 
     pending = view.build_provider_apply_settings()
 
@@ -1066,7 +1204,7 @@ def test_on_llm_selected_preserves_default_openrouter_managed_selection_during_g
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    view._on_llm_selected(GeminiLLMModel.GEMINI_31_FLASH_LITE.value)
+    view._on_llm_selected(TranslationModel.GEMINI_31_FLASH_LITE.value)
     pending = view.build_provider_apply_settings()
 
     assert pending is not None
@@ -1074,7 +1212,7 @@ def test_on_llm_selected_preserves_default_openrouter_managed_selection_during_g
     assert pending.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
 
-    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+    view._on_llm_selected(TranslationModel.QWEN_35_PLUS.value)
     pending = view.build_provider_apply_settings()
 
     assert pending is not None
@@ -1083,40 +1221,55 @@ def test_on_llm_selected_preserves_default_openrouter_managed_selection_during_g
     assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
 
 
-def test_load_from_settings_shows_openrouter_routing_label(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_from_settings_shows_translation_connection_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings = AppSettings()
-    settings.provider.llm = LLMProviderName.OPENROUTER
-    settings.openrouter.routing_mode = OpenRouterRoutingMode.NOVITA_FIRST
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMMA4,
+        connection=TranslationConnection.OPENROUTER,
+    )
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    assert view._openrouter_routing_row.visible is True
-    assert view._openrouter_routing_text.content.value == t(
-        "settings.openrouter_routing.novita_first"
+    assert view._translation_connection_row.visible is True
+    assert view._translation_connection_text.content.value == t(
+        "settings.translation_connection.openrouter"
     )
 
 
-def test_on_openrouter_routing_selected_updates_settings_and_flags(
+def test_on_translation_connection_selected_updates_settings_and_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
-    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.translation = TranslationSettings(
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED,
+        connection_history={
+            TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.MANAGED,
+        },
+    )
     changed: list[AppSettings] = []
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
     view.on_settings_changed = lambda incoming: changed.append(incoming)
 
-    view._on_openrouter_routing_selected(OpenRouterRoutingMode.PARASAIL_FIRST.value)
+    view._on_translation_connection_selected(TranslationConnection.OFFICIAL_BYOK.value)
 
     pending = view.build_provider_apply_settings()
 
-    assert settings.openrouter.routing_mode == OpenRouterRoutingMode.LATENCY
+    assert settings.translation.connection == TranslationConnection.MANAGED
     assert pending is not None
-    assert pending.openrouter.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
-    assert view._openrouter_routing_text.content.value == t(
-        "settings.openrouter_routing.parasail_first"
+    assert pending.translation.connection == TranslationConnection.OFFICIAL_BYOK
+    assert (
+        pending.translation.connection_history[TranslationModel.DEEPSEEK_V4_FLASH.value]
+        == TranslationConnection.OFFICIAL_BYOK
+    )
+    assert pending.provider.llm == LLMProviderName.DEEPSEEK
+    assert view._translation_connection_text.content.value == t(
+        "settings.translation_connection.official_byok"
     )
     assert view.has_provider_changes is True
     assert changed == []
@@ -1126,6 +1279,10 @@ def test_on_openrouter_fallback_selected_updates_draft_and_helper_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.GEMINI
 
     view, _ = _make_settings_view(monkeypatch)
@@ -1147,7 +1304,7 @@ def test_on_openrouter_fallback_selected_updates_draft_and_helper_copy(
         "settings.openrouter_fallback.inactive_helper"
     )
 
-    view._on_llm_selected(OpenRouterSelectionAlias.GEMMA4_MANAGED.value)
+    view._on_llm_selected(TranslationModel.GEMMA4.value)
 
     assert view._openrouter_fallback_helper_text.value == t(
         "settings.openrouter_fallback.active_helper"
@@ -1163,7 +1320,7 @@ def test_fallback_card_stays_visible_when_non_openrouter_active(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    assert view._openrouter_routing_row.visible is True
+    assert view._translation_connection_row.visible is True
     assert t("settings.openrouter_fallback") in _api_tab_card_titles(view)
 
 
@@ -1361,13 +1518,15 @@ def test_on_llm_selected_stages_byok_even_when_legacy_openrouter_key_exists(
 
     assert view._openrouter_key.value == "legacy-openrouter-key"
 
-    view._on_llm_selected(OpenRouterSelectionAlias.QWEN35_FLASH_BYOK.value)
+    view._on_translation_connection_selected(TranslationConnection.OPENROUTER.value)
 
     pending = view.build_provider_apply_settings()
 
     assert pending is not None
+    assert pending.translation.model == TranslationModel.GEMMA4
+    assert pending.translation.connection == TranslationConnection.OPENROUTER
     assert pending.provider.llm == LLMProviderName.OPENROUTER
-    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.QWEN35_FLASH_BYOK
+    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
 
 
 def test_openrouter_pkce_button_requests_auth_for_current_byok_selection(
@@ -1381,12 +1540,12 @@ def test_openrouter_pkce_button_requests_auth_for_current_byok_selection(
     requested: list[AppSettings] = []
     view.on_request_openrouter_pkce = requested.append
 
-    view._on_llm_selected(OpenRouterSelectionAlias.QWEN35_FLASH_BYOK.value)
+    view._on_translation_connection_selected(TranslationConnection.OPENROUTER.value)
     view._on_openrouter_pkce_click(None)
 
     assert requested[0].provider.llm == LLMProviderName.OPENROUTER
     assert requested[0].openrouter.selected_source == OpenRouterCredentialSource.BYOK
-    assert requested[0].openrouter.selection_alias == OpenRouterSelectionAlias.QWEN35_FLASH_BYOK
+    assert requested[0].openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
     assert requested[0].system_prompt == "O"
 
 
@@ -1470,10 +1629,14 @@ def test_openrouter_fallback_modal_lists_curated_openrouter_fallbacks(
     ]
 
 
-def test_llm_modal_omits_openrouter_descriptions_and_direct_qwen_flash_option(
+def test_llm_modal_lists_logical_translation_models_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.GEMINI
 
     view, _ = _make_settings_view(monkeypatch)
@@ -1506,42 +1669,34 @@ def test_llm_modal_omits_openrouter_descriptions_and_direct_qwen_flash_option(
     assert captured["title"] == t("settings.section.translation")
     assert captured["show_description"] is True
     assert [option.value for option in options] == [
-        OpenRouterSelectionAlias.GEMMA4_MANAGED.value,
-        OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED.value,
-        deepseek_managed.value,
-        GeminiLLMModel.GEMINI_3_FLASH.value,
-        GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
-        DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value,
-        OpenRouterSelectionAlias.GEMMA4_BYOK.value,
-        OpenRouterSelectionAlias.QWEN35_FLASH_BYOK.value,
-        deepseek_byok.value,
-        QwenLLMModel.QWEN_35_PLUS.value,
+        TranslationModel.GEMMA4.value,
+        TranslationModel.DEEPSEEK_V4_FLASH.value,
+        TranslationModel.GEMINI_3_FLASH.value,
+        TranslationModel.GEMINI_31_FLASH_LITE.value,
+        TranslationModel.QWEN_35_PLUS.value,
     ]
+    assert captured["current"] == TranslationModel.GEMINI_3_FLASH.value
+    assert OpenRouterSelectionAlias.GEMMA4_MANAGED.value not in option_by_value
+    assert OpenRouterSelectionAlias.GEMMA4_BYOK.value not in option_by_value
+    assert TranslationModel.QWEN_35_PLUS.value in option_by_value
+    assert all("qwen35_flash" not in value for value in option_by_value)
+    assert deepseek_managed.value not in option_by_value
+    assert deepseek_byok.value not in option_by_value
     assert QwenLLMModel.QWEN_35_FLASH.value not in option_by_value
-    assert option_by_value[OpenRouterSelectionAlias.GEMMA4_MANAGED.value].description == ""
-    assert option_by_value[OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED.value].description == ""
-    assert option_by_value[deepseek_managed.value].description == ""
-    assert option_by_value[OpenRouterSelectionAlias.GEMMA4_BYOK.value].description == ""
-    assert option_by_value[OpenRouterSelectionAlias.QWEN35_FLASH_BYOK.value].description == ""
-    assert option_by_value[deepseek_byok.value].description == ""
-    assert option_by_value[OpenRouterSelectionAlias.QWEN35_FLASH_BYOK.value].label == t(
-        "provider.qwen35_flash_openrouter"
+    assert option_by_value[TranslationModel.GEMMA4.value].label == t("provider.gemma4_26b_a4b_it")
+    assert option_by_value[TranslationModel.DEEPSEEK_V4_FLASH.value].label == t(
+        "provider.deepseek_v4_flash"
     )
-    assert option_by_value[deepseek_managed.value].label == t("provider.deepseek_v4_flash_managed")
-    assert option_by_value[deepseek_byok.value].label == t("provider.deepseek_v4_flash_openrouter")
-    direct_deepseek_label = option_by_value[DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value].label
-    deepseek_byok_label = option_by_value[deepseek_byok.value].label
-    assert direct_deepseek_label == t("provider.deepseek_v4_flash")
-    assert deepseek_byok_label != direct_deepseek_label
-    assert "OpenRouter" in deepseek_byok_label
-    assert "BYOK" in deepseek_byok_label
 
 
-def test_openrouter_routing_modal_only_lists_latency_option(
+def test_translation_connection_modal_lists_supported_connections(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
-    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.translation = TranslationSettings(
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED,
+    )
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
@@ -1559,12 +1714,55 @@ def test_openrouter_routing_modal_only_lists_latency_option(
 
     monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
 
-    view._on_openrouter_routing_click(None)
+    view._on_translation_connection_click(None)
 
     assert captured["show_description"] is True
     options = captured["options"]
-    assert [option.value for option in options] == [OpenRouterRoutingMode.LATENCY.value]
-    assert [option.label for option in options] == [t("settings.openrouter_routing.latency")]
+    assert [option.value for option in options] == [
+        TranslationConnection.MANAGED.value,
+        TranslationConnection.OPENROUTER.value,
+        TranslationConnection.OFFICIAL_BYOK.value,
+    ]
+    assert [option.label for option in options] == [
+        t("settings.translation_connection.managed"),
+        t("settings.translation_connection.openrouter"),
+        t("settings.translation_connection.official_byok"),
+    ]
+    assert captured["current"] == TranslationConnection.MANAGED.value
+
+
+def test_translation_connection_modal_opens_for_single_connection_model_with_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    attach_dummy_page(monkeypatch, view)
+
+    captured: dict[str, object] = {}
+
+    class DummyModal:
+        def __init__(self, _page, _title, options, _on_select, *, show_description=False):
+            captured["options"] = options
+            captured["show_description"] = show_description
+
+        def open(self, current: str) -> None:
+            captured["current"] = current
+
+    monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
+
+    view._on_translation_connection_click(None)
+
+    options = captured["options"]
+    assert captured["show_description"] is True
+    assert captured["current"] == TranslationConnection.OFFICIAL_BYOK.value
+    assert [option.value for option in options] == [TranslationConnection.OFFICIAL_BYOK.value]
+    assert t("settings.translation_connection.only_supported") in options[0].description
 
 
 def test_openrouter_fallback_modal_hides_provider_descriptions_for_active_options(
@@ -1636,6 +1834,10 @@ def test_openrouter_fallback_off_shows_off_description_when_main_provider_is_ina
 
 def test_on_llm_selected_updates_gemini_model(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.GEMINI
     settings.gemini.llm_model = GeminiLLMModel.GEMINI_3_FLASH
     settings.system_prompts = {"gemini": "G", "qwen": "Q"}
@@ -1643,13 +1845,15 @@ def test_on_llm_selected_updates_gemini_model(monkeypatch: pytest.MonkeyPatch) -
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    view._on_llm_selected(GeminiLLMModel.GEMINI_31_FLASH_LITE.value)
+    view._on_llm_selected(TranslationModel.GEMINI_31_FLASH_LITE.value)
 
     pending = view.build_provider_apply_settings()
 
     assert settings.provider.llm == LLMProviderName.GEMINI
     assert settings.gemini.llm_model == GeminiLLMModel.GEMINI_3_FLASH
     assert pending is not None
+    assert pending.translation.model == TranslationModel.GEMINI_31_FLASH_LITE
+    assert pending.translation.connection == TranslationConnection.OFFICIAL_BYOK
     assert pending.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
     assert view._prompt_editor.value == "G"
     assert settings.system_prompt == "G"
@@ -1660,6 +1864,10 @@ def test_on_llm_selected_logs_only_changed_fields_for_provider_switch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_31_FLASH_LITE,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.GEMINI
     settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
     settings.qwen.llm_model = QwenLLMModel.QWEN_35_PLUS
@@ -1673,16 +1881,23 @@ def test_on_llm_selected_logs_only_changed_fields_for_provider_switch(
         message
     )
 
-    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+    view._on_llm_selected(TranslationModel.QWEN_35_PLUS.value)
 
     assert basic_messages == ["[Settings] LLM provider changed: gemini -> qwen"]
-    assert detailed_messages == ["[Settings] LLM selection changed: provider=gemini->qwen"]
+    assert detailed_messages == [
+        "[Settings] Translation selection changed: "
+        "model=gemini31_flash_lite->qwen35_plus, provider=gemini->qwen"
+    ]
 
 
 def test_on_llm_selected_skips_log_when_selection_is_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.QWEN_35_PLUS,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.QWEN
     settings.qwen.llm_model = QwenLLMModel.QWEN_35_PLUS
     basic_messages: list[str] = []
@@ -1695,7 +1910,7 @@ def test_on_llm_selected_skips_log_when_selection_is_unchanged(
         message
     )
 
-    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+    view._on_llm_selected(TranslationModel.QWEN_35_PLUS.value)
 
     assert basic_messages == []
     assert detailed_messages == []
@@ -1753,7 +1968,7 @@ def test_provider_selection_equality_guards_skip_noop_draft_changes(
 
     view._on_stt_selected(STTProviderName.LOCAL_QWEN.value)
     view._on_peer_stt_selected(STTProviderName.DEEPGRAM.value)
-    view._on_openrouter_routing_selected(OpenRouterRoutingMode.LATENCY.value)
+    view._on_translation_connection_selected(TranslationConnection.MANAGED.value)
     view._on_qwen_region_selected(QwenRegion.BEIJING.value)
 
     assert view.has_provider_changes is False
@@ -2192,6 +2407,37 @@ def test_deepseek_provider_copy_is_backed_by_i18n(locale: str) -> None:
 
 
 @pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
+def test_translation_connection_and_model_copy_is_backed_by_i18n(locale: str) -> None:
+    bundle = i18n_module._load_bundle(locale)
+
+    for key in (
+        "settings.translation_connection",
+        "settings.translation_connection.managed",
+        "settings.translation_connection.managed.description",
+        "settings.translation_connection.openrouter",
+        "settings.translation_connection.openrouter.description",
+        "settings.translation_connection.official_byok",
+        "settings.translation_connection.official_byok.description",
+        "settings.translation_connection.only_supported",
+        "settings.translation_model.gemma4.description",
+        "settings.translation_model.deepseek_v4_flash.description",
+        "settings.translation_model.gemini3_flash.description",
+        "settings.translation_model.gemini31_flash_lite.description",
+        "settings.translation_model.qwen35_plus.description",
+    ):
+        assert key in bundle
+        assert bundle[key]
+        assert bundle[key] != key
+
+    assert (
+        bundle["settings.translation_connection.managed"]
+        == bundle["dashboard.trial.source.managed"]
+    )
+    if locale in {"ko", "zh-CN"}:
+        assert bundle["settings.translation_connection.managed"] != "Managed"
+
+
+@pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
 def test_peer_stt_local_qwen_explanatory_copy_renders_from_i18n(
     monkeypatch: pytest.MonkeyPatch,
     locale: str,
@@ -2524,7 +2770,7 @@ def test_api_tab_uses_three_row_layout_with_response_mode_and_api_keys(
     ]
     assert _row_card_titles(api_controls[1]) == [
         t("settings.low_latency_mode"),
-        t("settings.openrouter_routing"),
+        t("settings.translation_connection"),
         t("settings.openrouter_fallback"),
     ]
     assert _row_card_titles(api_controls[2]) == [t("settings.section.api_keys")]
@@ -2542,7 +2788,7 @@ def test_api_tab_primary_value_typography_is_consistent_across_rows(
         _container_text_size(view._peer_stt_text),
         _container_text_size(view._llm_text),
         _container_text_size(view._low_latency_text),
-        _container_text_size(view._openrouter_routing_text),
+        _container_text_size(view._translation_connection_text),
         _container_text_size(view._openrouter_fallback_text),
     } == {28}
 
@@ -3061,7 +3307,7 @@ def test_apply_locale_updates_all_settings_clickable_value_fonts_to_zh_cn(
             view._peer_stt_text,
             view._llm_text,
             view._low_latency_text,
-            view._openrouter_routing_text,
+            view._translation_connection_text,
             view._openrouter_fallback_text,
             view._overlay_text_scale_text,
         ):
@@ -3304,7 +3550,7 @@ def test_overlay_step_buttons_use_large_vr_hit_targets(
         assert button.height is None
 
 
-def test_translation_card_no_longer_contains_openrouter_routing_row(
+def test_translation_card_no_longer_contains_translation_connection_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
@@ -3312,7 +3558,7 @@ def test_translation_card_no_longer_contains_openrouter_routing_row(
     translation_card = _api_tab_card(view, t("settings.section.translation"))
     translation_column = translation_card.content.controls[1].content.content
 
-    assert view._openrouter_routing_row not in translation_column.controls
+    assert view._translation_connection_row not in translation_column.controls
 
 
 @pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
@@ -3530,7 +3776,7 @@ def test_apply_locale_and_refresh_prompt_if_empty(monkeypatch: pytest.MonkeyPatc
     assert view._stt_title.value == t("settings.section.stt")
     assert view._reset_prompt_btn.text == t("settings.reset_prompt")
     assert bool(view._prompt_editor.value.strip())
-    assert view._openrouter_routing_title.value == t("settings.openrouter_routing")
+    assert view._translation_connection_title.value == t("settings.translation_connection")
 
 
 def test_low_latency_card_title_uses_response_mode_copy_in_korean(
@@ -3975,7 +4221,7 @@ def test_settings_api_unit_cards_use_settings_unit_card_defaults(
         _api_tab_card(view, t("settings.section.peer_stt")),
         _api_tab_card(view, t("settings.section.translation")),
         _api_tab_card(view, t("settings.low_latency_mode")),
-        view._openrouter_routing_card,
+        view._translation_connection_card,
         view._openrouter_fallback_card,
     ]
 
@@ -4011,7 +4257,7 @@ def test_general_cards_use_settings_unit_card_defaults(
     assert view._integrated_context_button.expand is True
     assert view._integrated_context_button.content.size == 28
     assert view._integrated_context_button.content.color == settings_view.COLOR_ON_BACKGROUND
-    assert view._openrouter_routing_row.height is None
+    assert view._translation_connection_row.height is None
 
 
 def test_api_keys_card_uses_shared_full_width_auto_height(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -9,13 +9,15 @@ pytest.importorskip("flet")
 from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
     AppSettings,
-    DeepSeekLLMModel,
     GeminiLLMModel,
     LLMProviderName,
     OpenRouterFallbackSelectionAlias,
     OpenRouterSelectionAlias,
     QwenLLMModel,
     STTProviderName,
+    TranslationConnection,
+    TranslationModel,
+    TranslationSettings,
 )
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.i18n import language_name, provider_label, t
@@ -62,7 +64,7 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
         provider=provider_label(LLMProviderName.OPENROUTER.value),
     )
 
-    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
+    view._on_llm_selected(TranslationModel.QWEN_35_PLUS.value)
     pending = view.build_provider_apply_settings()
 
     assert view._prompt_editor.value == load_prompt_for_provider("qwen")
@@ -75,7 +77,7 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
     assert pending.provider.llm == LLMProviderName.QWEN
     assert pending.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS
 
-    view._on_llm_selected(GeminiLLMModel.GEMINI_3_FLASH.value)
+    view._on_llm_selected(TranslationModel.GEMINI_3_FLASH.value)
     pending = view.build_provider_apply_settings()
 
     assert view._prompt_editor.value == load_prompt_for_provider("gemini")
@@ -87,7 +89,7 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
     assert pending is not None
     assert pending.provider.llm == LLMProviderName.GEMINI
 
-    view._on_llm_selected(OpenRouterSelectionAlias.GEMMA4_BYOK.value)
+    view._on_llm_selected(TranslationModel.GEMMA4.value)
     pending = view.build_provider_apply_settings()
 
     assert view._prompt_editor.value == load_prompt_for_provider("openrouter")
@@ -100,8 +102,12 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
     assert pending.provider.llm == LLMProviderName.OPENROUTER
 
 
-def test_openrouter_alias_and_fallback_keep_prompt_ui_provider_scoped(monkeypatch) -> None:
+def test_deepseek_managed_and_fallback_keep_prompt_ui_provider_scoped(monkeypatch) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.GEMINI
     settings.system_prompts = {
         "gemini": "GEMINI CUSTOM",
@@ -113,7 +119,7 @@ def test_openrouter_alias_and_fallback_keep_prompt_ui_provider_scoped(monkeypatc
     view = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    view._on_llm_selected(OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED.value)
+    view._on_llm_selected(TranslationModel.DEEPSEEK_V4_FLASH.value)
     pending = view.build_provider_apply_settings()
 
     assert view._prompt_editor.value == "OPENROUTER CUSTOM"
@@ -122,8 +128,10 @@ def test_openrouter_alias_and_fallback_keep_prompt_ui_provider_scoped(monkeypatc
         provider=provider_label(LLMProviderName.OPENROUTER.value),
     )
     assert pending is not None
+    assert pending.translation.model == TranslationModel.DEEPSEEK_V4_FLASH
+    assert pending.translation.connection == TranslationConnection.MANAGED
     assert pending.provider.llm == LLMProviderName.OPENROUTER
-    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
     assert pending.system_prompt == "OPENROUTER CUSTOM"
 
     view._on_openrouter_fallback_selected(
@@ -173,6 +181,10 @@ def test_prompt_tab_labels_and_helper_copy_render_from_i18n(monkeypatch) -> None
 
 def test_settings_view_shows_qwen_model_label(monkeypatch) -> None:
     settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.QWEN_35_PLUS,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
     settings.provider.llm = LLMProviderName.QWEN
     settings.qwen.llm_model = QwenLLMModel.QWEN_35_PLUS
 
@@ -197,7 +209,7 @@ def test_settings_view_preserves_provider_specific_prompts(monkeypatch) -> None:
 
     assert view._prompt_editor.value == "GEMINI CUSTOM"
 
-    view._on_llm_selected(QwenLLMModel.QWEN_35_FLASH.value)
+    view._on_llm_selected(TranslationModel.QWEN_35_PLUS.value)
     pending = view.build_provider_apply_settings()
     assert view._prompt_editor.value == "QWEN CUSTOM"
     assert settings.system_prompt == "GEMINI CUSTOM"
@@ -210,14 +222,14 @@ def test_settings_view_preserves_provider_specific_prompts(monkeypatch) -> None:
     assert pending is not None
     assert pending.system_prompts["qwen"] == "QWEN EDITED"
 
-    view._on_llm_selected(LLMProviderName.GEMINI.value)
+    view._on_llm_selected(TranslationModel.GEMINI_3_FLASH.value)
     pending = view.build_provider_apply_settings()
     assert view._prompt_editor.value == "GEMINI CUSTOM"
     assert settings.system_prompt == "GEMINI CUSTOM"
     assert pending is not None
     assert pending.system_prompt == "GEMINI CUSTOM"
 
-    view._on_llm_selected(OpenRouterSelectionAlias.GEMMA4_BYOK.value)
+    view._on_llm_selected(TranslationModel.GEMMA4.value)
     pending = view.build_provider_apply_settings()
     assert view._prompt_editor.value == "OPENROUTER CUSTOM"
     assert settings.system_prompt == "GEMINI CUSTOM"
@@ -238,8 +250,8 @@ def test_prompt_draft_survives_provider_round_trip_until_commit(monkeypatch) -> 
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     view._on_prompt_change("GEMINI DRAFT")
-    view._on_llm_selected(QwenLLMModel.QWEN_35_PLUS.value)
-    view._on_llm_selected(LLMProviderName.GEMINI.value)
+    view._on_llm_selected(TranslationModel.QWEN_35_PLUS.value)
+    view._on_llm_selected(TranslationModel.GEMINI_3_FLASH.value)
 
     assert view._prompt_editor.value == "GEMINI DRAFT"
     assert settings.system_prompt == "GEMINI CUSTOM"
@@ -267,7 +279,7 @@ def test_prompt_commit_uses_prompt_apply_callback_without_generic_settings_emit(
     assert generic_changed == []
 
 
-def test_settings_view_llm_modal_ends_with_qwen_plus_only(monkeypatch) -> None:
+def test_settings_view_llm_modal_lists_logical_translation_models_once(monkeypatch) -> None:
     settings = AppSettings()
     view = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
@@ -290,24 +302,16 @@ def test_settings_view_llm_modal_ends_with_qwen_plus_only(monkeypatch) -> None:
     assert captured["show_description"] is True
     options = captured["options"]
     values = [option.value for option in options]
-    deepseek_managed = getattr(OpenRouterSelectionAlias, "DEEPSEEK_V4_FLASH_MANAGED", None)
-    deepseek_byok = getattr(OpenRouterSelectionAlias, "DEEPSEEK_V4_FLASH_BYOK", None)
-
-    assert deepseek_managed is not None
-    assert deepseek_byok is not None
 
     assert values == [
-        settings_view._OPENROUTER_MANAGED_OPTION_VALUE,
-        OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED.value,
-        deepseek_managed.value,
-        GeminiLLMModel.GEMINI_3_FLASH.value,
-        GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
-        DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value,
-        OpenRouterSelectionAlias.GEMMA4_BYOK.value,
-        OpenRouterSelectionAlias.QWEN35_FLASH_BYOK.value,
-        deepseek_byok.value,
-        QwenLLMModel.QWEN_35_PLUS.value,
+        TranslationModel.GEMMA4.value,
+        TranslationModel.DEEPSEEK_V4_FLASH.value,
+        TranslationModel.GEMINI_3_FLASH.value,
+        TranslationModel.GEMINI_31_FLASH_LITE.value,
+        TranslationModel.QWEN_35_PLUS.value,
     ]
+    assert TranslationModel.QWEN_35_PLUS.value in values
+    assert all("qwen35_flash" not in value for value in values)
 
 
 def test_settings_view_updates_gemini_model_without_provider_switch(monkeypatch) -> None:
@@ -323,7 +327,7 @@ def test_settings_view_updates_gemini_model_without_provider_switch(monkeypatch)
     view = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    view._on_llm_selected(GeminiLLMModel.GEMINI_31_FLASH_LITE.value)
+    view._on_llm_selected(TranslationModel.GEMINI_31_FLASH_LITE.value)
     pending = view.build_provider_apply_settings()
 
     assert settings.provider.llm == LLMProviderName.GEMINI

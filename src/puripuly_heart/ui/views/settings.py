@@ -13,7 +13,6 @@ import flet as ft
 from puripuly_heart.app.wiring import create_secret_store
 from puripuly_heart.config.llm_profiles import (
     OPENROUTER_FALLBACK_SELECTION_ALIASES,
-    OPENROUTER_MAIN_SELECTION_ALIASES,
     fallback_profile_for_alias,
     profile_for_alias,
 )
@@ -21,17 +20,18 @@ from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
     MAX_CUSTOM_VOCAB_TERMS,
     AppSettings,
-    DeepSeekLLMModel,
-    GeminiLLMModel,
     LLMProviderName,
     OpenRouterCredentialSource,
     OpenRouterFallbackSelectionAlias,
     OpenRouterLLMModel,
-    OpenRouterRoutingMode,
     OpenRouterSelectionAlias,
-    QwenLLMModel,
     QwenRegion,
     STTProviderName,
+    TranslationConnection,
+    TranslationModel,
+    default_translation_connection,
+    materialize_translation_settings,
+    supported_translation_connections,
 )
 from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.ui.components.managed_trial_usage_bar import ManagedTrialUsageBar
@@ -72,7 +72,6 @@ logger = logging.getLogger(__name__)
 _CJK_START = 0x3000
 _CENTER_ALIGNMENT = ft.alignment.Alignment(0, 0)
 _CENTER_RIGHT_ALIGNMENT = ft.alignment.Alignment(1, 0)
-_OPENROUTER_MANAGED_OPTION_VALUE = OpenRouterSelectionAlias.GEMMA4_MANAGED.value
 _SETTINGS_SUBTAB_ORDER = ("api", "general", "prompt", "overlay")
 _OVERLAY_DISTANCE_MIN = 0.5
 _OVERLAY_DISTANCE_MAX = 2.0
@@ -83,6 +82,23 @@ _OVERLAY_TEXT_SCALE_PRESETS = (
     ("normal", 1.0),
     ("small", 0.8),
 )
+_TRANSLATION_MODEL_LABEL_KEYS = {
+    TranslationModel.GEMMA4: "provider.gemma4_26b_a4b_it",
+    TranslationModel.DEEPSEEK_V4_FLASH: "provider.deepseek_v4_flash",
+    TranslationModel.GEMINI_3_FLASH: "provider.gemini3_flash",
+    TranslationModel.GEMINI_31_FLASH_LITE: "provider.gemini31_flash_lite",
+    TranslationModel.QWEN_35_PLUS: "provider.qwen35_plus",
+}
+_TRANSLATION_CONNECTION_LABEL_KEYS = {
+    TranslationConnection.MANAGED: "settings.translation_connection.managed",
+    TranslationConnection.OPENROUTER: "settings.translation_connection.openrouter",
+    TranslationConnection.OFFICIAL_BYOK: "settings.translation_connection.official_byok",
+}
+_TRANSLATION_CONNECTION_DESCRIPTION_KEYS = {
+    TranslationConnection.MANAGED: "settings.translation_connection.managed.description",
+    TranslationConnection.OPENROUTER: "settings.translation_connection.openrouter.description",
+    TranslationConnection.OFFICIAL_BYOK: "settings.translation_connection.official_byok.description",
+}
 
 
 def _make_text_button(label: str, **kwargs) -> ft.TextButton:
@@ -325,7 +341,7 @@ class SettingsView(ft.Column):
             self._overlay_anchor_button,
             self._overlay_text_scale_text,
             self._overlay_reset_button,
-            self._openrouter_routing_text,
+            self._translation_connection_text,
             self._openrouter_fallback_text,
         )
 
@@ -1293,20 +1309,20 @@ class SettingsView(ft.Column):
             ),
         )
 
-        # === Row 7: OpenRouter Routing (1x1 + 1x1) ===
-        self._openrouter_routing_title = ft.Text(
-            t("settings.openrouter_routing"),
+        # === Row 7: Response Mode / Translation Connection / Fallback ===
+        self._translation_connection_title = ft.Text(
+            t("settings.translation_connection"),
             size=24,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
-        self._openrouter_routing_text = self._build_clickable_text(
-            t("settings.openrouter_routing.latency"),
-            self._on_openrouter_routing_click,
+        self._translation_connection_text = self._build_clickable_text(
+            t("settings.translation_connection.managed"),
+            self._on_translation_connection_click,
         )
-        self._openrouter_routing_card = self._wrap_unit_card(
-            title=self._openrouter_routing_title,
-            value=self._openrouter_routing_text,
+        self._translation_connection_card = self._wrap_unit_card(
+            title=self._translation_connection_title,
+            value=self._translation_connection_text,
         )
         self._openrouter_fallback_title = ft.Text(
             t("settings.openrouter_fallback"),
@@ -1327,11 +1343,11 @@ class SettingsView(ft.Column):
             title=self._openrouter_fallback_title,
             value=self._openrouter_fallback_text,
         )
-        self._openrouter_routing_row = ft.Container(
+        self._translation_connection_row = ft.Container(
             content=ft.Row(
                 [
                     self._low_latency_card,
-                    self._openrouter_routing_card,
+                    self._translation_connection_card,
                     self._openrouter_fallback_card,
                 ],
                 spacing=16,
@@ -1339,6 +1355,7 @@ class SettingsView(ft.Column):
             ),
             visible=True,
         )
+        self._openrouter_routing_row = self._translation_connection_row
 
         # === Row 8: Persona (2x2) - Licenses style ===
         self._prompt_editor = PromptEditor(
@@ -1456,7 +1473,7 @@ class SettingsView(ft.Column):
 
         self._settings_subtab_shell = self._build_settings_subtab_shell(
             {
-                "api": [row1, self._openrouter_routing_row, api_keys_row],
+                "api": [row1, self._translation_connection_row, api_keys_row],
                 "general": [general_primary_row, general_audio_row, general_vad_row],
                 "prompt": [row7, persona_card],
                 "overlay": [overlay_row1, overlay_row2, overlay_row3],
@@ -1479,13 +1496,21 @@ class SettingsView(ft.Column):
         ]
 
     def _get_llm_modal_value(self, settings: AppSettings) -> str:
-        if settings.provider.llm == LLMProviderName.GEMINI:
-            return settings.gemini.llm_model.value
-        if settings.provider.llm == LLMProviderName.OPENROUTER:
-            return self._display_openrouter_selection_alias(settings).value
-        if settings.provider.llm == LLMProviderName.DEEPSEEK:
-            return settings.deepseek.llm_model.value
-        return settings.qwen.llm_model.value
+        return settings.translation.model.value
+
+    def _translation_model_display_label(self, model: TranslationModel) -> str:
+        return t(_TRANSLATION_MODEL_LABEL_KEYS[model])
+
+    def _translation_connection_display_label(self, connection: TranslationConnection) -> str:
+        return t(_TRANSLATION_CONNECTION_LABEL_KEYS[connection])
+
+    def _translation_connection_display_description(self, connection: TranslationConnection) -> str:
+        return t(_TRANSLATION_CONNECTION_DESCRIPTION_KEYS[connection], default="")
+
+    def _set_translation_connection_text(self, text: str) -> None:
+        text_control = self._translation_connection_text.content
+        text_control.value = text
+        text_control.size = 28
 
     def _stored_openrouter_selection_alias(
         self, settings: AppSettings
@@ -1552,30 +1577,12 @@ class SettingsView(ft.Column):
         return t(profile.description_key, default="")
 
     def _get_llm_display_label(self, settings: AppSettings) -> str:
-        if settings.provider.llm == LLMProviderName.GEMINI:
-            if settings.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE:
-                return t("provider.gemini31_flash_lite")
-            return t("provider.gemini3_flash")
-        if settings.provider.llm == LLMProviderName.OPENROUTER:
-            profile = self._openrouter_selection_profile(settings)
-            if profile is not None:
-                return self._openrouter_profile_display_label(profile)
-            return t("provider.gemma4_26b_a4b_it")
-        if settings.provider.llm == LLMProviderName.DEEPSEEK:
-            return t("provider.deepseek_v4_flash")
-        if settings.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS:
-            return t("provider.qwen35_plus")
-        return t("provider.qwen35_flash")
+        return self._translation_model_display_label(settings.translation.model)
 
-    def _get_openrouter_routing_display_label(self, settings: AppSettings | None) -> str:
+    def _get_translation_connection_display_label(self, settings: AppSettings | None) -> str:
         if settings is None:
-            return t("settings.openrouter_routing.latency")
-        return t(f"settings.openrouter_routing.{settings.openrouter.routing_mode.value}")
-
-    def _set_openrouter_routing_text(self, text: str) -> None:
-        text_control = self._openrouter_routing_text.content
-        text_control.value = text
-        text_control.size = 28
+            return self._translation_connection_display_label(TranslationConnection.MANAGED)
+        return self._translation_connection_display_label(settings.translation.connection)
 
     def _get_openrouter_fallback_display_label(self, settings: AppSettings | None) -> str:
         profile = self._openrouter_fallback_profile(settings)
@@ -1710,6 +1717,7 @@ class SettingsView(ft.Column):
         target.provider.stt = source.provider.stt
         target.provider.peer_stt = source.provider.peer_stt
         target.provider.llm = source.provider.llm
+        target.translation = copy.deepcopy(source.translation)
         target.gemini.llm_model = source.gemini.llm_model
         target.openrouter.llm_model = source.openrouter.llm_model
         target.openrouter.routing_mode = source.openrouter.routing_mode
@@ -1842,8 +1850,8 @@ class SettingsView(ft.Column):
             self._llm_text,
             self._get_llm_display_label(settings),
         )
-        self._set_openrouter_routing_text(
-            self._get_openrouter_routing_display_label(settings),
+        self._set_translation_connection_text(
+            self._get_translation_connection_display_label(settings),
         )
         self._sync_openrouter_fallback_card(settings)
 
@@ -1926,8 +1934,8 @@ class SettingsView(ft.Column):
             self._llm_text,
             self._get_llm_display_label(settings),
         )
-        self._set_openrouter_routing_text(
-            self._get_openrouter_routing_display_label(settings),
+        self._set_translation_connection_text(
+            self._get_translation_connection_display_label(settings),
         )
         self._sync_openrouter_fallback_card(settings)
         self._update_api_visibility()
@@ -2085,7 +2093,7 @@ class SettingsView(ft.Column):
         self._openrouter_pkce_button_row.visible = openrouter_byok_selected
         self._deepseek_key.visible = llm == LLMProviderName.DEEPSEEK
         self._sync_openrouter_pkce_button_state(settings)
-        self._openrouter_routing_row.visible = True
+        self._translation_connection_row.visible = True
         self._sync_openrouter_fallback_card(settings)
 
         qwen_regions: set[QwenRegion] = set()
@@ -2214,48 +2222,25 @@ class SettingsView(ft.Column):
         """Open LLM provider selection modal."""
         if not self.page:
             return
-        managed_openrouter_options: list[OptionItem] = []
-        byok_openrouter_options: list[OptionItem] = []
-        for alias in OPENROUTER_MAIN_SELECTION_ALIASES:
-            profile = profile_for_alias(alias)
-            option = OptionItem(
-                value=profile.alias,
-                label=self._openrouter_profile_display_label(profile),
-                description=self._openrouter_profile_display_description(profile),
-            )
-            if profile.openrouter_source == OpenRouterCredentialSource.MANAGED.value:
-                managed_openrouter_options.append(option)
-            else:
-                byok_openrouter_options.append(option)
         options = [
-            *managed_openrouter_options,
             OptionItem(
-                value=GeminiLLMModel.GEMINI_3_FLASH.value,
-                label=t("provider.gemini3_flash"),
-                description=t("provider.gemini3_flash.description", default=""),
-            ),
-            OptionItem(
-                value=GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
-                label=t("provider.gemini31_flash_lite"),
-                description=t("provider.gemini31_flash_lite.description", default=""),
-            ),
-            OptionItem(
-                value=DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value,
-                label=t("provider.deepseek_v4_flash"),
-                description=t("provider.deepseek_v4_flash.description", default=""),
-            ),
-            *byok_openrouter_options,
-            OptionItem(
-                value=QwenLLMModel.QWEN_35_PLUS.value,
-                label=t("provider.qwen35_plus"),
-                description=t("provider.qwen35_plus.description", default=""),
-            ),
+                value=model.value,
+                label=self._translation_model_display_label(model),
+                description=t(f"settings.translation_model.{model.value}.description", default=""),
+            )
+            for model in (
+                TranslationModel.GEMMA4,
+                TranslationModel.DEEPSEEK_V4_FLASH,
+                TranslationModel.GEMINI_3_FLASH,
+                TranslationModel.GEMINI_31_FLASH_LITE,
+                TranslationModel.QWEN_35_PLUS,
+            )
         ]
         display_settings = self._build_settings_with_provider_draft()
         current = (
             self._get_llm_modal_value(display_settings)
             if display_settings is not None
-            else GeminiLLMModel.GEMINI_3_FLASH.value
+            else TranslationModel.GEMMA4.value
         )
         modal = SettingsModal(
             self.page,
@@ -2266,185 +2251,83 @@ class SettingsView(ft.Column):
         )
         modal.open(current)
 
-    def _on_llm_selected(self, value: str) -> None:
-        """Handle LLM provider selection from modal."""
-        if not self._settings:
-            return
-        current_settings = self._build_settings_with_provider_draft()
-        assert current_settings is not None
-        old_provider = current_settings.provider.llm
-        old_gemini_model = current_settings.gemini.llm_model
-        old_openrouter_model = current_settings.openrouter.llm_model
-        old_openrouter_selected_source = current_settings.openrouter.selected_source
-        old_openrouter_selection_alias = self._stored_openrouter_selection_alias(current_settings)
-        old_qwen_model = current_settings.qwen.llm_model
-        old_deepseek_model = current_settings.deepseek.llm_model
-        deepseek_model = old_deepseek_model
-        try:
-            openrouter_profile = profile_for_alias(value)
-        except KeyError:
-            openrouter_profile = None
-        if (
-            openrouter_profile is not None
-            and openrouter_profile.provider != LLMProviderName.OPENROUTER.value
-        ):
-            openrouter_profile = None
+    def _restore_translation_connection_for_model(
+        self,
+        model: TranslationModel,
+        history: dict[str, TranslationConnection],
+    ) -> TranslationConnection:
+        connection = history.get(model.value)
+        if not isinstance(connection, TranslationConnection):
+            try:
+                connection = TranslationConnection(str(connection))
+            except (TypeError, ValueError):
+                connection = None
+        if connection in supported_translation_connections(model):
+            return connection
+        return default_translation_connection(model)
 
-        if value == LLMProviderName.GEMINI.value:
-            provider = LLMProviderName.GEMINI
-            gemini_model = GeminiLLMModel.GEMINI_3_FLASH
-            openrouter_model = old_openrouter_model
-            qwen_model = old_qwen_model
-            openrouter_selected_source = old_openrouter_selected_source
-            openrouter_selection_alias = old_openrouter_selection_alias
-        elif value == GeminiLLMModel.GEMINI_3_FLASH.value:
-            provider = LLMProviderName.GEMINI
-            gemini_model = GeminiLLMModel.GEMINI_3_FLASH
-            openrouter_model = old_openrouter_model
-            qwen_model = old_qwen_model
-            openrouter_selected_source = old_openrouter_selected_source
-            openrouter_selection_alias = old_openrouter_selection_alias
-        elif value == GeminiLLMModel.GEMINI_31_FLASH_LITE.value:
-            provider = LLMProviderName.GEMINI
-            gemini_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
-            openrouter_model = old_openrouter_model
-            qwen_model = old_qwen_model
-            openrouter_selected_source = old_openrouter_selected_source
-            openrouter_selection_alias = old_openrouter_selection_alias
-        elif value in (LLMProviderName.DEEPSEEK.value, DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value):
-            provider = LLMProviderName.DEEPSEEK
-            gemini_model = old_gemini_model
-            openrouter_model = old_openrouter_model
-            qwen_model = old_qwen_model
-            deepseek_model = DeepSeekLLMModel.DEEPSEEK_V4_FLASH
-            openrouter_selected_source = old_openrouter_selected_source
-            openrouter_selection_alias = old_openrouter_selection_alias
-        elif value == LLMProviderName.OPENROUTER.value:
-            provider = LLMProviderName.OPENROUTER
-            gemini_model = old_gemini_model
-            qwen_model = old_qwen_model
-            openrouter_selection_alias = OpenRouterSelectionAlias(_OPENROUTER_MANAGED_OPTION_VALUE)
-            openrouter_profile = profile_for_alias(openrouter_selection_alias.value)
-            assert openrouter_profile.openrouter_model is not None
-            openrouter_model = OpenRouterLLMModel(openrouter_profile.openrouter_model)
-            openrouter_selected_source = OpenRouterCredentialSource(
-                openrouter_profile.openrouter_source
-            )
-        elif openrouter_profile is not None and (
-            openrouter_profile.openrouter_source == OpenRouterCredentialSource.BYOK.value
-        ):
-            provider = LLMProviderName.OPENROUTER
-            gemini_model = old_gemini_model
-            qwen_model = old_qwen_model
-            openrouter_selection_alias = OpenRouterSelectionAlias(openrouter_profile.alias)
-            assert openrouter_profile.openrouter_model is not None
-            openrouter_model = OpenRouterLLMModel(openrouter_profile.openrouter_model)
-            openrouter_selected_source = OpenRouterCredentialSource.BYOK
-        elif openrouter_profile is not None:
-            provider = LLMProviderName.OPENROUTER
-            gemini_model = old_gemini_model
-            qwen_model = old_qwen_model
-            openrouter_selection_alias = OpenRouterSelectionAlias(openrouter_profile.alias)
-            assert openrouter_profile.openrouter_model is not None
-            openrouter_model = OpenRouterLLMModel(openrouter_profile.openrouter_model)
-            openrouter_selected_source = OpenRouterCredentialSource(
-                openrouter_profile.openrouter_source
-            )
-        elif value == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value:
-            provider = LLMProviderName.OPENROUTER
-            gemini_model = old_gemini_model
-            openrouter_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
-            qwen_model = old_qwen_model
-            openrouter_selected_source = OpenRouterCredentialSource.BYOK
-            openrouter_selection_alias = _derive_openrouter_selection_alias(
-                openrouter_model,
-                openrouter_selected_source,
-            )
-        elif value == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value:
-            provider = LLMProviderName.OPENROUTER
-            gemini_model = old_gemini_model
-            openrouter_model = OpenRouterLLMModel.QWEN_35_FLASH_02_23
-            qwen_model = old_qwen_model
-            openrouter_selected_source = OpenRouterCredentialSource.BYOK
-            openrouter_selection_alias = _derive_openrouter_selection_alias(
-                openrouter_model,
-                openrouter_selected_source,
-            )
-        elif value == QwenLLMModel.QWEN_35_PLUS.value:
-            provider = LLMProviderName.QWEN
-            gemini_model = old_gemini_model
-            openrouter_model = old_openrouter_model
-            qwen_model = QwenLLMModel.QWEN_35_PLUS
-            openrouter_selected_source = old_openrouter_selected_source
-            openrouter_selection_alias = old_openrouter_selection_alias
-        else:
-            provider = LLMProviderName.QWEN
-            gemini_model = old_gemini_model
-            openrouter_model = old_openrouter_model
-            qwen_model = QwenLLMModel.QWEN_35_FLASH
-            openrouter_selected_source = old_openrouter_selected_source
-            openrouter_selection_alias = old_openrouter_selection_alias
-
-        changes: list[str] = []
-        if old_provider != provider:
-            changes.append(f"provider={old_provider.value}->{provider.value}")
-        if old_gemini_model != gemini_model:
-            changes.append(f"gemini_model={old_gemini_model.value}->{gemini_model.value}")
-        if old_openrouter_model != openrouter_model:
-            changes.append(
-                f"openrouter_model={old_openrouter_model.value}->{openrouter_model.value}"
-            )
-        if old_openrouter_selected_source != openrouter_selected_source:
-            changes.append(
-                "openrouter_source="
-                f"{old_openrouter_selected_source.value}->{openrouter_selected_source.value}"
-            )
-        if old_openrouter_selection_alias != openrouter_selection_alias:
-            changes.append(
-                "openrouter_alias="
-                f"{old_openrouter_selection_alias.value if old_openrouter_selection_alias is not None else 'none'}"
-                f"->{openrouter_selection_alias.value if openrouter_selection_alias is not None else 'none'}"
-            )
-        if old_qwen_model != qwen_model:
-            changes.append(f"qwen_model={old_qwen_model.value}->{qwen_model.value}")
-        if old_deepseek_model != deepseek_model:
-            changes.append(f"deepseek_model={old_deepseek_model.value}->{deepseek_model.value}")
-        if not changes:
-            return
-        if old_provider != provider:
-            self._emit_runtime_basic(
-                f"[Settings] LLM provider changed: {old_provider.value} -> {provider.value}"
-            )
-        self._emit_runtime_detailed(f"[Settings] LLM selection changed: {', '.join(changes)}")
-
-        draft = self._ensure_provider_settings_draft()
-        draft.provider.llm = provider
-        draft.openrouter.llm_model = openrouter_model
-        draft.openrouter.selected_source = openrouter_selected_source
-        draft.openrouter.selection_alias = openrouter_selection_alias
-        if provider == LLMProviderName.QWEN:
-            draft.qwen.llm_model = qwen_model
-        elif provider == LLMProviderName.DEEPSEEK:
-            draft.deepseek.llm_model = deepseek_model
-        else:
-            draft.gemini.llm_model = gemini_model
-        self._update_api_visibility()
-        self.has_provider_changes = True
-
-        # Update text
-        display_settings = self._build_settings_with_provider_draft()
-        assert display_settings is not None
+    def _sync_translation_selection_controls(self, settings: AppSettings) -> None:
         self._set_unit_card_value_text(
             self._llm_text,
-            self._get_llm_display_label(display_settings),
+            self._get_llm_display_label(settings),
         )
-        self._set_openrouter_routing_text(
-            self._get_openrouter_routing_display_label(display_settings),
+        self._set_translation_connection_text(
+            self._get_translation_connection_display_label(settings),
         )
-        self._sync_openrouter_fallback_card(display_settings)
+        self._sync_openrouter_fallback_card(settings)
 
-        # Update prompt if provider changed
-        if old_provider != provider:
+    def _apply_translation_selection(
+        self,
+        model: TranslationModel,
+        connection: TranslationConnection,
+    ) -> None:
+        if not self._settings:
+            return
+        if connection not in supported_translation_connections(model):
+            return
+
+        current_settings = self._build_settings_with_provider_draft()
+        assert current_settings is not None
+        old_model = current_settings.translation.model
+        old_connection = current_settings.translation.connection
+        old_provider = current_settings.provider.llm
+        if old_model == model and old_connection == connection:
+            return
+
+        draft = self._ensure_provider_settings_draft()
+        draft.translation = copy.deepcopy(current_settings.translation)
+        draft.translation.model = model
+        draft.translation.connection = connection
+        draft.translation.connection_history = copy.deepcopy(
+            current_settings.translation.connection_history
+        )
+        draft.translation.connection_history[model.value] = connection
+        materialize_translation_settings(draft)
+        new_provider = draft.provider.llm
+
+        changes: list[str] = []
+        if old_model != model:
+            changes.append(f"model={old_model.value}->{model.value}")
+        if old_connection != connection:
+            changes.append(f"connection={old_connection.value}->{connection.value}")
+        if old_provider != new_provider:
+            changes.append(f"provider={old_provider.value}->{new_provider.value}")
+            self._emit_runtime_basic(
+                f"[Settings] LLM provider changed: {old_provider.value} -> {new_provider.value}"
+            )
+        if changes:
+            self._emit_runtime_detailed(
+                f"[Settings] Translation selection changed: {', '.join(changes)}"
+            )
+
+        self.has_provider_changes = True
+        self._update_api_visibility()
+
+        display_settings = self._build_settings_with_provider_draft()
+        assert display_settings is not None
+        self._sync_translation_selection_controls(display_settings)
+
+        if old_provider != display_settings.provider.llm:
             provider_name = self._active_prompt_key()
             self._prompt_editor.set_provider(provider_name)
             next_prompt = self._ensure_provider_prompt_value(draft, provider_name)
@@ -2456,7 +2339,78 @@ class SettingsView(ft.Column):
             self._qwen_region_btn.update()
             self._api_keys_column.update()
             self._llm_text.update()
-            self._openrouter_routing_row.update()
+            self._translation_connection_row.update()
+
+    def _on_llm_selected(self, value: str) -> None:
+        """Handle LLM provider selection from modal."""
+        if not self._settings:
+            return
+        current_settings = self._build_settings_with_provider_draft()
+        assert current_settings is not None
+        try:
+            model = TranslationModel(value)
+        except (TypeError, ValueError):
+            if value == LLMProviderName.OPENROUTER.value:
+                model = TranslationModel.GEMMA4
+            else:
+                return
+
+        if current_settings.translation.model == model:
+            return
+        history = copy.deepcopy(current_settings.translation.connection_history)
+        connection = self._restore_translation_connection_for_model(model, history)
+        self._apply_translation_selection(model, connection)
+
+    def _on_translation_connection_click(self, e) -> None:
+        if not self.page:
+            return
+        display_settings = self._build_settings_with_provider_draft()
+        model = (
+            display_settings.translation.model
+            if display_settings is not None
+            else TranslationModel.GEMMA4
+        )
+        connections = supported_translation_connections(model)
+        only_supported_suffix = t("settings.translation_connection.only_supported")
+        options: list[OptionItem] = []
+        for connection in connections:
+            description = self._translation_connection_display_description(connection)
+            if len(connections) == 1:
+                description = f"{description} {only_supported_suffix}".strip()
+            options.append(
+                OptionItem(
+                    value=connection.value,
+                    label=self._translation_connection_display_label(connection),
+                    description=description,
+                )
+            )
+        current = (
+            display_settings.translation.connection.value
+            if display_settings is not None
+            else default_translation_connection(model).value
+        )
+        modal = SettingsModal(
+            self.page,
+            t("settings.translation_connection"),
+            options,
+            self._on_translation_connection_selected,
+            show_description=True,
+        )
+        modal.open(current)
+
+    def _on_translation_connection_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+        current_settings = self._build_settings_with_provider_draft()
+        assert current_settings is not None
+        model = current_settings.translation.model
+        try:
+            connection = TranslationConnection(value)
+        except (TypeError, ValueError):
+            return
+        if connection not in supported_translation_connections(model):
+            return
+        self._apply_translation_selection(model, connection)
 
     def _on_openrouter_fallback_click(self, e) -> None:
         if not self.page:
@@ -2523,60 +2477,7 @@ class SettingsView(ft.Column):
         self._sync_openrouter_fallback_card(display_settings)
         if self.page:
             self._api_keys_column.update()
-            self._openrouter_routing_row.update()
-
-    def _on_openrouter_routing_click(self, e) -> None:
-        """Open OpenRouter routing selection modal."""
-        if not self.page:
-            return
-        options = [
-            OptionItem(
-                value=OpenRouterRoutingMode.LATENCY.value,
-                label=t("settings.openrouter_routing.latency"),
-                description=t("settings.openrouter_routing.latency.description", default=""),
-            ),
-        ]
-        display_settings = self._build_settings_with_provider_draft()
-        current = (
-            display_settings.openrouter.routing_mode.value
-            if display_settings is not None
-            else OpenRouterRoutingMode.LATENCY.value
-        )
-        modal = SettingsModal(
-            self.page,
-            t("settings.openrouter_routing"),
-            options,
-            self._on_openrouter_routing_selected,
-            show_description=True,
-        )
-        modal.open(current)
-
-    def _on_openrouter_routing_selected(self, value: str) -> None:
-        if not self._settings:
-            return
-
-        current_settings = self._build_settings_with_provider_draft()
-        assert current_settings is not None
-        old_value = current_settings.openrouter.routing_mode
-        try:
-            new_value = OpenRouterRoutingMode(value)
-        except ValueError:
-            new_value = OpenRouterRoutingMode.LATENCY
-
-        if old_value == new_value:
-            return
-
-        self._emit_runtime_detailed(
-            f"[Settings] OpenRouter routing mode changed: {old_value} -> {new_value}"
-        )
-        draft = self._ensure_provider_settings_draft()
-        draft.openrouter.routing_mode = new_value
-        self.has_provider_changes = True
-        self._set_openrouter_routing_text(
-            self._get_openrouter_routing_display_label(self._build_settings_with_provider_draft()),
-        )
-        if self.page:
-            self._openrouter_routing_text.update()
+            self._translation_connection_row.update()
 
     def _on_ui_click(self, e) -> None:
         """Open UI language selection modal."""
@@ -3409,7 +3310,7 @@ class SettingsView(ft.Column):
         self._peer_hangover_field.label = t("settings.vad.peer_hangover_ms")
         self._peer_pre_roll_field.label = t("settings.vad.peer_pre_roll_ms")
         self._low_latency_title.value = t("settings.low_latency_mode")
-        self._openrouter_routing_title.value = t("settings.openrouter_routing")
+        self._translation_connection_title.value = t("settings.translation_connection")
         self._openrouter_fallback_title.value = t("settings.openrouter_fallback")
         self._persona_title.value = t("settings.section.persona")
         self._custom_vocab_title.value = t("settings.section.custom_vocabulary")
@@ -3475,8 +3376,8 @@ class SettingsView(ft.Column):
                 self._llm_text,
                 self._get_llm_display_label(display_settings),
             )
-            self._set_openrouter_routing_text(
-                self._get_openrouter_routing_display_label(display_settings),
+            self._set_translation_connection_text(
+                self._get_translation_connection_display_label(display_settings),
             )
             self._sync_openrouter_fallback_card(display_settings)
             self._ui_text.content.value = locale_label(display_settings.ui.locale)

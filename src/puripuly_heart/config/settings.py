@@ -32,7 +32,7 @@ from puripuly_heart.config.llm_profiles import (
 )
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 19
+SETTINGS_SCHEMA_VERSION = 20
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
@@ -126,6 +126,204 @@ class OpenRouterFallbackSelectionAlias(str, Enum):
     GEMINI25_FLASH_LITE = OPENROUTER_FALLBACK_SELECTION_ALIAS_GEMINI25_FLASH_LITE
     QWEN35_FLASH = OPENROUTER_FALLBACK_SELECTION_ALIAS_QWEN35_FLASH
     DEEPSEEK_V4_FLASH = OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH
+
+
+class TranslationModel(str, Enum):
+    GEMMA4 = "gemma4"
+    DEEPSEEK_V4_FLASH = "deepseek_v4_flash"
+    GEMINI_3_FLASH = "gemini3_flash"
+    GEMINI_31_FLASH_LITE = "gemini31_flash_lite"
+    QWEN_35_PLUS = "qwen35_plus"
+
+
+class TranslationConnection(str, Enum):
+    MANAGED = "managed"
+    OPENROUTER = "openrouter"
+    OFFICIAL_BYOK = "official_byok"
+
+
+@dataclass(slots=True)
+class TranslationSettings:
+    model: TranslationModel = TranslationModel.GEMMA4
+    connection: TranslationConnection = TranslationConnection.MANAGED
+    connection_history: dict[str, TranslationConnection] = field(
+        default_factory=lambda: _default_translation_connection_history()
+    )
+
+    def validate(self) -> None:
+        if not isinstance(self.model, TranslationModel):
+            raise ValueError("invalid translation model")
+        if not isinstance(self.connection, TranslationConnection):
+            raise ValueError("invalid translation connection")
+        if self.connection not in _supported_translation_connections(self.model):
+            raise ValueError("translation connection is not supported for model")
+        if not isinstance(self.connection_history, dict):
+            raise ValueError("translation connection_history must be a dict")
+        for model_value, connection in self.connection_history.items():
+            model = _parse_translation_model(model_value)
+            if model is None:
+                raise ValueError("invalid translation connection_history model")
+            if not isinstance(connection, TranslationConnection):
+                raise ValueError("invalid translation connection_history connection")
+            if connection not in _supported_translation_connections(model):
+                raise ValueError("translation connection_history connection is not supported")
+
+
+TRANSLATION_CONNECTIONS_BY_MODEL: dict[TranslationModel, tuple[TranslationConnection, ...]] = {
+    TranslationModel.GEMMA4: (
+        TranslationConnection.MANAGED,
+        TranslationConnection.OPENROUTER,
+    ),
+    TranslationModel.DEEPSEEK_V4_FLASH: (
+        TranslationConnection.MANAGED,
+        TranslationConnection.OPENROUTER,
+        TranslationConnection.OFFICIAL_BYOK,
+    ),
+    TranslationModel.GEMINI_3_FLASH: (TranslationConnection.OFFICIAL_BYOK,),
+    TranslationModel.GEMINI_31_FLASH_LITE: (TranslationConnection.OFFICIAL_BYOK,),
+    TranslationModel.QWEN_35_PLUS: (TranslationConnection.OFFICIAL_BYOK,),
+}
+TRANSLATION_CONNECTION_PRIORITY: tuple[TranslationConnection, ...] = (
+    TranslationConnection.MANAGED,
+    TranslationConnection.OPENROUTER,
+    TranslationConnection.OFFICIAL_BYOK,
+)
+
+
+def supported_translation_connections(
+    model: TranslationModel,
+) -> tuple[TranslationConnection, ...]:
+    return TRANSLATION_CONNECTIONS_BY_MODEL[model]
+
+
+def default_translation_connection(model: TranslationModel) -> TranslationConnection:
+    supported_connections = supported_translation_connections(model)
+    for connection in TRANSLATION_CONNECTION_PRIORITY:
+        if connection in supported_connections:
+            return connection
+    return supported_connections[0]
+
+
+def _supported_translation_connections(
+    model: TranslationModel,
+) -> tuple[TranslationConnection, ...]:
+    return supported_translation_connections(model)
+
+
+def _default_translation_connection(model: TranslationModel) -> TranslationConnection:
+    return default_translation_connection(model)
+
+
+def _default_translation_connection_history() -> dict[str, TranslationConnection]:
+    return {TranslationModel.GEMMA4.value: TranslationConnection.MANAGED}
+
+
+def _parse_translation_model(value: object) -> TranslationModel | None:
+    if isinstance(value, TranslationModel):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip()
+        try:
+            return TranslationModel(normalized)
+        except ValueError:
+            pass
+    return None
+
+
+def _parse_translation_connection(value: object) -> TranslationConnection | None:
+    if isinstance(value, TranslationConnection):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip()
+        try:
+            return TranslationConnection(normalized)
+        except ValueError:
+            pass
+    return None
+
+
+def _parse_translation_connection_history(value: object) -> dict[str, TranslationConnection]:
+    if not isinstance(value, dict):
+        return {}
+
+    history: dict[str, TranslationConnection] = {}
+    for raw_model, raw_connection in value.items():
+        model = _parse_translation_model(raw_model)
+        connection = _parse_translation_connection(raw_connection)
+        if model is None or connection is None:
+            continue
+        if connection not in _supported_translation_connections(model):
+            continue
+        history[model.value] = connection
+    return history
+
+
+def _normalize_translation_settings(
+    *,
+    model: TranslationModel | None,
+    connection: TranslationConnection | None,
+    history: object = None,
+) -> TranslationSettings:
+    normalized_model = model or TranslationModel.GEMMA4
+    normalized_history = _parse_translation_connection_history(history)
+    if connection not in _supported_translation_connections(normalized_model):
+        connection = _default_translation_connection(normalized_model)
+    normalized_history[normalized_model.value] = connection
+    return TranslationSettings(
+        model=normalized_model,
+        connection=connection,
+        connection_history=normalized_history,
+    )
+
+
+def _translation_data_has_valid_model(value: object) -> bool:
+    return isinstance(value, dict) and _parse_translation_model(value.get("model")) is not None
+
+
+def _translation_connection_from_openrouter_source(
+    selected_source: OpenRouterCredentialSource,
+    *,
+    model: TranslationModel,
+) -> TranslationConnection:
+    if selected_source == OpenRouterCredentialSource.MANAGED:
+        return TranslationConnection.MANAGED
+    if selected_source == OpenRouterCredentialSource.BYOK:
+        return TranslationConnection.OPENROUTER
+    return _default_translation_connection(model)
+
+
+def _history_connection_or_default(
+    model: TranslationModel,
+    history: dict[str, TranslationConnection],
+) -> TranslationConnection:
+    connection = history.get(model.value)
+    if connection in _supported_translation_connections(model):
+        return connection
+    return _default_translation_connection(model)
+
+
+def _translation_settings_to_dict(settings: TranslationSettings) -> dict[str, Any]:
+    return {
+        "model": settings.model.value,
+        "connection": settings.connection.value,
+        "connection_history": {
+            model: connection.value for model, connection in settings.connection_history.items()
+        },
+    }
+
+
+def _default_translation_settings_dict() -> dict[str, Any]:
+    return {
+        "model": TranslationModel.GEMMA4.value,
+        "connection": TranslationConnection.MANAGED.value,
+        "connection_history": {
+            TranslationModel.GEMMA4.value: TranslationConnection.MANAGED.value,
+        },
+    }
+
+
+def _translation_settings_is_exact_default(settings: TranslationSettings) -> bool:
+    return _translation_settings_to_dict(settings) == _default_translation_settings_dict()
 
 
 @dataclass(slots=True)
@@ -526,6 +724,7 @@ class ManagedIdentitySettings:
 class AppSettings:
     settings_version: int = SETTINGS_SCHEMA_VERSION
     provider: ProviderSettings = field(default_factory=ProviderSettings)
+    translation: TranslationSettings = field(default_factory=TranslationSettings)
     languages: LanguageSettings = field(default_factory=LanguageSettings)
     audio: AudioSettings = field(default_factory=AudioSettings)
     desktop_audio: DesktopAudioSettings = field(default_factory=DesktopAudioSettings)
@@ -561,6 +760,7 @@ class AppSettings:
         if self.settings_version <= 0:
             raise ValueError("settings_version must be > 0")
         self.provider.validate()
+        self.translation.validate()
         self.languages.validate()
         self.audio.validate()
         self.desktop_audio.validate()
@@ -599,6 +799,15 @@ def _enum_to_value(obj: object) -> object:
 
 
 def to_dict(settings: AppSettings) -> dict[str, Any]:
+    settings = copy.deepcopy(settings)
+    if _translation_settings_is_exact_default(settings.translation):
+        inferred_translation = _derive_translation_settings_from_runtime(
+            settings,
+            history=settings.translation.connection_history,
+        )
+        if not _translation_settings_is_exact_default(inferred_translation):
+            settings.translation = inferred_translation
+    materialize_translation_settings(settings)
     (
         normalized_openrouter_model,
         normalized_openrouter_selected_source,
@@ -621,6 +830,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "peer_stt": _parse_peer_stt_provider(settings.provider.peer_stt.value).value,
             "llm": settings.provider.llm.value,
         },
+        "translation": _translation_settings_to_dict(settings.translation),
         "languages": {
             "source_language": settings.languages.source_language,
             "target_language": settings.languages.target_language,
@@ -1024,6 +1234,259 @@ def _resolve_openrouter_main_selection(
     selected_source = raw_selected_source
     selection_alias = _derive_openrouter_selection_alias(llm_model, selected_source)
     return llm_model, selected_source, selection_alias
+
+
+def _derive_translation_settings_from_runtime_values(
+    *,
+    provider_llm: LLMProviderName,
+    openrouter_model: OpenRouterLLMModel,
+    openrouter_selected_source: OpenRouterCredentialSource,
+    gemini_model: GeminiLLMModel,
+    qwen_model: QwenLLMModel,
+    history: object = None,
+) -> TranslationSettings:
+    normalized_history = _parse_translation_connection_history(history)
+
+    if provider_llm == LLMProviderName.OPENROUTER:
+        if openrouter_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT:
+            return _normalize_translation_settings(
+                model=TranslationModel.GEMMA4,
+                connection=_translation_connection_from_openrouter_source(
+                    openrouter_selected_source,
+                    model=TranslationModel.GEMMA4,
+                ),
+                history=normalized_history,
+            )
+        if openrouter_model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH:
+            return _normalize_translation_settings(
+                model=TranslationModel.DEEPSEEK_V4_FLASH,
+                connection=_translation_connection_from_openrouter_source(
+                    openrouter_selected_source,
+                    model=TranslationModel.DEEPSEEK_V4_FLASH,
+                ),
+                history=normalized_history,
+            )
+        if openrouter_model == OpenRouterLLMModel.QWEN_35_FLASH_02_23:
+            return _normalize_translation_settings(
+                model=TranslationModel.DEEPSEEK_V4_FLASH,
+                connection=_history_connection_or_default(
+                    TranslationModel.DEEPSEEK_V4_FLASH,
+                    normalized_history,
+                ),
+                history=normalized_history,
+            )
+
+    if provider_llm == LLMProviderName.DEEPSEEK:
+        return _normalize_translation_settings(
+            model=TranslationModel.DEEPSEEK_V4_FLASH,
+            connection=TranslationConnection.OFFICIAL_BYOK,
+            history=normalized_history,
+        )
+
+    if provider_llm == LLMProviderName.QWEN:
+        if qwen_model == QwenLLMModel.QWEN_35_FLASH:
+            return _normalize_translation_settings(
+                model=TranslationModel.DEEPSEEK_V4_FLASH,
+                connection=_history_connection_or_default(
+                    TranslationModel.DEEPSEEK_V4_FLASH,
+                    normalized_history,
+                ),
+                history=normalized_history,
+            )
+        return _normalize_translation_settings(
+            model=TranslationModel.QWEN_35_PLUS,
+            connection=TranslationConnection.OFFICIAL_BYOK,
+            history=normalized_history,
+        )
+
+    if gemini_model == GeminiLLMModel.GEMINI_3_FLASH:
+        return _normalize_translation_settings(
+            model=TranslationModel.GEMINI_3_FLASH,
+            connection=TranslationConnection.OFFICIAL_BYOK,
+            history=normalized_history,
+        )
+    return _normalize_translation_settings(
+        model=TranslationModel.GEMINI_31_FLASH_LITE,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+        history=normalized_history,
+    )
+
+
+def _derive_translation_settings_from_runtime(
+    settings: AppSettings,
+    history: object = None,
+) -> TranslationSettings:
+    return _derive_translation_settings_from_runtime_values(
+        provider_llm=settings.provider.llm,
+        openrouter_model=settings.openrouter.llm_model,
+        openrouter_selected_source=settings.openrouter.selected_source,
+        gemini_model=settings.gemini.llm_model,
+        qwen_model=settings.qwen.llm_model,
+        history=history,
+    )
+
+
+def materialize_translation_settings(settings: AppSettings) -> AppSettings:
+    settings.translation = _normalize_translation_settings(
+        model=_parse_translation_model(settings.translation.model),
+        connection=_parse_translation_connection(settings.translation.connection),
+        history=settings.translation.connection_history,
+    )
+    model = settings.translation.model
+    connection = settings.translation.connection
+
+    if model == TranslationModel.GEMMA4:
+        settings.provider.llm = LLMProviderName.OPENROUTER
+        settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+        settings.openrouter.selected_source = (
+            OpenRouterCredentialSource.MANAGED
+            if connection == TranslationConnection.MANAGED
+            else OpenRouterCredentialSource.BYOK
+        )
+        settings.openrouter.selection_alias = _derive_openrouter_selection_alias(
+            settings.openrouter.llm_model,
+            settings.openrouter.selected_source,
+        )
+        return settings
+
+    if model == TranslationModel.DEEPSEEK_V4_FLASH:
+        if connection == TranslationConnection.OFFICIAL_BYOK:
+            settings.provider.llm = LLMProviderName.DEEPSEEK
+            settings.deepseek.llm_model = DeepSeekLLMModel.DEEPSEEK_V4_FLASH
+            return settings
+        settings.provider.llm = LLMProviderName.OPENROUTER
+        settings.openrouter.llm_model = OpenRouterLLMModel.DEEPSEEK_V4_FLASH
+        settings.openrouter.selected_source = (
+            OpenRouterCredentialSource.MANAGED
+            if connection == TranslationConnection.MANAGED
+            else OpenRouterCredentialSource.BYOK
+        )
+        settings.openrouter.selection_alias = _derive_openrouter_selection_alias(
+            settings.openrouter.llm_model,
+            settings.openrouter.selected_source,
+        )
+        return settings
+
+    if model == TranslationModel.GEMINI_3_FLASH:
+        settings.provider.llm = LLMProviderName.GEMINI
+        settings.gemini.llm_model = GeminiLLMModel.GEMINI_3_FLASH
+        return settings
+
+    if model == TranslationModel.GEMINI_31_FLASH_LITE:
+        settings.provider.llm = LLMProviderName.GEMINI
+        settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
+        return settings
+
+    settings.provider.llm = LLMProviderName.QWEN
+    settings.qwen.llm_model = QwenLLMModel.QWEN_35_PLUS
+    return settings
+
+
+def _ensure_mapping_block(data: dict[str, Any], key: str) -> tuple[dict[str, Any], bool]:
+    block = data.get(key)
+    if isinstance(block, dict):
+        return block, False
+    block = {}
+    data[key] = block
+    return block, True
+
+
+def _set_mapping_value(mapping: dict[str, Any], key: str, value: object) -> bool:
+    if mapping.get(key) == value:
+        return False
+    mapping[key] = value
+    return True
+
+
+def _apply_materialized_translation_to_data(
+    data: dict[str, Any],
+    translation: TranslationSettings,
+) -> bool:
+    provider_data, changed = _ensure_mapping_block(data, "provider")
+    openrouter_data, block_changed = _ensure_mapping_block(data, "openrouter")
+    changed = changed or block_changed
+    gemini_data, block_changed = _ensure_mapping_block(data, "gemini")
+    changed = changed or block_changed
+    qwen_data, block_changed = _ensure_mapping_block(data, "qwen")
+    changed = changed or block_changed
+    deepseek_data, block_changed = _ensure_mapping_block(data, "deepseek")
+    changed = changed or block_changed
+
+    translation = _normalize_translation_settings(
+        model=_parse_translation_model(translation.model),
+        connection=_parse_translation_connection(translation.connection),
+        history=translation.connection_history,
+    )
+
+    if translation.model == TranslationModel.GEMMA4:
+        selected_source = (
+            OpenRouterCredentialSource.MANAGED
+            if translation.connection == TranslationConnection.MANAGED
+            else OpenRouterCredentialSource.BYOK
+        )
+        selection_alias = _derive_openrouter_selection_alias(
+            OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source,
+        )
+        changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.OPENROUTER.value)
+        changed |= _set_mapping_value(
+            openrouter_data,
+            "llm_model",
+            OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
+        )
+        changed |= _set_mapping_value(openrouter_data, "selected_source", selected_source.value)
+        changed |= _set_mapping_value(openrouter_data, "selection_alias", selection_alias.value)
+        return changed
+
+    if translation.model == TranslationModel.DEEPSEEK_V4_FLASH:
+        if translation.connection == TranslationConnection.OFFICIAL_BYOK:
+            changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.DEEPSEEK.value)
+            changed |= _set_mapping_value(
+                deepseek_data,
+                "llm_model",
+                DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value,
+            )
+            return changed
+        selected_source = (
+            OpenRouterCredentialSource.MANAGED
+            if translation.connection == TranslationConnection.MANAGED
+            else OpenRouterCredentialSource.BYOK
+        )
+        selection_alias = _derive_openrouter_selection_alias(
+            OpenRouterLLMModel.DEEPSEEK_V4_FLASH,
+            selected_source,
+        )
+        changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.OPENROUTER.value)
+        changed |= _set_mapping_value(
+            openrouter_data,
+            "llm_model",
+            OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value,
+        )
+        changed |= _set_mapping_value(openrouter_data, "selected_source", selected_source.value)
+        changed |= _set_mapping_value(openrouter_data, "selection_alias", selection_alias.value)
+        return changed
+
+    if translation.model == TranslationModel.GEMINI_3_FLASH:
+        changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.GEMINI.value)
+        changed |= _set_mapping_value(
+            gemini_data,
+            "llm_model",
+            GeminiLLMModel.GEMINI_3_FLASH.value,
+        )
+        return changed
+
+    if translation.model == TranslationModel.GEMINI_31_FLASH_LITE:
+        changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.GEMINI.value)
+        changed |= _set_mapping_value(
+            gemini_data,
+            "llm_model",
+            GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
+        )
+        return changed
+
+    changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.QWEN.value)
+    changed |= _set_mapping_value(qwen_data, "llm_model", QwenLLMModel.QWEN_35_PLUS.value)
+    return changed
 
 
 def _infer_qwen_region_from_legacy_asr_endpoint(value: object) -> QwenRegion | None:
@@ -1536,6 +1999,10 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         changed = True
         version = 19
 
+    if version < 20:
+        changed = True
+        version = 20
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -1715,6 +2182,37 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     normalized_deepseek_model = _parse_deepseek_llm_model(raw_deepseek_model).value
     if raw_deepseek_model != normalized_deepseek_model:
         deepseek_data["llm_model"] = normalized_deepseek_model
+        changed = True
+
+    translation_data = data.get("translation") if isinstance(data.get("translation"), dict) else {}
+    translation_history = _parse_translation_connection_history(
+        translation_data.get("connection_history") if isinstance(translation_data, dict) else None
+    )
+    if _translation_data_has_valid_model(translation_data):
+        normalized_translation_settings = _normalize_translation_settings(
+            model=_parse_translation_model(translation_data.get("model")),
+            connection=_parse_translation_connection(translation_data.get("connection")),
+            history=translation_history,
+        )
+    else:
+        normalized_translation_settings = _derive_translation_settings_from_runtime_values(
+            provider_llm=_parse_llm_provider(
+                provider_data.get("llm", LLMProviderName.GEMINI.value)
+            ),
+            openrouter_model=_parse_openrouter_llm_model(openrouter_data.get("llm_model")),
+            openrouter_selected_source=_parse_openrouter_credential_source(
+                openrouter_data.get("selected_source"),
+                fallback=_default_openrouter_credential_source_value(data),
+            ),
+            gemini_model=_parse_gemini_llm_model(gemini_data.get("llm_model")),
+            qwen_model=_parse_qwen_llm_model(qwen_data.get("llm_model")),
+            history=translation_history,
+        )
+    normalized_translation_data = _translation_settings_to_dict(normalized_translation_settings)
+    if data.get("translation") != normalized_translation_data:
+        data["translation"] = normalized_translation_data
+        changed = True
+    if _apply_materialized_translation_to_data(data, normalized_translation_settings):
         changed = True
 
     api_key_verified_data = data.get("api_key_verified")
@@ -2176,6 +2674,23 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         system_prompt=legacy_system_prompt,
         system_prompts=system_prompts,
     )
+
+    translation_data = data.get("translation") if isinstance(data.get("translation"), dict) else {}
+    translation_history = _parse_translation_connection_history(
+        translation_data.get("connection_history") if isinstance(translation_data, dict) else None
+    )
+    if _translation_data_has_valid_model(translation_data):
+        settings.translation = _normalize_translation_settings(
+            model=_parse_translation_model(translation_data.get("model")),
+            connection=_parse_translation_connection(translation_data.get("connection")),
+            history=translation_history,
+        )
+    else:
+        settings.translation = _derive_translation_settings_from_runtime(
+            settings,
+            history=translation_history,
+        )
+    materialize_translation_settings(settings)
 
     selected_prompt_key = _llm_prompt_key(settings.provider.llm)
     if legacy_system_prompt and selected_prompt_key not in settings.system_prompts:
