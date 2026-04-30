@@ -571,6 +571,7 @@ describe('broker migration behavior', () => {
 
       applyBrokerMigrations(db, {
         after: '0002_add_entitlement_verified_hardware_snapshot.sql',
+        through: '0003_add_abuse_runtime_state_and_issue_success_events.sql',
       });
 
       const configKeys = db
@@ -673,15 +674,73 @@ describe('broker migration behavior', () => {
 
       applyBrokerMigrations(db, {
         after: '0002_add_entitlement_verified_hardware_snapshot.sql',
+        through: '0003_add_abuse_runtime_state_and_issue_success_events.sql',
       });
 
       const migratedRow = db
         .prepare('SELECT value FROM broker_config WHERE key = ?')
         .get('abuse_controls') as { value: string };
+      const {
+        discordAuthStartIp: _discordAuthStartIp,
+        discordAuthStartInstallation: _discordAuthStartInstallation,
+        discordOpenrouterIssueIp: _discordOpenrouterIssueIp,
+        discordOpenrouterIssueInstallation: _discordOpenrouterIssueInstallation,
+        pendingDiscordOAuthSessions: _pendingDiscordOAuthSessions,
+        ...defaultsThrough0003
+      } = TEST_DEFAULT_ABUSE_CONTROLS;
 
       expect(JSON.parse(migratedRow.value)).toEqual({
-        ...TEST_DEFAULT_ABUSE_CONTROLS,
+        ...defaultsThrough0003,
         ...tunedLegacyControls,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('preserves a tuned daily issuance cap when 0004 adds Discord OAuth controls', () => {
+    const db = new DatabaseSync(':memory:');
+
+    try {
+      applyBrokerMigrations(db, {
+        through: '0003_add_abuse_runtime_state_and_issue_success_events.sql',
+      });
+
+      const rowBefore = db
+        .prepare('SELECT value FROM broker_config WHERE key = ?')
+        .get('abuse_controls') as { value: string };
+      const tunedControls = JSON.parse(rowBefore.value) as typeof TEST_DEFAULT_ABUSE_CONTROLS;
+      tunedControls.newActiveEntitlementsPerDay.maxCount = 123;
+      tunedControls.newActiveEntitlementsPerDay.windowDays = 3;
+
+      db.prepare(
+        'UPDATE broker_config SET value = ?, updated_at = ? WHERE key = ?',
+      ).run(
+        JSON.stringify(tunedControls),
+        '2026-04-30T06:00:00.000Z',
+        'abuse_controls',
+      );
+
+      applyBrokerMigrations(db, {
+        after: '0003_add_abuse_runtime_state_and_issue_success_events.sql',
+        through: '0004_add_discord_oauth_managed_issue.sql',
+      });
+
+      const migratedRow = db
+        .prepare('SELECT value FROM broker_config WHERE key = ?')
+        .get('abuse_controls') as { value: string };
+      const migratedControls = JSON.parse(migratedRow.value) as typeof TEST_DEFAULT_ABUSE_CONTROLS;
+
+      expect(migratedControls.newActiveEntitlementsPerDay).toEqual({
+        endpoint: 'POST /v1/providers/openrouter/discord/issue',
+        scope: 'global',
+        maxCount: 123,
+        windowDays: 3,
+      });
+      expect(migratedControls.pendingDiscordOAuthSessions).toEqual({
+        maxPerInstallation: 2,
+        maxPerIp: 20,
+        windowMinutes: 15,
       });
     } finally {
       db.close();

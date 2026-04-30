@@ -49,6 +49,7 @@ class DebugPreviewPanel(ft.Container):
         on_revoked_notice: Callable[[], None],
         on_founder_letter: Callable[[], None],
         on_pkce_failure: Callable[[], None],
+        on_discord_auth: Callable[[], None],
         on_peer_translation_eula: Callable[[], None],
     ) -> None:
         self._actions = (
@@ -56,6 +57,7 @@ class DebugPreviewPanel(ft.Container):
             _PreviewAction("revoked_notice", "debug_preview.revoked_notice", on_revoked_notice),
             _PreviewAction("founder_letter", "debug_preview.founder_letter", on_founder_letter),
             _PreviewAction("pkce_failure", "debug_preview.pkce_failure", on_pkce_failure),
+            _PreviewAction("discord_auth", "debug_preview.discord_auth", on_discord_auth),
             _PreviewAction(
                 "peer_translation_eula",
                 "debug_preview.peer_translation_eula",

@@ -328,6 +328,90 @@ describe('POST /v1/providers/openrouter/issue route contract', () => {
     });
   });
 
+  it.each([
+    { discordIssueStatus: 'issuing', managedCredentialRef: null },
+    {
+      discordIssueStatus: 'cleanup_required',
+      managedCredentialRef: 'hash_orphaned_discord_cleanup_required_issue',
+    },
+  ] satisfies Array<{
+    discordIssueStatus: 'issuing' | 'cleanup_required';
+    managedCredentialRef: string | null;
+  }>)(
+    'rejects legacy issue for Discord $discordIssueStatus pending_release without activating or mutating entitlement metadata',
+    async ({ discordIssueStatus, managedCredentialRef }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+      const managementApi = mockOpenRouterManagementApi();
+      const env = createTestBrokerEnv();
+      const installationId = `install-discord-${discordIssueStatus}-issue-guard`;
+      const release = await createPendingReleaseSession({
+        env,
+        installationId,
+        appVersion: '1.2.3',
+        hardwareHash: `hardware-hash-${discordIssueStatus}-issue-guard`,
+      });
+      env.__db
+        .prepare(
+          `UPDATE openrouter_entitlements
+              SET discord_issue_status = ?,
+                  discord_issue_reserved_at = ?,
+                  managed_credential_ref = ?
+            WHERE installation_id = ?`,
+        )
+        .run(
+          discordIssueStatus,
+          '2026-04-08T06:00:00.000Z',
+          managedCredentialRef,
+          installationId,
+        );
+      const entitlementBefore = env.__db
+        .prepare(
+          `SELECT status, managed_credential_ref, issued_at, expires_at,
+                  release_session_ref, release_token_hash, release_token_expires_at,
+                  verified_hardware_hash, verified_hardware_hash_salt_version,
+                  discord_issue_status, discord_issue_reserved_at
+             FROM openrouter_entitlements
+            WHERE installation_id = ?`,
+        )
+        .get(installationId) as Record<string, unknown>;
+      const requestBody = await signCanonicalIssueRequest(release.keyPair.privateKey, {
+        installation_id: installationId,
+        device_public_key: release.keyPair.devicePublicKey,
+        release_token: release.releaseToken,
+        hardware_hash: release.hardwareHash,
+        reason: 'llm_start',
+        budget_usd: 0.07,
+        model: 'google/gemma-4-26b-a4b-it',
+        signed_at: '2026-04-08T06:00:45.000Z',
+      });
+
+      const response = await postIssue(env, requestBody);
+
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toMatchObject({
+        error: {
+          code: 'challenge_invalid',
+          class: 'security_fail',
+          subcode: 'release_token_invalid',
+        },
+      });
+      expect(managementApi.fetchMock).not.toHaveBeenCalled();
+      const entitlementAfter = env.__db
+        .prepare(
+          `SELECT status, managed_credential_ref, issued_at, expires_at,
+                  release_session_ref, release_token_hash, release_token_expires_at,
+                  verified_hardware_hash, verified_hardware_hash_salt_version,
+                  discord_issue_status, discord_issue_reserved_at
+             FROM openrouter_entitlements
+            WHERE installation_id = ?`,
+        )
+        .get(installationId) as Record<string, unknown>;
+      expect(entitlementAfter).toEqual(entitlementBefore);
+    },
+  );
+
   it('rejects non-object JSON bodies with invalid_request', async () => {
     const env = createTestBrokerEnv();
     const response = await postIssue(env, 'null');

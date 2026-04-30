@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import uuid
@@ -24,6 +25,7 @@ from puripuly_heart.config.settings import (
 from puripuly_heart.core.managed_identity import (
     MANAGED_DEVICE_PRIVATE_KEY_SECRET,
     MANAGED_DEVICE_PUBLIC_KEY_SECRET,
+    canonical_discord_issue_payload,
     canonical_issue_payload,
     canonical_status_payload,
     canonical_verify_payload,
@@ -372,6 +374,50 @@ def test_issue_payload_matches_landed_broker_field_order() -> None:
     ).encode("utf-8")
 
 
+def test_discord_issue_payload_matches_landed_broker_field_order_and_hashes_code() -> None:
+    code_hash = base64.urlsafe_b64encode(
+        hashlib.sha256("discord-oauth-code".encode("utf-8")).digest()
+    ).decode("ascii").rstrip("=")
+
+    payload = canonical_discord_issue_payload(
+        installation_id="01961ad7-a7c1-7000-8000-0123456789ab",
+        device_public_key="device-public-key",
+        state="discord-state-1",
+        code="discord-oauth-code",
+        redirect_uri="http://127.0.0.1:62187/discord/callback",
+        hardware_hash="hardware-hash",
+        hardware_hash_salt_version=7,
+        app_version="2.0.0",
+        reason="llm_start",
+        budget_usd=0.07,
+        model="google/gemma-4-26b-a4b-it",
+        issue_nonce="issue-nonce-1",
+        signed_at="2026-04-30T06:00:30.000Z",
+    )
+
+    assert payload == (
+        "\n".join(
+            [
+                "POST",
+                "/v1/providers/openrouter/discord/issue",
+                "01961ad7-a7c1-7000-8000-0123456789ab",
+                "device-public-key",
+                "discord-state-1",
+                code_hash,
+                "http://127.0.0.1:62187/discord/callback",
+                "hardware-hash",
+                "7",
+                "2.0.0",
+                "llm_start",
+                "0.07",
+                "google/gemma-4-26b-a4b-it",
+                "issue-nonce-1",
+                "2026-04-30T06:00:30.000Z",
+            ]
+        )
+    ).encode("utf-8")
+
+
 def test_bundle_signing_matches_canonical_payload_contracts() -> None:
     settings = AppSettings()
     store = InMemorySecretStore()
@@ -452,3 +498,59 @@ def test_bundle_signing_matches_canonical_payload_contracts() -> None:
     )
     assert signed_issue["hardware_hash"] == "hardware-hash"
     public_key.verify(decode_base64url(signed_issue["signature"]), issue_payload)
+
+
+def test_bundle_signs_discord_issue_request_without_sending_code_hash_field() -> None:
+    settings = AppSettings()
+    store = InMemorySecretStore()
+    bundle = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    public_key = Ed25519PublicKey.from_public_bytes(decode_base64url(bundle.device_public_key))
+
+    payload = canonical_discord_issue_payload(
+        installation_id=bundle.installation_id,
+        device_public_key=bundle.device_public_key,
+        state="discord-state-1",
+        code="discord-oauth-code",
+        redirect_uri="http://127.0.0.1:62187/discord/callback",
+        hardware_hash="hardware-hash",
+        hardware_hash_salt_version=7,
+        app_version="2.0.0",
+        reason="llm_start",
+        budget_usd=0.07,
+        model="google/gemma-4-26b-a4b-it",
+        issue_nonce="issue-nonce-1",
+        signed_at="2026-04-30T06:00:30.000Z",
+    )
+    signed_request = bundle.sign_discord_issue_request(
+        code="discord-oauth-code",
+        state="discord-state-1",
+        redirect_uri="http://127.0.0.1:62187/discord/callback",
+        hardware_hash="hardware-hash",
+        hardware_hash_salt_version=7,
+        app_version="2.0.0",
+        reason="llm_start",
+        budget_usd=0.07,
+        model="google/gemma-4-26b-a4b-it",
+        issue_nonce="issue-nonce-1",
+        signed_at="2026-04-30T06:00:30.000Z",
+    )
+
+    assert signed_request == {
+        "code": "discord-oauth-code",
+        "state": "discord-state-1",
+        "installation_id": bundle.installation_id,
+        "device_public_key": bundle.device_public_key,
+        "redirect_uri": "http://127.0.0.1:62187/discord/callback",
+        "hardware_hash": "hardware-hash",
+        "hardware_hash_salt_version": 7,
+        "app_version": "2.0.0",
+        "reason": "llm_start",
+        "budget_usd": 0.07,
+        "model": "google/gemma-4-26b-a4b-it",
+        "issue_nonce": "issue-nonce-1",
+        "signed_at": "2026-04-30T06:00:30.000Z",
+        "signature_alg": "ed25519",
+        "signature": signed_request["signature"],
+    }
+    assert "code_hash" not in signed_request
+    public_key.verify(decode_base64url(signed_request["signature"]), payload)

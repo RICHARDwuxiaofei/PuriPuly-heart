@@ -125,6 +125,7 @@ describe('broker denylist, reputation, and revocation hooks', () => {
       onboarding_eligibility: {
         eligible: false,
         reason: 'revoked',
+        requires_discord_oauth: false,
       },
     });
 

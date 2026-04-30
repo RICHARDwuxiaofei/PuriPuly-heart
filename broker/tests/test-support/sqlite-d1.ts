@@ -97,6 +97,22 @@ class SqliteD1Database {
   prepare(sql: string): SqliteD1PreparedStatement {
     return new SqliteD1PreparedStatement(this.db, sql, [], this.hooks);
   }
+
+  async batch(statements: SqliteD1PreparedStatement[]): Promise<D1Result[]> {
+    const results: D1Result[] = [];
+
+    this.db.exec('BEGIN');
+    try {
+      for (const statement of statements) {
+        results.push(await statement.run());
+      }
+      this.db.exec('COMMIT');
+      return results;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
 }
 
 export interface TestBrokerEnv extends Record<string, unknown> {
@@ -105,6 +121,10 @@ export interface TestBrokerEnv extends Record<string, unknown> {
   OPENROUTER_MANAGED_GUARDRAIL_ID: string;
   OPENROUTER_MANAGED_API_KEY: string;
   OPENROUTER_MANAGED_USER_HMAC_SECRET: string;
+  DISCORD_CLIENT_ID: string;
+  DISCORD_CLIENT_SECRET: string;
+  DISCORD_REDIRECT_URI_ALLOWLIST: string;
+  DISCORD_USER_REF_SECRET: string;
   DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL: string;
   DISCORD_DAILY_REPORT_WEBHOOK_URL: string;
   __db: DatabaseSync;
@@ -131,6 +151,11 @@ export function createTestBrokerEnv(options: SqliteD1Hooks = {}): TestBrokerEnv 
     OPENROUTER_MANAGED_GUARDRAIL_ID: 'test-managed-guardrail-id',
     OPENROUTER_MANAGED_API_KEY: 'test-managed-api-key',
     OPENROUTER_MANAGED_USER_HMAC_SECRET: 'test-managed-user-hmac-secret',
+    DISCORD_CLIENT_ID: 'test-discord-client-id',
+    DISCORD_CLIENT_SECRET: 'test-discord-client-secret',
+    DISCORD_REDIRECT_URI_ALLOWLIST:
+      'http://127.0.0.1:62187/discord/callback,http://127.0.0.1:62188/discord/callback,http://127.0.0.1:62189/discord/callback',
+    DISCORD_USER_REF_SECRET: 'test-discord-user-ref-secret',
     DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL: 'https://discord.test/immediate-alert',
     DISCORD_DAILY_REPORT_WEBHOOK_URL: 'https://discord.test/daily-report',
     __db: db,
@@ -151,6 +176,10 @@ export function insertEntitlement(
     release_token_expires_at?: string | null;
     verified_hardware_hash?: string | null;
     verified_hardware_hash_salt_version?: number | null;
+    discord_user_ref?: string | null;
+    discord_issue_status?: 'issuing' | 'active' | 'failed' | 'cleanup_required' | null;
+    discord_issue_reserved_at?: string | null;
+    discord_issue_delivered_at?: string | null;
   },
 ): void {
   env.__db
@@ -166,8 +195,12 @@ export function insertEntitlement(
           release_token_hash,
           release_token_expires_at,
           verified_hardware_hash,
-          verified_hardware_hash_salt_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          verified_hardware_hash_salt_version,
+          discord_user_ref,
+          discord_issue_status,
+          discord_issue_reserved_at,
+          discord_issue_delivered_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.installation_id,
@@ -181,5 +214,9 @@ export function insertEntitlement(
       input.release_token_expires_at ?? null,
       input.verified_hardware_hash ?? null,
       input.verified_hardware_hash_salt_version ?? null,
+      input.discord_user_ref ?? null,
+      input.discord_issue_status ?? null,
+      input.discord_issue_reserved_at ?? null,
+      input.discord_issue_delivered_at ?? null,
     );
 }

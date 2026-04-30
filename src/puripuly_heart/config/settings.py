@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import locale
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -1088,6 +1089,43 @@ def ensure_prompt_defaults(settings: AppSettings) -> AppSettings:
         prompt = _shared_default_prompt()
         settings.system_prompt = prompt
         settings.system_prompts = _shared_default_system_prompts(prompt)
+    return settings
+
+
+def detect_system_locale() -> str | None:
+    try:
+        return locale.getlocale()[0]
+    except (ValueError, locale.Error):
+        return None
+
+
+def _normalize_first_run_locale(system_locale: str | None) -> str:
+    if system_locale is None:
+        return ""
+    normalized = system_locale.strip()
+    if not normalized:
+        return ""
+    normalized = normalized.split(".", maxsplit=1)[0]
+    normalized = normalized.split("@", maxsplit=1)[0]
+    return normalized.replace("_", "-").casefold()
+
+
+def resolve_first_run_ui_locale(system_locale: str | None) -> str:
+    normalized = _normalize_first_run_locale(system_locale)
+    if normalized == "ko" or normalized.startswith("ko-") or normalized.startswith("korean"):
+        return "ko"
+    if normalized == "zh" or normalized.startswith("zh-") or normalized.startswith("chinese"):
+        return "zh-CN"
+    return "en"
+
+
+def new_settings_for_first_run(system_locale: str | None = None) -> AppSettings:
+    if system_locale is None:
+        system_locale = detect_system_locale()
+    settings = AppSettings()
+    settings.ui.locale = resolve_first_run_ui_locale(system_locale)
+    ensure_prompt_defaults(settings)
+    settings.validate()
     return settings
 
 

@@ -16,20 +16,20 @@ from puripuly_heart.config.settings import (
     OpenRouterLLMModel,
     OpenRouterSelectionAlias,
 )
+from puripuly_heart.core.discord_oauth_loopback import DiscordOAuthCallbackError
 from puripuly_heart.core.managed_identity import ensure_managed_identity_bundle
 from puripuly_heart.core.managed_openrouter_release import (
-    ManagedOpenRouterChallengeSuccess,
+    ManagedOpenRouterDiscordStartSuccess,
     ManagedOpenRouterFingerprintSalt,
     ManagedOpenRouterIssueSuccess,
     ManagedOpenRouterLLMProvider,
-    ManagedOpenRouterPreflightStop,
     ManagedOpenRouterReleaseBehavior,
     ManagedOpenRouterReleaseDiagnostics,
     ManagedOpenRouterReleaseError,
     ManagedOpenRouterReleaseResult,
     ManagedOpenRouterReleaseService,
     ManagedOpenRouterUserFacingError,
-    ManagedOpenRouterVerifySuccess,
+    UnavailableManagedOpenRouterReleaseClient,
 )
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_MANAGED_API_KEY_SECRET,
@@ -46,9 +46,14 @@ class FakeManagedReleaseClient:
     challenge_result: object | None = None
     verify_result: object | None = None
     issue_result: object | None = None
+    discord_start_result: object | None = None
+    discord_issue_result: object | None = None
     challenge_gate: asyncio.Event | None = None
+    discord_start_gate: asyncio.Event | None = None
     issue_gate: asyncio.Event | None = None
     issue_started: asyncio.Event | None = None
+    discord_issue_gate: asyncio.Event | None = None
+    discord_issue_started: asyncio.Event | None = None
     calls: list[tuple[str, dict[str, object]]] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -96,6 +101,43 @@ class FakeManagedReleaseClient:
             raise result
         return result
 
+    async def start_discord_oauth(
+        self,
+        *,
+        installation_id: str,
+        device_public_key: str,
+        redirect_uri: str,
+        app_version: str,
+    ):
+        self.calls.append(
+            (
+                "discord_start",
+                {
+                    "installation_id": installation_id,
+                    "device_public_key": device_public_key,
+                    "redirect_uri": redirect_uri,
+                    "app_version": app_version,
+                },
+            )
+        )
+        if self.discord_start_gate is not None:
+            await self.discord_start_gate.wait()
+        result = self.discord_start_result
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def issue_discord_managed_key(self, request: dict[str, object]):
+        self.calls.append(("discord_issue", dict(request)))
+        if self.discord_issue_started is not None:
+            self.discord_issue_started.set()
+        if self.discord_issue_gate is not None:
+            await self.discord_issue_gate.wait()
+        result = self.discord_issue_result
+        if isinstance(result, Exception):
+            raise result
+        return result
+
 
 @dataclass
 class ClosableFakeManagedReleaseClient(FakeManagedReleaseClient):
@@ -125,6 +167,8 @@ def _make_service(
     secrets: InMemorySecretStore | None = None,
     persist_calls: list[tuple[str | None, str | None]] | None = None,
     raw_hardware_fingerprint_provider: Any | None = None,
+    discord_oauth_listener_factory: Any | None = None,
+    discord_oauth_callback_runner: Any | None = None,
 ) -> tuple[ManagedOpenRouterReleaseService, AppSettings, InMemorySecretStore]:
     resolved_settings = settings or AppSettings()
     resolved_settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
@@ -139,25 +183,119 @@ def _make_service(
             )
         )
 
-    service = ManagedOpenRouterReleaseService(
-        settings=resolved_settings,
-        secrets=resolved_secrets,
-        client=client,
-        persist_settings=persist,
-        app_version="2.0.0",
-        raw_hardware_fingerprint_provider=(
+    service_kwargs: dict[str, Any] = {
+        "settings": resolved_settings,
+        "secrets": resolved_secrets,
+        "client": client,
+        "persist_settings": persist,
+        "app_version": "2.0.0",
+        "raw_hardware_fingerprint_provider": (
             raw_hardware_fingerprint_provider
             if raw_hardware_fingerprint_provider is not None
             else (lambda: "raw-hardware-fingerprint-test")
         ),
-        signed_at_provider=lambda: "2026-04-08T06:00:45.000Z",
-        monotonic_ms_provider=lambda: 1_000,
-    )
+        "signed_at_provider": lambda: "2026-04-08T06:00:45.000Z",
+        "monotonic_ms_provider": lambda: 1_000,
+    }
+    if discord_oauth_listener_factory is not None:
+        service_kwargs["discord_oauth_listener_factory"] = discord_oauth_listener_factory
+    if discord_oauth_callback_runner is not None:
+        service_kwargs["discord_oauth_callback_runner"] = discord_oauth_callback_runner
+    service = ManagedOpenRouterReleaseService(**service_kwargs)
     return service, resolved_settings, resolved_secrets
 
 
 def _make_fingerprint_salt() -> ManagedOpenRouterFingerprintSalt:
     return ManagedOpenRouterFingerprintSalt(version=7, salt="fingerprint-salt-test")
+
+
+@dataclass
+class FakeDiscordOAuthListener:
+    redirect_uri: str = "http://127.0.0.1:62187/discord/callback"
+    closed: bool = False
+    close_calls: int = 0
+
+    def close(self) -> None:
+        self.closed = True
+        self.close_calls += 1
+
+
+@dataclass
+class FakeDiscordOAuthHarness:
+    redirect_uri: str = "http://127.0.0.1:62187/discord/callback"
+    callback_result: tuple[str, str] = ("discord-code-1", "discord-state-1")
+    callback_error: BaseException | None = None
+
+    def __post_init__(self) -> None:
+        self.listeners: list[FakeDiscordOAuthListener] = []
+        self.callback_calls: list[tuple[FakeDiscordOAuthListener, str, str]] = []
+
+    def bind_listener(self) -> FakeDiscordOAuthListener:
+        listener = FakeDiscordOAuthListener(redirect_uri=self.redirect_uri)
+        self.listeners.append(listener)
+        return listener
+
+    async def run_callback_flow(
+        self,
+        listener: FakeDiscordOAuthListener,
+        authorization_url: str,
+        expires_at: str,
+    ) -> tuple[str, str]:
+        self.callback_calls.append((listener, authorization_url, expires_at))
+        if self.callback_error is not None:
+            raise self.callback_error
+        return self.callback_result
+
+
+def _make_discord_start_success(
+    *,
+    redirect_uri: str = "http://127.0.0.1:62187/discord/callback",
+    authorization_url: str = "https://discord.com/oauth2/authorize?client_id=client-1",
+    expires_at: str = "2026-04-08T06:05:00.000Z",
+    issue_nonce: str = "issue-nonce-1",
+) -> ManagedOpenRouterDiscordStartSuccess:
+    return ManagedOpenRouterDiscordStartSuccess(
+        authorization_url=authorization_url,
+        redirect_uri=redirect_uri,
+        oauth_session_expires_at=expires_at,
+        issue_nonce=issue_nonce,
+        fingerprint_salt=_make_fingerprint_salt(),
+        fingerprint_salt_version=7,
+    )
+
+
+def _make_discord_service(
+    *,
+    client: FakeManagedReleaseClient | None = None,
+    settings: AppSettings | None = None,
+    secrets: InMemorySecretStore | None = None,
+    harness: FakeDiscordOAuthHarness | None = None,
+    persist_calls: list[tuple[str | None, str | None]] | None = None,
+    raw_hardware_fingerprint_provider: Any | None = None,
+) -> tuple[
+    ManagedOpenRouterReleaseService,
+    AppSettings,
+    InMemorySecretStore,
+    FakeManagedReleaseClient,
+    FakeDiscordOAuthHarness,
+]:
+    resolved_harness = harness or FakeDiscordOAuthHarness()
+    resolved_client = client or FakeManagedReleaseClient(
+        discord_start_result=_make_discord_start_success(
+            redirect_uri=resolved_harness.redirect_uri,
+        ),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
+    )
+    service, resolved_settings, resolved_secrets = _make_service(
+        client=resolved_client,
+        settings=settings,
+        secrets=secrets,
+        persist_calls=persist_calls,
+        raw_hardware_fingerprint_provider=raw_hardware_fingerprint_provider,
+        discord_oauth_listener_factory=resolved_harness.bind_listener,
+        discord_oauth_callback_runner=resolved_harness.run_callback_flow,
+    )
+    return service, resolved_settings, resolved_secrets, resolved_client, resolved_harness
 
 
 def _expected_hardware_hash(*, fingerprint_salt: str, raw_hardware_fingerprint: str) -> str:
@@ -196,23 +334,51 @@ async def test_prepare_for_translation_short_circuits_when_managed_key_exists() 
 
 
 @pytest.mark.asyncio
-async def test_prepare_for_translation_runs_challenge_verify_issue_and_persists_managed_key() -> (
-    None
-):
-    client = FakeManagedReleaseClient(
-        challenge_result=ManagedOpenRouterChallengeSuccess(
-            challenge="challenge-1",
-            challenge_expires_at="2026-04-08T06:05:00.000Z",
-            fingerprint_salt=_make_fingerprint_salt(),
-        ),
-        verify_result=ManagedOpenRouterVerifySuccess(
-            release_token="release-token-1",
-            release_token_expires_at="2026-04-08T06:15:00.000Z",
-        ),
-        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
+async def test_discord_oauth_short_circuits_local_key_without_listener_or_broker() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")
+    client = FakeManagedReleaseClient()
+    bind_calls: list[str] = []
+    callback_calls: list[str] = []
+
+    def bind_listener() -> FakeDiscordOAuthListener:
+        bind_calls.append("bind")
+        raise AssertionError("listener should not be bound when a managed key exists")
+
+    async def run_callback_flow(
+        _listener: FakeDiscordOAuthListener,
+        _authorization_url: str,
+        _expires_at: str,
+    ) -> tuple[str, str]:
+        callback_calls.append("callback")
+        raise AssertionError("browser/callback flow should not start when a managed key exists")
+
+    service, _, _ = _make_service(
+        client=client,
+        settings=settings,
+        secrets=secrets,
+        discord_oauth_listener_factory=bind_listener,
+        discord_oauth_callback_runner=run_callback_flow,
     )
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert result.api_key == "managed-key"
+    assert result.local_key_available is True
+    assert client.calls == []
+    assert bind_calls == []
+    assert callback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_discord_oauth_flow_persists_managed_key() -> None:
     persist_calls: list[tuple[str | None, str | None]] = []
-    service, settings, secrets = _make_service(client=client, persist_calls=persist_calls)
+    service, settings, secrets, client, harness = _make_discord_service(
+        persist_calls=persist_calls,
+    )
 
     result = await service.prepare_for_translation()
 
@@ -220,49 +386,164 @@ async def test_prepare_for_translation_runs_challenge_verify_issue_and_persists_
     assert result.api_key == "managed-key"
     assert result.local_key_available is True
     assert result.pending_issue is False
-    assert [name for name, _payload in client.calls] == ["challenge", "verify", "issue"]
-    verify_payload = client.calls[1][1]
-    assert verify_payload["challenge"] == "challenge-1"
-    assert verify_payload["hardware_hash"] == _expected_hardware_hash(
-        fingerprint_salt="fingerprint-salt-test",
-        raw_hardware_fingerprint="raw-hardware-fingerprint-test",
-    )
-    assert verify_payload["app_version"] == "2.0.0"
-    issue_payload = client.calls[2][1]
+    assert [name for name, _payload in client.calls] == ["discord_start", "discord_issue"]
+    start_payload = client.calls[0][1]
+    assert start_payload["redirect_uri"] == harness.listeners[0].redirect_uri
+    assert start_payload["app_version"] == "2.0.0"
+    assert harness.callback_calls == [
+        (
+            harness.listeners[0],
+            "https://discord.com/oauth2/authorize?client_id=client-1",
+            "2026-04-08T06:05:00.000Z",
+        )
+    ]
+    issue_payload = client.calls[1][1]
+    assert issue_payload["code"] == "discord-code-1"
+    assert issue_payload["state"] == "discord-state-1"
+    assert issue_payload["redirect_uri"] == harness.listeners[0].redirect_uri
+    assert issue_payload["issue_nonce"] == "issue-nonce-1"
+    assert issue_payload["app_version"] == "2.0.0"
     assert issue_payload["reason"] == "llm_start"
     assert issue_payload["budget_usd"] == 0.07
     assert issue_payload["hardware_hash"] == _expected_hardware_hash(
         fingerprint_salt="fingerprint-salt-test",
         raw_hardware_fingerprint="raw-hardware-fingerprint-test",
     )
+    assert issue_payload["hardware_hash_salt_version"] == 7
+    assert issue_payload["signed_at"] == "2026-04-08T06:00:45.000Z"
     assert settings.managed_identity.installation_id
     assert settings.managed_identity.release_token is None
     assert settings.managed_identity.release_token_expires_at is None
     assert settings.managed_identity.verified_hardware_hash is None
     assert settings.managed_identity.verified_hardware_hash_salt_version is None
     assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
+    assert harness.listeners[0].closed is True
+    assert harness.listeners[0].close_calls == 1
     assert len(persist_calls) >= 2
+
+
+@pytest.mark.asyncio
+async def test_discord_listener_bind_failure_maps_to_retry_result_without_broker_call() -> None:
+    client = FakeManagedReleaseClient(
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
+    )
+    callback_calls: list[str] = []
+
+    def bind_listener() -> FakeDiscordOAuthListener:
+        raise OSError("no Discord OAuth loopback port is available")
+
+    async def run_callback_flow(
+        _listener: FakeDiscordOAuthListener,
+        _authorization_url: str,
+        _expires_at: str,
+    ) -> tuple[str, str]:
+        callback_calls.append("callback")
+        raise AssertionError("callback flow should not start when listener binding fails")
+
+    service, _settings, _secrets = _make_service(
+        client=client,
+        discord_oauth_listener_factory=bind_listener,
+        discord_oauth_callback_runner=run_callback_flow,
+    )
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.RETRY
+    assert result.message_key == "managed_release.retry"
+    assert result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="discord_start",
+        code="discord_loopback_unavailable",
+        error_class="retryable",
+        message="Discord OAuth loopback listener unavailable: no Discord OAuth loopback port is available",
+    )
+    assert client.calls == []
+    assert callback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_discord_redirect_mismatch_closes_listener_and_maps_terminal_result() -> None:
+    harness = FakeDiscordOAuthHarness()
+    client = FakeManagedReleaseClient(
+        discord_start_result=_make_discord_start_success(
+            redirect_uri="http://127.0.0.1:62188/discord/callback",
+        ),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
+    )
+    service, _settings, _secrets, client, harness = _make_discord_service(
+        client=client,
+        harness=harness,
+    )
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.STOP
+    assert result.message_key == "managed_release.stop"
+    assert result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="discord_start",
+        code="discord_redirect_mismatch",
+        error_class="terminal",
+        message="Discord OAuth broker returned a different redirect URI",
+    )
+    assert harness.callback_calls == []
+    assert harness.listeners[0].closed is True
+    assert [name for name, _payload in client.calls] == ["discord_start"]
+
+
+@pytest.mark.asyncio
+async def test_discord_callback_error_maps_to_retry_result_and_closes_listener_without_issue() -> None:
+    harness = FakeDiscordOAuthHarness(
+        callback_error=DiscordOAuthCallbackError("access_denied", "discord-state-1"),
+    )
+    service, _settings, _secrets, client, harness = _make_discord_service(harness=harness)
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.RETRY
+    assert result.message_key == "managed_release.retry"
+    assert result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="discord_callback",
+        code="discord_oauth_callback_error",
+        error_class="retryable",
+        subcode="access_denied",
+        message="Discord OAuth callback failed: access_denied",
+    )
+    assert harness.listeners[0].closed is True
+    assert [name for name, _payload in client.calls] == ["discord_start"]
+
+
+@pytest.mark.asyncio
+async def test_discord_callback_timeout_maps_to_retry_result_and_closes_listener_without_issue() -> None:
+    harness = FakeDiscordOAuthHarness(
+        callback_error=TimeoutError("timed out waiting for Discord OAuth callback"),
+    )
+    service, _settings, _secrets, client, harness = _make_discord_service(harness=harness)
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.RETRY
+    assert result.message_key == "managed_release.retry"
+    assert result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="discord_callback",
+        code="discord_oauth_timeout",
+        error_class="retryable",
+        message="timed out waiting for Discord OAuth callback",
+    )
+    assert harness.listeners[0].closed is True
+    assert [name for name, _payload in client.calls] == ["discord_start"]
 
 
 @pytest.mark.asyncio
 async def test_prepare_for_translation_persists_managed_entitlement_snapshot() -> None:
     client = FakeManagedReleaseClient(
-        challenge_result=ManagedOpenRouterChallengeSuccess(
-            challenge="challenge-1",
-            challenge_expires_at="2026-04-08T06:05:00.000Z",
-            fingerprint_salt=_make_fingerprint_salt(),
-        ),
-        verify_result=ManagedOpenRouterVerifySuccess(
-            release_token="release-token-1",
-            release_token_expires_at="2026-04-08T06:15:00.000Z",
-        ),
-        issue_result=ManagedOpenRouterIssueSuccess(
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(
             openrouter_api_key="managed-key",
             managed_credential_ref="hash_abc123",
             expires_at="2026-10-17T12:34:56Z",
         ),
     )
-    service, settings, _secrets = _make_service(client=client)
+    service, settings, _secrets, _client, _harness = _make_discord_service(client=client)
 
     await service.prepare_for_translation()
 
@@ -511,16 +792,10 @@ async def test_prepare_for_translation_restarts_when_legacy_release_token_lacks_
 @pytest.mark.asyncio
 async def test_prepare_for_translation_preserves_legacy_hardware_hash_provider_semantics() -> None:
     client = FakeManagedReleaseClient(
-        challenge_result=ManagedOpenRouterChallengeSuccess(
-            challenge="challenge-1",
-            challenge_expires_at="2026-04-08T06:05:00.000Z",
-            fingerprint_salt=_make_fingerprint_salt(),
-        ),
-        verify_result=ManagedOpenRouterVerifySuccess(
-            release_token="release-token-1",
-            release_token_expires_at="2026-04-08T06:15:00.000Z",
-        ),
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
     )
+    harness = FakeDiscordOAuthHarness()
     settings = AppSettings()
     settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     secrets = InMemorySecretStore()
@@ -534,26 +809,21 @@ async def test_prepare_for_translation_preserves_legacy_hardware_hash_provider_s
         hardware_hash_provider=lambda: "precomputed-hardware-hash-123",
         signed_at_provider=lambda: "2026-04-08T06:00:45.000Z",
         monotonic_ms_provider=lambda: 1_000,
+        discord_oauth_listener_factory=harness.bind_listener,
+        discord_oauth_callback_runner=harness.run_callback_flow,
     )
 
     await service.prepare_for_translation()
 
-    verify_payload = client.calls[1][1]
-    assert verify_payload["hardware_hash"] == "precomputed-hardware-hash-123"
+    issue_payload = client.calls[1][1]
+    assert issue_payload["hardware_hash"] == "precomputed-hardware-hash-123"
 
 
 @pytest.mark.asyncio
 async def test_prepare_for_translation_collects_sync_raw_hardware_fingerprint_off_thread() -> None:
     client = FakeManagedReleaseClient(
-        challenge_result=ManagedOpenRouterChallengeSuccess(
-            challenge="challenge-1",
-            challenge_expires_at="2026-04-08T06:05:00.000Z",
-            fingerprint_salt=_make_fingerprint_salt(),
-        ),
-        verify_result=ManagedOpenRouterVerifySuccess(
-            release_token="release-token-1",
-            release_token_expires_at="2026-04-08T06:15:00.000Z",
-        ),
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
     )
     event_loop_thread_id = threading.get_ident()
     provider_thread_ids: list[int] = []
@@ -562,7 +832,7 @@ async def test_prepare_for_translation_collects_sync_raw_hardware_fingerprint_of
         provider_thread_ids.append(threading.get_ident())
         return "raw-hardware-fingerprint-test"
 
-    service, _, _ = _make_service(
+    service, _, _, _client, _harness = _make_discord_service(
         client=client,
         raw_hardware_fingerprint_provider=raw_provider,
     )
@@ -574,40 +844,37 @@ async def test_prepare_for_translation_collects_sync_raw_hardware_fingerprint_of
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["not_eligible", "unavailable"])
-async def test_prepare_for_translation_stops_early_on_preflight_stop(reason: str) -> None:
+async def test_prepare_for_translation_stops_early_on_terminal_discord_start_error() -> None:
     client = FakeManagedReleaseClient(
-        challenge_result=ManagedOpenRouterPreflightStop(reason=reason)
+        discord_start_result=ManagedOpenRouterReleaseError(
+            code="trial_not_eligible",
+            error_class="terminal",
+            message="trial is not eligible",
+            operation="discord_start",
+        )
     )
-    service, settings, secrets = _make_service(client=client)
+    service, settings, secrets, client, harness = _make_discord_service(client=client)
 
     result = await service.prepare_for_translation()
 
     assert result.behavior == ManagedOpenRouterReleaseBehavior.STOP
-    assert result.message_key == f"managed_release.{reason}"
+    assert result.message_key == "managed_release.not_eligible"
     assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert settings.managed_identity.release_token is None
     assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) is None
-    assert [name for name, _payload in client.calls] == ["challenge"]
+    assert harness.listeners[0].closed is True
+    assert [name for name, _payload in client.calls] == ["discord_start"]
 
 
 @pytest.mark.asyncio
 async def test_prepare_for_translation_reuses_single_flight_for_repeated_trans_attempts() -> None:
     gate = asyncio.Event()
     client = FakeManagedReleaseClient(
-        challenge_result=ManagedOpenRouterChallengeSuccess(
-            challenge="challenge-1",
-            challenge_expires_at="2026-04-08T06:05:00.000Z",
-            fingerprint_salt=_make_fingerprint_salt(),
-        ),
-        verify_result=ManagedOpenRouterVerifySuccess(
-            release_token="release-token-1",
-            release_token_expires_at="2026-04-08T06:15:00.000Z",
-        ),
-        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
-        challenge_gate=gate,
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
+        discord_start_gate=gate,
     )
-    service, _, _ = _make_service(client=client)
+    service, _, _, client, _harness = _make_discord_service(client=client)
 
     first_task = asyncio.create_task(service.prepare_for_translation())
     await asyncio.sleep(0)
@@ -617,7 +884,7 @@ async def test_prepare_for_translation_reuses_single_flight_for_repeated_trans_a
 
     first_result, second_result = await asyncio.gather(first_task, second_task)
 
-    assert [name for name, _payload in client.calls] == ["challenge", "verify", "issue"]
+    assert [name for name, _payload in client.calls] == ["discord_start", "discord_issue"]
     assert first_result.behavior == ManagedOpenRouterReleaseBehavior.READY
     assert second_result.behavior == ManagedOpenRouterReleaseBehavior.READY
     assert sorted([first_result.single_flight_reused, second_result.single_flight_reused]) == [
@@ -634,6 +901,28 @@ async def test_close_closes_underlying_client_transport_when_available() -> None
     await service.close()
 
     assert client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unavailable_client_discord_methods_raise_release_error_not_attribute_error() -> None:
+    client = UnavailableManagedOpenRouterReleaseClient()
+
+    with pytest.raises(ManagedOpenRouterReleaseError) as start_exc:
+        await client.start_discord_oauth(
+            installation_id="install-discord-123",
+            device_public_key="device-public-key-123",
+            redirect_uri="http://127.0.0.1:62187/discord/callback",
+            app_version="2.0.0",
+        )
+    assert start_exc.value.code == "trial_unavailable"
+    assert start_exc.value.error_class == "retryable"
+    assert start_exc.value.message == "managed OpenRouter release is unavailable"
+
+    with pytest.raises(ManagedOpenRouterReleaseError) as issue_exc:
+        await client.issue_discord_managed_key({"code": "discord-oauth-code"})
+    assert issue_exc.value.code == "trial_unavailable"
+    assert issue_exc.value.error_class == "retryable"
+    assert issue_exc.value.message == "managed OpenRouter release is unavailable"
 
 
 @pytest.mark.asyncio
@@ -1128,19 +1417,11 @@ async def test_issue_stops_and_restores_pending_release_state_when_cleanup_persi
 async def test_prepare_single_flight_survives_waiter_cancellation() -> None:
     gate = asyncio.Event()
     client = FakeManagedReleaseClient(
-        challenge_result=ManagedOpenRouterChallengeSuccess(
-            challenge="challenge-1",
-            challenge_expires_at="2026-04-08T06:05:00.000Z",
-            fingerprint_salt=_make_fingerprint_salt(),
-        ),
-        verify_result=ManagedOpenRouterVerifySuccess(
-            release_token="release-token-1",
-            release_token_expires_at="2026-04-08T06:15:00.000Z",
-        ),
-        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
-        challenge_gate=gate,
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
+        discord_start_gate=gate,
     )
-    service, _, _ = _make_service(client=client)
+    service, _, _, client, _harness = _make_discord_service(client=client)
 
     first_task = asyncio.create_task(service.prepare_for_translation())
     await asyncio.sleep(0)
@@ -1155,44 +1436,39 @@ async def test_prepare_single_flight_survives_waiter_cancellation() -> None:
     second_result = await second_task
 
     assert second_result.behavior == ManagedOpenRouterReleaseBehavior.READY
-    assert [name for name, _payload in client.calls] == ["challenge", "verify", "issue"]
+    assert [name for name, _payload in client.calls] == ["discord_start", "discord_issue"]
 
 
 @pytest.mark.asyncio
 async def test_close_cancels_in_flight_prepare_task() -> None:
     gate = asyncio.Event()
     client = FakeManagedReleaseClient(
-        challenge_result=ManagedOpenRouterChallengeSuccess(
-            challenge="challenge-1",
-            challenge_expires_at="2026-04-08T06:05:00.000Z",
-            fingerprint_salt=_make_fingerprint_salt(),
-        ),
-        verify_result=ManagedOpenRouterVerifySuccess(
-            release_token="release-token-1",
-            release_token_expires_at="2026-04-08T06:15:00.000Z",
-        ),
-        challenge_gate=gate,
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
+        discord_start_gate=gate,
     )
-    service, _, _ = _make_service(client=client)
+    service, _, _, _client, harness = _make_discord_service(client=client)
 
     task = asyncio.create_task(service.prepare_for_translation())
-    await asyncio.sleep(0)
+    for _ in range(10):
+        if harness.listeners:
+            break
+        await asyncio.sleep(0)
+    assert harness.listeners
     await service.close()
 
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert harness.listeners[0].closed is True
 
 
 @pytest.mark.asyncio
 async def test_prepare_for_translation_stops_when_hardware_fingerprint_lookup_fails() -> None:
     client = FakeManagedReleaseClient(
-        challenge_result=ManagedOpenRouterChallengeSuccess(
-            challenge="challenge-1",
-            challenge_expires_at="2026-04-08T06:05:00.000Z",
-            fingerprint_salt=_make_fingerprint_salt(),
-        )
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
     )
-    service, settings, secrets = _make_service(
+    service, settings, secrets, client, harness = _make_discord_service(
         client=client,
         raw_hardware_fingerprint_provider=lambda: (_ for _ in ()).throw(
             RuntimeError("fingerprint unavailable")
@@ -1206,15 +1482,16 @@ async def test_prepare_for_translation_stops_when_hardware_fingerprint_lookup_fa
     assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert settings.managed_identity.release_token is None
     assert secrets.get(OPENROUTER_MANAGED_API_KEY_SECRET) is None
-    assert [name for name, _payload in client.calls] == ["challenge"]
+    assert harness.listeners[0].closed is True
+    assert [name for name, _payload in client.calls] == ["discord_start"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("stage", "subcode"),
     [
-        ("challenge", "device_public_key_registered"),
-        ("verify", "installation_binding_mismatch"),
+        ("discord_start", "device_public_key_registered"),
+        ("discord_issue", "installation_binding_mismatch"),
     ],
 )
 async def test_prepare_for_translation_regenerates_identity_on_binding_mismatch_security_fail(
@@ -1230,9 +1507,9 @@ async def test_prepare_for_translation_regenerates_identity_on_binding_mismatch_
         persist_settings=lambda _updated: None,
     )
 
-    if stage == "challenge":
+    if stage == "discord_start":
         client = FakeManagedReleaseClient(
-            challenge_result=ManagedOpenRouterReleaseError(
+            discord_start_result=ManagedOpenRouterReleaseError(
                 code="trial_not_eligible",
                 error_class="security_fail",
                 subcode=subcode,
@@ -1241,20 +1518,20 @@ async def test_prepare_for_translation_regenerates_identity_on_binding_mismatch_
         )
     else:
         client = FakeManagedReleaseClient(
-            challenge_result=ManagedOpenRouterChallengeSuccess(
-                challenge="challenge-1",
-                challenge_expires_at="2026-04-08T06:05:00.000Z",
-                fingerprint_salt=_make_fingerprint_salt(),
-            ),
-            verify_result=ManagedOpenRouterReleaseError(
+            discord_start_result=_make_discord_start_success(),
+            discord_issue_result=ManagedOpenRouterReleaseError(
                 code="trial_not_eligible",
                 error_class="security_fail",
                 subcode=subcode,
-                message="verify must use the registered device_public_key for installation_id",
+                message="issue must use the registered device_public_key for installation_id",
             ),
         )
 
-    service, _, _ = _make_service(client=client, settings=settings, secrets=secrets)
+    service, _, _, _client, _harness = _make_discord_service(
+        client=client,
+        settings=settings,
+        secrets=secrets,
+    )
 
     result = await service.prepare_for_translation()
 
@@ -1346,18 +1623,10 @@ async def test_managed_openrouter_provider_issues_on_first_llm_start_only() -> N
 @pytest.mark.asyncio
 async def test_managed_openrouter_provider_translate_after_preissue_does_not_issue_again() -> None:
     client = FakeManagedReleaseClient(
-        challenge_result=ManagedOpenRouterChallengeSuccess(
-            challenge="challenge-1",
-            challenge_expires_at="2026-04-08T06:05:00.000Z",
-            fingerprint_salt=_make_fingerprint_salt(),
-        ),
-        verify_result=ManagedOpenRouterVerifySuccess(
-            release_token="release-token-1",
-            release_token_expires_at="2026-04-08T06:15:00.000Z",
-        ),
-        issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
     )
-    service, _, _ = _make_service(client=client)
+    service, _, _, client, _harness = _make_discord_service(client=client)
     delegate = FakeDelegateProvider()
     created_keys: list[str] = []
     provider = ManagedOpenRouterLLMProvider(
@@ -1378,7 +1647,7 @@ async def test_managed_openrouter_provider_translate_after_preissue_does_not_iss
     assert prepare_result.api_key == "managed-key"
     assert translate_result.text == "translated"
     assert created_keys == ["managed-key"]
-    assert [name for name, _payload in client.calls] == ["challenge", "verify", "issue"]
+    assert [name for name, _payload in client.calls] == ["discord_start", "discord_issue"]
 
 
 @pytest.mark.asyncio

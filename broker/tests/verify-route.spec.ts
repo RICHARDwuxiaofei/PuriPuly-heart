@@ -26,6 +26,8 @@ interface VerifyBoundsCase {
   message: string;
 }
 
+type DiscordBlockedIssueStatus = 'issuing' | 'cleanup_required';
+
 function createDeferred(): {
   promise: Promise<void>;
   resolve: () => void;
@@ -37,6 +39,36 @@ function createDeferred(): {
     }),
     resolve,
   };
+}
+
+function readEntitlementSnapshot(
+  env: ReturnType<typeof createTestBrokerEnv>,
+  installationId: string,
+): Record<string, unknown> {
+  return env.__db
+    .prepare(
+      `SELECT status, managed_credential_ref, release_session_ref,
+              release_token_hash, release_token_expires_at,
+              verified_hardware_hash, verified_hardware_hash_salt_version,
+              discord_issue_status, discord_issue_reserved_at
+         FROM openrouter_entitlements
+        WHERE installation_id = ?`,
+    )
+    .get(installationId) as Record<string, unknown>;
+}
+
+function readInstallationChallengeSnapshot(
+  env: ReturnType<typeof createTestBrokerEnv>,
+  installationId: string,
+): Record<string, unknown> {
+  return env.__db
+    .prepare(
+      `SELECT challenge, challenge_expires_at, challenge_salt_version,
+              hardware_hash, hardware_hash_salt_version
+         FROM installations
+        WHERE installation_id = ?`,
+    )
+    .get(installationId) as Record<string, unknown>;
 }
 
 describe('POST /v1/trial/challenge/verify route contract', () => {
@@ -227,6 +259,67 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
       verified_hardware_hash_salt_version: 7,
     });
   });
+
+  it.each([
+    { discordIssueStatus: 'issuing', managedCredentialRef: null },
+    {
+      discordIssueStatus: 'cleanup_required',
+      managedCredentialRef: 'hash_orphaned_discord_cleanup_required_verify',
+    },
+  ] satisfies Array<{
+    discordIssueStatus: DiscordBlockedIssueStatus;
+    managedCredentialRef: string | null;
+  }>)(
+    'rejects verify release-token minting for Discord $discordIssueStatus pending_release without mutating entitlement metadata',
+    async ({ discordIssueStatus, managedCredentialRef }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+      const env = createTestBrokerEnv();
+      const keyPair = await createDeviceKeyPair();
+      const installationId = `install-discord-${discordIssueStatus}-verify-guard`;
+      const challenge = await issueChallenge({
+        env,
+        installationId,
+        devicePublicKey: keyPair.devicePublicKey,
+        appVersion: '1.2.3',
+      });
+      insertEntitlement(env, {
+        installation_id: installationId,
+        status: 'pending_release',
+        budget_usd: 0.07,
+        managed_credential_ref: managedCredentialRef,
+        release_session_ref: `release-session-${discordIssueStatus}-verify-guard`,
+        release_token_hash: `release-token-hash-${discordIssueStatus}-verify-guard`,
+        release_token_expires_at: '2026-04-08T06:10:00.000Z',
+        verified_hardware_hash: `hardware-hash-${discordIssueStatus}-verify-guard`,
+        verified_hardware_hash_salt_version: 7,
+        discord_issue_status: discordIssueStatus,
+        discord_issue_reserved_at: '2026-04-08T06:00:00.000Z',
+      });
+      const entitlementBefore = readEntitlementSnapshot(env, installationId);
+      const installationBefore = readInstallationChallengeSnapshot(env, installationId);
+      const requestBody = await signCanonicalVerifyRequest(keyPair.privateKey, {
+        installation_id: installationId,
+        device_public_key: keyPair.devicePublicKey,
+        challenge: challenge.challenge,
+        challenge_expires_at: challenge.challenge_expires_at,
+        hardware_hash: `hardware-hash-${discordIssueStatus}-verify-attempt`,
+        app_version: '1.2.4',
+        signed_at: '2026-04-08T06:00:30.000Z',
+      });
+
+      const response = await postVerify(env, requestBody);
+
+      expect(response.status).toBe(409);
+      const payload = (await response.json()) as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('release_token');
+      expect(readEntitlementSnapshot(env, installationId)).toEqual(entitlementBefore);
+      expect(readInstallationChallengeSnapshot(env, installationId)).toEqual(
+        installationBefore,
+      );
+    },
+  );
 
   it('records verify outcome markers for both successful and failed verify attempts', async () => {
     vi.useFakeTimers();

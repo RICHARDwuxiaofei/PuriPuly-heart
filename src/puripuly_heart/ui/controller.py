@@ -33,8 +33,8 @@ from puripuly_heart.config.settings import (
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
-    ensure_prompt_defaults,
     load_settings,
+    new_settings_for_first_run,
     save_settings,
 )
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
@@ -146,6 +146,15 @@ _OVERLAY_FAILURE_REASONS = frozenset(
         "unknown",
     }
 )
+DISCORD_AUTH_ERROR_KEY_BY_SUBCODE = {
+    "discord_email_unverified": "discord_auth.error.email_unverified",
+    "discord_account_too_new": "discord_auth.error.account_too_new",
+    "discord_lifetime_used": "discord_auth.error.lifetime_used",
+    "hardware_duplicate": "discord_auth.error.hardware_duplicate",
+    "global_cap_reached": "discord_auth.error.daily_cap",
+    "oauth_session_expired": "discord_auth.error.expired",
+    "loopback_unavailable": "discord_auth.error.loopback_unavailable",
+}
 
 
 @dataclass(slots=True)
@@ -225,6 +234,7 @@ class GuiController:
     _overlay_monitor_task: asyncio.Task[None] | None = None
     _overlay_lock: asyncio.Lock | None = None
     _managed_trial_pending_auth: bool = field(init=False, default=False)
+    _discord_managed_auth_in_progress: bool = field(init=False, default=False)
     _managed_trial_usage_metadata: OpenRouterKeyMetadata | None = field(init=False, default=None)
     _managed_trial_usage_metadata_entitlement_ref: str | None = field(
         init=False,
@@ -249,6 +259,10 @@ class GuiController:
     @property
     def managed_auth_pending(self) -> bool:
         return self._managed_trial_pending_auth
+
+    @property
+    def discord_managed_auth_in_progress(self) -> bool:
+        return self._discord_managed_auth_in_progress
 
     @property
     def effective_context_mode(self) -> str:
@@ -565,6 +579,97 @@ class GuiController:
         except Exception:
             return True
         return resolution.api_key is None
+
+    def _managed_openrouter_selected(self) -> bool:
+        return bool(
+            self.settings is not None
+            and self.settings.provider.llm == LLMProviderName.OPENROUTER
+            and self.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+        )
+
+    def _managed_openrouter_local_key_available(self) -> bool:
+        if self.settings is None:
+            return False
+        try:
+            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+            resolution = resolve_openrouter_credentials(
+                self.settings,
+                secrets=secrets,
+                request_intent="TRANS",
+            )
+        except Exception:
+            return False
+        return resolution.api_key is not None
+
+    def dashboard_managed_auth_action(self) -> str:
+        if not self._managed_openrouter_selected():
+            return "continue"
+        if self._discord_managed_auth_in_progress or self._managed_trial_pending_auth:
+            return "in_progress"
+        if self._managed_openrouter_local_key_available():
+            return "continue"
+        return "prompt"
+
+    def _discord_auth_message_key(self, result) -> str:  # noqa: ANN001
+        diagnostics = getattr(result, "diagnostics", None)
+        subcode = getattr(diagnostics, "subcode", None)
+        if subcode is not None:
+            mapped_key = DISCORD_AUTH_ERROR_KEY_BY_SUBCODE.get(subcode)
+            if mapped_key is not None:
+                return mapped_key
+        if getattr(diagnostics, "code", None) == "discord_loopback_unavailable":
+            return DISCORD_AUTH_ERROR_KEY_BY_SUBCODE["loopback_unavailable"]
+        return getattr(result, "message_key", "discord_auth.error.retry")
+
+    async def start_discord_managed_auth_from_dialog(self) -> bool:
+        service = self._managed_openrouter_release_service
+        if service is None:
+            self._discord_managed_auth_in_progress = False
+            self._set_managed_trial_pending_auth(False)
+            self._show_short_message("discord_auth.error.retry")
+            return False
+
+        self._discord_managed_auth_in_progress = True
+        self._set_managed_trial_pending_auth(True)
+        try:
+            try:
+                result = await service.prepare_for_translation()
+            except Exception as exc:
+                self.log_basic(
+                    f"[ManagedAuth] Discord auth start failed: {exc}",
+                    level=logging.ERROR,
+                )
+                self._show_short_message("discord_auth.error.retry")
+                return False
+
+            if result.behavior == ManagedOpenRouterReleaseBehavior.READY and result.local_key_available:
+                if self.hub is None:
+                    self._show_short_message("discord_auth.error.retry")
+                    return False
+                if self.hub.llm is None:
+                    await self._rebuild_llm_provider()
+                if self.hub.llm is None:
+                    self._show_short_message("discord_auth.error.retry")
+                    return False
+                self._schedule_managed_trial_usage_refresh()
+                return True
+
+            message_key = self._discord_auth_message_key(result)
+            diagnostics = result.diagnostics
+            error_class = getattr(diagnostics, "error_class", None)
+            self.log_basic(
+                "[ManagedAuth] Discord auth failed: "
+                f"message_key={message_key} class={error_class or 'unknown'}",
+                level=logging.ERROR,
+            )
+            self._show_short_message(
+                message_key,
+                **dict(result.message_kwargs),
+            )
+            return False
+        finally:
+            self._discord_managed_auth_in_progress = False
+            self._set_managed_trial_pending_auth(False)
 
     def _managed_trial_remaining_percent(
         self, usage_metadata: OpenRouterKeyMetadata | None
@@ -1306,12 +1411,12 @@ class GuiController:
     def cancel_overlay_calibration_for_test(self) -> None:
         self.cancel_overlay_calibration()
 
-    async def set_translation_enabled(self, enabled: bool) -> None:
+    async def set_translation_enabled(self, enabled: bool) -> bool:
         request_generation = self._record_translation_toggle_intent(enabled)
         if not enabled:
             self._set_managed_trial_pending_auth(False)
         if self.hub is None:
-            return
+            return False
         self.log_basic(f"[Translation] Toggle request: enabled={enabled}")
         self.log_detailed(
             "[Translation] Toggle detail: "
@@ -1319,7 +1424,7 @@ class GuiController:
             f"llm_available={self.hub.llm is not None}"
         )
         if enabled and await self._handle_managed_translation_enable(request_generation) is False:
-            return
+            return False
         if enabled and not self._translation_toggle_intent_matches(
             enabled=True,
             generation=request_generation,
@@ -1327,14 +1432,14 @@ class GuiController:
             self.log_detailed(
                 "[Translation] Skipping stale enable request after newer toggle intent"
             )
-            return
+            return False
         if enabled and self.hub.llm is None:
             self.hub.translation_enabled = False
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 dash.set_translation_enabled(False)
             self._log_error("Translation is ON but LLM provider is not configured.")
-            return
+            return False
 
         # Log provider info when enabling
         if enabled and self.settings is not None:
@@ -1358,6 +1463,7 @@ class GuiController:
             if isinstance(llm, (GeminiLLMProvider, QwenLLMProvider, AsyncQwenLLMProvider)):
                 with contextlib.suppress(Exception):
                     await llm.warmup()
+        return bool(self.hub.translation_enabled)
 
     async def set_stt_enabled(self, enabled: bool) -> None:
         self.log_basic(f"[STT] Toggle request: enabled={enabled}")
@@ -2176,7 +2282,7 @@ class GuiController:
     def _load_or_init_settings(self, path: Path) -> AppSettings:
         if path.exists():
             return load_settings(path)
-        settings = ensure_prompt_defaults(AppSettings())
+        settings = new_settings_for_first_run()
         path.parent.mkdir(parents=True, exist_ok=True)
         save_settings(path, settings)
         return settings

@@ -8,6 +8,7 @@ import pytest
 
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterChallengeSuccess,
+    ManagedOpenRouterDiscordStartSuccess,
     ManagedOpenRouterFingerprintSalt,
     ManagedOpenRouterIssueSuccess,
     ManagedOpenRouterReleaseError,
@@ -85,6 +86,55 @@ async def test_challenge_parses_fingerprint_salt() -> None:
             version=7,
             salt="fingerprint-salt-123",
         ),
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_start_discord_oauth_posts_redirect_and_parses_success_payload() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/auth/discord/start"
+        assert json.loads(request.content) == {
+            "installation_id": "install-discord-123",
+            "device_public_key": "device-public-key-123",
+            "redirect_uri": "http://127.0.0.1:62187/discord/callback",
+            "app_version": "2.0.0",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "authorization_url": "https://discord.com/oauth2/authorize?state=state-123",
+                "redirect_uri": "http://127.0.0.1:62187/discord/callback",
+                "oauth_session_expires_at": "2026-04-30T06:05:00.000Z",
+                "issue_nonce": "issue-nonce-123",
+                "fingerprint_salt": {
+                    "version": 7,
+                    "salt": "fingerprint-salt-123",
+                },
+                "fingerprint_salt_version": 7,
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.start_discord_oauth(
+        installation_id="install-discord-123",
+        device_public_key="device-public-key-123",
+        redirect_uri="http://127.0.0.1:62187/discord/callback",
+        app_version="2.0.0",
+    )
+
+    assert result == ManagedOpenRouterDiscordStartSuccess(
+        authorization_url="https://discord.com/oauth2/authorize?state=state-123",
+        redirect_uri="http://127.0.0.1:62187/discord/callback",
+        oauth_session_expires_at="2026-04-30T06:05:00.000Z",
+        issue_nonce="issue-nonce-123",
+        fingerprint_salt=ManagedOpenRouterFingerprintSalt(
+            version=7,
+            salt="fingerprint-salt-123",
+        ),
+        fingerprint_salt_version=7,
     )
     await client.close()
 
@@ -189,6 +239,59 @@ async def test_issue_parses_success_payload() -> None:
         openrouter_api_key="managed-openrouter-api-key",
         managed_credential_ref="managed-credential-ref-123",
         expires_at="2026-10-10T06:00:00.000Z",
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_issue_discord_managed_key_posts_signed_payload_and_parses_success() -> None:
+    request_body = {
+        "code": "discord-oauth-code-123",
+        "state": "discord-state-123",
+        "installation_id": "install-discord-123",
+        "device_public_key": "device-public-key-123",
+        "redirect_uri": "http://127.0.0.1:62187/discord/callback",
+        "hardware_hash": "hardware-hash-123",
+        "hardware_hash_salt_version": 7,
+        "app_version": "2.0.0",
+        "reason": "llm_start",
+        "budget_usd": 0.07,
+        "model": "google/gemma-4-26b-a4b-it",
+        "issue_nonce": "issue-nonce-123",
+        "signed_at": "2026-04-30T06:00:30.000Z",
+        "signature_alg": "ed25519",
+        "signature": "signature-123",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/providers/openrouter/discord/issue"
+        assert json.loads(request.content) == request_body
+        return httpx.Response(
+            200,
+            json={
+                "openrouter_api_key": "managed-openrouter-api-key",
+                "managed_credential_ref": "managed-credential-ref-123",
+                "expires_at": "2026-07-30T06:00:00.000Z",
+                "openrouter_user_id": " user-123 ",
+                "managed_state": {
+                    "lifecycle": "active",
+                    "managed_availability": True,
+                },
+                "budget_usd": 0.07,
+                "model": "google/gemma-4-26b-a4b-it",
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.issue_discord_managed_key(request_body)
+
+    assert result == ManagedOpenRouterIssueSuccess(
+        openrouter_api_key="managed-openrouter-api-key",
+        managed_credential_ref="managed-credential-ref-123",
+        expires_at="2026-07-30T06:00:00.000Z",
+        openrouter_user_id="user-123",
     )
     await client.close()
 
@@ -632,6 +735,40 @@ async def test_unknown_broker_error_vocabulary_becomes_retryable_malformed_error
     assert exc_info.value.code == "trial_unavailable"
     assert exc_info.value.error_class == "retryable"
     assert "malformed error payload" in exc_info.value.message
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_malformed_discord_start_response_becomes_retryable_release_error() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "redirect_uri": "http://127.0.0.1:62187/discord/callback",
+                "oauth_session_expires_at": "2026-04-30T06:05:00.000Z",
+                "issue_nonce": "issue-nonce-123",
+                "fingerprint_salt": {
+                    "version": 7,
+                    "salt": "fingerprint-salt-123",
+                },
+                "fingerprint_salt_version": 7,
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    with pytest.raises(ManagedOpenRouterReleaseError) as exc_info:
+        await client.start_discord_oauth(
+            installation_id="install-discord-123",
+            device_public_key="device-public-key-123",
+            redirect_uri="http://127.0.0.1:62187/discord/callback",
+            app_version="2.0.0",
+        )
+
+    assert exc_info.value.operation == "discord_start"
+    assert exc_info.value.code == "trial_unavailable"
+    assert exc_info.value.error_class == "retryable"
+    assert "malformed payload" in exc_info.value.message
     await client.close()
 
 

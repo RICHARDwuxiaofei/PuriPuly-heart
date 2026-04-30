@@ -262,6 +262,7 @@ def test_dashboard_translation_visual_commit_forwards_metadata_and_runtime_log(
         "source_text_hash": "src-hash-1",
         "source_text_len": 12,
         "logical_turn_key": "peer:utt-1",
+        "debug_prefix": None,
     }
 
 

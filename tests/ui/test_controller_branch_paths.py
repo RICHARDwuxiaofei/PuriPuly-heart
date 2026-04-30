@@ -60,6 +60,7 @@ from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
 from puripuly_heart.providers.stt.deepgram import DeepgramRealtimeSTTBackend
 from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 from puripuly_heart.ui import controller as controller_module
+from puripuly_heart.ui.app import TranslatorApp
 from puripuly_heart.ui.controller import GuiController
 from puripuly_heart.ui.i18n import set_locale, t
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
@@ -1582,6 +1583,303 @@ async def test_apply_providers_staying_on_managed_does_not_prepare_managed_trans
     assert len(created_services) == 1
     assert created_services[0].prepare_calls == 0
     assert controller.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+
+
+def test_dashboard_trans_missing_managed_key_opens_discord_auth_dialog_without_prepare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = SimpleNamespace(tasks=[], run_task=lambda task: app.page.tasks.append(task))
+    dash = DummyDashboard()
+    app.view_dashboard = dash
+    dialog_calls: list[bool] = []
+    app.show_discord_managed_auth_dialog = lambda *, preview=False: dialog_calls.append(preview)
+
+    controller = _make_controller(app=app)
+    app.controller = controller
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+        )
+    )
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+
+    handled = app._on_translation_toggle(True)
+
+    assert handled is False
+    assert dialog_calls == [False]
+    assert dash.translation_enabled is False
+    assert app.page.tasks == []
+    assert controller._managed_openrouter_release_service.prepare_calls == 0
+
+
+def test_dashboard_trans_in_progress_managed_oauth_prevents_second_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = SimpleNamespace(tasks=[], run_task=lambda task: app.page.tasks.append(task))
+    dash = DummyDashboard()
+    app.view_dashboard = dash
+    dialog_calls: list[bool] = []
+    app.show_discord_managed_auth_dialog = lambda *, preview=False: dialog_calls.append(preview)
+
+    controller = _make_controller(app=app)
+    app.controller = controller
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._managed_trial_pending_auth = True
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+        )
+    )
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+
+    handled = app._on_translation_toggle(True)
+
+    assert handled is False
+    assert dialog_calls == []
+    assert dash.translation_enabled is False
+    assert app.page.tasks == []
+    assert controller._managed_openrouter_release_service.prepare_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_from_dialog_success_rebuilds_missing_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=None)
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+        )
+    )
+    rebuild_calls: list[str] = []
+
+    async def fake_rebuild_llm_provider(self: GuiController) -> None:
+        rebuild_calls.append("rebuild")
+        self.hub.llm = object()
+
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is True
+    assert controller._managed_openrouter_release_service.prepare_calls == 1
+    assert rebuild_calls == ["rebuild"]
+    assert controller.hub.llm is not None
+    assert controller.managed_auth_pending is False
+    assert dash.managed_auth_pending_calls == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_from_dialog_rebuild_failure_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snackbar_calls: list[tuple[str, str]] = []
+    controller = _make_controller(
+        app=SimpleNamespace(
+            _show_snackbar=lambda message, color: snackbar_calls.append((message, color))
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=None)
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+        )
+    )
+    rebuild_calls: list[str] = []
+
+    async def fake_rebuild_llm_provider(self: GuiController) -> None:
+        rebuild_calls.append("rebuild")
+        self.hub.llm = None
+
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+    monkeypatch.setattr(controller_module, "t", lambda key, **_kwargs: key)
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is False
+    assert rebuild_calls == ["rebuild"]
+    assert controller.hub.llm is None
+    assert snackbar_calls == [("discord_auth.error.retry", ft.Colors.ORANGE_700)]
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_from_dialog_missing_service_shows_retry_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snackbar_calls: list[tuple[str, str]] = []
+    controller = _make_controller(
+        app=SimpleNamespace(
+            _show_snackbar=lambda message, color: snackbar_calls.append((message, color))
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    monkeypatch.setattr(controller_module, "t", lambda key, **_kwargs: key)
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is False
+    assert snackbar_calls == [("discord_auth.error.retry", ft.Colors.ORANGE_700)]
+
+
+@pytest.mark.parametrize(
+    ("subcode", "expected_key"),
+    [
+        ("discord_email_unverified", "discord_auth.error.email_unverified"),
+        ("discord_account_too_new", "discord_auth.error.account_too_new"),
+        ("discord_lifetime_used", "discord_auth.error.lifetime_used"),
+        ("hardware_duplicate", "discord_auth.error.hardware_duplicate"),
+        ("global_cap_reached", "discord_auth.error.daily_cap"),
+        ("oauth_session_expired", "discord_auth.error.expired"),
+        ("loopback_unavailable", "discord_auth.error.loopback_unavailable"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_from_dialog_maps_error_subcodes_to_messages(
+    monkeypatch: pytest.MonkeyPatch,
+    subcode: str,
+    expected_key: str,
+) -> None:
+    snackbar_calls: list[tuple[str, str]] = []
+    controller = _make_controller(
+        app=SimpleNamespace(
+            _show_snackbar=lambda message, color: snackbar_calls.append((message, color))
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.RETRY,
+            message_key="managed_release.retry",
+            diagnostics=ManagedOpenRouterReleaseDiagnostics(
+                operation="discord_issue",
+                code="trial_not_eligible",
+                error_class="terminal",
+                subcode=subcode,
+                message="not eligible",
+            ),
+        )
+    )
+    monkeypatch.setattr(controller_module, "t", lambda key, **_kwargs: key)
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is False
+    assert snackbar_calls == [(expected_key, ft.Colors.ORANGE_700)]
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_from_dialog_does_not_log_raw_broker_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snackbar_calls: list[tuple[str, str]] = []
+    controller = _make_controller(
+        app=SimpleNamespace(
+            _show_snackbar=lambda message, color: snackbar_calls.append((message, color))
+        )
+    )
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    raw_subcode = "discord_email_unverified"
+    raw_message = "raw broker eligibility message"
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.STOP,
+            message_key="managed_release.not_eligible",
+            diagnostics=ManagedOpenRouterReleaseDiagnostics(
+                operation="discord_issue",
+                code="trial_not_eligible",
+                error_class="terminal",
+                subcode=raw_subcode,
+                message=raw_message,
+            ),
+        )
+    )
+    monkeypatch.setattr(controller_module, "t", lambda key, **_kwargs: key)
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is False
+    assert snackbar_calls == [("discord_auth.error.email_unverified", ft.Colors.ORANGE_700)]
+    logged_messages = [message for _level, message in controller._runtime_logging.basic_messages]
+    assert not any(raw_subcode in message for message in logged_messages)
+    assert not any(raw_message in message for message in logged_messages)
+
+
+def test_discord_auth_message_key_falls_back_to_result_message_key() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    result = ManagedOpenRouterReleaseResult(
+        behavior=ManagedOpenRouterReleaseBehavior.RETRY,
+        message_key="managed_release.retry_after_ms",
+        message_kwargs={"retry_after_ms": 5000},
+    )
+
+    assert controller._discord_auth_message_key(result) == "managed_release.retry_after_ms"
+
+
+def test_discord_auth_message_key_maps_loopback_bind_failure_diagnostic() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    result = ManagedOpenRouterReleaseResult(
+        behavior=ManagedOpenRouterReleaseBehavior.RETRY,
+        message_key="managed_release.retry",
+        diagnostics=ManagedOpenRouterReleaseDiagnostics(
+            operation="discord_start",
+            code="discord_loopback_unavailable",
+            error_class="retryable",
+            message="bind failed",
+        ),
+    )
+
+    assert controller._discord_auth_message_key(result) == (
+        "discord_auth.error.loopback_unavailable"
+    )
 
 
 def test_verified_key_and_runtime_signature_depend_on_region_and_settings() -> None:

@@ -262,8 +262,20 @@ def test_translator_app_mounts_debug_preview_when_enabled(
         "on_revoked_notice",
         "on_founder_letter",
         "on_pkce_failure",
+        "on_discord_auth",
         "on_peer_translation_eula",
     }
+    discord_callback = seen["callbacks"]["on_discord_auth"]
+    assert getattr(discord_callback, "__self__", None) is app
+    assert getattr(discord_callback, "__func__", None) is TranslatorApp._preview_discord_auth
+    preview_calls: list[bool] = []
+    monkeypatch.setattr(
+        app,
+        "show_discord_managed_auth_dialog",
+        lambda *, preview=False: preview_calls.append(preview),
+    )
+    discord_callback()
+    assert preview_calls == [True]
     root = page.added[0]
     assert isinstance(root.content, ft.Stack)
     assert root.content.controls[-1] is app.debug_preview_panel
@@ -649,6 +661,323 @@ def test_debug_preview_peer_translation_eula_opens_preview_safe_dialog(
     if seen["on_cancel"] is not None:
         seen["on_cancel"]()
     assert not hasattr(app, "controller")
+
+
+def test_debug_preview_discord_auth_opens_dialog_with_close_only_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    app.controller = SimpleNamespace(
+        settings=settings,
+        config_path=Path("settings.json"),
+        start_discord_managed_auth=lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not start broker OAuth"
+        ),
+        reopen_discord_managed_auth_browser=lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not reopen broker OAuth"
+        ),
+        cancel_discord_managed_auth=lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not cancel broker OAuth"
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "_start_discord_managed_auth",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not call OAuth start hook"
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app,
+        "_on_discord_managed_auth_byok",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not launch BYOK PKCE"
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app,
+        "_on_request_openrouter_pkce",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not launch OpenRouter PKCE"
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "save_settings",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not save settings"
+        ),
+    )
+    monkeypatch.setattr(
+        app_module.webbrowser,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not open external URLs"
+        ),
+    )
+
+    def open_preview_dialog():
+        app._preview_discord_auth()
+        dialog = app._discord_managed_auth_dialog
+        assert dialog._dialog is app.page.opened[-1]
+        return dialog, dialog._dialog
+
+    for button_attr in ("_continue_button", "_byok_button", "_close_button"):
+        dialog, opened_dialog = open_preview_dialog()
+        getattr(dialog, button_attr).on_click(None)
+        assert app.page.closed[-1] is opened_dialog
+
+    for button_attr in ("_reopen_browser_button", "_cancel_button"):
+        dialog, opened_dialog = open_preview_dialog()
+        dialog.set_waiting()
+        getattr(dialog, button_attr).on_click(None)
+        assert app.page.closed[-1] is opened_dialog
+
+    assert app.page.tasks == []
+    assert settings.openrouter.selected_source is OpenRouterCredentialSource.MANAGED
+
+
+def test_discord_managed_auth_byok_launches_openrouter_pkce_with_byok_target() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    settings.openrouter.llm_model = OpenRouterLLMModel.QWEN_35_FLASH_02_23
+    app.controller = SimpleNamespace(settings=settings)
+    pkce_calls: list[tuple[AppSettings, str]] = []
+    app._on_request_openrouter_pkce = (
+        lambda target_settings, *, launch_source="settings": pkce_calls.append(
+            (target_settings, launch_source)
+        )
+    )
+    app._show_snackbar = lambda *_args, **_kwargs: pytest.fail(
+        "managed Discord auth BYOK should build a valid OpenRouter target"
+    )
+
+    app._on_discord_managed_auth_byok()
+
+    assert len(pkce_calls) == 1
+    target_settings, launch_source = pkce_calls[0]
+    assert launch_source == "discord_auth"
+    assert target_settings is not settings
+    assert target_settings.provider.llm is LLMProviderName.OPENROUTER
+    assert target_settings.openrouter.selected_source is OpenRouterCredentialSource.BYOK
+    assert target_settings.openrouter.selection_alias is OpenRouterSelectionAlias.QWEN35_FLASH_BYOK
+    assert target_settings.openrouter.llm_model is OpenRouterLLMModel.QWEN_35_FLASH_02_23
+    assert settings.openrouter.selected_source is OpenRouterCredentialSource.MANAGED
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_uses_run_task_and_success_enables_translation() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(set_waiting_calls=0, close_calls=0)
+    dialog.set_waiting = lambda: setattr(dialog, "set_waiting_calls", dialog.set_waiting_calls + 1)
+    dialog.close = lambda: setattr(dialog, "close_calls", dialog.close_calls + 1)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    start_calls: list[str] = []
+    dashboard_translation_calls: list[bool] = []
+    hub = SimpleNamespace(llm=object(), translation_enabled=False)
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        start_calls.append("start")
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        enable_calls.append(enabled)
+        hub.translation_enabled = enabled
+        return True
+
+    app.controller = SimpleNamespace(
+        hub=hub,
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+
+    assert dialog.set_waiting_calls == 1
+    assert start_calls == []
+    assert len(app.page.tasks) == 1
+
+    await app.page.tasks[0]()
+
+    assert start_calls == ["start"]
+    assert dialog.close_calls == 1
+    assert snackbar_calls == [(app_module.t("discord_auth.success"), app_module.COLOR_SUCCESS)]
+    assert enable_calls == [True]
+    assert dashboard_translation_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_no_success_when_enable_fails() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(set_waiting=lambda: None, close=lambda: None)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    dashboard_translation_calls: list[bool] = []
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        enable_calls.append(enabled)
+        return False
+
+    app.controller = SimpleNamespace(
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    await app.page.tasks[0]()
+
+    assert enable_calls == [True]
+    assert snackbar_calls == []
+    assert dashboard_translation_calls == []
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_no_success_when_llm_unavailable_after_enable() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(set_waiting=lambda: None, close=lambda: None)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    dashboard_translation_calls: list[bool] = []
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        enable_calls.append(enabled)
+        return True
+
+    app.controller = SimpleNamespace(
+        hub=SimpleNamespace(llm=None, translation_enabled=False),
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    await app.page.tasks[0]()
+
+    assert enable_calls == [True]
+    assert snackbar_calls == []
+    assert dashboard_translation_calls == []
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_failure_does_not_show_success_snackbar() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._discord_managed_auth_dialog = SimpleNamespace(set_waiting=lambda: None, close=lambda: None)
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        return False
+
+    async def fake_set_translation_enabled(enabled: bool) -> None:
+        enable_calls.append(enabled)
+
+    app.controller = SimpleNamespace(
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    await app.page.tasks[0]()
+
+    assert snackbar_calls == []
+    assert enable_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_discord_managed_auth_prevents_late_success_and_enable() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(set_waiting=lambda: None, close_calls=0)
+    dialog.close = lambda: setattr(dialog, "close_calls", dialog.close_calls + 1)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    dashboard_translation_calls: list[bool] = []
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+    start_entered = asyncio.Event()
+    release_start = asyncio.Event()
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        start_entered.set()
+        await release_start.wait()
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        enable_calls.append(enabled)
+        return True
+
+    app.controller = SimpleNamespace(
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    task = asyncio.create_task(app.page.tasks[0]())
+    await start_entered.wait()
+
+    app._cancel_discord_managed_auth()
+    release_start.set()
+    await task
+
+    assert dialog.close_calls == 1
+    assert snackbar_calls == []
+    assert enable_calls == []
+    assert dashboard_translation_calls == []
+
+
+def test_discord_managed_auth_waiting_hides_reopen_when_controller_cannot_reopen() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app.controller = SimpleNamespace()
+
+    app.show_discord_managed_auth_dialog(preview=False)
+    dialog = app._discord_managed_auth_dialog
+    dialog.set_waiting()
+
+    assert dialog._reopen_browser_button is None
+    assert [control.text for control in dialog._actions.controls] == [
+        app_module.t("discord_auth.cancel")
+    ]
 
 
 def test_peer_translation_toggle_first_enable_opens_eula_without_running_task(

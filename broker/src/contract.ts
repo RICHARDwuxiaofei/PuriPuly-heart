@@ -28,13 +28,17 @@ export type {
   BrokerAbuseRuntimeStateValue,
   BrokerAsnClassificationEntry,
   BrokerDailyIssuanceCapConfig,
+  BrokerDailyIssuanceCapEndpoint,
   BrokerEndpointRateLimitConfig,
+  BrokerPendingDiscordOAuthSessionsConfig,
   BrokerAbuseControlsConfigValue,
   BrokerAbuseSubjectHookRecord,
   BrokerConfigRow,
   BrokerIssueSuccessEventRecord,
   BrokerRequestEventRecord,
   BrokerVelocityCapHookRecord,
+  DiscordOAuthSessionRecord,
+  DiscordOAuthSessionStatus,
   FingerprintSaltConfigValue,
   FingerprintSaltVersion,
   InstallationRecord,
@@ -62,6 +66,10 @@ export const REQUIRED_BINDINGS = {
     'OPENROUTER_MANAGEMENT_API_KEY',
     'OPENROUTER_MANAGED_GUARDRAIL_ID',
     'OPENROUTER_MANAGED_USER_HMAC_SECRET',
+    'DISCORD_CLIENT_ID',
+    'DISCORD_CLIENT_SECRET',
+    'DISCORD_REDIRECT_URI_ALLOWLIST',
+    'DISCORD_USER_REF_SECRET',
     'DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL',
     'DISCORD_DAILY_REPORT_WEBHOOK_URL',
   ],
@@ -73,6 +81,10 @@ export interface BrokerBindings {
   OPENROUTER_MANAGED_GUARDRAIL_ID: string;
   OPENROUTER_MANAGED_API_KEY: string;
   OPENROUTER_MANAGED_USER_HMAC_SECRET: string;
+  DISCORD_CLIENT_ID: string;
+  DISCORD_CLIENT_SECRET: string;
+  DISCORD_REDIRECT_URI_ALLOWLIST: string;
+  DISCORD_USER_REF_SECRET: string;
   DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL: string;
   DISCORD_DAILY_REPORT_WEBHOOK_URL: string;
 }

@@ -1,11 +1,11 @@
 import type { Context } from 'hono';
 
 import type {
-  FingerprintSaltConfigValue,
   InstallationRecord,
   OpenRouterEntitlementRecord,
 } from './persistence';
 import type { BrokerEnv } from './contract';
+import { getFingerprintSaltConfig } from './fingerprint-salt';
 import { deleteExpiredChallengePreflightInstallations } from './preflight-retention';
 import { nonEmptyString, stringValue, validatePublicInput } from './public-input';
 import {
@@ -240,6 +240,10 @@ export async function handleTrialChallenge(
       message: 'device_public_key is already registered to a different installation_id',
       entitlement,
     });
+  }
+
+  if (entitlement && isDiscordManagedPendingRelease(entitlement)) {
+    return releaseNotAllowedResponse(c, entitlement);
   }
 
   const issuanceCapDecision = await checkDailyIssuanceCap(
@@ -614,6 +618,10 @@ export async function handleTrialChallengeVerify(
     return respondVerifyFailure(releaseNotAllowedResponse(c, entitlement));
   }
 
+  if (entitlement && isDiscordManagedPendingRelease(entitlement)) {
+    return respondVerifyFailure(releaseNotAllowedResponse(c, entitlement));
+  }
+
   const fingerprintSalt = await getFingerprintSaltConfig(c.env.BROKER_DB);
   const duplicateHardware = await hasConflictingHardwareDuplicate(c.env.BROKER_DB, {
     installationId,
@@ -693,7 +701,11 @@ export async function handleTrialChallengeVerify(
               verified_hardware_hash = ?,
               verified_hardware_hash_salt_version = ?
         WHERE installation_id = ?
-          AND status = ?`,
+          AND status = ?
+          AND (
+            discord_issue_status IS NULL
+            OR discord_issue_status NOT IN ('issuing', 'cleanup_required')
+          )`,
     )
       .bind(
         releaseSessionRef,
@@ -986,6 +998,16 @@ function releaseNotAllowedResponse(
   });
 }
 
+function isDiscordManagedPendingRelease(
+  entitlement: OpenRouterEntitlementRecord | null,
+): boolean {
+  return (
+    entitlement?.status === 'pending_release' &&
+    (entitlement.discord_issue_status === 'issuing' ||
+      entitlement.discord_issue_status === 'cleanup_required')
+  );
+}
+
 async function recordVerifyOutcomeEvent(
   db: D1Database,
   context: {
@@ -1258,8 +1280,16 @@ async function clearPendingReleaseSessionTokenState(
     | 'release_session_ref'
     | 'release_token_hash'
     | 'release_token_expires_at'
+    | 'discord_issue_status'
   >,
 ): Promise<void> {
+  if (
+    entitlement.discord_issue_status === 'issuing' ||
+    entitlement.discord_issue_status === 'cleanup_required'
+  ) {
+    return;
+  }
+
   await db
     .prepare(
       `UPDATE openrouter_entitlements
@@ -1285,6 +1315,10 @@ async function clearPendingReleaseSessionTokenState(
                )
         WHERE installation_id = ?
           AND status = 'pending_release'
+          AND (
+            discord_issue_status IS NULL
+            OR discord_issue_status NOT IN ('issuing', 'cleanup_required')
+          )
           AND release_session_ref IS ?
           AND release_token_hash IS ?
           AND release_token_expires_at IS ?
@@ -1421,21 +1455,6 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   ) as ArrayBuffer;
 }
 
-async function getFingerprintSaltConfig(
-  db: D1Database,
-): Promise<FingerprintSaltConfigValue> {
-  const row = await db
-    .prepare('SELECT value FROM broker_config WHERE key = ?')
-    .bind('fingerprint_salt')
-    .first<{ value: string }>();
-
-  if (!row) {
-    throw new Error('missing fingerprint_salt config');
-  }
-
-  return JSON.parse(row.value) as FingerprintSaltConfigValue;
-}
-
 async function getInstallation(
   db: D1Database,
   installationId: string,
@@ -1460,7 +1479,9 @@ async function getEntitlement(
     .prepare(
       `SELECT installation_id, status, budget_usd, managed_credential_ref, issued_at,
               expires_at, release_session_ref, release_token_hash, release_token_expires_at,
-              verified_hardware_hash, verified_hardware_hash_salt_version
+              verified_hardware_hash, verified_hardware_hash_salt_version,
+              discord_user_ref, discord_issue_status, discord_issue_reserved_at,
+              discord_issue_delivered_at
          FROM openrouter_entitlements
          WHERE installation_id = ?`,
     )

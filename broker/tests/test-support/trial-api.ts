@@ -113,3 +113,38 @@ export async function postIssueWithExecutionContext(
     executionCtx,
   );
 }
+
+export async function postDiscordStart(
+  env: TestBrokerEnv,
+  body: object | string,
+): Promise<Response> {
+  return app.request(
+    'http://broker.test/v1/auth/discord/start',
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'cf-connecting-ip': '203.0.113.20',
+      },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    },
+    env,
+  );
+}
+
+export async function postDiscordIssue(
+  env: TestBrokerEnv,
+  body: object | string,
+): Promise<Response> {
+  return app.request(
+    'http://broker.test/v1/providers/openrouter/discord/issue',
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    },
+    env,
+  );
+}

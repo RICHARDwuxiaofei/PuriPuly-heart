@@ -15,6 +15,13 @@ from puripuly_heart.config.llm_profiles import (
     openrouter_alias_for_fields,
 )
 from puripuly_heart.config.settings import AppSettings, OpenRouterCredentialSource
+from puripuly_heart.core.discord_managed_oauth import run_discord_oauth_callback_flow
+from puripuly_heart.core.discord_oauth_loopback import (
+    DiscordOAuthCallbackError,
+    DiscordOAuthLoopbackClosedError,
+    DiscordOAuthLoopbackListener,
+    bind_first_available,
+)
 from puripuly_heart.core.hardware_fingerprint import compute_hardware_hash
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.managed_identity import (
@@ -37,6 +44,11 @@ BINDING_MISMATCH_SUBCODES = {
     "installation_binding_mismatch",
 }
 HardwareFingerprintProvider = Callable[[], str | Awaitable[str]]
+DiscordOAuthListenerFactory = Callable[[], DiscordOAuthLoopbackListener]
+DiscordOAuthCallbackRunner = Callable[
+    [DiscordOAuthLoopbackListener, str, str],
+    Awaitable[tuple[str, str]],
+]
 
 
 def _default_signed_at() -> str:
@@ -112,6 +124,16 @@ class ManagedOpenRouterChallengeSuccess:
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedOpenRouterDiscordStartSuccess:
+    authorization_url: str
+    redirect_uri: str
+    oauth_session_expires_at: str
+    issue_nonce: str
+    fingerprint_salt: ManagedOpenRouterFingerprintSalt
+    fingerprint_salt_version: int
+
+
+@dataclass(frozen=True, slots=True)
 class ManagedOpenRouterVerifySuccess:
     release_token: str
     release_token_expires_at: str
@@ -167,6 +189,20 @@ class ManagedOpenRouterReleaseClient(Protocol):
 
     async def issue(self, request: dict[str, object]) -> ManagedOpenRouterIssueSuccess: ...
 
+    async def start_discord_oauth(
+        self,
+        *,
+        installation_id: str,
+        device_public_key: str,
+        redirect_uri: str,
+        app_version: str,
+    ) -> ManagedOpenRouterDiscordStartSuccess: ...
+
+    async def issue_discord_managed_key(
+        self,
+        request: dict[str, object],
+    ) -> ManagedOpenRouterIssueSuccess: ...
+
 
 @dataclass(slots=True)
 class UnavailableManagedOpenRouterReleaseClient:
@@ -196,6 +232,32 @@ class UnavailableManagedOpenRouterReleaseClient:
             message="managed OpenRouter release is unavailable",
         )
 
+    async def start_discord_oauth(
+        self,
+        *,
+        installation_id: str,
+        device_public_key: str,
+        redirect_uri: str,
+        app_version: str,
+    ) -> ManagedOpenRouterDiscordStartSuccess:
+        _ = installation_id, device_public_key, redirect_uri, app_version
+        raise ManagedOpenRouterReleaseError(
+            code="trial_unavailable",
+            error_class="retryable",
+            message="managed OpenRouter release is unavailable",
+        )
+
+    async def issue_discord_managed_key(
+        self,
+        request: dict[str, object],
+    ) -> ManagedOpenRouterIssueSuccess:
+        _ = request
+        raise ManagedOpenRouterReleaseError(
+            code="trial_unavailable",
+            error_class="retryable",
+            message="managed OpenRouter release is unavailable",
+        )
+
 
 @dataclass(slots=True)
 class ManagedOpenRouterReleaseService:
@@ -208,6 +270,8 @@ class ManagedOpenRouterReleaseService:
     hardware_hash_provider: InitVar[HardwareFingerprintProvider | None] = None
     signed_at_provider: Callable[[], str] = _default_signed_at
     monotonic_ms_provider: Callable[[], int] = _default_monotonic_ms
+    discord_oauth_listener_factory: DiscordOAuthListenerFactory = bind_first_available
+    discord_oauth_callback_runner: DiscordOAuthCallbackRunner = run_discord_oauth_callback_flow
     _prepare_task: asyncio.Task[ManagedOpenRouterReleaseResult] | None = field(
         init=False,
         default=None,
@@ -347,56 +411,86 @@ class ManagedOpenRouterReleaseService:
                 )
             return await self._await_or_start_issue_flow()
 
+        listener: DiscordOAuthLoopbackListener | None = None
         try:
-            challenge_response = await self.client.challenge(
-                installation_id=bundle.installation_id,
-                device_public_key=bundle.device_public_key,
+            try:
+                listener = self.discord_oauth_listener_factory()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                return self._handle_release_error(
+                    _discord_listener_release_error(exc),
+                    operation="discord_start",
+                )
+            try:
+                start_response = await self.client.start_discord_oauth(
+                    installation_id=bundle.installation_id,
+                    device_public_key=bundle.device_public_key,
+                    redirect_uri=listener.redirect_uri,
+                    app_version=self.app_version,
+                )
+            except ManagedOpenRouterReleaseError as exc:
+                return self._handle_release_error(exc, operation="discord_start")
+
+            if start_response.redirect_uri != listener.redirect_uri:
+                return self._handle_release_error(
+                    ManagedOpenRouterReleaseError(
+                        code="discord_redirect_mismatch",
+                        error_class="terminal",
+                        message="Discord OAuth broker returned a different redirect URI",
+                        operation="discord_start",
+                    ),
+                    operation="discord_start",
+                )
+
+            try:
+                code, state = await self.discord_oauth_callback_runner(
+                    listener,
+                    start_response.authorization_url,
+                    start_response.oauth_session_expires_at,
+                )
+            except asyncio.CancelledError:
+                raise
+            except ManagedOpenRouterReleaseError as exc:
+                return self._handle_release_error(exc, operation="discord_callback")
+            except (DiscordOAuthCallbackError, DiscordOAuthLoopbackClosedError, TimeoutError) as exc:
+                return self._handle_release_error(
+                    _discord_callback_release_error(exc),
+                    operation="discord_callback",
+                )
+            try:
+                hardware_hash = await self._resolve_hardware_hash(
+                    fingerprint_salt=start_response.fingerprint_salt,
+                )
+            except Exception:
+                self._clear_retry_after()
+                return ManagedOpenRouterReleaseResult(
+                    behavior=ManagedOpenRouterReleaseBehavior.STOP,
+                    message_key="managed_release.stop",
+                )
+
+            issue_request = bundle.sign_discord_issue_request(
+                code=code,
+                state=state,
+                redirect_uri=listener.redirect_uri,
+                hardware_hash=hardware_hash,
+                hardware_hash_salt_version=start_response.fingerprint_salt_version,
                 app_version=self.app_version,
+                reason="llm_start",
+                budget_usd=MANAGED_OPENROUTER_TRIAL_BUDGET_USD,
+                model=_resolve_managed_issue_model(self.settings),
+                issue_nonce=start_response.issue_nonce,
+                signed_at=self.signed_at_provider(),
             )
-        except ManagedOpenRouterReleaseError as exc:
-            return self._handle_release_error(exc, operation="challenge")
+            try:
+                issue_response = await self.client.issue_discord_managed_key(issue_request)
+            except ManagedOpenRouterReleaseError as exc:
+                return self._handle_release_error(exc, operation="discord_issue")
 
-        if isinstance(challenge_response, ManagedOpenRouterPreflightStop):
-            self._clear_retry_after()
-            clear_temporary_managed_release_state(self.settings)
-            self.persist_settings(self.settings)
-            return ManagedOpenRouterReleaseResult(
-                behavior=ManagedOpenRouterReleaseBehavior.STOP,
-                message_key=f"managed_release.{challenge_response.reason}",
-            )
-
-        try:
-            hardware_hash = await self._resolve_hardware_hash(
-                fingerprint_salt=challenge_response.fingerprint_salt,
-            )
-        except Exception:
-            self._clear_retry_after()
-            return ManagedOpenRouterReleaseResult(
-                behavior=ManagedOpenRouterReleaseBehavior.STOP,
-                message_key="managed_release.stop",
-            )
-        verify_request = bundle.sign_verify_request(
-            challenge=challenge_response.challenge,
-            challenge_expires_at=challenge_response.challenge_expires_at,
-            hardware_hash=hardware_hash,
-            app_version=self.app_version,
-            signed_at=self.signed_at_provider(),
-        )
-        try:
-            verify_response = await self.client.verify(verify_request)
-        except ManagedOpenRouterReleaseError as exc:
-            return self._handle_release_error(exc, operation="verify")
-
-        self.settings.managed_identity.release_token = verify_response.release_token
-        self.settings.managed_identity.release_token_expires_at = (
-            verify_response.release_token_expires_at
-        )
-        self.settings.managed_identity.verified_hardware_hash = hardware_hash
-        self.settings.managed_identity.verified_hardware_hash_salt_version = (
-            challenge_response.fingerprint_salt.version
-        )
-        self.persist_settings(self.settings)
-        return await self._await_or_start_issue_flow()
+            return self._persist_managed_issue_success(issue_response)
+        finally:
+            if listener is not None:
+                listener.close()
 
     async def _await_or_start_issue_flow(self) -> ManagedOpenRouterReleaseResult:
         resolution = resolve_openrouter_credentials(
@@ -457,6 +551,12 @@ class ManagedOpenRouterReleaseService:
         except ManagedOpenRouterReleaseError as exc:
             return self._handle_release_error(exc, operation="issue")
 
+        return self._persist_managed_issue_success(issue_response)
+
+    def _persist_managed_issue_success(
+        self,
+        issue_response: ManagedOpenRouterIssueSuccess,
+    ) -> ManagedOpenRouterReleaseResult:
         try:
             self.secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, issue_response.openrouter_api_key)
         except Exception:
@@ -831,6 +931,54 @@ def _normalize_optional_text(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _discord_listener_release_error(error: Exception) -> ManagedOpenRouterReleaseError:
+    message = _exception_message(
+        error,
+        default="Discord OAuth loopback listener unavailable",
+    )
+    return ManagedOpenRouterReleaseError(
+        code="discord_loopback_unavailable",
+        error_class="retryable",
+        message=f"Discord OAuth loopback listener unavailable: {message}",
+        operation="discord_start",
+    )
+
+
+def _discord_callback_release_error(error: Exception) -> ManagedOpenRouterReleaseError:
+    if isinstance(error, DiscordOAuthCallbackError):
+        return ManagedOpenRouterReleaseError(
+            code="discord_oauth_callback_error",
+            error_class="retryable",
+            message=f"Discord OAuth callback failed: {error.error}",
+            operation="discord_callback",
+            subcode=error.error,
+        )
+    if isinstance(error, TimeoutError):
+        return ManagedOpenRouterReleaseError(
+            code="discord_oauth_timeout",
+            error_class="retryable",
+            message=_exception_message(
+                error,
+                default="timed out waiting for Discord OAuth callback",
+            ),
+            operation="discord_callback",
+        )
+    return ManagedOpenRouterReleaseError(
+        code="discord_oauth_callback_closed",
+        error_class="retryable",
+        message=_exception_message(
+            error,
+            default="Discord OAuth callback listener closed before completion",
+        ),
+        operation="discord_callback",
+    )
+
+
+def _exception_message(error: Exception, *, default: str) -> str:
+    message = str(error).strip()
+    return message or default
 
 
 def _normalize_retry_after_ms(value: int | None) -> int | None:

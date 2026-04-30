@@ -165,6 +165,43 @@ describe('broker abuse-controls runtime config validation', () => {
     });
   });
 
+  it('seeds Discord OAuth endpoint, pending-session, and daily cap defaults', () => {
+    const env = createTestBrokerEnv();
+    const controls = readAbuseControls(env) as ReturnType<typeof readAbuseControls> &
+      Record<string, unknown>;
+
+    expect(controls.discordAuthStartIp).toEqual({
+      endpoint: 'POST /v1/auth/discord/start',
+      scope: 'ip',
+      maxRequests: 20,
+      windowMinutes: 15,
+    });
+    expect(controls.discordAuthStartInstallation).toEqual({
+      endpoint: 'POST /v1/auth/discord/start',
+      scope: 'installation_id',
+      maxRequests: 5,
+      windowMinutes: 15,
+    });
+    expect(controls.discordOpenrouterIssueIp).toEqual({
+      endpoint: 'POST /v1/providers/openrouter/discord/issue',
+      scope: 'ip',
+      maxRequests: 10,
+      windowMinutes: 15,
+    });
+    expect(controls.discordOpenrouterIssueInstallation).toEqual({
+      endpoint: 'POST /v1/providers/openrouter/discord/issue',
+      scope: 'installation_id',
+      maxRequests: 3,
+      windowMinutes: 15,
+    });
+    expect(controls.pendingDiscordOAuthSessions).toEqual({
+      maxPerInstallation: 2,
+      maxPerIp: 20,
+      windowMinutes: 15,
+    });
+    expect(controls.newActiveEntitlementsPerDay.maxCount).toBe(500);
+  });
+
   it('falls back to default abuse controls when immediate-alert thresholds are not strictly increasing', async () => {
     const env = createTestBrokerEnv();
     updateAbuseControls(env, (controls) => {

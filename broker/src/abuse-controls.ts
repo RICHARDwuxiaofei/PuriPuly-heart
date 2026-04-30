@@ -328,52 +328,56 @@ export async function checkEndpointRateLimit(
   context: RequestAbuseContext,
 ): Promise<AbuseDecision | null> {
   const controls = await getBrokerAbuseControlsConfig(db);
-  const endpointConfig = getEndpointRateLimitConfig(controls, context.endpoint);
-  if (!endpointConfig) {
+  const endpointConfigs = getEndpointRateLimitConfigs(controls, context.endpoint);
+  if (endpointConfigs.length === 0) {
     return null;
   }
 
-  const scopeValue =
-    endpointConfig.scope === 'ip' ? context.ip : context.installationId;
-  if (!scopeValue) {
-    return null;
+  for (const endpointConfig of endpointConfigs) {
+    const scopeValue =
+      endpointConfig.scope === 'ip' ? context.ip : context.installationId;
+    if (!scopeValue) {
+      continue;
+    }
+
+    const windowStartIso = new Date(
+      context.now.getTime() - endpointConfig.windowMinutes * 60_000,
+    ).toISOString();
+    const scopeColumn = endpointConfig.scope === 'ip' ? 'ip' : 'installation_id';
+    const row = await db
+      .prepare(
+        `SELECT COUNT(*) AS count, MIN(observed_at) AS oldest
+           FROM broker_request_events
+          WHERE endpoint = ?
+            AND ${scopeColumn} = ?
+            AND observed_at >= ?`,
+      )
+      .bind(context.endpoint, scopeValue, windowStartIso)
+      .first<{ count: number; oldest: string | null }>();
+
+    const count = Number(row?.count ?? 0);
+    if (count <= endpointConfig.maxRequests) {
+      continue;
+    }
+
+    return {
+      status: 429,
+      code: 'rate_limited',
+      class: 'retryable',
+      message: `request rate limit exceeded for ${context.endpoint}`,
+      subcode:
+        endpointConfig.scope === 'ip'
+          ? 'ip_rate_limited'
+          : 'installation_rate_limited',
+      retryAfterMs: retryAfterFromIso(
+        row?.oldest,
+        endpointConfig.windowMinutes * 60_000,
+        context.now,
+      ),
+    };
   }
 
-  const windowStartIso = new Date(
-    context.now.getTime() - endpointConfig.windowMinutes * 60_000,
-  ).toISOString();
-  const scopeColumn = endpointConfig.scope === 'ip' ? 'ip' : 'installation_id';
-  const row = await db
-    .prepare(
-      `SELECT COUNT(*) AS count, MIN(observed_at) AS oldest
-         FROM broker_request_events
-        WHERE endpoint = ?
-          AND ${scopeColumn} = ?
-          AND observed_at >= ?`,
-    )
-    .bind(context.endpoint, scopeValue, windowStartIso)
-    .first<{ count: number; oldest: string | null }>();
-
-  const count = Number(row?.count ?? 0);
-  if (count <= endpointConfig.maxRequests) {
-    return null;
-  }
-
-  return {
-    status: 429,
-    code: 'rate_limited',
-    class: 'retryable',
-    message: `request rate limit exceeded for ${context.endpoint}`,
-    subcode:
-      endpointConfig.scope === 'ip'
-        ? 'ip_rate_limited'
-        : 'installation_rate_limited',
-    retryAfterMs: retryAfterFromIso(
-      row?.oldest,
-      endpointConfig.windowMinutes * 60_000,
-      context.now,
-    ),
-  };
+  return null;
 }
 
 export async function checkVelocityCapHook(
@@ -573,21 +577,28 @@ export async function hasConflictingHardwareDuplicate(
   return legacyReservedRow !== null;
 }
 
-function getEndpointRateLimitConfig(
+function getEndpointRateLimitConfigs(
   controls: BrokerAbuseControlsConfigValue,
   endpoint: string,
-): BrokerEndpointRateLimitConfig | null {
+): BrokerEndpointRateLimitConfig[] {
   switch (endpoint) {
     case 'POST /v1/trial/challenge':
-      return controls.trialChallenge;
+      return [controls.trialChallenge];
     case 'POST /v1/trial/challenge/verify':
-      return controls.trialChallengeVerify;
+      return [controls.trialChallengeVerify];
     case 'POST /v1/providers/openrouter/issue':
-      return controls.openrouterIssue;
+      return [controls.openrouterIssue];
     case 'GET /v1/trial/status':
-      return controls.trialStatus;
+      return [controls.trialStatus];
+    case 'POST /v1/auth/discord/start':
+      return [controls.discordAuthStartIp, controls.discordAuthStartInstallation];
+    case 'POST /v1/providers/openrouter/discord/issue':
+      return [
+        controls.discordOpenrouterIssueIp,
+        controls.discordOpenrouterIssueInstallation,
+      ];
     default:
-      return null;
+      return [];
   }
 }
 
@@ -794,6 +805,29 @@ function validateBrokerAbuseControlsConfig(
     'GET /v1/trial/status',
     'installation_id',
   );
+  const discordAuthStartIp = validateEndpointRateLimitConfig(
+    value.discordAuthStartIp,
+    'POST /v1/auth/discord/start',
+    'ip',
+  );
+  const discordAuthStartInstallation = validateEndpointRateLimitConfig(
+    value.discordAuthStartInstallation,
+    'POST /v1/auth/discord/start',
+    'installation_id',
+  );
+  const discordOpenrouterIssueIp = validateEndpointRateLimitConfig(
+    value.discordOpenrouterIssueIp,
+    'POST /v1/providers/openrouter/discord/issue',
+    'ip',
+  );
+  const discordOpenrouterIssueInstallation = validateEndpointRateLimitConfig(
+    value.discordOpenrouterIssueInstallation,
+    'POST /v1/providers/openrouter/discord/issue',
+    'installation_id',
+  );
+  const pendingDiscordOAuthSessions = validatePendingDiscordOAuthSessionsConfig(
+    value.pendingDiscordOAuthSessions,
+  );
   const newActiveEntitlementsPerDay = validateDailyIssuanceCapConfig(
     value.newActiveEntitlementsPerDay,
   );
@@ -808,6 +842,11 @@ function validateBrokerAbuseControlsConfig(
     !trialChallengeVerify ||
     !openrouterIssue ||
     !trialStatus ||
+    !discordAuthStartIp ||
+    !discordAuthStartInstallation ||
+    !discordOpenrouterIssueIp ||
+    !discordOpenrouterIssueInstallation ||
+    !pendingDiscordOAuthSessions ||
     !newActiveEntitlementsPerDay ||
     !immediateAlerts ||
     !asnFastPath ||
@@ -823,6 +862,11 @@ function validateBrokerAbuseControlsConfig(
     trialChallengeVerify,
     openrouterIssue,
     trialStatus,
+    discordAuthStartIp,
+    discordAuthStartInstallation,
+    discordOpenrouterIssueIp,
+    discordOpenrouterIssueInstallation,
+    pendingDiscordOAuthSessions,
     newActiveEntitlementsPerDay,
     immediateAlerts,
     asnFastPath,
@@ -918,8 +962,12 @@ function validateDailyIssuanceCapConfig(
     return null;
   }
 
+  const endpoint = value.endpoint;
   if (
-    value.endpoint !== 'POST /v1/providers/openrouter/issue' ||
+    !(
+      endpoint === 'POST /v1/providers/openrouter/issue' ||
+      endpoint === 'POST /v1/providers/openrouter/discord/issue'
+    ) ||
     value.scope !== 'global' ||
     !(value.maxCount === null || isPositiveInteger(value.maxCount)) ||
     !isPositiveInteger(value.windowDays)
@@ -928,10 +976,32 @@ function validateDailyIssuanceCapConfig(
   }
 
   return {
-    endpoint: 'POST /v1/providers/openrouter/issue',
+    endpoint,
     scope: 'global',
     maxCount: value.maxCount,
     windowDays: value.windowDays,
+  };
+}
+
+function validatePendingDiscordOAuthSessionsConfig(
+  value: unknown,
+): BrokerAbuseControlsConfigValue['pendingDiscordOAuthSessions'] | null {
+  if (!isJsonObject(value)) {
+    return null;
+  }
+
+  if (
+    !isPositiveInteger(value.maxPerInstallation) ||
+    !isPositiveInteger(value.maxPerIp) ||
+    !isPositiveInteger(value.windowMinutes)
+  ) {
+    return null;
+  }
+
+  return {
+    maxPerInstallation: value.maxPerInstallation,
+    maxPerIp: value.maxPerIp,
+    windowMinutes: value.windowMinutes,
   };
 }
 
@@ -1078,17 +1148,11 @@ function getCloudflareMetadata(c: Context<BrokerEnv>): {
   const cf = rawRequest.cf ?? {};
 
   return {
-    asn:
-      cf.asn ??
-      nonEmptyString(c.req.header('x-test-cf-asn')) ??
-      nonEmptyString(c.req.header('cf-asn')),
+    asn: cf.asn,
     country: cf.country ?? nonEmptyString(c.req.header('cf-ipcountry')),
-    httpProtocol:
-      cf.httpProtocol ?? nonEmptyString(c.req.header('x-test-cf-http-protocol')),
-    tlsVersion:
-      cf.tlsVersion ?? nonEmptyString(c.req.header('x-test-cf-tls-version')),
-    tlsCipher:
-      cf.tlsCipher ?? nonEmptyString(c.req.header('x-test-cf-tls-cipher')),
+    httpProtocol: cf.httpProtocol,
+    tlsVersion: cf.tlsVersion,
+    tlsCipher: cf.tlsCipher,
   };
 }
 

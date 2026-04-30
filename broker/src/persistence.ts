@@ -11,11 +11,21 @@ export interface BrokerEndpointRateLimitConfig {
   windowMinutes: number;
 }
 
+export type BrokerDailyIssuanceCapEndpoint =
+  | 'POST /v1/providers/openrouter/issue'
+  | 'POST /v1/providers/openrouter/discord/issue';
+
 export interface BrokerDailyIssuanceCapConfig {
-  endpoint: 'POST /v1/providers/openrouter/issue';
+  endpoint: BrokerDailyIssuanceCapEndpoint;
   scope: 'global';
   maxCount: number | null;
   windowDays: number;
+}
+
+export interface BrokerPendingDiscordOAuthSessionsConfig {
+  maxPerInstallation: number;
+  maxPerIp: number;
+  windowMinutes: number;
 }
 
 export interface BrokerImmediateAlertsConfig {
@@ -55,6 +65,11 @@ export interface BrokerAbuseControlsConfigValue {
   trialChallengeVerify: BrokerEndpointRateLimitConfig;
   openrouterIssue: BrokerEndpointRateLimitConfig;
   trialStatus: BrokerEndpointRateLimitConfig;
+  discordAuthStartIp: BrokerEndpointRateLimitConfig;
+  discordAuthStartInstallation: BrokerEndpointRateLimitConfig;
+  discordOpenrouterIssueIp: BrokerEndpointRateLimitConfig;
+  discordOpenrouterIssueInstallation: BrokerEndpointRateLimitConfig;
+  pendingDiscordOAuthSessions: BrokerPendingDiscordOAuthSessionsConfig;
   newActiveEntitlementsPerDay: BrokerDailyIssuanceCapConfig;
   immediateAlerts: BrokerImmediateAlertsConfig;
   asnFastPath: BrokerAsnFastPathConfig;
@@ -88,10 +103,39 @@ export const DEFAULT_BROKER_ABUSE_CONTROLS: BrokerAbuseControlsConfigValue = {
     maxRequests: 30,
     windowMinutes: 15,
   },
+  discordAuthStartIp: {
+    endpoint: 'POST /v1/auth/discord/start',
+    scope: 'ip',
+    maxRequests: 20,
+    windowMinutes: 15,
+  },
+  discordAuthStartInstallation: {
+    endpoint: 'POST /v1/auth/discord/start',
+    scope: 'installation_id',
+    maxRequests: 5,
+    windowMinutes: 15,
+  },
+  discordOpenrouterIssueIp: {
+    endpoint: 'POST /v1/providers/openrouter/discord/issue',
+    scope: 'ip',
+    maxRequests: 10,
+    windowMinutes: 15,
+  },
+  discordOpenrouterIssueInstallation: {
+    endpoint: 'POST /v1/providers/openrouter/discord/issue',
+    scope: 'installation_id',
+    maxRequests: 3,
+    windowMinutes: 15,
+  },
+  pendingDiscordOAuthSessions: {
+    maxPerInstallation: 2,
+    maxPerIp: 20,
+    windowMinutes: 15,
+  },
   newActiveEntitlementsPerDay: {
-    endpoint: 'POST /v1/providers/openrouter/issue',
+    endpoint: 'POST /v1/providers/openrouter/discord/issue',
     scope: 'global',
-    maxCount: null,
+    maxCount: 500,
     windowDays: 1,
   },
   immediateAlerts: {
@@ -238,8 +282,39 @@ export const OPENROUTER_ENTITLEMENT_STATUS_VALUES = [
   'revoked',
 ] as const;
 
+export const DISCORD_OAUTH_SESSION_STATUS_VALUES = [
+  'pending',
+  'processing',
+  'consumed',
+  'canceled',
+  'failed',
+  'expired',
+] as const;
+
 export type OpenRouterEntitlementStatus =
   (typeof OPENROUTER_ENTITLEMENT_STATUS_VALUES)[number];
+
+export type DiscordOAuthSessionStatus =
+  (typeof DISCORD_OAUTH_SESSION_STATUS_VALUES)[number];
+
+export interface DiscordOAuthSessionRecord {
+  state_hash: string;
+  installation_id: string;
+  device_public_key: string;
+  redirect_uri: string;
+  pkce_code_verifier: string | null;
+  issue_nonce_hash: string;
+  fingerprint_salt_version: number;
+  discord_user_ref: string | null;
+  discord_email_verified: 0 | 1 | null;
+  discord_account_created_at: string | null;
+  eligibility_checked_at: string | null;
+  status: DiscordOAuthSessionStatus;
+  created_at: string;
+  expires_at: string;
+  processing_started_at: string | null;
+  consumed_at: string | null;
+}
 
 export interface OpenRouterEntitlementRecord {
   installation_id: string;
@@ -253,6 +328,10 @@ export interface OpenRouterEntitlementRecord {
   release_token_expires_at: string | null;
   verified_hardware_hash: string | null;
   verified_hardware_hash_salt_version: number | null;
+  discord_user_ref: string | null;
+  discord_issue_status: 'issuing' | 'active' | 'failed' | 'cleanup_required' | null;
+  discord_issue_reserved_at: string | null;
+  discord_issue_delivered_at: string | null;
 }
 
 export interface BrokerRequestEventRecord {
@@ -399,14 +478,23 @@ export const BROKER_PERSISTENCE_MODEL = {
         'release_token_expires_at',
         'verified_hardware_hash',
         'verified_hardware_hash_salt_version',
+        'discord_user_ref',
+        'discord_issue_status',
+        'discord_issue_reserved_at',
+        'discord_issue_delivered_at',
       ],
-      unique: ['managed_credential_ref'],
-      indexed: ['status', 'expires_at'],
+      unique: ['managed_credential_ref', 'discord_user_ref'],
+      indexed: ['status', 'expires_at', 'discord_issue_reserved_at'],
       partialUniqueIndexes: [
         {
           name: 'idx_openrouter_entitlements_release_token_hash',
           columns: ['release_token_hash'],
           predicate: 'release_token_hash IS NOT NULL',
+        },
+        {
+          name: 'idx_openrouter_entitlements_discord_user_ref',
+          columns: ['discord_user_ref'],
+          predicate: 'discord_user_ref IS NOT NULL',
         },
       ],
       updateStrategy: 'in-place',
@@ -426,6 +514,48 @@ export const BROKER_PERSISTENCE_MODEL = {
           verifyBehavior: 'rotate for existing pending_release row',
         },
       },
+    },
+    discordOAuthSessions: {
+      name: 'discord_oauth_sessions',
+      purpose:
+        'bounded OAuth PKCE/session state for Discord-gated managed OpenRouter issuance',
+      primaryKey: 'state_hash',
+      columns: [
+        'state_hash',
+        'installation_id',
+        'device_public_key',
+        'redirect_uri',
+        'pkce_code_verifier',
+        'issue_nonce_hash',
+        'fingerprint_salt_version',
+        'discord_user_ref',
+        'discord_email_verified',
+        'discord_account_created_at',
+        'eligibility_checked_at',
+        'status',
+        'created_at',
+        'expires_at',
+        'processing_started_at',
+        'consumed_at',
+      ],
+      storedStatuses: DISCORD_OAUTH_SESSION_STATUS_VALUES,
+      retention: 'expires_at cleanup only; durable entitlement and identity evidence is separate',
+      indexed: ['installation_id + status + created_at', 'expires_at'],
+    },
+    discordIdentities: {
+      name: 'discord_identities',
+      purpose: 'durable HMAC Discord user reference uniqueness for managed issuance',
+      primaryKey: 'discord_user_ref',
+      columns: [
+        'discord_user_ref',
+        'entitlement_installation_id',
+        'status',
+        'ref_secret_version',
+        'created_at',
+        'updated_at',
+      ],
+      storedStatuses: ['issuing', 'active', 'failed', 'cleanup_required'],
+      foreignKeys: ['entitlement_installation_id -> installations.installation_id'],
     },
     brokerRequestEvents: {
       name: 'broker_request_events',

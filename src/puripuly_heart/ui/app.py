@@ -1,4 +1,7 @@
+import asyncio
+import contextlib
 import copy
+import inspect
 import logging
 import webbrowser
 
@@ -20,6 +23,7 @@ from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.core.updater import check_for_update
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
 from puripuly_heart.ui.components.debug_preview_panel import DebugPreviewPanel
+from puripuly_heart.ui.components.discord_managed_auth_dialog import DiscordManagedAuthDialog
 from puripuly_heart.ui.components.founder_letter_dialog import FounderLetterDialog
 from puripuly_heart.ui.components.peer_translation_eula_dialog import PeerTranslationEulaDialog
 from puripuly_heart.ui.components.title_bar import TitleBar
@@ -65,6 +69,9 @@ class TranslatorApp:
         self.debug_ui_preview = bool(debug_ui_preview)
         self.debug_preview_panel: DebugPreviewPanel | None = None
         self._openrouter_pkce_request_active = False
+        self._discord_managed_auth_generation = 0
+        self._discord_managed_auth_cancelled = False
+        self._discord_managed_auth_task_handle = None
         self._setup_page()
         self._build_layout()
 
@@ -180,6 +187,7 @@ class TranslatorApp:
             on_revoked_notice=self._preview_revoked_notice,
             on_founder_letter=self._preview_founder_letter,
             on_pkce_failure=self._preview_pkce_failure,
+            on_discord_auth=self._preview_discord_auth,
             on_peer_translation_eula=self._preview_peer_translation_eula,
         )
 
@@ -203,6 +211,9 @@ class TranslatorApp:
 
     def _preview_pkce_failure(self) -> None:
         self._show_snackbar(t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)
+
+    def _preview_discord_auth(self) -> None:
+        self.show_discord_managed_auth_dialog(preview=True)
 
     def _preview_peer_translation_eula(self) -> None:
         self._show_peer_translation_eula(self._debug_preview_noop)
@@ -373,18 +384,48 @@ class TranslatorApp:
             return
         logger.log(level, message)
 
-    def _on_translation_toggle(self, enabled: bool) -> None:
+    def _revert_dashboard_translation_toggle(self) -> None:
+        self._set_dashboard_translation_visual_state(False)
+
+    def _set_dashboard_translation_visual_state(self, enabled: bool) -> None:
+        dash = getattr(self, "view_dashboard", None)
+        set_translation_enabled = getattr(dash, "set_translation_enabled", None)
+        if callable(set_translation_enabled):
+            try:
+                set_translation_enabled(enabled)
+            except Exception:
+                logger.exception("Failed to update dashboard translation toggle")
+
+    def _dashboard_managed_auth_action(self) -> str:
+        action = getattr(self.controller, "dashboard_managed_auth_action", None)
+        if not callable(action):
+            return "continue"
+        try:
+            return str(action())
+        except Exception:
+            logger.exception("Failed to evaluate managed auth dashboard gate")
+            return "prompt"
+
+    def _on_translation_toggle(self, enabled: bool) -> bool:
         self._log_basic(f"[Dashboard] Translation toggle requested: enabled={enabled}")
         self._log_detailed(
             "[Dashboard] Translation toggle detail: "
             f"dashboard_state={getattr(getattr(self, 'view_dashboard', None), 'is_translation_on', None)} "
             f"overlay_state={getattr(self, 'overlay_state', 'unknown')}"
         )
+        if enabled:
+            managed_auth_action = self._dashboard_managed_auth_action()
+            if managed_auth_action in {"prompt", "in_progress"}:
+                self._revert_dashboard_translation_toggle()
+                if managed_auth_action == "prompt":
+                    self.show_discord_managed_auth_dialog(preview=False)
+                return False
 
         async def _task():
             await self.controller.set_translation_enabled(enabled)
 
         self.page.run_task(_task)
+        return True
 
     def _on_stt_toggle(self, enabled: bool) -> None:
         self._log_basic(f"[Dashboard] STT toggle requested: enabled={enabled}")
@@ -559,7 +600,133 @@ class TranslatorApp:
 
         self._queue_settings_mutation_task(_task)
 
-    def _build_founder_letter_target_settings(self) -> AppSettings | None:
+    def _close_discord_managed_auth_dialog(self) -> None:
+        dialog = getattr(self, "_discord_managed_auth_dialog", None)
+        close = getattr(dialog, "close", None)
+        if callable(close):
+            close()
+
+    def show_discord_managed_auth_dialog(self, preview: bool = False) -> None:
+        if preview:
+            on_continue = self._close_discord_managed_auth_dialog
+            on_byok = self._close_discord_managed_auth_dialog
+            on_close = self._close_discord_managed_auth_dialog
+            on_reopen_browser = self._close_discord_managed_auth_dialog
+            on_cancel = self._close_discord_managed_auth_dialog
+        else:
+            on_continue = self._start_discord_managed_auth
+            on_byok = self._on_discord_managed_auth_byok
+            on_close = self._close_discord_managed_auth_dialog
+            on_reopen_browser = (
+                self._reopen_discord_managed_auth_browser
+                if self._supports_discord_managed_auth_reopen()
+                else None
+            )
+            on_cancel = self._cancel_discord_managed_auth
+
+        dialog = DiscordManagedAuthDialog(
+            self.page,
+            on_continue=on_continue,
+            on_byok=on_byok,
+            on_close=on_close,
+            on_reopen_browser=on_reopen_browser,
+            on_cancel=on_cancel,
+        )
+        self._discord_managed_auth_dialog = dialog
+        dialog.open()
+
+    def _run_optional_discord_auth_controller_hook(self, hook_name: str) -> None:
+        controller = getattr(self, "controller", None)
+        hook = getattr(controller, hook_name, None)
+        if not callable(hook):
+            return
+        result = hook()
+        if inspect.isawaitable(result):
+
+            async def _task() -> None:
+                await result
+
+            self.page.run_task(_task)
+
+    def _supports_discord_managed_auth_reopen(self) -> bool:
+        controller = getattr(self, "controller", None)
+        reopen = getattr(controller, "reopen_discord_managed_auth_browser", None)
+        return callable(reopen)
+
+    def _next_discord_managed_auth_generation(self) -> int:
+        generation = int(getattr(self, "_discord_managed_auth_generation", 0)) + 1
+        self._discord_managed_auth_generation = generation
+        self._discord_managed_auth_cancelled = False
+        return generation
+
+    def _is_current_discord_managed_auth_generation(self, generation: int) -> bool:
+        return bool(
+            generation == getattr(self, "_discord_managed_auth_generation", None)
+            and not getattr(self, "_discord_managed_auth_cancelled", False)
+        )
+
+    def _translation_enable_succeeded(self, controller: object, result: object) -> bool:
+        if result is False:
+            return False
+        hub = getattr(controller, "hub", None)
+        if hub is not None:
+            return bool(
+                getattr(hub, "llm", None) is not None
+                and getattr(hub, "translation_enabled", False)
+            )
+        return result is True
+
+    def _start_discord_managed_auth(self) -> None:
+        dialog = getattr(self, "_discord_managed_auth_dialog", None)
+        set_waiting = getattr(dialog, "set_waiting", None)
+        if callable(set_waiting):
+            set_waiting()
+        generation = self._next_discord_managed_auth_generation()
+
+        async def _task() -> None:
+            controller = getattr(self, "controller", None)
+            start_auth = getattr(controller, "start_discord_managed_auth_from_dialog", None)
+            if not callable(start_auth):
+                return
+            try:
+                ok = await start_auth()
+                if not ok or not self._is_current_discord_managed_auth_generation(generation):
+                    return
+                enable_translation = getattr(controller, "set_translation_enabled", None)
+                if not callable(enable_translation):
+                    return
+                enable_result = await enable_translation(True)
+                if not self._is_current_discord_managed_auth_generation(generation):
+                    return
+                if not self._translation_enable_succeeded(controller, enable_result):
+                    return
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Discord managed auth task failed")
+                return
+            self._close_discord_managed_auth_dialog()
+            self._show_snackbar(t("discord_auth.success"), COLOR_SUCCESS)
+            self._set_dashboard_translation_visual_state(True)
+            if self._is_current_discord_managed_auth_generation(generation):
+                self._discord_managed_auth_task_handle = None
+
+        self._discord_managed_auth_task_handle = self.page.run_task(_task)
+
+    def _reopen_discord_managed_auth_browser(self) -> None:
+        self._run_optional_discord_auth_controller_hook("reopen_discord_managed_auth_browser")
+
+    def _cancel_discord_managed_auth(self) -> None:
+        self._discord_managed_auth_cancelled = True
+        task_handle = getattr(self, "_discord_managed_auth_task_handle", None)
+        cancel = getattr(task_handle, "cancel", None)
+        if callable(cancel):
+            with contextlib.suppress(Exception):
+                cancel()
+        self._discord_managed_auth_task_handle = None
+        self._close_discord_managed_auth_dialog()
+
+    def _build_managed_openrouter_byok_target_settings(self) -> AppSettings | None:
         current_settings = getattr(getattr(self, "controller", None), "settings", None)
         if current_settings is None:
             return None
@@ -593,6 +760,16 @@ class TranslatorApp:
         target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
         target_settings.openrouter.llm_model = OpenRouterLLMModel(openrouter_model)
         return target_settings
+
+    def _build_founder_letter_target_settings(self) -> AppSettings | None:
+        return self._build_managed_openrouter_byok_target_settings()
+
+    def _on_discord_managed_auth_byok(self) -> None:
+        target_settings = self._build_managed_openrouter_byok_target_settings()
+        if target_settings is None:
+            self._show_snackbar(t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)
+            return
+        self._on_request_openrouter_pkce(target_settings, launch_source="discord_auth")
 
     def _on_founder_letter_connect(self) -> None:
         target_settings = self._build_founder_letter_target_settings()

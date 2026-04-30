@@ -23,6 +23,7 @@ DEBUG_PREVIEW_I18N_KEYS = {
     "debug_preview.revoked_notice",
     "debug_preview.founder_letter",
     "debug_preview.pkce_failure",
+    "debug_preview.discord_auth",
     "debug_preview.peer_translation_eula",
     "peer_translation_eula.title",
     "peer_translation_eula.body",
@@ -36,6 +37,7 @@ ACTION_KEYS = [
     "revoked_notice",
     "founder_letter",
     "pkce_failure",
+    "discord_auth",
     "peer_translation_eula",
 ]
 
@@ -46,6 +48,7 @@ def _callbacks(seen: list[str]):
         "on_revoked_notice": lambda: seen.append("revoked_notice"),
         "on_founder_letter": lambda: seen.append("founder_letter"),
         "on_pkce_failure": lambda: seen.append("pkce_failure"),
+        "on_discord_auth": lambda: seen.append("discord_auth"),
         "on_peer_translation_eula": lambda: seen.append("peer_translation_eula"),
     }
 
@@ -122,6 +125,9 @@ def test_debug_preview_panel_apply_locale_refreshes_labels(
         _button_label(panel._action_buttons["brake_notice"]) == "label:debug_preview.brake_notice"
     )
     assert (
+        _button_label(panel._action_buttons["discord_auth"]) == "label:debug_preview.discord_auth"
+    )
+    assert (
         _button_label(panel._action_buttons["peer_translation_eula"])
         == "label:debug_preview.peer_translation_eula"
     )
@@ -149,6 +155,7 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
         "Revoked notice",
         "Founder letter",
         "PKCE failure",
+        "Discord auth",
         "Peer translation EULA",
     ]
 
@@ -157,6 +164,7 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
 
     assert panel._toggle_button.text == "label:debug_preview.button"
     assert panel._action_buttons["brake_notice"].text == "label:debug_preview.brake_notice"
+    assert panel._action_buttons["discord_auth"].text == "label:debug_preview.discord_auth"
     assert (
         panel._action_buttons["peer_translation_eula"].text
         == "label:debug_preview.peer_translation_eula"
