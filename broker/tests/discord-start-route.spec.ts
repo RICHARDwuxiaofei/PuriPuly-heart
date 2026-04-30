@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import app from '../src/index';
 import { createDeviceKeyPair } from './test-support/ed25519';
+import { normalizedErrorEnvelope } from './test-support/errors';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import { updateAbuseControls } from './test-support/abuse-controls';
 
@@ -101,6 +102,63 @@ describe('Discord OAuth start route', () => {
     });
 
     expect(response.status).toBe(400);
+  });
+
+  it('rejects an installation_id already bound to a different device_public_key', async () => {
+    const env = createTestBrokerEnv();
+    const existingKeyPair = await createDeviceKeyPair();
+    const submittedKeyPair = await createDeviceKeyPair();
+    insertInstallation(env, {
+      installationId: 'install-discord-start-binding-mismatch',
+      devicePublicKey: existingKeyPair.devicePublicKey,
+    });
+
+    const response = await postDiscordAuthStart({
+      env,
+      installationId: 'install-discord-start-binding-mismatch',
+      devicePublicKey: submittedKeyPair.devicePublicKey,
+      redirectUri: REGISTERED_REDIRECT_URIS[0],
+      appVersion: '1.2.3',
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'trial_not_eligible',
+        class: 'security_fail',
+        subcode: 'installation_binding_mismatch',
+        message: 'installation_id is already bound to a different device_public_key',
+      }),
+    );
+    expect(countPendingDiscordSessions(env)).toBe(0);
+  });
+
+  it('rejects a device_public_key already registered to another installation_id', async () => {
+    const env = createTestBrokerEnv();
+    const keyPair = await createDeviceKeyPair();
+    insertInstallation(env, {
+      installationId: 'install-discord-start-registered-other',
+      devicePublicKey: keyPair.devicePublicKey,
+    });
+
+    const response = await postDiscordAuthStart({
+      env,
+      installationId: 'install-discord-start-registered-new',
+      devicePublicKey: keyPair.devicePublicKey,
+      redirectUri: REGISTERED_REDIRECT_URIS[0],
+      appVersion: '1.2.3',
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'trial_not_eligible',
+        class: 'security_fail',
+        subcode: 'device_public_key_registered',
+        message: 'device_public_key is already registered to a different installation_id',
+      }),
+    );
+    expect(countPendingDiscordSessions(env)).toBe(0);
   });
 
   it.each(REGISTERED_REDIRECT_URIS)(
@@ -235,4 +293,42 @@ async function postDiscordAuthStart(options: {
     },
     options.env,
   );
+}
+
+function insertInstallation(
+  env: ReturnType<typeof createTestBrokerEnv>,
+  input: {
+    installationId: string;
+    devicePublicKey: string;
+  },
+): void {
+  env.__db
+    .prepare(
+      `INSERT INTO installations (
+          installation_id,
+          device_public_key,
+          hardware_hash,
+          hardware_hash_salt_version,
+          app_version,
+          challenge,
+          challenge_expires_at,
+          challenge_salt_version,
+          created_at,
+          last_seen_at
+        ) VALUES (?, ?, NULL, NULL, ?, NULL, NULL, NULL, ?, ?)`,
+    )
+    .run(
+      input.installationId,
+      input.devicePublicKey,
+      '1.2.3',
+      '2026-04-30T06:00:00.000Z',
+      '2026-04-30T06:00:00.000Z',
+    );
+}
+
+function countPendingDiscordSessions(env: ReturnType<typeof createTestBrokerEnv>): number {
+  const row = env.__db
+    .prepare('SELECT COUNT(*) AS count FROM discord_oauth_sessions')
+    .get() as { count: number };
+  return Number(row.count);
 }

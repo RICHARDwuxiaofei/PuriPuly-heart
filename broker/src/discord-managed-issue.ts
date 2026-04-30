@@ -1,9 +1,12 @@
 import type { Context } from 'hono';
 
 import {
+  checkActiveIssuanceBrake,
   checkEndpointRateLimit,
+  checkVelocityCapHook,
   extractRequestNetworkMetadata,
   getBrokerAbuseControlsConfig,
+  matchSubjectHook,
   recordRequestEvent,
   resolveClientIp,
 } from './abuse-controls';
@@ -33,6 +36,7 @@ import { nonEmptyString, stringValue, validatePublicInput } from './public-input
 import type {
   BrokerPendingDiscordOAuthSessionsConfig,
   DiscordOAuthSessionRecord,
+  InstallationRecord,
   OpenRouterEntitlementRecord,
 } from './persistence';
 import {
@@ -72,6 +76,8 @@ type DiscordReservationErrorSubcode =
   | 'hardware_duplicate'
   | 'global_cap_reached'
   | 'discord_installation_already_issuing'
+  | 'installation_binding_mismatch'
+  | 'device_public_key_registered'
   | 'entitlement_reservation_failed';
 
 type DiscordReservationResult =
@@ -201,11 +207,16 @@ export async function handleDiscordAuthStart(
   }
 
   const now = new Date();
+  const existingInstallation = await getInstallation(c.env.BROKER_DB, installationId);
+  const trustedInstallationId =
+    existingInstallation && existingInstallation.device_public_key !== devicePublicKey
+      ? null
+      : installationId;
   const requestContext = {
     endpoint: DISCORD_AUTH_START_ENDPOINT,
     now,
     ip: resolveClientIp(c),
-    installationId,
+    installationId: trustedInstallationId,
     hardwareHash: null,
   };
 
@@ -235,6 +246,16 @@ export async function handleDiscordAuthStart(
   );
   if (pendingLimitDecision) {
     return pendingLimitDecision(c);
+  }
+
+  const bindingGateResponse = await discordInstallationBindingGuardResponse(c, {
+    installationId,
+    devicePublicKey,
+    existingInstallation,
+    entitlement: null,
+  });
+  if (bindingGateResponse) {
+    return bindingGateResponse;
   }
 
   const fingerprintSalt = await getFingerprintSaltConfig(c.env.BROKER_DB);
@@ -295,6 +316,49 @@ export async function handleDiscordOpenRouterIssue(
 
   const now = new Date();
   const nowIso = now.toISOString();
+  const requestContext = {
+    endpoint: `${DISCORD_OPENROUTER_ISSUE_METHOD} ${DISCORD_OPENROUTER_ISSUE_PATH}`,
+    now,
+    ip: resolveClientIp(c),
+    installationId: input.value.installationId,
+    hardwareHash: input.value.hardwareHash,
+  };
+  const currentEntitlement = await getEntitlement(
+    c.env.BROKER_DB,
+    input.value.installationId,
+  );
+
+  const subjectHook = await matchSubjectHook(c.env.BROKER_DB, requestContext);
+  if (subjectHook) {
+    const hookEntitlement = await getEntitlement(
+      c.env.BROKER_DB,
+      input.value.installationId,
+    );
+    return publicErrorResponse(c, subjectHook.status, {
+      code: subjectHook.code,
+      class: subjectHook.class,
+      subcode: subjectHook.subcode,
+      retryAfterMs: subjectHook.retryAfterMs,
+      message: subjectHook.message,
+      entitlement: hookEntitlement,
+    });
+  }
+
+  const issuanceBrakeDecision = await checkActiveIssuanceBrake(
+    c.env.BROKER_DB,
+    currentEntitlement,
+  );
+  if (issuanceBrakeDecision) {
+    return publicErrorResponse(c, issuanceBrakeDecision.status, {
+      code: issuanceBrakeDecision.code,
+      class: issuanceBrakeDecision.class,
+      subcode: issuanceBrakeDecision.subcode,
+      retryAfterMs: issuanceBrakeDecision.retryAfterMs,
+      message: issuanceBrakeDecision.message,
+      entitlement: currentEntitlement,
+    });
+  }
+
   const stateHash = await sha256Base64Url(input.value.state);
   const codeHash = await sha256Base64Url(input.value.code);
   const issueNonceHash = await sha256Base64Url(input.value.issueNonce);
@@ -315,6 +379,15 @@ export async function handleDiscordOpenRouterIssue(
   });
   if (sessionGateResponse) {
     return sessionGateResponse;
+  }
+
+  const bindingGateResponse = await discordInstallationBindingGuardResponse(c, {
+    installationId: input.value.installationId,
+    devicePublicKey: input.value.devicePublicKey,
+    entitlement: currentEntitlement,
+  });
+  if (bindingGateResponse) {
+    return bindingGateResponse;
   }
 
   const signedAtDate = parseIsoDate(input.value.signedAt);
@@ -339,6 +412,38 @@ export async function handleDiscordOpenRouterIssue(
   });
   if (!signatureIsValid) {
     return discordSignatureMismatchResponse(c);
+  }
+
+  await recordRequestEvent(c.env.BROKER_DB, requestContext);
+
+  const rateLimitDecision = await checkEndpointRateLimit(
+    c.env.BROKER_DB,
+    requestContext,
+  );
+  if (rateLimitDecision) {
+    return publicErrorResponse(c, rateLimitDecision.status, {
+      code: rateLimitDecision.code,
+      class: rateLimitDecision.class,
+      subcode: rateLimitDecision.subcode,
+      retryAfterMs: rateLimitDecision.retryAfterMs,
+      message: rateLimitDecision.message,
+      entitlement: currentEntitlement,
+    });
+  }
+
+  const velocityCapDecision = await checkVelocityCapHook(
+    c.env.BROKER_DB,
+    requestContext,
+  );
+  if (velocityCapDecision) {
+    return publicErrorResponse(c, velocityCapDecision.status, {
+      code: velocityCapDecision.code,
+      class: velocityCapDecision.class,
+      subcode: velocityCapDecision.subcode,
+      retryAfterMs: velocityCapDecision.retryAfterMs,
+      message: velocityCapDecision.message,
+      entitlement: currentEntitlement,
+    });
   }
 
   const claimed = await claimDiscordOAuthSession(c.env.BROKER_DB, {
@@ -451,6 +556,7 @@ export async function handleDiscordOpenRouterIssue(
     const activationSucceeded = await activateDiscordReservation(c.env.BROKER_DB, {
       stateHash,
       installationId: input.value.installationId,
+      devicePublicKey: input.value.devicePublicKey,
       discordUserRef,
       managedCredentialRef: childKey.hash,
       issuedAt,
@@ -768,6 +874,53 @@ async function validateDiscordSessionGate(
   return null;
 }
 
+async function discordInstallationBindingGuardResponse(
+  c: Context<BrokerEnv>,
+  input: {
+    installationId: string;
+    devicePublicKey: string;
+    existingInstallation?: InstallationRecord | null;
+    entitlement: OpenRouterEntitlementRecord | null;
+  },
+): Promise<Response | null> {
+  const conflict = await getDiscordInstallationBindingConflict(c.env.BROKER_DB, input);
+  if (!conflict) {
+    return null;
+  }
+
+  return discordInstallationBindingErrorResponse(c, conflict, input.entitlement);
+}
+
+async function getDiscordInstallationBindingConflict(
+  db: D1Database,
+  input: {
+    installationId: string;
+    devicePublicKey: string;
+    existingInstallation?: InstallationRecord | null;
+  },
+): Promise<'installation_binding_mismatch' | 'device_public_key_registered' | null> {
+  const installation =
+    input.existingInstallation !== undefined
+      ? input.existingInstallation
+      : await getInstallation(db, input.installationId);
+  if (installation && installation.device_public_key !== input.devicePublicKey) {
+    return 'installation_binding_mismatch';
+  }
+
+  const installationByPublicKey = await getInstallationByPublicKey(
+    db,
+    input.devicePublicKey,
+  );
+  if (
+    installationByPublicKey &&
+    installationByPublicKey.installation_id !== input.installationId
+  ) {
+    return 'device_public_key_registered';
+  }
+
+  return null;
+}
+
 async function getDiscordOAuthSession(
   db: D1Database,
   stateHash: string,
@@ -1037,7 +1190,20 @@ async function reserveDiscordEntitlement(
 ): Promise<DiscordReservationResult> {
   let identityInserted = false;
   try {
+    const bindingConflict = await getDiscordInstallationBindingConflict(db, input);
+    if (bindingConflict) {
+      return { ok: false, subcode: bindingConflict };
+    }
+
     await insertDiscordInstallationIfAbsent(db, input);
+
+    const postInsertBindingConflict = await getDiscordInstallationBindingConflict(
+      db,
+      input,
+    );
+    if (postInsertBindingConflict) {
+      return { ok: false, subcode: postInsertBindingConflict };
+    }
 
     identityInserted = await insertDiscordIdentityReservation(db, input);
     if (!identityInserted) {
@@ -1046,7 +1212,18 @@ async function reserveDiscordEntitlement(
 
     const reserved = await insertOrUpdateIssuingDiscordEntitlement(db, input);
     if (reserved) {
-      await updateDiscordInstallationBinding(db, input);
+      const bindingUpdated = await updateDiscordInstallationBinding(db, input);
+      if (!bindingUpdated) {
+        await releaseDiscordReservation(db, input);
+        const reserveBindingConflict = await getDiscordInstallationBindingConflict(
+          db,
+          input,
+        );
+        return {
+          ok: false,
+          subcode: reserveBindingConflict ?? 'entitlement_reservation_failed',
+        };
+      }
       return { ok: true };
     }
 
@@ -1130,29 +1307,31 @@ async function updateDiscordInstallationBinding(
     appVersion: string;
     nowIso: string;
   },
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  const result = await db
     .prepare(
       `UPDATE installations
-          SET device_public_key = ?,
-              hardware_hash = ?,
+          SET hardware_hash = ?,
               hardware_hash_salt_version = ?,
               app_version = ?,
               challenge = NULL,
               challenge_expires_at = NULL,
               challenge_salt_version = NULL,
               last_seen_at = ?
-        WHERE installation_id = ?`,
+        WHERE installation_id = ?
+          AND device_public_key = ?`,
     )
     .bind(
-      input.devicePublicKey,
       input.hardwareHash,
       input.hardwareHashSaltVersion,
       input.appVersion,
       input.nowIso,
       input.installationId,
+      input.devicePublicKey,
     )
     .run();
+
+  return Number(result.meta.changes ?? 0) === 1;
 }
 
 async function insertDiscordIdentityReservation(
@@ -1631,6 +1810,7 @@ async function activateDiscordReservation(
   input: {
     stateHash: string;
     installationId: string;
+    devicePublicKey: string;
     discordUserRef: string;
     managedCredentialRef: string;
     issuedAt: string;
@@ -1654,7 +1834,13 @@ async function activateDiscordReservation(
           AND discord_user_ref = ?
           AND status = 'pending_release'
           AND discord_issue_status = 'issuing'
-          AND managed_credential_ref IS NULL`,
+          AND managed_credential_ref IS NULL
+          AND EXISTS (
+            SELECT 1
+              FROM installations activation_installation
+             WHERE activation_installation.installation_id = openrouter_entitlements.installation_id
+               AND activation_installation.device_public_key = ?
+          )`,
     )
     .bind(
       input.managedCredentialRef,
@@ -1663,6 +1849,7 @@ async function activateDiscordReservation(
       input.deliveredAt,
       input.installationId,
       input.discordUserRef,
+      input.devicePublicKey,
     )
     .run();
   if (Number(entitlementResult.meta.changes ?? 0) !== 1) {
@@ -1715,6 +1902,38 @@ async function getEntitlement(
     )
     .bind(installationId)
     .first<OpenRouterEntitlementRecord>();
+}
+
+async function getInstallation(
+  db: D1Database,
+  installationId: string,
+): Promise<InstallationRecord | null> {
+  return db
+    .prepare(
+      `SELECT installation_id, device_public_key, hardware_hash, hardware_hash_salt_version,
+              app_version, challenge, challenge_expires_at, challenge_salt_version,
+              created_at, last_seen_at
+         FROM installations
+        WHERE installation_id = ?`,
+    )
+    .bind(installationId)
+    .first<InstallationRecord>();
+}
+
+async function getInstallationByPublicKey(
+  db: D1Database,
+  devicePublicKey: string,
+): Promise<InstallationRecord | null> {
+  return db
+    .prepare(
+      `SELECT installation_id, device_public_key, hardware_hash, hardware_hash_salt_version,
+              app_version, challenge, challenge_expires_at, challenge_salt_version,
+              created_at, last_seen_at
+         FROM installations
+        WHERE device_public_key = ?`,
+    )
+    .bind(devicePublicKey)
+    .first<InstallationRecord>();
 }
 
 async function discordIssueSuccessResponse(
@@ -2021,6 +2240,9 @@ function discordReservationErrorResponse(
           'Discord managed entitlement is already issuing for this installation; restart Discord OAuth onboarding',
         entitlement: null,
       });
+    case 'installation_binding_mismatch':
+    case 'device_public_key_registered':
+      return discordInstallationBindingErrorResponse(c, reservation.subcode, null);
     case 'entitlement_reservation_failed':
       return publicErrorResponse(c, 500, {
         code: 'internal_error',
@@ -2030,6 +2252,23 @@ function discordReservationErrorResponse(
         entitlement: null,
       });
   }
+}
+
+function discordInstallationBindingErrorResponse(
+  c: Context<BrokerEnv>,
+  subcode: 'installation_binding_mismatch' | 'device_public_key_registered',
+  entitlement: OpenRouterEntitlementRecord | null,
+): Response {
+  return publicErrorResponse(c, 409, {
+    code: 'trial_not_eligible',
+    class: 'security_fail',
+    subcode,
+    message:
+      subcode === 'installation_binding_mismatch'
+        ? 'installation_id is already bound to a different device_public_key'
+        : 'device_public_key is already registered to a different installation_id',
+    entitlement,
+  });
 }
 
 function addMonthsUtc(value: Date, months: number): Date {
@@ -2261,7 +2500,7 @@ async function checkPendingDiscordOAuthIpLimit(
     endpoint: string;
     now: Date;
     ip: string | null;
-    installationId: string;
+    installationId: string | null;
   },
   pendingControls: BrokerPendingDiscordOAuthSessionsConfig,
 ): Promise<((c: Context<BrokerEnv>) => Response) | null> {

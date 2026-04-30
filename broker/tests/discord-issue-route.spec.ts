@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import app from '../src/index';
 import {
   createDeviceKeyPair,
   encodeBase64Url,
@@ -15,7 +16,11 @@ import {
   type TestBrokerEnv,
 } from './test-support/sqlite-d1';
 import { postDiscordIssue, postDiscordStart } from './test-support/trial-api';
-import { updateAbuseControls } from './test-support/abuse-controls';
+import {
+  insertSubjectHook,
+  updateAbuseControls,
+  updateAbuseRuntimeState,
+} from './test-support/abuse-controls';
 
 const REGISTERED_REDIRECT_URI = 'http://127.0.0.1:62187/discord/callback';
 const APP_VERSION = '1.2.3';
@@ -286,6 +291,78 @@ describe('Discord issue gate', () => {
     expect(discordApi.fetchMock).not.toHaveBeenCalled();
   });
 
+  it('rejects a stale session when installation_id is later bound to a different device_public_key', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const started = await startDiscordSession('install-discord-issue-stale-install-binding');
+    const conflictingKeyPair = await createDeviceKeyPair();
+    insertInstallation(started.env, {
+      installationId: started.installationId,
+      devicePublicKey: conflictingKeyPair.devicePublicKey,
+      hardwareHash: 'hardware-hash-stale-install-binding',
+      hardwareHashSaltVersion: started.fingerprintSaltVersion,
+    });
+    const discordApi = mockDiscordApi();
+
+    const response = await postDiscordIssue(
+      started.env,
+      await signedIssueRequest(started, {
+        code: 'discord-oauth-code-stale-install-binding',
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'trial_not_eligible',
+        class: 'security_fail',
+        subcode: 'installation_binding_mismatch',
+        message: 'installation_id is already bound to a different device_public_key',
+      }),
+    );
+    expect(discordApi.fetchMock).not.toHaveBeenCalled();
+    await expect(readSessionByState(started.env, started.state)).resolves.toEqual(
+      expect.objectContaining({
+        status: 'pending',
+        pkce_code_verifier: expect.any(String),
+      }),
+    );
+  });
+
+  it('rejects a stale session when device_public_key is later registered to another installation_id', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const started = await startDiscordSession('install-discord-issue-stale-key-binding');
+    insertInstallation(started.env, {
+      installationId: 'install-discord-issue-stale-key-other',
+      devicePublicKey: started.keyPair.devicePublicKey,
+      hardwareHash: 'hardware-hash-stale-key-binding',
+      hardwareHashSaltVersion: started.fingerprintSaltVersion,
+    });
+    const discordApi = mockDiscordApi();
+
+    const response = await postDiscordIssue(
+      started.env,
+      await signedIssueRequest(started, {
+        code: 'discord-oauth-code-stale-key-binding',
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'trial_not_eligible',
+        class: 'security_fail',
+        subcode: 'device_public_key_registered',
+        message: 'device_public_key is already registered to a different installation_id',
+      }),
+    );
+    expect(discordApi.fetchMock).not.toHaveBeenCalled();
+    expect(countDiscordEntitlements(started.env)).toBe(0);
+  });
+
   it('rejects stale signed_at without Discord token exchange', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW_ISO));
@@ -375,6 +452,141 @@ describe('Discord issue gate', () => {
         pkce_code_verifier: expect.any(String),
       }),
     );
+  });
+
+  it.each([
+    {
+      name: 'installation_id',
+      configure: (env: TestBrokerEnv, started: StartedDiscordSession) => {
+        updateAbuseControls(env, (controls) => {
+          controls.discordOpenrouterIssueInstallation.maxRequests = 1;
+        });
+        insertRequestEvent(env, {
+          endpoint: 'POST /v1/providers/openrouter/discord/issue',
+          installationId: started.installationId,
+          ip: null,
+          observedAt: '2026-04-30T05:59:00.000Z',
+        });
+      },
+      post: async (started: StartedDiscordSession, body: object) =>
+        postDiscordIssue(started.env, body),
+      expectedSubcode: 'installation_rate_limited',
+    },
+    {
+      name: 'ip',
+      configure: (env: TestBrokerEnv) => {
+        updateAbuseControls(env, (controls) => {
+          controls.discordOpenrouterIssueIp.maxRequests = 1;
+        });
+        insertRequestEvent(env, {
+          endpoint: 'POST /v1/providers/openrouter/discord/issue',
+          installationId: null,
+          ip: '198.51.100.44',
+          observedAt: '2026-04-30T05:59:00.000Z',
+        });
+      },
+      post: async (started: StartedDiscordSession, body: object) =>
+        postDiscordIssueWithIp(started.env, body, '198.51.100.44'),
+      expectedSubcode: 'ip_rate_limited',
+    },
+  ])(
+    'honors configured Discord issue $name endpoint rate limits before Discord token exchange',
+    async ({ configure, post, expectedSubcode }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(NOW_ISO));
+
+      const started = await startDiscordSession(
+        `install-discord-rate-limit-${expectedSubcode}`,
+      );
+      configure(started.env, started);
+      const discordApi = mockDiscordApi();
+      const response = await post(
+        started,
+        await signedIssueRequest(started, {
+          code: `discord-oauth-code-rate-limit-${expectedSubcode}`,
+        }),
+      );
+
+      expect(response.status).toBe(429);
+      await expect(response.json()).resolves.toEqual(
+        normalizedErrorEnvelope({
+          code: 'rate_limited',
+          class: 'retryable',
+          subcode: expectedSubcode,
+          retryAfterMs: 840_000,
+          message: 'request rate limit exceeded for POST /v1/providers/openrouter/discord/issue',
+        }),
+      );
+      expect(discordApi.fetchMock).not.toHaveBeenCalled();
+      expect(countDiscordEntitlements(started.env)).toBe(0);
+    },
+  );
+
+  it('honors Discord issue subject deny hooks before Discord token exchange', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const started = await startDiscordSession('install-discord-subject-deny');
+    insertSubjectHook(started.env, {
+      hook_kind: 'denylist',
+      subject_type: 'installation_id',
+      subject_value: started.installationId,
+      outcome_code: 'trial_not_eligible',
+      outcome_class: 'terminal',
+      reason: 'installation is denied for managed issuance',
+    });
+    const discordApi = mockDiscordApi();
+
+    const response = await postDiscordIssue(
+      started.env,
+      await signedIssueRequest(started, {
+        code: 'discord-oauth-code-subject-deny',
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'trial_not_eligible',
+        class: 'terminal',
+        message: 'installation is denied for managed issuance',
+      }),
+    );
+    expect(discordApi.fetchMock).not.toHaveBeenCalled();
+    expect(countDiscordEntitlements(started.env)).toBe(0);
+  });
+
+  it('honors the active issuance brake before Discord token exchange', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const started = await startDiscordSession('install-discord-active-brake');
+    updateAbuseRuntimeState(started.env, (state) => {
+      state.brake.active = true;
+      state.brake.reason = 'manual';
+      state.brake.changedAt = NOW_ISO;
+      state.brake.changedBy = 'operator';
+    });
+    const discordApi = mockDiscordApi();
+
+    const response = await postDiscordIssue(
+      started.env,
+      await signedIssueRequest(started, {
+        code: 'discord-oauth-code-active-brake',
+      }),
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'issuance_suspended',
+        class: 'retryable',
+        subcode: 'manual',
+        message: 'new entitlement issuance is temporarily suspended',
+      }),
+    );
+    expect(discordApi.fetchMock).not.toHaveBeenCalled();
+    expect(countDiscordEntitlements(started.env)).toBe(0);
   });
 
   it('reservation/lifetime rejects a Discord account that already has a delivered managed entitlement', async () => {
@@ -596,9 +808,10 @@ describe('Discord issue gate', () => {
 
     const env = createTestBrokerEnv();
     const installationId = 'install-discord-same-installation-delivered-hardware';
+    const keyPair = await createDeviceKeyPair();
     insertInstallation(env, {
       installationId,
-      devicePublicKey: 'same-installation-delivered-device-key',
+      devicePublicKey: keyPair.devicePublicKey,
       hardwareHash: 'hardware-hash-same-installation-delivered',
       hardwareHashSaltVersion: 7,
       appVersion: '1.0-existing-active',
@@ -621,7 +834,7 @@ describe('Discord issue gate', () => {
     });
     const installationBefore = await readInstallation(env, installationId);
 
-    const started = await startDiscordSession(installationId, env);
+    const started = await startDiscordSession(installationId, env, keyPair);
     const discordApi = mockDiscordApi({
       user: {
         id: discordSnowflakeForAgeDays(32),
@@ -665,13 +878,14 @@ describe('Discord issue gate', () => {
 
     const env = createTestBrokerEnv();
     const installationId = 'install-discord-same-installation-issuing-conflict';
+    const keyPair = await createDeviceKeyPair();
     const existingDiscordUserRef = await deriveExpectedDiscordUserRef(
       env.DISCORD_USER_REF_SECRET,
       discordSnowflakeForAgeDays(35),
     );
     insertInstallation(env, {
       installationId,
-      devicePublicKey: 'same-installation-issuing-device-key',
+      devicePublicKey: keyPair.devicePublicKey,
       hardwareHash: 'hardware-hash-same-installation-issuing-old',
       hardwareHashSaltVersion: 7,
       appVersion: '1.0-existing-issuing',
@@ -696,7 +910,7 @@ describe('Discord issue gate', () => {
     });
     const installationBefore = await readInstallation(env, installationId);
 
-    const started = await startDiscordSession(installationId, env);
+    const started = await startDiscordSession(installationId, env, keyPair);
     const discordApi = mockDiscordApi({
       user: {
         id: discordSnowflakeForAgeDays(31),
@@ -1141,6 +1355,7 @@ describe('Discord issue gate', () => {
 
     const env = createTestBrokerEnv();
     const installationId = 'install-discord-cleanup-required-same-installation';
+    const keyPair = await createDeviceKeyPair();
     const orphanedCredentialRef = 'hash_discord_orphaned_cleanup_required_same_install';
     const existingDiscordUserRef = await deriveExpectedDiscordUserRef(
       env.DISCORD_USER_REF_SECRET,
@@ -1153,7 +1368,7 @@ describe('Discord issue gate', () => {
     );
     insertInstallation(env, {
       installationId,
-      devicePublicKey: 'cleanup-required-same-installation-device-key',
+      devicePublicKey: keyPair.devicePublicKey,
       hardwareHash: 'hardware-hash-cleanup-required-existing',
       hardwareHashSaltVersion: 7,
     });
@@ -1176,7 +1391,7 @@ describe('Discord issue gate', () => {
     const entitlementBefore = await readEntitlement(env, installationId);
     const installationBefore = await readInstallation(env, installationId);
 
-    const started = await startDiscordSession(installationId, env);
+    const started = await startDiscordSession(installationId, env, keyPair);
     const discordApi = mockDiscordApi({
       user: {
         id: newDiscordUserId,
@@ -1689,11 +1904,12 @@ describe('Discord eligibility', () => {
 async function startDiscordSession(
   installationId: string,
   env: TestBrokerEnv = createTestBrokerEnv(),
+  keyPair?: DeviceKeyPair,
 ): Promise<StartedDiscordSession> {
-  const keyPair = await createDeviceKeyPair();
+  const sessionKeyPair = keyPair ?? (await createDeviceKeyPair());
   const response = await postDiscordStart(env, {
     installation_id: installationId,
-    device_public_key: keyPair.devicePublicKey,
+    device_public_key: sessionKeyPair.devicePublicKey,
     redirect_uri: REGISTERED_REDIRECT_URI,
     app_version: APP_VERSION,
   });
@@ -1715,7 +1931,7 @@ async function startDiscordSession(
 
   return {
     env,
-    keyPair,
+    keyPair: sessionKeyPair,
     installationId,
     state,
     issueNonce: payload.issue_nonce,
@@ -1929,6 +2145,46 @@ function insertDiscordIdentity(
       NOW_ISO,
       NOW_ISO,
     );
+}
+
+function insertRequestEvent(
+  env: TestBrokerEnv,
+  input: {
+    endpoint: string;
+    ip: string | null;
+    installationId: string | null;
+    observedAt: string;
+  },
+): void {
+  env.__db
+    .prepare(
+      `INSERT INTO broker_request_events (
+          endpoint,
+          ip,
+          installation_id,
+          observed_at
+        ) VALUES (?, ?, ?, ?)`,
+    )
+    .run(input.endpoint, input.ip, input.installationId, input.observedAt);
+}
+
+async function postDiscordIssueWithIp(
+  env: TestBrokerEnv,
+  body: object | string,
+  ip: string,
+): Promise<Response> {
+  return app.request(
+    'http://broker.test/v1/providers/openrouter/discord/issue',
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'cf-connecting-ip': ip,
+      },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    },
+    env,
+  );
 }
 
 function countDiscordIdentities(env: TestBrokerEnv): number {
