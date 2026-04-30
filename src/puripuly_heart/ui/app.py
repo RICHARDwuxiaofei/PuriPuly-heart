@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import copy
 import inspect
 import logging
@@ -67,6 +69,9 @@ class TranslatorApp:
         self.debug_ui_preview = bool(debug_ui_preview)
         self.debug_preview_panel: DebugPreviewPanel | None = None
         self._openrouter_pkce_request_active = False
+        self._discord_managed_auth_generation = 0
+        self._discord_managed_auth_cancelled = False
+        self._discord_managed_auth_task_handle = None
         self._setup_page()
         self._build_layout()
 
@@ -612,7 +617,11 @@ class TranslatorApp:
             on_continue = self._start_discord_managed_auth
             on_byok = self._on_discord_managed_auth_byok
             on_close = self._close_discord_managed_auth_dialog
-            on_reopen_browser = self._reopen_discord_managed_auth_browser
+            on_reopen_browser = (
+                self._reopen_discord_managed_auth_browser
+                if self._supports_discord_managed_auth_reopen()
+                else None
+            )
             on_cancel = self._cancel_discord_managed_auth
 
         dialog = DiscordManagedAuthDialog(
@@ -639,32 +648,83 @@ class TranslatorApp:
 
             self.page.run_task(_task)
 
+    def _supports_discord_managed_auth_reopen(self) -> bool:
+        controller = getattr(self, "controller", None)
+        reopen = getattr(controller, "reopen_discord_managed_auth_browser", None)
+        return callable(reopen)
+
+    def _next_discord_managed_auth_generation(self) -> int:
+        generation = int(getattr(self, "_discord_managed_auth_generation", 0)) + 1
+        self._discord_managed_auth_generation = generation
+        self._discord_managed_auth_cancelled = False
+        return generation
+
+    def _is_current_discord_managed_auth_generation(self, generation: int) -> bool:
+        return bool(
+            generation == getattr(self, "_discord_managed_auth_generation", None)
+            and not getattr(self, "_discord_managed_auth_cancelled", False)
+        )
+
+    def _translation_enable_succeeded(self, controller: object, result: object) -> bool:
+        if result is False:
+            return False
+        hub = getattr(controller, "hub", None)
+        if hub is not None:
+            return bool(
+                getattr(hub, "llm", None) is not None
+                and getattr(hub, "translation_enabled", False)
+            )
+        return result is True
+
     def _start_discord_managed_auth(self) -> None:
         dialog = getattr(self, "_discord_managed_auth_dialog", None)
         set_waiting = getattr(dialog, "set_waiting", None)
         if callable(set_waiting):
             set_waiting()
+        generation = self._next_discord_managed_auth_generation()
 
         async def _task() -> None:
             controller = getattr(self, "controller", None)
             start_auth = getattr(controller, "start_discord_managed_auth_from_dialog", None)
             if not callable(start_auth):
                 return
-            ok = await start_auth()
-            if not ok:
+            try:
+                ok = await start_auth()
+                if not ok or not self._is_current_discord_managed_auth_generation(generation):
+                    return
+                enable_translation = getattr(controller, "set_translation_enabled", None)
+                if not callable(enable_translation):
+                    return
+                enable_result = await enable_translation(True)
+                if not self._is_current_discord_managed_auth_generation(generation):
+                    return
+                if not self._translation_enable_succeeded(controller, enable_result):
+                    return
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Discord managed auth task failed")
                 return
             self._close_discord_managed_auth_dialog()
             self._show_snackbar(t("discord_auth.success"), COLOR_SUCCESS)
-            await controller.set_translation_enabled(True)
             self._set_dashboard_translation_visual_state(True)
+            if self._is_current_discord_managed_auth_generation(generation):
+                self._discord_managed_auth_task_handle = None
 
-        self.page.run_task(_task)
+        self._discord_managed_auth_task_handle = self.page.run_task(_task)
 
     def _reopen_discord_managed_auth_browser(self) -> None:
         self._run_optional_discord_auth_controller_hook("reopen_discord_managed_auth_browser")
 
     def _cancel_discord_managed_auth(self) -> None:
-        self._run_optional_discord_auth_controller_hook("cancel_discord_managed_auth")
+        self._discord_managed_auth_cancelled = True
+        task_handle = getattr(self, "_discord_managed_auth_task_handle", None)
+        cancel = getattr(task_handle, "cancel", None)
+        if callable(cancel):
+            with contextlib.suppress(Exception):
+                cancel()
+        self._discord_managed_auth_task_handle = None
+        self._close_discord_managed_auth_dialog()
 
     def _build_managed_openrouter_byok_target_settings(self) -> AppSettings | None:
         current_settings = getattr(getattr(self, "controller", None), "settings", None)

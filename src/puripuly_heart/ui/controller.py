@@ -639,14 +639,16 @@ class GuiController:
                 self._show_short_message("discord_auth.error.retry")
                 return False
 
-            if (
-                result.behavior == ManagedOpenRouterReleaseBehavior.READY
-                and result.local_key_available
-            ):
-                if self.hub is not None and self.hub.llm is None:
+            if result.behavior == ManagedOpenRouterReleaseBehavior.READY and result.local_key_available:
+                if self.hub is None:
+                    self._show_short_message("discord_auth.error.retry")
+                    return False
+                if self.hub.llm is None:
                     await self._rebuild_llm_provider()
-                else:
-                    self._schedule_managed_trial_usage_refresh()
+                if self.hub.llm is None:
+                    self._show_short_message("discord_auth.error.retry")
+                    return False
+                self._schedule_managed_trial_usage_refresh()
                 return True
 
             message_key = self._discord_auth_message_key(result)
@@ -1406,12 +1408,12 @@ class GuiController:
     def cancel_overlay_calibration_for_test(self) -> None:
         self.cancel_overlay_calibration()
 
-    async def set_translation_enabled(self, enabled: bool) -> None:
+    async def set_translation_enabled(self, enabled: bool) -> bool:
         request_generation = self._record_translation_toggle_intent(enabled)
         if not enabled:
             self._set_managed_trial_pending_auth(False)
         if self.hub is None:
-            return
+            return False
         self.log_basic(f"[Translation] Toggle request: enabled={enabled}")
         self.log_detailed(
             "[Translation] Toggle detail: "
@@ -1419,7 +1421,7 @@ class GuiController:
             f"llm_available={self.hub.llm is not None}"
         )
         if enabled and await self._handle_managed_translation_enable(request_generation) is False:
-            return
+            return False
         if enabled and not self._translation_toggle_intent_matches(
             enabled=True,
             generation=request_generation,
@@ -1427,14 +1429,14 @@ class GuiController:
             self.log_detailed(
                 "[Translation] Skipping stale enable request after newer toggle intent"
             )
-            return
+            return False
         if enabled and self.hub.llm is None:
             self.hub.translation_enabled = False
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 dash.set_translation_enabled(False)
             self._log_error("Translation is ON but LLM provider is not configured.")
-            return
+            return False
 
         # Log provider info when enabling
         if enabled and self.settings is not None:
@@ -1458,6 +1460,7 @@ class GuiController:
             if isinstance(llm, (GeminiLLMProvider, QwenLLMProvider, AsyncQwenLLMProvider)):
                 with contextlib.suppress(Exception):
                     await llm.warmup()
+        return bool(self.hub.translation_enabled)
 
     async def set_stt_enabled(self, enabled: bool) -> None:
         self.log_basic(f"[STT] Toggle request: enabled={enabled}")

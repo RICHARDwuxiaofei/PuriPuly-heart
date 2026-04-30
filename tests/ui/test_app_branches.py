@@ -788,6 +788,7 @@ async def test_start_discord_managed_auth_uses_run_task_and_success_enables_tran
     enable_calls: list[bool] = []
     start_calls: list[str] = []
     dashboard_translation_calls: list[bool] = []
+    hub = SimpleNamespace(llm=object(), translation_enabled=False)
     app.view_dashboard = SimpleNamespace(
         set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
     )
@@ -797,10 +798,13 @@ async def test_start_discord_managed_auth_uses_run_task_and_success_enables_tran
         start_calls.append("start")
         return True
 
-    async def fake_set_translation_enabled(enabled: bool) -> None:
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
         enable_calls.append(enabled)
+        hub.translation_enabled = enabled
+        return True
 
     app.controller = SimpleNamespace(
+        hub=hub,
         start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
         set_translation_enabled=fake_set_translation_enabled,
     )
@@ -818,6 +822,75 @@ async def test_start_discord_managed_auth_uses_run_task_and_success_enables_tran
     assert snackbar_calls == [(app_module.t("discord_auth.success"), app_module.COLOR_SUCCESS)]
     assert enable_calls == [True]
     assert dashboard_translation_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_no_success_when_enable_fails() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(set_waiting=lambda: None, close=lambda: None)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    dashboard_translation_calls: list[bool] = []
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        enable_calls.append(enabled)
+        return False
+
+    app.controller = SimpleNamespace(
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    await app.page.tasks[0]()
+
+    assert enable_calls == [True]
+    assert snackbar_calls == []
+    assert dashboard_translation_calls == []
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_no_success_when_llm_unavailable_after_enable() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(set_waiting=lambda: None, close=lambda: None)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    dashboard_translation_calls: list[bool] = []
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        enable_calls.append(enabled)
+        return True
+
+    app.controller = SimpleNamespace(
+        hub=SimpleNamespace(llm=None, translation_enabled=False),
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    await app.page.tasks[0]()
+
+    assert enable_calls == [True]
+    assert snackbar_calls == []
+    assert dashboard_translation_calls == []
 
 
 @pytest.mark.asyncio
@@ -845,6 +918,66 @@ async def test_start_discord_managed_auth_failure_does_not_show_success_snackbar
 
     assert snackbar_calls == []
     assert enable_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_discord_managed_auth_prevents_late_success_and_enable() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(set_waiting=lambda: None, close_calls=0)
+    dialog.close = lambda: setattr(dialog, "close_calls", dialog.close_calls + 1)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    dashboard_translation_calls: list[bool] = []
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+    start_entered = asyncio.Event()
+    release_start = asyncio.Event()
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        start_entered.set()
+        await release_start.wait()
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        enable_calls.append(enabled)
+        return True
+
+    app.controller = SimpleNamespace(
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    task = asyncio.create_task(app.page.tasks[0]())
+    await start_entered.wait()
+
+    app._cancel_discord_managed_auth()
+    release_start.set()
+    await task
+
+    assert dialog.close_calls == 1
+    assert snackbar_calls == []
+    assert enable_calls == []
+    assert dashboard_translation_calls == []
+
+
+def test_discord_managed_auth_waiting_hides_reopen_when_controller_cannot_reopen() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app.controller = SimpleNamespace()
+
+    app.show_discord_managed_auth_dialog(preview=False)
+    dialog = app._discord_managed_auth_dialog
+    dialog.set_waiting()
+
+    assert dialog._reopen_browser_button is None
+    assert [control.text for control in dialog._actions.controls] == [
+        app_module.t("discord_auth.cancel")
+    ]
 
 
 def test_peer_translation_toggle_first_enable_opens_eula_without_running_task(

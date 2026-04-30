@@ -1699,6 +1699,45 @@ async def test_start_discord_managed_auth_from_dialog_success_rebuilds_missing_p
 
 
 @pytest.mark.asyncio
+async def test_start_discord_managed_auth_from_dialog_rebuild_failure_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snackbar_calls: list[tuple[str, str]] = []
+    controller = _make_controller(
+        app=SimpleNamespace(
+            _show_snackbar=lambda message, color: snackbar_calls.append((message, color))
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=None)
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+        )
+    )
+    rebuild_calls: list[str] = []
+
+    async def fake_rebuild_llm_provider(self: GuiController) -> None:
+        rebuild_calls.append("rebuild")
+        self.hub.llm = None
+
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+    monkeypatch.setattr(controller_module, "t", lambda key, **_kwargs: key)
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is False
+    assert rebuild_calls == ["rebuild"]
+    assert controller.hub.llm is None
+    assert snackbar_calls == [("discord_auth.error.retry", ft.Colors.ORANGE_700)]
+
+
+@pytest.mark.asyncio
 async def test_start_discord_managed_auth_from_dialog_missing_service_shows_retry_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
