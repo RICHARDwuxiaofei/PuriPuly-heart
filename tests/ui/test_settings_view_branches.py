@@ -647,6 +647,39 @@ def test_deepseek_connection_selection_controls_api_key_visibility(
     assert view._deepseek_key.visible is True
 
 
+def test_official_api_connection_hides_openrouter_key_even_with_saved_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.OPENROUTER,
+    )
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    settings.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._update_api_visibility()
+    assert view._openrouter_key.visible is True
+
+    view._on_translation_connection_selected(TranslationConnection.OFFICIAL_BYOK.value)
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.provider.llm == LLMProviderName.DEEPSEEK
+    assert pending.translation.connection == TranslationConnection.OFFICIAL_BYOK
+    assert (
+        pending.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.QWEN35_FLASH
+    )
+    assert view._openrouter_key.visible is False
+    assert view._deepseek_key.visible is True
+    assert view._openrouter_fallback_helper_text.value == t(
+        "settings.openrouter_fallback.inactive_helper"
+    )
+
+
 def test_on_stt_selected_updates_provider_and_pipeline_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1345,7 +1378,7 @@ def test_update_api_visibility_keeps_openrouter_key_for_openrouter_gemini_fallba
     assert view._alibaba_key_singapore.visible is False
 
 
-def test_update_api_visibility_keeps_openrouter_key_for_inactive_byok_fallback(
+def test_update_api_visibility_hides_openrouter_key_for_inactive_byok_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("PURIPULY_HEART_OPENROUTER_LEGACY_CONNECT", raising=False)
@@ -1361,10 +1394,10 @@ def test_update_api_visibility_keeps_openrouter_key_for_inactive_byok_fallback(
     view._update_api_visibility()
 
     assert view._google_key.visible is True
-    assert view._openrouter_key.visible is True
+    assert view._openrouter_key.visible is False
 
 
-def test_update_api_visibility_shows_openrouter_key_for_byok_fallback_when_main_provider_is_gemini(
+def test_update_api_visibility_hides_openrouter_key_for_byok_fallback_when_main_provider_is_gemini(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("PURIPULY_HEART_OPENROUTER_LEGACY_CONNECT", raising=False)
@@ -1378,7 +1411,7 @@ def test_update_api_visibility_shows_openrouter_key_for_byok_fallback_when_main_
     view._update_api_visibility()
 
     assert view._google_key.visible is True
-    assert view._openrouter_key.visible is True
+    assert view._openrouter_key.visible is False
 
 
 def test_openrouter_key_field_and_pkce_button_are_visible_for_byok_without_break_glass(
@@ -1716,7 +1749,7 @@ def test_translation_connection_modal_lists_supported_connections(
 
     view._on_translation_connection_click(None)
 
-    assert captured["show_description"] is True
+    assert captured["show_description"] is False
     options = captured["options"]
     assert [option.value for option in options] == [
         TranslationConnection.MANAGED.value,
@@ -1728,10 +1761,11 @@ def test_translation_connection_modal_lists_supported_connections(
         t("settings.translation_connection.openrouter"),
         t("settings.translation_connection.official_byok"),
     ]
+    assert [option.description for option in options] == ["", "", ""]
     assert captured["current"] == TranslationConnection.MANAGED.value
 
 
-def test_translation_connection_modal_opens_for_single_connection_model_with_suffix(
+def test_translation_connection_modal_opens_for_single_connection_model_without_description(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -1759,10 +1793,10 @@ def test_translation_connection_modal_opens_for_single_connection_model_with_suf
     view._on_translation_connection_click(None)
 
     options = captured["options"]
-    assert captured["show_description"] is True
+    assert captured["show_description"] is False
     assert captured["current"] == TranslationConnection.OFFICIAL_BYOK.value
     assert [option.value for option in options] == [TranslationConnection.OFFICIAL_BYOK.value]
-    assert t("settings.translation_connection.only_supported") in options[0].description
+    assert options[0].description == ""
 
 
 def test_openrouter_fallback_modal_hides_provider_descriptions_for_active_options(
@@ -2435,6 +2469,41 @@ def test_translation_connection_and_model_copy_is_backed_by_i18n(locale: str) ->
     )
     if locale in {"ko", "zh-CN"}:
         assert bundle["settings.translation_connection.managed"] != "Managed"
+
+    assert (
+        bundle["settings.translation_connection.official_byok"]
+        == {
+            "en": "Official API",
+            "ko": "공식 API",
+            "zh-CN": "官方 API",
+        }[locale]
+    )
+
+    expected_model_descriptions = {
+        "en": {
+            "settings.translation_model.gemma4.description": "Good for most situations We recommend using this model",
+            "settings.translation_model.deepseek_v4_flash.description": "Use this model if you're in mainland China",
+            "settings.translation_model.gemini3_flash.description": "Translation speed may be unstable",
+            "settings.translation_model.gemini31_flash_lite.description": "Translation speed may be unstable",
+            "settings.translation_model.qwen35_plus.description": "A strong alternative to DeepSeek",
+        },
+        "ko": {
+            "settings.translation_model.gemma4.description": "대부분의 상황에서 좋아요 이 모델을 사용하는 걸 권장해요",
+            "settings.translation_model.deepseek_v4_flash.description": "중국 대륙에서 사용하고 있다면 이 모델을 사용해주세요",
+            "settings.translation_model.gemini3_flash.description": "번역 속도가 불안정할 수 있어요",
+            "settings.translation_model.gemini31_flash_lite.description": "번역 속도가 불안정할 수 있어요",
+            "settings.translation_model.qwen35_plus.description": "딥시크의 좋은 대안이에요",
+        },
+        "zh-CN": {
+            "settings.translation_model.gemma4.description": "适合大多数情况 建议使用此模型",
+            "settings.translation_model.deepseek_v4_flash.description": "如果你在中国大陆使用，请使用此模型",
+            "settings.translation_model.gemini3_flash.description": "翻译速度可能不稳定",
+            "settings.translation_model.gemini31_flash_lite.description": "翻译速度可能不稳定",
+            "settings.translation_model.qwen35_plus.description": "DeepSeek 的不错替代选择",
+        },
+    }[locale]
+    for key, expected in expected_model_descriptions.items():
+        assert bundle[key] == expected
 
 
 @pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])

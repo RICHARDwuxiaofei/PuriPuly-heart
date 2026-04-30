@@ -94,11 +94,6 @@ _TRANSLATION_CONNECTION_LABEL_KEYS = {
     TranslationConnection.OPENROUTER: "settings.translation_connection.openrouter",
     TranslationConnection.OFFICIAL_BYOK: "settings.translation_connection.official_byok",
 }
-_TRANSLATION_CONNECTION_DESCRIPTION_KEYS = {
-    TranslationConnection.MANAGED: "settings.translation_connection.managed.description",
-    TranslationConnection.OPENROUTER: "settings.translation_connection.openrouter.description",
-    TranslationConnection.OFFICIAL_BYOK: "settings.translation_connection.official_byok.description",
-}
 
 
 def _make_text_button(label: str, **kwargs) -> ft.TextButton:
@@ -1504,9 +1499,6 @@ class SettingsView(ft.Column):
     def _translation_connection_display_label(self, connection: TranslationConnection) -> str:
         return t(_TRANSLATION_CONNECTION_LABEL_KEYS[connection])
 
-    def _translation_connection_display_description(self, connection: TranslationConnection) -> str:
-        return t(_TRANSLATION_CONNECTION_DESCRIPTION_KEYS[connection], default="")
-
     def _set_translation_connection_text(self, text: str) -> None:
         text_control = self._translation_connection_text.content
         text_control.value = text
@@ -1565,6 +1557,8 @@ class SettingsView(ft.Column):
         self, settings: AppSettings | None
     ) -> OpenRouterCredentialSource:
         if settings is None:
+            return OpenRouterCredentialSource.NONE
+        if settings.provider.llm != LLMProviderName.OPENROUTER:
             return OpenRouterCredentialSource.NONE
         if settings.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.NONE:
             return OpenRouterCredentialSource.NONE
@@ -2371,19 +2365,13 @@ class SettingsView(ft.Column):
             else TranslationModel.GEMMA4
         )
         connections = supported_translation_connections(model)
-        only_supported_suffix = t("settings.translation_connection.only_supported")
-        options: list[OptionItem] = []
-        for connection in connections:
-            description = self._translation_connection_display_description(connection)
-            if len(connections) == 1:
-                description = f"{description} {only_supported_suffix}".strip()
-            options.append(
-                OptionItem(
-                    value=connection.value,
-                    label=self._translation_connection_display_label(connection),
-                    description=description,
-                )
+        options = [
+            OptionItem(
+                value=connection.value,
+                label=self._translation_connection_display_label(connection),
             )
+            for connection in connections
+        ]
         current = (
             display_settings.translation.connection.value
             if display_settings is not None
@@ -2394,7 +2382,7 @@ class SettingsView(ft.Column):
             t("settings.translation_connection"),
             options,
             self._on_translation_connection_selected,
-            show_description=True,
+            show_description=False,
         )
         modal.open(current)
 
