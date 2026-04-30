@@ -8,11 +8,13 @@ import urllib.request
 
 import pytest
 
+from puripuly_heart.core import discord_oauth_loopback as loopback
 from puripuly_heart.core.discord_oauth_loopback import (
     DISCORD_OAUTH_LOOPBACK_PATH,
     DISCORD_OAUTH_LOOPBACK_PORTS,
     DiscordOAuthCallbackError,
     DiscordOAuthLoopbackClosedError,
+    _DiscordOAuthHTTPServer,
     bind_first_available,
 )
 
@@ -105,20 +107,65 @@ def test_close_unblocks_wait_and_stops_listener_thread() -> None:
     assert isinstance(outcome.get("error"), DiscordOAuthLoopbackClosedError)
 
 
-def test_first_occupied_port_falls_back_to_second_registered_port() -> None:
-    occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+def _free_loopback_port() -> int:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        try:
-            occupied.bind(("127.0.0.1", DISCORD_OAUTH_LOOPBACK_PORTS[0]))
-            occupied.listen(1)
-        except OSError as exc:
-            pytest.skip(f"first Discord OAuth loopback port is already unavailable: {exc}")
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+    finally:
+        sock.close()
 
+
+def test_server_bind_does_not_enable_reuseaddr_and_uses_windows_exclusive_bind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exclusive_addr_use = 0x1004
+    monkeypatch.setattr(socket, "SO_EXCLUSIVEADDRUSE", exclusive_addr_use, raising=False)
+    calls: list[tuple[str, int, int, int] | tuple[str, tuple[str, int]]] = []
+
+    class FakeSocket:
+        def setsockopt(self, level: int, option: int, value: int) -> None:
+            calls.append(("setsockopt", level, option, value))
+
+        def bind(self, address: tuple[str, int]) -> None:
+            calls.append(("bind", address))
+
+        def getsockname(self) -> tuple[str, int]:
+            return ("127.0.0.1", DISCORD_OAUTH_LOOPBACK_PORTS[0])
+
+    server = _DiscordOAuthHTTPServer.__new__(_DiscordOAuthHTTPServer)
+    server.socket = FakeSocket()
+    server.server_address = ("127.0.0.1", DISCORD_OAUTH_LOOPBACK_PORTS[0])
+
+    server.server_bind()
+
+    assert _DiscordOAuthHTTPServer.allow_reuse_address is False
+    assert calls == [
+        ("setsockopt", socket.SOL_SOCKET, exclusive_addr_use, 1),
+        ("bind", ("127.0.0.1", DISCORD_OAUTH_LOOPBACK_PORTS[0])),
+    ]
+
+
+def test_occupied_configured_port_cannot_be_reused_and_falls_back_to_next_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    occupied.bind(("127.0.0.1", 0))
+    occupied.listen(1)
+    occupied_port = int(occupied.getsockname()[1])
+    fallback_port = _free_loopback_port()
+    monkeypatch.setattr(
+        loopback,
+        "DISCORD_OAUTH_LOOPBACK_PORTS",
+        (occupied_port, fallback_port),
+    )
+
+    try:
         listener = bind_first_available()
         try:
-            assert listener.port == DISCORD_OAUTH_LOOPBACK_PORTS[1]
+            assert listener.port == fallback_port
         finally:
             listener.close()
     finally:
-        occupied.close()
+        if occupied is not None:
+            occupied.close()

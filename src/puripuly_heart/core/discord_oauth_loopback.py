@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import threading
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,8 +30,14 @@ class DiscordOAuthLoopbackClosedError(RuntimeError):
 
 
 class _DiscordOAuthHTTPServer(ThreadingHTTPServer):
-    allow_reuse_address = True
+    allow_reuse_address = False
     daemon_threads = True
+
+    def server_bind(self) -> None:
+        exclusive_addr_use = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if exclusive_addr_use is not None:
+            self.socket.setsockopt(socket.SOL_SOCKET, exclusive_addr_use, 1)
+        super().server_bind()
 
 
 @dataclass(slots=True)
