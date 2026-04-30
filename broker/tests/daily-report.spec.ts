@@ -55,11 +55,17 @@ describe('broker daily heartbeat', () => {
 
     const body = JSON.parse(String(init.body)) as {
       content?: string;
-      embeds: Array<{ title: string }>;
+      embeds: Array<{ title: string; fields: Array<{ name: string }> }>;
     };
 
     expect(body.embeds[0]?.title).toContain('daily heartbeat');
     expect(body.content).toContain('broker_daily_heartbeat.v1');
+    expect(body.content).not.toContain('estimated_monthly_exposure_usd');
+    expect(body.content).not.toContain('monthly_cap_usd');
+    expect(body.content).not.toContain('remaining_budget_usd');
+    expect(body.embeds[0]?.fields.map((field) => field.name)).not.toContain(
+      'Budget summary',
+    );
     expect(readAbuseRuntimeState(env).dailyReport).toEqual({
       lastDeliveredAt: '2026-04-19T00:00:00.000Z',
       lastDeliveredDateUtc: '2026-04-19',
@@ -157,7 +163,7 @@ describe('broker daily heartbeat', () => {
     expect(sent.payload.summary.cloud_asn_share_24h).toBe(17);
   });
 
-  it('preserves current-month issue-success history so month-to-date exposure stays accurate after retention cleanup', async () => {
+  it('omits monthly budget exposure from daily heartbeat payloads after retention cleanup', async () => {
     const env = createTestBrokerEnv();
     updateAbuseControls(env, (controls) => {
       controls.dailyReport.enabled = true;
@@ -190,15 +196,17 @@ describe('broker daily heartbeat', () => {
       new Date('2026-04-18T00:00:00.000Z'),
     );
 
-    expect(retentionResult.issueSuccessDeleted).toBe(1);
+    expect(retentionResult.issueSuccessDeleted).toBe(2);
 
     const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal('fetch', fetchMock);
 
     const sent = await runDailyReport(env, new Date('2026-04-18T12:00:00.000Z'));
 
-    expect(sent.payload.summary.estimated_monthly_exposure_usd).toBe(0.16);
-    expect(sent.payload.summary.remaining_budget_usd).toBe(14.84);
+    expect(sent.payload.summary.issue_success_24h).toBe(1);
+    expect(sent.payload.summary).not.toHaveProperty('estimated_monthly_exposure_usd');
+    expect(sent.payload.summary).not.toHaveProperty('monthly_cap_usd');
+    expect(sent.payload.summary).not.toHaveProperty('remaining_budget_usd');
   });
 
   it('derives highest_alert_level_24h from actual rolling threshold state at the report-window boundary', async () => {

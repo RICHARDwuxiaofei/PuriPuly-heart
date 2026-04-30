@@ -19,14 +19,12 @@ import type {
   BrokerAbuseControlsConfigValue,
   BrokerAbuseRuntimeStateValue,
 } from './persistence';
-import { MANAGED_TRIAL_BUDGET_POLICY } from './trial-policy';
 
 type AlertLevel = 'warn1' | 'warn2' | 'warn3' | 'critical';
 
 const DAILY_HEARTBEAT_SCHEMA_VERSION = 'broker_daily_heartbeat.v1';
 const DAILY_REPORT_WINDOW_MS = 24 * 60 * 60_000;
 const ROLLING_ALERT_WINDOW_MS = 60 * 60_000;
-const MONTHLY_CAP_USD = 15;
 const DAILY_REPORT_PERSIST_MAX_ATTEMPTS = 3;
 
 interface CountRow {
@@ -133,14 +131,10 @@ export async function buildDailyHeartbeatPacket(
   const effectiveControls = controls ?? (await getBrokerAbuseControlsConfig(db));
   const nowIso = now.toISOString();
   const windowStart24h = new Date(now.getTime() - DAILY_REPORT_WINDOW_MS).toISOString();
-  const monthStartUtc = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
-  ).toISOString();
 
   const [
     requestCountsResult,
     issueCountRow,
-    monthlyIssueCountRow,
     asnCountResult,
     issueSeverityResult,
     auditResult,
@@ -165,15 +159,6 @@ export async function buildDailyHeartbeatPacket(
               AND observed_at <= ?`,
         )
         .bind(windowStart24h, nowIso)
-        .first<CountRow>(),
-      db
-        .prepare(
-          `SELECT COUNT(*) AS count
-             FROM broker_issue_success_events
-            WHERE observed_at >= ?
-              AND observed_at <= ?`,
-        )
-        .bind(monthStartUtc, nowIso)
         .first<CountRow>(),
       db
         .prepare(
@@ -254,11 +239,6 @@ export async function buildDailyHeartbeatPacket(
         sum + entry.count,
       0,
     );
-  const monthlyIssueCount = Number(monthlyIssueCountRow?.count ?? 0);
-  const estimatedMonthlyExposureUsd = roundUsd(
-    monthlyIssueCount * MANAGED_TRIAL_BUDGET_POLICY.hardLimit,
-  );
-
   return {
     schema_version: DAILY_HEARTBEAT_SCHEMA_VERSION,
     generated_at: nowIso,
@@ -279,11 +259,6 @@ export async function buildDailyHeartbeatPacket(
       top_asns: topAsns,
       cloud_asn_share_24h:
         issueSuccess24h === 0 ? 0 : Math.round((cloudAsnIssueCount / issueSuccess24h) * 100),
-      estimated_monthly_exposure_usd: estimatedMonthlyExposureUsd,
-      monthly_cap_usd: MONTHLY_CAP_USD,
-      remaining_budget_usd: roundUsd(
-        Math.max(0, MONTHLY_CAP_USD - estimatedMonthlyExposureUsd),
-      ),
       manual_revocations_24h: Number(manualRevocationCountRow?.count ?? 0),
     },
   };
@@ -458,8 +433,4 @@ function resolveTopAsn(
   }
 
   return topAsn;
-}
-
-function roundUsd(value: number): number {
-  return Math.round(value * 100) / 100;
 }

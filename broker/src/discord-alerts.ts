@@ -44,9 +44,6 @@ export interface DailyReportPayload {
       display_name: string | null;
     }>;
     cloud_asn_share_24h: number;
-    estimated_monthly_exposure_usd: number;
-    monthly_cap_usd: number;
-    remaining_budget_usd: number;
     manual_revocations_24h: number;
   };
 }
@@ -138,15 +135,6 @@ export async function sendDailyReport(
             `highest_alert=${packet.summary.highest_alert_level_24h ?? 'none'}`,
             `brake_triggered=${packet.summary.brake_triggered_24h}`,
             `manual_revocations=${packet.summary.manual_revocations_24h}`,
-          ].join('\n'),
-          inline: true,
-        },
-        {
-          name: 'Budget summary',
-          value: [
-            `estimated_monthly_exposure_usd=${packet.summary.estimated_monthly_exposure_usd.toFixed(2)}`,
-            `monthly_cap_usd=${packet.summary.monthly_cap_usd.toFixed(2)}`,
-            `remaining_budget_usd=${packet.summary.remaining_budget_usd.toFixed(2)}`,
           ].join('\n'),
           inline: true,
         },

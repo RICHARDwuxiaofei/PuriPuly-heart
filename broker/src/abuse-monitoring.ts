@@ -8,14 +8,12 @@ import {
 } from './abuse-controls';
 import type { BrokerBindings } from './contract';
 import { sendDiscordEmbed } from './discord-alerts';
-import { MANAGED_TRIAL_BUDGET_POLICY } from './trial-policy';
 
 type AlertLevel = 'warn1' | 'warn2' | 'warn3' | 'critical';
 type BrakeReason = 'global_threshold' | 'asn_fast_path';
 
 const INTERPRETATION_PACKET_SCHEMA_VERSION =
   'broker_abuse_interpretation_packet.v1';
-const CURRENT_PHASE_MONTHLY_CAP_USD = 15;
 const FIVE_MINUTES_MS = 5 * 60_000;
 const FIFTEEN_MINUTES_MS = 15 * 60_000;
 const SIXTY_MINUTES_MS = 60 * 60_000;
@@ -107,12 +105,6 @@ export interface InterpretationPacket {
     hourly_issue_p95_7d: number;
     current_vs_median: number;
     current_vs_p95: number;
-  };
-  budget_context: {
-    estimated_new_exposure_usd_60m: number;
-    monthly_cap_usd: number;
-    monthly_spend_so_far_usd: number | null;
-    remaining_budget_usd: number | null;
   };
   derived_flags: {
     cloud_asn_concentration: boolean;
@@ -432,12 +424,7 @@ function resolveIssueSuccessRetentionCutoff(
   now: Date,
   issueSuccessDays: number,
 ): string {
-  return new Date(
-    Math.min(
-      now.getTime() - issueSuccessDays * 24 * 60 * 60_000,
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
-    ),
-  ).toISOString();
+  return new Date(now.getTime() - issueSuccessDays * 24 * 60 * 60_000).toISOString();
 }
 
 function buildInterpretationPacket(input: {
@@ -566,14 +553,6 @@ function buildInterpretationPacket(input: {
       hourly_issue_p95_7d: historicalP95,
       current_vs_median: ratioOrAbsolute(issueSuccess1h, historicalMedian),
       current_vs_p95: ratioOrAbsolute(issueSuccess1h, historicalP95),
-    },
-    budget_context: {
-      estimated_new_exposure_usd_60m: roundToTwo(
-        issueSuccess1h * MANAGED_TRIAL_BUDGET_POLICY.hardLimit,
-      ),
-      monthly_cap_usd: CURRENT_PHASE_MONTHLY_CAP_USD,
-      monthly_spend_so_far_usd: null,
-      remaining_budget_usd: null,
     },
     derived_flags: {
       cloud_asn_concentration:

@@ -598,12 +598,6 @@ describe('broker immediate abuse monitoring', () => {
         current_vs_median: 1.5,
         current_vs_p95: 1,
       },
-      budget_context: {
-        estimated_new_exposure_usd_60m: 0.24,
-        monthly_cap_usd: 15,
-        monthly_spend_so_far_usd: null,
-        remaining_budget_usd: null,
-      },
       derived_flags: {
         cloud_asn_concentration: false,
         sudden_issue_spike: true,
@@ -611,6 +605,7 @@ describe('broker immediate abuse monitoring', () => {
         browser_like_signal_weak: true,
       },
     });
+    expect(packet).not.toHaveProperty('budget_context');
     expect(packet.rolling_issue_counts.issue_success.timeline_5m_buckets).toHaveLength(12);
   });
 
