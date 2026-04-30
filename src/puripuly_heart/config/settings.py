@@ -1093,7 +1093,10 @@ def ensure_prompt_defaults(settings: AppSettings) -> AppSettings:
 
 
 def detect_system_locale() -> str | None:
-    return locale.getlocale()[0]
+    try:
+        return locale.getlocale()[0]
+    except (ValueError, locale.Error):
+        return None
 
 
 def _normalize_first_run_locale(system_locale: str | None) -> str:

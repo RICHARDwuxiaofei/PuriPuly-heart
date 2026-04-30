@@ -36,6 +36,20 @@ def test_detect_system_locale_uses_locale_getlocale(monkeypatch: pytest.MonkeyPa
     assert settings_module.detect_system_locale() == "Korean_Korea"
 
 
+@pytest.mark.parametrize("exc", [ValueError("bad locale"), settings_module.locale.Error("bad locale")])
+def test_first_run_settings_falls_back_to_english_when_system_locale_is_invalid(
+    exc: Exception,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_invalid_locale() -> tuple[str | None, str | None]:
+        raise exc
+
+    monkeypatch.setattr(settings_module.locale, "getlocale", raise_invalid_locale)
+
+    assert settings_module.detect_system_locale() is None
+    assert _new_first_run_settings().ui.locale == "en"
+
+
 @pytest.mark.parametrize(
     "system_locale",
     ["ko", "ko-KR", "ko_KR", "KO_kr", "Korean_Korea.949"],
