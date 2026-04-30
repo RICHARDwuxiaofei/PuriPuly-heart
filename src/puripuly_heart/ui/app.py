@@ -380,13 +380,16 @@ class TranslatorApp:
         logger.log(level, message)
 
     def _revert_dashboard_translation_toggle(self) -> None:
+        self._set_dashboard_translation_visual_state(False)
+
+    def _set_dashboard_translation_visual_state(self, enabled: bool) -> None:
         dash = getattr(self, "view_dashboard", None)
         set_translation_enabled = getattr(dash, "set_translation_enabled", None)
         if callable(set_translation_enabled):
             try:
-                set_translation_enabled(False)
+                set_translation_enabled(enabled)
             except Exception:
-                logger.exception("Failed to revert dashboard translation toggle")
+                logger.exception("Failed to update dashboard translation toggle")
 
     def _dashboard_managed_auth_action(self) -> str:
         action = getattr(self.controller, "dashboard_managed_auth_action", None)
@@ -653,6 +656,7 @@ class TranslatorApp:
             self._close_discord_managed_auth_dialog()
             self._show_snackbar(t("discord_auth.success"), COLOR_SUCCESS)
             await controller.set_translation_enabled(True)
+            self._set_dashboard_translation_visual_state(True)
 
         self.page.run_task(_task)
 

@@ -1769,6 +1769,47 @@ async def test_start_discord_managed_auth_from_dialog_maps_error_subcodes_to_mes
     assert snackbar_calls == [(expected_key, ft.Colors.ORANGE_700)]
 
 
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_from_dialog_does_not_log_raw_broker_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snackbar_calls: list[tuple[str, str]] = []
+    controller = _make_controller(
+        app=SimpleNamespace(
+            _show_snackbar=lambda message, color: snackbar_calls.append((message, color))
+        )
+    )
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    raw_subcode = "discord_email_unverified"
+    raw_message = "raw broker eligibility message"
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.STOP,
+            message_key="managed_release.not_eligible",
+            diagnostics=ManagedOpenRouterReleaseDiagnostics(
+                operation="discord_issue",
+                code="trial_not_eligible",
+                error_class="terminal",
+                subcode=raw_subcode,
+                message=raw_message,
+            ),
+        )
+    )
+    monkeypatch.setattr(controller_module, "t", lambda key, **_kwargs: key)
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is False
+    assert snackbar_calls == [("discord_auth.error.email_unverified", ft.Colors.ORANGE_700)]
+    logged_messages = [message for _level, message in controller._runtime_logging.basic_messages]
+    assert not any(raw_subcode in message for message in logged_messages)
+    assert not any(raw_message in message for message in logged_messages)
+
+
 def test_discord_auth_message_key_falls_back_to_result_message_key() -> None:
     controller = _make_controller(app=SimpleNamespace())
     result = ManagedOpenRouterReleaseResult(

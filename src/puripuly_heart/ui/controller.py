@@ -649,11 +649,16 @@ class GuiController:
                     self._schedule_managed_trial_usage_refresh()
                 return True
 
-            diagnostics_text = format_managed_openrouter_diagnostics(result.diagnostics)
-            if diagnostics_text:
-                self.log_basic(f"[ManagedAuth] {diagnostics_text}", level=logging.ERROR)
+            message_key = self._discord_auth_message_key(result)
+            diagnostics = result.diagnostics
+            error_class = getattr(diagnostics, "error_class", None)
+            self.log_basic(
+                "[ManagedAuth] Discord auth failed: "
+                f"message_key={message_key} class={error_class or 'unknown'}",
+                level=logging.ERROR,
+            )
             self._show_short_message(
-                self._discord_auth_message_key(result),
+                message_key,
                 **dict(result.message_kwargs),
             )
             return False

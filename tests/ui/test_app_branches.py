@@ -787,6 +787,10 @@ async def test_start_discord_managed_auth_uses_run_task_and_success_enables_tran
     snackbar_calls: list[tuple[str, object]] = []
     enable_calls: list[bool] = []
     start_calls: list[str] = []
+    dashboard_translation_calls: list[bool] = []
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
     app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
 
     async def fake_start_discord_managed_auth_from_dialog() -> bool:
@@ -813,6 +817,7 @@ async def test_start_discord_managed_auth_uses_run_task_and_success_enables_tran
     assert dialog.close_calls == 1
     assert snackbar_calls == [(app_module.t("discord_auth.success"), app_module.COLOR_SUCCESS)]
     assert enable_calls == [True]
+    assert dashboard_translation_calls == [True]
 
 
 @pytest.mark.asyncio
