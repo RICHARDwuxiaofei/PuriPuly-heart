@@ -62,6 +62,9 @@ class DiscordManagedAuthDialog:
         self._cancel_button: ft.TextButton | None = None
 
     def open(self) -> None:
+        if self._dialog is not None and self._is_open:
+            return
+
         self._is_waiting = False
         self._title_text = ft.Text(
             t("discord_auth.title"),
@@ -201,16 +204,20 @@ class DiscordManagedAuthDialog:
         return [self._continue_button, self._byok_button, self._close_button]
 
     def _build_waiting_actions(self) -> list[ft.Control]:
-        self._reopen_browser_button = ft.ElevatedButton(
-            text=t("discord_auth.reopen_browser"),
-            on_click=lambda _: self._reopen_browser(),
-            style=ft.ButtonStyle(
-                bgcolor=COLOR_PRIMARY,
-                color=ft.Colors.WHITE,
-                padding=ft.padding.symmetric(horizontal=22, vertical=16),
-                shape=ft.RoundedRectangleBorder(radius=18),
-            ),
-        )
+        controls: list[ft.Control] = []
+        self._reopen_browser_button = None
+        if self._on_reopen_browser is not None:
+            self._reopen_browser_button = ft.ElevatedButton(
+                text=t("discord_auth.reopen_browser"),
+                on_click=lambda _: self._reopen_browser(),
+                style=ft.ButtonStyle(
+                    bgcolor=COLOR_PRIMARY,
+                    color=ft.Colors.WHITE,
+                    padding=ft.padding.symmetric(horizontal=22, vertical=16),
+                    shape=ft.RoundedRectangleBorder(radius=18),
+                ),
+            )
+            controls.append(self._reopen_browser_button)
         self._cancel_button = ft.TextButton(
             text=t("discord_auth.cancel"),
             on_click=lambda _: self._cancel_waiting(),
@@ -221,7 +228,8 @@ class DiscordManagedAuthDialog:
                 overlay_color=ft.Colors.TRANSPARENT,
             ),
         )
-        return [self._reopen_browser_button, self._cancel_button]
+        controls.append(self._cancel_button)
+        return controls
 
     def _close_then(self, action: Callable[[], None]) -> None:
         self.close()
