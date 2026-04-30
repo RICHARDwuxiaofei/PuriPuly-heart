@@ -14,6 +14,10 @@ from puripuly_heart.ui.components.founder_letter_dialog import (  # noqa: E402
 from puripuly_heart.ui.components.peer_translation_eula_dialog import (  # noqa: E402
     PeerTranslationEulaDialog,
 )
+from puripuly_heart.ui.components.warm_document_dialog import (  # noqa: E402
+    WarmDocumentDialogAction,
+    open_warm_document_dialog,
+)
 from puripuly_heart.ui.theme import (  # noqa: E402
     COLOR_BACKGROUND,
     COLOR_NEUTRAL_DARK,
@@ -24,12 +28,15 @@ from puripuly_heart.ui.theme import (  # noqa: E402
 class FakePage:
     def __init__(self) -> None:
         self.dialog = None
+        self.closed: list[object] = []
 
     def open(self, dialog) -> None:
         self.dialog = dialog
 
     def close(self, dialog) -> None:
-        _ = dialog
+        self.closed.append(dialog)
+        if self.dialog is dialog:
+            self.dialog = None
 
 
 def _open_founder_letter(monkeypatch: pytest.MonkeyPatch) -> tuple[FakePage, list[str]]:
@@ -189,3 +196,84 @@ def test_document_dialogs_use_large_standalone_action_buttons(
     assert action_row.controls[0].style.animation_duration == 0
     assert action_row.controls[1].style.animation_duration == 0
     assert getattr(action_row, "bgcolor", None) != COLOR_BACKGROUND
+
+
+def test_warm_document_dialog_supports_three_ordered_actions_with_close_policy() -> None:
+    page = FakePage()
+    events: list[str] = []
+
+    result = open_warm_document_dialog(
+        page,
+        body_paragraphs=["Body copy"],
+        actions=[
+            WarmDocumentDialogAction(label="BYOK", on_select=lambda: events.append("byok")),
+            WarmDocumentDialogAction(label="Close", on_select=lambda: events.append("close")),
+            WarmDocumentDialogAction(
+                label="Continue",
+                on_select=lambda: events.append("continue"),
+                close_before_action=False,
+            ),
+        ],
+        glow_factory=lambda content: content,
+    )
+
+    action_row = _content_column(page).controls[-1]
+
+    assert action_row is result.action_row
+    assert result.initial_action_buttons == tuple(action_row.controls)
+    assert [button.text for button in action_row.controls] == ["BYOK", "Close", "Continue"]
+    assert [button.__class__.__name__ for button in action_row.controls] == [
+        "TextButton",
+        "TextButton",
+        "TextButton",
+    ]
+
+    result.initial_action_buttons[2].on_click(None)
+
+    assert events == ["continue"]
+    assert page.closed == []
+    assert page.dialog is result.dialog
+
+    result.initial_action_buttons[0].on_click(None)
+
+    assert events == ["continue", "byok"]
+    assert page.closed == [result.dialog]
+    assert page.dialog is None
+
+
+def test_warm_document_dialog_can_replace_actions_with_shared_style() -> None:
+    page = FakePage()
+    events: list[str] = []
+
+    result = open_warm_document_dialog(
+        page,
+        body_paragraphs=["Body copy"],
+        actions=[
+            WarmDocumentDialogAction(label="Left", on_select=lambda: events.append("left")),
+            WarmDocumentDialogAction(label="Right", on_select=lambda: events.append("right")),
+        ],
+        glow_factory=lambda content: content,
+    )
+
+    replacement_buttons = result.set_actions(
+        [
+            WarmDocumentDialogAction(
+                label="Cancel",
+                on_select=lambda: events.append("cancel"),
+                close_before_action=False,
+            )
+        ]
+    )
+
+    assert replacement_buttons == tuple(result.action_row.controls)
+    assert result.action_row.controls == list(replacement_buttons)
+    assert [button.text for button in result.action_row.controls] == ["Cancel"]
+    assert result.action_row.controls[0].style.color[ft.ControlState.DEFAULT] == COLOR_NEUTRAL_DARK
+    assert result.action_row.controls[0].style.color[ft.ControlState.HOVERED] == COLOR_PRIMARY
+    assert result.action_row.controls[0].style.animation_duration == 0
+
+    replacement_buttons[0].on_click(None)
+
+    assert events == ["cancel"]
+    assert page.closed == []
+    assert page.dialog is result.dialog
