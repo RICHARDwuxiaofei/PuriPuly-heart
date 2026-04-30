@@ -17,6 +17,8 @@ from puripuly_heart.config.llm_profiles import (
 from puripuly_heart.config.settings import AppSettings, OpenRouterCredentialSource
 from puripuly_heart.core.discord_managed_oauth import run_discord_oauth_callback_flow
 from puripuly_heart.core.discord_oauth_loopback import (
+    DiscordOAuthCallbackError,
+    DiscordOAuthLoopbackClosedError,
     DiscordOAuthLoopbackListener,
     bind_first_available,
 )
@@ -411,7 +413,15 @@ class ManagedOpenRouterReleaseService:
 
         listener: DiscordOAuthLoopbackListener | None = None
         try:
-            listener = self.discord_oauth_listener_factory()
+            try:
+                listener = self.discord_oauth_listener_factory()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                return self._handle_release_error(
+                    _discord_listener_release_error(exc),
+                    operation="discord_start",
+                )
             try:
                 start_response = await self.client.start_discord_oauth(
                     installation_id=bundle.installation_id,
@@ -423,18 +433,31 @@ class ManagedOpenRouterReleaseService:
                 return self._handle_release_error(exc, operation="discord_start")
 
             if start_response.redirect_uri != listener.redirect_uri:
-                raise ManagedOpenRouterReleaseError(
-                    code="discord_redirect_mismatch",
-                    error_class="terminal",
-                    message="Discord OAuth broker returned a different redirect URI",
+                return self._handle_release_error(
+                    ManagedOpenRouterReleaseError(
+                        code="discord_redirect_mismatch",
+                        error_class="terminal",
+                        message="Discord OAuth broker returned a different redirect URI",
+                        operation="discord_start",
+                    ),
                     operation="discord_start",
                 )
 
-            code, state = await self.discord_oauth_callback_runner(
-                listener,
-                start_response.authorization_url,
-                start_response.oauth_session_expires_at,
-            )
+            try:
+                code, state = await self.discord_oauth_callback_runner(
+                    listener,
+                    start_response.authorization_url,
+                    start_response.oauth_session_expires_at,
+                )
+            except asyncio.CancelledError:
+                raise
+            except ManagedOpenRouterReleaseError as exc:
+                return self._handle_release_error(exc, operation="discord_callback")
+            except (DiscordOAuthCallbackError, DiscordOAuthLoopbackClosedError, TimeoutError) as exc:
+                return self._handle_release_error(
+                    _discord_callback_release_error(exc),
+                    operation="discord_callback",
+                )
             try:
                 hardware_hash = await self._resolve_hardware_hash(
                     fingerprint_salt=start_response.fingerprint_salt,
@@ -908,6 +931,54 @@ def _normalize_optional_text(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _discord_listener_release_error(error: Exception) -> ManagedOpenRouterReleaseError:
+    message = _exception_message(
+        error,
+        default="Discord OAuth loopback listener unavailable",
+    )
+    return ManagedOpenRouterReleaseError(
+        code="discord_loopback_unavailable",
+        error_class="retryable",
+        message=f"Discord OAuth loopback listener unavailable: {message}",
+        operation="discord_start",
+    )
+
+
+def _discord_callback_release_error(error: Exception) -> ManagedOpenRouterReleaseError:
+    if isinstance(error, DiscordOAuthCallbackError):
+        return ManagedOpenRouterReleaseError(
+            code="discord_oauth_callback_error",
+            error_class="retryable",
+            message=f"Discord OAuth callback failed: {error.error}",
+            operation="discord_callback",
+            subcode=error.error,
+        )
+    if isinstance(error, TimeoutError):
+        return ManagedOpenRouterReleaseError(
+            code="discord_oauth_timeout",
+            error_class="retryable",
+            message=_exception_message(
+                error,
+                default="timed out waiting for Discord OAuth callback",
+            ),
+            operation="discord_callback",
+        )
+    return ManagedOpenRouterReleaseError(
+        code="discord_oauth_callback_closed",
+        error_class="retryable",
+        message=_exception_message(
+            error,
+            default="Discord OAuth callback listener closed before completion",
+        ),
+        operation="discord_callback",
+    )
+
+
+def _exception_message(error: Exception, *, default: str) -> str:
+    message = str(error).strip()
+    return message or default
 
 
 def _normalize_retry_after_ms(value: int | None) -> int | None:

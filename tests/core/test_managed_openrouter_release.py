@@ -423,7 +423,46 @@ async def test_discord_oauth_flow_persists_managed_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_discord_redirect_mismatch_closes_listener_and_raises_terminal_error() -> None:
+async def test_discord_listener_bind_failure_maps_to_retry_result_without_broker_call() -> None:
+    client = FakeManagedReleaseClient(
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
+    )
+    callback_calls: list[str] = []
+
+    def bind_listener() -> FakeDiscordOAuthListener:
+        raise OSError("no Discord OAuth loopback port is available")
+
+    async def run_callback_flow(
+        _listener: FakeDiscordOAuthListener,
+        _authorization_url: str,
+        _expires_at: str,
+    ) -> tuple[str, str]:
+        callback_calls.append("callback")
+        raise AssertionError("callback flow should not start when listener binding fails")
+
+    service, _settings, _secrets = _make_service(
+        client=client,
+        discord_oauth_listener_factory=bind_listener,
+        discord_oauth_callback_runner=run_callback_flow,
+    )
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.RETRY
+    assert result.message_key == "managed_release.retry"
+    assert result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="discord_start",
+        code="discord_loopback_unavailable",
+        error_class="retryable",
+        message="Discord OAuth loopback listener unavailable: no Discord OAuth loopback port is available",
+    )
+    assert client.calls == []
+    assert callback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_discord_redirect_mismatch_closes_listener_and_maps_terminal_result() -> None:
     harness = FakeDiscordOAuthHarness()
     client = FakeManagedReleaseClient(
         discord_start_result=_make_discord_start_success(
@@ -436,29 +475,60 @@ async def test_discord_redirect_mismatch_closes_listener_and_raises_terminal_err
         harness=harness,
     )
 
-    with pytest.raises(ManagedOpenRouterReleaseError) as exc_info:
-        await service.prepare_for_translation()
+    result = await service.prepare_for_translation()
 
-    assert exc_info.value.code == "discord_redirect_mismatch"
-    assert exc_info.value.error_class == "terminal"
-    assert exc_info.value.operation == "discord_start"
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.STOP
+    assert result.message_key == "managed_release.stop"
+    assert result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="discord_start",
+        code="discord_redirect_mismatch",
+        error_class="terminal",
+        message="Discord OAuth broker returned a different redirect URI",
+    )
     assert harness.callback_calls == []
     assert harness.listeners[0].closed is True
     assert [name for name, _payload in client.calls] == ["discord_start"]
 
 
 @pytest.mark.asyncio
-async def test_discord_callback_error_propagates_and_closes_listener_without_issue() -> None:
+async def test_discord_callback_error_maps_to_retry_result_and_closes_listener_without_issue() -> None:
     harness = FakeDiscordOAuthHarness(
         callback_error=DiscordOAuthCallbackError("access_denied", "discord-state-1"),
     )
     service, _settings, _secrets, client, harness = _make_discord_service(harness=harness)
 
-    with pytest.raises(DiscordOAuthCallbackError) as exc_info:
-        await service.prepare_for_translation()
+    result = await service.prepare_for_translation()
 
-    assert exc_info.value.error == "access_denied"
-    assert exc_info.value.state == "discord-state-1"
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.RETRY
+    assert result.message_key == "managed_release.retry"
+    assert result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="discord_callback",
+        code="discord_oauth_callback_error",
+        error_class="retryable",
+        subcode="access_denied",
+        message="Discord OAuth callback failed: access_denied",
+    )
+    assert harness.listeners[0].closed is True
+    assert [name for name, _payload in client.calls] == ["discord_start"]
+
+
+@pytest.mark.asyncio
+async def test_discord_callback_timeout_maps_to_retry_result_and_closes_listener_without_issue() -> None:
+    harness = FakeDiscordOAuthHarness(
+        callback_error=TimeoutError("timed out waiting for Discord OAuth callback"),
+    )
+    service, _settings, _secrets, client, harness = _make_discord_service(harness=harness)
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.RETRY
+    assert result.message_key == "managed_release.retry"
+    assert result.diagnostics == ManagedOpenRouterReleaseDiagnostics(
+        operation="discord_callback",
+        code="discord_oauth_timeout",
+        error_class="retryable",
+        message="timed out waiting for Discord OAuth callback",
+    )
     assert harness.listeners[0].closed is True
     assert [name for name, _payload in client.calls] == ["discord_start"]
 
