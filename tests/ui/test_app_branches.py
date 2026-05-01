@@ -608,6 +608,24 @@ def test_debug_preview_founder_letter_opens_dialog_without_actions(
     assert app._founder_letter_dialog is not None
 
 
+def test_founder_readme_url_for_locale_uses_origin_readme_pages() -> None:
+    resolver = getattr(app_module, "founder_readme_url_for_locale", None)
+
+    assert callable(resolver)
+    assert resolver("ko") == (
+        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ko.md"
+    )
+    assert resolver("zh-CN") == (
+        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.zh-CN.md"
+    )
+    assert resolver("ja") == (
+        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ja.md"
+    )
+    assert resolver("en") == ("https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.md")
+    assert resolver("fr") == ("https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.md")
+    assert resolver(None) == ("https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.md")
+
+
 def test_debug_preview_pkce_failure_only_shows_failure_snackbar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1885,7 +1903,7 @@ def test_show_snackbar_opens_page_snackbar() -> None:
     assert snackbar.duration == 1234
 
 
-def test_show_founder_letter_dialog_opens_without_external_actions(
+def test_show_founder_letter_dialog_opens_with_locale_readme_action(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = TranslatorApp.__new__(TranslatorApp)
@@ -1900,10 +1918,14 @@ def test_show_founder_letter_dialog_opens_without_external_actions(
     captured: dict[str, object] = {}
     pkce_calls: list[tuple[AppSettings, str]] = []
     opened_urls: list[str] = []
+    previous_locale = i18n_module.get_locale()
 
     class FakeFounderLetterDialog:
-        def __init__(self, page):
+        def __init__(self, page, *, on_readme=None, on_connect=None, on_contact=None):
             captured["page"] = page
+            captured["on_readme"] = on_readme
+            captured["on_connect"] = on_connect
+            captured["on_contact"] = on_contact
 
         def open(self) -> None:
             captured["opened"] = True
@@ -1918,12 +1940,22 @@ def test_show_founder_letter_dialog_opens_without_external_actions(
         ),
     )
 
-    app.show_founder_letter_dialog()
+    try:
+        i18n_module.set_locale("ko")
 
-    assert captured["page"] is app.page
-    assert captured["opened"] is True
+        app.show_founder_letter_dialog()
+
+        assert captured["page"] is app.page
+        assert captured["opened"] is True
+        assert callable(captured["on_readme"])
+        assert captured["on_connect"] is None
+        assert captured["on_contact"] is None
+        captured["on_readme"]()
+    finally:
+        i18n_module.set_locale(previous_locale)
+
     assert pkce_calls == []
-    assert opened_urls == []
+    assert opened_urls == ["https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ko.md"]
 
 
 def test_show_founder_letter_dialog_does_not_prepare_byok_alias_when_opened(
@@ -1942,8 +1974,11 @@ def test_show_founder_letter_dialog_does_not_prepare_byok_alias_when_opened(
     pkce_calls: list[tuple[AppSettings, str]] = []
 
     class FakeFounderLetterDialog:
-        def __init__(self, _page):
+        def __init__(self, _page, *, on_readme=None, on_connect=None, on_contact=None):
             captured["page"] = _page
+            captured["on_readme"] = on_readme
+            captured["on_connect"] = on_connect
+            captured["on_contact"] = on_contact
 
         def open(self) -> None:
             captured["opened"] = True
@@ -1961,6 +1996,9 @@ def test_show_founder_letter_dialog_does_not_prepare_byok_alias_when_opened(
 
     assert captured["opened"] is True
     assert captured["page"] is app.page
+    assert callable(captured["on_readme"])
+    assert captured["on_connect"] is None
+    assert captured["on_contact"] is None
     assert pkce_calls == []
 
 

@@ -53,6 +53,17 @@ MIN_WINDOW_WIDTH = 1024
 MIN_WINDOW_HEIGHT = 760
 APP_CONTENT_PADDING = 16
 FOUNDER_CONTACT_URL = "https://x.com/kapitalismho"
+FOUNDER_README_BASE_URL = "https://github.com/kapitalismho/PuriPuly-heart/blob/main"
+FOUNDER_README_PATH_BY_LOCALE = {
+    "ko": "README.ko.md",
+    "zh-CN": "README.zh-CN.md",
+    "ja": "README.ja.md",
+}
+
+
+def founder_readme_url_for_locale(locale: str | None) -> str:
+    readme_path = FOUNDER_README_PATH_BY_LOCALE.get(locale or "", "README.md")
+    return f"{FOUNDER_README_BASE_URL}/{readme_path}"
 
 
 class TranslatorApp:
@@ -776,8 +787,11 @@ class TranslatorApp:
     def _on_founder_letter_contact(self) -> None:
         webbrowser.open(FOUNDER_CONTACT_URL)
 
+    def _on_founder_letter_readme(self) -> None:
+        webbrowser.open(founder_readme_url_for_locale(get_locale()))
+
     def show_founder_letter_dialog(self) -> None:
-        dialog = FounderLetterDialog(self.page)
+        dialog = FounderLetterDialog(self.page, on_readme=self._on_founder_letter_readme)
         self._founder_letter_dialog = dialog
         dialog.open()
 

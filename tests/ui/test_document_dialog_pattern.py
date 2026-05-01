@@ -154,7 +154,10 @@ def test_founder_letter_body_text_is_one_selectable_text_control(
     assert body_column.controls[0].value == (
         "value:openrouter.handoff.letter.p1\n\n"
         "value:openrouter.handoff.letter.p2\n\n"
-        "value:openrouter.handoff.letter.p3"
+        "value:openrouter.handoff.letter.p3\n\n"
+        "value:openrouter.handoff.letter.p4\n\n"
+        "value:openrouter.handoff.letter.p5\n\n"
+        "value:openrouter.handoff.letter.p6"
     )
 
 
