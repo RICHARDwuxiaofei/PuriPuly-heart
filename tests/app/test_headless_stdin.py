@@ -75,6 +75,21 @@ async def test_headless_stdin_enqueues_translated_text(monkeypatch):
 
     await runner._stdin_loop(osc)
 
+    assert [msg.text for msg in osc.messages] == ["OK"]
+
+
+@pytest.mark.asyncio
+async def test_headless_stdin_includes_source_when_configured(monkeypatch):
+    loop = FakeLoop(lines=["hello\n", ""])
+    monkeypatch.setattr(asyncio, "get_running_loop", lambda: loop)
+
+    settings = AppSettings()
+    settings.osc.chatbox_include_source = True
+    runner = HeadlessStdinRunner(settings=settings, llm=FakeLLM(), clock=FakeClock())
+    osc = FakeOscQueue()
+
+    await runner._stdin_loop(osc)
+
     assert [msg.text for msg in osc.messages] == ["hello (OK)"]
 
 
