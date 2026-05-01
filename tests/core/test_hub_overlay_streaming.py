@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
@@ -136,51 +135,6 @@ class FailingOverlaySink:
 
 
 @dataclass(slots=True)
-class StubStreamingLLMProvider(LLMProvider):
-    chunks: list[str]
-
-    async def stream_translate(
-        self,
-        *,
-        utterance_id: UUID,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        _ = (utterance_id, text, system_prompt, source_language, target_language, context)
-        for chunk in self.chunks:
-            yield chunk
-
-    async def close(self) -> None:
-        return
-
-
-@dataclass(slots=True)
-class ImmediateFailingStreamingLLMProvider(LLMProvider):
-    error: Exception
-
-    async def stream_translate(
-        self,
-        *,
-        utterance_id: UUID,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        _ = (utterance_id, text, system_prompt, source_language, target_language, context)
-        raise self.error
-        if False:
-            yield ""
-
-    async def close(self) -> None:
-        return
-
-
-@dataclass(slots=True)
 class ImmediateFailingTranslateLLMProvider(LLMProvider):
     error: Exception
 
@@ -196,6 +150,33 @@ class ImmediateFailingTranslateLLMProvider(LLMProvider):
     ):
         _ = (utterance_id, text, system_prompt, source_language, target_language, context)
         raise self.error
+
+    async def close(self) -> None:
+        return
+
+
+@dataclass(slots=True)
+class StubTranslateLLMProvider(LLMProvider):
+    text: str
+
+    async def translate(
+        self,
+        *,
+        utterance_id: UUID,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ) -> Translation:
+        _ = (system_prompt, context)
+        return Translation(
+            utterance_id=utterance_id,
+            text=self.text,
+            source_text=text,
+            source_language=source_language,
+            target_language=target_language,
+        )
 
     async def close(self) -> None:
         return
@@ -1427,7 +1408,7 @@ async def test_overlay_sink_failures_do_not_break_chatbox_or_translation_complet
     osc = RecordingOscQueue()
     hub = ClientHub(
         stt=None,
-        llm=StubStreamingLLMProvider(chunks=["hello"]),
+        llm=StubTranslateLLMProvider(text="hello"),
         osc=osc,
         overlay_sink=sink,
     )
@@ -1445,7 +1426,7 @@ async def test_hub_emits_self_translation_to_overlay_after_translation_completio
     osc = RecordingOscQueue()
     hub = ClientHub(
         stt=None,
-        llm=StubStreamingLLMProvider(chunks=["hello"]),
+        llm=StubTranslateLLMProvider(text="hello"),
         osc=osc,
         overlay_sink=sink,
     )
@@ -1513,7 +1494,7 @@ async def test_hub_closes_self_overlay_line_after_translation_completion() -> No
     sink = RecordingOverlaySink()
     hub = ClientHub(
         stt=None,
-        llm=StubStreamingLLMProvider(chunks=["hello"]),
+        llm=StubTranslateLLMProvider(text="hello"),
         osc=RecordingOscQueue(),
         overlay_sink=sink,
     )
@@ -1535,7 +1516,7 @@ async def test_self_translation_failure_closes_overlay_line_as_incomplete() -> N
     sink = RecordingOverlaySink()
     hub = ClientHub(
         stt=None,
-        llm=ImmediateFailingStreamingLLMProvider(error=RuntimeError("boom")),
+        llm=ImmediateFailingTranslateLLMProvider(error=RuntimeError("boom")),
         osc=RecordingOscQueue(),
         overlay_sink=sink,
     )

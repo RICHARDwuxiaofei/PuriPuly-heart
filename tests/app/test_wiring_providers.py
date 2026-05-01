@@ -495,7 +495,7 @@ def test_create_llm_provider_openrouter_wraps_primary_with_source_locked_openrou
             selected_source=OpenRouterCredentialSource.BYOK,
             routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
             selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
-            fallback_selection_alias=OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH,
         ),
     )
     secrets = InMemorySecretStore()
@@ -522,7 +522,7 @@ def test_create_llm_provider_openrouter_wraps_primary_with_source_locked_openrou
 
     assert isinstance(fallback_delegate, OpenRouterLLMProvider)
     assert fallback_delegate.api_key == "or-key"
-    assert fallback_delegate.model == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
+    assert fallback_delegate.model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
     assert fallback_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
     assert fallback_delegate.runtime_logging is runtime_logging
 
@@ -537,7 +537,7 @@ def test_create_llm_provider_openrouter_byok_paths_omit_managed_user_identifier(
             selected_source=OpenRouterCredentialSource.BYOK,
             routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
             selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
-            fallback_selection_alias=OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH,
         ),
     )
     secrets = InMemorySecretStore()
@@ -705,7 +705,7 @@ def test_create_llm_provider_openrouter_managed_fallback_delegate_factory_loads_
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
         openrouter=OpenRouterSettings(
             selected_source=OpenRouterCredentialSource.MANAGED,
-            fallback_selection_alias=OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH,
         ),
     )
     secrets = InMemorySecretStore()
@@ -753,7 +753,7 @@ def test_create_llm_provider_openrouter_managed_fallback_delegate_factory_loads_
     assert load_calls == 1
 
 
-def test_create_llm_provider_openrouter_managed_gemini_fallback_clears_primary_alias_for_issue_identity() -> (
+def test_create_llm_provider_openrouter_managed_deepseek_fallback_clears_primary_alias_for_issue_identity() -> (
     None
 ):
     settings = AppSettings(
@@ -763,7 +763,7 @@ def test_create_llm_provider_openrouter_managed_gemini_fallback_clears_primary_a
             selected_source=OpenRouterCredentialSource.MANAGED,
             routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
             selection_alias=OpenRouterSelectionAlias.GEMMA4_MANAGED,
-            fallback_selection_alias=OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH,
         ),
     )
     secrets = InMemorySecretStore()
@@ -794,11 +794,11 @@ def test_create_llm_provider_openrouter_managed_gemini_fallback_clears_primary_a
     assert fallback_delegate.release_service.settings.openrouter.selection_alias is None
     assert (
         fallback_delegate.release_service.settings.openrouter.llm_model
-        == OpenRouterLLMModel.GEMINI_25_FLASH_LITE
+        == OpenRouterLLMModel.DEEPSEEK_V4_FLASH
     )
     assert (
         _resolve_managed_issue_model(fallback_delegate.release_service.settings)
-        == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
+        == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
     )
     assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
     assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
@@ -806,7 +806,7 @@ def test_create_llm_provider_openrouter_managed_gemini_fallback_clears_primary_a
     fallback_openrouter_delegate = fallback_delegate.delegate_factory("managed-key")
 
     assert isinstance(fallback_openrouter_delegate, OpenRouterLLMProvider)
-    assert fallback_openrouter_delegate.model == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
+    assert fallback_openrouter_delegate.model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
     assert fallback_openrouter_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
 
 

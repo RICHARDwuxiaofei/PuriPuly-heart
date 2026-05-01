@@ -235,8 +235,6 @@
   "provider.gemini3_flash.description": "'神'...だけどたまにサーバーが不安定です",
   "provider.gemini31_flash_lite": "Gemini 3.1 Flash Lite",
   "provider.gemini31_flash_lite.description": "速くて（そこそこ）賢いです",
-  "provider.gemini25_flash_lite": "Gemini 2.5 Flash Lite",
-  "provider.gemini25_flash_lite.description": "",
   "provider.openrouter": "OpenRouter",
   "provider.openrouter.description": "OpenRouter APIルートです",
   "provider.deepseek": "DeepSeek",

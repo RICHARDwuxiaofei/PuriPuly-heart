@@ -40,10 +40,8 @@ class FakeLLMProvider:
     """Fake LLM provider that records calls."""
 
     calls: list[dict] = field(default_factory=list)
-    stream_calls: list[dict] = field(default_factory=list)
     response_text: str = "translated"
     delay_s: float = 0.01
-    stream_snapshots: list[str] = field(default_factory=list)
 
     async def translate(
         self,
@@ -64,28 +62,6 @@ class FakeLLMProvider:
         )
         await asyncio.sleep(self.delay_s)
         return Translation(utterance_id=utterance_id, text=self.response_text)
-
-    async def stream_translate(
-        self,
-        *,
-        utterance_id,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ):
-        self.stream_calls.append(
-            {
-                "utterance_id": utterance_id,
-                "text": text,
-                "context": context,
-            }
-        )
-        await asyncio.sleep(self.delay_s)
-        snapshots = self.stream_snapshots or [self.response_text]
-        for snapshot in snapshots:
-            yield snapshot
 
     async def close(self) -> None:
         pass
@@ -283,12 +259,10 @@ class TestRuntimeLatencyLogging:
 
             assert len(llm.calls) == 1
             assert llm.calls[0]["text"] == "hello"
-            assert llm.stream_calls == []
 
             await hub._translate_and_enqueue(uuid4(), "peer hello", runtime=hub.peer_runtime)
 
             assert [call["text"] for call in llm.calls] == ["hello", "peer hello"]
-            assert llm.stream_calls == []
         finally:
             await hub.stop()
 

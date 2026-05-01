@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
 from uuid import uuid4
@@ -20,7 +19,6 @@ from puripuly_heart.providers.llm.gemini import (
 class FakeGeminiClient(GeminiClient):
     last_call: dict[str, str] | None = None
     closed: bool = False
-    stream_parts: list[str] | None = None
 
     async def translate(
         self,
@@ -39,25 +37,6 @@ class FakeGeminiClient(GeminiClient):
             "context": context,
         }
         return "TRANSLATED"
-
-    async def stream_translate(
-        self,
-        *,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        self.last_call = {
-            "text": text,
-            "system_prompt": system_prompt,
-            "source_language": source_language,
-            "target_language": target_language,
-            "context": context,
-        }
-        for part in self.stream_parts or []:
-            yield part
 
     async def close(self) -> None:
         self.closed = True
@@ -102,32 +81,6 @@ async def test_gemini_provider_uses_injected_client():
     }
 
 
-@pytest.mark.asyncio
-async def test_gemini_provider_stream_translate_yields_cumulative_text():
-    fake = FakeGeminiClient(stream_parts=["h", "ello"])
-    provider = GeminiLLMProvider(api_key="k", client=fake)
-
-    chunks = [
-        chunk
-        async for chunk in provider.stream_translate(
-            utterance_id=uuid4(),
-            text="hello",
-            system_prompt="PROMPT",
-            source_language="ko-KR",
-            target_language="en",
-        )
-    ]
-
-    assert chunks == ["h", "hello"]
-    assert fake.last_call == {
-        "text": "hello",
-        "system_prompt": "PROMPT",
-        "source_language": "ko-KR",
-        "target_language": "en",
-        "context": "",
-    }
-
-
 def _install_fake_google(monkeypatch, *, response_text: str | None) -> dict[str, object]:
     state: dict[str, object] = {}
 
@@ -156,15 +109,6 @@ def _install_fake_google(monkeypatch, *, response_text: str | None) -> dict[str,
         async def generate_content(self, **kwargs):
             state.update(kwargs)
             return SimpleNamespace(text=response_text)
-
-        async def generate_content_stream(self, **kwargs):
-            state["stream_call"] = kwargs
-
-            async def _stream():
-                for part in state.get("stream_parts", []):
-                    yield SimpleNamespace(text=part)
-
-            return _stream()
 
     class FakeAio:
         def __init__(self):
@@ -232,31 +176,6 @@ async def test_google_genai_client_formats_prompt_and_context(
 
 
 @pytest.mark.asyncio
-async def test_google_genai_client_stream_translate_emits_incremental_parts(monkeypatch):
-    state = _install_fake_google(monkeypatch, response_text="unused")
-    state["stream_parts"] = ["h", "ello"]
-
-    client = GoogleGenaiGeminiClient(api_key="k", model="m")
-    chunks = [
-        chunk
-        async for chunk in client.stream_translate(
-            text="hello",
-            system_prompt="Translate {source_language} to {target_language}.",
-            source_language="ko",
-            target_language="en",
-            context="a -> b",
-        )
-    ]
-
-    assert chunks == ["h", "ello"]
-    assert (
-        state["stream_call"]["contents"]
-        == "<context>\na -> b\n</context>\n\n<input>\nhello\n</input>"
-    )
-    assert state["stream_call"]["config"].system_instruction == "Translate ko to en."
-
-
-@pytest.mark.asyncio
 async def test_google_genai_client_raises_on_empty_response(
     monkeypatch, caplog: pytest.LogCaptureFixture
 ):
@@ -273,27 +192,6 @@ async def test_google_genai_client_raises_on_empty_response(
             )
 
     assert "[Basic][LLM] Gemini response missing text [translate]" in caplog.messages
-
-
-@pytest.mark.asyncio
-async def test_google_genai_client_logs_basic_when_stream_has_no_text(
-    monkeypatch, caplog: pytest.LogCaptureFixture
-):
-    state = _install_fake_google(monkeypatch, response_text="unused")
-    state["stream_parts"] = []
-
-    client = GoogleGenaiGeminiClient(api_key="k", model="m")
-    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.gemini"):
-        with pytest.raises(RuntimeError, match="Gemini response did not contain text"):
-            async for _chunk in client.stream_translate(
-                text="hello",
-                system_prompt="PROMPT",
-                source_language="en",
-                target_language="ko",
-            ):
-                pass
-
-    assert "[Basic][LLM] Gemini response missing text [stream]" in caplog.messages
 
 
 @pytest.mark.asyncio
@@ -347,32 +245,5 @@ async def test_google_genai_client_uses_runtime_logging_for_missing_text_warning
     assert runtime_logging.basic_messages == [
         ("[Basic][LLM] Gemini request [translate][context=no] en -> ko: 'hello'", logging.INFO),
         ("[Basic][LLM] Gemini response missing text [translate]", logging.ERROR),
-    ]
-    assert caplog.messages == []
-
-
-@pytest.mark.asyncio
-async def test_google_genai_client_uses_runtime_logging_for_stream_missing_text_warning(
-    monkeypatch, caplog: pytest.LogCaptureFixture
-):
-    state = _install_fake_google(monkeypatch, response_text="unused")
-    state["stream_parts"] = []
-    runtime_logging = SpyRuntimeLogging(detailed_return=False)
-
-    client = GoogleGenaiGeminiClient(api_key="k", model="m", runtime_logging=runtime_logging)
-    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.gemini"):
-        with pytest.raises(RuntimeError, match="Gemini response did not contain text"):
-            async for _chunk in client.stream_translate(
-                text="hello",
-                system_prompt="PROMPT",
-                source_language="en",
-                target_language="ko",
-            ):
-                pass
-
-    assert runtime_logging.detailed_messages == []
-    assert runtime_logging.basic_messages == [
-        ("[Basic][LLM] Gemini request [stream][context=no] en -> ko: 'hello'", logging.INFO),
-        ("[Basic][LLM] Gemini response missing text [stream]", logging.ERROR),
     ]
     assert caplog.messages == []

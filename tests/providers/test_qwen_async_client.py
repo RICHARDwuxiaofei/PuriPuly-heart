@@ -31,42 +31,15 @@ class FakeResponse:
         pass
 
 
-class FakeStreamResponse:
-    status_code = 200
-
-    def __init__(self, lines: tuple[str, ...] | None = None):
-        self._lines = lines or (
-            'data: {"choices":[{"delta":{"content":"ni"}}]}',
-            'data: {"choices":[{"delta":{"content":"hao"}}]}',
-            "data: [DONE]",
-        )
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        return None
-
-    async def aread(self) -> bytes:
-        return b""
-
-    async def aiter_lines(self):
-        for line in self._lines:
-            yield line
-
-
 class FakeAsyncClient:
     def __init__(
         self,
         response_data: dict | None = None,
-        stream_lines: tuple[str, ...] | None = None,
     ):
         self.last_request: dict = {}
         self.requests: list[dict] = []
-        self.stream_requests: list[dict] = []
         self.closed = False
         self._response_data = response_data
-        self._stream_lines = stream_lines
 
     async def aclose(self):
         self.closed = True
@@ -76,12 +49,6 @@ class FakeAsyncClient:
         self.last_request = request
         self.requests.append(request)
         return FakeResponse(self._response_data)
-
-    def stream(self, method, url, **kwargs):
-        request = {"method": method, "url": url, **kwargs}
-        self.last_request = request
-        self.stream_requests.append(request)
-        return FakeStreamResponse(self._stream_lines)
 
 
 @pytest.mark.asyncio
@@ -147,34 +114,6 @@ async def test_httpx_client_omits_empty_options(monkeypatch):
         {"role": "system", "content": "SYSTEM"},
         {"role": "user", "content": "<input>\nhello\n</input>"},
     ]
-
-
-@pytest.mark.asyncio
-async def test_httpx_client_stream_translate_builds_streaming_request(monkeypatch):
-    fake_client = FakeAsyncClient()
-    monkeypatch.setattr("httpx.AsyncClient", lambda **kw: fake_client)
-
-    client = HttpxQwenClient(api_key="k", model="m", base_url="https://example")
-    chunks = [
-        chunk
-        async for chunk in client.stream_translate(
-            text="hello",
-            system_prompt="SYSTEM",
-            source_language="ko",
-            target_language="en",
-            context='- "previous"',
-        )
-    ]
-
-    assert chunks == ["ni", "hao"]
-    assert len(fake_client.stream_requests) == 1
-    request = fake_client.stream_requests[0]
-    assert request["method"] == "POST"
-    assert request["url"] == "https://example/chat/completions"
-    assert request["headers"]["Authorization"] == "Bearer k"
-    assert request["json"]["stream"] is True
-    assert request["json"]["messages"][0]["role"] == "system"
-    assert request["json"]["messages"][1]["role"] == "user"
 
 
 @pytest.mark.asyncio

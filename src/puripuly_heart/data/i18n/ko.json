@@ -235,8 +235,6 @@
   "provider.gemini3_flash.description": "'신'...인데 가끔씩 서버가 불안정해요",
   "provider.gemini31_flash_lite": "Gemini 3.1 Flash Lite",
   "provider.gemini31_flash_lite.description": "빠르고 (적당히) 똑똑해요",
-  "provider.gemini25_flash_lite": "Gemini 2.5 Flash Lite",
-  "provider.gemini25_flash_lite.description": "",
   "provider.openrouter": "OpenRouter",
   "provider.openrouter.description": "OpenRouter API 경로예요",
   "provider.deepseek": "DeepSeek",

@@ -49,7 +49,7 @@ def test_settings_view_loads_qwen_prompt(monkeypatch) -> None:
 
     assert view._prompt_editor.value == load_prompt_for_provider("qwen")
     assert settings.system_prompt == view._prompt_editor.value
-    assert settings.system_prompts["qwen"] == view._prompt_editor.value
+    assert settings.system_prompts == {}
 
 
 def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
@@ -102,7 +102,7 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
     assert pending.provider.llm == LLMProviderName.OPENROUTER
 
 
-def test_deepseek_managed_and_fallback_keep_prompt_ui_provider_scoped(monkeypatch) -> None:
+def test_deepseek_managed_and_fallback_keep_single_prompt(monkeypatch) -> None:
     settings = AppSettings()
     settings.translation = TranslationSettings(
         model=TranslationModel.GEMINI_3_FLASH,
@@ -122,7 +122,7 @@ def test_deepseek_managed_and_fallback_keep_prompt_ui_provider_scoped(monkeypatc
     view._on_llm_selected(TranslationModel.DEEPSEEK_V4_FLASH.value)
     pending = view.build_provider_apply_settings()
 
-    assert view._prompt_editor.value == "OPENROUTER CUSTOM"
+    assert view._prompt_editor.value == "GEMINI CUSTOM"
     assert view._prompt_for_text.value == t(
         "settings.prompt_for",
         provider=provider_label(LLMProviderName.OPENROUTER.value),
@@ -132,24 +132,21 @@ def test_deepseek_managed_and_fallback_keep_prompt_ui_provider_scoped(monkeypatc
     assert pending.translation.connection == TranslationConnection.MANAGED
     assert pending.provider.llm == LLMProviderName.OPENROUTER
     assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
-    assert pending.system_prompt == "OPENROUTER CUSTOM"
+    assert pending.system_prompt == "GEMINI CUSTOM"
 
-    view._on_openrouter_fallback_selected(
-        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value
-    )
+    view._on_openrouter_fallback_selected(OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value)
     pending = view.build_provider_apply_settings()
 
-    assert view._prompt_editor.value == "OPENROUTER CUSTOM"
+    assert view._prompt_editor.value == "GEMINI CUSTOM"
     assert view._prompt_for_text.value == t(
         "settings.prompt_for",
         provider=provider_label(LLMProviderName.OPENROUTER.value),
     )
     assert pending is not None
     assert (
-        pending.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+        pending.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.QWEN35_FLASH
     )
-    assert pending.system_prompt == "OPENROUTER CUSTOM"
+    assert pending.system_prompt == "GEMINI CUSTOM"
 
 
 def test_prompt_tab_labels_and_helper_copy_render_from_i18n(monkeypatch) -> None:
@@ -194,7 +191,7 @@ def test_settings_view_shows_qwen_model_label(monkeypatch) -> None:
     assert view._llm_text.content.value == t("provider.qwen35_plus")
 
 
-def test_settings_view_preserves_provider_specific_prompts(monkeypatch) -> None:
+def test_settings_view_uses_single_prompt_across_provider_switches(monkeypatch) -> None:
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.GEMINI
     settings.system_prompts = {
@@ -211,30 +208,31 @@ def test_settings_view_preserves_provider_specific_prompts(monkeypatch) -> None:
 
     view._on_llm_selected(TranslationModel.QWEN_35_PLUS.value)
     pending = view.build_provider_apply_settings()
-    assert view._prompt_editor.value == "QWEN CUSTOM"
-    assert settings.system_prompt == "GEMINI CUSTOM"
-    assert pending is not None
-    assert pending.system_prompt == "QWEN CUSTOM"
-
-    view._on_prompt_change("QWEN EDITED")
-    pending = view.build_provider_apply_settings()
-    assert settings.system_prompts["qwen"] == "QWEN CUSTOM"
-    assert pending is not None
-    assert pending.system_prompts["qwen"] == "QWEN EDITED"
-
-    view._on_llm_selected(TranslationModel.GEMINI_3_FLASH.value)
-    pending = view.build_provider_apply_settings()
     assert view._prompt_editor.value == "GEMINI CUSTOM"
     assert settings.system_prompt == "GEMINI CUSTOM"
     assert pending is not None
     assert pending.system_prompt == "GEMINI CUSTOM"
 
-    view._on_llm_selected(TranslationModel.GEMMA4.value)
+    view._on_prompt_change("QWEN EDITED")
     pending = view.build_provider_apply_settings()
-    assert view._prompt_editor.value == "OPENROUTER CUSTOM"
+    assert settings.system_prompts == {}
+    assert pending is not None
+    assert pending.system_prompt == "QWEN EDITED"
+    assert pending.system_prompts == {}
+
+    view._on_llm_selected(TranslationModel.GEMINI_3_FLASH.value)
+    pending = view.build_provider_apply_settings()
+    assert view._prompt_editor.value == "QWEN EDITED"
     assert settings.system_prompt == "GEMINI CUSTOM"
     assert pending is not None
-    assert pending.system_prompt == "OPENROUTER CUSTOM"
+    assert pending.system_prompt == "QWEN EDITED"
+
+    view._on_llm_selected(TranslationModel.GEMMA4.value)
+    pending = view.build_provider_apply_settings()
+    assert view._prompt_editor.value == "QWEN EDITED"
+    assert settings.system_prompt == "GEMINI CUSTOM"
+    assert pending is not None
+    assert pending.system_prompt == "QWEN EDITED"
 
 
 def test_prompt_draft_survives_provider_round_trip_until_commit(monkeypatch) -> None:
@@ -257,6 +255,23 @@ def test_prompt_draft_survives_provider_round_trip_until_commit(monkeypatch) -> 
     assert settings.system_prompt == "GEMINI CUSTOM"
 
 
+def test_single_prompt_whitespace_survives_provider_switch(monkeypatch) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.system_prompt = "  CUSTOM PROMPT\n"
+
+    view = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_llm_selected(TranslationModel.QWEN_35_PLUS.value)
+    pending = view.build_provider_apply_settings()
+
+    assert view._prompt_editor.value == "  CUSTOM PROMPT\n"
+    assert pending is not None
+    assert pending.system_prompt == "  CUSTOM PROMPT\n"
+    assert pending.system_prompts == {}
+
+
 def test_prompt_commit_uses_prompt_apply_callback_without_generic_settings_emit(
     monkeypatch,
 ) -> None:
@@ -275,7 +290,7 @@ def test_prompt_commit_uses_prompt_apply_callback_without_generic_settings_emit(
     assert view.has_pending_prompt_changes is False
     assert len(prompt_applied) == 1
     assert prompt_applied[0].system_prompt == "custom prompt"
-    assert prompt_applied[0].system_prompts[view._active_prompt_key()] == "custom prompt"
+    assert prompt_applied[0].system_prompts == {}
     assert generic_changed == []
 
 

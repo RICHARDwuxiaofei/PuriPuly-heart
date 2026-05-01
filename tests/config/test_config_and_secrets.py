@@ -62,7 +62,7 @@ def test_settings_roundtrip(tmp_path):
     expected.languages.recent_target_languages = ["en", "zh-CN", "ja", "ko", "es", "fr"]
     shared_prompt = load_prompt_for_provider("gemini")
     expected.system_prompt = shared_prompt
-    expected.system_prompts = {provider.value: shared_prompt for provider in LLMProviderName}
+    expected.system_prompts = {}
 
     assert loaded == expected
 
@@ -434,13 +434,11 @@ def test_openrouter_fallback_aliases_include_curated_openrouter_models() -> None
 
     assert tuple(alias.value for alias in OpenRouterFallbackSelectionAlias) == (
         OpenRouterFallbackSelectionAlias.NONE.value,
-        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value,
         OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value,
         deepseek_fallback.value,
     )
     assert OPENROUTER_FALLBACK_SELECTION_ALIASES == (
         OpenRouterFallbackSelectionAlias.NONE.value,
-        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value,
         OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value,
         deepseek_fallback.value,
     )
@@ -1182,7 +1180,7 @@ def test_stt_custom_vocabulary_roundtrip_caps_terms_to_100(tmp_path):
     assert loaded.stt.custom_terms["ko"][-1] == "term-099"
 
 
-def test_system_prompts_roundtrip(tmp_path):
+def test_system_prompts_are_not_persisted(tmp_path):
     path = tmp_path / "settings.json"
     settings = AppSettings()
     settings.system_prompts = {
@@ -1201,10 +1199,11 @@ def test_system_prompts_roundtrip(tmp_path):
     settings.system_prompt = "qwen prompt"
     save_settings(path, settings)
 
+    persisted = json.loads(path.read_text(encoding="utf-8"))
     loaded = load_settings(path)
-    assert loaded.system_prompts["gemini"] == "gemini prompt"
-    assert loaded.system_prompts["openrouter"] == "openrouter prompt"
-    assert loaded.system_prompts["qwen"] == "qwen prompt"
+
+    assert "system_prompts" not in persisted
+    assert loaded.system_prompts == {}
     assert loaded.system_prompt == "qwen prompt"
 
 
@@ -1792,15 +1791,23 @@ def test_from_dict_defaults_invalid_openrouter_fallback_to_deepseek_v4_flash() -
     )
 
 
-def test_openrouter_gemini25_flash_lite_fallback_uses_stable_slug() -> None:
-    expected = "google/gemini-2.5-flash-lite"
+def test_openrouter_legacy_gemini25_flash_lite_fallback_normalizes_to_deepseek() -> None:
+    deepseek_fallback = OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
 
-    assert OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value == expected
+    assert resolve_openrouter_fallback_model(
+        "gemini25_flash_lite"
+    ) == resolve_openrouter_fallback_model(deepseek_fallback.value)
+
+
+def test_from_dict_normalizes_legacy_gemini25_flash_lite_fallback_to_deepseek() -> None:
+    data = to_dict(AppSettings())
+    data["openrouter"]["fallback_selection_alias"] = "gemini25_flash_lite"
+
+    loaded = from_dict(data)
+
     assert (
-        resolve_openrouter_fallback_model(
-            OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value
-        )
-        == expected
+        loaded.openrouter.fallback_selection_alias
+        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
     )
 
 
@@ -1914,9 +1921,7 @@ def test_openrouter_qwen_flash_main_roundtrip_migrates_to_deepseek_and_preserves
     legacy["openrouter"]["routing_mode"] = OpenRouterRoutingMode.LATENCY.value
     legacy["openrouter"]["selected_source"] = OpenRouterCredentialSource.MANAGED.value
     legacy["openrouter"]["selection_alias"] = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED.value
-    legacy["openrouter"][
-        "fallback_selection_alias"
-    ] = OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value
+    legacy["openrouter"]["fallback_selection_alias"] = "gemini25_flash_lite"
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
@@ -1929,7 +1934,7 @@ def test_openrouter_qwen_flash_main_roundtrip_migrates_to_deepseek_and_preserves
     assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
     assert (
         loaded.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
     )
     assert loaded.openrouter.llm_model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH
     assert loaded.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
@@ -1941,7 +1946,7 @@ def test_openrouter_qwen_flash_main_roundtrip_migrates_to_deepseek_and_preserves
     assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.MANAGED.value
     assert (
         persisted["openrouter"]["fallback_selection_alias"]
-        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value
+        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH.value
     )
 
 
@@ -2059,7 +2064,7 @@ def test_from_dict_defaults_invalid_openrouter_routing_mode_to_latency() -> None
     assert loaded.openrouter.routing_mode == OpenRouterRoutingMode.LATENCY
 
 
-def test_from_dict_uses_prompt_for_selected_provider():
+def test_from_dict_ignores_legacy_system_prompts_for_selected_provider():
     data = to_dict(AppSettings())
     data.pop("translation", None)
     data["provider"]["llm"] = "qwen"
@@ -2070,12 +2075,11 @@ def test_from_dict_uses_prompt_for_selected_provider():
     data["system_prompt"] = "legacy"
 
     loaded = from_dict(data)
-    assert loaded.system_prompt == "qwen custom"
-    assert loaded.system_prompts["gemini"] == "gemini custom"
-    assert loaded.system_prompts["qwen"] == "qwen custom"
+    assert loaded.system_prompt == "legacy"
+    assert loaded.system_prompts == {}
 
 
-def test_from_dict_uses_openrouter_prompt_for_selected_provider():
+def test_from_dict_ignores_legacy_openrouter_system_prompt_map():
     data = to_dict(AppSettings())
     data.pop("translation", None)
     data["provider"]["llm"] = "openrouter"
@@ -2088,8 +2092,8 @@ def test_from_dict_uses_openrouter_prompt_for_selected_provider():
 
     loaded = from_dict(data)
 
-    assert loaded.system_prompt == "openrouter custom"
-    assert loaded.system_prompts["openrouter"] == "openrouter custom"
+    assert loaded.system_prompt == "legacy"
+    assert loaded.system_prompts == {}
 
 
 def test_from_dict_backfills_legacy_system_prompt_to_selected_provider():
@@ -2100,7 +2104,7 @@ def test_from_dict_backfills_legacy_system_prompt_to_selected_provider():
     data.pop("system_prompts", None)
 
     loaded = from_dict(data)
-    assert loaded.system_prompts["gemini"] == "legacy prompt"
+    assert loaded.system_prompts == {}
     assert loaded.system_prompt == "legacy prompt"
 
 
@@ -2121,14 +2125,13 @@ def test_load_settings_schema_migration_resets_all_prompt_values(tmp_path) -> No
     loaded = load_settings(path)
     persisted = json.loads(path.read_text(encoding="utf-8"))
     shared_prompt = load_prompt_for_provider("gemini")
-    expected_prompts = {provider.value: shared_prompt for provider in LLMProviderName}
 
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert loaded.system_prompt == shared_prompt
     assert persisted["system_prompt"] == shared_prompt
-    assert loaded.system_prompts == expected_prompts
-    assert persisted["system_prompts"] == expected_prompts
+    assert loaded.system_prompts == {}
+    assert "system_prompts" not in persisted
 
 
 def test_from_dict_initializes_empty_prompt_fields_to_shared_default() -> None:
@@ -2138,15 +2141,13 @@ def test_from_dict_initializes_empty_prompt_fields_to_shared_default() -> None:
 
     loaded = from_dict(data)
     shared_prompt = load_prompt_for_provider("gemini")
-    expected_prompts = {provider.value: shared_prompt for provider in LLMProviderName}
 
     assert loaded.system_prompt == shared_prompt
-    assert loaded.system_prompts == expected_prompts
+    assert loaded.system_prompts == {}
 
 
 def test_prompt_customized_after_migration_survives_save_load(tmp_path) -> None:
     path = tmp_path / "settings.json"
-    shared_prompt = load_prompt_for_provider("gemini")
     custom_qwen_prompt = LEGACY_QWEN_DEFAULT_PROMPT
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.QWEN
@@ -2158,8 +2159,6 @@ def test_prompt_customized_after_migration_survives_save_load(tmp_path) -> None:
         },
     )
     settings.system_prompt = custom_qwen_prompt
-    settings.system_prompts = {provider.value: shared_prompt for provider in LLMProviderName}
-    settings.system_prompts["qwen"] = custom_qwen_prompt
 
     save_settings(path, settings)
 
@@ -2169,9 +2168,9 @@ def test_prompt_customized_after_migration_survives_save_load(tmp_path) -> None:
     assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert loaded.system_prompt == custom_qwen_prompt
-    assert loaded.system_prompts["qwen"] == custom_qwen_prompt
+    assert loaded.system_prompts == {}
     assert persisted["system_prompt"] == custom_qwen_prompt
-    assert persisted["system_prompts"]["qwen"] == custom_qwen_prompt
+    assert "system_prompts" not in persisted
 
 
 def test_load_settings_migrates_legacy_soniox_model_and_persists(tmp_path):

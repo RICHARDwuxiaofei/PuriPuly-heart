@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import inspect
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import InitVar, dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
@@ -891,27 +891,6 @@ class ManagedOpenRouterLLMProvider(LLMProvider):
                 if inspect.isawaitable(callback_result):
                     await callback_result
             return self._delegate
-
-    async def stream_translate(
-        self,
-        *,
-        utterance_id: UUID,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        delegate = await self._ensure_delegate()
-        async for snapshot in delegate.stream_translate(
-            utterance_id=utterance_id,
-            text=text,
-            system_prompt=system_prompt,
-            source_language=source_language,
-            target_language=target_language,
-            context=context,
-        ):
-            yield snapshot
 
     async def translate(
         self,

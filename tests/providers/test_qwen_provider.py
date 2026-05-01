@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -18,7 +17,6 @@ from puripuly_heart.providers.llm.qwen import (
 @dataclass
 class FakeQwenClient(QwenClient):
     last_call: dict[str, object] | None = None
-    stream_parts: list[str] | None = None
 
     async def translate(
         self,
@@ -37,25 +35,6 @@ class FakeQwenClient(QwenClient):
             "context": context,
         }
         return "TRANSLATED"
-
-    async def stream_translate(
-        self,
-        *,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        self.last_call = {
-            "text": text,
-            "system_prompt": system_prompt,
-            "source_language": source_language,
-            "target_language": target_language,
-            "context": context,
-        }
-        for part in self.stream_parts or []:
-            yield part
 
 
 class SpyRuntimeLogging:
@@ -93,32 +72,6 @@ async def test_qwen_provider_uses_injected_client():
         "system_prompt": "PROMPT",
         "source_language": "ko-KR",
         "target_language": "en",
-        "context": "",
-    }
-
-
-@pytest.mark.asyncio
-async def test_qwen_provider_stream_translate_yields_cumulative_text():
-    fake = FakeQwenClient(stream_parts=["ni", "hao"])
-    provider = QwenLLMProvider(api_key="k", client=fake)
-
-    chunks = [
-        chunk
-        async for chunk in provider.stream_translate(
-            utterance_id=uuid4(),
-            text="hello",
-            system_prompt="PROMPT",
-            source_language="en",
-            target_language="zh-CN",
-        )
-    ]
-
-    assert chunks == ["ni", "nihao"]
-    assert fake.last_call == {
-        "text": "hello",
-        "system_prompt": "PROMPT",
-        "source_language": "en",
-        "target_language": "zh-CN",
         "context": "",
     }
 
@@ -200,49 +153,6 @@ async def test_qwen_client_raises_when_missing_content(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_qwen_client_stream_translate_uses_legacy_generation(monkeypatch):
-    calls: dict[str, object] = {}
-
-    class FakeChunk:
-        status_code = 200
-
-        def __init__(self, content: str):
-            self.output = {"choices": [{"message": {"content": content}}]}
-
-    class FakeGeneration:
-        @staticmethod
-        def call(**kwargs):
-            calls.update(kwargs)
-            return [FakeChunk("ni"), FakeChunk("hao")]
-
-    class FakeDashScope:
-        api_key = ""
-        base_http_api_url = ""
-        Generation = FakeGeneration
-
-    monkeypatch.setitem(sys.modules, "dashscope", FakeDashScope)
-
-    client = DashScopeQwenClient(api_key="k", model="qwen-plus", base_url="https://example/api/v1")
-    chunks = [
-        chunk
-        async for chunk in client.stream_translate(
-            text="hello",
-            system_prompt="Translate naturally",
-            source_language="en",
-            target_language="zh-CN",
-            context='- "이전 문장"',
-        )
-    ]
-
-    assert chunks == ["ni", "hao"]
-    assert calls["stream"] is True
-    assert calls["incremental_output"] is True
-    assert calls["result_format"] == "message"
-    assert calls["messages"][0]["role"] == "system"
-    assert calls["messages"][1]["role"] == "user"
-
-
-@pytest.mark.asyncio
 async def test_qwen_client_uses_compatible_mode_for_qwen35(monkeypatch):
     calls: dict[str, object] = {}
 
@@ -294,71 +204,6 @@ async def test_qwen_client_uses_compatible_mode_for_qwen35(monkeypatch):
     assert "</context>" in body["messages"][1]["content"]
     assert "<input>\nhello\n</input>" in body["messages"][1]["content"]
     assert "Input: hello" not in body["messages"][1]["content"]
-
-
-@pytest.mark.asyncio
-async def test_qwen_client_stream_translate_uses_compatible_mode(monkeypatch):
-    calls: dict[str, object] = {}
-
-    class FakeStreamResponse:
-        status_code = 200
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-        async def aread(self) -> bytes:
-            return b""
-
-        async def aiter_lines(self):
-            for line in (
-                'data: {"choices":[{"delta":{"content":"ni"}}]}',
-                'data: {"choices":[{"delta":{"content":"hao"}}]}',
-                "data: [DONE]",
-            ):
-                yield line
-
-    class FakeAsyncClient:
-        def __init__(self, **_kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-        def stream(self, method, url, **kwargs):
-            calls["method"] = method
-            calls["url"] = url
-            calls["json"] = kwargs["json"]
-            return FakeStreamResponse()
-
-    monkeypatch.setattr("httpx.AsyncClient", FakeAsyncClient)
-
-    client = DashScopeQwenClient(
-        api_key="k", model="qwen3.5-plus", base_url="https://example/api/v1"
-    )
-    chunks = [
-        chunk
-        async for chunk in client.stream_translate(
-            text="hello",
-            system_prompt="Translate naturally",
-            source_language="en",
-            target_language="zh-CN",
-            context='- "이전 문장"',
-        )
-    ]
-
-    assert chunks == ["ni", "hao"]
-    assert calls["method"] == "POST"
-    assert calls["url"] == "https://example/compatible-mode/v1/chat/completions"
-    assert calls["json"]["stream"] is True
-    assert calls["json"]["model"] == "qwen3.5-plus"
-    assert calls["json"]["messages"][0]["role"] == "system"
-    assert calls["json"]["messages"][1]["role"] == "user"
 
 
 @pytest.mark.asyncio

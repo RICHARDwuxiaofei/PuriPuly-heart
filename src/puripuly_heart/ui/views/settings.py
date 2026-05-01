@@ -1633,11 +1633,13 @@ class SettingsView(ft.Column):
         return self._active_prompt_key_for_settings(self._build_settings_with_provider_draft())
 
     def _ensure_provider_prompt_value(self, settings: AppSettings, provider_name: str) -> str:
-        prompt = settings.system_prompts.get(provider_name, "").strip()
-        if prompt:
+        prompt = settings.system_prompt
+        if prompt.strip():
+            settings.system_prompts = {}
             return prompt
         prompt = load_prompt_for_provider(provider_name)
-        settings.system_prompts[provider_name] = prompt
+        settings.system_prompt = prompt
+        settings.system_prompts = {}
         return prompt
 
     def _current_source_language(self) -> str:
@@ -1741,7 +1743,7 @@ class SettingsView(ft.Column):
                 source.managed_identity.verified_hardware_hash_salt_version
             )
         target.system_prompt = source.system_prompt
-        target.system_prompts = copy.deepcopy(source.system_prompts)
+        target.system_prompts = {}
 
     def _build_settings_with_provider_draft(self) -> AppSettings | None:
         if self._settings is None:
@@ -1774,16 +1776,17 @@ class SettingsView(ft.Column):
         )
 
     def _sanitize_provider_apply_settings(self, settings: AppSettings | None) -> AppSettings | None:
+        if settings is not None:
+            settings.system_prompts = {}
         return settings
 
     def _stage_prompt_draft(self, value: str) -> None:
         if not self._settings:
             return
         committed_prompt = self._committed_prompt_value()
-        prompt_key = self._active_prompt_key()
         draft = self._ensure_provider_settings_draft()
         draft.system_prompt = value
-        draft.system_prompts[prompt_key] = value
+        draft.system_prompts = {}
         self.has_pending_prompt_changes = value != committed_prompt
         if not self.has_pending_prompt_changes and not self.has_provider_changes:
             self._provider_settings_draft = None
@@ -1791,8 +1794,7 @@ class SettingsView(ft.Column):
     def _committed_prompt_value(self) -> str:
         if not self._settings:
             return ""
-        prompt_key = self._active_prompt_key_for_settings(self._settings)
-        return self._settings.system_prompts.get(prompt_key, self._settings.system_prompt)
+        return self._settings.system_prompt
 
     def build_provider_apply_settings(self) -> AppSettings | None:
         return self._sanitize_provider_apply_settings(self._build_settings_with_provider_draft())
@@ -1894,17 +1896,12 @@ class SettingsView(ft.Column):
         # Prompt
         provider_name = self._active_prompt_key()
         self._prompt_editor.set_provider(provider_name)
-        stored_prompt = settings.system_prompts.get(provider_name, "").strip()
-        if stored_prompt:
-            self._prompt_editor.value = stored_prompt
-            settings.system_prompt = stored_prompt
-        elif settings.system_prompt.strip():
+        settings.system_prompts = {}
+        if settings.system_prompt.strip():
             self._prompt_editor.value = settings.system_prompt
-            settings.system_prompts[provider_name] = settings.system_prompt
         else:
             self._prompt_editor.load_default_prompt(emit_change=False)
             settings.system_prompt = self._prompt_editor.value
-            settings.system_prompts[provider_name] = settings.system_prompt
 
         self._set_custom_vocabulary_draft_from_settings(
             preserve_existing=preserve_custom_vocab_draft
@@ -1948,17 +1945,12 @@ class SettingsView(ft.Column):
 
         provider_name = self._active_prompt_key()
         self._prompt_editor.set_provider(provider_name)
-        stored_prompt = settings.system_prompts.get(provider_name, "").strip()
-        if stored_prompt:
-            self._prompt_editor.value = stored_prompt
-            settings.system_prompt = stored_prompt
-        elif settings.system_prompt.strip():
+        settings.system_prompts = {}
+        if settings.system_prompt.strip():
             self._prompt_editor.value = settings.system_prompt
-            settings.system_prompts[provider_name] = settings.system_prompt
         else:
             self._prompt_editor.load_default_prompt(emit_change=False)
             settings.system_prompt = self._prompt_editor.value
-            settings.system_prompts[provider_name] = settings.system_prompt
         self._sync_prompt_tab_copy()
 
         try:

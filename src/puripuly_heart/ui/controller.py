@@ -889,7 +889,7 @@ class GuiController:
             target.managed_identity.verified_hardware_hash = None
             target.managed_identity.verified_hardware_hash_salt_version = None
         target.system_prompt = source.system_prompt
-        target.system_prompts = copy.deepcopy(source.system_prompts)
+        target.system_prompts = {}
 
     def merge_settings_tab_apply_with_current_languages(self, pending: AppSettings) -> AppSettings:
         if self.settings is None:

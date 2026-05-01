@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -88,36 +88,11 @@ class FakeLLM(LLMProvider):
     error: Exception | None = None
     model: str | None = None
     selected_source: str | None = None
-    stream_snapshots: list[str] = field(default_factory=list)
     translate_calls: list[dict[str, object]] = field(default_factory=list)
-    stream_calls: list[dict[str, object]] = field(default_factory=list)
     close_calls: int = 0
     translate_started: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     translate_cancelled: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     translate_finished: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
-
-    async def stream_translate(
-        self,
-        *,
-        utterance_id: UUID,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        self.stream_calls.append(
-            {
-                "utterance_id": utterance_id,
-                "text": text,
-                "system_prompt": system_prompt,
-                "source_language": source_language,
-                "target_language": target_language,
-                "context": context,
-            }
-        )
-        for snapshot in self.stream_snapshots:
-            yield snapshot
 
     async def translate(
         self,
@@ -170,20 +145,6 @@ class _OpenRouterDelegateShapeLLM(LLMProvider):
     translated_text: str = "translated"
     close_calls: int = 0
 
-    async def stream_translate(
-        self,
-        *,
-        utterance_id: UUID,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        _ = utterance_id, text, system_prompt, source_language, target_language, context
-        if False:
-            yield ""
-
     async def translate(
         self,
         *,
@@ -221,27 +182,6 @@ class _EquivalentLazyWrapperLLM(LLMProvider):
             if self._delegate is None:
                 self._delegate = self.factory()
             return self._delegate
-
-    async def stream_translate(
-        self,
-        *,
-        utterance_id: UUID,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        delegate = await self._ensure_delegate()
-        async for snapshot in delegate.stream_translate(
-            utterance_id=utterance_id,
-            text=text,
-            system_prompt=system_prompt,
-            source_language=source_language,
-            target_language=target_language,
-            context=context,
-        ):
-            yield snapshot
 
     async def translate(
         self,
@@ -294,26 +234,6 @@ class _ManagedReleaseServiceStub:
             message_key="managed_release.ready",
             api_key=self.api_key,
         )
-
-
-@pytest.mark.asyncio
-async def test_fallback_racer_stream_translate_delegates_to_primary_unchanged() -> None:
-    primary = FakeLLM(stream_snapshots=["h", "he", "hello"])
-    fallback = FakeLLM(stream_snapshots=["unused"])
-    provider = FallbackRacingLLMProvider(primary=primary, fallback=fallback)
-
-    chunks = [
-        chunk
-        async for chunk in provider.stream_translate(**_translation_kwargs(utterance_id=uuid4()))
-    ]
-
-    assert chunks == ["h", "he", "hello"]
-    assert len(primary.stream_calls) == 1
-    assert fallback.stream_calls == []
-    assert primary.translate_calls == []
-    assert fallback.translate_calls == []
-
-    await provider.close()
 
 
 def test_provider_identity_recovers_managed_wrapper_settings_before_delegate_init() -> None:
@@ -396,7 +316,7 @@ async def test_fallback_racer_persists_managed_wrapper_identity_from_release_ser
     )
     fallback = FakeLLM(
         translated_text="fallback",
-        model=OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value,
+        model=OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value,
         selected_source=OpenRouterCredentialSource.MANAGED.value,
     )
     runtime_logging = _PersistedRuntimeLogging()
@@ -425,7 +345,7 @@ async def test_fallback_racer_persists_managed_wrapper_identity_from_release_ser
     payload = _payload_for_event(runtime_logging, event="primary_completed")
     assert payload["primary_model"] == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value
     assert payload["primary_credential_source"] == OpenRouterCredentialSource.MANAGED.value
-    assert payload["fallback_model"] == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
+    assert payload["fallback_model"] == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
     assert payload["fallback_credential_source"] == OpenRouterCredentialSource.MANAGED.value
 
     await provider.close()
@@ -445,7 +365,7 @@ async def test_fallback_racer_persisted_event_prefers_delegate_model_over_releas
     )
     fallback = FakeLLM(
         translated_text="fallback",
-        model=OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value,
+        model=OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value,
         selected_source=OpenRouterCredentialSource.MANAGED.value,
     )
     runtime_logging = _PersistedRuntimeLogging()
@@ -476,7 +396,7 @@ async def test_fallback_racer_persisted_event_prefers_delegate_model_over_releas
     payload = _payload_for_event(runtime_logging, event="primary_completed")
     assert payload["primary_model"] == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
     assert payload["primary_credential_source"] == "openrouter"
-    assert payload["fallback_model"] == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
+    assert payload["fallback_model"] == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
     assert payload["fallback_credential_source"] == OpenRouterCredentialSource.MANAGED.value
 
     await provider.close()

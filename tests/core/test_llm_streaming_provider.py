@@ -1,51 +1,47 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
 import pytest
 
+from puripuly_heart.app.wiring import _LazyFactoryLLMProvider
+from puripuly_heart.core.llm import FallbackRacingLLMProvider
 from puripuly_heart.core.llm.provider import LLMProvider, SemaphoreLLMProvider
+from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterLLMProvider
 from puripuly_heart.domain.models import Translation
-
-
-@dataclass(slots=True)
-class StubStreamingLLMProvider(LLMProvider):
-    chunks: list[str]
-
-    async def stream_translate(
-        self,
-        *,
-        utterance_id: UUID,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        _ = (utterance_id, text, system_prompt, source_language, target_language, context)
-        for chunk in self.chunks:
-            yield chunk
-
-    async def close(self) -> None:
-        return
-
-
-class MissingStreamingLLMProvider(LLMProvider):
-    async def close(self) -> None:
-        return
+from puripuly_heart.providers.llm.deepseek import (
+    DeepSeekClient,
+    DeepSeekLLMProvider,
+    HttpxDeepSeekClient,
+)
+from puripuly_heart.providers.llm.gemini import (
+    GeminiClient,
+    GeminiLLMProvider,
+    GoogleGenaiGeminiClient,
+)
+from puripuly_heart.providers.llm.openrouter import (
+    HttpxOpenRouterClient,
+    OpenRouterClient,
+    OpenRouterLLMProvider,
+)
+from puripuly_heart.providers.llm.qwen import (
+    DashScopeQwenClient,
+    QwenClient,
+    QwenLLMProvider,
+)
+from puripuly_heart.providers.llm.qwen_async import (
+    AsyncQwenClient,
+    AsyncQwenLLMProvider,
+    HttpxQwenClient,
+)
 
 
 @dataclass(slots=True)
 class TranslateOnlyLLMProvider(LLMProvider):
     translated_text: str = "hello"
-    calls: list[dict[str, object]] | None = None
-
-    def __post_init__(self) -> None:
-        if self.calls is None:
-            self.calls = []
+    calls: list[dict[str, object]] = field(default_factory=list)
 
     async def translate(
         self,
@@ -57,7 +53,6 @@ class TranslateOnlyLLMProvider(LLMProvider):
         target_language: str,
         context: str = "",
     ) -> Translation:
-        assert self.calls is not None
         self.calls.append(
             {
                 "utterance_id": utterance_id,
@@ -80,100 +75,67 @@ class TranslateOnlyLLMProvider(LLMProvider):
         return
 
 
+@pytest.mark.parametrize(
+    "provider_type",
+    [
+        LLMProvider,
+        SemaphoreLLMProvider,
+        FallbackRacingLLMProvider,
+        ManagedOpenRouterLLMProvider,
+        _LazyFactoryLLMProvider,
+        GeminiLLMProvider,
+        GoogleGenaiGeminiClient,
+        OpenRouterLLMProvider,
+        HttpxOpenRouterClient,
+        QwenLLMProvider,
+        DashScopeQwenClient,
+        AsyncQwenLLMProvider,
+        HttpxQwenClient,
+        DeepSeekLLMProvider,
+        HttpxDeepSeekClient,
+    ],
+)
+def test_production_llm_classes_do_not_expose_stream_translate(provider_type: type) -> None:
+    assert "stream_translate" not in provider_type.__dict__
+
+
+@pytest.mark.parametrize(
+    "client_contract",
+    [
+        GeminiClient,
+        OpenRouterClient,
+        QwenClient,
+        AsyncQwenClient,
+        DeepSeekClient,
+    ],
+)
+def test_llm_client_contracts_do_not_require_stream_translate(client_contract: type) -> None:
+    assert "stream_translate" not in client_contract.__dict__
+
+
 @pytest.mark.asyncio
-async def test_stream_translate_yields_cumulative_snapshots():
-    provider = StubStreamingLLMProvider(chunks=["h", "he", "hello"])
-
-    chunks = [
-        chunk
-        async for chunk in provider.stream_translate(
-            utterance_id=uuid4(),
-            text="안녕",
-            system_prompt="PROMPT",
-            source_language="ko",
-            target_language="en",
-        )
-    ]
-
-    assert chunks == ["h", "he", "hello"]
-
-
-@pytest.mark.asyncio
-async def test_translate_aggregates_stream_to_final_translation():
-    provider = StubStreamingLLMProvider(chunks=["h", "he", "hello"])
+async def test_semaphore_provider_preserves_translate_behavior_without_stream_contract() -> None:
+    inner = TranslateOnlyLLMProvider(translated_text="translated")
+    provider = SemaphoreLLMProvider(inner=inner, semaphore=asyncio.Semaphore(1))
+    utterance_id = uuid4()
 
     result = await provider.translate(
-        utterance_id=uuid4(),
+        utterance_id=utterance_id,
         text="안녕",
         system_prompt="PROMPT",
         source_language="ko",
         target_language="en",
+        context='- "previous"',
     )
 
-    assert result.translated_text == "hello"
-
-
-@pytest.mark.asyncio
-async def test_semaphore_provider_stream_translate_wraps_inner_stream():
-    inner = StubStreamingLLMProvider(chunks=["h", "he", "hello"])
-    provider = SemaphoreLLMProvider(inner=inner, semaphore=asyncio.Semaphore(1))
-
-    chunks = [
-        chunk
-        async for chunk in provider.stream_translate(
-            utterance_id=uuid4(),
-            text="안녕",
-            system_prompt="PROMPT",
-            source_language="ko",
-            target_language="en",
-        )
-    ]
-
-    assert chunks == ["h", "he", "hello"]
-
-
-@pytest.mark.asyncio
-async def test_missing_stream_contract_returns_async_iterator_and_raises_on_iteration():
-    provider = MissingStreamingLLMProvider()
-
-    stream = provider.stream_translate(
-        utterance_id=uuid4(),
-        text="안녕",
-        system_prompt="PROMPT",
-        source_language="ko",
-        target_language="en",
-    )
-
-    assert hasattr(stream, "__aiter__")
-
-    with pytest.raises(NotImplementedError):
-        await anext(stream)
-
-
-@pytest.mark.asyncio
-async def test_semaphore_provider_stream_translate_falls_back_for_translate_only_inner():
-    inner = TranslateOnlyLLMProvider(translated_text="fallback")
-    provider = SemaphoreLLMProvider(inner=inner, semaphore=asyncio.Semaphore(1))
-
-    chunks = [
-        chunk
-        async for chunk in provider.stream_translate(
-            utterance_id=uuid4(),
-            text="안녕",
-            system_prompt="PROMPT",
-            source_language="ko",
-            target_language="en",
-        )
-    ]
-
-    assert chunks == ["fallback"]
+    assert result.translated_text == "translated"
     assert inner.calls == [
         {
-            "utterance_id": inner.calls[0]["utterance_id"],
+            "utterance_id": utterance_id,
             "text": "안녕",
             "system_prompt": "PROMPT",
             "source_language": "ko",
             "target_language": "en",
-            "context": "",
+            "context": '- "previous"',
         }
     ]

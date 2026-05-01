@@ -114,9 +114,7 @@ def test_first_run_settings_preserve_prompt_defaults() -> None:
     default_prompt = load_prompt_for_provider("gemini")
 
     assert settings.system_prompt == default_prompt
-    assert settings.system_prompts == {
-        provider.value: default_prompt for provider in LLMProviderName
-    }
+    assert settings.system_prompts == {}
 
 
 def test_first_run_settings_preserve_provider_defaults() -> None:
@@ -137,7 +135,7 @@ def test_first_run_settings_roundtrip_through_dict_serialization() -> None:
     assert restored.provider.llm == LLMProviderName.OPENROUTER
     assert restored.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
     assert restored.system_prompt == settings.system_prompt
-    assert restored.system_prompts == settings.system_prompts
+    assert restored.system_prompts == {}
 
 
 def test_first_run_settings_without_explicit_locale_detects_system_locale(

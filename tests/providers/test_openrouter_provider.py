@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -20,7 +19,6 @@ from puripuly_heart.providers.llm.openrouter import (
 class FakeOpenRouterClient(OpenRouterClient):
     last_call: dict[str, object] | None = None
     closed: bool = False
-    stream_parts: list[str] | None = None
 
     async def translate(
         self,
@@ -39,25 +37,6 @@ class FakeOpenRouterClient(OpenRouterClient):
             "context": context,
         }
         return "TRANSLATED"
-
-    async def stream_translate(
-        self,
-        *,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        self.last_call = {
-            "text": text,
-            "system_prompt": system_prompt,
-            "source_language": source_language,
-            "target_language": target_language,
-            "context": context,
-        }
-        for part in self.stream_parts or []:
-            yield part
 
     async def close(self) -> None:
         self.closed = True
@@ -90,49 +69,16 @@ class FakeResponse:
         pass
 
 
-class FakeStreamResponse:
-    def __init__(
-        self,
-        *,
-        status_code: int = 200,
-        lines: tuple[str, ...] | None = None,
-        body: bytes = b"",
-    ):
-        self.status_code = status_code
-        self._lines = lines or (
-            'data: {"choices":[{"delta":{"content":"he"}}]}',
-            'data: {"choices":[{"delta":{"content":"llo"}}]}',
-            "data: [DONE]",
-        )
-        self._body = body
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        return None
-
-    async def aread(self) -> bytes:
-        return self._body
-
-    async def aiter_lines(self):
-        for line in self._lines:
-            yield line
-
-
 class FakeAsyncClient:
     def __init__(
         self,
         *,
         response_data: dict | None = None,
-        stream_response: FakeStreamResponse | None = None,
     ):
         self.last_request: dict = {}
         self.requests: list[dict] = []
-        self.stream_requests: list[dict] = []
         self.closed = False
         self._response_data = response_data
-        self._stream_response = stream_response or FakeStreamResponse()
 
     async def aclose(self):
         self.closed = True
@@ -142,12 +88,6 @@ class FakeAsyncClient:
         self.last_request = request
         self.requests.append(request)
         return FakeResponse(self._response_data)
-
-    def stream(self, method, url, **kwargs):
-        request = {"method": method, "url": url, **kwargs}
-        self.last_request = request
-        self.stream_requests.append(request)
-        return self._stream_response
 
 
 @pytest.mark.asyncio
@@ -173,25 +113,6 @@ async def test_openrouter_provider_uses_injected_client() -> None:
         "target_language": "en",
         "context": "",
     }
-
-
-@pytest.mark.asyncio
-async def test_openrouter_provider_stream_translate_yields_cumulative_text() -> None:
-    fake = FakeOpenRouterClient(stream_parts=["he", "llo"])
-    provider = OpenRouterLLMProvider(api_key="k", client=fake)
-
-    chunks = [
-        chunk
-        async for chunk in provider.stream_translate(
-            utterance_id=uuid4(),
-            text="hello",
-            system_prompt="PROMPT",
-            source_language="ko-KR",
-            target_language="en",
-        )
-    ]
-
-    assert chunks == ["he", "hello"]
 
 
 @pytest.mark.asyncio
@@ -333,7 +254,7 @@ async def test_httpx_openrouter_client_builds_reasoning_disabled_request_with_la
     assert body["provider"] == {
         "sort": "latency",
         "allow_fallbacks": True,
-        "ignore": ["venice", "deepinfra"],
+        "ignore": ["venice", "deepinfra", "google-vertex"],
     }
     assert body["messages"][0] == {"role": "system", "content": "SYSTEM"}
     assert body["messages"][1]["role"] == "user"
@@ -366,7 +287,7 @@ async def test_httpx_openrouter_client_latency_routing_ignores_venice_and_deepin
     assert body["provider"] == {
         "sort": "latency",
         "allow_fallbacks": True,
-        "ignore": ["venice", "deepinfra"],
+        "ignore": ["venice", "deepinfra", "google-vertex"],
     }
 
 
@@ -393,47 +314,6 @@ async def test_httpx_openrouter_client_builds_ordered_request_for_parasail_first
     assert result == "OK"
     body = fake_client.last_request["json"]
     assert body["provider"] == {"order": ["Parasail", "Novita"], "allow_fallbacks": True}
-
-
-@pytest.mark.asyncio
-async def test_httpx_openrouter_client_stream_translate_builds_streaming_request(
-    monkeypatch,
-) -> None:
-    fake_client = FakeAsyncClient()
-    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
-
-    client = HttpxOpenRouterClient(
-        api_key="k",
-        model="m",
-        base_url="https://example",
-        user_identifier="managed-user-123",
-    )
-    chunks = [
-        chunk
-        async for chunk in client.stream_translate(
-            text="hello",
-            system_prompt="SYSTEM",
-            source_language="ko",
-            target_language="en",
-            context="",
-        )
-    ]
-
-    assert chunks == ["he", "llo"]
-    assert len(fake_client.stream_requests) == 1
-    request = fake_client.stream_requests[0]
-    assert request["method"] == "POST"
-    assert request["url"] == "https://example/chat/completions"
-    assert request["headers"]["Authorization"] == "Bearer k"
-    assert request["json"]["stream"] is True
-    assert request["json"]["max_tokens"] == 100
-    assert request["json"]["reasoning"] == {"effort": "none"}
-    assert request["json"]["user"] == "managed-user-123"
-    assert request["json"]["provider"] == {
-        "sort": "latency",
-        "allow_fallbacks": True,
-        "ignore": ["venice", "deepinfra"],
-    }
 
 
 @pytest.mark.asyncio
@@ -464,56 +344,6 @@ async def test_httpx_openrouter_client_translate_raises_on_length_finish_reason(
 
 
 @pytest.mark.asyncio
-async def test_httpx_openrouter_client_stream_translate_raises_on_length_finish_reason(
-    monkeypatch,
-) -> None:
-    fake_client = FakeAsyncClient(
-        stream_response=FakeStreamResponse(
-            lines=(
-                'data: {"choices":[{"delta":{"content":"par"}}]}',
-                'data: {"choices":[{"finish_reason":"length"}]}',
-                "data: [DONE]",
-            )
-        )
-    )
-    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
-
-    client = HttpxOpenRouterClient(api_key="k", model="m", base_url="https://example")
-
-    with pytest.raises(RuntimeError, match="truncated"):
-        async for _chunk in client.stream_translate(
-            text="hello",
-            system_prompt="SYSTEM",
-            source_language="ko",
-            target_language="en",
-        ):
-            pass
-
-
-@pytest.mark.asyncio
-async def test_httpx_openrouter_client_surfaces_stream_error_message(monkeypatch) -> None:
-    fake_client = FakeAsyncClient(
-        stream_response=FakeStreamResponse(
-            status_code=429,
-            lines=(),
-            body=b'{"error":{"message":"quota exceeded"}}',
-        )
-    )
-    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
-
-    client = HttpxOpenRouterClient(api_key="k", model="m", base_url="https://example")
-
-    with pytest.raises(RuntimeError, match="quota exceeded"):
-        async for _chunk in client.stream_translate(
-            text="hello",
-            system_prompt="SYSTEM",
-            source_language="ko",
-            target_language="en",
-        ):
-            pass
-
-
-@pytest.mark.asyncio
 async def test_httpx_openrouter_client_logs_basic_translate_success_without_runtime_logging(
     monkeypatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -535,32 +365,6 @@ async def test_httpx_openrouter_client_logs_basic_translate_success_without_runt
     assert caplog.messages == [
         "[Basic][LLM] OpenRouter request [translate][context=yes] ko -> en: 'hello'",
         "[Basic][LLM] OpenRouter response [translate]: 'OK'",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_httpx_openrouter_client_logs_basic_stream_success_without_runtime_logging(
-    monkeypatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    fake_client = FakeAsyncClient()
-    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
-
-    client = HttpxOpenRouterClient(api_key="k", model="m", base_url="https://example")
-
-    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.openrouter"):
-        chunks = [
-            chunk
-            async for chunk in client.stream_translate(
-                text="hello",
-                system_prompt="SYSTEM",
-                source_language="ko",
-                target_language="en",
-            )
-        ]
-
-    assert chunks == ["he", "llo"]
-    assert caplog.messages == [
-        "[Basic][LLM] OpenRouter request [stream][context=no] ko -> en: 'hello'",
     ]
 
 
@@ -601,37 +405,6 @@ async def test_httpx_openrouter_client_logs_basic_translate_failure_without_runt
     assert caplog.messages == [
         "[Basic][LLM] OpenRouter request [translate][context=no] ko -> en: 'hello'",
         "[Basic][LLM] OpenRouter request failed [translate]: status=429 message=quota exceeded",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_httpx_openrouter_client_logs_basic_stream_failure_without_runtime_logging(
-    monkeypatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    fake_client = FakeAsyncClient(
-        stream_response=FakeStreamResponse(
-            status_code=429,
-            lines=(),
-            body=b'{"error":{"message":"quota exceeded"}}',
-        )
-    )
-    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
-
-    client = HttpxOpenRouterClient(api_key="k", model="m", base_url="https://example")
-
-    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.openrouter"):
-        with pytest.raises(RuntimeError, match="quota exceeded"):
-            async for _chunk in client.stream_translate(
-                text="hello",
-                system_prompt="SYSTEM",
-                source_language="ko",
-                target_language="en",
-            ):
-                pass
-
-    assert caplog.messages == [
-        "[Basic][LLM] OpenRouter request [stream][context=no] ko -> en: 'hello'",
-        "[Basic][LLM] OpenRouter request failed [stream]: status=429 message=quota exceeded",
     ]
 
 
@@ -719,86 +492,4 @@ async def test_httpx_openrouter_client_runtime_logging_logs_basic_translate_fail
             logging.ERROR,
         ),
     ]
-    assert caplog.messages == []
-
-
-@pytest.mark.asyncio
-async def test_httpx_openrouter_client_runtime_logging_logs_basic_stream_success(
-    monkeypatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    fake_client = FakeAsyncClient()
-    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
-    runtime_logging = SpyRuntimeLogging(detailed_return=False)
-
-    client = HttpxOpenRouterClient(
-        api_key="k",
-        model="m",
-        base_url="https://example",
-        runtime_logging=runtime_logging,
-    )
-
-    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.openrouter"):
-        chunks = [
-            chunk
-            async for chunk in client.stream_translate(
-                text="hello",
-                system_prompt="SYSTEM",
-                source_language="ko",
-                target_language="en",
-            )
-        ]
-
-    assert chunks == ["he", "llo"]
-    assert runtime_logging.basic_messages == [
-        (
-            "[Basic][LLM] OpenRouter request [stream][context=no] ko -> en: 'hello'",
-            logging.INFO,
-        ),
-    ]
-    assert runtime_logging.detailed_messages == []
-    assert caplog.messages == []
-
-
-@pytest.mark.asyncio
-async def test_httpx_openrouter_client_runtime_logging_logs_basic_stream_failure(
-    monkeypatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    fake_client = FakeAsyncClient(
-        stream_response=FakeStreamResponse(
-            status_code=429,
-            lines=(),
-            body=b'{"error":{"message":"quota exceeded"}}',
-        )
-    )
-    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
-    runtime_logging = SpyRuntimeLogging(detailed_return=False)
-
-    client = HttpxOpenRouterClient(
-        api_key="k",
-        model="m",
-        base_url="https://example",
-        runtime_logging=runtime_logging,
-    )
-
-    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.llm.openrouter"):
-        with pytest.raises(RuntimeError, match="quota exceeded"):
-            async for _chunk in client.stream_translate(
-                text="hello",
-                system_prompt="SYSTEM",
-                source_language="ko",
-                target_language="en",
-            ):
-                pass
-
-    assert runtime_logging.basic_messages == [
-        (
-            "[Basic][LLM] OpenRouter request [stream][context=no] ko -> en: 'hello'",
-            logging.INFO,
-        ),
-        (
-            "[Basic][LLM] OpenRouter request failed [stream]: status=429 message=quota exceeded",
-            logging.ERROR,
-        ),
-    ]
-    assert runtime_logging.detailed_messages == []
     assert caplog.messages == []

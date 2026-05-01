@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Protocol
 from uuid import UUID
@@ -112,23 +110,6 @@ def _extract_message_content(content: object) -> str:
     raise RuntimeError("OpenRouter response did not contain message content")
 
 
-def _extract_stream_content(content: object) -> str:
-    if isinstance(content, str):
-        return content
-
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        if parts:
-            return "".join(parts)
-
-    return ""
-
-
 def _extract_error_message(data: object) -> str:
     if not isinstance(data, dict):
         return ""
@@ -142,31 +123,6 @@ def _extract_error_message(data: object) -> str:
             return nested.strip()
     if isinstance(error, str) and error.strip():
         return error.strip()
-    return ""
-
-
-def _extract_stream_delta(data: object) -> str:
-    if not isinstance(data, dict):
-        return ""
-
-    choices = data.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return ""
-
-    choice = choices[0]
-    if not isinstance(choice, dict):
-        return ""
-
-    delta = choice.get("delta")
-    if isinstance(delta, dict):
-        content = _extract_stream_content(delta.get("content"))
-        if content:
-            return content
-
-    message = choice.get("message")
-    if isinstance(message, dict):
-        return _extract_stream_content(message.get("content"))
-
     return ""
 
 
@@ -191,7 +147,11 @@ def _build_provider_preferences(
         return {"order": ["Parasail", "Novita"], "allow_fallbacks": True}
     if routing_mode == OpenRouterRoutingMode.NOVITA_FIRST:
         return {"order": ["Novita", "Parasail"], "allow_fallbacks": True}
-    return {"sort": "latency", "allow_fallbacks": True, "ignore": ["venice", "deepinfra"]}
+    return {
+        "sort": "latency",
+        "allow_fallbacks": True,
+        "ignore": ["venice", "deepinfra", "google-vertex"],
+    }
 
 
 class OpenRouterClient(Protocol):
@@ -204,16 +164,6 @@ class OpenRouterClient(Protocol):
         target_language: str,
         context: str = "",
     ) -> str: ...
-
-    async def stream_translate(
-        self,
-        *,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]: ...
 
     async def close(self) -> None: ...
 
@@ -259,31 +209,6 @@ class OpenRouterLLMProvider:
                 runtime_logging=self.runtime_logging,
             )
         return self._internal_client
-
-    async def stream_translate(
-        self,
-        *,
-        utterance_id: UUID,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        _ = utterance_id
-        client = self._get_client()
-        cumulative = ""
-        async for part in client.stream_translate(
-            text=text,
-            system_prompt=system_prompt,
-            source_language=source_language,
-            target_language=target_language,
-            context=context,
-        ):
-            if not part:
-                continue
-            cumulative += part
-            yield cumulative
 
     async def translate(
         self,
@@ -381,7 +306,6 @@ class HttpxOpenRouterClient:
         source_language: str,
         target_language: str,
         context: str,
-        stream: bool = False,
     ) -> dict[str, object]:
         system_content = _build_system_prompt(
             system_prompt=system_prompt,
@@ -403,8 +327,6 @@ class HttpxOpenRouterClient:
         user_identifier = normalize_managed_openrouter_user_identifier(self.user_identifier)
         if user_identifier is not None:
             request_body["user"] = user_identifier
-        if stream:
-            request_body["stream"] = True
         return request_body
 
     def _headers(self) -> dict[str, str]:
@@ -478,78 +400,6 @@ class HttpxOpenRouterClient:
             text=result,
         )
         return result
-
-    async def stream_translate(
-        self,
-        *,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        _log_basic_request(
-            runtime_logging=self.runtime_logging,
-            operation="stream",
-            text=text,
-            source_language=source_language,
-            target_language=target_language,
-            context=context,
-        )
-
-        request_body = self._build_request_body(
-            text=text,
-            system_prompt=system_prompt,
-            source_language=source_language,
-            target_language=target_language,
-            context=context,
-            stream=True,
-        )
-        client = await self._get_http_client()
-        async with client.stream(
-            "POST",
-            f"{self.base_url}/chat/completions",
-            headers=self._headers(),
-            json=request_body,
-        ) as response:
-            if response.status_code != 200:
-                body_text = (await response.aread()).decode(errors="ignore")
-                error_message = ""
-                with contextlib.suppress(Exception):
-                    error_message = _extract_error_message(json.loads(body_text))
-                if not error_message:
-                    error_message = body_text[:200]
-                _log_basic_request_failure(
-                    runtime_logging=self.runtime_logging,
-                    operation="stream",
-                    status=response.status_code,
-                    message=error_message or "unknown error",
-                )
-                raise RuntimeError(
-                    "OpenRouter request failed "
-                    f"(status={response.status_code}, message={error_message})"
-                )
-
-            saw_text = False
-            saw_length_truncation = False
-            async for line in response.aiter_lines():
-                if not line or not line.startswith("data:"):
-                    continue
-                payload = line[len("data:") :].strip()
-                if not payload or payload == "[DONE]":
-                    continue
-                data = json.loads(payload)
-                if _has_length_finish_reason(data):
-                    saw_length_truncation = True
-                part = _extract_stream_delta(data)
-                if not part:
-                    continue
-                saw_text = True
-                yield part
-            if saw_length_truncation:
-                raise RuntimeError("OpenRouter stream was truncated by max_tokens limit")
-            if not saw_text:
-                raise RuntimeError("OpenRouter stream did not contain message content")
 
     async def close(self) -> None:
         async with self._client_lock:

@@ -14,11 +14,9 @@ from puripuly_heart.config.audio_host_api import (
 )
 from puripuly_heart.config.llm_profiles import (
     OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH,
-    OPENROUTER_FALLBACK_SELECTION_ALIAS_GEMINI25_FLASH_LITE,
     OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE,
     OPENROUTER_FALLBACK_SELECTION_ALIAS_QWEN35_FLASH,
     OPENROUTER_MODEL_DEEPSEEK_V4_FLASH,
-    OPENROUTER_MODEL_GEMINI_25_FLASH_LITE,
     OPENROUTER_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_BYOK,
     OPENROUTER_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_MANAGED,
     OPENROUTER_SELECTION_ALIAS_GEMMA4_BYOK,
@@ -66,9 +64,6 @@ class LLMProviderName(str, Enum):
     DEEPSEEK = "deepseek"
 
 
-_PROMPT_PROVIDER_KEYS = tuple(provider.value for provider in LLMProviderName)
-
-
 class SecretsBackend(str, Enum):
     KEYRING = "keyring"
     ENCRYPTED_FILE = "encrypted_file"
@@ -97,7 +92,6 @@ class OpenRouterLLMModel(str, Enum):
     GEMMA_4_26B_A4B_IT = "google/gemma-4-26b-a4b-it"
     QWEN_35_FLASH_02_23 = "qwen/qwen3.5-flash-02-23"
     DEEPSEEK_V4_FLASH = OPENROUTER_MODEL_DEEPSEEK_V4_FLASH
-    GEMINI_25_FLASH_LITE = OPENROUTER_MODEL_GEMINI_25_FLASH_LITE
 
 
 class OpenRouterRoutingMode(str, Enum):
@@ -123,7 +117,6 @@ class OpenRouterSelectionAlias(str, Enum):
 
 class OpenRouterFallbackSelectionAlias(str, Enum):
     NONE = OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE
-    GEMINI25_FLASH_LITE = OPENROUTER_FALLBACK_SELECTION_ALIAS_GEMINI25_FLASH_LITE
     QWEN35_FLASH = OPENROUTER_FALLBACK_SELECTION_ALIAS_QWEN35_FLASH
     DEEPSEEK_V4_FLASH = OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH
 
@@ -945,7 +938,6 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             ),
         },
         "system_prompt": settings.system_prompt,
-        "system_prompts": settings.system_prompts,
     }
     return _enum_to_value(data)  # type: ignore[return-value]
 
@@ -1515,43 +1507,18 @@ def _parse_qwen_region(value: object, *, legacy_asr_endpoint: object = None) -> 
     return QwenRegion.BEIJING
 
 
-def _llm_prompt_key(provider: LLMProviderName) -> str:
-    if provider == LLMProviderName.GEMINI:
-        return "gemini"
-    if provider == LLMProviderName.OPENROUTER:
-        return "openrouter"
-    if provider == LLMProviderName.DEEPSEEK:
-        return "deepseek"
-    return "qwen"
-
-
-def _parse_system_prompts(value: object) -> dict[str, str]:
-    if not isinstance(value, dict):
-        return {}
-    out: dict[str, str] = {}
-    for key, prompt in value.items():
-        if isinstance(key, str) and isinstance(prompt, str):
-            out[key] = prompt
-    return out
-
-
 def _shared_default_prompt() -> str:
     from puripuly_heart.config.prompts import load_prompt_for_provider
 
     return load_prompt_for_provider(LLMProviderName.GEMINI.value)
 
 
-def _shared_default_system_prompts(prompt: str) -> dict[str, str]:
-    return {provider_key: prompt for provider_key in _PROMPT_PROVIDER_KEYS}
-
-
 def ensure_prompt_defaults(settings: AppSettings) -> AppSettings:
     system_prompt_empty = not settings.system_prompt.strip()
-    system_prompts_empty = all(not prompt.strip() for prompt in settings.system_prompts.values())
-    if system_prompt_empty and system_prompts_empty:
+    if system_prompt_empty:
         prompt = _shared_default_prompt()
         settings.system_prompt = prompt
-        settings.system_prompts = _shared_default_system_prompts(prompt)
+    settings.system_prompts = {}
     return settings
 
 
@@ -1997,7 +1964,6 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     if version < 19:
         prompt = _shared_default_prompt()
         data["system_prompt"] = prompt
-        data["system_prompts"] = _shared_default_system_prompts(prompt)
         changed = True
         version = 19
 
@@ -2374,6 +2340,10 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         )
         changed = True
 
+    if "system_prompts" in data:
+        data.pop("system_prompts", None)
+        changed = True
+
     if data.get("settings_version") != version:
         data["settings_version"] = version
         changed = True
@@ -2423,7 +2393,6 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     input_device_raw = audio_data.get("input_device")
     vad_threshold_raw = stt_data.get("vad_speech_threshold")
     legacy_system_prompt = str(data.get("system_prompt", ""))
-    system_prompts = _parse_system_prompts(data.get("system_prompts"))
     settings_version = _coerce_int(data.get("settings_version"), SETTINGS_SCHEMA_VERSION)
     parsed_custom_terms = _parse_custom_terms(stt_data.get("custom_terms", _default_custom_terms()))
     if "custom_vocabulary_enabled" in stt_data:
@@ -2674,7 +2643,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             ),
         ),
         system_prompt=legacy_system_prompt,
-        system_prompts=system_prompts,
+        system_prompts={},
     )
 
     translation_data = data.get("translation") if isinstance(data.get("translation"), dict) else {}
@@ -2694,21 +2663,6 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         )
     materialize_translation_settings(settings)
 
-    selected_prompt_key = _llm_prompt_key(settings.provider.llm)
-    if legacy_system_prompt and selected_prompt_key not in settings.system_prompts:
-        settings.system_prompts[selected_prompt_key] = legacy_system_prompt
-
-    if (
-        settings_version < 19
-        and settings.system_prompts.get("qwen", "").strip() == LEGACY_QWEN_DEFAULT_PROMPT
-    ):
-        from puripuly_heart.config.prompts import load_prompt_for_provider
-
-        settings.system_prompts["qwen"] = load_prompt_for_provider("qwen")
-
-    selected_prompt = settings.system_prompts.get(selected_prompt_key, "").strip()
-    if selected_prompt:
-        settings.system_prompt = selected_prompt
     ensure_prompt_defaults(settings)
     settings.validate()
     return settings

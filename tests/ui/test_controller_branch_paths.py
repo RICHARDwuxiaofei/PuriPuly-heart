@@ -1949,7 +1949,7 @@ def test_build_llm_provider_signature_tracks_openrouter_fallback_alias_only() ->
     base = AppSettings()
     base.provider.llm = LLMProviderName.OPENROUTER
     base.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
-    base.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+    base.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
 
     same_runtime_missing_ui_alias = copy.deepcopy(base)
     same_runtime_missing_ui_alias.openrouter.selection_alias = None
@@ -5382,6 +5382,7 @@ async def test_apply_settings_self_target_change_clears_peer_runtime_when_peer_t
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.languages.peer_target_language = ""
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = settings
     controller.hub = DummyHub()
@@ -5434,6 +5435,7 @@ async def test_apply_settings_self_source_change_clears_peer_runtime_when_peer_s
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.languages.peer_source_language = ""
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = settings
     controller.hub = DummyHub()
@@ -6367,7 +6369,7 @@ def test_merge_settings_tab_apply_with_current_languages_preserves_all_language_
     controller.settings = AppSettings()
     controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
     controller.settings.openrouter.fallback_selection_alias = (
-        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
     )
     controller.settings.languages.source_language = "fr"
     controller.settings.languages.target_language = "de"
@@ -6424,8 +6426,7 @@ def test_merge_settings_tab_apply_with_current_languages_preserves_all_language_
     assert merged.managed_identity.verified_hardware_hash == "pending-hash"
     assert merged.managed_identity.verified_hardware_hash_salt_version == 7
     assert merged.system_prompt == "draft prompt"
-    assert merged.system_prompts == {"openrouter": "draft prompt"}
-    assert merged.system_prompts is not pending.system_prompts
+    assert merged.system_prompts == {}
 
 
 @pytest.mark.asyncio
@@ -6436,7 +6437,7 @@ async def test_apply_providers_preserves_current_languages_while_applying_provid
     controller.settings = AppSettings()
     controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
     controller.settings.openrouter.fallback_selection_alias = (
-        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
     )
     controller.settings.languages.source_language = "fr"
     controller.settings.languages.target_language = "de"
@@ -6521,7 +6522,7 @@ async def test_apply_providers_preserves_current_languages_while_applying_provid
     assert controller.settings.managed_identity.verified_hardware_hash == "pending-hash"
     assert controller.settings.managed_identity.verified_hardware_hash_salt_version == 5
     assert controller.settings.system_prompt == "draft prompt"
-    assert controller.settings.system_prompts == {"openrouter": "draft prompt"}
+    assert controller.settings.system_prompts == {}
     assert calls == ["llm", "peer", "rebuild_stt"]
 
 
@@ -6534,7 +6535,7 @@ async def test_apply_providers_rebuilds_only_llm_for_openrouter_fallback_alias_c
     controller.settings.provider.llm = LLMProviderName.OPENROUTER
     controller.settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_MANAGED
     controller.settings.openrouter.fallback_selection_alias = (
-        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
     )
     controller.hub = DummyHub()
     controller._last_self_stt_provider_signature = controller._build_self_stt_provider_signature(
@@ -7072,17 +7073,16 @@ def test_load_or_init_settings_creates_default_file(
 
     loaded = controller._load_or_init_settings(path)
     shared_prompt = load_prompt_for_provider("gemini")
-    expected_prompts = {provider.value: shared_prompt for provider in LLMProviderName}
 
     assert isinstance(loaded, AppSettings)
     assert loaded.ui.overlay_enabled is False
     assert loaded.system_prompt == shared_prompt
-    assert loaded.system_prompts == expected_prompts
+    assert loaded.system_prompts == {}
     assert path.parent.exists() is True
     assert saves == [(path, loaded)]
     assert saves[0][1].ui.overlay_enabled is False
     assert saves[0][1].system_prompt == shared_prompt
-    assert saves[0][1].system_prompts == expected_prompts
+    assert saves[0][1].system_prompts == {}
 
 
 @pytest.mark.asyncio

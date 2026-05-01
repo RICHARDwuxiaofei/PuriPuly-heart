@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -17,7 +16,6 @@ from puripuly_heart.providers.llm.deepseek import (
 class FakeDeepSeekClient(DeepSeekClient):
     last_call: dict[str, object] | None = None
     closed: bool = False
-    stream_parts: list[str] | None = None
 
     async def translate(
         self,
@@ -37,25 +35,6 @@ class FakeDeepSeekClient(DeepSeekClient):
         }
         return "TRANSLATED"
 
-    async def stream_translate(
-        self,
-        *,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        self.last_call = {
-            "text": text,
-            "system_prompt": system_prompt,
-            "source_language": source_language,
-            "target_language": target_language,
-            "context": context,
-        }
-        for part in self.stream_parts or []:
-            yield part
-
     async def close(self) -> None:
         self.closed = True
 
@@ -70,36 +49,6 @@ class FakeResponse:
         return self._data
 
 
-class FakeStreamResponse:
-    def __init__(
-        self,
-        *,
-        status_code: int = 200,
-        lines: tuple[str, ...] | None = None,
-        body: bytes = b"",
-    ):
-        self.status_code = status_code
-        self._lines = lines or (
-            'data: {"choices":[{"delta":{"content":"he"}}]}',
-            'data: {"choices":[{"delta":{"content":"llo"}}]}',
-            "data: [DONE]",
-        )
-        self._body = body
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        return None
-
-    async def aread(self) -> bytes:
-        return self._body
-
-    async def aiter_lines(self):
-        for line in self._lines:
-            yield line
-
-
 class FakeAsyncClient:
     def __init__(
         self,
@@ -107,16 +56,13 @@ class FakeAsyncClient:
         response_data: dict | None = None,
         response_status: int = 200,
         response_text: str = "",
-        stream_response: FakeStreamResponse | None = None,
     ):
         self.last_request: dict = {}
         self.requests: list[dict] = []
-        self.stream_requests: list[dict] = []
         self.closed = False
         self._response_data = response_data
         self._response_status = response_status
         self._response_text = response_text
-        self._stream_response = stream_response or FakeStreamResponse()
 
     async def __aenter__(self):
         return self
@@ -137,12 +83,6 @@ class FakeAsyncClient:
             text=self._response_text,
         )
 
-    def stream(self, method, url, **kwargs):
-        request = {"method": method, "url": url, **kwargs}
-        self.last_request = request
-        self.stream_requests.append(request)
-        return self._stream_response
-
 
 @pytest.mark.asyncio
 async def test_deepseek_provider_uses_injected_client() -> None:
@@ -160,32 +100,6 @@ async def test_deepseek_provider_uses_injected_client() -> None:
 
     assert out.utterance_id == utterance_id
     assert out.text == "TRANSLATED"
-    assert fake.last_call == {
-        "text": "hello",
-        "system_prompt": "PROMPT",
-        "source_language": "ko-KR",
-        "target_language": "en",
-        "context": "",
-    }
-
-
-@pytest.mark.asyncio
-async def test_deepseek_provider_stream_translate_yields_cumulative_text() -> None:
-    fake = FakeDeepSeekClient(stream_parts=["he", "llo"])
-    provider = DeepSeekLLMProvider(api_key="k", client=fake)
-
-    chunks = [
-        chunk
-        async for chunk in provider.stream_translate(
-            utterance_id=uuid4(),
-            text="hello",
-            system_prompt="PROMPT",
-            source_language="ko-KR",
-            target_language="en",
-        )
-    ]
-
-    assert chunks == ["he", "hello"]
     assert fake.last_call == {
         "text": "hello",
         "system_prompt": "PROMPT",
@@ -255,40 +169,6 @@ async def test_httpx_deepseek_client_builds_non_thinking_request(monkeypatch) ->
 
 
 @pytest.mark.asyncio
-async def test_httpx_deepseek_client_stream_translate_builds_streaming_request(
-    monkeypatch,
-) -> None:
-    fake_client = FakeAsyncClient()
-    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
-
-    client = HttpxDeepSeekClient(
-        api_key="k",
-        model="deepseek-v4-flash",
-        base_url="https://example.deepseek",
-    )
-    chunks = [
-        chunk
-        async for chunk in client.stream_translate(
-            text="hello",
-            system_prompt="SYSTEM",
-            source_language="ko",
-            target_language="en",
-            context="",
-        )
-    ]
-
-    assert chunks == ["he", "llo"]
-    assert len(fake_client.stream_requests) == 1
-    request = fake_client.stream_requests[0]
-    assert request["method"] == "POST"
-    assert request["url"] == "https://example.deepseek/chat/completions"
-    assert request["headers"]["Authorization"] == "Bearer k"
-    assert request["json"]["stream"] is True
-    assert request["json"]["max_tokens"] == 100
-    assert request["json"]["thinking"] == {"type": "disabled"}
-
-
-@pytest.mark.asyncio
 async def test_httpx_deepseek_client_translate_raises_on_length_finish_reason(
     monkeypatch,
 ) -> None:
@@ -313,56 +193,6 @@ async def test_httpx_deepseek_client_translate_raises_on_length_finish_reason(
             source_language="ko",
             target_language="en",
         )
-
-
-@pytest.mark.asyncio
-async def test_httpx_deepseek_client_stream_translate_raises_on_length_finish_reason(
-    monkeypatch,
-) -> None:
-    fake_client = FakeAsyncClient(
-        stream_response=FakeStreamResponse(
-            lines=(
-                'data: {"choices":[{"delta":{"content":"par"}}]}',
-                'data: {"choices":[{"finish_reason":"length"}]}',
-                "data: [DONE]",
-            )
-        )
-    )
-    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
-
-    client = HttpxDeepSeekClient(api_key="k", model="m", base_url="https://example")
-
-    with pytest.raises(RuntimeError, match="truncated"):
-        async for _chunk in client.stream_translate(
-            text="hello",
-            system_prompt="SYSTEM",
-            source_language="ko",
-            target_language="en",
-        ):
-            pass
-
-
-@pytest.mark.asyncio
-async def test_httpx_deepseek_client_surfaces_stream_error_message(monkeypatch) -> None:
-    fake_client = FakeAsyncClient(
-        stream_response=FakeStreamResponse(
-            status_code=429,
-            lines=(),
-            body=b'{"error":{"message":"quota exceeded"}}',
-        )
-    )
-    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
-
-    client = HttpxDeepSeekClient(api_key="k", model="m", base_url="https://example")
-
-    with pytest.raises(RuntimeError, match="quota exceeded"):
-        async for _chunk in client.stream_translate(
-            text="hello",
-            system_prompt="SYSTEM",
-            source_language="ko",
-            target_language="en",
-        ):
-            pass
 
 
 @pytest.mark.asyncio

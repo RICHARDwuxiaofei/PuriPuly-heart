@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -18,7 +17,6 @@ from puripuly_heart.providers.llm.qwen_async import (
 class FakeAsyncQwenClient(AsyncQwenClient):
     last_call: dict[str, object] | None = None
     closed: bool = False
-    stream_parts: list[str] | None = None
 
     async def translate(
         self,
@@ -37,25 +35,6 @@ class FakeAsyncQwenClient(AsyncQwenClient):
             "context": context,
         }
         return "TRANSLATED"
-
-    async def stream_translate(
-        self,
-        *,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        self.last_call = {
-            "text": text,
-            "system_prompt": system_prompt,
-            "source_language": source_language,
-            "target_language": target_language,
-            "context": context,
-        }
-        for part in self.stream_parts or []:
-            yield part
 
     async def close(self) -> None:
         self.closed = True
@@ -117,25 +96,6 @@ async def test_async_qwen_provider_passes_context():
     assert fake.last_call is not None
     assert fake.last_call["system_prompt"] == "PROMPT"
     assert fake.last_call["context"] == '- "안녕"'
-
-
-@pytest.mark.asyncio
-async def test_async_qwen_provider_stream_translate_yields_cumulative_text():
-    fake = FakeAsyncQwenClient(stream_parts=["ni", "hao"])
-    provider = AsyncQwenLLMProvider(api_key="k", client=fake)
-
-    chunks = [
-        chunk
-        async for chunk in provider.stream_translate(
-            utterance_id=uuid4(),
-            text="hello",
-            system_prompt="PROMPT",
-            source_language="en",
-            target_language="zh-CN",
-        )
-    ]
-
-    assert chunks == ["ni", "nihao"]
 
 
 @pytest.mark.asyncio

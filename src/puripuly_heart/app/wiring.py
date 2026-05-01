@@ -71,27 +71,6 @@ class _LazyFactoryLLMProvider(LLMProvider):
                 self._delegate = self.factory()
             return self._delegate
 
-    async def stream_translate(
-        self,
-        *,
-        utterance_id,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ):
-        delegate = await self._ensure_delegate()
-        async for snapshot in delegate.stream_translate(
-            utterance_id=utterance_id,
-            text=text,
-            system_prompt=system_prompt,
-            source_language=source_language,
-            target_language=target_language,
-            context=context,
-        ):
-            yield snapshot
-
     async def translate(
         self,
         *,

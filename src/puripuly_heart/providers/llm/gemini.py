@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import UUID
@@ -66,16 +65,6 @@ class GeminiClient(Protocol):
         context: str = "",
     ) -> str: ...
 
-    async def stream_translate(
-        self,
-        *,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]: ...
-
     async def close(self) -> None: ...
 
 
@@ -97,31 +86,6 @@ class GeminiLLMProvider:
                 runtime_logging=self.runtime_logging,
             )
         return self._internal_client
-
-    async def stream_translate(
-        self,
-        *,
-        utterance_id: UUID,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        _ = utterance_id
-        client = self._get_client()
-        cumulative = ""
-        async for part in client.stream_translate(
-            text=text,
-            system_prompt=system_prompt,
-            source_language=source_language,
-            target_language=target_language,
-            context=context,
-        ):
-            if not part:
-                continue
-            cumulative += part
-            yield cumulative
 
     async def translate(
         self,
@@ -258,49 +222,6 @@ class GoogleGenaiGeminiClient:
             return result
         _log_basic_missing_text(runtime_logging=self.runtime_logging, operation="translate")
         raise RuntimeError("Gemini response did not contain text")
-
-    async def stream_translate(
-        self,
-        *,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        from google.genai import types  # type: ignore
-
-        formatted_system_prompt, user_message = self._build_request(
-            operation="stream",
-            text=text,
-            system_prompt=system_prompt,
-            source_language=source_language,
-            target_language=target_language,
-            context=context,
-        )
-
-        client = self._get_client()
-        stream = await client.aio.models.generate_content_stream(
-            model=self.model,
-            contents=user_message,
-            config=types.GenerateContentConfig(
-                system_instruction=formatted_system_prompt,
-                thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL),
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            ),
-        )
-
-        saw_text = False
-        async for chunk in stream:
-            part = getattr(chunk, "text", None)
-            if not isinstance(part, str) or not part:
-                continue
-            saw_text = True
-            yield part
-
-        if not saw_text:
-            _log_basic_missing_text(runtime_logging=self.runtime_logging, operation="stream")
-            raise RuntimeError("Gemini response did not contain text")
 
     async def close(self) -> None:
         self._client = None

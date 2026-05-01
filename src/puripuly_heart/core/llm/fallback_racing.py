@@ -5,7 +5,7 @@ import contextlib
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
@@ -47,26 +47,6 @@ class FallbackRacingLLMProvider(LLMProvider):
     def __post_init__(self) -> None:
         self.fallback_timeout_ms = max(0, int(self.fallback_timeout_ms))
         self.loser_grace_ms = max(0, int(self.loser_grace_ms))
-
-    async def stream_translate(
-        self,
-        *,
-        utterance_id: UUID,
-        text: str,
-        system_prompt: str,
-        source_language: str,
-        target_language: str,
-        context: str = "",
-    ) -> AsyncIterator[str]:
-        async for snapshot in self.primary.stream_translate(
-            utterance_id=utterance_id,
-            text=text,
-            system_prompt=system_prompt,
-            source_language=source_language,
-            target_language=target_language,
-            context=context,
-        ):
-            yield snapshot
 
     async def translate(
         self,

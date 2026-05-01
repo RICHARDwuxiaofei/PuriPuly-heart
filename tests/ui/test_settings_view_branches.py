@@ -403,7 +403,7 @@ def test_load_from_settings_uses_system_prompt_when_provider_prompt_missing(
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     assert view._prompt_editor.value == "LEGACY PROMPT"
-    assert settings.system_prompts["gemini"] == "LEGACY PROMPT"
+    assert settings.system_prompts == {}
 
 
 def test_load_from_settings_uses_default_prompt_when_all_empty(
@@ -419,7 +419,7 @@ def test_load_from_settings_uses_default_prompt_when_all_empty(
 
     assert bool(view._prompt_editor.value.strip())
     assert settings.system_prompt == view._prompt_editor.value
-    assert settings.system_prompts["qwen"] == view._prompt_editor.value
+    assert settings.system_prompts == {}
 
 
 def test_load_secrets_failure_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -824,7 +824,7 @@ def test_on_llm_selected_updates_model_and_prompt_state(monkeypatch: pytest.Monk
     assert pending.translation.connection == TranslationConnection.OFFICIAL_BYOK
     assert pending.provider.llm == LLMProviderName.QWEN
     assert pending.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS
-    assert view._prompt_editor.value == "Q"
+    assert view._prompt_editor.value == "G"
     assert settings.system_prompt == "G"
 
     view._on_llm_selected(TranslationModel.QWEN_35_PLUS.value)
@@ -865,8 +865,8 @@ def test_on_translation_connection_selected_updates_openrouter_model_and_prompt_
     assert pending.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     assert pending.openrouter.selected_source == OpenRouterCredentialSource.BYOK
     assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
-    assert pending.system_prompt == "O"
-    assert view._prompt_editor.value == "O"
+    assert pending.system_prompt == "G"
+    assert view._prompt_editor.value == "G"
     assert settings.system_prompt == "G"
     assert view.has_provider_changes is True
 
@@ -899,8 +899,8 @@ def test_on_llm_selected_updates_deepseek_model_with_default_managed_connection(
     assert pending.translation.connection == TranslationConnection.MANAGED
     assert pending.provider.llm == LLMProviderName.OPENROUTER
     assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
-    assert pending.system_prompt == "O"
-    assert view._prompt_editor.value == "O"
+    assert pending.system_prompt == "G"
+    assert view._prompt_editor.value == "G"
     assert view._llm_text.content.value == t("provider.deepseek_v4_flash")
     assert view._translation_connection_text.content.value == t(
         "settings.translation_connection.managed"
@@ -943,7 +943,7 @@ def test_on_llm_selected_restores_saved_connection_history(
     assert view._translation_connection_text.content.value == t(
         "settings.translation_connection.official_byok"
     )
-    assert view._prompt_editor.value == "D"
+    assert view._prompt_editor.value == "O"
 
 
 def test_on_llm_selected_invalid_value_is_noop(
@@ -1013,7 +1013,7 @@ def test_on_llm_selected_stages_byok_with_default_openrouter_prompt_when_unsaved
     )
     settings.provider.llm = LLMProviderName.GEMINI
     settings.system_prompts = {"gemini": "G", "qwen": "Q"}
-    settings.system_prompt = "G"
+    settings.system_prompt = ""
     view = _make_llm_selection_view(monkeypatch, settings)
     view.on_request_openrouter_pkce = lambda _settings: (_ for _ in ()).throw(
         AssertionError("BYOK selection should not launch PKCE immediately")
@@ -1027,7 +1027,7 @@ def test_on_llm_selected_stages_byok_with_default_openrouter_prompt_when_unsaved
     assert pending is not None
     assert pending.provider.llm == LLMProviderName.OPENROUTER
     assert pending.system_prompt == "DEFAULT PROMPT"
-    assert pending.system_prompts["openrouter"] == "DEFAULT PROMPT"
+    assert pending.system_prompts == {}
     assert view._prompt_editor.value == "DEFAULT PROMPT"
 
 
@@ -1062,7 +1062,7 @@ def test_on_llm_selected_updates_managed_openrouter_label_and_source(
         "settings.translation_connection.managed"
     )
     assert view._openrouter_key.visible is False
-    assert view._prompt_editor.value == "O"
+    assert view._prompt_editor.value == "G"
 
 
 def test_on_llm_selected_openrouter_provider_value_defaults_to_gemma_managed(
@@ -1119,7 +1119,7 @@ def test_on_llm_selected_sets_deepseek_managed_connection_and_label(
     assert view._translation_connection_text.content.value == t(
         "settings.translation_connection.managed"
     )
-    assert view._prompt_editor.value == "O"
+    assert view._prompt_editor.value == "G"
 
 
 def test_on_llm_selected_updates_prompt_helper_copy_live_when_mounted(
@@ -1322,18 +1322,15 @@ def test_on_openrouter_fallback_selected_updates_draft_and_helper_copy(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    view._on_openrouter_fallback_selected(
-        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value
-    )
+    view._on_openrouter_fallback_selected(OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value)
 
     pending = view.build_provider_apply_settings()
 
     assert pending is not None
     assert (
-        pending.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+        pending.openrouter.fallback_selection_alias == OpenRouterFallbackSelectionAlias.QWEN35_FLASH
     )
-    assert view._openrouter_fallback_text.content.value == t("provider.gemini25_flash_lite")
+    assert view._openrouter_fallback_text.content.value == t("provider.qwen35_flash_fallback")
     assert view._openrouter_fallback_helper_text.value == t(
         "settings.openrouter_fallback.inactive_helper"
     )
@@ -1386,7 +1383,7 @@ def test_fallback_card_stays_visible_when_non_openrouter_active(
     assert t("settings.openrouter_fallback") in _api_tab_card_titles(view)
 
 
-def test_update_api_visibility_keeps_openrouter_key_for_openrouter_gemini_fallback(
+def test_update_api_visibility_keeps_openrouter_key_for_openrouter_deepseek_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("PURIPULY_HEART_OPENROUTER_LEGACY_CONNECT", raising=False)
@@ -1395,7 +1392,7 @@ def test_update_api_visibility_keeps_openrouter_key_for_openrouter_gemini_fallba
     settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
     settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
     settings.openrouter.fallback_selection_alias = (
-        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
     )
 
     view = _make_llm_selection_view(monkeypatch, settings)
@@ -1416,7 +1413,7 @@ def test_update_api_visibility_hides_openrouter_key_for_inactive_byok_fallback(
     settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
     settings.openrouter.selection_alias = OpenRouterSelectionAlias.GEMMA4_BYOK
     settings.openrouter.fallback_selection_alias = (
-        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
     )
 
     view = _make_llm_selection_view(monkeypatch, settings)
@@ -1608,7 +1605,7 @@ def test_openrouter_pkce_button_requests_auth_for_current_byok_selection(
     assert requested[0].provider.llm == LLMProviderName.OPENROUTER
     assert requested[0].openrouter.selected_source == OpenRouterCredentialSource.BYOK
     assert requested[0].openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
-    assert requested[0].system_prompt == "O"
+    assert requested[0].system_prompt == "G"
 
 
 def test_refresh_after_openrouter_pkce_success_preserves_unrelated_drafts(
@@ -1679,13 +1676,11 @@ def test_openrouter_fallback_modal_lists_curated_openrouter_fallbacks(
 
     assert [option.value for option in options] == [
         OpenRouterFallbackSelectionAlias.NONE.value,
-        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value,
         OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value,
         deepseek_fallback.value,
     ]
     assert [option.label for option in options] == [
         t("settings.openrouter_fallback.none"),
-        t("provider.gemini25_flash_lite"),
         t("provider.qwen35_flash_fallback"),
         t("provider.deepseek_v4_flash_fallback"),
     ]
@@ -1860,7 +1855,6 @@ def test_openrouter_fallback_modal_hides_provider_descriptions_for_active_option
     assert options[OpenRouterFallbackSelectionAlias.NONE.value].description == t(
         "settings.openrouter_fallback.none.description"
     )
-    assert options[OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value].description == ""
     assert options[OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value].description == ""
     assert options[deepseek_fallback.value].description == ""
 
@@ -2030,7 +2024,7 @@ def test_provider_selection_equality_guards_skip_noop_draft_changes(
     view.on_settings_changed = lambda incoming: changed.append(incoming)
 
     view._on_stt_selected(STTProviderName.LOCAL_QWEN.value)
-    view._on_peer_stt_selected(STTProviderName.DEEPGRAM.value)
+    view._on_peer_stt_selected(STTProviderName.LOCAL_QWEN.value)
     view._on_translation_connection_selected(TranslationConnection.MANAGED.value)
     view._on_qwen_region_selected(QwenRegion.BEIJING.value)
 
@@ -3736,18 +3730,16 @@ def test_prompt_change_only_updates_draft_until_commit(monkeypatch: pytest.Monke
     view.on_settings_changed = lambda incoming: changed.append(incoming)
 
     original_prompt = settings.system_prompt
-    original_provider_prompt = settings.system_prompts[view._active_prompt_key()]
-
     view._on_prompt_change("custom prompt")
 
     pending = view.build_provider_apply_settings()
 
     assert settings.system_prompt == original_prompt
-    assert settings.system_prompts[view._active_prompt_key()] == original_provider_prompt
+    assert settings.system_prompts == {}
     assert view.has_pending_prompt_changes is True
     assert pending is not None
     assert pending.system_prompt == "custom prompt"
-    assert pending.system_prompts[view._active_prompt_key()] == "custom prompt"
+    assert pending.system_prompts == {}
     assert changed == []
 
 
@@ -3764,7 +3756,7 @@ def test_prompt_commit_emits_once_when_no_provider_changes(monkeypatch: pytest.M
     assert view.has_pending_prompt_changes is False
     assert changed
     assert changed[-1].system_prompt == "custom prompt"
-    assert changed[-1].system_prompts[view._active_prompt_key()] == "custom prompt"
+    assert changed[-1].system_prompts == {}
 
 
 def test_prompt_commit_preserves_peer_local_qwen_before_emit(
@@ -3829,9 +3821,8 @@ def test_refresh_prompt_if_empty_stages_default_for_apply(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    prompt_key = view._active_prompt_key()
     view._settings.system_prompt = ""
-    view._settings.system_prompts[prompt_key] = ""
+    view._settings.system_prompts = {}
     view._provider_settings_draft = None
     view.has_provider_changes = False
     view.has_pending_prompt_changes = False
@@ -3844,7 +3835,7 @@ def test_refresh_prompt_if_empty_stages_default_for_apply(
     assert view.has_pending_prompt_changes is True
     assert pending is not None
     assert pending.system_prompt == view._prompt_editor.value
-    assert pending.system_prompts[prompt_key] == view._prompt_editor.value
+    assert pending.system_prompts == {}
 
 
 def test_on_text_hover_updates_container_once(monkeypatch: pytest.MonkeyPatch) -> None:
