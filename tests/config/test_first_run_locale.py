@@ -36,7 +36,9 @@ def test_detect_system_locale_uses_locale_getlocale(monkeypatch: pytest.MonkeyPa
     assert settings_module.detect_system_locale() == "Korean_Korea"
 
 
-@pytest.mark.parametrize("exc", [ValueError("bad locale"), settings_module.locale.Error("bad locale")])
+@pytest.mark.parametrize(
+    "exc", [ValueError("bad locale"), settings_module.locale.Error("bad locale")]
+)
 def test_first_run_settings_falls_back_to_english_when_system_locale_is_invalid(
     exc: Exception,
     monkeypatch: pytest.MonkeyPatch,
@@ -79,12 +81,22 @@ def test_first_run_locale_maps_chinese_locales_to_simplified_chinese(
     assert _resolve_first_run_locale(system_locale) == "zh-CN"
 
 
-@pytest.mark.parametrize("system_locale", ["ja", "en_US", None])
+@pytest.mark.parametrize(
+    "system_locale",
+    ["ja", "ja-JP", "ja_JP", "JA_jp", "Japanese_Japan.932"],
+)
+def test_first_run_locale_maps_japanese_locales_to_japanese(system_locale: str) -> None:
+    assert _resolve_first_run_locale(system_locale) == "ja"
+
+
+@pytest.mark.parametrize("system_locale", ["en_US", "fr_FR", None])
 def test_first_run_locale_defaults_to_english(system_locale: str | None) -> None:
     assert _resolve_first_run_locale(system_locale) == "en"
 
 
-def test_load_settings_preserves_existing_saved_locale(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_settings_preserves_existing_saved_locale(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     path = tmp_path / "settings.json"
     saved = AppSettings()
     saved.ui.locale = "ja"

@@ -174,7 +174,7 @@ def test_debug_preview_i18n_keys_exist_in_all_locale_bundles() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     i18n_dir = repo_root / "src" / "puripuly_heart" / "data" / "i18n"
 
-    for locale in ("en.json", "ko.json", "zh-CN.json"):
+    for locale in ("en.json", "ko.json", "zh-CN.json", "ja.json"):
         bundle = json.loads((i18n_dir / locale).read_text(encoding="utf-8"))
         missing = DEBUG_PREVIEW_I18N_KEYS - set(bundle)
         assert not missing, f"{locale} missing {sorted(missing)}"

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from puripuly_heart.ui.i18n import available_locales
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 I18N_DIR = REPO_ROOT / "src" / "puripuly_heart" / "data" / "i18n"
 RUNTIME_SOURCE_DIR = REPO_ROOT / "src" / "puripuly_heart"
@@ -51,6 +53,10 @@ def test_i18n_bundles_share_the_same_keys() -> None:
     }
 
     assert mismatches == {}
+
+
+def test_available_locales_use_product_display_order() -> None:
+    assert available_locales() == ("en", "ko", "zh-CN", "ja")
 
 
 def test_i18n_bundles_do_not_keep_unused_runtime_keys() -> None:

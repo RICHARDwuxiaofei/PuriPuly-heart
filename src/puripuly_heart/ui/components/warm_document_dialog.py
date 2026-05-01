@@ -46,6 +46,18 @@ def _action_button_style() -> ft.ButtonStyle:
     )
 
 
+def _make_text_button(label: str, **kwargs) -> ft.TextButton:
+    try:
+        return ft.TextButton(text=label, **kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument 'text'" not in str(exc):
+            raise
+        button = ft.TextButton(content=label, **kwargs)
+        if hasattr(button, "text"):
+            button.text = label
+        return button
+
+
 @dataclass(frozen=True)
 class WarmDocumentDialogAction:
     label: str
@@ -121,8 +133,8 @@ def open_warm_document_dialog(
         action_specs: Sequence[WarmDocumentDialogAction],
     ) -> tuple[ft.TextButton, ...]:
         return tuple(
-            ft.TextButton(
-                text=action.label,
+            _make_text_button(
+                action.label,
                 on_click=lambda _, selected_action=action: select(selected_action),
                 style=_action_button_style(),
             )

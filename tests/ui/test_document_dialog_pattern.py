@@ -8,6 +8,7 @@ import flet as ft  # noqa: E402
 
 import puripuly_heart.ui.components.founder_letter_dialog as founder_module  # noqa: E402
 import puripuly_heart.ui.components.peer_translation_eula_dialog as eula_module  # noqa: E402
+import puripuly_heart.ui.components.warm_document_dialog as warm_dialog_module  # noqa: E402
 from puripuly_heart.ui.components.founder_letter_dialog import (  # noqa: E402
     FounderLetterDialog,
 )
@@ -242,6 +243,28 @@ def test_warm_document_dialog_supports_three_ordered_actions_with_close_policy()
     assert events == ["continue", "byok"]
     assert page.closed == [result.dialog]
     assert page.dialog is None
+
+
+def test_warm_document_dialog_supports_content_only_text_button_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ContentOnlyTextButton:
+        def __init__(self, *, content, on_click=None, style=None) -> None:
+            self.content = content
+            self.on_click = on_click
+            self.style = style
+
+    monkeypatch.setattr(warm_dialog_module.ft, "TextButton", ContentOnlyTextButton)
+    page = FakePage()
+
+    result = open_warm_document_dialog(
+        page,
+        body_paragraphs=["Body copy"],
+        actions=[WarmDocumentDialogAction(label="Close")],
+        glow_factory=lambda content: content,
+    )
+
+    assert result.initial_action_buttons[0].content == "Close"
 
 
 def test_warm_document_dialog_can_replace_actions_with_shared_style() -> None:

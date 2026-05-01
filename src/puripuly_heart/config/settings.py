@@ -1577,6 +1577,8 @@ def resolve_first_run_ui_locale(system_locale: str | None) -> str:
     normalized = _normalize_first_run_locale(system_locale)
     if normalized == "ko" or normalized.startswith("ko-") or normalized.startswith("korean"):
         return "ko"
+    if normalized == "ja" or normalized.startswith("ja-") or normalized.startswith("japanese"):
+        return "ja"
     if normalized == "zh" or normalized.startswith("zh-") or normalized.startswith("chinese"):
         return "zh-CN"
     return "en"
