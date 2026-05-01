@@ -330,8 +330,8 @@ def _translation_settings_is_exact_default(settings: TranslationSettings) -> boo
 class LanguageSettings:
     source_language: str = "ko"
     target_language: str = "en"
-    peer_source_language: str = ""
-    peer_target_language: str = ""
+    peer_source_language: str = "en"
+    peer_target_language: str = "ko"
     recent_source_languages: list[str] = field(default_factory=lambda: ["en", "zh-CN", "ja"])
     recent_target_languages: list[str] = field(default_factory=lambda: ["en", "zh-CN", "ja"])
 
@@ -528,7 +528,7 @@ class OSCSettings:
 @dataclass(slots=True)
 class ProviderSettings:
     stt: STTProviderName = STTProviderName.LOCAL_QWEN
-    peer_stt: STTProviderName = STTProviderName.DEEPGRAM
+    peer_stt: STTProviderName = STTProviderName.LOCAL_QWEN
     llm: LLMProviderName = LLMProviderName.OPENROUTER
 
     def validate(self) -> None:

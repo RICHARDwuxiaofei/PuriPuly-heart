@@ -903,7 +903,10 @@ def test_create_stt_backend_local_qwen_passes_language_hint_without_hotwords() -
 
 def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration_without_hint_terms() -> None:
     settings = AppSettings(
-        provider=ProviderSettings(stt=STTProviderName.SONIOX),
+        provider=ProviderSettings(
+            stt=STTProviderName.SONIOX,
+            peer_stt=STTProviderName.DEEPGRAM,
+        ),
         deepgram_stt=DeepgramSTTSettings(model="nova-3"),
     )
     settings.audio.internal_sample_rate_hz = 8000
@@ -916,14 +919,17 @@ def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration_without_h
     assert backend.api_key == "peer-k"
     assert backend.model == "nova-3"
     assert backend.sample_rate_hz == 16000
-    assert backend.language == get_deepgram_language(settings.languages.source_language)
+    assert backend.language == get_deepgram_language(settings.languages.effective_peer_source)
     assert list(backend.keyterms) == []
     assert backend.stream_label == "peer"
 
 
 def test_create_peer_stt_backend_uses_effective_peer_source_language_without_hint_terms() -> None:
     settings = AppSettings(
-        provider=ProviderSettings(stt=STTProviderName.SONIOX),
+        provider=ProviderSettings(
+            stt=STTProviderName.SONIOX,
+            peer_stt=STTProviderName.DEEPGRAM,
+        ),
         deepgram_stt=DeepgramSTTSettings(model="nova-3"),
     )
     settings.languages.source_language = "ko"
@@ -942,8 +948,18 @@ def test_self_stt_provider_setting_does_not_change_peer_backend_choice() -> None
     secrets = InMemorySecretStore()
     secrets.set("deepgram_api_key", "peer-k")
 
-    soniox_settings = AppSettings(provider=ProviderSettings(stt=STTProviderName.SONIOX))
-    qwen_settings = AppSettings(provider=ProviderSettings(stt=STTProviderName.QWEN_ASR))
+    soniox_settings = AppSettings(
+        provider=ProviderSettings(
+            stt=STTProviderName.SONIOX,
+            peer_stt=STTProviderName.DEEPGRAM,
+        )
+    )
+    qwen_settings = AppSettings(
+        provider=ProviderSettings(
+            stt=STTProviderName.QWEN_ASR,
+            peer_stt=STTProviderName.DEEPGRAM,
+        )
+    )
 
     soniox_backend = create_peer_stt_backend(soniox_settings, secrets=secrets)
     qwen_backend = create_peer_stt_backend(qwen_settings, secrets=secrets)

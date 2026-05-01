@@ -67,6 +67,30 @@ def test_settings_roundtrip(tmp_path):
     assert loaded == expected
 
 
+def test_new_user_defaults_peer_voice_to_english_to_korean_local_qwen() -> None:
+    settings = AppSettings()
+
+    assert settings.languages.source_language == "ko"
+    assert settings.languages.target_language == "en"
+    assert settings.languages.peer_source_language == "en"
+    assert settings.languages.peer_target_language == "ko"
+    assert settings.languages.effective_peer_source == "en"
+    assert settings.languages.effective_peer_target == "ko"
+    assert settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
+
+
+def test_partial_settings_deserialization_preserves_legacy_peer_fallbacks() -> None:
+    settings = from_dict({})
+
+    assert settings.languages.source_language == "ko"
+    assert settings.languages.target_language == "en"
+    assert settings.languages.peer_source_language == ""
+    assert settings.languages.peer_target_language == ""
+    assert settings.languages.effective_peer_source == "ko"
+    assert settings.languages.effective_peer_target == "en"
+    assert settings.provider.peer_stt == STTProviderName.DEEPGRAM
+
+
 def test_save_settings_writes_via_temp_replace(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "settings.json"
     settings = AppSettings()

@@ -713,7 +713,7 @@ def test_on_peer_stt_selected_updates_provider_and_pipeline_flags(
 
     pending = view.build_provider_apply_settings()
 
-    assert settings.provider.peer_stt == STTProviderName.DEEPGRAM
+    assert settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
     assert pending is not None
     assert pending.provider.peer_stt == STTProviderName.SONIOX
     assert view.has_provider_changes is True
@@ -760,6 +760,7 @@ def test_peer_stt_local_qwen_choice_can_be_persisted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.DEEPGRAM
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 

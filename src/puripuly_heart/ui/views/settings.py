@@ -1088,7 +1088,7 @@ class SettingsView(ft.Column):
             color=COLOR_NEUTRAL,
         )
         self._peer_stt_text = self._build_clickable_text(
-            provider_label(STTProviderName.DEEPGRAM.value),
+            provider_label(STTProviderName.LOCAL_QWEN.value),
             self._on_peer_stt_click,
         )
         self._peer_stt_label = ft.Text(
@@ -1763,7 +1763,7 @@ class SettingsView(ft.Column):
 
     def _effective_peer_stt_provider(self, settings: AppSettings | None) -> STTProviderName:
         if settings is None:
-            return STTProviderName.DEEPGRAM
+            return STTProviderName.LOCAL_QWEN
         return self._normalized_peer_stt_provider(settings.provider.peer_stt)
 
     def _peer_stt_option_item(self, provider: STTProviderName) -> OptionItem:
@@ -2196,7 +2196,7 @@ class SettingsView(ft.Column):
         current_provider = (
             display_settings.provider.peer_stt
             if display_settings is not None
-            else STTProviderName.DEEPGRAM
+            else STTProviderName.LOCAL_QWEN
         )
         current = self._normalized_peer_stt_provider(current_provider).value
         SettingsModal(

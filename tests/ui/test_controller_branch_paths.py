@@ -734,7 +734,7 @@ def test_sync_ui_from_settings_updates_dashboard_and_settings_view() -> None:
 
     controller._sync_ui_from_settings()
 
-    assert dash.languages == ("ko", "en", "", "")
+    assert dash.languages == ("ko", "en", "en", "ko")
     assert dash.recent_languages == (["ko", "ja"], ["en", "zh"])
     assert dash.on_recent_languages_change is not None
     assert settings_view.calls == [(settings, Path("settings.json"), False)]

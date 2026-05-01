@@ -186,6 +186,23 @@ def _make_overlay_peer_contract(
     )
 
 
+def test_dashboard_initial_peer_language_defaults_to_english_to_korean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+
+    assert view._source_lang_code == "ko"
+    assert view._target_lang_code == "en"
+    assert view._peer_source_lang_code == "en"
+    assert view._peer_target_lang_code == "ko"
+    assert view.language_card.languages[-1] == (
+        "name-ko",
+        "name-en",
+        "name-en",
+        "name-ko",
+    )
+
+
 def test_dashboard_stt_toggle_warning_and_enable_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     view = _make_dashboard(monkeypatch)
     seen: list[bool] = []
@@ -283,8 +300,8 @@ def test_dashboard_submit_and_language_selection_paths(monkeypatch: pytest.Monke
     assert sends == [("You", "hello")]
     assert view._recent_source_langs == ["ja"]
     assert view._recent_target_langs == ["fr"]
-    assert lang_changes[-1] == ("fr", "ja", "", "")
-    assert view.language_card.languages[-1] == ("name-fr", "name-ja", "name-fr", "name-ja")
+    assert lang_changes[-1] == ("fr", "ja", "en", "ko")
+    assert view.language_card.languages[-1] == ("name-fr", "name-ja", "name-en", "name-ko")
 
 
 def test_dashboard_recent_languages_caps_and_notifies(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -703,7 +720,7 @@ def test_dashboard_peer_language_edits_share_controller_update_path(
     view._on_peer_source_select("ja")
     view._on_peer_target_select("fr")
 
-    assert changes == [("ko", "en", "ja", ""), ("ko", "en", "ja", "fr")]
+    assert changes == [("ko", "en", "ja", "ko"), ("ko", "en", "ja", "fr")]
 
 
 def test_dashboard_peer_swap_exchanges_source_and_target(

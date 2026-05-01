@@ -50,8 +50,8 @@ class DashboardView(ft.Column):
         # Current language settings
         self._source_lang_code = "ko"
         self._target_lang_code = "en"
-        self._peer_source_lang_code = ""
-        self._peer_target_lang_code = ""
+        self._peer_source_lang_code = "en"
+        self._peer_target_lang_code = "ko"
 
         # Recent languages (max 3 each)
         self._recent_source_langs: list[str] = []
