@@ -506,7 +506,7 @@ class OSCSettings:
     chatbox_clear: bool = False
     chatbox_max_chars: int = 144
     vrc_mic_intercept: bool = False
-    chatbox_include_source: bool = True
+    chatbox_include_source: bool = False
 
     def validate(self) -> None:
         if not self.host:
@@ -2590,7 +2590,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             chatbox_clear=bool(data.get("osc", {}).get("chatbox_clear", False)),
             chatbox_max_chars=int(data.get("osc", {}).get("chatbox_max_chars", 144)),
             vrc_mic_intercept=bool(data.get("osc", {}).get("vrc_mic_intercept", False)),
-            chatbox_include_source=bool(data.get("osc", {}).get("chatbox_include_source", True)),
+            chatbox_include_source=bool(data.get("osc", {}).get("chatbox_include_source", False)),
         ),
         secrets=SecretsSettings(
             backend=SecretsBackend(
