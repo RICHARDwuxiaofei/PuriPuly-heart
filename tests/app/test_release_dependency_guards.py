@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -246,14 +247,21 @@ def test_workflows_pin_exact_python_and_uv_versions() -> None:
         assert SHARED_SETUP_ACTION in workflow
 
 
-def test_workflows_pin_innosetup_and_use_shared_windows_build_script() -> None:
+def test_workflows_pin_innosetup_and_build_installer_without_slow_smoke_script() -> None:
     for workflow_path in (
         ROOT / ".github" / "workflows" / "push-ci.yml",
         ROOT / ".github" / "workflows" / "release.yml",
     ):
         workflow = workflow_path.read_text(encoding="utf-8")
         assert PINNED_INNOSETUP_VERSION in workflow
-        assert "scripts/ci/build-release-artifacts.ps1" in workflow
+        assert "scripts/ci/build-release-artifacts.ps1" not in workflow
+        assert "cargo build" in workflow
+        assert "PyInstaller" in workflow
+        assert "ISCC.exe" in workflow
+        assert "DisplayVersion" in workflow
+        assert "Inno Setup version mismatch" in workflow
+        assert "--allow-downgrade" in workflow
+        assert "--force" in workflow
 
 
 def test_readmes_distinguish_direct_packaging_from_full_release_complete_path() -> None:
@@ -758,14 +766,13 @@ def test_build_spec_deduplicates_any_root_level_auto_collected_soxr_dll() -> Non
     assert spec.index("a = Analysis(") < spec.index("normalize_soxr_runtime_binaries(a.binaries)")
 
 
-def test_push_ci_workflow_prepares_soxr_release_inputs_before_build_release_artifacts() -> None:
+def test_push_ci_workflow_prepares_soxr_release_inputs_before_pyinstaller_packaging() -> None:
     workflow = (ROOT / ".github" / "workflows" / "push-ci.yml").read_text(encoding="utf-8")
     job_block = _workflow_job_block(workflow, "windows-release-path")
 
     assert SOXR_RELEASE_INPUTS_SCRIPT in job_block
-    assert job_block.index(SOXR_RELEASE_INPUTS_SCRIPT) < job_block.index(
-        "scripts/ci/build-release-artifacts.ps1"
-    )
+    assert "scripts/ci/build-release-artifacts.ps1" not in job_block
+    assert job_block.index(SOXR_RELEASE_INPUTS_SCRIPT) < job_block.index("PyInstaller")
 
 
 def test_release_workflow_prepares_soxr_release_inputs_before_build_and_publishes_source_bundle() -> (
@@ -775,9 +782,8 @@ def test_release_workflow_prepares_soxr_release_inputs_before_build_and_publishe
     job_block = _workflow_job_block(workflow, "build-installer")
 
     assert SOXR_RELEASE_INPUTS_SCRIPT in job_block
-    assert job_block.index(SOXR_RELEASE_INPUTS_SCRIPT) < job_block.index(
-        "scripts/ci/build-release-artifacts.ps1"
-    )
+    assert "scripts/ci/build-release-artifacts.ps1" not in job_block
+    assert job_block.index(SOXR_RELEASE_INPUTS_SCRIPT) < job_block.index("PyInstaller")
     assert SOXR_SOURCE_BUNDLE_NAME in workflow
     assert (
         "release-artifacts/installer_output/"
@@ -1147,17 +1153,47 @@ def test_installer_script_path_prefix_helper_handles_drive_root_boundaries() -> 
     assert r"(NormalizedRoot[Length(NormalizedRoot)] = '\')" in script
 
 
-def test_installer_script_adds_local_stt_source_controls_and_provisioning_hook() -> None:
+def test_installer_script_uses_inno_managed_local_stt_download() -> None:
     script = (ROOT / "installer.iss").read_text(encoding="utf-8")
 
-    assert 'Source: "scripts\\installer\\install-local-stt-model.ps1"' in script
     assert "LocalSttSourcePage" in script
-    assert "LocalSttSourceComboBox" in script
     assert "LocalSttReinstallCheckBox" in script
-    assert "GetDefaultLocalSttSource" in script
-    assert "ActiveLanguage() = 'chinesesimplified'" in script
-    assert "RunLocalSttModelInstall" in script
-    assert "install-local-stt-model.ps1" in script
+    assert "CreateDownloadPage" in script
+    assert "ASR model" in script
+    assert "Local Speech Model" not in script
+    assert "local speech model" not in script
+    assert "DownloadPage.Add" in script
+    assert "DownloadPage.Download" in script
+    assert "GetSHA256OfFile" in script
+    assert "FileSize64" in script
+    assert "ValidateLocalSttInstalledManifest" in script
+    assert "selected_revision" in script
+    assert "LocalSttDownloadFailed" in script
+    assert "DownloadLocalSttSource('huggingface'" in script
+    assert "DownloadLocalSttSource('modelscope'" in script
+    assert "function RunLocalSttModelInstall(): Boolean;" in script
+    assert "if not RunLocalSttModelInstall() then begin" in script
+    assert "CurStepChanged" not in script
+    assert "GetSelectedLocalSttSource" not in script
+    assert "LocalSttSourceComboBox" not in script
+    assert "install-local-stt-model.ps1" not in script
+    assert "SW_HIDE" not in script
+
+
+def test_installer_script_embeds_local_stt_manifest_assets_for_inno_download() -> None:
+    script = (ROOT / "installer.iss").read_text(encoding="utf-8")
+    manifest = json.loads(
+        (
+            ROOT / "src/puripuly_heart/data/models/qwen3-asr-0.6b-int8-sherpa.manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert "HuggingFaceLocalSttUrl" in script
+    assert "ModelScopeLocalSttUrl" in script
+    for asset in manifest["files"]:
+        assert asset["relative_path"] in script
+        assert asset["sha256"] in script
+        assert str(asset["size_bytes"]) in script
 
 
 def test_installer_script_supports_local_stt_appdata_override_for_smoke_runs() -> None:
