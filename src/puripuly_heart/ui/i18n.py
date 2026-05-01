@@ -113,6 +113,32 @@ def t(key: str, *, default: str | None = None, **params: Any) -> str:
     return value
 
 
+def t_for_locale(
+    locale: str | None,
+    key: str,
+    *,
+    default: str | None = None,
+    **params: Any,
+) -> str:
+    resolved_locale = resolve_locale(locale)
+    value = _load_bundle(resolved_locale).get(key)
+    if value is None:
+        value = _load_bundle(_FALLBACK_LOCALE).get(key)
+    if value is None:
+        value = default if default is not None else key
+    if params:
+        try:
+            return value.format(**params)
+        except Exception:
+            logger.debug(
+                "Failed to format i18n key '%s' for locale '%s' with params %s",
+                key,
+                resolved_locale,
+                params,
+            )
+    return value
+
+
 def language_name(code: str) -> str:
     info = get_language_info(code)
     if not info:

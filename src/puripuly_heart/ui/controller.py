@@ -232,6 +232,11 @@ class GuiController:
     _overlay_lock: asyncio.Lock | None = None
     _managed_trial_pending_auth: bool = field(init=False, default=False)
     _discord_managed_auth_in_progress: bool = field(init=False, default=False)
+    _discord_managed_auth_callback_received_hook: Callable[[], None] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     _managed_trial_usage_metadata: OpenRouterKeyMetadata | None = field(init=False, default=None)
     _managed_trial_usage_metadata_entitlement_ref: str | None = field(
         init=False,
@@ -618,7 +623,9 @@ class GuiController:
             return DISCORD_AUTH_ERROR_KEY_BY_SUBCODE["loopback_unavailable"]
         return getattr(result, "message_key", "discord_auth.error.retry")
 
-    async def start_discord_managed_auth_from_dialog(self) -> bool:
+    async def start_discord_managed_auth_from_dialog(
+        self, *, on_callback_received: Callable[[], None] | None = None
+    ) -> bool:
         service = self._managed_openrouter_release_service
         if service is None:
             self._discord_managed_auth_in_progress = False
@@ -626,6 +633,8 @@ class GuiController:
             self._show_short_message("discord_auth.error.retry")
             return False
 
+        previous_callback = self._discord_managed_auth_callback_received_hook
+        self._discord_managed_auth_callback_received_hook = on_callback_received
         self._discord_managed_auth_in_progress = True
         self._set_managed_trial_pending_auth(True)
         try:
@@ -668,6 +677,8 @@ class GuiController:
             )
             return False
         finally:
+            if self._discord_managed_auth_callback_received_hook is on_callback_received:
+                self._discord_managed_auth_callback_received_hook = previous_callback
             self._discord_managed_auth_in_progress = False
             self._set_managed_trial_pending_auth(False)
 
@@ -2632,7 +2643,13 @@ class GuiController:
             persist_settings=lambda updated: save_settings(self.config_path, updated),
             raw_hardware_fingerprint_provider=get_raw_hardware_fingerprint,
             app_version=__version__,
+            on_discord_callback_received=self._on_discord_managed_auth_callback_received,
         )
+
+    def _on_discord_managed_auth_callback_received(self) -> None:
+        hook = self._discord_managed_auth_callback_received_hook
+        if callable(hook):
+            hook()
 
     async def _start_mic_loop(self) -> None:
         assert self.settings is not None
