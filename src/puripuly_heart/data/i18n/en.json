@@ -98,7 +98,7 @@
   "settings.translation_connection.official_byok.description": "Use the model provider's official API key directly.",
   "settings.translation_connection.only_supported": "This model currently supports only this connection method.",
   "settings.translation_model.gemma4.description": "Good for most situations We recommend using this model",
-  "settings.translation_model.deepseek_v4_flash.description": "Use this model if you're in mainland China",
+  "settings.translation_model.deepseek_v4_flash.description": "An option for people using PuriPuly in mainland China",
   "settings.translation_model.gemini3_flash.description": "Translation speed may be unstable",
   "settings.translation_model.gemini31_flash_lite.description": "Translation speed may be unstable",
   "settings.translation_model.qwen35_plus.description": "A strong alternative to DeepSeek",

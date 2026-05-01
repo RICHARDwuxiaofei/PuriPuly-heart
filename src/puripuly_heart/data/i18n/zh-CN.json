@@ -98,7 +98,7 @@
     "settings.translation_connection.official_byok.description": "直接使用模型提供商的官方 API 密钥。",
     "settings.translation_connection.only_supported": "此模型目前仅支持这种连接方式。",
     "settings.translation_model.gemma4.description": "适合大多数情况 建议使用此模型",
-    "settings.translation_model.deepseek_v4_flash.description": "如果你在中国大陆使用，请使用此模型",
+    "settings.translation_model.deepseek_v4_flash.description": "适合在中国大陆使用 PuriPuly 的用户",
     "settings.translation_model.gemini3_flash.description": "翻译速度可能不稳定",
     "settings.translation_model.gemini31_flash_lite.description": "翻译速度可能不稳定",
     "settings.translation_model.qwen35_plus.description": "DeepSeek 的不错替代选择",
