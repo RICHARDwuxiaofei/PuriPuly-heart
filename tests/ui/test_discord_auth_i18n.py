@@ -27,7 +27,7 @@ REQUIRED_DISCORD_AUTH_KEYS = [
 
 _EXPECTED_EXACT_STRINGS = {
     "en": {
-        "discord_auth.body": "PuriPuly provides free usage for new users.\nIt can translate about 400 utterances.\nIt is issued immediately after Discord verification.",
+        "discord_auth.body": "PuriPuly gives new users a free usage allowance.\nThat's about 400 translated utterances.\nYou'll receive it right after Discord verification.",
         "discord_auth.success": "Discord verification is complete.",
     },
     "ko": {
@@ -35,7 +35,7 @@ _EXPECTED_EXACT_STRINGS = {
         "discord_auth.success": "Discord 인증이 완료되었어요.",
     },
     "zh-CN": {
-        "discord_auth.body": "PuriPuly 为新用户提供免费用量。\n按发言计算，可翻译约 400 次。\n完成 Discord 认证后会立即发放。",
+        "discord_auth.body": "PuriPuly 会为新用户提供免费使用额度。\n按发言计算，可翻译约 400 次。\n完成 Discord 认证后会立即发放。",
         "discord_auth.success": "Discord 认证已完成。",
     },
 }
