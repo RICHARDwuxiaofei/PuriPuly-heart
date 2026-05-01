@@ -3,6 +3,7 @@ from __future__ import annotations
 import socket
 import threading
 from dataclasses import dataclass
+from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import NoReturn
 from urllib.parse import parse_qs, urlsplit
@@ -10,6 +11,23 @@ from urllib.parse import parse_qs, urlsplit
 DISCORD_OAUTH_LOOPBACK_PORTS = (62187, 62188, 62189)
 DISCORD_OAUTH_LOOPBACK_HOST = "127.0.0.1"
 DISCORD_OAUTH_LOOPBACK_PATH = "/discord/callback"
+DISCORD_OAUTH_CALLBACK_TITLE_KEY = "discord_auth.callback.title"
+DISCORD_OAUTH_CALLBACK_COMPLETION_LINE_KEYS = (
+    "discord_auth.callback.line1",
+    "discord_auth.callback.line2",
+    "discord_auth.callback.line3",
+)
+DISCORD_OAUTH_CALLBACK_COMPLETION_FALLBACK_LINES = (
+    "We received your Discord verification",
+    "PuriPuly is finishing your Managed key setup.",
+    "You can close this tab.",
+)
+DISCORD_OAUTH_CALLBACK_FONT_FAMILIES = {
+    "en": "system-ui, sans-serif",
+    "ko": '"NanumSquareRound", system-ui, sans-serif',
+    "ja": '"M PLUS Rounded 1c", system-ui, sans-serif',
+    "zh-CN": '"ResourceHanRoundedCN", system-ui, sans-serif',
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +61,7 @@ class _DiscordOAuthHTTPServer(ThreadingHTTPServer):
 @dataclass(slots=True)
 class DiscordOAuthLoopbackListener:
     port: int
+    locale: str
     _server: _DiscordOAuthHTTPServer
     _thread: threading.Thread
     _event: threading.Event
@@ -52,9 +71,10 @@ class DiscordOAuthLoopbackListener:
     _closed: bool = False
 
     @classmethod
-    def bind(cls, port: int) -> DiscordOAuthLoopbackListener:
+    def bind(cls, port: int, *, locale: str | None = None) -> DiscordOAuthLoopbackListener:
         listener = cls.__new__(cls)
         listener.port = port
+        listener.locale = _resolve_callback_locale(locale)
         listener._event = threading.Event()
         listener._lock = threading.Lock()
         listener._result = None
@@ -125,14 +145,116 @@ class DiscordOAuthLoopbackListener:
         closer.start()
 
 
-def bind_first_available() -> DiscordOAuthLoopbackListener:
+def bind_first_available(*, locale: str | None = None) -> DiscordOAuthLoopbackListener:
     last_error: OSError | None = None
     for port in DISCORD_OAUTH_LOOPBACK_PORTS:
         try:
-            return DiscordOAuthLoopbackListener.bind(port)
+            return DiscordOAuthLoopbackListener.bind(port, locale=locale)
         except OSError as exc:
             last_error = exc
     raise OSError("no Discord OAuth loopback port is available") from last_error
+
+
+def _resolve_callback_locale(locale: str | None) -> str:
+    try:
+        from puripuly_heart.ui.i18n import get_locale, resolve_locale
+
+        return resolve_locale(locale if locale is not None else get_locale())
+    except Exception:
+        return "en"
+
+
+def _callback_completion_line(locale: str, key: str, fallback: str) -> str:
+    try:
+        from puripuly_heart.ui.i18n import t_for_locale
+
+        return t_for_locale(locale, key, default=fallback)
+    except Exception:
+        return fallback
+
+
+def _callback_completion_page(locale: str) -> bytes:
+    resolved_locale = _resolve_callback_locale(locale)
+    title = _callback_completion_line(
+        resolved_locale,
+        DISCORD_OAUTH_CALLBACK_TITLE_KEY,
+        "PuriPuly",
+    )
+    lines = [
+        _callback_completion_line(resolved_locale, key, fallback)
+        for key, fallback in zip(
+            DISCORD_OAUTH_CALLBACK_COMPLETION_LINE_KEYS,
+            DISCORD_OAUTH_CALLBACK_COMPLETION_FALLBACK_LINES,
+            strict=True,
+        )
+    ]
+    lines_html = "<br>\n".join(escape(line) for line in lines)
+    font_family = DISCORD_OAUTH_CALLBACK_FONT_FAMILIES.get(
+        resolved_locale,
+        DISCORD_OAUTH_CALLBACK_FONT_FAMILIES["en"],
+    )
+    html = f"""<!doctype html>
+<html lang="{escape(resolved_locale, quote=True)}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escape(title)}</title>
+  <style>
+    :root {{ color-scheme: light; }}
+    * {{ box-sizing: border-box; }}
+    html, body {{ min-height: 100%; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 32px;
+      background: #FFF8F6;
+      color: #5C4D4C;
+      font-family: {font_family};
+    }}
+    main {{
+      max-width: 46rem;
+      text-align: center;
+      font-size: clamp(24px, 4vw, 32px);
+      line-height: 1.6;
+      font-weight: 600;
+      word-break: keep-all;
+      overflow-wrap: break-word;
+    }}
+    p {{ margin: 0; }}
+  </style>
+</head>
+<body>
+  <main>
+    <p>{lines_html}</p>
+  </main>
+</body>
+</html>
+"""
+    return html.encode("utf-8")
+
+
+def render_discord_oauth_callback_completion_page(locale: str | None = None) -> bytes:
+    return _callback_completion_page(_resolve_callback_locale(locale))
+
+
+def _send_success_callback_response(
+    handler: BaseHTTPRequestHandler,
+    listener: DiscordOAuthLoopbackListener,
+    result: DiscordOAuthCallbackResult,
+) -> None:
+    listener._complete(result=result)
+    try:
+        body = _callback_completion_page(listener.locale)
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/html; charset=utf-8")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+    finally:
+        listener._close_async()
 
 
 def _handler_for(listener: DiscordOAuthLoopbackListener) -> type[BaseHTTPRequestHandler]:
@@ -156,10 +278,11 @@ def _handler_for(listener: DiscordOAuthLoopbackListener) -> type[BaseHTTPRequest
                 return
 
             if state is not None and code is not None:
-                self.send_response(204)
-                self.end_headers()
-                listener._complete(result=DiscordOAuthCallbackResult(code=code, state=state))
-                listener._close_async()
+                _send_success_callback_response(
+                    self,
+                    listener,
+                    DiscordOAuthCallbackResult(code=code, state=state),
+                )
                 return
 
             self.send_error(400)

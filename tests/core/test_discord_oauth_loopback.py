@@ -13,8 +13,10 @@ from puripuly_heart.core.discord_oauth_loopback import (
     DISCORD_OAUTH_LOOPBACK_PATH,
     DISCORD_OAUTH_LOOPBACK_PORTS,
     DiscordOAuthCallbackError,
+    DiscordOAuthCallbackResult,
     DiscordOAuthLoopbackClosedError,
     _DiscordOAuthHTTPServer,
+    _send_success_callback_response,
     bind_first_available,
 )
 
@@ -31,6 +33,16 @@ def _get_status(url: str) -> int:
         return exc.code
 
 
+def _get_response(url: str) -> tuple[int, str, str]:
+    try:
+        with urllib.request.urlopen(url, timeout=2.0) as response:
+            body = response.read().decode("utf-8")
+            return response.status, response.headers.get("content-type", ""), body
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8")
+        return exc.code, exc.headers.get("content-type", ""), body
+
+
 def test_bind_first_available_uses_fixed_loopback_redirect_uri() -> None:
     listener = bind_first_available()
     try:
@@ -42,15 +54,104 @@ def test_bind_first_available_uses_fixed_loopback_redirect_uri() -> None:
         listener.close()
 
 
-def test_success_callback_returns_204_and_wait_returns_code_state() -> None:
-    listener = bind_first_available()
+def test_success_callback_returns_completion_page_and_wait_returns_code_state() -> None:
+    listener = bind_first_available(locale="ko")
     try:
-        assert _get_status(_callback_url(listener, code="discord-code-1", state="state-1")) == 204
+        status, content_type, body = _get_response(
+            _callback_url(listener, code="discord-code-1", state="state-1")
+        )
+
+        assert status == 200
+        assert "text/html" in content_type
+        assert "charset=utf-8" in content_type.lower()
+        assert "Discord 인증 정보를 받았어요" in body
+        assert "PuriPuly 앱에서 Managed 키 발급을 마무리하고 있어요." in body
+        assert "이 탭은 닫아도 괜찮아요." in body
+        assert "window.close" not in body
+        assert "<script" not in body
+        assert "<button" not in body
+        assert "border-radius" not in body
+        assert "box-shadow" not in body
+        assert "Arial Rounded MT Bold" not in body
+        assert "<title>PuriPuly</title>" in body
 
         result = listener.wait(timeout=2.0)
 
         assert result.code == "discord-code-1"
         assert result.state == "state-1"
+    finally:
+        listener.close()
+
+
+class FakeSuccessResponseHandler:
+    def __init__(self) -> None:
+        self.wfile = self
+        self.status: int | None = None
+        self.headers: list[tuple[str, str]] = []
+        self.ended = False
+
+    def send_response(self, status: int) -> None:
+        self.status = status
+
+    def send_header(self, name: str, value: str) -> None:
+        self.headers.append((name, value))
+
+    def end_headers(self) -> None:
+        self.ended = True
+
+    def write(self, _body: bytes) -> int:
+        raise OSError("browser disconnected")
+
+
+class FakeSuccessResponseListener:
+    locale = "en"
+
+    def __init__(self) -> None:
+        self.completed: DiscordOAuthCallbackResult | None = None
+        self.closed_async = False
+
+    def _complete(self, *, result: DiscordOAuthCallbackResult | None = None) -> None:
+        self.completed = result
+
+    def _close_async(self) -> None:
+        self.closed_async = True
+
+
+def test_success_callback_delivers_result_even_when_browser_disconnects() -> None:
+    handler = FakeSuccessResponseHandler()
+    listener = FakeSuccessResponseListener()
+    result = DiscordOAuthCallbackResult(code="discord-code-1", state="state-1")
+
+    with pytest.raises(OSError, match="browser disconnected"):
+        _send_success_callback_response(handler, listener, result)
+
+    assert listener.completed == result
+    assert listener.closed_async is True
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_text", "expected_font"),
+    [
+        ("en", "We received your Discord verification", "system-ui"),
+        ("ko", "Discord 인증 정보를 받았어요", "NanumSquareRound"),
+        ("ja", "Discord認証情報を受け取りました", "M PLUS Rounded 1c"),
+        ("zh-CN", "已收到 Discord 认证信息", "ResourceHanRoundedCN"),
+    ],
+)
+def test_success_callback_completion_page_matches_locale(
+    locale: str,
+    expected_text: str,
+    expected_font: str,
+) -> None:
+    listener = bind_first_available(locale=locale)
+    try:
+        status, _content_type, body = _get_response(
+            _callback_url(listener, code="discord-code-1", state="state-1")
+        )
+
+        assert status == 200
+        assert expected_text in body
+        assert expected_font in body
     finally:
         listener.close()
 

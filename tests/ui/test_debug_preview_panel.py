@@ -24,6 +24,7 @@ DEBUG_PREVIEW_I18N_KEYS = {
     "debug_preview.founder_letter",
     "debug_preview.pkce_failure",
     "debug_preview.discord_auth",
+    "debug_preview.discord_callback_page",
     "debug_preview.peer_translation_eula",
     "peer_translation_eula.body",
     "peer_translation_eula.accept",
@@ -37,6 +38,7 @@ ACTION_KEYS = [
     "founder_letter",
     "pkce_failure",
     "discord_auth",
+    "discord_callback_page",
     "peer_translation_eula",
 ]
 
@@ -48,6 +50,7 @@ def _callbacks(seen: list[str]):
         "on_founder_letter": lambda: seen.append("founder_letter"),
         "on_pkce_failure": lambda: seen.append("pkce_failure"),
         "on_discord_auth": lambda: seen.append("discord_auth"),
+        "on_discord_callback_page": lambda: seen.append("discord_callback_page"),
         "on_peer_translation_eula": lambda: seen.append("peer_translation_eula"),
     }
 
@@ -127,6 +130,10 @@ def test_debug_preview_panel_apply_locale_refreshes_labels(
         _button_label(panel._action_buttons["discord_auth"]) == "label:debug_preview.discord_auth"
     )
     assert (
+        _button_label(panel._action_buttons["discord_callback_page"])
+        == "label:debug_preview.discord_callback_page"
+    )
+    assert (
         _button_label(panel._action_buttons["peer_translation_eula"])
         == "label:debug_preview.peer_translation_eula"
     )
@@ -155,6 +162,7 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
         "Founder letter",
         "PKCE failure",
         "Discord auth",
+        "Discord callback page",
         "Peer translation EULA",
     ]
 
@@ -164,6 +172,10 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
     assert panel._toggle_button.text == "label:debug_preview.button"
     assert panel._action_buttons["brake_notice"].text == "label:debug_preview.brake_notice"
     assert panel._action_buttons["discord_auth"].text == "label:debug_preview.discord_auth"
+    assert (
+        panel._action_buttons["discord_callback_page"].text
+        == "label:debug_preview.discord_callback_page"
+    )
     assert (
         panel._action_buttons["peer_translation_eula"].text
         == "label:debug_preview.peer_translation_eula"

@@ -3,7 +3,9 @@ import contextlib
 import copy
 import inspect
 import logging
+import tempfile
 import webbrowser
+from pathlib import Path
 
 import flet as ft
 
@@ -18,6 +20,9 @@ from puripuly_heart.config.settings import (
     OpenRouterLLMModel,
     OpenRouterSelectionAlias,
     save_settings,
+)
+from puripuly_heart.core.discord_oauth_loopback import (
+    render_discord_oauth_callback_completion_page,
 )
 from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.core.updater import check_for_update
@@ -64,6 +69,19 @@ FOUNDER_README_PATH_BY_LOCALE = {
 def founder_readme_url_for_locale(locale: str | None) -> str:
     readme_path = FOUNDER_README_PATH_BY_LOCALE.get(locale or "", "README.md")
     return f"{FOUNDER_README_BASE_URL}/{readme_path}"
+
+
+def _write_discord_callback_preview_page(locale: str | None) -> str:
+    html = render_discord_oauth_callback_completion_page(locale)
+    with tempfile.NamedTemporaryFile(
+        "wb",
+        prefix="puripuly-discord-callback-",
+        suffix=".html",
+        delete=False,
+    ) as handle:
+        handle.write(html)
+        path = Path(handle.name)
+    return path.as_uri()
 
 
 class TranslatorApp:
@@ -199,6 +217,7 @@ class TranslatorApp:
             on_founder_letter=self._preview_founder_letter,
             on_pkce_failure=self._preview_pkce_failure,
             on_discord_auth=self._preview_discord_auth,
+            on_discord_callback_page=self._preview_discord_callback_page,
             on_peer_translation_eula=self._preview_peer_translation_eula,
         )
 
@@ -221,6 +240,9 @@ class TranslatorApp:
 
     def _preview_discord_auth(self) -> None:
         self.show_discord_managed_auth_dialog(preview=True)
+
+    def _preview_discord_callback_page(self) -> None:
+        webbrowser.open(_write_discord_callback_preview_page(get_locale()))
 
     def _preview_peer_translation_eula(self) -> None:
         self._show_peer_translation_eula(self._debug_preview_noop)
