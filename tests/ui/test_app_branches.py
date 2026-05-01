@@ -567,12 +567,14 @@ def test_managed_release_ko_snackbar_copy_matches_requested_wording() -> None:
         i18n_module.set_locale(previous_locale)
 
 
-def test_debug_preview_founder_letter_opens_dialog_without_actions(
+def test_debug_preview_founder_letter_opens_dialog_with_readme_action(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
     captured: dict[str, object] = {}
+    opened_urls: list[str] = []
+    previous_locale = i18n_module.get_locale()
 
     def fail_save(*_args, **_kwargs):
         pytest.fail("debug founder-letter preview must not save settings")
@@ -587,25 +589,38 @@ def test_debug_preview_founder_letter_opens_dialog_without_actions(
     monkeypatch.setattr(
         app_module.webbrowser,
         "open",
-        lambda *_args, **_kwargs: pytest.fail(
-            "debug founder-letter preview must not open external URLs"
-        ),
+        lambda url: opened_urls.append(url),
     )
 
     class FakeFounderLetterDialog:
-        def __init__(self, page):
+        def __init__(self, page, *, on_readme=None, on_connect=None, on_contact=None):
             captured["page"] = page
+            captured["on_readme"] = on_readme
+            captured["on_connect"] = on_connect
+            captured["on_contact"] = on_contact
 
         def open(self) -> None:
             captured["opened"] = True
 
     monkeypatch.setattr(app_module, "FounderLetterDialog", FakeFounderLetterDialog)
 
-    app._preview_founder_letter()
+    try:
+        i18n_module.set_locale("ko")
 
-    assert captured["page"] is app.page
-    assert captured["opened"] is True
+        app._preview_founder_letter()
+
+        assert captured["page"] is app.page
+        assert captured["opened"] is True
+        assert callable(captured["on_readme"])
+        assert captured["on_connect"] is None
+        assert captured["on_contact"] is None
+        assert opened_urls == []
+        captured["on_readme"]()
+    finally:
+        i18n_module.set_locale(previous_locale)
+
     assert app._founder_letter_dialog is not None
+    assert opened_urls == ["https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ko.md"]
 
 
 def test_founder_readme_url_for_locale_uses_origin_readme_pages() -> None:

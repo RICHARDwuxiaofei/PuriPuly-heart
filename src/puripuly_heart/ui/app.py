@@ -212,7 +212,7 @@ class TranslatorApp:
         return None
 
     def _preview_founder_letter(self) -> None:
-        dialog = FounderLetterDialog(self.page)
+        dialog = FounderLetterDialog(self.page, on_readme=self._on_founder_letter_readme)
         self._founder_letter_dialog = dialog
         dialog.open()
 
