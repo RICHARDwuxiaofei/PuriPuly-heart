@@ -94,6 +94,12 @@ _TRANSLATION_CONNECTION_LABEL_KEYS = {
     TranslationConnection.OPENROUTER: "settings.translation_connection.openrouter",
     TranslationConnection.OFFICIAL_BYOK: "settings.translation_connection.official_byok",
 }
+_TRANSLATION_CONNECTION_DESCRIPTION_KEYS = {
+    TranslationConnection.MANAGED: "settings.translation_connection.managed.description",
+    TranslationConnection.OPENROUTER: "settings.translation_connection.openrouter.description",
+    TranslationConnection.OFFICIAL_BYOK: "settings.translation_connection.official_byok.description",
+}
+_TRANSLATION_CONNECTION_ONLY_SUPPORTED_KEY = "settings.translation_connection.only_supported"
 
 
 def _make_text_button(label: str, **kwargs) -> ft.TextButton:
@@ -1498,6 +1504,12 @@ class SettingsView(ft.Column):
 
     def _translation_connection_display_label(self, connection: TranslationConnection) -> str:
         return t(_TRANSLATION_CONNECTION_LABEL_KEYS[connection])
+
+    def _translation_connection_display_description(self, connection: TranslationConnection) -> str:
+        return t(_TRANSLATION_CONNECTION_DESCRIPTION_KEYS[connection], default="")
+
+    def _translation_connection_only_supported_description(self) -> str:
+        return t(_TRANSLATION_CONNECTION_ONLY_SUPPORTED_KEY, default="")
 
     def _set_translation_connection_text(self, text: str) -> None:
         text_control = self._translation_connection_text.content

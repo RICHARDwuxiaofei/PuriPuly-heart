@@ -129,6 +129,7 @@ def provider_label(provider_code: str) -> str:
 
 
 _SOURCE_KEY_MAP = {
+    "Managed": "dashboard.trial.source.managed",
     "You": "source.you",
     "Mic": "source.mic",
     "VRChat": "source.vrchat",
