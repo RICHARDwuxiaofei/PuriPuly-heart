@@ -32,14 +32,17 @@ REQUIRED_DISCORD_AUTH_KEYS = [
 _EXPECTED_EXACT_STRINGS = {
     "en": {
         "discord_auth.title": "Start free beta translation",
+        "discord_auth.body": "PuriPuly provides free usage for new users.\nIt can translate about 400 utterances.\nIt is issued immediately after Discord verification.",
         "discord_auth.success": "Discord verification is complete.",
     },
     "ko": {
         "discord_auth.title": "무료 베타 번역을 시작할게요",
+        "discord_auth.body": "PuriPuly는 신규 사용자에게 무료 사용량을 제공해요.\n발화 기준 약 400회를 번역할 수 있어요.\nDiscord 인증 후 바로 발급돼요.",
         "discord_auth.success": "Discord 인증이 완료되었어요.",
     },
     "zh-CN": {
         "discord_auth.title": "开始免费测试版翻译",
+        "discord_auth.body": "PuriPuly 为新用户提供免费用量。\n按发言计算，可翻译约 400 次。\n完成 Discord 认证后会立即发放。",
         "discord_auth.success": "Discord 认证已完成。",
     },
 }
@@ -69,7 +72,9 @@ def test_discord_auth_i18n_keys_exist_and_are_not_empty(locale: str) -> None:
 
 
 @pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
-def test_discord_auth_i18n_uses_planned_title_and_success_copy(locale: str) -> None:
+def test_discord_auth_i18n_uses_planned_title_body_and_success_copy(
+    locale: str,
+) -> None:
     bundle = _load_bundle(locale)
 
     for key, expected_value in _EXPECTED_EXACT_STRINGS[locale].items():

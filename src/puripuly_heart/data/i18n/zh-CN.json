@@ -237,7 +237,7 @@
     "debug_preview.peer_translation_eula": "对方翻译 EULA",
     "debug_preview.discord_auth": "Discord 认证",
     "discord_auth.title": "开始免费测试版翻译",
-    "discord_auth.body": "通过 Discord 验证一次后，就可以不用自己的 OpenRouter 密钥开始免费测试版翻译。",
+    "discord_auth.body": "PuriPuly 为新用户提供免费用量。\n按发言计算，可翻译约 400 次。\n完成 Discord 认证后会立即发放。",
     "discord_auth.requirements": "需要一个已验证邮箱的 Discord 账号。我们只用它确认测试资格并保护共享预算。",
     "discord_auth.continue": "Discord OAuth 认证",
     "discord_auth.byok": "使用自己的 API 密钥",

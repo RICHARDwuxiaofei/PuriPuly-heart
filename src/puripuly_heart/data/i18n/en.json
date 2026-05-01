@@ -237,7 +237,7 @@
   "debug_preview.peer_translation_eula": "Peer translation EULA",
   "debug_preview.discord_auth": "Discord auth",
   "discord_auth.title": "Start free beta translation",
-  "discord_auth.body": "Verify with Discord once so PuriPuly can start the free beta translation path without asking for your own OpenRouter key.",
+  "discord_auth.body": "PuriPuly provides free usage for new users.\nIt can translate about 400 utterances.\nIt is issued immediately after Discord verification.",
   "discord_auth.requirements": "You'll need a Discord account with a verified email. We only use it to confirm beta eligibility and protect the shared budget.",
   "discord_auth.continue": "Discord OAuth verification",
   "discord_auth.byok": "Use my own API key",
