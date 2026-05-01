@@ -3317,7 +3317,7 @@ def test_legacy_overlay_cleanup_copy_renders_from_i18n(
             anchor_labels = _control_labels(anchor_card)
 
             assert view._integrated_context_label.value == t("settings.integrated_context")
-            assert view._integrated_context_button.content.value == t("settings.context.local")
+            assert view._integrated_context_button.content.value == t("settings.context.integrated")
             assert view._integrated_context_hint.value == ""
             assert view._overlay_translation_title.value == t("settings.overlay.show_translation")
             assert view._overlay_peer_original_title.value == t(
@@ -3332,7 +3332,7 @@ def test_legacy_overlay_cleanup_copy_renders_from_i18n(
             )
             assert view._overlay_reset_title.value == t("settings.overlay.position_reset")
             assert t("settings.integrated_context") in general_labels
-            assert t("settings.context.local") in general_labels
+            assert t("settings.context.integrated") in general_labels
             assert t("settings.context.integrated_modal_helper") not in general_labels
             assert t("settings.overlay.show_translation") in translation_labels
             assert t("settings.overlay.calibration.anchor") in anchor_labels
@@ -4428,10 +4428,10 @@ def test_integrated_context_general_card_labels_render_from_i18n(
         general_labels = _control_labels(general_card)
 
         assert view._integrated_context_label.value == t("settings.integrated_context")
-        assert view._integrated_context_button.content.value == t("settings.context.local")
+        assert view._integrated_context_button.content.value == t("settings.context.integrated")
         assert view._integrated_context_hint.value == ""
         assert t("settings.integrated_context") in general_labels
-        assert t("settings.context.local") in general_labels
+        assert t("settings.context.integrated") in general_labels
         assert t("settings.context.integrated_modal_helper") not in general_labels
     finally:
         i18n_module.set_locale(old_locale)

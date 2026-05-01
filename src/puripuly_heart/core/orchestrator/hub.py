@@ -122,7 +122,8 @@ class ClientHub:
     translation_enabled: bool = True
     peer_translation_enabled: bool = False
     integrated_context_enabled: bool = False
-    hangover_s: float = 1.1  # VAD hangover in seconds (for E2E latency calculation)
+    hangover_s: float = 1.1  # Self VAD hangover in seconds for user-facing E2E latency.
+    peer_hangover_s: float = 0.6  # Peer VAD hangover in seconds for user-facing E2E latency.
 
     # Context memory settings
     context_time_window_s: float = 30.0  # Only include entries within this time window
@@ -314,6 +315,10 @@ class ClientHub:
             return None
         return max(0, int(round((end_at - start_at) * 1000)))
 
+    def _latency_hangover_ms(self, channel: ChannelId) -> int:
+        hangover_s = self.peer_hangover_s if channel == "peer" else self.hangover_s
+        return max(0, int(round(hangover_s * 1000)))
+
     def _emit_latency_trace_if_ready(
         self,
         *,
@@ -352,9 +357,12 @@ class ClientHub:
             return
         speech_end_at = timeline.stage_times.get("speech_end")
         final_output_at = timeline.stage_times.get(final_output_stage)
-        speech_end_to_final_output_ms = self._elapsed_latency_ms(speech_end_at, final_output_at)
-        if speech_end_to_final_output_ms is None:
+        measured_speech_end_to_final_output_ms = self._elapsed_latency_ms(
+            speech_end_at, final_output_at
+        )
+        if measured_speech_end_to_final_output_ms is None:
             return
+        e2e_ms = measured_speech_end_to_final_output_ms + self._latency_hangover_ms(channel)
 
         stt_final_at = timeline.stage_times.get("stt_final")
         speech_end_to_stt_final_ms = self._elapsed_latency_ms(speech_end_at, stt_final_at)
@@ -366,17 +374,15 @@ class ClientHub:
         self._emit_basic(
             format_basic_latency_summary(
                 channel=channel,
-                e2e_ms=speech_end_to_final_output_ms,
-                final_output_stage=final_output_stage,
+                e2e_ms=e2e_ms,
             )
         )
         self._emit_detailed(
             format_detailed_latency_breakdown(
                 channel=channel,
-                e2e_ms=speech_end_to_final_output_ms,
+                e2e_ms=e2e_ms,
                 speech_end_to_stt_final_ms=speech_end_to_stt_final_ms,
                 stt_final_to_final_output_ms=stt_final_to_final_output_ms,
-                final_output_stage=final_output_stage,
             )
         )
         timeline.basic_summary_emitted = True

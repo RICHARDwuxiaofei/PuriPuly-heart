@@ -2076,6 +2076,7 @@ class GuiController:
                 if settings.stt.low_latency_mode
                 else 1.1
             )
+            self.hub.peer_hangover_s = settings.desktop_audio.vad_hangover_ms / 1000.0
             self.hub.chatbox_include_source = settings.osc.chatbox_include_source
             self._sync_effective_hub_flags(settings)
 
@@ -2271,6 +2272,7 @@ class GuiController:
                 if next_settings.stt.low_latency_mode
                 else 1.1
             )
+            self.hub.peer_hangover_s = next_settings.desktop_audio.vad_hangover_ms / 1000.0
             self.hub.chatbox_include_source = next_settings.osc.chatbox_include_source
             self._sync_effective_hub_flags(next_settings)
 
@@ -2570,6 +2572,7 @@ class GuiController:
                 if self.settings.stt.low_latency_mode
                 else 1.1
             ),
+            peer_hangover_s=self.settings.desktop_audio.vad_hangover_ms / 1000.0,
         )
 
         if self.vrc_mic_state is None:

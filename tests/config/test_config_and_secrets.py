@@ -77,6 +77,7 @@ def test_new_user_defaults_peer_voice_to_english_to_korean_local_qwen() -> None:
     assert settings.languages.effective_peer_source == "en"
     assert settings.languages.effective_peer_target == "ko"
     assert settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
+    assert settings.ui.integrated_context_enabled is True
 
 
 def test_partial_settings_deserialization_preserves_legacy_peer_fallbacks() -> None:
@@ -89,6 +90,13 @@ def test_partial_settings_deserialization_preserves_legacy_peer_fallbacks() -> N
     assert settings.languages.effective_peer_source == "ko"
     assert settings.languages.effective_peer_target == "en"
     assert settings.provider.peer_stt == STTProviderName.DEEPGRAM
+    assert settings.ui.integrated_context_enabled is True
+
+
+def test_from_dict_preserves_explicit_integrated_context_disabled() -> None:
+    settings = from_dict({"ui": {"integrated_context_enabled": False}})
+
+    assert settings.ui.integrated_context_enabled is False
 
 
 def test_save_settings_writes_via_temp_replace(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

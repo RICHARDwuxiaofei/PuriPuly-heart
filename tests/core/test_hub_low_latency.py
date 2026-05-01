@@ -267,7 +267,7 @@ class TestRuntimeLatencyLogging:
             await hub.stop()
 
     @pytest.mark.asyncio
-    async def test_basic_latency_summary_uses_speech_end_boundary_without_hangover(self):
+    async def test_basic_latency_summary_includes_self_hangover_without_stage(self):
         runtime_logging, log_stream = _make_runtime_logging_capture()
         clock = FakeClock(initial_time=10.0)
         hub = ClientHub(
@@ -299,8 +299,8 @@ class TestRuntimeLatencyLogging:
             latency_message = next(message for message in messages if "[Basic][Latency]" in message)
 
             assert "channel=self" in latency_message
-            assert "e2e_ms=250" in latency_message
-            assert "final_output_stage=self_chatbox_enqueue" in latency_message
+            assert "e2e_ms=10150" in latency_message
+            assert "final_output_stage=" not in latency_message
             assert "speech_end_to_stt_final_ms=" not in latency_message
             assert "stt_final_to_final_output_ms=" not in latency_message
             assert "hangover" not in latency_message
@@ -380,9 +380,10 @@ class TestRuntimeLatencyLogging:
             assert any(
                 "[Detailed][LatencyBreakdown]" in message
                 and "channel=self" in message
+                and "e2e_ms=1150" in message
                 and "speech_end_to_stt_final_ms=50" in message
                 and "stt_final_to_final_output_ms=0" in message
-                and "final_output_stage=self_chatbox_enqueue" in message
+                and "final_output_stage=" not in message
                 for message in detailed_messages
             )
         finally:

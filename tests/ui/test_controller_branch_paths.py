@@ -223,6 +223,7 @@ class DummyHub:
         self.low_latency_merge_gap_ms = 600
         self.low_latency_spec_retry_max = 10
         self.hangover_s = 1.1
+        self.peer_hangover_s = 0.6
         self.clear_context_calls = 0
         self.promo_calls = 0
         self.replace_stt_calls: list[object | None] = []
@@ -2181,6 +2182,7 @@ async def test_apply_settings_routes_peer_activation_toggles_through_peer_runtim
     )
 
     enabled = AppSettings()
+    enabled.provider.peer_stt = STTProviderName.SONIOX
     enabled.ui.peer_translation_enabled = True
     enabled.ui.peer_translation_eula_accepted = True
     await controller.apply_settings(enabled)
@@ -2194,6 +2196,35 @@ async def test_apply_settings_routes_peer_activation_toggles_through_peer_runtim
         False,
     ]
     assert controller.hub.peer_translation_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_apply_settings_copies_self_and_peer_vad_hangovers_to_hub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    settings = AppSettings()
+    settings.stt.low_latency_mode = True
+    settings.stt.low_latency_vad_hangover_ms = 650
+    settings.desktop_audio.vad_hangover_ms = 950
+    controller.settings = settings
+    controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=object())
+    controller._last_self_stt_runtime_signature = controller._build_self_stt_runtime_signature(
+        settings
+    )
+    controller._last_peer_stt_runtime_signature = controller._build_peer_stt_runtime_signature(
+        settings
+    )
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController, "_replace_runtime_stt_provider", lambda self: asyncio.sleep(0)
+    )
+    monkeypatch.setattr(GuiController, "_refresh_peer_stt_runtime", lambda self: asyncio.sleep(0))
+
+    await controller.apply_settings(settings)
+
+    assert controller.hub.hangover_s == 0.65
+    assert controller.hub.peer_hangover_s == 0.95
 
 
 @pytest.mark.asyncio
@@ -2324,7 +2355,7 @@ async def test_set_peer_translation_enabled_routes_through_controller_runtime_ru
 
     assert controller.settings.ui.overlay_enabled is True
     assert controller.settings.ui.peer_translation_enabled is True
-    assert controller.settings.ui.integrated_context_enabled is False
+    assert controller.settings.ui.integrated_context_enabled is True
     assert controller.settings.ui.integrated_context_bootstrapped is False
     assert controller.overlay_state == "starting"
     assert refresh_calls == ["refresh", "refresh"]
@@ -2664,6 +2695,7 @@ async def test_refresh_peer_stt_runtime_returns_without_runtime(
 ) -> None:
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.SONIOX
     controller.settings.ui.peer_translation_enabled = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
     controller.overlay_state = "connected"
@@ -2679,6 +2711,7 @@ async def test_refresh_peer_stt_runtime_returns_without_runtime(
 async def test_refresh_peer_stt_runtime_does_not_warm_peer_runtime() -> None:
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.SONIOX
     controller.settings.ui.peer_translation_enabled = True
     controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
@@ -2863,6 +2896,7 @@ async def test_create_peer_audio_source_from_runtime_config_uses_desktop_loopbac
 async def test_refresh_overlay_runtime_dependencies_applies_peer_runtime_policy() -> None:
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
+    controller.settings.provider.peer_stt = STTProviderName.SONIOX
     controller.settings.ui.peer_translation_enabled = True
     controller.settings.ui.peer_translation_eula_accepted = True
     controller.hub = DummyHub(llm=object(), stt=object(), peer_stt=None)
@@ -6377,6 +6411,9 @@ def test_merge_settings_tab_apply_with_current_languages_preserves_all_language_
     controller.settings.languages.peer_target_language = "it"
     controller.settings.languages.recent_source_languages = ["fr", "ko"]
     controller.settings.languages.recent_target_languages = ["de", "en"]
+    controller.settings.stt.low_latency_mode = True
+    controller.settings.stt.low_latency_vad_hangover_ms = 650
+    controller.settings.desktop_audio.vad_hangover_ms = 950
     controller.hub = DummyHub()
     controller.hub.source_language = "es"
     controller.hub.target_language = "pt"
@@ -6445,6 +6482,9 @@ async def test_apply_providers_preserves_current_languages_while_applying_provid
     controller.settings.languages.peer_target_language = "it"
     controller.settings.languages.recent_source_languages = ["fr", "ko"]
     controller.settings.languages.recent_target_languages = ["de", "en"]
+    controller.settings.stt.low_latency_mode = True
+    controller.settings.stt.low_latency_vad_hangover_ms = 650
+    controller.settings.desktop_audio.vad_hangover_ms = 950
     controller.hub = DummyHub()
     controller.hub.source_language = "es"
     controller.hub.target_language = "pt"
@@ -6523,6 +6563,8 @@ async def test_apply_providers_preserves_current_languages_while_applying_provid
     assert controller.settings.managed_identity.verified_hardware_hash_salt_version == 5
     assert controller.settings.system_prompt == "draft prompt"
     assert controller.settings.system_prompts == {}
+    assert controller.hub.hangover_s == 0.65
+    assert controller.hub.peer_hangover_s == 0.95
     assert calls == ["llm", "peer", "rebuild_stt"]
 
 

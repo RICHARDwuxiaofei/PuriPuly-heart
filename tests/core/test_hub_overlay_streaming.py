@@ -496,6 +496,7 @@ async def test_peer_overlay_first_emit_latency_summary_and_detailed_trace() -> N
         peer_translation_enabled=True,
         runtime_logging=basic_runtime_logging,
         clock=basic_clock,
+        peer_hangover_s=0.95,
     )
     detailed_hub = ClientHub(
         stt=None,
@@ -508,6 +509,7 @@ async def test_peer_overlay_first_emit_latency_summary_and_detailed_trace() -> N
         peer_translation_enabled=True,
         runtime_logging=detailed_runtime_logging,
         clock=detailed_clock,
+        peer_hangover_s=0.95,
     )
 
     try:
@@ -556,8 +558,8 @@ async def test_peer_overlay_first_emit_latency_summary_and_detailed_trace() -> N
         )
 
         assert "channel=peer" in basic_latency_message
-        assert "e2e_ms=180" in basic_latency_message
-        assert "final_output_stage=peer_overlay_first_emit" in basic_latency_message
+        assert "e2e_ms=1130" in basic_latency_message
+        assert "final_output_stage=" not in basic_latency_message
         assert not any("[Detailed][Latency]" in message for message in basic_messages)
         assert not any("[Detailed][LatencyBreakdown]" in message for message in basic_messages)
 
@@ -582,9 +584,10 @@ async def test_peer_overlay_first_emit_latency_summary_and_detailed_trace() -> N
         assert any(
             "[Detailed][LatencyBreakdown]" in message
             and "channel=peer" in message
+            and "e2e_ms=1130" in message
             and "speech_end_to_stt_final_ms=30" in message
             and "stt_final_to_final_output_ms=150" in message
-            and "final_output_stage=peer_overlay_first_emit" in message
+            and "final_output_stage=" not in message
             for message in detailed_messages
         )
         assert not any(
@@ -637,17 +640,13 @@ async def test_peer_overlay_first_emit_waits_for_llm_done() -> None:
         await llm.started.wait()
 
         assert sink.events == []
-        assert not any(
-            "stage=peer_overlay_first_emit" in message for message in _runtime_log_messages(stream)
-        )
+        assert not any("[Basic][Latency]" in message for message in _runtime_log_messages(stream))
 
         assert llm.release is not None
         llm.release.set_result(None)
         await asyncio.gather(*hub.peer_runtime.translation_tasks.values(), return_exceptions=True)
         assert [event.type for event in sink.events] == ["translation_final", "utterance_closed"]
-        assert any(
-            "stage=peer_overlay_first_emit" in message for message in _runtime_log_messages(stream)
-        )
+        assert any("[Basic][Latency]" in message for message in _runtime_log_messages(stream))
     finally:
         runtime_logging.close()
         await hub.stop()

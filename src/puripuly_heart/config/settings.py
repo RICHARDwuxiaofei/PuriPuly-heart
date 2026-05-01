@@ -632,7 +632,7 @@ class UiSettings:
     overlay_enabled: bool = False
     peer_translation_enabled: bool = False
     peer_translation_eula_accepted: bool = False
-    integrated_context_enabled: bool = False
+    integrated_context_enabled: bool = True
     integrated_context_bootstrapped: bool = False
 
     def validate(self) -> None:
@@ -2604,7 +2604,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             peer_translation_eula_accepted=bool(
                 ui_data.get("peer_translation_eula_accepted", False)
             ),
-            integrated_context_enabled=bool(ui_data.get("integrated_context_enabled", False)),
+            integrated_context_enabled=bool(ui_data.get("integrated_context_enabled", True)),
             integrated_context_bootstrapped=bool(
                 ui_data.get("integrated_context_bootstrapped", False)
             ),

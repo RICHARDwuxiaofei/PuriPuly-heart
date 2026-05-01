@@ -36,7 +36,7 @@ LATENCY_TRACE_POINT_CONTRACTS: dict[str, LatencyTracePointContract] = {
     "speech_end": LatencyTracePointContract(
         name="speech_end",
         timing_semantics="Shared latency zero boundary recorded when the hub accepts SpeechEnd for the utterance.",
-        acceptance_expectation="Use the post-VAD SpeechEnd boundary only; do not add hangover_s back into published latency values.",
+        acceptance_expectation="Record the post-VAD SpeechEnd boundary; published e2e_ms adds the channel-specific VAD hangover for user-facing latency.",
     ),
     "stt_final": LatencyTracePointContract(
         name="stt_final",
@@ -80,13 +80,11 @@ def format_basic_latency_summary(
     *,
     channel: str,
     e2e_ms: int,
-    final_output_stage: str,
 ) -> str:
     parts = [
         f"channel={channel}",
         f"e2e_ms={e2e_ms}",
     ]
-    parts.append(f"final_output_stage={final_output_stage}")
     return f"[Basic][Latency] {' '.join(parts)}"
 
 
@@ -107,7 +105,6 @@ def format_detailed_latency_breakdown(
     *,
     channel: str,
     e2e_ms: int,
-    final_output_stage: str,
     speech_end_to_stt_final_ms: int | None = None,
     stt_final_to_final_output_ms: int | None = None,
 ) -> str:
@@ -119,7 +116,6 @@ def format_detailed_latency_breakdown(
         parts.append(f"speech_end_to_stt_final_ms={speech_end_to_stt_final_ms}")
     if stt_final_to_final_output_ms is not None:
         parts.append(f"stt_final_to_final_output_ms={stt_final_to_final_output_ms}")
-    parts.append(f"final_output_stage={final_output_stage}")
     return f"[Detailed][LatencyBreakdown] {' '.join(parts)}"
 
 
