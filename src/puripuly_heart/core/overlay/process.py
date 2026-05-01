@@ -11,11 +11,12 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Protocol
 from uuid import uuid4
 
 from puripuly_heart import __version__
 
+from . import openvr_vendor
 from .diagnostics import OverlayDiagnosticsRecorder, default_overlay_diagnostics_dir
 from .manifest import (
     OVERLAY_CONTRACT_VERSION,
@@ -27,9 +28,6 @@ logger = logging.getLogger(__name__)
 
 OVERLAY_EXECUTABLE_NAME = "PuriPulyHeartOverlay.exe"
 OPENVR_RUNTIME_DLL_NAME = "openvr_api.dll"
-_STEAMVR_OPENVR_RUNTIME_DLL_RELATIVE_PATH = (
-    Path("Steam") / "steamapps" / "common" / "SteamVR" / "bin" / "win64" / OPENVR_RUNTIME_DLL_NAME
-)
 _EXIT_CODE_TO_FAILURE_REASON = {
     10: "contract_mismatch",
     12: "bridge_auth_failed",
@@ -183,15 +181,8 @@ class DefaultOverlayProcessRunner:
                 f"staged overlay executable is older than overlay source: {stale_source}",
             )
         if path.name == OVERLAY_EXECUTABLE_NAME:
-            try:
-                bundled_runtime_path = self.ensure_bundled_openvr_runtime_dll(path)
-            except FileNotFoundError:
-                logger.warning(
-                    "[overlay] bundled OpenVR runtime DLL source not found; continuing without %s",
-                    OPENVR_RUNTIME_DLL_NAME,
-                )
-            else:
-                logger.info("[overlay] OpenVR runtime DLL ready at %s", bundled_runtime_path)
+            bundled_runtime_path = self.ensure_bundled_openvr_runtime_dll(path)
+            logger.info("[overlay] OpenVR runtime DLL ready at %s", bundled_runtime_path)
         return path
 
     async def spawn(
@@ -235,6 +226,10 @@ class DefaultOverlayProcessRunner:
             sys_executable=sys_executable,
             repo_root=repo_root,
         )
+        if packaged_sibling.exists() and staged.exists():
+            if staged.stat().st_mtime > packaged_sibling.stat().st_mtime:
+                return staged
+            return packaged_sibling
         if packaged_sibling.exists():
             return packaged_sibling
         if staged.exists():
@@ -293,50 +288,68 @@ class DefaultOverlayProcessRunner:
         return executable_path.with_name(OPENVR_RUNTIME_DLL_NAME)
 
     @classmethod
-    def default_openvr_runtime_dll_candidates(
-        cls,
-        *,
-        environ: Mapping[str, str] | None = None,
-    ) -> tuple[Path, ...]:
-        env = environ or os.environ
-        candidate_roots: list[Path] = []
-        for key in (
-            "ProgramFiles(x86)",
-            "PROGRAMFILES(X86)",
-            "ProgramW6432",
-            "ProgramFiles",
-            "PROGRAMFILES",
-        ):
-            raw_value = env.get(key)
-            if not raw_value:
-                continue
-            root = Path(raw_value)
-            if root not in candidate_roots:
-                candidate_roots.append(root)
-        return tuple(root / _STEAMVR_OPENVR_RUNTIME_DLL_RELATIVE_PATH for root in candidate_roots)
-
-    @classmethod
     def ensure_bundled_openvr_runtime_dll(
         cls,
         executable_path: Path,
-        *,
-        environ: Mapping[str, str] | None = None,
     ) -> Path:
         bundled_path = cls.bundled_openvr_runtime_dll_path(executable_path)
-        if bundled_path.exists():
-            return bundled_path
+        if cls._local_dev_repo_root_for_staged_executable(executable_path) is not None:
+            try:
+                vendored_bundle = openvr_vendor.validate_vendored_openvr_bundle()
+            except (FileNotFoundError, ValueError) as error:
+                raise OverlayPreparationError("vendored_openvr_dll_missing", str(error)) from error
+            return cls._refresh_staged_openvr_runtime_dll(bundled_path, vendored_bundle)
+        return cls._validate_packaged_openvr_runtime_dll(bundled_path)
 
-        for candidate in cls.default_openvr_runtime_dll_candidates(environ=environ):
-            if not candidate.exists():
-                continue
+    @classmethod
+    def _refresh_staged_openvr_runtime_dll(
+        cls,
+        bundled_path: Path,
+        vendored_bundle: openvr_vendor.VendoredOpenVrBundle,
+    ) -> Path:
+        if cls._staged_openvr_runtime_dll_needs_refresh(bundled_path, vendored_bundle):
             bundled_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(candidate, bundled_path)
-            return bundled_path
-
-        raise FileNotFoundError(
-            "OpenVR runtime DLL not found in default SteamVR locations: "
-            f"{_STEAMVR_OPENVR_RUNTIME_DLL_RELATIVE_PATH}"
+            shutil.copy2(vendored_bundle.dll_path, bundled_path)
+        return openvr_vendor.validate_openvr_runtime_dll(
+            bundled_path,
+            expected_sha256=vendored_bundle.dll_sha256,
         )
+
+    @classmethod
+    def _staged_openvr_runtime_dll_needs_refresh(
+        cls,
+        bundled_path: Path,
+        vendored_bundle: openvr_vendor.VendoredOpenVrBundle,
+    ) -> bool:
+        if not bundled_path.is_file():
+            return True
+
+        try:
+            openvr_vendor.validate_openvr_runtime_dll(
+                bundled_path,
+                expected_sha256=vendored_bundle.dll_sha256,
+            )
+        except ValueError:
+            return True
+        return False
+
+    @classmethod
+    def _validate_packaged_openvr_runtime_dll(
+        cls,
+        bundled_path: Path,
+    ) -> Path:
+        if not bundled_path.is_file():
+            raise OverlayPreparationError(
+                "packaged_openvr_dll_missing",
+                f"Packaged OpenVR runtime DLL not found: {bundled_path}",
+            )
+
+        try:
+            return openvr_vendor.validate_openvr_runtime_dll(bundled_path)
+        except FileNotFoundError as error:
+            raise OverlayPreparationError("packaged_openvr_dll_missing", str(error)) from error
+        except ValueError as error:
+            raise OverlayPreparationError("openvr_dll_hash_mismatch", str(error)) from error
 
 
 @dataclass(slots=True)

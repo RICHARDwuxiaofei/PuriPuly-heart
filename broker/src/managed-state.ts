@@ -1,4 +1,7 @@
-import type { OpenRouterEntitlementRecord } from './persistence';
+import type {
+  OpenRouterEntitlementRecord,
+  OpenRouterEntitlementStatus,
+} from './persistence';
 import { TRIAL_PROVIDER_POLICY } from './trial-policy';
 
 export interface ManagedStateResponse {
@@ -24,7 +27,8 @@ export interface ManagedStateResponse {
 export interface TrialStatusResponse extends ManagedStateResponse {
   onboarding_eligibility: {
     eligible: boolean;
-    reason: 'eligible' | 'pending_release' | 'active' | 'expired' | 'revoked';
+    reason: 'discord_required' | OpenRouterEntitlementStatus;
+    requires_discord_oauth: boolean;
   };
 }
 
@@ -76,13 +80,13 @@ export function normalizeTrialStatusResponse(
   entitlement: OpenRouterEntitlementRecord | null,
 ): TrialStatusResponse {
   const managedState = normalizeManagedState(entitlement);
-  const lifecycle = managedState.managed_state.lifecycle;
 
   return {
     ...managedState,
     onboarding_eligibility: {
-      eligible: lifecycle === 'none' || lifecycle === 'pending_release',
-      reason: lifecycle === 'none' ? 'eligible' : lifecycle,
+      eligible: entitlement === null,
+      reason: entitlement === null ? 'discord_required' : entitlement.status,
+      requires_discord_oauth: entitlement === null,
     },
   };
 }

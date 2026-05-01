@@ -2,14 +2,38 @@ from __future__ import annotations
 
 import copy
 import json
+import locale
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from puripuly_heart.config.audio_host_api import (
+    WINDOWS_DIRECTSOUND_HOST_API,
+    WINDOWS_WASAPI_HOST_API,
+)
+from puripuly_heart.config.llm_profiles import (
+    OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH,
+    OPENROUTER_FALLBACK_SELECTION_ALIAS_GEMINI25_FLASH_LITE,
+    OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE,
+    OPENROUTER_FALLBACK_SELECTION_ALIAS_QWEN35_FLASH,
+    OPENROUTER_MODEL_DEEPSEEK_V4_FLASH,
+    OPENROUTER_MODEL_GEMINI_25_FLASH_LITE,
+    OPENROUTER_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_BYOK,
+    OPENROUTER_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_MANAGED,
+    OPENROUTER_SELECTION_ALIAS_GEMMA4_BYOK,
+    OPENROUTER_SELECTION_ALIAS_GEMMA4_MANAGED,
+    OPENROUTER_SELECTION_ALIAS_QWEN35_FLASH_BYOK,
+    OPENROUTER_SELECTION_ALIAS_QWEN35_FLASH_MANAGED,
+    get_openrouter_llm_profile,
+    get_openrouter_selection_alias_for_model_and_source,
+    normalize_openrouter_fallback_selection_alias,
+    openrouter_alias_for_fields,
+)
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 13
+SETTINGS_SCHEMA_VERSION = 20
+STT_INTERNAL_SAMPLE_RATE_HZ = 16000
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
@@ -39,6 +63,10 @@ class LLMProviderName(str, Enum):
     GEMINI = "gemini"
     OPENROUTER = "openrouter"
     QWEN = "qwen"
+    DEEPSEEK = "deepseek"
+
+
+_PROMPT_PROVIDER_KEYS = tuple(provider.value for provider in LLMProviderName)
 
 
 class SecretsBackend(str, Enum):
@@ -61,8 +89,15 @@ class QwenLLMModel(str, Enum):
     QWEN_35_PLUS = "qwen3.5-plus"
 
 
+class DeepSeekLLMModel(str, Enum):
+    DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
+
+
 class OpenRouterLLMModel(str, Enum):
     GEMMA_4_26B_A4B_IT = "google/gemma-4-26b-a4b-it"
+    QWEN_35_FLASH_02_23 = "qwen/qwen3.5-flash-02-23"
+    DEEPSEEK_V4_FLASH = OPENROUTER_MODEL_DEEPSEEK_V4_FLASH
+    GEMINI_25_FLASH_LITE = OPENROUTER_MODEL_GEMINI_25_FLASH_LITE
 
 
 class OpenRouterRoutingMode(str, Enum):
@@ -75,6 +110,220 @@ class OpenRouterCredentialSource(str, Enum):
     NONE = "none"
     MANAGED = "managed"
     BYOK = "byok"
+
+
+class OpenRouterSelectionAlias(str, Enum):
+    GEMMA4_MANAGED = OPENROUTER_SELECTION_ALIAS_GEMMA4_MANAGED
+    GEMMA4_BYOK = OPENROUTER_SELECTION_ALIAS_GEMMA4_BYOK
+    QWEN35_FLASH_MANAGED = OPENROUTER_SELECTION_ALIAS_QWEN35_FLASH_MANAGED
+    QWEN35_FLASH_BYOK = OPENROUTER_SELECTION_ALIAS_QWEN35_FLASH_BYOK
+    DEEPSEEK_V4_FLASH_MANAGED = OPENROUTER_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_MANAGED
+    DEEPSEEK_V4_FLASH_BYOK = OPENROUTER_SELECTION_ALIAS_DEEPSEEK_V4_FLASH_BYOK
+
+
+class OpenRouterFallbackSelectionAlias(str, Enum):
+    NONE = OPENROUTER_FALLBACK_SELECTION_ALIAS_NONE
+    GEMINI25_FLASH_LITE = OPENROUTER_FALLBACK_SELECTION_ALIAS_GEMINI25_FLASH_LITE
+    QWEN35_FLASH = OPENROUTER_FALLBACK_SELECTION_ALIAS_QWEN35_FLASH
+    DEEPSEEK_V4_FLASH = OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH
+
+
+class TranslationModel(str, Enum):
+    GEMMA4 = "gemma4"
+    DEEPSEEK_V4_FLASH = "deepseek_v4_flash"
+    GEMINI_3_FLASH = "gemini3_flash"
+    GEMINI_31_FLASH_LITE = "gemini31_flash_lite"
+    QWEN_35_PLUS = "qwen35_plus"
+
+
+class TranslationConnection(str, Enum):
+    MANAGED = "managed"
+    OPENROUTER = "openrouter"
+    OFFICIAL_BYOK = "official_byok"
+
+
+@dataclass(slots=True)
+class TranslationSettings:
+    model: TranslationModel = TranslationModel.GEMMA4
+    connection: TranslationConnection = TranslationConnection.MANAGED
+    connection_history: dict[str, TranslationConnection] = field(
+        default_factory=lambda: _default_translation_connection_history()
+    )
+
+    def validate(self) -> None:
+        if not isinstance(self.model, TranslationModel):
+            raise ValueError("invalid translation model")
+        if not isinstance(self.connection, TranslationConnection):
+            raise ValueError("invalid translation connection")
+        if self.connection not in _supported_translation_connections(self.model):
+            raise ValueError("translation connection is not supported for model")
+        if not isinstance(self.connection_history, dict):
+            raise ValueError("translation connection_history must be a dict")
+        for model_value, connection in self.connection_history.items():
+            model = _parse_translation_model(model_value)
+            if model is None:
+                raise ValueError("invalid translation connection_history model")
+            if not isinstance(connection, TranslationConnection):
+                raise ValueError("invalid translation connection_history connection")
+            if connection not in _supported_translation_connections(model):
+                raise ValueError("translation connection_history connection is not supported")
+
+
+TRANSLATION_CONNECTIONS_BY_MODEL: dict[TranslationModel, tuple[TranslationConnection, ...]] = {
+    TranslationModel.GEMMA4: (
+        TranslationConnection.MANAGED,
+        TranslationConnection.OPENROUTER,
+    ),
+    TranslationModel.DEEPSEEK_V4_FLASH: (
+        TranslationConnection.MANAGED,
+        TranslationConnection.OPENROUTER,
+        TranslationConnection.OFFICIAL_BYOK,
+    ),
+    TranslationModel.GEMINI_3_FLASH: (TranslationConnection.OFFICIAL_BYOK,),
+    TranslationModel.GEMINI_31_FLASH_LITE: (TranslationConnection.OFFICIAL_BYOK,),
+    TranslationModel.QWEN_35_PLUS: (TranslationConnection.OFFICIAL_BYOK,),
+}
+TRANSLATION_CONNECTION_PRIORITY: tuple[TranslationConnection, ...] = (
+    TranslationConnection.MANAGED,
+    TranslationConnection.OPENROUTER,
+    TranslationConnection.OFFICIAL_BYOK,
+)
+
+
+def supported_translation_connections(
+    model: TranslationModel,
+) -> tuple[TranslationConnection, ...]:
+    return TRANSLATION_CONNECTIONS_BY_MODEL[model]
+
+
+def default_translation_connection(model: TranslationModel) -> TranslationConnection:
+    supported_connections = supported_translation_connections(model)
+    for connection in TRANSLATION_CONNECTION_PRIORITY:
+        if connection in supported_connections:
+            return connection
+    return supported_connections[0]
+
+
+def _supported_translation_connections(
+    model: TranslationModel,
+) -> tuple[TranslationConnection, ...]:
+    return supported_translation_connections(model)
+
+
+def _default_translation_connection(model: TranslationModel) -> TranslationConnection:
+    return default_translation_connection(model)
+
+
+def _default_translation_connection_history() -> dict[str, TranslationConnection]:
+    return {TranslationModel.GEMMA4.value: TranslationConnection.MANAGED}
+
+
+def _parse_translation_model(value: object) -> TranslationModel | None:
+    if isinstance(value, TranslationModel):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip()
+        try:
+            return TranslationModel(normalized)
+        except ValueError:
+            pass
+    return None
+
+
+def _parse_translation_connection(value: object) -> TranslationConnection | None:
+    if isinstance(value, TranslationConnection):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip()
+        try:
+            return TranslationConnection(normalized)
+        except ValueError:
+            pass
+    return None
+
+
+def _parse_translation_connection_history(value: object) -> dict[str, TranslationConnection]:
+    if not isinstance(value, dict):
+        return {}
+
+    history: dict[str, TranslationConnection] = {}
+    for raw_model, raw_connection in value.items():
+        model = _parse_translation_model(raw_model)
+        connection = _parse_translation_connection(raw_connection)
+        if model is None or connection is None:
+            continue
+        if connection not in _supported_translation_connections(model):
+            continue
+        history[model.value] = connection
+    return history
+
+
+def _normalize_translation_settings(
+    *,
+    model: TranslationModel | None,
+    connection: TranslationConnection | None,
+    history: object = None,
+) -> TranslationSettings:
+    normalized_model = model or TranslationModel.GEMMA4
+    normalized_history = _parse_translation_connection_history(history)
+    if connection not in _supported_translation_connections(normalized_model):
+        connection = _default_translation_connection(normalized_model)
+    normalized_history[normalized_model.value] = connection
+    return TranslationSettings(
+        model=normalized_model,
+        connection=connection,
+        connection_history=normalized_history,
+    )
+
+
+def _translation_data_has_valid_model(value: object) -> bool:
+    return isinstance(value, dict) and _parse_translation_model(value.get("model")) is not None
+
+
+def _translation_connection_from_openrouter_source(
+    selected_source: OpenRouterCredentialSource,
+    *,
+    model: TranslationModel,
+) -> TranslationConnection:
+    if selected_source == OpenRouterCredentialSource.MANAGED:
+        return TranslationConnection.MANAGED
+    if selected_source == OpenRouterCredentialSource.BYOK:
+        return TranslationConnection.OPENROUTER
+    return _default_translation_connection(model)
+
+
+def _history_connection_or_default(
+    model: TranslationModel,
+    history: dict[str, TranslationConnection],
+) -> TranslationConnection:
+    connection = history.get(model.value)
+    if connection in _supported_translation_connections(model):
+        return connection
+    return _default_translation_connection(model)
+
+
+def _translation_settings_to_dict(settings: TranslationSettings) -> dict[str, Any]:
+    return {
+        "model": settings.model.value,
+        "connection": settings.connection.value,
+        "connection_history": {
+            model: connection.value for model, connection in settings.connection_history.items()
+        },
+    }
+
+
+def _default_translation_settings_dict() -> dict[str, Any]:
+    return {
+        "model": TranslationModel.GEMMA4.value,
+        "connection": TranslationConnection.MANAGED.value,
+        "connection_history": {
+            TranslationModel.GEMMA4.value: TranslationConnection.MANAGED.value,
+        },
+    }
+
+
+def _translation_settings_is_exact_default(settings: TranslationSettings) -> bool:
+    return _translation_settings_to_dict(settings) == _default_translation_settings_dict()
 
 
 @dataclass(slots=True)
@@ -103,15 +352,15 @@ class LanguageSettings:
 
 @dataclass(slots=True)
 class AudioSettings:
-    internal_sample_rate_hz: int = 16000
+    internal_sample_rate_hz: int = STT_INTERNAL_SAMPLE_RATE_HZ
     internal_channels: int = 1
     ring_buffer_ms: int = 500
-    input_host_api: str = "Windows DirectSound"
+    input_host_api: str = WINDOWS_WASAPI_HOST_API
     input_device: str = ""
 
     def validate(self) -> None:
-        if self.internal_sample_rate_hz not in (8000, 16000):
-            raise ValueError("internal_sample_rate_hz must be 8000 or 16000")
+        if self.internal_sample_rate_hz != STT_INTERNAL_SAMPLE_RATE_HZ:
+            raise ValueError(f"internal_sample_rate_hz must be {STT_INTERNAL_SAMPLE_RATE_HZ}")
         if self.internal_channels != 1:
             raise ValueError("internal_channels must be 1 (mono)")
         if self.ring_buffer_ms <= 0:
@@ -262,8 +511,6 @@ class OSCSettings:
     chatbox_send: bool = True
     chatbox_clear: bool = False
     chatbox_max_chars: int = 144
-    cooldown_s: float = 1.5
-    ttl_s: float = 7.0
     vrc_mic_intercept: bool = False
     chatbox_include_source: bool = True
 
@@ -276,17 +523,13 @@ class OSCSettings:
             raise ValueError("chatbox_address must start with '/'")
         if self.chatbox_max_chars <= 0:
             raise ValueError("chatbox_max_chars must be > 0")
-        if self.cooldown_s <= 0:
-            raise ValueError("cooldown_s must be > 0")
-        if self.ttl_s <= 0:
-            raise ValueError("ttl_s must be > 0")
 
 
 @dataclass(slots=True)
 class ProviderSettings:
     stt: STTProviderName = STTProviderName.LOCAL_QWEN
     peer_stt: STTProviderName = STTProviderName.DEEPGRAM
-    llm: LLMProviderName = LLMProviderName.GEMINI
+    llm: LLMProviderName = LLMProviderName.OPENROUTER
 
     def validate(self) -> None:
         if not isinstance(self.stt, STTProviderName):
@@ -341,11 +584,35 @@ class QwenSettings:
 
 
 @dataclass(slots=True)
+class DeepSeekSettings:
+    llm_model: DeepSeekLLMModel = DeepSeekLLMModel.DEEPSEEK_V4_FLASH
+
+    def validate(self) -> None:
+        if not isinstance(self.llm_model, DeepSeekLLMModel):
+            raise ValueError("invalid deepseek llm model")
+
+
+@dataclass(slots=True)
 class OpenRouterSettings:
     llm_model: OpenRouterLLMModel = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
-    selected_source: OpenRouterCredentialSource = OpenRouterCredentialSource.NONE
+    selected_source: OpenRouterCredentialSource = OpenRouterCredentialSource.MANAGED
+    selection_alias: OpenRouterSelectionAlias | None = None
+    fallback_selection_alias: OpenRouterFallbackSelectionAlias = (
+        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+    )
     broker_base_url: str = DEFAULT_OPENROUTER_BROKER_BASE_URL
+
+    def __post_init__(self) -> None:
+        (
+            self.llm_model,
+            self.selected_source,
+            self.selection_alias,
+        ) = _resolve_openrouter_runtime_main_selection(
+            selection_alias=self.selection_alias,
+            llm_model=self.llm_model,
+            selected_source=self.selected_source,
+        )
 
     def validate(self) -> None:
         if not isinstance(self.llm_model, OpenRouterLLMModel):
@@ -354,6 +621,14 @@ class OpenRouterSettings:
             raise ValueError("invalid openrouter routing mode")
         if not isinstance(self.selected_source, OpenRouterCredentialSource):
             raise ValueError("invalid openrouter credential source")
+        if self.selection_alias is not None and not isinstance(
+            self.selection_alias, OpenRouterSelectionAlias
+        ):
+            raise ValueError("invalid openrouter selection alias")
+        if self.selection_alias is None and self.selected_source != OpenRouterCredentialSource.NONE:
+            raise ValueError("openrouter selection alias is required for active sources")
+        if not isinstance(self.fallback_selection_alias, OpenRouterFallbackSelectionAlias):
+            raise ValueError("invalid openrouter fallback selection alias")
         if not isinstance(self.broker_base_url, str) or not self.broker_base_url.strip():
             raise ValueError("invalid openrouter broker base url")
 
@@ -361,17 +636,29 @@ class OpenRouterSettings:
 @dataclass(slots=True)
 class UiSettings:
     locale: str = "en"
-    # Session-only toggle; intentionally not persisted to settings.json.
     overlay_enabled: bool = False
-    show_overlay_translation: bool = True
-    show_overlay_peer_original: bool = True
     peer_translation_enabled: bool = False
+    peer_translation_eula_accepted: bool = False
     integrated_context_enabled: bool = False
     integrated_context_bootstrapped: bool = False
 
     def validate(self) -> None:
         if not self.locale:
             raise ValueError("locale must be non-empty")
+
+
+@dataclass(slots=True)
+class OverlaySettings:
+    show_translation: bool = True
+    show_peer_original: bool = True
+    calibration: OverlayCalibration = field(default_factory=OverlayCalibration)
+
+    def validate(self) -> None:
+        if not isinstance(self.show_translation, bool):
+            raise ValueError("overlay show_translation must be a bool")
+        if not isinstance(self.show_peer_original, bool):
+            raise ValueError("overlay show_peer_original must be a bool")
+        self.calibration.validate()
 
 
 @dataclass(slots=True)
@@ -382,6 +669,7 @@ class ApiKeyVerificationSettings:
     soniox: bool = False
     google: bool = False
     openrouter: bool = False
+    deepseek: bool = False
     alibaba_beijing: bool = False
     alibaba_singapore: bool = False
 
@@ -396,6 +684,9 @@ class ManagedIdentitySettings:
     release_token_expires_at: str | None = None
     verified_hardware_hash: str | None = None
     verified_hardware_hash_salt_version: int | None = None
+    active_managed_credential_ref: str | None = None
+    active_managed_expires_at: str | None = None
+    founder_letter_seen_credential_ref: str | None = None
 
     def validate(self) -> None:
         if not isinstance(self.installation_id, str):
@@ -415,16 +706,29 @@ class ManagedIdentitySettings:
             and not isinstance(self.verified_hardware_hash_salt_version, int)
         ):
             raise ValueError("managed verified_hardware_hash_salt_version must be an int or None")
+        if self.active_managed_credential_ref is not None and not isinstance(
+            self.active_managed_credential_ref, str
+        ):
+            raise ValueError("managed active_managed_credential_ref must be a string or None")
+        if self.active_managed_expires_at is not None and not isinstance(
+            self.active_managed_expires_at, str
+        ):
+            raise ValueError("managed active_managed_expires_at must be a string or None")
+        if self.founder_letter_seen_credential_ref is not None and not isinstance(
+            self.founder_letter_seen_credential_ref, str
+        ):
+            raise ValueError("managed founder_letter_seen_credential_ref must be a string or None")
 
 
 @dataclass(slots=True)
 class AppSettings:
     settings_version: int = SETTINGS_SCHEMA_VERSION
     provider: ProviderSettings = field(default_factory=ProviderSettings)
+    translation: TranslationSettings = field(default_factory=TranslationSettings)
     languages: LanguageSettings = field(default_factory=LanguageSettings)
     audio: AudioSettings = field(default_factory=AudioSettings)
     desktop_audio: DesktopAudioSettings = field(default_factory=DesktopAudioSettings)
-    overlay_calibration: OverlayCalibration = field(default_factory=OverlayCalibration)
+    overlay: OverlaySettings = field(default_factory=OverlaySettings)
     stt: STTSettings = field(default_factory=STTSettings)
     deepgram_stt: DeepgramSTTSettings = field(default_factory=DeepgramSTTSettings)
     qwen_asr_stt: QwenASRSTTSettings = field(default_factory=QwenASRSTTSettings)
@@ -434,6 +738,7 @@ class AppSettings:
     gemini: GeminiSettings = field(default_factory=GeminiSettings)
     openrouter: OpenRouterSettings = field(default_factory=OpenRouterSettings)
     qwen: QwenSettings = field(default_factory=QwenSettings)
+    deepseek: DeepSeekSettings = field(default_factory=DeepSeekSettings)
     llm: LLMSettings = field(default_factory=LLMSettings)
     osc: OSCSettings = field(default_factory=OSCSettings)
     secrets: SecretsSettings = field(default_factory=SecretsSettings)
@@ -443,14 +748,23 @@ class AppSettings:
     system_prompt: str = ""
     system_prompts: dict[str, str] = field(default_factory=dict)
 
+    @property
+    def overlay_calibration(self) -> OverlayCalibration:
+        return self.overlay.calibration
+
+    @overlay_calibration.setter
+    def overlay_calibration(self, value: OverlayCalibration) -> None:
+        self.overlay.calibration = value
+
     def validate(self) -> None:
         if self.settings_version <= 0:
             raise ValueError("settings_version must be > 0")
         self.provider.validate()
+        self.translation.validate()
         self.languages.validate()
         self.audio.validate()
         self.desktop_audio.validate()
-        self.overlay_calibration.validate()
+        self.overlay.validate()
         self.stt.validate()
         self.deepgram_stt.validate()
         self.qwen_asr_stt.validate()
@@ -460,6 +774,7 @@ class AppSettings:
         self.gemini.validate()
         self.openrouter.validate()
         self.qwen.validate()
+        self.deepseek.validate()
         self.llm.validate()
         self.osc.validate()
         self.secrets.validate()
@@ -484,13 +799,38 @@ def _enum_to_value(obj: object) -> object:
 
 
 def to_dict(settings: AppSettings) -> dict[str, Any]:
+    settings = copy.deepcopy(settings)
+    if _translation_settings_is_exact_default(settings.translation):
+        inferred_translation = _derive_translation_settings_from_runtime(
+            settings,
+            history=settings.translation.connection_history,
+        )
+        if not _translation_settings_is_exact_default(inferred_translation):
+            settings.translation = inferred_translation
+    materialize_translation_settings(settings)
+    (
+        normalized_openrouter_model,
+        normalized_openrouter_selected_source,
+        normalized_openrouter_selection_alias,
+    ) = _resolve_openrouter_runtime_main_selection(
+        selection_alias=settings.openrouter.selection_alias,
+        llm_model=settings.openrouter.llm_model,
+        selected_source=settings.openrouter.selected_source,
+    )
+    normalized_openrouter_selection_alias_value = (
+        normalized_openrouter_selection_alias.value
+        if normalized_openrouter_selection_alias is not None
+        else None
+    )
+
     data: dict[str, Any] = {
         "settings_version": settings.settings_version,
         "provider": {
             "stt": settings.provider.stt.value,
-            "peer_stt": settings.provider.peer_stt.value,
+            "peer_stt": _parse_peer_stt_provider(settings.provider.peer_stt.value).value,
             "llm": settings.provider.llm.value,
         },
+        "translation": _translation_settings_to_dict(settings.translation),
         "languages": {
             "source_language": settings.languages.source_language,
             "target_language": settings.languages.target_language,
@@ -512,7 +852,11 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "vad_hangover_ms": settings.desktop_audio.vad_hangover_ms,
             "vad_pre_roll_ms": settings.desktop_audio.vad_pre_roll_ms,
         },
-        "overlay_calibration": settings.overlay_calibration.to_dict(),
+        "overlay": {
+            "show_translation": settings.overlay.show_translation,
+            "show_peer_original": settings.overlay.show_peer_original,
+            "calibration": settings.overlay.calibration.to_dict(),
+        },
         "stt": {
             "drain_timeout_s": settings.stt.drain_timeout_s,
             "vad_speech_threshold": settings.stt.vad_speech_threshold,
@@ -536,32 +880,23 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "keepalive_interval_s": settings.soniox_stt.keepalive_interval_s,
             "trailing_silence_ms": settings.soniox_stt.trailing_silence_ms,
         },
-        "peer_qwen_asr_stt": {
-            "model": settings.peer_qwen_asr_stt.model,
-            "region": (
-                settings.peer_qwen_asr_stt.region.value
-                if settings.peer_qwen_asr_stt.region is not None
-                else None
-            ),
-        },
-        "peer_soniox_stt": {
-            "model": settings.peer_soniox_stt.model,
-            "endpoint": settings.peer_soniox_stt.endpoint,
-            "keepalive_interval_s": settings.peer_soniox_stt.keepalive_interval_s,
-            "trailing_silence_ms": settings.peer_soniox_stt.trailing_silence_ms,
-        },
         "gemini": {
             "llm_model": settings.gemini.llm_model.value,
         },
         "openrouter": {
-            "llm_model": settings.openrouter.llm_model.value,
+            "llm_model": normalized_openrouter_model.value,
             "routing_mode": settings.openrouter.routing_mode.value,
-            "selected_source": settings.openrouter.selected_source.value,
+            "selected_source": normalized_openrouter_selected_source.value,
+            "selection_alias": normalized_openrouter_selection_alias_value,
+            "fallback_selection_alias": settings.openrouter.fallback_selection_alias.value,
             "broker_base_url": settings.openrouter.broker_base_url,
         },
         "qwen": {
             "region": settings.qwen.region.value,
             "llm_model": settings.qwen.llm_model.value,
+        },
+        "deepseek": {
+            "llm_model": settings.deepseek.llm_model.value,
         },
         "llm": {"concurrency_limit": settings.llm.concurrency_limit},
         "osc": {
@@ -571,8 +906,6 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "chatbox_send": settings.osc.chatbox_send,
             "chatbox_clear": settings.osc.chatbox_clear,
             "chatbox_max_chars": settings.osc.chatbox_max_chars,
-            "cooldown_s": settings.osc.cooldown_s,
-            "ttl_s": settings.osc.ttl_s,
             "vrc_mic_intercept": settings.osc.vrc_mic_intercept,
             "chatbox_include_source": settings.osc.chatbox_include_source,
         },
@@ -582,9 +915,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         },
         "ui": {
             "locale": settings.ui.locale,
-            "show_overlay_translation": settings.ui.show_overlay_translation,
-            "show_overlay_peer_original": settings.ui.show_overlay_peer_original,
-            "peer_translation_enabled": settings.ui.peer_translation_enabled,
+            "peer_translation_eula_accepted": settings.ui.peer_translation_eula_accepted,
             "integrated_context_enabled": settings.ui.integrated_context_enabled,
             "integrated_context_bootstrapped": settings.ui.integrated_context_bootstrapped,
         },
@@ -593,6 +924,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "soniox": settings.api_key_verified.soniox,
             "google": settings.api_key_verified.google,
             "openrouter": settings.api_key_verified.openrouter,
+            "deepseek": settings.api_key_verified.deepseek,
             "alibaba_beijing": settings.api_key_verified.alibaba_beijing,
             "alibaba_singapore": settings.api_key_verified.alibaba_singapore,
         },
@@ -603,6 +935,13 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "verified_hardware_hash": settings.managed_identity.verified_hardware_hash,
             "verified_hardware_hash_salt_version": (
                 settings.managed_identity.verified_hardware_hash_salt_version
+            ),
+            "active_managed_credential_ref": (
+                settings.managed_identity.active_managed_credential_ref
+            ),
+            "active_managed_expires_at": settings.managed_identity.active_managed_expires_at,
+            "founder_letter_seen_credential_ref": (
+                settings.managed_identity.founder_letter_seen_credential_ref
             ),
         },
         "system_prompt": settings.system_prompt,
@@ -619,6 +958,10 @@ def _parse_stt_provider(value: str) -> STTProviderName:
         return STTProviderName(value)
     except ValueError:
         return STTProviderName.DEEPGRAM
+
+
+def _parse_peer_stt_provider(value: str) -> STTProviderName:
+    return _parse_stt_provider(value)
 
 
 def _parse_llm_provider(value: object) -> LLMProviderName:
@@ -657,6 +1000,18 @@ def _parse_gemini_llm_model(value: object) -> GeminiLLMModel:
     return GeminiLLMModel.GEMINI_31_FLASH_LITE
 
 
+def _parse_deepseek_llm_model(value: object) -> DeepSeekLLMModel:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized == "deepseek-chat":
+            normalized = DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value
+        try:
+            return DeepSeekLLMModel(normalized)
+        except ValueError:
+            pass
+    return DeepSeekLLMModel.DEEPSEEK_V4_FLASH
+
+
 def _parse_openrouter_llm_model(value: object) -> OpenRouterLLMModel:
     if isinstance(value, str):
         normalized = value.strip()
@@ -691,6 +1046,111 @@ def _parse_openrouter_credential_source(
     return fallback
 
 
+def _parse_openrouter_selection_alias_profile(value: object):
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized:
+            return get_openrouter_llm_profile(normalized)
+    return None
+
+
+def _derive_openrouter_selection_alias(
+    llm_model: OpenRouterLLMModel,
+    selected_source: OpenRouterCredentialSource,
+) -> OpenRouterSelectionAlias:
+    alias = get_openrouter_selection_alias_for_model_and_source(
+        llm_model.value,
+        selected_source.value,
+    )
+    if alias is None:
+        alias = (
+            OpenRouterSelectionAlias.GEMMA4_MANAGED.value
+            if selected_source == OpenRouterCredentialSource.MANAGED
+            else OpenRouterSelectionAlias.GEMMA4_BYOK.value
+        )
+    return OpenRouterSelectionAlias(alias)
+
+
+def _parse_openrouter_selection_alias(
+    value: object,
+    *,
+    llm_model: OpenRouterLLMModel,
+    selected_source: OpenRouterCredentialSource,
+) -> OpenRouterSelectionAlias:
+    profile = _parse_openrouter_selection_alias_profile(value)
+    if profile is not None and profile.openrouter_model is not None:
+        canonical_alias = openrouter_alias_for_fields(
+            model=profile.openrouter_model,
+            source=profile.openrouter_source,
+        )
+        if canonical_alias is not None:
+            return OpenRouterSelectionAlias(canonical_alias)
+    return _derive_openrouter_selection_alias(llm_model, selected_source)
+
+
+def _parse_openrouter_fallback_selection_alias(value: object) -> OpenRouterFallbackSelectionAlias:
+    if isinstance(value, str):
+        normalized = normalize_openrouter_fallback_selection_alias(value)
+        if normalized is not None:
+            try:
+                return OpenRouterFallbackSelectionAlias(normalized)
+            except ValueError:
+                pass
+    return OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+
+
+def _resolve_openrouter_runtime_main_selection(
+    *,
+    selection_alias: object,
+    llm_model: object,
+    selected_source: object,
+) -> tuple[
+    OpenRouterLLMModel,
+    OpenRouterCredentialSource,
+    OpenRouterSelectionAlias | None,
+]:
+    selection_profile = _parse_openrouter_selection_alias_profile(selection_alias)
+    if selection_profile is not None and selection_profile.openrouter_model is not None:
+        resolved_llm_model = _parse_openrouter_llm_model(selection_profile.openrouter_model)
+        resolved_selected_source = _parse_openrouter_credential_source(
+            selection_profile.openrouter_source
+        )
+        if (
+            resolved_selected_source == OpenRouterCredentialSource.NONE
+            and _parse_openrouter_credential_source(selected_source)
+            != OpenRouterCredentialSource.NONE
+        ):
+            resolved_selected_source = _parse_openrouter_credential_source(selected_source)
+        if resolved_selected_source == OpenRouterCredentialSource.NONE:
+            return resolved_llm_model, resolved_selected_source, None
+        canonical_selection_alias = _derive_openrouter_selection_alias(
+            resolved_llm_model,
+            resolved_selected_source,
+        )
+        canonical_profile = get_openrouter_llm_profile(canonical_selection_alias.value)
+        assert canonical_profile is not None and canonical_profile.openrouter_model is not None
+        return (
+            _parse_openrouter_llm_model(canonical_profile.openrouter_model),
+            _parse_openrouter_credential_source(canonical_profile.openrouter_source),
+            canonical_selection_alias,
+        )
+
+    normalized_llm_model = _parse_openrouter_llm_model(llm_model)
+    normalized_selected_source = _parse_openrouter_credential_source(selected_source)
+    if normalized_selected_source == OpenRouterCredentialSource.NONE:
+        return normalized_llm_model, normalized_selected_source, None
+    normalized_selection_alias = _derive_openrouter_selection_alias(
+        normalized_llm_model, normalized_selected_source
+    )
+    normalized_profile = get_openrouter_llm_profile(normalized_selection_alias.value)
+    assert normalized_profile is not None and normalized_profile.openrouter_model is not None
+    return (
+        _parse_openrouter_llm_model(normalized_profile.openrouter_model),
+        _parse_openrouter_credential_source(normalized_profile.openrouter_source),
+        normalized_selection_alias,
+    )
+
+
 def _parse_openrouter_broker_base_url(value: object) -> str:
     if isinstance(value, str):
         normalized = value.strip()
@@ -699,14 +1159,18 @@ def _parse_openrouter_broker_base_url(value: object) -> str:
     return DEFAULT_OPENROUTER_BROKER_BASE_URL
 
 
-def _default_openrouter_credential_source_value(data: dict[str, Any]) -> OpenRouterCredentialSource:
-    provider_data = data.get("provider")
+def _loaded_llm_provider(settings_data: dict[str, Any]) -> LLMProviderName:
+    provider_data = settings_data.get("provider")
     provider_llm_value = (
         provider_data.get("llm", LLMProviderName.GEMINI.value)
         if isinstance(provider_data, dict)
         else LLMProviderName.GEMINI.value
     )
-    if _parse_llm_provider(provider_llm_value) == LLMProviderName.OPENROUTER:
+    return _parse_llm_provider(provider_llm_value)
+
+
+def _default_openrouter_credential_source_value(data: dict[str, Any]) -> OpenRouterCredentialSource:
+    if _loaded_llm_provider(data) == LLMProviderName.OPENROUTER:
         return OpenRouterCredentialSource.BYOK
     return OpenRouterCredentialSource.NONE
 
@@ -719,6 +1183,310 @@ def _get_raw_openrouter_selected_source(openrouter_data: dict[str, Any]) -> obje
     if "selected_credential_source" in openrouter_data:
         return openrouter_data["selected_credential_source"]
     return None
+
+
+def _resolve_openrouter_main_selection(
+    openrouter_data: dict[str, Any],
+    settings_data: dict[str, Any],
+) -> tuple[
+    OpenRouterLLMModel,
+    OpenRouterCredentialSource,
+    OpenRouterSelectionAlias | None,
+]:
+    raw_selected_source = _parse_openrouter_credential_source(
+        _get_raw_openrouter_selected_source(openrouter_data),
+        fallback=_default_openrouter_credential_source_value(settings_data),
+    )
+    if (
+        _loaded_llm_provider(settings_data) == LLMProviderName.OPENROUTER
+        and raw_selected_source == OpenRouterCredentialSource.NONE
+    ):
+        raw_selected_source = _default_openrouter_credential_source_value(settings_data)
+    selection_profile = _parse_openrouter_selection_alias_profile(
+        openrouter_data.get("selection_alias")
+    )
+    if raw_selected_source == OpenRouterCredentialSource.NONE:
+        llm_default = (
+            selection_profile.openrouter_model
+            if selection_profile is not None and selection_profile.openrouter_model is not None
+            else OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value
+        )
+        llm_model = _parse_openrouter_llm_model(openrouter_data.get("llm_model", llm_default))
+        return llm_model, raw_selected_source, None
+
+    if selection_profile is not None and selection_profile.openrouter_model is not None:
+        llm_model = _parse_openrouter_llm_model(selection_profile.openrouter_model)
+        selected_source = _parse_openrouter_credential_source(
+            selection_profile.openrouter_source,
+            fallback=_default_openrouter_credential_source_value(settings_data),
+        )
+        if (
+            selected_source == OpenRouterCredentialSource.NONE
+            and raw_selected_source != OpenRouterCredentialSource.NONE
+        ):
+            selected_source = raw_selected_source
+        if selected_source == OpenRouterCredentialSource.NONE:
+            return llm_model, selected_source, None
+        selection_alias = _derive_openrouter_selection_alias(llm_model, selected_source)
+        return llm_model, selected_source, selection_alias
+
+    llm_model = _parse_openrouter_llm_model(openrouter_data.get("llm_model"))
+    selected_source = raw_selected_source
+    selection_alias = _derive_openrouter_selection_alias(llm_model, selected_source)
+    return llm_model, selected_source, selection_alias
+
+
+def _derive_translation_settings_from_runtime_values(
+    *,
+    provider_llm: LLMProviderName,
+    openrouter_model: OpenRouterLLMModel,
+    openrouter_selected_source: OpenRouterCredentialSource,
+    gemini_model: GeminiLLMModel,
+    qwen_model: QwenLLMModel,
+    history: object = None,
+) -> TranslationSettings:
+    normalized_history = _parse_translation_connection_history(history)
+
+    if provider_llm == LLMProviderName.OPENROUTER:
+        if openrouter_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT:
+            return _normalize_translation_settings(
+                model=TranslationModel.GEMMA4,
+                connection=_translation_connection_from_openrouter_source(
+                    openrouter_selected_source,
+                    model=TranslationModel.GEMMA4,
+                ),
+                history=normalized_history,
+            )
+        if openrouter_model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH:
+            return _normalize_translation_settings(
+                model=TranslationModel.DEEPSEEK_V4_FLASH,
+                connection=_translation_connection_from_openrouter_source(
+                    openrouter_selected_source,
+                    model=TranslationModel.DEEPSEEK_V4_FLASH,
+                ),
+                history=normalized_history,
+            )
+        if openrouter_model == OpenRouterLLMModel.QWEN_35_FLASH_02_23:
+            return _normalize_translation_settings(
+                model=TranslationModel.DEEPSEEK_V4_FLASH,
+                connection=_history_connection_or_default(
+                    TranslationModel.DEEPSEEK_V4_FLASH,
+                    normalized_history,
+                ),
+                history=normalized_history,
+            )
+
+    if provider_llm == LLMProviderName.DEEPSEEK:
+        return _normalize_translation_settings(
+            model=TranslationModel.DEEPSEEK_V4_FLASH,
+            connection=TranslationConnection.OFFICIAL_BYOK,
+            history=normalized_history,
+        )
+
+    if provider_llm == LLMProviderName.QWEN:
+        if qwen_model == QwenLLMModel.QWEN_35_FLASH:
+            return _normalize_translation_settings(
+                model=TranslationModel.DEEPSEEK_V4_FLASH,
+                connection=_history_connection_or_default(
+                    TranslationModel.DEEPSEEK_V4_FLASH,
+                    normalized_history,
+                ),
+                history=normalized_history,
+            )
+        return _normalize_translation_settings(
+            model=TranslationModel.QWEN_35_PLUS,
+            connection=TranslationConnection.OFFICIAL_BYOK,
+            history=normalized_history,
+        )
+
+    if gemini_model == GeminiLLMModel.GEMINI_3_FLASH:
+        return _normalize_translation_settings(
+            model=TranslationModel.GEMINI_3_FLASH,
+            connection=TranslationConnection.OFFICIAL_BYOK,
+            history=normalized_history,
+        )
+    return _normalize_translation_settings(
+        model=TranslationModel.GEMINI_31_FLASH_LITE,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+        history=normalized_history,
+    )
+
+
+def _derive_translation_settings_from_runtime(
+    settings: AppSettings,
+    history: object = None,
+) -> TranslationSettings:
+    return _derive_translation_settings_from_runtime_values(
+        provider_llm=settings.provider.llm,
+        openrouter_model=settings.openrouter.llm_model,
+        openrouter_selected_source=settings.openrouter.selected_source,
+        gemini_model=settings.gemini.llm_model,
+        qwen_model=settings.qwen.llm_model,
+        history=history,
+    )
+
+
+def materialize_translation_settings(settings: AppSettings) -> AppSettings:
+    settings.translation = _normalize_translation_settings(
+        model=_parse_translation_model(settings.translation.model),
+        connection=_parse_translation_connection(settings.translation.connection),
+        history=settings.translation.connection_history,
+    )
+    model = settings.translation.model
+    connection = settings.translation.connection
+
+    if model == TranslationModel.GEMMA4:
+        settings.provider.llm = LLMProviderName.OPENROUTER
+        settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+        settings.openrouter.selected_source = (
+            OpenRouterCredentialSource.MANAGED
+            if connection == TranslationConnection.MANAGED
+            else OpenRouterCredentialSource.BYOK
+        )
+        settings.openrouter.selection_alias = _derive_openrouter_selection_alias(
+            settings.openrouter.llm_model,
+            settings.openrouter.selected_source,
+        )
+        return settings
+
+    if model == TranslationModel.DEEPSEEK_V4_FLASH:
+        if connection == TranslationConnection.OFFICIAL_BYOK:
+            settings.provider.llm = LLMProviderName.DEEPSEEK
+            settings.deepseek.llm_model = DeepSeekLLMModel.DEEPSEEK_V4_FLASH
+            return settings
+        settings.provider.llm = LLMProviderName.OPENROUTER
+        settings.openrouter.llm_model = OpenRouterLLMModel.DEEPSEEK_V4_FLASH
+        settings.openrouter.selected_source = (
+            OpenRouterCredentialSource.MANAGED
+            if connection == TranslationConnection.MANAGED
+            else OpenRouterCredentialSource.BYOK
+        )
+        settings.openrouter.selection_alias = _derive_openrouter_selection_alias(
+            settings.openrouter.llm_model,
+            settings.openrouter.selected_source,
+        )
+        return settings
+
+    if model == TranslationModel.GEMINI_3_FLASH:
+        settings.provider.llm = LLMProviderName.GEMINI
+        settings.gemini.llm_model = GeminiLLMModel.GEMINI_3_FLASH
+        return settings
+
+    if model == TranslationModel.GEMINI_31_FLASH_LITE:
+        settings.provider.llm = LLMProviderName.GEMINI
+        settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
+        return settings
+
+    settings.provider.llm = LLMProviderName.QWEN
+    settings.qwen.llm_model = QwenLLMModel.QWEN_35_PLUS
+    return settings
+
+
+def _ensure_mapping_block(data: dict[str, Any], key: str) -> tuple[dict[str, Any], bool]:
+    block = data.get(key)
+    if isinstance(block, dict):
+        return block, False
+    block = {}
+    data[key] = block
+    return block, True
+
+
+def _set_mapping_value(mapping: dict[str, Any], key: str, value: object) -> bool:
+    if mapping.get(key) == value:
+        return False
+    mapping[key] = value
+    return True
+
+
+def _apply_materialized_translation_to_data(
+    data: dict[str, Any],
+    translation: TranslationSettings,
+) -> bool:
+    provider_data, changed = _ensure_mapping_block(data, "provider")
+    openrouter_data, block_changed = _ensure_mapping_block(data, "openrouter")
+    changed = changed or block_changed
+    gemini_data, block_changed = _ensure_mapping_block(data, "gemini")
+    changed = changed or block_changed
+    qwen_data, block_changed = _ensure_mapping_block(data, "qwen")
+    changed = changed or block_changed
+    deepseek_data, block_changed = _ensure_mapping_block(data, "deepseek")
+    changed = changed or block_changed
+
+    translation = _normalize_translation_settings(
+        model=_parse_translation_model(translation.model),
+        connection=_parse_translation_connection(translation.connection),
+        history=translation.connection_history,
+    )
+
+    if translation.model == TranslationModel.GEMMA4:
+        selected_source = (
+            OpenRouterCredentialSource.MANAGED
+            if translation.connection == TranslationConnection.MANAGED
+            else OpenRouterCredentialSource.BYOK
+        )
+        selection_alias = _derive_openrouter_selection_alias(
+            OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source,
+        )
+        changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.OPENROUTER.value)
+        changed |= _set_mapping_value(
+            openrouter_data,
+            "llm_model",
+            OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
+        )
+        changed |= _set_mapping_value(openrouter_data, "selected_source", selected_source.value)
+        changed |= _set_mapping_value(openrouter_data, "selection_alias", selection_alias.value)
+        return changed
+
+    if translation.model == TranslationModel.DEEPSEEK_V4_FLASH:
+        if translation.connection == TranslationConnection.OFFICIAL_BYOK:
+            changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.DEEPSEEK.value)
+            changed |= _set_mapping_value(
+                deepseek_data,
+                "llm_model",
+                DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value,
+            )
+            return changed
+        selected_source = (
+            OpenRouterCredentialSource.MANAGED
+            if translation.connection == TranslationConnection.MANAGED
+            else OpenRouterCredentialSource.BYOK
+        )
+        selection_alias = _derive_openrouter_selection_alias(
+            OpenRouterLLMModel.DEEPSEEK_V4_FLASH,
+            selected_source,
+        )
+        changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.OPENROUTER.value)
+        changed |= _set_mapping_value(
+            openrouter_data,
+            "llm_model",
+            OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value,
+        )
+        changed |= _set_mapping_value(openrouter_data, "selected_source", selected_source.value)
+        changed |= _set_mapping_value(openrouter_data, "selection_alias", selection_alias.value)
+        return changed
+
+    if translation.model == TranslationModel.GEMINI_3_FLASH:
+        changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.GEMINI.value)
+        changed |= _set_mapping_value(
+            gemini_data,
+            "llm_model",
+            GeminiLLMModel.GEMINI_3_FLASH.value,
+        )
+        return changed
+
+    if translation.model == TranslationModel.GEMINI_31_FLASH_LITE:
+        changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.GEMINI.value)
+        changed |= _set_mapping_value(
+            gemini_data,
+            "llm_model",
+            GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
+        )
+        return changed
+
+    changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.QWEN.value)
+    changed |= _set_mapping_value(qwen_data, "llm_model", QwenLLMModel.QWEN_35_PLUS.value)
+    return changed
 
 
 def _infer_qwen_region_from_legacy_asr_endpoint(value: object) -> QwenRegion | None:
@@ -752,6 +1520,8 @@ def _llm_prompt_key(provider: LLMProviderName) -> str:
         return "gemini"
     if provider == LLMProviderName.OPENROUTER:
         return "openrouter"
+    if provider == LLMProviderName.DEEPSEEK:
+        return "deepseek"
     return "qwen"
 
 
@@ -763,6 +1533,65 @@ def _parse_system_prompts(value: object) -> dict[str, str]:
         if isinstance(key, str) and isinstance(prompt, str):
             out[key] = prompt
     return out
+
+
+def _shared_default_prompt() -> str:
+    from puripuly_heart.config.prompts import load_prompt_for_provider
+
+    return load_prompt_for_provider(LLMProviderName.GEMINI.value)
+
+
+def _shared_default_system_prompts(prompt: str) -> dict[str, str]:
+    return {provider_key: prompt for provider_key in _PROMPT_PROVIDER_KEYS}
+
+
+def ensure_prompt_defaults(settings: AppSettings) -> AppSettings:
+    system_prompt_empty = not settings.system_prompt.strip()
+    system_prompts_empty = all(not prompt.strip() for prompt in settings.system_prompts.values())
+    if system_prompt_empty and system_prompts_empty:
+        prompt = _shared_default_prompt()
+        settings.system_prompt = prompt
+        settings.system_prompts = _shared_default_system_prompts(prompt)
+    return settings
+
+
+def detect_system_locale() -> str | None:
+    try:
+        return locale.getlocale()[0]
+    except (ValueError, locale.Error):
+        return None
+
+
+def _normalize_first_run_locale(system_locale: str | None) -> str:
+    if system_locale is None:
+        return ""
+    normalized = system_locale.strip()
+    if not normalized:
+        return ""
+    normalized = normalized.split(".", maxsplit=1)[0]
+    normalized = normalized.split("@", maxsplit=1)[0]
+    return normalized.replace("_", "-").casefold()
+
+
+def resolve_first_run_ui_locale(system_locale: str | None) -> str:
+    normalized = _normalize_first_run_locale(system_locale)
+    if normalized == "ko" or normalized.startswith("ko-") or normalized.startswith("korean"):
+        return "ko"
+    if normalized == "ja" or normalized.startswith("ja-") or normalized.startswith("japanese"):
+        return "ja"
+    if normalized == "zh" or normalized.startswith("zh-") or normalized.startswith("chinese"):
+        return "zh-CN"
+    return "en"
+
+
+def new_settings_for_first_run(system_locale: str | None = None) -> AppSettings:
+    if system_locale is None:
+        system_locale = detect_system_locale()
+    settings = AppSettings()
+    settings.ui.locale = resolve_first_run_ui_locale(system_locale)
+    ensure_prompt_defaults(settings)
+    settings.validate()
+    return settings
 
 
 def _parse_custom_terms(value: object) -> dict[str, list[str]]:
@@ -800,6 +1629,13 @@ def _coerce_int(value: object, fallback: int) -> int:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return fallback
+
+
+def _normalize_internal_sample_rate_hz(value: object) -> int:
+    normalized = _coerce_int(value, STT_INTERNAL_SAMPLE_RATE_HZ)
+    if normalized == 8000:
+        return STT_INTERNAL_SAMPLE_RATE_HZ
+    return normalized
 
 
 def _parse_optional_str(value: object) -> str | None:
@@ -1063,11 +1899,129 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 13
 
+    if version < 14:
+        audio_data = data.get("audio")
+        if isinstance(audio_data, dict):
+            raw_internal_sample_rate_hz = audio_data.get(
+                "internal_sample_rate_hz", STT_INTERNAL_SAMPLE_RATE_HZ
+            )
+            normalized_internal_sample_rate_hz = _normalize_internal_sample_rate_hz(
+                raw_internal_sample_rate_hz
+            )
+            if raw_internal_sample_rate_hz != normalized_internal_sample_rate_hz:
+                audio_data["internal_sample_rate_hz"] = normalized_internal_sample_rate_hz
+                changed = True
+
+        version = 14
+
+    if version < 15:
+        openrouter_data = data.get("openrouter")
+        if not isinstance(openrouter_data, dict):
+            openrouter_data = {}
+            data["openrouter"] = openrouter_data
+            changed = True
+
+        (
+            normalized_openrouter_model,
+            normalized_openrouter_selected_source,
+            normalized_selection_alias,
+        ) = _resolve_openrouter_main_selection(openrouter_data, data)
+        normalized_selection_alias_value = (
+            normalized_selection_alias.value if normalized_selection_alias is not None else None
+        )
+        if openrouter_data.get("llm_model") != normalized_openrouter_model.value:
+            openrouter_data["llm_model"] = normalized_openrouter_model.value
+            changed = True
+        if openrouter_data.get("selected_source") != normalized_openrouter_selected_source.value:
+            openrouter_data["selected_source"] = normalized_openrouter_selected_source.value
+            changed = True
+        if openrouter_data.get("selection_alias") != normalized_selection_alias_value:
+            openrouter_data["selection_alias"] = normalized_selection_alias_value
+            changed = True
+
+        normalized_fallback_selection_alias = _parse_openrouter_fallback_selection_alias(
+            openrouter_data.get("fallback_selection_alias")
+        )
+        if (
+            openrouter_data.get("fallback_selection_alias")
+            != normalized_fallback_selection_alias.value
+        ):
+            openrouter_data["fallback_selection_alias"] = normalized_fallback_selection_alias.value
+            changed = True
+
+        version = 15
+
+    if version < 16:
+        managed_identity_data = data.get("managed_identity")
+        if not isinstance(managed_identity_data, dict):
+            managed_identity_data = {}
+            data["managed_identity"] = managed_identity_data
+            changed = True
+
+        for key in (
+            "active_managed_credential_ref",
+            "active_managed_expires_at",
+            "founder_letter_seen_credential_ref",
+        ):
+            if key not in managed_identity_data:
+                managed_identity_data[key] = None
+                changed = True
+
+        version = 16
+
+    if version < 17:
+        audio_data = data.get("audio")
+        if isinstance(audio_data, dict):
+            input_host_api = audio_data.get("input_host_api")
+            if (
+                isinstance(input_host_api, str)
+                and input_host_api.strip() == WINDOWS_DIRECTSOUND_HOST_API
+            ):
+                audio_data["input_host_api"] = WINDOWS_WASAPI_HOST_API
+                changed = True
+
+        version = 17
+
+    if version < 18:
+        osc_data = data.get("osc")
+        if isinstance(osc_data, dict):
+            if "cooldown_s" in osc_data:
+                osc_data.pop("cooldown_s")
+                changed = True
+            if "ttl_s" in osc_data:
+                osc_data.pop("ttl_s")
+                changed = True
+
+        version = 18
+
+    if version < 19:
+        prompt = _shared_default_prompt()
+        data["system_prompt"] = prompt
+        data["system_prompts"] = _shared_default_system_prompts(prompt)
+        changed = True
+        version = 19
+
+    if version < 20:
+        changed = True
+        version = 20
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
         data["stt"] = stt_data
         changed = True
+
+    audio_data = data.get("audio")
+    if isinstance(audio_data, dict):
+        raw_internal_sample_rate_hz = audio_data.get(
+            "internal_sample_rate_hz", STT_INTERNAL_SAMPLE_RATE_HZ
+        )
+        normalized_internal_sample_rate_hz = _normalize_internal_sample_rate_hz(
+            raw_internal_sample_rate_hz
+        )
+        if raw_internal_sample_rate_hz != normalized_internal_sample_rate_hz:
+            audio_data["internal_sample_rate_hz"] = normalized_internal_sample_rate_hz
+            changed = True
 
     if "custom_terms" not in stt_data:
         stt_data["custom_terms"] = _default_custom_terms()
@@ -1107,7 +2061,7 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         changed = True
     if isinstance(provider_data, dict) and "peer_stt" in provider_data:
         raw_peer_provider = provider_data.get("peer_stt")
-        normalized_peer_provider = _parse_stt_provider(str(raw_peer_provider)).value
+        normalized_peer_provider = _parse_peer_stt_provider(str(raw_peer_provider)).value
         if raw_peer_provider != normalized_peer_provider:
             provider_data["peer_stt"] = normalized_peer_provider
             changed = True
@@ -1147,10 +2101,16 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         data["openrouter"] = openrouter_data
         changed = True
 
-    raw_openrouter_model = openrouter_data.get("llm_model")
-    normalized_openrouter_model = _parse_openrouter_llm_model(raw_openrouter_model).value
-    if raw_openrouter_model != normalized_openrouter_model:
-        openrouter_data["llm_model"] = normalized_openrouter_model
+    (
+        normalized_openrouter_model,
+        normalized_openrouter_selected_source,
+        normalized_selection_alias,
+    ) = _resolve_openrouter_main_selection(openrouter_data, data)
+    normalized_selection_alias_value = (
+        normalized_selection_alias.value if normalized_selection_alias is not None else None
+    )
+    if openrouter_data.get("llm_model") != normalized_openrouter_model.value:
+        openrouter_data["llm_model"] = normalized_openrouter_model.value
         changed = True
 
     raw_openrouter_routing_mode = openrouter_data.get("routing_mode")
@@ -1161,19 +2121,25 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         openrouter_data["routing_mode"] = normalized_openrouter_routing_mode
         changed = True
 
-    raw_openrouter_selected_source = _get_raw_openrouter_selected_source(openrouter_data)
-    normalized_openrouter_selected_source = _parse_openrouter_credential_source(
-        raw_openrouter_selected_source,
-        fallback=_default_openrouter_credential_source_value(data),
-    )
     if openrouter_data.get("selected_source") != normalized_openrouter_selected_source.value:
         openrouter_data["selected_source"] = normalized_openrouter_selected_source.value
+        changed = True
+    if openrouter_data.get("selection_alias") != normalized_selection_alias_value:
+        openrouter_data["selection_alias"] = normalized_selection_alias_value
         changed = True
     if "credential_source" in openrouter_data:
         del openrouter_data["credential_source"]
         changed = True
     if "selected_credential_source" in openrouter_data:
         del openrouter_data["selected_credential_source"]
+        changed = True
+
+    raw_fallback_selection_alias = openrouter_data.get("fallback_selection_alias")
+    normalized_fallback_selection_alias = _parse_openrouter_fallback_selection_alias(
+        raw_fallback_selection_alias
+    )
+    if raw_fallback_selection_alias != normalized_fallback_selection_alias.value:
+        openrouter_data["fallback_selection_alias"] = normalized_fallback_selection_alias.value
         changed = True
 
     raw_openrouter_broker_base_url = openrouter_data.get("broker_base_url")
@@ -1208,22 +2174,117 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         qwen_data["llm_model"] = normalized_qwen_model
         changed = True
 
+    deepseek_data = data.get("deepseek")
+    if not isinstance(deepseek_data, dict):
+        deepseek_data = {}
+        data["deepseek"] = deepseek_data
+        changed = True
+
+    raw_deepseek_model = deepseek_data.get("llm_model")
+    normalized_deepseek_model = _parse_deepseek_llm_model(raw_deepseek_model).value
+    if raw_deepseek_model != normalized_deepseek_model:
+        deepseek_data["llm_model"] = normalized_deepseek_model
+        changed = True
+
+    translation_data = data.get("translation") if isinstance(data.get("translation"), dict) else {}
+    translation_history = _parse_translation_connection_history(
+        translation_data.get("connection_history") if isinstance(translation_data, dict) else None
+    )
+    if _translation_data_has_valid_model(translation_data):
+        normalized_translation_settings = _normalize_translation_settings(
+            model=_parse_translation_model(translation_data.get("model")),
+            connection=_parse_translation_connection(translation_data.get("connection")),
+            history=translation_history,
+        )
+    else:
+        normalized_translation_settings = _derive_translation_settings_from_runtime_values(
+            provider_llm=_parse_llm_provider(
+                provider_data.get("llm", LLMProviderName.GEMINI.value)
+            ),
+            openrouter_model=_parse_openrouter_llm_model(openrouter_data.get("llm_model")),
+            openrouter_selected_source=_parse_openrouter_credential_source(
+                openrouter_data.get("selected_source"),
+                fallback=_default_openrouter_credential_source_value(data),
+            ),
+            gemini_model=_parse_gemini_llm_model(gemini_data.get("llm_model")),
+            qwen_model=_parse_qwen_llm_model(qwen_data.get("llm_model")),
+            history=translation_history,
+        )
+    normalized_translation_data = _translation_settings_to_dict(normalized_translation_settings)
+    if data.get("translation") != normalized_translation_data:
+        data["translation"] = normalized_translation_data
+        changed = True
+    if _apply_materialized_translation_to_data(data, normalized_translation_settings):
+        changed = True
+
+    api_key_verified_data = data.get("api_key_verified")
+    if not isinstance(api_key_verified_data, dict):
+        api_key_verified_data = {}
+        data["api_key_verified"] = api_key_verified_data
+        changed = True
+    if "deepseek" not in api_key_verified_data:
+        api_key_verified_data["deepseek"] = False
+        changed = True
+
+    overlay_data = data.get("overlay")
+    if not isinstance(overlay_data, dict):
+        overlay_data = {}
+        data["overlay"] = overlay_data
+        changed = True
+
+    overlay_calibration_data = overlay_data.get("calibration")
+    if not isinstance(overlay_calibration_data, dict):
+        overlay_calibration_data = {}
+
+    legacy_overlay_calibration_data = data.get("overlay_calibration")
+    if not isinstance(legacy_overlay_calibration_data, dict):
+        legacy_overlay_calibration_data = {}
+
+    normalized_overlay_calibration = OverlayCalibration().to_dict()
+    normalized_overlay_calibration.update(legacy_overlay_calibration_data)
+    normalized_overlay_calibration.update(overlay_calibration_data)
+    if overlay_data.get("calibration") != normalized_overlay_calibration:
+        overlay_data["calibration"] = normalized_overlay_calibration
+        changed = True
+
     ui_data = data.get("ui")
     if not isinstance(ui_data, dict):
         ui_data = {}
         data["ui"] = ui_data
         changed = True
 
-    if "show_overlay_translation" not in ui_data:
-        ui_data["show_overlay_translation"] = True
+    normalized_show_translation = bool(
+        overlay_data.get("show_translation", ui_data.get("show_overlay_translation", True))
+    )
+    if overlay_data.get("show_translation") != normalized_show_translation:
+        overlay_data["show_translation"] = normalized_show_translation
         changed = True
 
-    if "show_overlay_peer_original" not in ui_data:
-        ui_data["show_overlay_peer_original"] = True
+    normalized_show_peer_original = bool(
+        overlay_data.get("show_peer_original", ui_data.get("show_overlay_peer_original", True))
+    )
+    if overlay_data.get("show_peer_original") != normalized_show_peer_original:
+        overlay_data["show_peer_original"] = normalized_show_peer_original
+        changed = True
+
+    if "show_overlay_translation" in ui_data:
+        del ui_data["show_overlay_translation"]
+        changed = True
+
+    if "show_overlay_peer_original" in ui_data:
+        del ui_data["show_overlay_peer_original"]
         changed = True
 
     if "overlay_enabled" in ui_data:
         del ui_data["overlay_enabled"]
+        changed = True
+
+    if "peer_translation_enabled" in ui_data:
+        del ui_data["peer_translation_enabled"]
+        changed = True
+
+    if "overlay_calibration" in data:
+        del data["overlay_calibration"]
         changed = True
 
     managed_identity_data = data.get("managed_identity")
@@ -1276,6 +2337,43 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         )
         changed = True
 
+    raw_active_managed_credential_ref = managed_identity_data.get("active_managed_credential_ref")
+    normalized_active_managed_credential_ref = _parse_optional_str(
+        raw_active_managed_credential_ref
+    )
+    if (
+        "active_managed_credential_ref" not in managed_identity_data
+        or raw_active_managed_credential_ref != normalized_active_managed_credential_ref
+    ):
+        managed_identity_data["active_managed_credential_ref"] = (
+            normalized_active_managed_credential_ref
+        )
+        changed = True
+
+    raw_active_managed_expires_at = managed_identity_data.get("active_managed_expires_at")
+    normalized_active_managed_expires_at = _parse_optional_str(raw_active_managed_expires_at)
+    if (
+        "active_managed_expires_at" not in managed_identity_data
+        or raw_active_managed_expires_at != normalized_active_managed_expires_at
+    ):
+        managed_identity_data["active_managed_expires_at"] = normalized_active_managed_expires_at
+        changed = True
+
+    raw_founder_letter_seen_credential_ref = managed_identity_data.get(
+        "founder_letter_seen_credential_ref"
+    )
+    normalized_founder_letter_seen_credential_ref = _parse_optional_str(
+        raw_founder_letter_seen_credential_ref
+    )
+    if (
+        "founder_letter_seen_credential_ref" not in managed_identity_data
+        or raw_founder_letter_seen_credential_ref != normalized_founder_letter_seen_credential_ref
+    ):
+        managed_identity_data["founder_letter_seen_credential_ref"] = (
+            normalized_founder_letter_seen_credential_ref
+        )
+        changed = True
+
     if data.get("settings_version") != version:
         data["settings_version"] = version
         changed = True
@@ -1286,7 +2384,16 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 def from_dict(data: dict[str, Any]) -> AppSettings:
     audio_data = data.get("audio") or {}
     desktop_audio_data = data.get("desktop_audio") or {}
-    overlay_calibration_data = data.get("overlay_calibration") or {}
+    overlay_data = data.get("overlay") if isinstance(data.get("overlay"), dict) else {}
+    legacy_overlay_calibration_data = (
+        data.get("overlay_calibration") if isinstance(data.get("overlay_calibration"), dict) else {}
+    )
+    overlay_calibration_data = (
+        overlay_data.get("calibration") if isinstance(overlay_data.get("calibration"), dict) else {}
+    )
+    merged_overlay_calibration_data = OverlayCalibration().to_dict()
+    merged_overlay_calibration_data.update(legacy_overlay_calibration_data)
+    merged_overlay_calibration_data.update(overlay_calibration_data)
     stt_data = data.get("stt") or {}
     ui_data = data.get("ui") or {}
     managed_identity_data = (
@@ -1312,11 +2419,12 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         else STTProviderName.DEEPGRAM.value
     )
 
-    input_host_api_raw = audio_data.get("input_host_api")
+    input_host_api_raw = audio_data.get("input_host_api", WINDOWS_WASAPI_HOST_API)
     input_device_raw = audio_data.get("input_device")
     vad_threshold_raw = stt_data.get("vad_speech_threshold")
     legacy_system_prompt = str(data.get("system_prompt", ""))
     system_prompts = _parse_system_prompts(data.get("system_prompts"))
+    settings_version = _coerce_int(data.get("settings_version"), SETTINGS_SCHEMA_VERSION)
     parsed_custom_terms = _parse_custom_terms(stt_data.get("custom_terms", _default_custom_terms()))
     if "custom_vocabulary_enabled" in stt_data:
         custom_vocabulary_enabled = bool(stt_data.get("custom_vocabulary_enabled"))
@@ -1324,8 +2432,12 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         custom_vocabulary_enabled = any(bool(terms) for terms in parsed_custom_terms.values())
 
     qwen_raw = data.get("qwen") if isinstance(data.get("qwen"), dict) else {}
+    deepseek_raw = data.get("deepseek") if isinstance(data.get("deepseek"), dict) else {}
     qwen_asr_raw = data.get("qwen_asr_stt") if isinstance(data.get("qwen_asr_stt"), dict) else {}
     openrouter_raw = data.get("openrouter") if isinstance(data.get("openrouter"), dict) else {}
+    openrouter_model, openrouter_selected_source, openrouter_selection_alias = (
+        _resolve_openrouter_main_selection(openrouter_raw, data)
+    )
     qwen_settings = QwenSettings(
         region=_parse_qwen_region(
             qwen_raw.get("region"),
@@ -1335,10 +2447,10 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     )
 
     settings = AppSettings(
-        settings_version=_coerce_int(data.get("settings_version"), SETTINGS_SCHEMA_VERSION),
+        settings_version=settings_version,
         provider=ProviderSettings(
             stt=_parse_stt_provider(str(stt_provider_value)),
-            peer_stt=_parse_stt_provider(str(raw_peer_provider)),
+            peer_stt=_parse_peer_stt_provider(str(raw_peer_provider)),
             llm=_parse_llm_provider(provider_data.get("llm", LLMProviderName.GEMINI.value)),
         ),
         languages=LanguageSettings(
@@ -1360,7 +2472,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             )[:6],
         ),
         audio=AudioSettings(
-            internal_sample_rate_hz=int(audio_data.get("internal_sample_rate_hz", 16000)),
+            internal_sample_rate_hz=_normalize_internal_sample_rate_hz(
+                audio_data.get("internal_sample_rate_hz", STT_INTERNAL_SAMPLE_RATE_HZ)
+            ),
             internal_channels=int(audio_data.get("internal_channels", 1)),
             ring_buffer_ms=int(audio_data.get("ring_buffer_ms", 500)),
             input_host_api=str(input_host_api_raw) if input_host_api_raw is not None else "",
@@ -1376,42 +2490,52 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             vad_hangover_ms=int(desktop_audio_data.get("vad_hangover_ms", 600)),
             vad_pre_roll_ms=int(desktop_audio_data.get("vad_pre_roll_ms", 500)),
         ),
-        overlay_calibration=OverlayCalibration(
-            anchor=str(
-                overlay_calibration_data.get(
-                    "anchor",
-                    OverlayCalibration().anchor,
+        overlay=OverlaySettings(
+            show_translation=bool(
+                overlay_data.get("show_translation", ui_data.get("show_overlay_translation", True))
+            ),
+            show_peer_original=bool(
+                overlay_data.get(
+                    "show_peer_original", ui_data.get("show_overlay_peer_original", True)
                 )
             ),
-            offset_x=float(
-                overlay_calibration_data.get(
-                    "offset_x",
-                    OverlayCalibration().offset_x,
-                )
-            ),
-            offset_y=float(
-                overlay_calibration_data.get(
-                    "offset_y",
-                    OverlayCalibration().offset_y,
-                )
-            ),
-            distance=float(
-                overlay_calibration_data.get(
-                    "distance",
-                    OverlayCalibration().distance,
-                )
-            ),
-            text_scale=float(
-                overlay_calibration_data.get(
-                    "text_scale",
-                    OverlayCalibration().text_scale,
-                )
-            ),
-            background_alpha=float(
-                overlay_calibration_data.get(
-                    "background_alpha",
-                    OverlayCalibration().background_alpha,
-                )
+            calibration=OverlayCalibration(
+                anchor=str(
+                    merged_overlay_calibration_data.get(
+                        "anchor",
+                        OverlayCalibration().anchor,
+                    )
+                ),
+                offset_x=float(
+                    merged_overlay_calibration_data.get(
+                        "offset_x",
+                        OverlayCalibration().offset_x,
+                    )
+                ),
+                offset_y=float(
+                    merged_overlay_calibration_data.get(
+                        "offset_y",
+                        OverlayCalibration().offset_y,
+                    )
+                ),
+                distance=float(
+                    merged_overlay_calibration_data.get(
+                        "distance",
+                        OverlayCalibration().distance,
+                    )
+                ),
+                text_scale=float(
+                    merged_overlay_calibration_data.get(
+                        "text_scale",
+                        OverlayCalibration().text_scale,
+                    )
+                ),
+                background_alpha=float(
+                    merged_overlay_calibration_data.get(
+                        "background_alpha",
+                        OverlayCalibration().background_alpha,
+                    )
+                ),
             ),
         ),
         stt=STTSettings(
@@ -1465,27 +2589,28 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             ),
         ),
         openrouter=OpenRouterSettings(
-            llm_model=_parse_openrouter_llm_model(
-                openrouter_raw.get(
-                    "llm_model",
-                    OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
-                )
-            ),
+            llm_model=openrouter_model,
             routing_mode=_parse_openrouter_routing_mode(
                 openrouter_raw.get(
                     "routing_mode",
                     OpenRouterRoutingMode.LATENCY.value,
                 )
             ),
-            selected_source=_parse_openrouter_credential_source(
-                _get_raw_openrouter_selected_source(openrouter_raw),
-                fallback=_default_openrouter_credential_source_value(data),
+            selected_source=openrouter_selected_source,
+            selection_alias=openrouter_selection_alias,
+            fallback_selection_alias=_parse_openrouter_fallback_selection_alias(
+                openrouter_raw.get("fallback_selection_alias")
             ),
             broker_base_url=_parse_openrouter_broker_base_url(
                 openrouter_raw.get("broker_base_url")
             ),
         ),
         qwen=qwen_settings,
+        deepseek=DeepSeekSettings(
+            llm_model=_parse_deepseek_llm_model(
+                deepseek_raw.get("llm_model", DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value)
+            ),
+        ),
         llm=LLMSettings(concurrency_limit=int(data.get("llm", {}).get("concurrency_limit", 5))),
         osc=OSCSettings(
             host=str(data.get("osc", {}).get("host", "127.0.0.1")),
@@ -1494,8 +2619,6 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             chatbox_send=bool(data.get("osc", {}).get("chatbox_send", True)),
             chatbox_clear=bool(data.get("osc", {}).get("chatbox_clear", False)),
             chatbox_max_chars=int(data.get("osc", {}).get("chatbox_max_chars", 144)),
-            cooldown_s=float(data.get("osc", {}).get("cooldown_s", 1.5)),
-            ttl_s=float(data.get("osc", {}).get("ttl_s", 7.0)),
             vrc_mic_intercept=bool(data.get("osc", {}).get("vrc_mic_intercept", False)),
             chatbox_include_source=bool(data.get("osc", {}).get("chatbox_include_source", True)),
         ),
@@ -1507,9 +2630,11 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         ),
         ui=UiSettings(
             locale=str(ui_data.get("locale", "en")),
-            show_overlay_translation=bool(ui_data.get("show_overlay_translation", True)),
-            show_overlay_peer_original=bool(ui_data.get("show_overlay_peer_original", True)),
-            peer_translation_enabled=bool(ui_data.get("peer_translation_enabled", False)),
+            overlay_enabled=False,
+            peer_translation_enabled=False,
+            peer_translation_eula_accepted=bool(
+                ui_data.get("peer_translation_eula_accepted", False)
+            ),
             integrated_context_enabled=bool(ui_data.get("integrated_context_enabled", False)),
             integrated_context_bootstrapped=bool(
                 ui_data.get("integrated_context_bootstrapped", False)
@@ -1520,6 +2645,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             soniox=bool(data.get("api_key_verified", {}).get("soniox", False)),
             google=bool(data.get("api_key_verified", {}).get("google", False)),
             openrouter=bool(data.get("api_key_verified", {}).get("openrouter", False)),
+            deepseek=bool(data.get("api_key_verified", {}).get("deepseek", False)),
             alibaba_beijing=bool(data.get("api_key_verified", {}).get("alibaba_beijing", False)),
             alibaba_singapore=bool(
                 data.get("api_key_verified", {}).get("alibaba_singapore", False)
@@ -1537,16 +2663,45 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             verified_hardware_hash_salt_version=_parse_optional_int(
                 managed_identity_data.get("verified_hardware_hash_salt_version")
             ),
+            active_managed_credential_ref=_parse_optional_str(
+                managed_identity_data.get("active_managed_credential_ref")
+            ),
+            active_managed_expires_at=_parse_optional_str(
+                managed_identity_data.get("active_managed_expires_at")
+            ),
+            founder_letter_seen_credential_ref=_parse_optional_str(
+                managed_identity_data.get("founder_letter_seen_credential_ref")
+            ),
         ),
         system_prompt=legacy_system_prompt,
         system_prompts=system_prompts,
     )
 
+    translation_data = data.get("translation") if isinstance(data.get("translation"), dict) else {}
+    translation_history = _parse_translation_connection_history(
+        translation_data.get("connection_history") if isinstance(translation_data, dict) else None
+    )
+    if _translation_data_has_valid_model(translation_data):
+        settings.translation = _normalize_translation_settings(
+            model=_parse_translation_model(translation_data.get("model")),
+            connection=_parse_translation_connection(translation_data.get("connection")),
+            history=translation_history,
+        )
+    else:
+        settings.translation = _derive_translation_settings_from_runtime(
+            settings,
+            history=translation_history,
+        )
+    materialize_translation_settings(settings)
+
     selected_prompt_key = _llm_prompt_key(settings.provider.llm)
     if legacy_system_prompt and selected_prompt_key not in settings.system_prompts:
         settings.system_prompts[selected_prompt_key] = legacy_system_prompt
 
-    if settings.system_prompts.get("qwen", "").strip() == LEGACY_QWEN_DEFAULT_PROMPT:
+    if (
+        settings_version < 19
+        and settings.system_prompts.get("qwen", "").strip() == LEGACY_QWEN_DEFAULT_PROMPT
+    ):
         from puripuly_heart.config.prompts import load_prompt_for_provider
 
         settings.system_prompts["qwen"] = load_prompt_for_provider("qwen")
@@ -1554,6 +2709,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
     selected_prompt = settings.system_prompts.get(selected_prompt_key, "").strip()
     if selected_prompt:
         settings.system_prompt = selected_prompt
+    ensure_prompt_defaults(settings)
     settings.validate()
     return settings
 

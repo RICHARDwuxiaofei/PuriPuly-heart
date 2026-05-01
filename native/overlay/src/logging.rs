@@ -66,6 +66,13 @@ impl OverlayLogger {
         }
     }
 
+    pub fn is_detailed(&self) -> bool {
+        self.mode
+            .read()
+            .map(|guard| matches!(*guard, OverlayLoggingMode::Detailed))
+            .unwrap_or(false)
+    }
+
     fn from_streams(stdout: LogStream, stderr: LogStream, mode: OverlayLoggingMode) -> Self {
         Self {
             stdout: Mutex::new(stdout),

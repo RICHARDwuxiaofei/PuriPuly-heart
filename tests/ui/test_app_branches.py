@@ -10,12 +10,21 @@ pytest.importorskip("flet")
 import flet as ft
 
 import puripuly_heart.ui.app as app_module
+from puripuly_heart.config.settings import (
+    AppSettings,
+    LLMProviderName,
+    OpenRouterCredentialSource,
+    OpenRouterLLMModel,
+    OpenRouterSelectionAlias,
+)
+from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.app import TranslatorApp, _check_and_notify_update
 
 
 class DummyPage:
     def __init__(self) -> None:
         self.opened: list[object] = []
+        self.closed: list[object] = []
         self.tasks: list[object] = []
         self.title: str = ""
         self.theme = None
@@ -33,9 +42,15 @@ class DummyPage:
             min_height=0,
             icon="",
         )
+        self.dialog = None
 
     def open(self, control) -> None:
         self.opened.append(control)
+
+    def close(self, control) -> None:
+        self.closed.append(control)
+        if self.dialog is control:
+            self.dialog = None
 
     def run_task(self, coro_fn) -> None:
         self.tasks.append(coro_fn)
@@ -70,29 +85,246 @@ class RuntimeLoggingController:
         self.detailed_messages.append(message)
 
 
+class ConstructionDummyController:
+    def __init__(self, page, app, config_path):
+        self.page = page
+        self.app = app
+        self.config_path = config_path
+        self.settings = None
+        self.runtime_logging_mode = "detailed"
+        self.basic_messages: list[str] = []
+        self.detailed_messages: list[str] = []
+
+    def set_runtime_logging_mode(self, mode: str) -> None:
+        self.runtime_logging_mode = mode
+
+    def log_basic(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+        _ = level
+        self.basic_messages.append(message)
+
+    def log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+        _ = level
+        self.detailed_messages.append(message)
+
+
+class ConstructionDummyDashboardView(ft.Container):
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_send_message = None
+        self.on_toggle_translation = None
+        self.on_toggle_stt = None
+        self.on_toggle_overlay = None
+        self.on_toggle_peer_translation = None
+        self.on_language_change = None
+        self.overlay_peer_contract = None
+        self.runtime_log_detailed = None
+
+    def set_overlay_peer_contract(self, contract) -> None:
+        self.overlay_peer_contract = contract
+
+    def apply_locale(self) -> None:
+        return None
+
+
+class ConstructionDummySettingsView(ft.Container):
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_settings_changed = None
+        self.on_prompt_apply_settings = None
+        self.on_providers_changed = None
+        self.on_request_openrouter_pkce = None
+        self.on_verify_api_key = None
+        self.on_secret_cleared = None
+        self.show_snackbar = None
+        self.overlay_peer_contract = None
+        self.has_provider_changes = False
+        self.has_pending_prompt_changes = False
+
+    def set_overlay_runtime_state(self, *_args, **_kwargs) -> None:
+        return None
+
+    def set_overlay_peer_contract(self, contract) -> None:
+        self.overlay_peer_contract = contract
+
+    def apply_locale(self) -> None:
+        return None
+
+    def refresh_prompt_if_empty(self) -> None:
+        return None
+
+
+class ConstructionDummyLogsView(ft.Container):
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_mode_change = None
+        self.runtime_logging_mode = "basic"
+
+    def set_runtime_logging_mode(self, mode: str) -> None:
+        self.runtime_logging_mode = mode
+
+    def apply_locale(self) -> None:
+        return None
+
+    async def scroll_to_bottom(self) -> None:
+        return None
+
+    def log_basic(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+        _ = (message, level)
+
+    def log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+        _ = (message, level)
+
+
+def _patch_app_construction(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_module, "GuiController", ConstructionDummyController)
+    monkeypatch.setattr(app_module, "DashboardView", ConstructionDummyDashboardView)
+    monkeypatch.setattr(app_module, "SettingsView", ConstructionDummySettingsView)
+    monkeypatch.setattr(app_module, "LogsView", ConstructionDummyLogsView)
+    monkeypatch.setattr(app_module, "AboutView", lambda: ft.Container())
+    monkeypatch.setattr(app_module, "TitleBar", lambda _page: ft.Container())
+    monkeypatch.setattr(app_module, "BottomNavBar", lambda on_change: ft.Container(data=on_change))
+    monkeypatch.setattr(app_module, "register_fonts", lambda _page: None)
+    monkeypatch.setattr(app_module, "get_app_theme", lambda **_kwargs: "theme")
+    monkeypatch.setattr(app_module, "font_for_language", lambda _code: "font")
+    monkeypatch.setattr(app_module, "get_locale", lambda: "en")
+
+
 def test_translator_app_init_builds_layout_and_wires_callbacks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class DummyController:
+    _patch_app_construction(monkeypatch)
+
+    page = DummyPage()
+    app = TranslatorApp(page, config_path=Path("settings.json"))
+
+    assert app.controller.config_path == Path("settings.json")
+    assert page.title == app_module.t("app.title")
+    assert page.window.frameless is True
+    assert page.window.resizable is True
+    assert page.window.width == app_module.DEFAULT_WINDOW_WIDTH
+    assert page.window.height == app_module.DEFAULT_WINDOW_HEIGHT
+    assert page.window.min_width == app_module.MIN_WINDOW_WIDTH
+    assert page.window.min_height == app_module.MIN_WINDOW_HEIGHT
+    assert page.window.width >= page.window.min_width
+    assert page.window.height >= page.window.min_height
+    assert page.added
+    assert app.view_dashboard.on_send_message == app._on_manual_submit
+    assert app.view_dashboard.on_toggle_overlay == app._on_overlay_toggle
+    assert app.view_dashboard.on_toggle_peer_translation == app._on_peer_translation_toggle
+    assert app.view_settings.on_verify_api_key == app._on_verify_api_key
+    assert app.view_settings.on_prompt_apply_settings == app._on_prompt_apply_settings
+    assert not hasattr(app.view_settings, "on_overlay_toggle")
+    assert not hasattr(app.view_settings, "on_peer_translation_toggle")
+    assert app.view_settings.runtime_log_basic == app.controller.log_basic
+    assert app.view_settings.runtime_log_detailed == app.controller.log_detailed
+    assert app.view_logs.on_mode_change == app._on_runtime_logging_mode_change
+    assert app.view_logs.runtime_logging_mode == "detailed"
+
+
+def test_translator_app_does_not_mount_debug_preview_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_app_construction(monkeypatch)
+
+    page = DummyPage()
+    app = TranslatorApp(page, config_path=Path("settings.json"))
+
+    assert app.debug_ui_preview is False
+    assert app.debug_preview_panel is None
+    root = page.added[0]
+    assert not isinstance(root.content, ft.Stack)
+
+
+def test_translator_app_mounts_debug_preview_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_app_construction(monkeypatch)
+    seen: dict[str, object] = {}
+
+    class FakeDebugPreviewPanel(ft.Container):
+        def __init__(self, **callbacks):
+            seen["callbacks"] = callbacks
+            super().__init__(data="fake-debug-preview-panel")
+
+    monkeypatch.setattr(app_module, "DebugPreviewPanel", FakeDebugPreviewPanel)
+
+    page = DummyPage()
+    app = TranslatorApp(
+        page,
+        config_path=Path("settings.json"),
+        debug_ui_preview=True,
+    )
+
+    assert app.debug_ui_preview is True
+    assert app.debug_preview_panel is not None
+    assert set(seen["callbacks"]) == {
+        "on_brake_notice",
+        "on_revoked_notice",
+        "on_founder_letter",
+        "on_pkce_failure",
+        "on_discord_auth",
+        "on_peer_translation_eula",
+    }
+    discord_callback = seen["callbacks"]["on_discord_auth"]
+    assert getattr(discord_callback, "__self__", None) is app
+    assert getattr(discord_callback, "__func__", None) is TranslatorApp._preview_discord_auth
+    preview_calls: list[bool] = []
+    monkeypatch.setattr(
+        app,
+        "show_discord_managed_auth_dialog",
+        lambda *, preview=False: preview_calls.append(preview),
+    )
+    discord_callback()
+    assert preview_calls == [True]
+    root = page.added[0]
+    assert isinstance(root.content, ft.Stack)
+    assert root.content.controls[-1] is app.debug_preview_panel
+
+
+def test_translator_app_keeps_debug_ui_preview_out_of_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_app_construction(monkeypatch)
+    seen: dict[str, object] = {}
+
+    class RecordingController(ConstructionDummyController):
         def __init__(self, page, app, config_path):
+            super().__init__(page, app, config_path)
+            seen["controller_args"] = (page, app, config_path)
+
+    monkeypatch.setattr(app_module, "GuiController", RecordingController)
+
+    app = TranslatorApp(
+        DummyPage(),
+        config_path=Path("settings.json"),
+        debug_ui_preview=True,
+    )
+
+    assert app.debug_ui_preview is True
+    assert seen["controller_args"] == (app.page, app, Path("settings.json"))
+
+
+def test_translator_app_wires_runtime_log_detailed_into_dashboard_visual_commit_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyController:
+        def __init__(self, page, app, config_path, debug_ui_preview: bool = False):
             self.page = page
             self.app = app
             self.config_path = config_path
+            self.debug_ui_preview = debug_ui_preview
             self.settings = None
-            self.runtime_logging_mode = "detailed"
-            self.basic_messages: list[str] = []
-            self.detailed_messages: list[str] = []
+            self.runtime_logging_mode = "basic"
 
         def set_runtime_logging_mode(self, mode: str) -> None:
             self.runtime_logging_mode = mode
 
         def log_basic(self, message: str, *, level: int = app_module.logging.INFO) -> None:
-            _ = level
-            self.basic_messages.append(message)
+            _ = (message, level)
 
-        def log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
-            _ = level
-            self.detailed_messages.append(message)
+        def log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> bool:
+            _ = (message, level)
+            return True
 
     class DummyDashboardView(ft.Container):
         def __init__(self) -> None:
@@ -100,7 +332,10 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
             self.on_send_message = None
             self.on_toggle_translation = None
             self.on_toggle_stt = None
+            self.on_toggle_overlay = None
+            self.on_toggle_peer_translation = None
             self.on_language_change = None
+            self.runtime_log_detailed = None
 
         def apply_locale(self) -> None:
             return None
@@ -109,7 +344,7 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
         def __init__(self) -> None:
             super().__init__()
             self.on_settings_changed = None
-            self.on_overlay_toggle = None
+            self.on_prompt_apply_settings = None
             self.on_providers_changed = None
             self.on_verify_api_key = None
             self.on_secret_cleared = None
@@ -125,22 +360,15 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
         def __init__(self) -> None:
             super().__init__()
             self.on_mode_change = None
-            self.runtime_logging_mode = "basic"
 
         def set_runtime_logging_mode(self, mode: str) -> None:
-            self.runtime_logging_mode = mode
+            _ = mode
 
         def apply_locale(self) -> None:
             return None
 
         async def scroll_to_bottom(self) -> None:
             return None
-
-        def log_basic(self, message: str, *, level: int = app_module.logging.INFO) -> None:
-            _ = (message, level)
-
-        def log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
-            _ = (message, level)
 
     monkeypatch.setattr(app_module, "GuiController", DummyController)
     monkeypatch.setattr(app_module, "DashboardView", DummyDashboardView)
@@ -154,23 +382,48 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     monkeypatch.setattr(app_module, "font_for_language", lambda _code: "font")
     monkeypatch.setattr(app_module, "get_locale", lambda: "en")
 
+    app = TranslatorApp(DummyPage(), config_path=Path("settings.json"))
+
+    assert app.view_dashboard.runtime_log_detailed == app._log_detailed
+
+
+def test_settings_view_pkce_callback_is_wired(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_app_construction(monkeypatch)
+
+    app = TranslatorApp(DummyPage(), config_path=Path("settings.json"))
+
+    assert app.view_settings.on_request_openrouter_pkce == app._on_request_openrouter_pkce
+
+
+def test_translator_app_4x3_window_keeps_shell_navigation_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_app_construction(monkeypatch)
+
     page = DummyPage()
     app = TranslatorApp(page, config_path=Path("settings.json"))
+    monkeypatch.setattr(app.content_area, "update", lambda: None)
 
-    assert app.controller.config_path == Path("settings.json")
-    assert page.title == app_module.t("app.title")
-    assert page.window.frameless is True
-    assert page.window.resizable is True
-    assert page.window.width == 960
-    assert page.window.height == 780
-    assert page.added
-    assert app.view_dashboard.on_send_message == app._on_manual_submit
-    assert app.view_settings.on_verify_api_key == app._on_verify_api_key
-    assert app.view_settings.on_overlay_toggle == app._on_overlay_toggle
-    assert app.view_settings.runtime_log_basic == app.controller.log_basic
-    assert app.view_settings.runtime_log_detailed == app.controller.log_detailed
-    assert app.view_logs.on_mode_change == app._on_runtime_logging_mode_change
-    assert app.view_logs.runtime_logging_mode == "detailed"
+    assert app.content_area.padding == app_module.APP_CONTENT_PADDING
+    assert app.layout.controls == [app.title_bar, app.content_area, app.bottom_nav]
+    assert app.content_area.content is app.view_dashboard
+
+    app._on_nav_change(1)
+    assert app.content_area.content is app.view_settings
+    assert app.content_area.padding == 0
+
+    app._on_nav_change(2)
+    assert app.content_area.content is app.view_logs
+    assert app.content_area.padding == app_module.APP_CONTENT_PADDING
+
+    app._on_nav_change(3)
+    assert app.content_area.content is app.view_about
+    assert app.content_area.padding == app_module.APP_CONTENT_PADDING
+
+    app._on_nav_change(0)
+    assert app.content_area.content is app.view_dashboard
+    assert app.content_area.padding == app_module.APP_CONTENT_PADDING
+    assert len(page.tasks) == 1
 
 
 def test_on_runtime_logging_mode_change_updates_controller_and_logs_view() -> None:
@@ -206,8 +459,8 @@ async def test_main_gui_routes_update_check_through_app_log_helper(
             seen["started"] = True
 
     class FakeApp:
-        def __init__(self, incoming_page, *, config_path):
-            seen["init"] = (incoming_page, config_path)
+        def __init__(self, incoming_page, *, config_path, debug_ui_preview=False):
+            seen["init"] = (incoming_page, config_path, debug_ui_preview)
             seen["app"] = self
             self.page = incoming_page
             self.controller = FakeController()
@@ -227,6 +480,674 @@ async def test_main_gui_routes_update_check_through_app_log_helper(
     assert seen["check"][0] is page
     assert getattr(seen["check"][1], "__self__", None) is seen["app"]
     assert getattr(seen["check"][1], "__func__", None) is FakeApp._log_detailed
+    assert seen["init"] == (page, Path("settings.json"), False)
+
+
+@pytest.mark.asyncio
+async def test_main_gui_forwards_debug_ui_preview_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = DummyPage()
+    seen: dict[str, object] = {}
+
+    class FakeController:
+        async def start(self) -> None:
+            seen["started"] = True
+
+    class FakeApp:
+        def __init__(self, incoming_page, *, config_path, debug_ui_preview=False):
+            seen["init"] = (incoming_page, config_path, debug_ui_preview)
+            self.page = incoming_page
+            self.controller = FakeController()
+
+        def _log_detailed(self, message: str, *, level: int = app_module.logging.INFO) -> None:
+            _ = (message, level)
+
+    async def fake_check_and_notify_update(incoming_page, *, log_detailed=None) -> None:
+        seen["check"] = (incoming_page, log_detailed)
+
+    monkeypatch.setattr(app_module, "TranslatorApp", FakeApp)
+    monkeypatch.setattr(app_module, "_check_and_notify_update", fake_check_and_notify_update)
+
+    await app_module.main_gui(
+        page,
+        config_path=Path("settings.json"),
+        debug_ui_preview=True,
+    )
+
+    assert seen["started"] is True
+    assert seen["init"] == (page, Path("settings.json"), True)
+    assert seen["check"][0] is page
+
+
+class PreviewDashboard:
+    def __init__(self) -> None:
+        self.managed_trial_calls: list[dict[str, object]] = []
+
+    def set_managed_trial_state(self, **kwargs) -> None:
+        self.managed_trial_calls.append(kwargs)
+        raise AssertionError("debug preview must not write removed Dashboard trial-card state")
+
+
+def test_debug_preview_surviving_managed_actions_are_snackbar_only() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.view_dashboard = PreviewDashboard()
+    snackbar_calls: list[tuple[str, object]] = []
+    app._show_snackbar = lambda message, bgcolor: snackbar_calls.append((message, bgcolor))
+
+    assert not hasattr(app, "_set_debug_managed_trial_preview")
+    assert not hasattr(app, "_preview_managed_normal")
+    assert not hasattr(app, "_preview_managed_exhausted")
+    assert not hasattr(app, "_preview_clear")
+
+    app._preview_brake_notice()
+    app._preview_revoked_notice()
+
+    assert snackbar_calls == [
+        (app_module.t("managed_release.brake"), ft.Colors.ORANGE_700),
+        (app_module.t("managed_release.revoked_contact"), ft.Colors.ORANGE_700),
+    ]
+    assert app.view_dashboard.managed_trial_calls == []
+
+
+def test_managed_release_ko_snackbar_copy_matches_requested_wording() -> None:
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale("ko")
+
+        assert (
+            i18n_module.t("managed_release.brake")
+            == "신규 인증이 잠시 중지된 상태에요. BYOK 방식으로 이용해주세요."
+        )
+        assert (
+            i18n_module.t("managed_release.revoked_contact")
+            == "엑세스 키가 손상되었어요. 저에게 연락해서 새 키를 받아가세요."
+        )
+    finally:
+        i18n_module.set_locale(previous_locale)
+
+
+def test_debug_preview_founder_letter_opens_dialog_with_readme_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    captured: dict[str, object] = {}
+    opened_urls: list[str] = []
+    previous_locale = i18n_module.get_locale()
+
+    def fail_save(*_args, **_kwargs):
+        pytest.fail("debug founder-letter preview must not save settings")
+
+    app.controller = SimpleNamespace(settings=AppSettings(), _save_settings=fail_save)
+    monkeypatch.setattr(
+        app,
+        "_on_request_openrouter_pkce",
+        lambda *_args, **_kwargs: pytest.fail("debug founder-letter preview must not launch PKCE"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module.webbrowser,
+        "open",
+        lambda url: opened_urls.append(url),
+    )
+
+    class FakeFounderLetterDialog:
+        def __init__(self, page, *, on_readme=None, on_connect=None, on_contact=None):
+            captured["page"] = page
+            captured["on_readme"] = on_readme
+            captured["on_connect"] = on_connect
+            captured["on_contact"] = on_contact
+
+        def open(self) -> None:
+            captured["opened"] = True
+
+    monkeypatch.setattr(app_module, "FounderLetterDialog", FakeFounderLetterDialog)
+
+    try:
+        i18n_module.set_locale("ko")
+
+        app._preview_founder_letter()
+
+        assert captured["page"] is app.page
+        assert captured["opened"] is True
+        assert callable(captured["on_readme"])
+        assert captured["on_connect"] is None
+        assert captured["on_contact"] is None
+        assert opened_urls == []
+        captured["on_readme"]()
+    finally:
+        i18n_module.set_locale(previous_locale)
+
+    assert app._founder_letter_dialog is not None
+    assert opened_urls == ["https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ko.md"]
+
+
+def test_founder_readme_url_for_locale_uses_origin_readme_pages() -> None:
+    resolver = getattr(app_module, "founder_readme_url_for_locale", None)
+
+    assert callable(resolver)
+    assert resolver("ko") == (
+        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ko.md"
+    )
+    assert resolver("zh-CN") == (
+        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.zh-CN.md"
+    )
+    assert resolver("ja") == (
+        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ja.md"
+    )
+    assert resolver("en") == ("https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.md")
+    assert resolver("fr") == ("https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.md")
+    assert resolver(None) == ("https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.md")
+
+
+def test_debug_preview_pkce_failure_only_shows_failure_snackbar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    seen: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        app,
+        "_on_request_openrouter_pkce",
+        lambda *_args, **_kwargs: pytest.fail("debug preview must not launch PKCE"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app,
+        "_show_snackbar",
+        lambda message, bgcolor: seen.append((message, bgcolor)),
+    )
+
+    app._preview_pkce_failure()
+
+    assert seen == [(app_module.t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)]
+
+
+def test_debug_preview_peer_translation_eula_opens_preview_safe_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    seen: dict[str, object] = {}
+
+    class FakeDialog:
+        def __init__(self, page, *, on_accept, on_cancel=None):
+            seen["page"] = page
+            seen["on_accept"] = on_accept
+            seen["on_cancel"] = on_cancel
+
+        def open(self):
+            seen["opened"] = True
+
+    monkeypatch.setattr(app_module, "PeerTranslationEulaDialog", FakeDialog)
+
+    app._preview_peer_translation_eula()
+
+    assert seen["page"] is app.page
+    assert seen["opened"] is True
+    seen["on_accept"]()
+    if seen["on_cancel"] is not None:
+        seen["on_cancel"]()
+    assert not hasattr(app, "controller")
+
+
+def test_debug_preview_discord_auth_opens_dialog_with_close_only_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    app.controller = SimpleNamespace(
+        settings=settings,
+        config_path=Path("settings.json"),
+        start_discord_managed_auth=lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not start broker OAuth"
+        ),
+        reopen_discord_managed_auth_browser=lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not reopen broker OAuth"
+        ),
+        cancel_discord_managed_auth=lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not cancel broker OAuth"
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "_start_discord_managed_auth",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not call OAuth start hook"
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app,
+        "_on_discord_managed_auth_byok",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not launch BYOK PKCE"
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app,
+        "_on_request_openrouter_pkce",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not launch OpenRouter PKCE"
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "save_settings",
+        lambda *_args, **_kwargs: pytest.fail("debug Discord-auth preview must not save settings"),
+    )
+    monkeypatch.setattr(
+        app_module.webbrowser,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail(
+            "debug Discord-auth preview must not open external URLs"
+        ),
+    )
+
+    def open_preview_dialog():
+        app._preview_discord_auth()
+        dialog = app._discord_managed_auth_dialog
+        assert dialog._dialog is app.page.opened[-1]
+        return dialog, dialog._dialog
+
+    for button_attr in ("_continue_button", "_close_button"):
+        dialog, opened_dialog = open_preview_dialog()
+        getattr(dialog, button_attr).on_click(None)
+        assert app.page.closed[-1] is opened_dialog
+
+    for button_attr in ("_reopen_browser_button", "_cancel_button"):
+        dialog, opened_dialog = open_preview_dialog()
+        dialog.set_waiting()
+        getattr(dialog, button_attr).on_click(None)
+        assert app.page.closed[-1] is opened_dialog
+
+    assert app.page.tasks == []
+    assert settings.openrouter.selected_source is OpenRouterCredentialSource.MANAGED
+
+
+def test_discord_managed_auth_byok_launches_openrouter_pkce_with_byok_target() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    settings.openrouter.llm_model = OpenRouterLLMModel.QWEN_35_FLASH_02_23
+    app.controller = SimpleNamespace(settings=settings)
+    pkce_calls: list[tuple[AppSettings, str]] = []
+    app._on_request_openrouter_pkce = (
+        lambda target_settings, *, launch_source="settings": pkce_calls.append(
+            (target_settings, launch_source)
+        )
+    )
+    app._show_snackbar = lambda *_args, **_kwargs: pytest.fail(
+        "managed Discord auth BYOK should build a valid OpenRouter target"
+    )
+
+    app._on_discord_managed_auth_byok()
+
+    assert len(pkce_calls) == 1
+    target_settings, launch_source = pkce_calls[0]
+    assert launch_source == "discord_auth"
+    assert target_settings is not settings
+    assert target_settings.provider.llm is LLMProviderName.OPENROUTER
+    assert target_settings.openrouter.selected_source is OpenRouterCredentialSource.BYOK
+    assert target_settings.openrouter.selection_alias is OpenRouterSelectionAlias.QWEN35_FLASH_BYOK
+    assert target_settings.openrouter.llm_model is OpenRouterLLMModel.QWEN_35_FLASH_02_23
+    assert settings.openrouter.selected_source is OpenRouterCredentialSource.MANAGED
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_uses_run_task_and_success_enables_translation() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(set_waiting_calls=0, close_calls=0)
+    dialog.set_waiting = lambda: setattr(dialog, "set_waiting_calls", dialog.set_waiting_calls + 1)
+    dialog.close = lambda: setattr(dialog, "close_calls", dialog.close_calls + 1)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    start_calls: list[str] = []
+    dashboard_translation_calls: list[bool] = []
+    hub = SimpleNamespace(llm=object(), translation_enabled=False)
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        start_calls.append("start")
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        enable_calls.append(enabled)
+        hub.translation_enabled = enabled
+        return True
+
+    app.controller = SimpleNamespace(
+        hub=hub,
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+
+    assert dialog.set_waiting_calls == 1
+    assert start_calls == []
+    assert len(app.page.tasks) == 1
+
+    await app.page.tasks[0]()
+
+    assert start_calls == ["start"]
+    assert dialog.close_calls == 1
+    assert snackbar_calls == [(app_module.t("discord_auth.success"), app_module.COLOR_SUCCESS)]
+    assert enable_calls == [True]
+    assert dashboard_translation_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_no_success_when_enable_fails() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(set_waiting=lambda: None, close=lambda: None)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    dashboard_translation_calls: list[bool] = []
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        enable_calls.append(enabled)
+        return False
+
+    app.controller = SimpleNamespace(
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    await app.page.tasks[0]()
+
+    assert enable_calls == [True]
+    assert snackbar_calls == []
+    assert dashboard_translation_calls == []
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_no_success_when_llm_unavailable_after_enable() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(set_waiting=lambda: None, close=lambda: None)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    dashboard_translation_calls: list[bool] = []
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        enable_calls.append(enabled)
+        return True
+
+    app.controller = SimpleNamespace(
+        hub=SimpleNamespace(llm=None, translation_enabled=False),
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    await app.page.tasks[0]()
+
+    assert enable_calls == [True]
+    assert snackbar_calls == []
+    assert dashboard_translation_calls == []
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_failure_does_not_show_success_snackbar() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._discord_managed_auth_dialog = SimpleNamespace(set_waiting=lambda: None, close=lambda: None)
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        return False
+
+    async def fake_set_translation_enabled(enabled: bool) -> None:
+        enable_calls.append(enabled)
+
+    app.controller = SimpleNamespace(
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    await app.page.tasks[0]()
+
+    assert snackbar_calls == []
+    assert enable_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_discord_managed_auth_prevents_late_success_and_enable() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(set_waiting=lambda: None, close_calls=0)
+    dialog.close = lambda: setattr(dialog, "close_calls", dialog.close_calls + 1)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    enable_calls: list[bool] = []
+    dashboard_translation_calls: list[bool] = []
+    app.view_dashboard = SimpleNamespace(
+        set_translation_enabled=lambda enabled: dashboard_translation_calls.append(enabled)
+    )
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+    start_entered = asyncio.Event()
+    release_start = asyncio.Event()
+
+    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+        start_entered.set()
+        await release_start.wait()
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        enable_calls.append(enabled)
+        return True
+
+    app.controller = SimpleNamespace(
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    task = asyncio.create_task(app.page.tasks[0]())
+    await start_entered.wait()
+
+    app._cancel_discord_managed_auth()
+    release_start.set()
+    await task
+
+    assert dialog.close_calls == 1
+    assert snackbar_calls == []
+    assert enable_calls == []
+    assert dashboard_translation_calls == []
+
+
+def test_discord_managed_auth_waiting_hides_reopen_when_controller_cannot_reopen() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app.controller = SimpleNamespace()
+
+    app.show_discord_managed_auth_dialog(preview=False)
+    dialog = app._discord_managed_auth_dialog
+    dialog.set_waiting()
+
+    assert dialog._reopen_browser_button is None
+    assert [control.text for control in dialog._actions.controls] == [
+        app_module.t("discord_auth.cancel")
+    ]
+
+
+def test_peer_translation_toggle_first_enable_opens_eula_without_running_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.ui.peer_translation_eula_accepted = False
+    app.controller = SimpleNamespace(settings=settings)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        app,
+        "_show_peer_translation_eula",
+        lambda on_accept: seen.setdefault("on_accept", on_accept),
+    )
+
+    app._on_peer_translation_toggle(True)
+
+    assert "on_accept" in seen
+    assert app.page.tasks == []
+    assert settings.ui.peer_translation_eula_accepted is False
+
+
+@pytest.mark.asyncio
+async def test_peer_translation_toggle_after_eula_acceptance_saves_and_enables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.ui.peer_translation_eula_accepted = False
+    calls: list[bool] = []
+
+    async def fake_enable(enabled: bool):
+        calls.append(enabled)
+
+    app.controller = SimpleNamespace(
+        settings=settings,
+        config_path="settings.json",
+        set_peer_translation_enabled=fake_enable,
+    )
+    saves: list[tuple[str, AppSettings]] = []
+    monkeypatch.setattr(app_module, "save_settings", lambda path, cfg: saves.append((path, cfg)))
+
+    app._accept_peer_translation_eula_and_enable()
+    await app.page.tasks[0]()
+
+    assert settings.ui.peer_translation_eula_accepted is True
+    assert calls == [True]
+    assert saves == [("settings.json", settings)]
+
+
+@pytest.mark.asyncio
+async def test_peer_translation_toggle_with_existing_acceptance_enables_directly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.ui.peer_translation_eula_accepted = True
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        app,
+        "_show_peer_translation_eula",
+        lambda _on_accept: pytest.fail("accepted peer translation should not reopen EULA"),
+    )
+
+    async def fake_enable(enabled: bool):
+        calls.append(enabled)
+
+    app.controller = SimpleNamespace(settings=settings, set_peer_translation_enabled=fake_enable)
+
+    app._on_peer_translation_toggle(True)
+    await app.page.tasks[0]()
+
+    assert calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_peer_translation_disable_does_not_open_eula(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.ui.peer_translation_eula_accepted = False
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        app,
+        "_show_peer_translation_eula",
+        lambda _on_accept: pytest.fail("disabling peer translation should not show EULA"),
+    )
+
+    async def fake_enable(enabled: bool):
+        calls.append(enabled)
+
+    app.controller = SimpleNamespace(settings=settings, set_peer_translation_enabled=fake_enable)
+
+    app._on_peer_translation_toggle(False)
+    await app.page.tasks[0]()
+
+    assert calls == [False]
+
+
+@pytest.mark.asyncio
+async def test_on_nav_change_merges_current_languages_into_prompt_only_apply() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._current_tab = 1
+    app.view_dashboard = object()
+    app.view_logs = SimpleNamespace(scroll_to_bottom=lambda: asyncio.sleep(0))
+    app.view_about = object()
+    pending_settings = object()
+    merged_settings = object()
+    app.view_settings = SimpleNamespace(
+        has_provider_changes=False,
+        has_pending_prompt_changes=True,
+        consume_prompt_apply_settings=lambda: pending_settings,
+        refresh_prompt_if_empty=lambda: None,
+    )
+    app.content_area = DummyContent()
+    events: list[tuple[str, object]] = []
+
+    def fake_merge_settings(settings) -> object:
+        events.append(("merge", settings))
+        return merged_settings
+
+    async def fake_apply_settings(settings) -> None:
+        events.append(("apply", settings))
+
+    app.controller = SimpleNamespace(
+        merge_settings_tab_apply_with_current_languages=fake_merge_settings,
+        apply_settings=fake_apply_settings,
+        apply_providers=lambda _settings=None: asyncio.sleep(0),
+    )
+
+    app._on_nav_change(0)
+
+    assert app.content_area.content is app.view_dashboard
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert events == [("merge", pending_settings), ("apply", merged_settings)]
 
 
 @pytest.mark.asyncio
@@ -298,19 +1219,27 @@ async def test_on_nav_change_applies_pending_prompt_changes_when_leaving_setting
     app.view_dashboard = object()
     app.view_logs = SimpleNamespace(scroll_to_bottom=lambda: asyncio.sleep(0))
     app.view_about = object()
+    pending_settings = object()
+    merged_settings = object()
+    merge_calls: list[object] = []
     app.view_settings = SimpleNamespace(
         has_provider_changes=False,
         has_pending_prompt_changes=True,
-        consume_prompt_apply_settings=lambda: "prompt-settings",
+        consume_prompt_apply_settings=lambda: pending_settings,
         refresh_prompt_if_empty=lambda: None,
     )
     app.content_area = DummyContent()
     seen: list[object] = []
 
+    def fake_merge_settings(settings) -> object:
+        merge_calls.append(settings)
+        return merged_settings
+
     async def fake_apply_settings(settings) -> None:
         seen.append(settings)
 
     app.controller = SimpleNamespace(
+        merge_settings_tab_apply_with_current_languages=fake_merge_settings,
         apply_settings=fake_apply_settings,
         apply_providers=lambda _settings=None: asyncio.sleep(0),
     )
@@ -320,7 +1249,389 @@ async def test_on_nav_change_applies_pending_prompt_changes_when_leaving_setting
     assert app.content_area.content is app.view_dashboard
     assert len(app.page.tasks) == 1
     await app.page.tasks[0]()
-    assert seen == ["prompt-settings"]
+    assert merge_calls == [pending_settings]
+    assert seen == [merged_settings]
+
+
+@pytest.mark.asyncio
+async def test_on_prompt_apply_settings_merges_current_languages_before_apply_settings() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    pending_settings = object()
+    merged_settings = object()
+    events: list[tuple[str, object]] = []
+
+    def fake_merge_settings(settings) -> object:
+        events.append(("merge", settings))
+        return merged_settings
+
+    async def fake_apply_settings(settings) -> None:
+        events.append(("apply", settings))
+
+    app.controller = SimpleNamespace(
+        merge_settings_tab_apply_with_current_languages=fake_merge_settings,
+        apply_settings=fake_apply_settings,
+    )
+
+    app._on_prompt_apply_settings(pending_settings)
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert events == [("merge", pending_settings), ("apply", merged_settings)]
+
+
+@pytest.mark.asyncio
+async def test_prompt_apply_keeps_dashboard_target_for_next_request() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    pending_settings = AppSettings()
+    pending_settings.languages.target_language = "en"
+    merged_settings = AppSettings()
+    merged_settings.languages.target_language = "ja"
+    applied_targets: list[str] = []
+
+    def fake_merge_settings(settings: AppSettings) -> AppSettings:
+        assert settings is pending_settings
+        return merged_settings
+
+    async def fake_apply_settings(settings: AppSettings) -> None:
+        applied_targets.append(settings.languages.target_language)
+
+    app.controller = SimpleNamespace(
+        merge_settings_tab_apply_with_current_languages=fake_merge_settings,
+        apply_settings=fake_apply_settings,
+    )
+
+    app._on_prompt_apply_settings(pending_settings)
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert pending_settings.languages.target_language == "en"
+    assert applied_targets == ["ja"]
+
+
+@pytest.mark.asyncio
+async def test_on_settings_changed_applies_raw_settings_without_prompt_merge() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    raw_settings = object()
+    seen: list[object] = []
+
+    def fake_merge_settings(_settings) -> object:
+        raise AssertionError("prompt merge should not run for generic settings changes")
+
+    async def fake_apply_settings(settings) -> None:
+        seen.append(settings)
+
+    app.controller = SimpleNamespace(
+        merge_settings_tab_apply_with_current_languages=fake_merge_settings,
+        apply_settings=fake_apply_settings,
+    )
+
+    app._on_settings_changed(raw_settings)
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert seen == [raw_settings]
+
+
+def test_on_request_openrouter_pkce_uses_settings_mutation_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_app_construction(monkeypatch)
+    app = TranslatorApp(DummyPage(), config_path=Path("settings.json"))
+    target_settings = AppSettings()
+    queued: list[object] = []
+    monkeypatch.setattr(app, "_queue_settings_mutation_task", queued.append)
+
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+
+    assert len(queued) == 1
+
+
+def test_on_request_openrouter_pkce_reopens_existing_auth_url_while_flow_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    target_settings = AppSettings()
+    reopen_calls: list[str] = []
+
+    async def fake_connect_openrouter_via_pkce(
+        *, target_settings: AppSettings, launch_source: str
+    ) -> bool:
+        _ = (target_settings, launch_source)
+        return False
+
+    app.controller = SimpleNamespace(
+        connect_openrouter_via_pkce=fake_connect_openrouter_via_pkce,
+        reopen_openrouter_pkce_authorization_url=lambda: reopen_calls.append("reopen") or True,
+        settings=AppSettings(),
+        config_path=Path("settings.json"),
+    )
+    app.view_settings = SimpleNamespace(
+        refresh_after_openrouter_pkce_success=lambda *_args, **_kwargs: None,
+        load_from_settings=lambda *_args, **_kwargs: None,
+    )
+    queued: list[object] = []
+    monkeypatch.setattr(app, "_queue_settings_mutation_task", queued.append)
+
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+
+    assert len(queued) == 1
+    assert reopen_calls == ["reopen"]
+
+
+@pytest.mark.asyncio
+async def test_on_request_openrouter_pkce_ignores_duplicate_while_flow_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    target_settings = AppSettings()
+    pkce_calls: list[str] = []
+
+    async def fake_connect_openrouter_via_pkce(
+        *, target_settings: AppSettings, launch_source: str
+    ) -> bool:
+        _ = target_settings
+        pkce_calls.append(launch_source)
+        return False
+
+    app.controller = SimpleNamespace(
+        connect_openrouter_via_pkce=fake_connect_openrouter_via_pkce,
+        reopen_openrouter_pkce_authorization_url=lambda: False,
+        settings=AppSettings(),
+        config_path=Path("settings.json"),
+    )
+    app.view_settings = SimpleNamespace(
+        refresh_after_openrouter_pkce_success=lambda *_args, **_kwargs: None,
+        load_from_settings=lambda *_args, **_kwargs: None,
+    )
+    queued: list[object] = []
+    monkeypatch.setattr(app, "_queue_settings_mutation_task", queued.append)
+
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+
+    assert len(queued) == 1
+    await queued[0]()
+    assert pkce_calls == ["settings"]
+
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+
+    assert len(queued) == 2
+
+
+@pytest.mark.asyncio
+async def test_on_request_openrouter_pkce_uses_draft_preserving_refresh_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    target_settings = AppSettings()
+    updated_settings = AppSettings()
+    pkce_calls: list[tuple[AppSettings, str]] = []
+    refresh_calls: list[tuple[AppSettings, Path]] = []
+    snackbar_calls: list[tuple[str, str]] = []
+
+    async def fake_connect_openrouter_via_pkce(
+        *, target_settings: AppSettings, launch_source: str
+    ) -> bool:
+        pkce_calls.append((target_settings, launch_source))
+        return True
+
+    app.controller = SimpleNamespace(
+        connect_openrouter_via_pkce=fake_connect_openrouter_via_pkce,
+        settings=updated_settings,
+        config_path=Path("settings.json"),
+    )
+    app.view_settings = SimpleNamespace(
+        refresh_after_openrouter_pkce_success=lambda settings, *, config_path: refresh_calls.append(
+            (settings, config_path)
+        ),
+        load_from_settings=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("full load_from_settings refresh should not run on PKCE success")
+        ),
+    )
+    app._show_snackbar = lambda message, bgcolor: snackbar_calls.append((message, bgcolor))
+    queued: list[object] = []
+    monkeypatch.setattr(app, "_queue_settings_mutation_task", queued.append)
+
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+
+    assert len(queued) == 1
+    await queued[0]()
+    assert pkce_calls == [(target_settings, "settings")]
+    assert refresh_calls == [(updated_settings, Path("settings.json"))]
+    assert snackbar_calls == [(app_module.t("openrouter.pkce.connected"), app_module.COLOR_SUCCESS)]
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale("ko")
+        assert i18n_module.t("openrouter.pkce.connected") == "OpenRouter 인증이 완료되었어요."
+    finally:
+        i18n_module.set_locale(previous_locale)
+
+
+@pytest.mark.asyncio
+async def test_on_request_openrouter_pkce_does_not_refresh_settings_view_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    target_settings = AppSettings()
+    refresh_calls: list[tuple[AppSettings, Path]] = []
+
+    async def fake_connect_openrouter_via_pkce(
+        *, target_settings: AppSettings, launch_source: str
+    ) -> bool:
+        _ = (target_settings, launch_source)
+        return False
+
+    app.controller = SimpleNamespace(
+        connect_openrouter_via_pkce=fake_connect_openrouter_via_pkce,
+        settings=AppSettings(),
+        config_path=Path("settings.json"),
+    )
+    app.view_settings = SimpleNamespace(
+        refresh_after_openrouter_pkce_success=lambda settings, *, config_path: refresh_calls.append(
+            (settings, config_path)
+        ),
+        load_from_settings=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("full load_from_settings refresh should not run on PKCE failure")
+        ),
+    )
+    queued: list[object] = []
+    monkeypatch.setattr(app, "_queue_settings_mutation_task", queued.append)
+
+    app._on_request_openrouter_pkce(target_settings, launch_source="settings")
+
+    assert len(queued) == 1
+    await queued[0]()
+    assert refresh_calls == []
+
+
+@pytest.mark.asyncio
+async def test_queue_orders_generic_settings_change_before_prompt_apply() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    raw_settings = object()
+    pending_settings = object()
+    merged_settings = object()
+    events: list[tuple[str, object]] = []
+
+    def fake_merge_settings(settings) -> object:
+        events.append(("merge", settings))
+        return merged_settings
+
+    async def fake_apply_settings(settings) -> None:
+        events.append(("apply", settings))
+
+    app.controller = SimpleNamespace(
+        merge_settings_tab_apply_with_current_languages=fake_merge_settings,
+        apply_settings=fake_apply_settings,
+    )
+
+    app._on_settings_changed(raw_settings)
+    app._on_prompt_apply_settings(pending_settings)
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+
+    assert events == [
+        ("apply", raw_settings),
+        ("merge", pending_settings),
+        ("apply", merged_settings),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_queue_orders_generic_settings_change_before_provider_apply_on_settings_exit() -> (
+    None
+):
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._current_tab = 1
+    raw_settings = object()
+    provider_settings = object()
+    app.view_dashboard = object()
+    app.view_logs = SimpleNamespace(scroll_to_bottom=lambda: asyncio.sleep(0))
+    app.view_about = object()
+    app.view_settings = SimpleNamespace(
+        has_provider_changes=True,
+        consume_provider_apply_settings=lambda: provider_settings,
+        refresh_prompt_if_empty=lambda: None,
+    )
+    app.content_area = DummyContent()
+    events: list[tuple[str, object]] = []
+
+    async def fake_apply_settings(settings) -> None:
+        events.append(("settings", settings))
+
+    async def fake_apply_providers(settings) -> None:
+        events.append(("providers", settings))
+
+    app.controller = SimpleNamespace(
+        apply_settings=fake_apply_settings,
+        apply_providers=fake_apply_providers,
+    )
+
+    app._on_settings_changed(raw_settings)
+    app._on_nav_change(0)
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+
+    assert events == [("settings", raw_settings), ("providers", provider_settings)]
+
+
+def test_on_nav_change_closes_open_dialog_before_switching_tabs() -> None:
+    events: list[tuple[str, object]] = []
+
+    class RecordingContent:
+        def __init__(self, initial) -> None:
+            self._content = initial
+
+        @property
+        def content(self):
+            return self._content
+
+        @content.setter
+        def content(self, value) -> None:
+            events.append(("content", value))
+            self._content = value
+
+        def update(self) -> None:
+            events.append(("update", self._content))
+
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = object()
+    app.page.dialog = dialog
+
+    def fake_close(control) -> None:
+        events.append(("close", control))
+        app.page.closed.append(control)
+        if app.page.dialog is control:
+            app.page.dialog = None
+
+    app.page.close = fake_close
+    app._current_tab = 0
+    app.view_dashboard = object()
+    app.view_settings = SimpleNamespace(
+        has_provider_changes=False,
+        refresh_prompt_if_empty=lambda: None,
+    )
+    app.view_logs = SimpleNamespace(scroll_to_bottom=lambda: asyncio.sleep(0))
+    app.view_about = object()
+    app.content_area = RecordingContent(app.view_dashboard)
+    app.controller = SimpleNamespace(apply_providers=lambda _settings=None: asyncio.sleep(0))
+
+    app._on_nav_change(1)
+
+    assert events[:3] == [
+        ("close", dialog),
+        ("content", app.view_settings),
+        ("update", app.view_settings),
+    ]
+    assert app.page.closed == [dialog]
 
 
 def test_apply_locale_updates_views_and_page(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -342,13 +1653,38 @@ def test_apply_locale_updates_views_and_page(monkeypatch: pytest.MonkeyPatch) ->
     assert app.page.updated == 1
 
 
+def test_refresh_overlay_peer_contract_ignores_missing_controller() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.view_dashboard = SimpleNamespace(
+        set_overlay_peer_contract=lambda contract: (_ for _ in ()).throw(
+            AssertionError(f"unexpected dashboard contract: {contract}")
+        )
+    )
+    app.view_settings = SimpleNamespace(
+        set_overlay_peer_contract=lambda contract: (_ for _ in ()).throw(
+            AssertionError(f"unexpected settings contract: {contract}")
+        )
+    )
+
+    app.refresh_overlay_peer_contract()
+
+    assert getattr(app, "overlay_peer_contract", None) is None
+
+
 def test_on_overlay_state_changed_updates_settings_view_runtime_state() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
+    contract = object()
     seen: list[tuple[str, str | None]] = []
+    refreshed: list[object] = []
+    app.controller = SimpleNamespace(build_overlay_peer_consumer_contract=lambda: contract)
+    app.view_dashboard = SimpleNamespace(
+        set_overlay_peer_contract=lambda incoming: refreshed.append(("dashboard", incoming))
+    )
     app.view_settings = SimpleNamespace(
         set_overlay_runtime_state=lambda state, failure_reason=None: seen.append(
             (state, failure_reason)
-        )
+        ),
+        set_overlay_peer_contract=lambda incoming: refreshed.append(("settings", incoming)),
     )
 
     app.on_overlay_state_changed(state="failed", failure_reason="runtime_crashed")
@@ -356,6 +1692,7 @@ def test_on_overlay_state_changed_updates_settings_view_runtime_state() -> None:
     assert app.overlay_state == "failed"
     assert app.overlay_failure_reason == "runtime_crashed"
     assert seen == [("failed", "runtime_crashed")]
+    assert refreshed == [("settings", contract), ("dashboard", contract)]
 
 
 @pytest.mark.asyncio
@@ -376,6 +1713,9 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
     async def fake_overlay(enabled: bool) -> None:
         seen.append(("overlay", enabled))
 
+    async def fake_peer(enabled: bool) -> None:
+        seen.append(("peer", enabled))
+
     async def fake_apply_settings(settings) -> None:
         seen.append(("apply_settings", settings))
 
@@ -387,6 +1727,7 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
         set_translation_enabled=fake_translation,
         set_stt_enabled=fake_stt,
         set_overlay_enabled=fake_overlay,
+        set_peer_translation_enabled=fake_peer,
         apply_settings=fake_apply_settings,
         apply_providers=fake_apply_providers,
     )
@@ -395,6 +1736,7 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
     app._on_translation_toggle(True)
     app._on_stt_toggle(False)
     app._on_overlay_toggle(True)
+    app._on_peer_translation_toggle(True)
     app._on_settings_changed("settings")
     app._on_providers_changed()
 
@@ -407,6 +1749,7 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
         ("translation", True),
         ("stt", False),
         ("overlay", True),
+        ("peer", True),
         ("apply_settings", "settings"),
         ("apply_providers", True),
     ]
@@ -442,12 +1785,12 @@ def test_toggle_handlers_route_basic_and_detailed_runtime_logs() -> None:
     assert app.controller.basic_messages == [
         "[Dashboard] Translation toggle requested: enabled=True",
         "[Dashboard] STT toggle requested: enabled=False",
-        "[Settings] Overlay toggle requested: enabled=True",
+        "[Dashboard] Overlay toggle requested: enabled=True",
     ]
     assert app.controller.detailed_messages == [
         "[Dashboard] Translation toggle detail: dashboard_state=False overlay_state=connected",
         "[Dashboard] STT toggle detail: dashboard_state=True overlay_state=connected",
-        "[Settings] Overlay toggle detail: overlay_state=connected failure_reason=runtime_crashed",
+        "[Dashboard] Overlay toggle detail: overlay_state=connected failure_reason=runtime_crashed",
     ]
 
 
@@ -480,25 +1823,30 @@ async def test_on_language_change_updates_settings_and_shows_warning(monkeypatch
         languages=SimpleNamespace(source_language="ko", target_language="en"),
         provider=SimpleNamespace(stt=SimpleNamespace(value="deepgram")),
     )
-    seen: list[object] = []
+    seen: list[tuple[str, str, str, str]] = []
 
-    async def fake_apply_settings(updated) -> None:
-        seen.append(updated)
+    async def fake_on_dashboard_language_change(
+        *, source_code: str, target_code: str, peer_source_code: str, peer_target_code: str
+    ) -> None:
+        seen.append((source_code, target_code, peer_source_code, peer_target_code))
 
     warning = SimpleNamespace(key="dashboard.warn_stt_key", language_code="ko")
     monkeypatch.setattr(
         app_module, "get_stt_compatibility_warning", lambda *_args, **_kwargs: warning
     )
-    app.controller = SimpleNamespace(settings=settings, apply_settings=fake_apply_settings)
+    app.controller = SimpleNamespace(
+        settings=settings,
+        on_dashboard_language_change=fake_on_dashboard_language_change,
+    )
 
-    app._on_language_change("ja", "fr")
+    app._on_language_change("ja", "fr", "", "it")
 
-    assert settings.languages.source_language == "ja"
-    assert settings.languages.target_language == "fr"
+    assert settings.languages.source_language == "ko"
+    assert settings.languages.target_language == "en"
     assert len(app.page.opened) == 1
     assert len(app.page.tasks) == 1
     await app.page.tasks[0]()
-    assert seen == [settings]
+    assert seen == [("ja", "fr", "", "it")]
 
 
 @pytest.mark.asyncio
@@ -519,7 +1867,7 @@ async def test_on_verify_api_key_persists_and_updates_dashboard_flags(
 
     async def fake_verify(provider: str, key: str):
         _ = key
-        return provider == "deepgram", "ok"
+        return provider in {"deepgram", "deepseek"}, "ok"
 
     settings = SimpleNamespace(
         api_key_verified=SimpleNamespace(
@@ -527,6 +1875,7 @@ async def test_on_verify_api_key_persists_and_updates_dashboard_flags(
             soniox=False,
             google=False,
             openrouter=False,
+            deepseek=False,
             alibaba_beijing=False,
             alibaba_singapore=False,
         )
@@ -543,16 +1892,19 @@ async def test_on_verify_api_key_persists_and_updates_dashboard_flags(
     deepgram_result = await app._on_verify_api_key("deepgram", "k")
     google_result = await app._on_verify_api_key("google", "k")
     openrouter_result = await app._on_verify_api_key("openrouter", "k")
+    deepseek_result = await app._on_verify_api_key("deepseek", "k")
 
     assert deepgram_result == (True, "ok")
     assert google_result == (False, "ok")
     assert openrouter_result == (False, "ok")
+    assert deepseek_result == (True, "ok")
     assert settings.api_key_verified.deepgram is True
     assert settings.api_key_verified.google is False
     assert settings.api_key_verified.openrouter is False
+    assert settings.api_key_verified.deepseek is True
     assert app.view_dashboard.stt_calls[-1] == (False, False)
-    assert app.view_dashboard.trans_calls[-1] == (True, False)
-    assert len(saves) == 3
+    assert app.view_dashboard.trans_calls[-1] == (False, False)
+    assert len(saves) == 4
 
 
 def test_show_snackbar_opens_page_snackbar() -> None:
@@ -564,6 +1916,105 @@ def test_show_snackbar_opens_page_snackbar() -> None:
     assert len(app.page.opened) == 1
     snackbar = app.page.opened[0]
     assert snackbar.duration == 1234
+
+
+def test_show_founder_letter_dialog_opens_with_locale_readme_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.openrouter.selection_alias = OpenRouterSelectionAlias.QWEN35_FLASH_MANAGED
+    settings.openrouter.llm_model = OpenRouterLLMModel.QWEN_35_FLASH_02_23
+    app.controller = SimpleNamespace(settings=settings)
+
+    captured: dict[str, object] = {}
+    pkce_calls: list[tuple[AppSettings, str]] = []
+    opened_urls: list[str] = []
+    previous_locale = i18n_module.get_locale()
+
+    class FakeFounderLetterDialog:
+        def __init__(self, page, *, on_readme=None, on_connect=None, on_contact=None):
+            captured["page"] = page
+            captured["on_readme"] = on_readme
+            captured["on_connect"] = on_connect
+            captured["on_contact"] = on_contact
+
+        def open(self) -> None:
+            captured["opened"] = True
+
+    monkeypatch.setattr(app_module, "FounderLetterDialog", FakeFounderLetterDialog)
+    monkeypatch.setattr(app_module.webbrowser, "open", lambda url: opened_urls.append(url))
+    monkeypatch.setattr(
+        app,
+        "_on_request_openrouter_pkce",
+        lambda target_settings, *, launch_source="settings": pkce_calls.append(
+            (target_settings, launch_source)
+        ),
+    )
+
+    try:
+        i18n_module.set_locale("ko")
+
+        app.show_founder_letter_dialog()
+
+        assert captured["page"] is app.page
+        assert captured["opened"] is True
+        assert callable(captured["on_readme"])
+        assert captured["on_connect"] is None
+        assert captured["on_contact"] is None
+        captured["on_readme"]()
+    finally:
+        i18n_module.set_locale(previous_locale)
+
+    assert pkce_calls == []
+    assert opened_urls == ["https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ko.md"]
+
+
+def test_show_founder_letter_dialog_does_not_prepare_byok_alias_when_opened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.openrouter.selection_alias = None
+    settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    app.controller = SimpleNamespace(settings=settings)
+
+    captured: dict[str, object] = {}
+    pkce_calls: list[tuple[AppSettings, str]] = []
+
+    class FakeFounderLetterDialog:
+        def __init__(self, _page, *, on_readme=None, on_connect=None, on_contact=None):
+            captured["page"] = _page
+            captured["on_readme"] = on_readme
+            captured["on_connect"] = on_connect
+            captured["on_contact"] = on_contact
+
+        def open(self) -> None:
+            captured["opened"] = True
+
+    monkeypatch.setattr(app_module, "FounderLetterDialog", FakeFounderLetterDialog)
+    monkeypatch.setattr(
+        app,
+        "_on_request_openrouter_pkce",
+        lambda target_settings, *, launch_source="settings": pkce_calls.append(
+            (target_settings, launch_source)
+        ),
+    )
+
+    app.show_founder_letter_dialog()
+
+    assert captured["opened"] is True
+    assert captured["page"] is app.page
+    assert callable(captured["on_readme"])
+    assert captured["on_connect"] is None
+    assert captured["on_contact"] is None
+    assert pkce_calls == []
 
 
 @pytest.mark.asyncio

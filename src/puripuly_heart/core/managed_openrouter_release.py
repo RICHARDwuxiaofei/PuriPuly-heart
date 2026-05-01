@@ -10,7 +10,18 @@ from enum import Enum
 from typing import Protocol
 from uuid import UUID
 
+from puripuly_heart.config.llm_profiles import (
+    get_openrouter_llm_profile,
+    openrouter_alias_for_fields,
+)
 from puripuly_heart.config.settings import AppSettings, OpenRouterCredentialSource
+from puripuly_heart.core.discord_managed_oauth import run_discord_oauth_callback_flow
+from puripuly_heart.core.discord_oauth_loopback import (
+    DiscordOAuthCallbackError,
+    DiscordOAuthLoopbackClosedError,
+    DiscordOAuthLoopbackListener,
+    bind_first_available,
+)
 from puripuly_heart.core.hardware_fingerprint import compute_hardware_hash
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.managed_identity import (
@@ -19,19 +30,25 @@ from puripuly_heart.core.managed_identity import (
 )
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_MANAGED_API_KEY_SECRET,
+    best_effort_store_managed_openrouter_user_identifier,
     clear_temporary_managed_release_state,
     resolve_openrouter_credentials,
 )
+from puripuly_heart.core.openrouter_handoff import store_managed_entitlement_snapshot
 from puripuly_heart.core.storage.secrets import SecretStore
 from puripuly_heart.domain.models import Translation
 
-MANAGED_OPENROUTER_TRIAL_MODEL = "google/gemma-4-26b-a4b-it"
 MANAGED_OPENROUTER_TRIAL_BUDGET_USD = 0.07
 BINDING_MISMATCH_SUBCODES = {
     "device_public_key_registered",
     "installation_binding_mismatch",
 }
 HardwareFingerprintProvider = Callable[[], str | Awaitable[str]]
+DiscordOAuthListenerFactory = Callable[[], DiscordOAuthLoopbackListener]
+DiscordOAuthCallbackRunner = Callable[
+    [DiscordOAuthLoopbackListener, str, str],
+    Awaitable[tuple[str, str]],
+]
 
 
 def _default_signed_at() -> str:
@@ -50,10 +67,42 @@ class ManagedOpenRouterReleaseBehavior(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedOpenRouterReleaseDiagnostics:
+    operation: str | None = None
+    code: str | None = None
+    error_class: str | None = None
+    subcode: str | None = None
+    retry_after_ms: int | None = None
+    message: str | None = None
+
+
+def format_managed_openrouter_diagnostics(
+    diagnostics: ManagedOpenRouterReleaseDiagnostics | None,
+) -> str:
+    if diagnostics is None:
+        return ""
+    parts: list[str] = []
+    if diagnostics.operation is not None:
+        parts.append(f"operation={diagnostics.operation}")
+    if diagnostics.code is not None:
+        parts.append(f"code={diagnostics.code}")
+    if diagnostics.error_class is not None:
+        parts.append(f"class={diagnostics.error_class}")
+    if diagnostics.subcode is not None:
+        parts.append(f"subcode={diagnostics.subcode}")
+    if diagnostics.retry_after_ms is not None:
+        parts.append(f"retry_after_ms={diagnostics.retry_after_ms}")
+    if diagnostics.message is not None:
+        parts.append(f"message={diagnostics.message}")
+    return " ".join(parts)
+
+
+@dataclass(frozen=True, slots=True)
 class ManagedOpenRouterReleaseResult:
     behavior: ManagedOpenRouterReleaseBehavior
     message_key: str
     message_kwargs: Mapping[str, object] = field(default_factory=dict)
+    diagnostics: ManagedOpenRouterReleaseDiagnostics | None = None
     retry_after_ms: int | None = None
     api_key: str | None = None
     local_key_available: bool = False
@@ -75,6 +124,16 @@ class ManagedOpenRouterChallengeSuccess:
 
 
 @dataclass(frozen=True, slots=True)
+class ManagedOpenRouterDiscordStartSuccess:
+    authorization_url: str
+    redirect_uri: str
+    oauth_session_expires_at: str
+    issue_nonce: str
+    fingerprint_salt: ManagedOpenRouterFingerprintSalt
+    fingerprint_salt_version: int
+
+
+@dataclass(frozen=True, slots=True)
 class ManagedOpenRouterVerifySuccess:
     release_token: str
     release_token_expires_at: str
@@ -85,6 +144,7 @@ class ManagedOpenRouterIssueSuccess:
     openrouter_api_key: str
     managed_credential_ref: str | None = None
     expires_at: str | None = None
+    openrouter_user_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,11 +157,23 @@ class ManagedOpenRouterReleaseError(Exception):
     code: str
     error_class: str
     message: str
+    operation: str | None = None
     subcode: str | None = None
     retry_after_ms: int | None = None
+    managed_lifecycle: str | None = None
 
     def __str__(self) -> str:
         return self.message or self.code
+
+    def to_diagnostics(self) -> ManagedOpenRouterReleaseDiagnostics:
+        return ManagedOpenRouterReleaseDiagnostics(
+            operation=self.operation,
+            code=self.code,
+            error_class=self.error_class,
+            subcode=self.subcode,
+            retry_after_ms=self.retry_after_ms,
+            message=self.message,
+        )
 
 
 class ManagedOpenRouterReleaseClient(Protocol):
@@ -116,6 +188,20 @@ class ManagedOpenRouterReleaseClient(Protocol):
     async def verify(self, request: dict[str, str]) -> ManagedOpenRouterVerifySuccess: ...
 
     async def issue(self, request: dict[str, object]) -> ManagedOpenRouterIssueSuccess: ...
+
+    async def start_discord_oauth(
+        self,
+        *,
+        installation_id: str,
+        device_public_key: str,
+        redirect_uri: str,
+        app_version: str,
+    ) -> ManagedOpenRouterDiscordStartSuccess: ...
+
+    async def issue_discord_managed_key(
+        self,
+        request: dict[str, object],
+    ) -> ManagedOpenRouterIssueSuccess: ...
 
 
 @dataclass(slots=True)
@@ -146,6 +232,32 @@ class UnavailableManagedOpenRouterReleaseClient:
             message="managed OpenRouter release is unavailable",
         )
 
+    async def start_discord_oauth(
+        self,
+        *,
+        installation_id: str,
+        device_public_key: str,
+        redirect_uri: str,
+        app_version: str,
+    ) -> ManagedOpenRouterDiscordStartSuccess:
+        _ = installation_id, device_public_key, redirect_uri, app_version
+        raise ManagedOpenRouterReleaseError(
+            code="trial_unavailable",
+            error_class="retryable",
+            message="managed OpenRouter release is unavailable",
+        )
+
+    async def issue_discord_managed_key(
+        self,
+        request: dict[str, object],
+    ) -> ManagedOpenRouterIssueSuccess:
+        _ = request
+        raise ManagedOpenRouterReleaseError(
+            code="trial_unavailable",
+            error_class="retryable",
+            message="managed OpenRouter release is unavailable",
+        )
+
 
 @dataclass(slots=True)
 class ManagedOpenRouterReleaseService:
@@ -158,6 +270,8 @@ class ManagedOpenRouterReleaseService:
     hardware_hash_provider: InitVar[HardwareFingerprintProvider | None] = None
     signed_at_provider: Callable[[], str] = _default_signed_at
     monotonic_ms_provider: Callable[[], int] = _default_monotonic_ms
+    discord_oauth_listener_factory: DiscordOAuthListenerFactory = bind_first_available
+    discord_oauth_callback_runner: DiscordOAuthCallbackRunner = run_discord_oauth_callback_flow
     _prepare_task: asyncio.Task[ManagedOpenRouterReleaseResult] | None = field(
         init=False,
         default=None,
@@ -169,6 +283,11 @@ class ManagedOpenRouterReleaseService:
         repr=False,
     )
     _retry_after_deadline_ms: int | None = field(init=False, default=None, repr=False)
+    _retry_after_diagnostics: ManagedOpenRouterReleaseDiagnostics | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     _legacy_hardware_hash_provider: HardwareFingerprintProvider | None = field(
         init=False,
         default=None,
@@ -236,6 +355,8 @@ class ManagedOpenRouterReleaseService:
             )
             if prepare_result.behavior != ManagedOpenRouterReleaseBehavior.READY:
                 return prepare_result
+            if prepare_result.local_key_available or prepare_result.api_key is not None:
+                return prepare_result
 
         if self._issue_task is not None and not self._issue_task.done():
             return await self._await_shared_task(self._issue_task, single_flight_reused=True)
@@ -250,8 +371,7 @@ class ManagedOpenRouterReleaseService:
         if retry_result is not None:
             return retry_result
 
-        task = self._start_shared_task("_issue_task", self._run_issue_flow())
-        return await self._await_shared_task(task, single_flight_reused=False)
+        return await self._await_or_start_issue_flow()
 
     async def _run_prepare_flow(self) -> ManagedOpenRouterReleaseResult:
         resolution = resolve_openrouter_credentials(
@@ -269,6 +389,7 @@ class ManagedOpenRouterReleaseService:
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.READY,
                 message_key="managed_release.ready",
+                api_key=resolution.api_key,
                 local_key_available=True,
             )
 
@@ -288,67 +409,113 @@ class ManagedOpenRouterReleaseService:
                     behavior=ManagedOpenRouterReleaseBehavior.RESTART,
                     message_key="managed_release.restart",
                 )
+            return await self._await_or_start_issue_flow()
+
+        listener: DiscordOAuthLoopbackListener | None = None
+        try:
+            try:
+                listener = self.discord_oauth_listener_factory()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                return self._handle_release_error(
+                    _discord_listener_release_error(exc),
+                    operation="discord_start",
+                )
+            try:
+                start_response = await self.client.start_discord_oauth(
+                    installation_id=bundle.installation_id,
+                    device_public_key=bundle.device_public_key,
+                    redirect_uri=listener.redirect_uri,
+                    app_version=self.app_version,
+                )
+            except ManagedOpenRouterReleaseError as exc:
+                return self._handle_release_error(exc, operation="discord_start")
+
+            if start_response.redirect_uri != listener.redirect_uri:
+                return self._handle_release_error(
+                    ManagedOpenRouterReleaseError(
+                        code="discord_redirect_mismatch",
+                        error_class="terminal",
+                        message="Discord OAuth broker returned a different redirect URI",
+                        operation="discord_start",
+                    ),
+                    operation="discord_start",
+                )
+
+            try:
+                code, state = await self.discord_oauth_callback_runner(
+                    listener,
+                    start_response.authorization_url,
+                    start_response.oauth_session_expires_at,
+                )
+            except asyncio.CancelledError:
+                raise
+            except ManagedOpenRouterReleaseError as exc:
+                return self._handle_release_error(exc, operation="discord_callback")
+            except (DiscordOAuthCallbackError, DiscordOAuthLoopbackClosedError, TimeoutError) as exc:
+                return self._handle_release_error(
+                    _discord_callback_release_error(exc),
+                    operation="discord_callback",
+                )
+            try:
+                hardware_hash = await self._resolve_hardware_hash(
+                    fingerprint_salt=start_response.fingerprint_salt,
+                )
+            except Exception:
+                self._clear_retry_after()
+                return ManagedOpenRouterReleaseResult(
+                    behavior=ManagedOpenRouterReleaseBehavior.STOP,
+                    message_key="managed_release.stop",
+                )
+
+            issue_request = bundle.sign_discord_issue_request(
+                code=code,
+                state=state,
+                redirect_uri=listener.redirect_uri,
+                hardware_hash=hardware_hash,
+                hardware_hash_salt_version=start_response.fingerprint_salt_version,
+                app_version=self.app_version,
+                reason="llm_start",
+                budget_usd=MANAGED_OPENROUTER_TRIAL_BUDGET_USD,
+                model=_resolve_managed_issue_model(self.settings),
+                issue_nonce=start_response.issue_nonce,
+                signed_at=self.signed_at_provider(),
+            )
+            try:
+                issue_response = await self.client.issue_discord_managed_key(issue_request)
+            except ManagedOpenRouterReleaseError as exc:
+                return self._handle_release_error(exc, operation="discord_issue")
+
+            return self._persist_managed_issue_success(issue_response)
+        finally:
+            if listener is not None:
+                listener.close()
+
+    async def _await_or_start_issue_flow(self) -> ManagedOpenRouterReleaseResult:
+        resolution = resolve_openrouter_credentials(
+            self.settings,
+            secrets=self.secrets,
+            request_intent="TRANS",
+        )
+        if resolution.api_key is not None:
+            self._clear_retry_after()
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.READY,
                 message_key="managed_release.ready",
-                pending_issue=True,
+                api_key=resolution.api_key,
+                local_key_available=True,
             )
 
-        try:
-            challenge_response = await self.client.challenge(
-                installation_id=bundle.installation_id,
-                device_public_key=bundle.device_public_key,
-                app_version=self.app_version,
-            )
-        except ManagedOpenRouterReleaseError as exc:
-            return self._handle_release_error(exc)
+        if self._issue_task is not None and not self._issue_task.done():
+            return await self._await_shared_task(self._issue_task, single_flight_reused=True)
 
-        if isinstance(challenge_response, ManagedOpenRouterPreflightStop):
-            self._clear_retry_after()
-            clear_temporary_managed_release_state(self.settings)
-            self.persist_settings(self.settings)
-            return ManagedOpenRouterReleaseResult(
-                behavior=ManagedOpenRouterReleaseBehavior.STOP,
-                message_key=f"managed_release.{challenge_response.reason}",
-            )
+        retry_result = self._result_for_retry_after_window()
+        if retry_result is not None:
+            return retry_result
 
-        try:
-            hardware_hash = await self._resolve_hardware_hash(
-                fingerprint_salt=challenge_response.fingerprint_salt,
-            )
-        except Exception:
-            self._clear_retry_after()
-            return ManagedOpenRouterReleaseResult(
-                behavior=ManagedOpenRouterReleaseBehavior.STOP,
-                message_key="managed_release.stop",
-            )
-        verify_request = bundle.sign_verify_request(
-            challenge=challenge_response.challenge,
-            challenge_expires_at=challenge_response.challenge_expires_at,
-            hardware_hash=hardware_hash,
-            app_version=self.app_version,
-            signed_at=self.signed_at_provider(),
-        )
-        try:
-            verify_response = await self.client.verify(verify_request)
-        except ManagedOpenRouterReleaseError as exc:
-            return self._handle_release_error(exc)
-
-        self.settings.managed_identity.release_token = verify_response.release_token
-        self.settings.managed_identity.release_token_expires_at = (
-            verify_response.release_token_expires_at
-        )
-        self.settings.managed_identity.verified_hardware_hash = hardware_hash
-        self.settings.managed_identity.verified_hardware_hash_salt_version = (
-            challenge_response.fingerprint_salt.version
-        )
-        self.persist_settings(self.settings)
-        self._clear_retry_after()
-        return ManagedOpenRouterReleaseResult(
-            behavior=ManagedOpenRouterReleaseBehavior.READY,
-            message_key="managed_release.ready",
-            pending_issue=True,
-        )
+        task = self._start_shared_task("_issue_task", self._run_issue_flow())
+        return await self._await_shared_task(task, single_flight_reused=False)
 
     async def _run_issue_flow(self) -> ManagedOpenRouterReleaseResult:
         bundle = ensure_managed_identity_bundle(
@@ -376,14 +543,20 @@ class ManagedOpenRouterReleaseService:
             reason="llm_start",
             hardware_hash=verified_hardware_hash,
             budget_usd=MANAGED_OPENROUTER_TRIAL_BUDGET_USD,
-            model=MANAGED_OPENROUTER_TRIAL_MODEL,
+            model=_resolve_managed_issue_model(self.settings),
             signed_at=self.signed_at_provider(),
         )
         try:
             issue_response = await self.client.issue(issue_request)
         except ManagedOpenRouterReleaseError as exc:
-            return self._handle_release_error(exc)
+            return self._handle_release_error(exc, operation="issue")
 
+        return self._persist_managed_issue_success(issue_response)
+
+    def _persist_managed_issue_success(
+        self,
+        issue_response: ManagedOpenRouterIssueSuccess,
+    ) -> ManagedOpenRouterReleaseResult:
         try:
             self.secrets.set(OPENROUTER_MANAGED_API_KEY_SECRET, issue_response.openrouter_api_key)
         except Exception:
@@ -418,6 +591,16 @@ class ManagedOpenRouterReleaseService:
                 behavior=ManagedOpenRouterReleaseBehavior.STOP,
                 message_key="managed_release.stop",
             )
+        best_effort_store_managed_openrouter_user_identifier(
+            self.settings,
+            secrets=self.secrets,
+            openrouter_user_id=issue_response.openrouter_user_id,
+        )
+        store_managed_entitlement_snapshot(
+            self.settings,
+            managed_credential_ref=issue_response.managed_credential_ref,
+            expires_at=issue_response.expires_at,
+        )
         clear_temporary_managed_release_state(self.settings)
         self.persist_settings(self.settings)
         self._clear_retry_after()
@@ -431,7 +614,12 @@ class ManagedOpenRouterReleaseService:
     def _handle_release_error(
         self,
         error: ManagedOpenRouterReleaseError,
+        *,
+        operation: str | None = None,
     ) -> ManagedOpenRouterReleaseResult:
+        diagnostics = error.to_diagnostics()
+        if diagnostics.operation is None and operation is not None:
+            diagnostics = replace(diagnostics, operation=operation)
         if error.error_class == "security_fail" and error.subcode in BINDING_MISMATCH_SUBCODES:
             try:
                 regenerate_managed_identity_bundle(
@@ -444,11 +632,37 @@ class ManagedOpenRouterReleaseService:
                 return ManagedOpenRouterReleaseResult(
                     behavior=ManagedOpenRouterReleaseBehavior.STOP,
                     message_key="managed_release.stop",
+                    diagnostics=diagnostics,
                 )
             self._clear_retry_after()
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.RESTART,
                 message_key="managed_release.restart",
+                diagnostics=diagnostics,
+            )
+
+        if error.managed_lifecycle == "revoked":
+            clear_temporary_managed_release_state(self.settings)
+            self.persist_settings(self.settings)
+            self._clear_retry_after()
+            return ManagedOpenRouterReleaseResult(
+                behavior=ManagedOpenRouterReleaseBehavior.STOP,
+                message_key="managed_release.revoked_contact",
+                diagnostics=diagnostics,
+            )
+
+        if error.code == "issuance_suspended":
+            retry_after_ms = _normalize_retry_after_ms(error.retry_after_ms)
+            self._clear_retry_after()
+            message_kwargs: dict[str, object] = {}
+            if retry_after_ms is not None:
+                message_kwargs["retry_after_ms"] = retry_after_ms
+            return ManagedOpenRouterReleaseResult(
+                behavior=ManagedOpenRouterReleaseBehavior.RETRY,
+                message_key="managed_release.brake",
+                message_kwargs=message_kwargs,
+                diagnostics=replace(diagnostics, retry_after_ms=retry_after_ms),
+                retry_after_ms=retry_after_ms,
             )
 
         if (
@@ -465,6 +679,7 @@ class ManagedOpenRouterReleaseService:
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.RESTART,
                 message_key="managed_release.restart",
+                diagnostics=diagnostics,
             )
 
         if error.error_class == "terminal":
@@ -478,15 +693,18 @@ class ManagedOpenRouterReleaseService:
                     if error.code == "trial_not_eligible"
                     else "managed_release.stop"
                 ),
+                diagnostics=diagnostics,
             )
 
         retry_after_ms = _normalize_retry_after_ms(error.retry_after_ms)
         if retry_after_ms is not None:
             self._retry_after_deadline_ms = self.monotonic_ms_provider() + retry_after_ms
+            self._retry_after_diagnostics = diagnostics
             return ManagedOpenRouterReleaseResult(
                 behavior=ManagedOpenRouterReleaseBehavior.RETRY,
                 message_key="managed_release.retry_after_ms",
                 message_kwargs={"retry_after_ms": retry_after_ms},
+                diagnostics=replace(diagnostics, retry_after_ms=retry_after_ms),
                 retry_after_ms=retry_after_ms,
             )
 
@@ -494,6 +712,7 @@ class ManagedOpenRouterReleaseService:
         return ManagedOpenRouterReleaseResult(
             behavior=ManagedOpenRouterReleaseBehavior.RETRY,
             message_key="managed_release.retry",
+            diagnostics=diagnostics,
         )
 
     async def _resolve_hardware_hash(
@@ -538,15 +757,20 @@ class ManagedOpenRouterReleaseService:
             self._clear_retry_after()
             return None
         remaining_ms = self._retry_after_deadline_ms - now_ms
+        diagnostics = self._retry_after_diagnostics
+        if diagnostics is not None:
+            diagnostics = replace(diagnostics, retry_after_ms=remaining_ms)
         return ManagedOpenRouterReleaseResult(
             behavior=ManagedOpenRouterReleaseBehavior.RETRY,
             message_key="managed_release.retry_after_ms",
             message_kwargs={"retry_after_ms": remaining_ms},
+            diagnostics=diagnostics,
             retry_after_ms=remaining_ms,
         )
 
     def _clear_retry_after(self) -> None:
         self._retry_after_deadline_ms = None
+        self._retry_after_diagnostics = None
 
     async def close(self) -> None:
         prepare_task = self._prepare_task
@@ -577,6 +801,7 @@ class ManagedOpenRouterDelegateFactory(Protocol):
 class ManagedOpenRouterUserFacingError(RuntimeError):
     message_key: str
     message_kwargs: Mapping[str, object] = field(default_factory=dict)
+    diagnostics: ManagedOpenRouterReleaseDiagnostics | None = None
 
     def __str__(self) -> str:
         from puripuly_heart.ui.i18n import t
@@ -595,6 +820,22 @@ class ManagedOpenRouterLLMProvider(LLMProvider):
     _delegate: LLMProvider | None = field(init=False, default=None, repr=False)
     _delegate_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock, repr=False)
 
+    @property
+    def model(self) -> object | None:
+        if self._delegate is not None:
+            return getattr(self._delegate, "model", None)
+        settings = getattr(self.release_service, "settings", None)
+        openrouter_settings = getattr(settings, "openrouter", None)
+        return getattr(openrouter_settings, "llm_model", None)
+
+    @property
+    def selected_source(self) -> object | None:
+        if self._delegate is not None:
+            return getattr(self._delegate, "selected_source", None)
+        settings = getattr(self.release_service, "settings", None)
+        openrouter_settings = getattr(settings, "openrouter", None)
+        return getattr(openrouter_settings, "selected_source", None)
+
     async def _ensure_delegate(self) -> LLMProvider:
         if self._delegate is not None:
             return self._delegate
@@ -603,15 +844,35 @@ class ManagedOpenRouterLLMProvider(LLMProvider):
             if self._delegate is not None:
                 return self._delegate
             ensure_key = getattr(self.release_service, "ensure_key_for_llm_start")
-            result = await ensure_key()
+            try:
+                result = await ensure_key()
+            except ManagedOpenRouterUserFacingError:
+                raise
+            except Exception as exc:
+                raise ManagedOpenRouterUserFacingError(
+                    message_key="managed_release.retry",
+                    diagnostics=ManagedOpenRouterReleaseDiagnostics(message=str(exc)),
+                ) from exc
             if not isinstance(result, ManagedOpenRouterReleaseResult):
-                raise RuntimeError("managed release service returned an unsupported result")
+                raise ManagedOpenRouterUserFacingError(
+                    message_key="managed_release.retry",
+                    diagnostics=ManagedOpenRouterReleaseDiagnostics(
+                        message="managed release service returned an unsupported result"
+                    ),
+                )
             if result.behavior != ManagedOpenRouterReleaseBehavior.READY or not result.api_key:
                 raise ManagedOpenRouterUserFacingError(
                     message_key=result.message_key or "managed_release.restart",
                     message_kwargs=result.message_kwargs,
+                    diagnostics=result.diagnostics,
                 )
-            self._delegate = self.delegate_factory(result.api_key)
+            try:
+                self._delegate = self.delegate_factory(result.api_key)
+            except Exception as exc:
+                raise ManagedOpenRouterUserFacingError(
+                    message_key="managed_release.retry",
+                    diagnostics=ManagedOpenRouterReleaseDiagnostics(message=str(exc)),
+                ) from exc
             if self.on_delegate_ready is not None:
                 callback_result = self.on_delegate_ready()
                 if inspect.isawaitable(callback_result):
@@ -672,6 +933,54 @@ def _normalize_optional_text(value: str | None) -> str | None:
     return normalized or None
 
 
+def _discord_listener_release_error(error: Exception) -> ManagedOpenRouterReleaseError:
+    message = _exception_message(
+        error,
+        default="Discord OAuth loopback listener unavailable",
+    )
+    return ManagedOpenRouterReleaseError(
+        code="discord_loopback_unavailable",
+        error_class="retryable",
+        message=f"Discord OAuth loopback listener unavailable: {message}",
+        operation="discord_start",
+    )
+
+
+def _discord_callback_release_error(error: Exception) -> ManagedOpenRouterReleaseError:
+    if isinstance(error, DiscordOAuthCallbackError):
+        return ManagedOpenRouterReleaseError(
+            code="discord_oauth_callback_error",
+            error_class="retryable",
+            message=f"Discord OAuth callback failed: {error.error}",
+            operation="discord_callback",
+            subcode=error.error,
+        )
+    if isinstance(error, TimeoutError):
+        return ManagedOpenRouterReleaseError(
+            code="discord_oauth_timeout",
+            error_class="retryable",
+            message=_exception_message(
+                error,
+                default="timed out waiting for Discord OAuth callback",
+            ),
+            operation="discord_callback",
+        )
+    return ManagedOpenRouterReleaseError(
+        code="discord_oauth_callback_closed",
+        error_class="retryable",
+        message=_exception_message(
+            error,
+            default="Discord OAuth callback listener closed before completion",
+        ),
+        operation="discord_callback",
+    )
+
+
+def _exception_message(error: Exception, *, default: str) -> str:
+    message = str(error).strip()
+    return message or default
+
+
 def _normalize_retry_after_ms(value: int | None) -> int | None:
     if value is None:
         return None
@@ -690,3 +999,18 @@ async def _resolve_provider_without_blocking_event_loop(
     if inspect.iscoroutinefunction(provider):
         return await _resolve_maybe_awaitable(provider())
     return await _resolve_maybe_awaitable(await asyncio.to_thread(provider))
+
+
+def _resolve_managed_issue_model(settings: AppSettings) -> str:
+    selection_alias = settings.openrouter.selection_alias
+    if selection_alias is None:
+        selection_alias = openrouter_alias_for_fields(
+            model=settings.openrouter.llm_model.value,
+            source=settings.openrouter.selected_source.value,
+        )
+    profile = get_openrouter_llm_profile(
+        selection_alias.value if hasattr(selection_alias, "value") else selection_alias
+    )
+    if profile is not None and profile.openrouter_model is not None:
+        return profile.openrouter_model
+    return settings.openrouter.llm_model.value

@@ -120,11 +120,12 @@ describe('broker denylist, reputation, and revocation hooks', () => {
         provider: 'OpenRouter',
         budget_usd: 0.07,
         issued_at: '2026-04-08T06:00:00.000Z',
-        expires_at: '2026-10-08T06:00:00.000Z',
+        expires_at: '2026-07-08T06:00:00.000Z',
       },
       onboarding_eligibility: {
         eligible: false,
         reason: 'revoked',
+        requires_discord_oauth: false,
       },
     });
 
@@ -200,7 +201,7 @@ describe('broker denylist, reputation, and revocation hooks', () => {
         provider: 'OpenRouter',
         budget_usd: 0.07,
         issued_at: '2026-04-08T06:00:00.000Z',
-        expires_at: '2026-10-08T06:00:00.000Z',
+        expires_at: '2026-07-08T06:00:00.000Z',
       },
     });
   });

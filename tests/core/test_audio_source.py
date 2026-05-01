@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import numpy as np
@@ -136,24 +137,125 @@ async def test_sounddevice_audio_source_frames_and_close(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
 
     source = SoundDeviceAudioSource(sample_rate_hz=None, channels=1, max_queue_frames=1)
-    stream = stream_ref["stream"]
-    stream.callback(np.ones((4,), dtype=np.float32), None, None, "warn")
-    stream.callback(np.ones((4,), dtype=np.float32), None, None, None)
+    try:
+        stream = stream_ref["stream"]
+        stream.callback(np.ones((4,), dtype=np.float32), None, None, "warn")
+        stream.callback(np.ones((4,), dtype=np.float32), None, None, None)
 
-    frame = await source.frames().__anext__()
-    assert frame.sample_rate_hz == 48000
-    assert frame.channels == 1
-    np.testing.assert_allclose(frame.samples, np.ones((4,), dtype=np.float32))
+        frame = await source.frames().__anext__()
+        assert frame.sample_rate_hz == 48000
+        assert frame.channels == 1
+        np.testing.assert_allclose(frame.samples, np.ones((4,), dtype=np.float32))
 
-    stopped_frames = source.frames()
-    source._queue.sync_q.put_nowait(None)
-    with pytest.raises(StopAsyncIteration):
-        await stopped_frames.__anext__()
+        stopped_frames = source.frames()
+        source._queue.sync_q.put_nowait(None)
+        with pytest.raises(StopAsyncIteration):
+            await stopped_frames.__anext__()
 
-    source._queue.sync_q.put_nowait(None)
-    await source.close()
-    assert stream.stopped is True
-    assert stream.closed is True
+        source._queue.sync_q.put_nowait(None)
+        await source.close()
+        assert stream.stopped is True
+        assert stream.closed is True
 
-    await source.close()
-    stream.callback(np.ones((2,), dtype=np.float32), None, None, None)
+        await source.close()
+        stream.callback(np.ones((2,), dtype=np.float32), None, None, None)
+    finally:
+        await source.close()
+
+
+def test_sounddevice_audio_source_does_not_pass_wasapi_settings_by_default(monkeypatch):
+    stream_kwargs: dict[str, object] = {}
+
+    class FakeInputStream:
+        def __init__(self, **kwargs):
+            stream_kwargs.update(kwargs)
+            self.samplerate = 48000
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    fake_sd = SimpleNamespace(InputStream=FakeInputStream)
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    source = SoundDeviceAudioSource()
+    try:
+        assert "extra_settings" not in stream_kwargs
+        assert stream_kwargs["blocksize"] == 0
+        assert stream_kwargs["samplerate"] is None
+        assert stream_kwargs["channels"] == 1
+        assert stream_kwargs["dtype"] == "float32"
+    finally:
+        asyncio.run(source.close())
+
+
+def test_sounddevice_audio_source_passes_wasapi_auto_convert_settings(monkeypatch):
+    stream_kwargs: dict[str, object] = {}
+    wasapi_settings: list[object] = []
+
+    class FakeWasapiSettings:
+        def __init__(self, *, exclusive, auto_convert):
+            self.exclusive = exclusive
+            self.auto_convert = auto_convert
+            wasapi_settings.append(self)
+
+    class FakeInputStream:
+        def __init__(self, **kwargs):
+            stream_kwargs.update(kwargs)
+            self.samplerate = 48000
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    fake_sd = SimpleNamespace(
+        InputStream=FakeInputStream,
+        WasapiSettings=FakeWasapiSettings,
+    )
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    source = SoundDeviceAudioSource(wasapi_auto_convert=True, wasapi_exclusive=False)
+    try:
+        assert len(wasapi_settings) == 1
+        assert stream_kwargs["extra_settings"] is wasapi_settings[0]
+        assert wasapi_settings[0].exclusive is False
+        assert wasapi_settings[0].auto_convert is True
+    finally:
+        asyncio.run(source.close())
+
+
+def test_sounddevice_audio_source_rejects_wasapi_settings_when_unavailable(monkeypatch):
+    stream_created = False
+
+    class FakeInputStream:
+        def __init__(self, **kwargs):
+            nonlocal stream_created
+            stream_created = True
+            self.samplerate = 48000
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    fake_sd = SimpleNamespace(InputStream=FakeInputStream)
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    with pytest.raises(RuntimeError, match="WASAPI settings support is unavailable"):
+        SoundDeviceAudioSource(wasapi_auto_convert=True)
+
+    assert stream_created is False

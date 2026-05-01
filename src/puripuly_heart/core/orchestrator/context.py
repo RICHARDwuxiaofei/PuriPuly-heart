@@ -14,8 +14,8 @@ class ContextResolver:
     clock: Clock = SystemClock()
     local_time_window_s: float = 30.0
     local_max_entries: int = 3
-    integrated_time_window_s: float = 60.0
-    integrated_max_entries: int = 6
+    integrated_time_window_s: float = 40.0
+    integrated_max_entries: int = 4
 
     def get_local_entries(
         self,
@@ -58,6 +58,8 @@ class ContextResolver:
         peer_translation_enabled: bool,
         source_language: str,
         target_language: str,
+        other_source_language: str | None = None,
+        other_target_language: str | None = None,
     ) -> tuple[str, ContextMode]:
         if requested_mode != "integrated" or not peer_translation_enabled:
             return self.resolve_local(
@@ -70,28 +72,24 @@ class ContextResolver:
             other_runtime=other_runtime,
             source_language=source_language,
             target_language=target_language,
+            other_source_language=other_source_language,
+            other_target_language=other_target_language,
         )
         return self.format_integrated(integrated_entries), "integrated"
 
     def _format_entries(self, entries: list[ContextEntry]) -> str:
         if not entries:
             return ""
-        return "\n".join(
-            f'- [{self._relative_age(entry.timestamp)}s ago] "{entry.text}"' for entry in entries
-        )
+        return "\n".join(self._format_entry(entry) for entry in entries)
+
+    def _format_entry(self, entry: ContextEntry) -> str:
+        label = "peer" if entry.channel == "peer" else "self"
+        return f'- [{label}, {self._relative_age(entry.timestamp)}s ago] "{entry.text}"'
 
     def format_integrated(self, entries: list[tuple[ChannelRuntime, ContextEntry]]) -> str:
         if not entries:
             return ""
-        lines: list[str] = []
-        for runtime, entry in entries:
-            age_text = f"{self._relative_age(entry.timestamp)}s ago"
-            if runtime.channel == "peer":
-                prefix = f"peer, {age_text}"
-            else:
-                prefix = age_text
-            lines.append(f'- [{prefix}] "{entry.text}"')
-        return "\n".join(lines)
+        return "\n".join(self._format_entry(entry) for _, entry in entries)
 
     def _get_integrated_entries(
         self,
@@ -100,13 +98,24 @@ class ContextResolver:
         other_runtime: ChannelRuntime,
         source_language: str,
         target_language: str,
+        other_source_language: str | None = None,
+        other_target_language: str | None = None,
     ) -> list[tuple[ChannelRuntime, ContextEntry]]:
         combined: list[tuple[ChannelRuntime, ContextEntry]] = []
-        for channel_runtime in (runtime, other_runtime):
+        other_source_language = (
+            source_language if other_source_language is None else other_source_language
+        )
+        other_target_language = (
+            target_language if other_target_language is None else other_target_language
+        )
+        for channel_runtime, entry_source_language, entry_target_language in (
+            (runtime, source_language, target_language),
+            (other_runtime, other_source_language, other_target_language),
+        ):
             for entry in channel_runtime.get_valid_context(
                 now=self.clock.now(),
-                source_language=source_language,
-                target_language=target_language,
+                source_language=entry_source_language,
+                target_language=entry_target_language,
                 time_window_s=self.integrated_time_window_s,
                 max_entries=self.integrated_max_entries,
             ):

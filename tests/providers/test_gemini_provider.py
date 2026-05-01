@@ -223,7 +223,7 @@ async def test_google_genai_client_formats_prompt_and_context(
         )
 
     assert result == "OK"
-    assert state["contents"] == "<context>\na -> b\n</context>\nInput: hello"
+    assert state["contents"] == "<context>\na -> b\n</context>\n\n<input>\nhello\n</input>"
     assert state["config"].system_instruction == "Translate ko to en."
     assert (
         "[Basic][LLM] Gemini request [translate][context=yes] ko -> en: 'hello'" in caplog.messages
@@ -249,7 +249,10 @@ async def test_google_genai_client_stream_translate_emits_incremental_parts(monk
     ]
 
     assert chunks == ["h", "ello"]
-    assert state["stream_call"]["contents"] == "<context>\na -> b\n</context>\nInput: hello"
+    assert (
+        state["stream_call"]["contents"]
+        == "<context>\na -> b\n</context>\n\n<input>\nhello\n</input>"
+    )
     assert state["stream_call"]["config"].system_instruction == "Translate ko to en."
 
 
@@ -311,7 +314,7 @@ async def test_google_genai_client_uses_runtime_logging_for_basic_translate_payl
         )
 
     assert result == "OK"
-    assert state["contents"] == "<context>\na -> b\n</context>\nInput: hello"
+    assert state["contents"] == "<context>\na -> b\n</context>\n\n<input>\nhello\n</input>"
     assert runtime_logging.basic_messages == [
         (
             "[Basic][LLM] Gemini request [translate][context=yes] ko -> en: 'hello'",

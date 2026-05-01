@@ -228,6 +228,7 @@ Installer_output/
 !/scripts/ci/
 /scripts/ci/*
 !/scripts/ci/build-release-artifacts.ps1
+!/scripts/ci/prepare-soxr-release-inputs.ps1
 !/scripts/ci/read-project-version.py
 !/scripts/installer/
 /scripts/installer/*
@@ -237,6 +238,11 @@ Installer_output/
 .agents/
 docs/plans/
 docs/superpowers
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/specs/
+docs/superpowers/specs/*
+!docs/superpowers/specs/2026-04-28-peer-burst-as-product-permanent.md
 .worktrees/
 .superpowers/
 /settings.json

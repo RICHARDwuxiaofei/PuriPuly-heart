@@ -49,7 +49,8 @@ describe('GET /v1/trial/status signing contract', () => {
       current_entitlement: null,
       onboarding_eligibility: {
         eligible: true,
-        reason: 'eligible',
+        reason: 'discord_required',
+        requires_discord_oauth: true,
       },
     });
   });

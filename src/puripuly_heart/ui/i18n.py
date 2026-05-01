@@ -12,10 +12,19 @@ logger = logging.getLogger(__name__)
 _I18N_DIR = "data/i18n"
 _DEFAULT_LOCALE = "en"
 _FALLBACK_LOCALE = "en"
+_LOCALE_DISPLAY_ORDER = ("en", "ko", "zh-CN", "ja")
+_LOCALE_DISPLAY_RANK = {code: index for index, code in enumerate(_LOCALE_DISPLAY_ORDER)}
 
 _current_locale = _DEFAULT_LOCALE
 _bundles: dict[str, dict[str, str]] = {}
 _locale_cache: tuple[str, ...] | None = None
+
+
+def _locale_display_sort_key(locale_code: str) -> tuple[int, str]:
+    return (
+        _LOCALE_DISPLAY_RANK.get(locale_code, len(_LOCALE_DISPLAY_ORDER)),
+        locale_code.casefold(),
+    )
 
 
 def _load_bundle(locale: str) -> dict[str, str]:
@@ -60,10 +69,7 @@ def available_locales() -> tuple[str, ...]:
     if not locales:
         locales = [_DEFAULT_LOCALE]
 
-    if _DEFAULT_LOCALE in locales:
-        locales = [_DEFAULT_LOCALE] + sorted(code for code in locales if code != _DEFAULT_LOCALE)
-    else:
-        locales = sorted(locales)
+    locales = sorted(locales, key=_locale_display_sort_key)
 
     _locale_cache = tuple(locales)
     return _locale_cache
@@ -123,6 +129,7 @@ def provider_label(provider_code: str) -> str:
 
 
 _SOURCE_KEY_MAP = {
+    "Managed": "dashboard.trial.source.managed",
     "You": "source.you",
     "Mic": "source.mic",
     "VRChat": "source.vrchat",

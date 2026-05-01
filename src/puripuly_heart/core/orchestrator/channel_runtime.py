@@ -158,7 +158,8 @@ class ChannelRuntime:
             and len(entry.text) >= 2
         ]
 
-    async def reset_runtime_state(self) -> None:
+    async def clear_live_translation_state(self) -> None:
+        translation_task_ids = set(self.translation_tasks)
         translation_tasks = list(self.translation_tasks.values())
         for task in translation_tasks:
             task.cancel()
@@ -166,21 +167,37 @@ class ChannelRuntime:
             await asyncio.gather(*translation_tasks, return_exceptions=True)
         self.translation_tasks.clear()
 
-        if self.merge_buffer is not None:
-            merge_tasks = [
-                self.merge_buffer.spec_task,
-                self.merge_buffer.finalize_wait_task,
-                self.merge_buffer.awaiting_vad_timeout_task,
-                self.merge_buffer.resume_end_timeout_task,
-            ]
-            for task in merge_tasks:
-                if task is not None and not task.done():
-                    task.cancel()
-            await asyncio.gather(
-                *(task for task in merge_tasks if task is not None), return_exceptions=True
-            )
-            self.merge_buffer = None
+        for utterance_id in translation_task_ids:
+            self.utterance_start_times.pop(utterance_id, None)
+            self.speech_ended_ids.discard(utterance_id)
 
+        if self.merge_buffer is None:
+            return
+
+        merge_buffer = self.merge_buffer
+        merge_tasks = [
+            merge_buffer.spec_task,
+            merge_buffer.finalize_wait_task,
+            merge_buffer.awaiting_vad_timeout_task,
+            merge_buffer.resume_end_timeout_task,
+        ]
+        for task in merge_tasks:
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in merge_tasks if task is not None), return_exceptions=True
+        )
+
+        for utterance_id in set(merge_buffer.utterance_ids):
+            self.utterances.pop(utterance_id, None)
+            self.utterance_sources.pop(utterance_id, None)
+            self.utterance_start_times.pop(utterance_id, None)
+            self.speech_ended_ids.discard(utterance_id)
+
+        self.merge_buffer = None
+
+    async def reset_runtime_state(self) -> None:
+        await self.clear_live_translation_state()
         self.utterances.clear()
         self.utterance_sources.clear()
         self.utterance_start_times.clear()

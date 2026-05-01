@@ -8,7 +8,7 @@ from uuid import uuid4
 from puripuly_heart.config.settings import AppSettings
 from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.llm.provider import LLMProvider
-from puripuly_heart.core.osc.smart_queue import SmartOscQueue
+from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.domain.models import OSCMessage
 
@@ -27,12 +27,10 @@ class HeadlessStdinRunner:
             chatbox_send=self.settings.osc.chatbox_send,
             chatbox_clear=self.settings.osc.chatbox_clear,
         )
-        osc = SmartOscQueue(
+        osc = ChatboxPaginator(
             sender=sender,
             clock=self.clock,
             max_chars=self.settings.osc.chatbox_max_chars,
-            cooldown_s=self.settings.osc.cooldown_s,
-            ttl_s=self.settings.osc.ttl_s,
         )
 
         flush_task = asyncio.create_task(self._flush_loop(osc))
@@ -47,7 +45,7 @@ class HeadlessStdinRunner:
 
         return 0
 
-    async def _stdin_loop(self, osc: SmartOscQueue) -> None:
+    async def _stdin_loop(self, osc: ChatboxPaginator) -> None:
         loop = asyncio.get_running_loop()
         while True:
             line = await loop.run_in_executor(None, sys.stdin.readline)
@@ -77,7 +75,7 @@ class HeadlessStdinRunner:
                 OSCMessage(utterance_id=utterance_id, text=merged, created_at=self.clock.now())
             )
 
-    async def _flush_loop(self, osc: SmartOscQueue) -> None:
+    async def _flush_loop(self, osc: ChatboxPaginator) -> None:
         try:
             while True:
                 osc.process_due()

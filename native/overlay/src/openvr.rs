@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 #[cfg(any(windows, test))]
 use std::ffi::{CStr, CString};
@@ -14,7 +14,7 @@ const OVERLAY_KEY_PREFIX: &str = "com.puripuly.heart.overlay.";
 const OVERLAY_NAME_PREFIX: &str = "PuriPuly Heart Overlay ";
 #[cfg(any(windows, test))]
 const FN_TABLE_INTERFACE_PREFIX: &str = "FnTable:";
-const DEFAULT_OVERLAY_WIDTH_METERS: f32 = 1.0;
+const DEFAULT_OVERLAY_WIDTH_METERS: f32 = 1.0667;
 const DEFAULT_OVERLAY_DISTANCE_METERS: f32 = 1.1;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -193,6 +193,29 @@ pub trait OverlayFrameSubmitter {
     fn set_overlay_visible(&mut self, _visible: bool) -> Result<(), OpenVrError> {
         Ok(())
     }
+
+    fn take_visibility_api_call_log(&mut self) -> Option<String> {
+        None
+    }
+
+    fn sample_frame_timing(&self) -> Option<FrameTimingSample> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrameTimingSample {
+    pub frame_index: u32,
+    pub num_frame_presents: u32,
+    pub num_mis_presented: u32,
+    pub num_dropped_frames: u32,
+    pub system_time_seconds: f64,
+    pub client_frame_interval_ms: f32,
+    pub present_call_cpu_ms: f32,
+    pub wait_for_present_cpu_ms: f32,
+    pub compositor_render_cpu_ms: f32,
+    pub total_render_gpu_ms: f32,
+    pub post_submit_gpu_ms: f32,
 }
 
 pub fn submit_texture<T: OverlayTextureSubmitter>(
@@ -208,6 +231,8 @@ pub fn submit_texture<T: OverlayTextureSubmitter>(
 #[derive(Debug, Default)]
 pub struct FakeOpenVr {
     last_call: RefCell<Option<String>>,
+    visible: Cell<bool>,
+    last_visibility_api_call_log: RefCell<Option<String>>,
 }
 
 impl FakeOpenVr {
@@ -252,11 +277,20 @@ impl OverlayFrameSubmitter for OpenVrOverlay {
     fn set_overlay_visible(&mut self, visible: bool) -> Result<(), OpenVrError> {
         self.backend.set_overlay_visible(visible)
     }
+
+    fn take_visibility_api_call_log(&mut self) -> Option<String> {
+        self.backend.take_visibility_api_call_log()
+    }
+
+    fn sample_frame_timing(&self) -> Option<FrameTimingSample> {
+        self.backend.sample_frame_timing()
+    }
 }
 
 enum OpenVrBackend {
     #[cfg(windows)]
     Windows(WindowsOpenVrOverlay),
+    #[cfg(not(windows))]
     Test(FakeOpenVr),
 }
 
@@ -318,6 +352,7 @@ impl OpenVrBackend {
         match self {
             #[cfg(windows)]
             Self::Windows(openvr) => openvr.submit_frame(frame),
+            #[cfg(not(windows))]
             Self::Test(openvr) => submit_texture(openvr, frame),
         }
     }
@@ -329,6 +364,7 @@ impl OpenVrBackend {
         match self {
             #[cfg(windows)]
             Self::Windows(openvr) => openvr.apply_calibration(calibration),
+            #[cfg(not(windows))]
             Self::Test(_) => Ok(()),
         }
     }
@@ -337,7 +373,17 @@ impl OpenVrBackend {
         match self {
             #[cfg(windows)]
             Self::Windows(openvr) => openvr.set_overlay_visible(visible),
+            #[cfg(not(windows))]
             Self::Test(openvr) => openvr.set_overlay_visible(visible),
+        }
+    }
+
+    fn take_visibility_api_call_log(&mut self) -> Option<String> {
+        match self {
+            #[cfg(windows)]
+            Self::Windows(openvr) => openvr.take_visibility_api_call_log(),
+            #[cfg(not(windows))]
+            Self::Test(openvr) => openvr.take_visibility_api_call_log(),
         }
     }
 
@@ -345,6 +391,16 @@ impl OpenVrBackend {
         match self {
             #[cfg(windows)]
             Self::Windows(openvr) => openvr.display_refresh_rate_hz(),
+            #[cfg(not(windows))]
+            Self::Test(_) => None,
+        }
+    }
+
+    fn sample_frame_timing(&self) -> Option<FrameTimingSample> {
+        match self {
+            #[cfg(windows)]
+            Self::Windows(openvr) => openvr.sample_frame_timing(),
+            #[cfg(not(windows))]
             Self::Test(_) => None,
         }
     }
@@ -354,9 +410,11 @@ impl OpenVrBackend {
 struct WindowsOpenVrOverlay {
     overlay_api: *mut openvr_sys::VR_IVROverlay_FnTable,
     system_api: *mut openvr_sys::VR_IVRSystem_FnTable,
+    compositor_api: Option<*mut openvr_sys::VR_IVRCompositor_FnTable>,
     overlay_handle: openvr_sys::VROverlayHandle_t,
     placement_policy: OverlayPlacementPolicy,
     visible: bool,
+    last_visibility_api_call_log: Option<String>,
 }
 
 #[cfg(windows)]
@@ -364,14 +422,17 @@ impl WindowsOpenVrOverlay {
     fn new(overlay_instance_id: &str) -> Result<Self, OpenVrError> {
         let overlay_api = initialize_overlay_api()?;
         let system_api = initialize_system_api()?;
+        let compositor_api = initialize_compositor_api().ok();
         let overlay_handle = create_overlay_handle(overlay_api, overlay_instance_id)?;
 
         let instance = Self {
             overlay_api,
             system_api,
+            compositor_api,
             overlay_handle,
             placement_policy: OverlayPlacementPolicy::default(),
             visible: false,
+            last_visibility_api_call_log: None,
         };
         instance.configure_overlay()?;
         Ok(instance)
@@ -439,16 +500,38 @@ impl WindowsOpenVrOverlay {
     }
 
     fn set_overlay_visible(&mut self, visible: bool) -> Result<(), OpenVrError> {
+        let cached_visible_before = self.visible;
         if self.visible == visible {
+            self.last_visibility_api_call_log = Some(format_openvr_visibility_api_call_log(
+                visible,
+                cached_visible_before,
+                "SkipCachedMatch",
+                self.visible,
+            ));
             return Ok(());
         }
+        let api = if visible {
+            "ShowOverlay"
+        } else {
+            "HideOverlay"
+        };
         if visible {
             self.show_overlay()?;
         } else {
             self.hide_overlay()?;
         }
         self.visible = visible;
+        self.last_visibility_api_call_log = Some(format_openvr_visibility_api_call_log(
+            visible,
+            cached_visible_before,
+            api,
+            self.visible,
+        ));
         Ok(())
+    }
+
+    fn take_visibility_api_call_log(&mut self) -> Option<String> {
+        self.last_visibility_api_call_log.take()
     }
 
     fn display_refresh_rate_hz(&self) -> Option<f32> {
@@ -468,6 +551,30 @@ impl WindowsOpenVrOverlay {
         } else {
             None
         }
+    }
+
+    fn sample_frame_timing(&self) -> Option<FrameTimingSample> {
+        let compositor_api = self.compositor_api?;
+        let get_frame_timing = unsafe { (*compositor_api).GetFrameTiming }?;
+        let mut timing: openvr_sys::Compositor_FrameTiming = unsafe { std::mem::zeroed() };
+        timing.m_nSize = std::mem::size_of::<openvr_sys::Compositor_FrameTiming>() as u32;
+        let ok = unsafe { get_frame_timing(&mut timing, 0) };
+        if !ok {
+            return None;
+        }
+        Some(FrameTimingSample {
+            frame_index: timing.m_nFrameIndex,
+            num_frame_presents: timing.m_nNumFramePresents,
+            num_mis_presented: timing.m_nNumMisPresented,
+            num_dropped_frames: timing.m_nNumDroppedFrames,
+            system_time_seconds: timing.m_flSystemTimeInSeconds,
+            client_frame_interval_ms: timing.m_flClientFrameIntervalMs,
+            present_call_cpu_ms: timing.m_flPresentCallCpuMs,
+            wait_for_present_cpu_ms: timing.m_flWaitForPresentCpuMs,
+            compositor_render_cpu_ms: timing.m_flCompositorRenderCpuMs,
+            total_render_gpu_ms: timing.m_flTotalRenderGpuMs,
+            post_submit_gpu_ms: timing.m_flPostSubmitGpuMs,
+        })
     }
 }
 
@@ -494,13 +601,46 @@ impl OverlayFrameSubmitter for FakeOpenVr {
     }
 
     fn set_overlay_visible(&mut self, visible: bool) -> Result<(), OpenVrError> {
-        self.last_call.replace(Some(if visible {
-            "ShowOverlay".to_string()
+        let cached_visible_before = self.visible.get();
+        let api = if cached_visible_before == visible {
+            "SkipCachedMatch"
+        } else if visible {
+            "ShowOverlay"
         } else {
-            "HideOverlay".to_string()
-        }));
+            "HideOverlay"
+        };
+        if cached_visible_before != visible {
+            self.last_call.replace(Some(api.to_string()));
+            self.visible.set(visible);
+        }
+        self.last_visibility_api_call_log
+            .replace(Some(format_openvr_visibility_api_call_log(
+                visible,
+                cached_visible_before,
+                api,
+                self.visible.get(),
+            )));
         Ok(())
     }
+
+    fn take_visibility_api_call_log(&mut self) -> Option<String> {
+        self.last_visibility_api_call_log.borrow_mut().take()
+    }
+}
+
+pub(crate) fn format_openvr_visibility_api_call_log(
+    desired_visible: bool,
+    cached_visible_before: bool,
+    api: &str,
+    cached_visible_after: bool,
+) -> String {
+    format!(
+        "openvr_overlay_visibility_api_call desired_visible={} cached_visible_before={} api={} cached_visible_after={}",
+        desired_visible,
+        cached_visible_before,
+        api,
+        cached_visible_after,
+    )
 }
 
 #[cfg(windows)]
@@ -572,6 +712,27 @@ fn initialize_system_api() -> Result<*mut openvr_sys::VR_IVRSystem_FnTable, Open
     }
 
     Ok(system_api as *mut openvr_sys::VR_IVRSystem_FnTable)
+}
+
+#[cfg(windows)]
+fn initialize_compositor_api() -> Result<*mut openvr_sys::VR_IVRCompositor_FnTable, OpenVrError> {
+    let compositor_interface_version =
+        fn_table_interface_version(openvr_sys::IVRCompositor_Version)?;
+    let mut interface_error = openvr_sys::EVRInitError_VRInitError_None;
+    let compositor_api = unsafe {
+        openvr_sys::VR_GetGenericInterface(
+            compositor_interface_version.as_ptr(),
+            &mut interface_error,
+        )
+    };
+    if interface_error != openvr_sys::EVRInitError_VRInitError_None || compositor_api == 0 {
+        return Err(OpenVrError::Init(format!(
+            "VR_GetGenericInterface (compositor) failed: {}",
+            vr_init_error_name(interface_error)
+        )));
+    }
+
+    Ok(compositor_api as *mut openvr_sys::VR_IVRCompositor_FnTable)
 }
 
 #[cfg(any(windows, test))]
@@ -685,9 +846,11 @@ mod tests {
     use std::cell::Cell;
 
     use super::{
-        fn_table_interface_version, run_startup_preflight, OpenVrBackgroundInitError,
-        OpenVrPreflightApi, OpenVrStartupPreflightError,
+        fn_table_interface_version, run_startup_preflight, FakeOpenVr, OpenVrBackgroundInitError,
+        OpenVrPreflightApi, OpenVrStartupPreflightError, OverlayFrameSubmitter,
+        OverlayPlacementPolicy,
     };
+    use crate::state::OverlayCalibration;
 
     enum FakeBackgroundInitResult {
         Ok,
@@ -750,6 +913,23 @@ mod tests {
             Err(OpenVrStartupPreflightError::SteamVrNotInstalled)
         );
         assert_eq!(api.shutdown_calls(), 0);
+    }
+
+    #[test]
+    fn placement_policy_defaults_to_wider_readable_overlay_width() {
+        let policy = OverlayPlacementPolicy::default();
+
+        assert!((policy.width_meters - 1.0667).abs() < 0.0001);
+    }
+
+    #[test]
+    fn placement_policy_scales_wider_overlay_width_with_text_calibration() {
+        let policy = OverlayPlacementPolicy::from_calibration(&OverlayCalibration {
+            text_scale: 1.2,
+            ..OverlayCalibration::default()
+        });
+
+        assert!((policy.width_meters - 1.28004).abs() < 0.001);
     }
 
     #[test]
@@ -820,5 +1000,31 @@ mod tests {
         let request = fn_table_interface_version(b"IVROverlay_028\0").expect("request");
 
         assert_eq!(request.to_bytes_with_nul(), b"FnTable:IVROverlay_028\0");
+    }
+
+    #[test]
+    fn fake_openvr_visibility_diagnostic_reports_show_and_skip_cached_match() {
+        let mut openvr = FakeOpenVr::default();
+
+        openvr.set_overlay_visible(true).expect("show overlay");
+        let show_log = openvr
+            .take_visibility_api_call_log()
+            .expect("show visibility log");
+        assert!(show_log.contains("openvr_overlay_visibility_api_call"));
+        assert!(show_log.contains("desired_visible=true"));
+        assert!(show_log.contains("cached_visible_before=false"));
+        assert!(show_log.contains("api=ShowOverlay"));
+        assert!(show_log.contains("cached_visible_after=true"));
+
+        openvr
+            .set_overlay_visible(true)
+            .expect("skip cached visibility match");
+        let skip_log = openvr
+            .take_visibility_api_call_log()
+            .expect("skip visibility log");
+        assert!(skip_log.contains("desired_visible=true"));
+        assert!(skip_log.contains("cached_visible_before=true"));
+        assert!(skip_log.contains("api=SkipCachedMatch"));
+        assert!(skip_log.contains("cached_visible_after=true"));
     }
 }

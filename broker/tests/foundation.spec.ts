@@ -32,6 +32,13 @@ describe('broker foundation', () => {
           'OPENROUTER_MANAGED_API_KEY',
           'OPENROUTER_MANAGEMENT_API_KEY',
           'OPENROUTER_MANAGED_GUARDRAIL_ID',
+          'OPENROUTER_MANAGED_USER_HMAC_SECRET',
+          'DISCORD_CLIENT_ID',
+          'DISCORD_CLIENT_SECRET',
+          'DISCORD_REDIRECT_URI_ALLOWLIST',
+          'DISCORD_USER_REF_SECRET',
+          'DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL',
+          'DISCORD_DAILY_REPORT_WEBHOOK_URL',
         ],
       },
       hosting: {
@@ -54,7 +61,12 @@ describe('broker foundation', () => {
       trialProviderPolicy: {
         managedFreeTrial: {
           provider: 'OpenRouter',
-          model: 'google/gemma-4-26b-a4b-it',
+          models: [
+            'google/gemma-4-26b-a4b-it',
+            'qwen/qwen3.5-flash-02-23',
+            'deepseek/deepseek-v4-flash',
+            'google/gemini-2.5-flash-lite',
+          ],
         },
         upstreamProviderRouting: 'unpinned-by-broker',
         excludedProviders: ['Alibaba'],

@@ -255,3 +255,54 @@ def test_closing_runtime_logging_service_detaches_session_handlers(tmp_path):
 
     assert log_file_one.read_text(encoding="utf-8") == "before close\n"
     assert log_file_two.read_text(encoding="utf-8") == "after close\n"
+
+
+def test_session_runtime_logging_service_persists_file_only_events_in_basic_mode(tmp_path):
+    stream = io.StringIO()
+    log_file = tmp_path / "persisted.log"
+    stream_handler = logging.StreamHandler(stream)
+    stream_handler.setFormatter(logging.Formatter("%(message)s"))
+    file_handler = RotatingFileHandler(log_file, maxBytes=4096, backupCount=0, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+
+    root_logger = logging.getLogger(f"test.runtime.persisted.root.{uuid4()}")
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+
+    session_logger = logging.getLogger(f"test.runtime.persisted.session.{uuid4()}")
+    session_logger.handlers.clear()
+    session_logger.propagate = False
+
+    service = SessionRuntimeLoggingService(
+        root_logger=root_logger,
+        session_logger=session_logger,
+        sinks=_SharedSinkBundle(
+            stream_handler=stream_handler,
+            file_handler=file_handler,
+            log_file=log_file,
+        ),
+        ui_handler_factory=_RealtimeHandler,
+    )
+
+    sink = _RealtimeSink()
+    service.attach_realtime_sink(sink)
+    service.emit_basic("basic line")
+    service.emit_persisted(
+        '[Persisted][Fallback] {"dual_bill_candidate": true, "event": "race_finished", '
+        '"fallback_credential_source": "managed", "fallback_model": '
+        '"google/gemini-2.5-flash-lite", "fallback_triggered": true, '
+        '"primary_credential_source": "managed", "primary_model": '
+        '"google/gemma-4-26b-a4b-it", "returned_source": "fallback", '
+        '"winner": "fallback"}'
+    )
+    service.close()
+
+    assert stream.getvalue().splitlines() == ["basic line"]
+    assert sink.lines == ["basic line"]
+    log_lines = log_file.read_text(encoding="utf-8").splitlines()
+    assert log_lines[0] == "basic line"
+    assert log_lines[1].startswith("[Persisted][Fallback] ")
+    assert '"event": "race_finished"' in log_lines[1]
+    assert '"primary_model": "google/gemma-4-26b-a4b-it"' in log_lines[1]
+    assert '"fallback_model": "google/gemini-2.5-flash-lite"' in log_lines[1]
+    assert '"winner": "fallback"' in log_lines[1]

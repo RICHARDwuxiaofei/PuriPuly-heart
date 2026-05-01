@@ -72,7 +72,8 @@ describe('GET /v1/trial/status lifecycle data', () => {
       });
 
       expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toEqual({
+      const payload = (await response.json()) as Record<string, unknown>;
+      expect(payload).toEqual({
         managed_state: {
           lifecycle,
           managed_availability: false,
@@ -85,8 +86,10 @@ describe('GET /v1/trial/status lifecycle data', () => {
         },
         onboarding_eligibility: {
           eligible: false,
-          reason: lifecycle,
+          reason: storedStatus,
+          requires_discord_oauth: false,
         },
       });
+      expect(payload).not.toHaveProperty('authorization_url');
     });
 });

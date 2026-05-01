@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-2.0.0-blue" alt="Version" />
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
+  <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
 </p>
@@ -320,9 +320,22 @@ python -m pytest         # Test (recommended within venv)
 
 ### Build
 
+Direct executable-only / manual packaging steps:
+
+This direct executable/manual-installer path is not the release-complete compliance-packaging path. It also requires the staged overlay executable at `build/overlay/PuriPulyHeartOverlay.exe` plus the vendored OpenVR bundle under `third_party/openvr/`, as enforced by `build.spec`.
+
 ```bash
+.\scripts\ci\prepare-soxr-release-inputs.ps1
 .venv\Scripts\pyinstaller build.spec   # Executable
-ISCC installer.iss       # Installer
+ISCC installer.iss                      # Manual installer packaging
+```
+
+For the release-complete compliance-packaging path, run `scripts/ci/prepare-soxr-release-inputs.ps1` first and then `scripts/ci/build-release-artifacts.ps1`:
+
+```bash
+$env:APP_VERSION = (& ".\.venv\Scripts\python.exe" scripts/ci/read-project-version.py).Trim()
+.\scripts\ci\prepare-soxr-release-inputs.ps1
+.\scripts\ci\build-release-artifacts.ps1 -AppVersion $env:APP_VERSION -InnoSetupVersion 6.6.1
 ```
 ---
 
@@ -340,6 +353,6 @@ ISCC installer.iss       # Installer
 
 ## License
 
-[MIT](LICENSE)
+[AGPL-3.0-or-later](LICENSE)
 
-Third-party licenses: `THIRD_PARTY_NOTICES.txt`
+Third-party licenses and notices: `src/puripuly_heart/data/THIRD_PARTY_NOTICES.txt`

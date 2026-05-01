@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-2.0.0-blue" alt="Version" />
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
+  <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
 </p>
@@ -314,9 +314,22 @@ python -m pytest         # 运行测试 (建议在虚拟环境中执行)
 
 ### 打包构建
 
+仅生成可执行文件 / 手动打包步骤：
+
+这一路径只用于直接生成可执行文件 / 手动安装包，不是完整发布所需的合规打包路径。并且它仍然需要 `build.spec` 会校验的已暂存 overlay 可执行文件 `build/overlay/PuriPulyHeartOverlay.exe`，以及 `third_party/openvr/` 下的 vendored OpenVR bundle。
+
 ```bash
+.\scripts\ci\prepare-soxr-release-inputs.ps1
 .venv\Scripts\pyinstaller build.spec   # 生成执行文件
-ISCC installer.iss       # 制作安装包
+ISCC installer.iss                      # 手动制作安装包
+```
+
+完整发布所需的 Windows 合规打包路径需要先运行 `scripts/ci/prepare-soxr-release-inputs.ps1`，再运行 `scripts/ci/build-release-artifacts.ps1`：
+
+```bash
+$env:APP_VERSION = (& ".\.venv\Scripts\python.exe" scripts/ci/read-project-version.py).Trim()
+.\scripts\ci\prepare-soxr-release-inputs.ps1
+.\scripts\ci\build-release-artifacts.ps1 -AppVersion $env:APP_VERSION -InnoSetupVersion 6.6.1
 ```
 ---
 
@@ -332,8 +345,8 @@ ISCC installer.iss       # 制作安装包
 
 ---
 
-## 开源协议
+## 许可证
 
-[MIT](LICENSE)
+[AGPL-3.0-or-later](LICENSE)
 
-第三方软件开源协议说明: `THIRD_PARTY_NOTICES.txt`
+第三方许可证和声明: `src/puripuly_heart/data/THIRD_PARTY_NOTICES.txt`

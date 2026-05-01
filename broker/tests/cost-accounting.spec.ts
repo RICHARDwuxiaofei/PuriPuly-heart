@@ -11,7 +11,6 @@ describe('managed trial onboarding cost accounting', () => {
         outputTokens: 15,
         llmCallsPerUtterance: 1.3,
       },
-      theoreticalUsesAtHardLimit: 396,
       operationalBufferPercent: {
         min: 5,
         max: 10,

@@ -196,6 +196,38 @@ async def test_integrated_context_always_includes_peer_entries() -> None:
     assert "peer line" in context
 
 
+def test_integrated_context_includes_opposite_direction_peer_entries() -> None:
+    clock = FakeClock(_now=112.0)
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        clock=clock,
+        integrated_context_enabled=True,
+        peer_translation_enabled=True,
+    )
+    hub.source_language = "ko"
+    hub.target_language = "en"
+    hub.peer_source_language = "en"
+    hub.peer_target_language = "ko"
+    hub._remember_context_entry("self previous", timestamp=100.0, runtime=hub.self_runtime)
+    hub._remember_context_entry("peer previous", timestamp=105.0, runtime=hub.peer_runtime)
+
+    _, self_context, _, self_mode = hub._prepare_llm_request_with_mode(
+        "self current",
+        runtime=hub.self_runtime,
+    )
+    _, peer_context, _, peer_mode = hub._prepare_llm_request_with_mode(
+        "peer current",
+        runtime=hub.peer_runtime,
+    )
+
+    assert self_mode == "integrated"
+    assert peer_mode == "integrated"
+    assert self_context == ('- [self, 12s ago] "self previous"\n- [peer, 7s ago] "peer previous"')
+    assert peer_context == ('- [self, 12s ago] "self previous"\n- [peer, 7s ago] "peer previous"')
+
+
 @pytest.mark.asyncio
 async def test_peer_translation_respects_master_translation_toggle() -> None:
     llm = FakeLLM()
@@ -218,9 +250,7 @@ async def test_peer_translation_respects_master_translation_toggle() -> None:
 
 
 @pytest.mark.asyncio
-async def test_peer_transcripts_stay_peer_routed_across_runtime_swap_without_duplicates() -> (
-    None
-):
+async def test_peer_transcripts_stay_peer_routed_across_runtime_swap_without_duplicates() -> None:
     old_peer = ManagedSTTProvider(
         backend=LabelledPeerBackend("old"),
         sample_rate_hz=16000,
@@ -247,7 +277,9 @@ async def test_peer_transcripts_stay_peer_routed_across_runtime_swap_without_dup
     await hub.start(auto_flush_osc=False)
 
     first_id = __import__("uuid").uuid4()
-    await hub.handle_peer_vad_event(SpeechStart(first_id, pre_roll=samples(0.0), chunk=samples(1.0)))
+    await hub.handle_peer_vad_event(
+        SpeechStart(first_id, pre_roll=samples(0.0), chunk=samples(1.0))
+    )
     await hub.handle_peer_vad_event(SpeechEnd(first_id))
     first_final = await _next_transcript_final_event(hub.ui_events)
 

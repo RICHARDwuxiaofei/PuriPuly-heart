@@ -163,7 +163,7 @@ async def test_apply_policy_is_idempotent_for_same_runtime_signature() -> None:
 
 
 @pytest.mark.asyncio
-async def test_same_signature_reapply_still_delivers_late_terminal_failure() -> None:
+async def test_same_signature_reapply_still_auto_recovers_late_terminal_failure() -> None:
     hub = DummyHub()
     created: list[FailureAwareSTT] = []
 
@@ -189,8 +189,9 @@ async def test_same_signature_reapply_still_delivers_late_terminal_failure() -> 
     await runtime.apply_policy(config=config, desired_active=True)
     await created[0].trigger_failure(RuntimeError("peer session closed"))
 
-    assert runtime.state == PeerChannelRuntimeState.FAULTED
-    assert hub.replace_peer_stt_calls[-1] is None
+    assert runtime.state == PeerChannelRuntimeState.RUNNING
+    assert len(created) == 1
+    assert hub.peer_stt is created[0]
 
 
 @pytest.mark.asyncio
@@ -401,12 +402,21 @@ async def test_loop_crash_detaches_and_moves_runtime_to_faulted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_terminal_managed_stt_failure_detaches_and_next_activation_recovers() -> None:
+async def test_terminal_managed_stt_failure_auto_recovers_without_policy_reapply() -> None:
     hub = DummyHub()
+    created: list[FailureAwareSTT] = []
+
+    def stt_factory(config, on_terminal_failure):
+        _ = config
+        stt = FailureAwareSTT()
+        stt.on_terminal_failure = on_terminal_failure
+        created.append(stt)
+        return stt
+
     runtime = PeerChannelRuntime(
         hub=hub,
         clock=FakeClock(),
-        stt_factory=lambda config, on_terminal_failure: DummyManagedSTT(),
+        stt_factory=stt_factory,
         source_factory=lambda config: DummySource(),
         vad_factory=lambda config, model_path: "peer-vad",
         vad_model_resolver=lambda: Path("vad.onnx"),
@@ -415,14 +425,46 @@ async def test_terminal_managed_stt_failure_detaches_and_next_activation_recover
     config = make_peer_runtime_config()
 
     await runtime.apply_policy(config=config, desired_active=True)
-    await runtime._on_terminal_stt_failure(RuntimeError("peer session closed"))
-
-    assert runtime.state == PeerChannelRuntimeState.FAULTED
-    assert hub.replace_peer_stt_calls[-1] is None
-
-    await runtime.apply_policy(config=config, desired_active=True)
+    await created[0].trigger_failure(RuntimeError("peer session closed"))
 
     assert runtime.state == PeerChannelRuntimeState.RUNNING
+    assert len(created) == 1
+    assert hub.peer_stt is created[0]
+
+
+@pytest.mark.asyncio
+async def test_late_stt_failure_after_audio_loop_fault_does_not_recover() -> None:
+    hub = DummyHub()
+    created: list[FailureAwareSTT] = []
+
+    def stt_factory(config, on_terminal_failure):
+        _ = config
+        stt = FailureAwareSTT()
+        stt.on_terminal_failure = on_terminal_failure
+        created.append(stt)
+        return stt
+
+    async def failing_run_audio_loop(**kwargs):
+        _ = kwargs
+        raise RuntimeError("loop crashed")
+
+    runtime = PeerChannelRuntime(
+        hub=hub,
+        clock=FakeClock(),
+        stt_factory=stt_factory,
+        source_factory=lambda config: DummySource(),
+        vad_factory=lambda config, model_path: "peer-vad",
+        vad_model_resolver=lambda: Path("vad.onnx"),
+        run_audio_loop=failing_run_audio_loop,
+    )
+
+    await runtime.apply_policy(config=make_peer_runtime_config(), desired_active=True)
+    await asyncio.sleep(0)
+    await created[0].trigger_failure(RuntimeError("late peer session closed"))
+
+    assert runtime.state == PeerChannelRuntimeState.FAULTED
+    assert len(created) == 1
+    assert hub.peer_stt is None
 
 
 @pytest.mark.asyncio

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import logging
+import os
 import secrets
 import threading
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -19,14 +22,19 @@ from puripuly_heart.app.wiring import (
     create_stt_backend,
     resolve_peer_stt_config,
 )
+from puripuly_heart.config.audio_host_api import normalize_input_host_api
+from puripuly_heart.config.llm_profiles import profile_for_alias
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
     OpenRouterCredentialSource,
+    OpenRouterLLMModel,
+    OpenRouterSelectionAlias,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
     load_settings,
+    new_settings_for_first_run,
     save_settings,
 )
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
@@ -58,16 +66,26 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseBehavior,
     ManagedOpenRouterReleaseService,
     UnavailableManagedOpenRouterReleaseClient,
+    format_managed_openrouter_diagnostics,
 )
-from puripuly_heart.core.openrouter_credentials import resolve_openrouter_credentials
+from puripuly_heart.core.openrouter_credentials import (
+    OPENROUTER_BYOK_API_KEY_SECRET,
+    resolve_openrouter_credentials,
+)
+from puripuly_heart.core.openrouter_handoff import (
+    is_effectively_exhausted,
+    mark_founder_letter_shown,
+    should_auto_show_founder_letter,
+)
+from puripuly_heart.core.openrouter_pkce import OpenRouterPKCEClient
 from puripuly_heart.core.orchestrator.hub import ClientHub
+from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
 from puripuly_heart.core.osc.receiver import (
     VRC_OSC_RECEIVER_HOST,
     VRC_OSC_RECEIVER_PORT,
     VrcMicState,
     VrcOscReceiver,
 )
-from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.overlay.bridge import OverlayBridge
 from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
@@ -80,6 +98,7 @@ from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
 from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
+from puripuly_heart.providers.llm.deepseek import DeepSeekLLMProvider
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterKeyMetadata, OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
@@ -90,6 +109,10 @@ from puripuly_heart.providers.stt.soniox import SonioxRealtimeSTTBackend
 from puripuly_heart.ui.event_bridge import UIEventBridge
 from puripuly_heart.ui.i18n import get_locale, set_locale, t
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
+from puripuly_heart.ui.overlay_peer_contract import (
+    OverlayPeerConsumerContract,
+    build_overlay_peer_consumer_contract,
+)
 from puripuly_heart.ui.views.logs import FletLogHandler
 
 logger = logging.getLogger(__name__)
@@ -107,6 +130,9 @@ _OVERLAY_FAILURE_REASONS = frozenset(
         "bridge_auth_failed",
         "startup_timeout",
         "stale_overlay_build",
+        "vendored_openvr_dll_missing",
+        "packaged_openvr_dll_missing",
+        "openvr_dll_hash_mismatch",
         "steamvr_not_installed",
         "steamvr_not_running",
         "hmd_not_found",
@@ -117,6 +143,15 @@ _OVERLAY_FAILURE_REASONS = frozenset(
         "unknown",
     }
 )
+DISCORD_AUTH_ERROR_KEY_BY_SUBCODE = {
+    "discord_email_unverified": "discord_auth.error.email_unverified",
+    "discord_account_too_new": "discord_auth.error.account_too_new",
+    "discord_lifetime_used": "discord_auth.error.lifetime_used",
+    "hardware_duplicate": "discord_auth.error.hardware_duplicate",
+    "global_cap_reached": "discord_auth.error.daily_cap",
+    "oauth_session_expired": "discord_auth.error.expired",
+    "loopback_unavailable": "discord_auth.error.loopback_unavailable",
+}
 
 
 @dataclass(slots=True)
@@ -140,9 +175,10 @@ class GuiController:
     settings: AppSettings | None = None
     clock: SystemClock = SystemClock()
     _managed_openrouter_release_service: ManagedOpenRouterReleaseService | None = None
+    _openrouter_pkce_client: OpenRouterPKCEClient | None = None
 
     sender: VrchatOscUdpSender | None = None
-    osc: SmartOscQueue | None = None
+    osc: ChatboxPaginator | None = None
     hub: ClientHub | None = None
     _peer_runtime: PeerChannelRuntime | None = None
     receiver: VrcOscReceiver | None = None
@@ -164,6 +200,7 @@ class GuiController:
     _last_peer_stt_provider_signature: tuple[object, ...] | None = None
     _last_llm_provider_signature: tuple[object, ...] | None = None
     _last_peer_translation_enabled: bool | None = None
+    _last_peer_translation_activation_requested: bool | None = None
     _last_vrc_mic_sync_enabled: bool | None = None
     _vrc_receiver_lock: asyncio.Lock | None = None
     _ui_event_bridge: UIEventBridge | None = None
@@ -185,6 +222,7 @@ class GuiController:
         repr=False,
     )
     _local_stt_pending_enable_after_install: bool = field(init=False, default=False)
+    _local_stt_pending_peer_enable_after_install: bool = field(init=False, default=False)
     _overlay_bridge: OverlayBridge | None = None
     _overlay_presenter: OverlayPresenter | None = None
     _overlay_manager: OverlayProcessManager | None = None
@@ -192,12 +230,15 @@ class GuiController:
     _overlay_start_task: asyncio.Task[None] | None = None
     _overlay_monitor_task: asyncio.Task[None] | None = None
     _overlay_lock: asyncio.Lock | None = None
-    _managed_trial_transient_message_key: str | None = field(init=False, default=None)
-    _managed_trial_transient_message_kwargs: dict[str, object] = field(
-        init=False,
-        default_factory=dict,
-    )
     _managed_trial_pending_auth: bool = field(init=False, default=False)
+    _discord_managed_auth_in_progress: bool = field(init=False, default=False)
+    _managed_trial_usage_metadata: OpenRouterKeyMetadata | None = field(init=False, default=None)
+    _managed_trial_usage_metadata_entitlement_ref: str | None = field(
+        init=False,
+        default=None,
+    )
+    _translation_toggle_intent_enabled: bool = field(init=False, default=False)
+    _translation_toggle_generation: int = field(init=False, default=0)
     _runtime_logging: SessionRuntimeLoggingService | None = field(init=False, default=None)
 
     overlay_state: str = "off"
@@ -213,6 +254,14 @@ class GuiController:
         return self._effective_peer_translation_enabled_for(self.settings)
 
     @property
+    def managed_auth_pending(self) -> bool:
+        return self._managed_trial_pending_auth
+
+    @property
+    def discord_managed_auth_in_progress(self) -> bool:
+        return self._discord_managed_auth_in_progress
+
+    @property
     def effective_context_mode(self) -> str:
         if self.settings is None:
             return "local"
@@ -222,10 +271,19 @@ class GuiController:
 
     def _effective_peer_translation_enabled_for(self, settings: AppSettings) -> bool:
         return bool(
-            settings.ui.peer_translation_enabled
+            self._peer_translation_activation_requested_for(settings)
             and self._effective_peer_overlay_enabled_for(settings)
             and self.hub is not None
             and getattr(self.hub, "peer_stt", None) is not None
+        )
+
+    def _peer_translation_eula_accepted_for(self, settings: AppSettings) -> bool:
+        return bool(settings.ui.peer_translation_eula_accepted)
+
+    def _peer_translation_activation_requested_for(self, settings: AppSettings) -> bool:
+        return bool(
+            settings.ui.peer_translation_enabled
+            and self._peer_translation_eula_accepted_for(settings)
         )
 
     def _effective_peer_overlay_enabled_for(self, settings: AppSettings) -> bool:
@@ -249,16 +307,36 @@ class GuiController:
             resolved_settings
         )
 
+    def build_overlay_peer_consumer_contract(self) -> OverlayPeerConsumerContract | None:
+        if self.settings is None:
+            return None
+        return build_overlay_peer_consumer_contract(
+            overlay_intent_enabled=bool(self.settings.ui.overlay_enabled),
+            overlay_state=self.overlay_state,
+            overlay_failure_reason=self.failure_reason,
+            peer_intent_enabled=bool(self.settings.ui.peer_translation_enabled),
+            peer_effective_enabled=self._effective_peer_translation_enabled_for(self.settings),
+        )
+
+    def _refresh_overlay_peer_consumers(self) -> None:
+        refresh_contract = getattr(self.app, "refresh_overlay_peer_contract", None)
+        if callable(refresh_contract):
+            with contextlib.suppress(Exception):
+                refresh_contract()
+
     async def _refresh_overlay_runtime_dependencies(self) -> None:
         if self.settings is None or self.hub is None:
             return
 
         await self._refresh_peer_stt_runtime()
         self._sync_effective_hub_flags(self.settings)
+        self._refresh_overlay_peer_consumers()
 
     async def start(self) -> None:
         self.settings = self._load_or_init_settings(self.config_path)
-        self.overlay_calibration = self.settings.overlay_calibration.copy()
+        self.settings.ui.overlay_enabled = False
+        self.settings.ui.peer_translation_enabled = False
+        self._sync_overlay_calibration_cache(self.settings)
         self._overlay_calibration_draft = None
         set_locale(self.settings.ui.locale)
         self._sync_ui_from_settings()
@@ -300,6 +378,7 @@ class GuiController:
             llm_key_map = {
                 "gemini": "google",
                 "openrouter": "openrouter",
+                "deepseek": "deepseek",
                 "qwen": self._get_alibaba_verified_key(),
             }
             llm_verified_key = llm_key_map.get(llm_provider, llm_provider)
@@ -314,7 +393,7 @@ class GuiController:
             dash.set_translation_enabled(False)
             dash.set_stt_enabled(False)
             self.hub.translation_enabled = False
-            await self._refresh_managed_trial_usage_state()
+            await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=False)
 
         await self.hub.start(auto_flush_osc=True)
 
@@ -325,9 +404,6 @@ class GuiController:
         )
         self._ui_event_bridge = bridge
         self._bridge_task = asyncio.create_task(bridge.run())
-
-        if self.settings.ui.overlay_enabled:
-            await self.set_overlay_enabled(True)
 
     def _get_alibaba_verified_key(self) -> str:
         """Get the api_key_verified field name based on Qwen region."""
@@ -384,10 +460,8 @@ class GuiController:
     def _peer_stt_runtime_custom_vocabulary_signature(
         self, settings: AppSettings
     ) -> tuple[bool, tuple[str, ...]]:
-        return (
-            settings.stt.custom_vocabulary_enabled,
-            tuple(get_effective_custom_terms(settings, settings.languages.effective_peer_source)),
-        )
+        _ = settings
+        return (False, ())
 
     def _build_self_stt_runtime_signature(self, settings: AppSettings) -> tuple[object, ...]:
         custom_vocab_enabled, custom_terms = self._stt_runtime_custom_vocabulary_signature(settings)
@@ -466,13 +540,136 @@ class GuiController:
             and self.hub.llm is not None
         )
 
-    def _set_managed_trial_transient_message(
-        self,
-        message_key: str | None,
-        message_kwargs: dict[str, object] | None = None,
-    ) -> None:
-        self._managed_trial_transient_message_key = message_key
-        self._managed_trial_transient_message_kwargs = dict(message_kwargs or {})
+    def _sync_managed_auth_dashboard_notice(self) -> None:
+        dash = getattr(self.app, "view_dashboard", None)
+        setter = getattr(dash, "set_managed_auth_pending", None) if dash is not None else None
+        if callable(setter):
+            setter(self._managed_trial_pending_auth)
+
+    def _set_managed_trial_pending_auth(self, pending: bool) -> None:
+        self._managed_trial_pending_auth = bool(pending)
+        self._sync_managed_auth_dashboard_notice()
+
+    def clear_managed_auth_pending_state(self) -> None:
+        self._set_managed_trial_pending_auth(False)
+
+    def _record_translation_toggle_intent(self, enabled: bool) -> int:
+        self._translation_toggle_intent_enabled = bool(enabled)
+        self._translation_toggle_generation += 1
+        return self._translation_toggle_generation
+
+    def _translation_toggle_intent_matches(self, *, enabled: bool, generation: int) -> bool:
+        return generation == self._translation_toggle_generation and (
+            self._translation_toggle_intent_enabled == bool(enabled)
+        )
+
+    def _should_show_managed_auth_pending_before_prepare(self) -> bool:
+        if self.settings is None:
+            return False
+        try:
+            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+            resolution = resolve_openrouter_credentials(
+                self.settings,
+                secrets=secrets,
+                request_intent="TRANS",
+            )
+        except Exception:
+            return True
+        return resolution.api_key is None
+
+    def _managed_openrouter_selected(self) -> bool:
+        return bool(
+            self.settings is not None
+            and self.settings.provider.llm == LLMProviderName.OPENROUTER
+            and self.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+        )
+
+    def _managed_openrouter_local_key_available(self) -> bool:
+        if self.settings is None:
+            return False
+        try:
+            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+            resolution = resolve_openrouter_credentials(
+                self.settings,
+                secrets=secrets,
+                request_intent="TRANS",
+            )
+        except Exception:
+            return False
+        return resolution.api_key is not None
+
+    def dashboard_managed_auth_action(self) -> str:
+        if not self._managed_openrouter_selected():
+            return "continue"
+        if self._discord_managed_auth_in_progress or self._managed_trial_pending_auth:
+            return "in_progress"
+        if self._managed_openrouter_local_key_available():
+            return "continue"
+        return "prompt"
+
+    def _discord_auth_message_key(self, result) -> str:  # noqa: ANN001
+        diagnostics = getattr(result, "diagnostics", None)
+        subcode = getattr(diagnostics, "subcode", None)
+        if subcode is not None:
+            mapped_key = DISCORD_AUTH_ERROR_KEY_BY_SUBCODE.get(subcode)
+            if mapped_key is not None:
+                return mapped_key
+        if getattr(diagnostics, "code", None) == "discord_loopback_unavailable":
+            return DISCORD_AUTH_ERROR_KEY_BY_SUBCODE["loopback_unavailable"]
+        return getattr(result, "message_key", "discord_auth.error.retry")
+
+    async def start_discord_managed_auth_from_dialog(self) -> bool:
+        service = self._managed_openrouter_release_service
+        if service is None:
+            self._discord_managed_auth_in_progress = False
+            self._set_managed_trial_pending_auth(False)
+            self._show_short_message("discord_auth.error.retry")
+            return False
+
+        self._discord_managed_auth_in_progress = True
+        self._set_managed_trial_pending_auth(True)
+        try:
+            try:
+                result = await service.prepare_for_translation()
+            except Exception as exc:
+                self.log_basic(
+                    f"[ManagedAuth] Discord auth start failed: {exc}",
+                    level=logging.ERROR,
+                )
+                self._show_short_message("discord_auth.error.retry")
+                return False
+
+            if (
+                result.behavior == ManagedOpenRouterReleaseBehavior.READY
+                and result.local_key_available
+            ):
+                if self.hub is None:
+                    self._show_short_message("discord_auth.error.retry")
+                    return False
+                if self.hub.llm is None:
+                    await self._rebuild_llm_provider()
+                if self.hub.llm is None:
+                    self._show_short_message("discord_auth.error.retry")
+                    return False
+                self._schedule_managed_trial_usage_refresh()
+                return True
+
+            message_key = self._discord_auth_message_key(result)
+            diagnostics = result.diagnostics
+            error_class = getattr(diagnostics, "error_class", None)
+            self.log_basic(
+                "[ManagedAuth] Discord auth failed: "
+                f"message_key={message_key} class={error_class or 'unknown'}",
+                level=logging.ERROR,
+            )
+            self._show_short_message(
+                message_key,
+                **dict(result.message_kwargs),
+            )
+            return False
+        finally:
+            self._discord_managed_auth_in_progress = False
+            self._set_managed_trial_pending_auth(False)
 
     def _managed_trial_remaining_percent(
         self, usage_metadata: OpenRouterKeyMetadata | None
@@ -488,15 +685,47 @@ class GuiController:
         )
 
     def _schedule_managed_trial_usage_refresh(self) -> None:
+        async def _run_refresh() -> None:
+            await self._refresh_managed_trial_usage_state_best_effort()
+
         with contextlib.suppress(RuntimeError):
-            asyncio.get_running_loop().create_task(self._refresh_managed_trial_usage_state())
+            asyncio.get_running_loop().create_task(_run_refresh())
 
     def _on_managed_trial_delegate_ready(self) -> None:
-        self._managed_trial_pending_auth = False
-        self._set_managed_trial_transient_message(None)
+        self._set_managed_trial_pending_auth(False)
         self._schedule_managed_trial_usage_refresh()
 
+    async def _refresh_managed_trial_usage_state_best_effort(self) -> None:
+        try:
+            await self._refresh_managed_trial_usage_state()
+        except Exception as exc:
+            self.log_basic(
+                f"[ManagedAuth] Usage refresh failed: {exc}",
+                level=logging.WARNING,
+            )
+
     async def _refresh_managed_trial_usage_state(self) -> None:
+        await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=True)
+
+    def _clear_managed_trial_usage_metadata_cache(self) -> None:
+        self._managed_trial_usage_metadata = None
+        self._managed_trial_usage_metadata_entitlement_ref = None
+
+    def _sync_managed_trial_usage_metadata_scope(self) -> str | None:
+        if self.settings is None:
+            self._clear_managed_trial_usage_metadata_cache()
+            return None
+        entitlement_ref = self.settings.managed_identity.active_managed_credential_ref
+        if entitlement_ref != self._managed_trial_usage_metadata_entitlement_ref:
+            self._managed_trial_usage_metadata = None
+            self._managed_trial_usage_metadata_entitlement_ref = entitlement_ref
+        return entitlement_ref
+
+    async def _refresh_managed_trial_usage_state_impl(
+        self,
+        *,
+        auto_show_founder_letter: bool,
+    ) -> None:
         view_settings = getattr(self.app, "view_settings", None)
         setter = (
             getattr(view_settings, "set_managed_trial_usage_state", None)
@@ -508,14 +737,13 @@ class GuiController:
             or self.settings.provider.llm != LLMProviderName.OPENROUTER
             or self.settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED
         ):
-            self._managed_trial_pending_auth = False
-            self._set_managed_trial_transient_message(None)
+            self._clear_managed_trial_usage_metadata_cache()
+            self._set_managed_trial_pending_auth(False)
             if callable(setter):
                 setter(visible=False, remaining_percent=None)
             return
 
-        if not callable(setter):
-            return
+        entitlement_ref = self._sync_managed_trial_usage_metadata_scope()
 
         try:
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
@@ -526,13 +754,59 @@ class GuiController:
         usage_metadata: OpenRouterKeyMetadata | None = None
         api_key = resolution.api_key if resolution is not None else None
         if api_key:
-            self._managed_trial_pending_auth = False
+            self._set_managed_trial_pending_auth(False)
             usage_metadata = await OpenRouterLLMProvider.fetch_key_metadata(api_key)
 
-        setter(
-            visible=True,
-            remaining_percent=self._managed_trial_remaining_percent(usage_metadata),
-        )
+        self._managed_trial_usage_metadata = usage_metadata
+        self._managed_trial_usage_metadata_entitlement_ref = entitlement_ref
+
+        if callable(setter):
+            setter(
+                visible=True,
+                remaining_percent=self._managed_trial_remaining_percent(usage_metadata),
+            )
+
+        if auto_show_founder_letter and is_effectively_exhausted(usage_metadata):
+            self._disable_translation_for_managed_exhaustion(
+                reopen_founder_letter=should_auto_show_founder_letter(self.settings, usage_metadata)
+            )
+
+    def _show_founder_letter_dialog(self) -> None:
+        if self.settings is None:
+            return
+        show_founder_letter_dialog = getattr(self.app, "show_founder_letter_dialog", None)
+        if not callable(show_founder_letter_dialog):
+            return
+        show_founder_letter_dialog()
+        mark_founder_letter_shown(self.settings)
+        with contextlib.suppress(Exception):
+            self._save_settings()
+
+    def _disable_translation_for_managed_exhaustion(
+        self,
+        *,
+        reopen_founder_letter: bool,
+    ) -> None:
+        self._record_translation_toggle_intent(False)
+        self._set_managed_trial_pending_auth(False)
+        if reopen_founder_letter:
+            self._show_founder_letter_dialog()
+        if self.hub is not None:
+            self.hub.translation_enabled = False
+        dash = getattr(self.app, "view_dashboard", None)
+        if dash is not None:
+            dash.set_translation_enabled(False)
+
+    async def _should_route_managed_trans_to_founder_letter(self) -> bool:
+        if self.settings is None:
+            return False
+        with contextlib.suppress(Exception):
+            await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=False)
+        if not is_effectively_exhausted(self._managed_trial_usage_metadata):
+            return False
+
+        self._disable_translation_for_managed_exhaustion(reopen_founder_letter=True)
+        return True
 
     def _build_llm_provider_signature(self, settings: AppSettings) -> tuple[object, ...]:
         return (
@@ -553,8 +827,18 @@ class GuiController:
                 if settings.provider.llm == LLMProviderName.OPENROUTER
                 else None
             ),
+            (
+                settings.openrouter.fallback_selection_alias
+                if settings.provider.llm == LLMProviderName.OPENROUTER
+                else None
+            ),
             settings.qwen.llm_model if settings.provider.llm == LLMProviderName.QWEN else None,
             settings.qwen.region if settings.provider.llm == LLMProviderName.QWEN else None,
+            (
+                settings.deepseek.llm_model
+                if settings.provider.llm == LLMProviderName.DEEPSEEK
+                else None
+            ),
         )
 
     def _sync_signature_caches(self, settings: AppSettings) -> None:
@@ -566,10 +850,60 @@ class GuiController:
         self._last_peer_stt_provider_signature = self._build_peer_stt_provider_signature(settings)
         self._last_llm_provider_signature = self._build_llm_provider_signature(settings)
         self._last_peer_translation_enabled = settings.ui.peer_translation_enabled
+        self._last_peer_translation_activation_requested = (
+            self._peer_translation_activation_requested_for(settings)
+        )
+
+    def _copy_provider_prompt_apply_fields(self, source: AppSettings, target: AppSettings) -> None:
+        target.provider.stt = source.provider.stt
+        target.provider.peer_stt = source.provider.peer_stt
+        target.provider.llm = source.provider.llm
+        target.gemini.llm_model = source.gemini.llm_model
+        target.openrouter.llm_model = source.openrouter.llm_model
+        target.openrouter.routing_mode = source.openrouter.routing_mode
+        target.openrouter.selected_source = source.openrouter.selected_source
+        target.openrouter.selection_alias = source.openrouter.selection_alias
+        target.openrouter.fallback_selection_alias = source.openrouter.fallback_selection_alias
+        target.qwen.llm_model = source.qwen.llm_model
+        target.qwen.region = source.qwen.region
+        target.deepseek.llm_model = source.deepseek.llm_model
+        if source.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
+            target.managed_identity.verified_hardware_hash = (
+                source.managed_identity.verified_hardware_hash
+            )
+            target.managed_identity.verified_hardware_hash_salt_version = (
+                source.managed_identity.verified_hardware_hash_salt_version
+            )
+        else:
+            target.managed_identity.verified_hardware_hash = None
+            target.managed_identity.verified_hardware_hash_salt_version = None
+        target.system_prompt = source.system_prompt
+        target.system_prompts = copy.deepcopy(source.system_prompts)
+
+    def merge_settings_tab_apply_with_current_languages(self, pending: AppSettings) -> AppSettings:
+        if self.settings is None:
+            return copy.deepcopy(pending)
+
+        merged = copy.deepcopy(self.settings)
+        self._copy_provider_prompt_apply_fields(pending, merged)
+        if self.hub is not None:
+            merged.languages.source_language = self.hub.source_language
+            merged.languages.target_language = self.hub.target_language
+            merged.languages.peer_source_language = getattr(
+                self.hub,
+                "peer_source_language",
+                merged.languages.peer_source_language,
+            )
+            merged.languages.peer_target_language = getattr(
+                self.hub,
+                "peer_target_language",
+                merged.languages.peer_target_language,
+            )
+        return merged
 
     def _peer_runtime_should_be_active(self, settings: AppSettings) -> bool:
         return bool(
-            settings.ui.peer_translation_enabled
+            self._peer_translation_activation_requested_for(settings)
             and self._effective_peer_overlay_enabled_for(settings)
             and self.hub is not None
             and self._overlay_bridge is not None
@@ -642,13 +976,67 @@ class GuiController:
         if not enabled:
             self.settings.ui.peer_translation_enabled = False
             self._last_peer_translation_enabled = False
-        self._save_settings()
+            self._last_peer_translation_activation_requested = False
+        self._refresh_overlay_peer_consumers()
 
         if enabled:
             await self._begin_overlay_start()
             return
 
         await self._shutdown_overlay_runtime(preserve_failure_reason=True)
+
+    async def set_peer_translation_enabled(self, enabled: bool) -> None:
+        if self.settings is None:
+            return
+
+        enabled = bool(enabled)
+        self.log_basic(f"[Peer] Toggle request: enabled={enabled}")
+        self.log_detailed(
+            "[Peer] Toggle detail: "
+            f"overlay_enabled={self.settings.ui.overlay_enabled} "
+            f"overlay_state={self.overlay_state} "
+            f"peer_stt_available={self.hub is not None and getattr(self.hub, 'peer_stt', None) is not None} "
+            f"eula_accepted={self.settings.ui.peer_translation_eula_accepted}"
+        )
+
+        if enabled and not self._peer_translation_eula_accepted_for(self.settings):
+            self.settings.ui.peer_translation_enabled = False
+            self._last_peer_translation_enabled = False
+            self._last_peer_translation_activation_requested = False
+            self._sync_effective_hub_flags(self.settings)
+            self._refresh_overlay_peer_consumers()
+            self.log_basic("[Peer] Toggle ignored: eula_accepted=False")
+            return
+
+        if enabled and not self.settings.ui.overlay_enabled:
+            self.settings.ui.overlay_enabled = True
+        self.settings.ui.peer_translation_enabled = enabled
+        self._last_peer_translation_enabled = enabled
+        self._last_peer_translation_activation_requested = (
+            self._peer_translation_activation_requested_for(self.settings)
+        )
+        if enabled:
+            await self._ensure_peer_local_stt_ready()
+        self._clear_local_stt_pending_enable_if_provider_switched_away()
+        self._sync_local_stt_notice()
+        self._refresh_overlay_peer_consumers()
+
+        if enabled and self.overlay_state not in {"starting", "connected"}:
+            await self._begin_overlay_start()
+        else:
+            await self._refresh_overlay_runtime_dependencies()
+        self._sync_effective_hub_flags(self.settings)
+        if enabled:
+            self._enqueue_peer_translation_disclosure()
+        self._refresh_overlay_peer_consumers()
+
+    def _enqueue_peer_translation_disclosure(self) -> None:
+        hub = self.hub
+        if hub is None:
+            return
+        enqueue_disclosure = getattr(hub, "enqueue_peer_translation_disclosure", None)
+        if callable(enqueue_disclosure):
+            enqueue_disclosure(t("peer_translation.disclosure"))
 
     def on_overlay_start_failed(self, failure_reason: str | None) -> None:
         previous_state = self.overlay_state
@@ -692,22 +1080,21 @@ class GuiController:
             overlay_instance_id = f"overlay-{secrets.token_hex(8)}"
             diagnostics = OverlayDiagnosticsRecorder(overlay_instance_id=overlay_instance_id)
 
-            def runtime_log_detailed(message: str, *, level: int = logging.INFO) -> bool:
-                return self.log_detailed(message, level=level)
-
             if presenter is None:
                 presenter = OverlayPresenter(
                     calibration=self.overlay_calibration.copy(),
                     clock=self.clock,
                     diagnostics=diagnostics,
-                    runtime_log_detailed=runtime_log_detailed,
-                    show_translation=self.settings.ui.show_overlay_translation,
-                    show_peer_original=self.settings.ui.show_overlay_peer_original,
+                    runtime_log_detailed=self.log_detailed,
+                    show_translation=self.settings.overlay.show_translation,
+                    show_peer_original=self.settings.overlay.show_peer_original,
+                    peer_presentation_refresh_burst=True,
                 )
                 self._overlay_presenter = presenter
             else:
                 presenter.diagnostics = diagnostics
-                presenter.runtime_log_detailed = runtime_log_detailed
+                presenter.runtime_log_detailed = self.log_detailed
+                await presenter.update_peer_presentation_refresh_burst(True)
             bridge = OverlayBridge(
                 session_token=secrets.token_urlsafe(16),
                 initial_snapshot=presenter.snapshot(),
@@ -717,6 +1104,9 @@ class GuiController:
             )
             await bridge.start()
             presenter.attach_bridge(bridge)
+            latest_snapshot = presenter.snapshot()
+            if bridge.snapshot() != latest_snapshot:
+                await bridge.replace_snapshot(latest_snapshot)
             self._overlay_bridge = bridge
             self._overlay_diagnostics = diagnostics
             self.hub.overlay_sink = presenter
@@ -963,7 +1353,7 @@ class GuiController:
         self.overlay_calibration = self._overlay_calibration_draft.copy()
         self._overlay_calibration_draft = None
         if self.settings is not None:
-            self.settings.overlay_calibration = self.overlay_calibration.copy()
+            self.settings.overlay.calibration = self.overlay_calibration.copy()
             self._save_settings()
         self._schedule_overlay_calibration_emit()
         return self.overlay_calibration.copy()
@@ -971,6 +1361,12 @@ class GuiController:
     def cancel_overlay_calibration(self) -> OverlayCalibration:
         self._overlay_calibration_draft = None
         return self.overlay_calibration.copy()
+
+    def _sync_overlay_calibration_cache(self, settings: AppSettings | None = None) -> None:
+        resolved_settings = settings or self.settings
+        if resolved_settings is None:
+            return
+        self.overlay_calibration = resolved_settings.overlay.calibration.copy()
 
     async def _emit_overlay_calibration_update(self) -> None:
         presenter = self._overlay_presenter
@@ -1015,24 +1411,35 @@ class GuiController:
     def cancel_overlay_calibration_for_test(self) -> None:
         self.cancel_overlay_calibration()
 
-    async def set_translation_enabled(self, enabled: bool) -> None:
+    async def set_translation_enabled(self, enabled: bool) -> bool:
+        request_generation = self._record_translation_toggle_intent(enabled)
+        if not enabled:
+            self._set_managed_trial_pending_auth(False)
         if self.hub is None:
-            return
+            return False
         self.log_basic(f"[Translation] Toggle request: enabled={enabled}")
         self.log_detailed(
             "[Translation] Toggle detail: "
             f"current_enabled={self.hub.translation_enabled} "
             f"llm_available={self.hub.llm is not None}"
         )
-        if enabled and await self._handle_managed_translation_enable() is False:
-            return
+        if enabled and await self._handle_managed_translation_enable(request_generation) is False:
+            return False
+        if enabled and not self._translation_toggle_intent_matches(
+            enabled=True,
+            generation=request_generation,
+        ):
+            self.log_detailed(
+                "[Translation] Skipping stale enable request after newer toggle intent"
+            )
+            return False
         if enabled and self.hub.llm is None:
             self.hub.translation_enabled = False
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 dash.set_translation_enabled(False)
             self._log_error("Translation is ON but LLM provider is not configured.")
-            return
+            return False
 
         # Log provider info when enabling
         if enabled and self.settings is not None:
@@ -1056,6 +1463,7 @@ class GuiController:
             if isinstance(llm, (GeminiLLMProvider, QwenLLMProvider, AsyncQwenLLMProvider)):
                 with contextlib.suppress(Exception):
                     await llm.warmup()
+        return bool(self.hub.translation_enabled)
 
     async def set_stt_enabled(self, enabled: bool) -> None:
         self.log_basic(f"[STT] Toggle request: enabled={enabled}")
@@ -1092,7 +1500,11 @@ class GuiController:
                 self._show_short_stt_message("local_stt.download_in_progress")
                 return
             if current_status in ("missing", "invalid", "download_failed"):
-                self._handle_local_stt_unavailable(current_status)
+                self._handle_local_stt_unavailable(
+                    current_status,
+                    resume_self=True,
+                    resume_peer=self._peer_local_stt_requested(self.settings),
+                )
                 return
 
         # Mark promo eligible when user explicitly enables STT via button
@@ -1127,29 +1539,50 @@ class GuiController:
                 return
         self._log_error(message)
 
-    async def _handle_managed_translation_enable(self) -> bool:
+    async def _handle_managed_translation_enable(self, request_generation: int) -> bool:
         if self.settings is None or self.hub is None:
             return True
         if self.settings.provider.llm != LLMProviderName.OPENROUTER:
             return True
         if self.settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED:
             return True
+        if await self._should_route_managed_trans_to_founder_letter():
+            return False
         service = self._managed_openrouter_release_service
         if service is None:
             return True
 
-        result = await service.prepare_for_translation()
-        if result.behavior == ManagedOpenRouterReleaseBehavior.READY:
-            self._managed_trial_pending_auth = bool(result.pending_issue and not result.api_key)
-            self._set_managed_trial_transient_message(None)
-            await self._refresh_managed_trial_usage_state()
+        self._set_managed_trial_pending_auth(
+            self._should_show_managed_auth_pending_before_prepare()
+        )
+        try:
+            result = await service.prepare_for_translation()
+        except Exception:
+            self._set_managed_trial_pending_auth(False)
+            raise
+
+        self._set_managed_trial_pending_auth(False)
+
+        if not self._translation_toggle_intent_matches(
+            enabled=True,
+            generation=request_generation,
+        ):
+            self.log_detailed(
+                "[Translation] Skipping stale managed enable result after newer toggle intent"
+            )
+            return False
+
+        if result.behavior == ManagedOpenRouterReleaseBehavior.READY and result.local_key_available:
             if self.hub.llm is None:
                 await self._rebuild_llm_provider()
+            else:
+                self._schedule_managed_trial_usage_refresh()
             return True
 
-        self._managed_trial_pending_auth = False
-        self._set_managed_trial_transient_message(result.message_key, dict(result.message_kwargs))
-        await self._refresh_managed_trial_usage_state()
+        diagnostics_text = format_managed_openrouter_diagnostics(result.diagnostics)
+        if diagnostics_text:
+            self.log_basic(f"[ManagedAuth] {diagnostics_text}", level=logging.ERROR)
+        await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=False)
         self.hub.translation_enabled = False
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
@@ -1170,14 +1603,27 @@ class GuiController:
             return self._local_stt_runtime_status
         return self._local_stt_install_state.status
 
+    def _peer_local_stt_requested(self, settings: AppSettings | None = None) -> bool:
+        resolved_settings = settings or self.settings
+        return bool(
+            resolved_settings is not None
+            and resolved_settings.provider.peer_stt == STTProviderName.LOCAL_QWEN
+            and self._peer_translation_activation_requested_for(resolved_settings)
+        )
+
     def _reset_local_stt_pending_enable_after_install(self) -> None:
         self._local_stt_pending_enable_after_install = False
+
+    def _reset_local_stt_pending_peer_enable_after_install(self) -> None:
+        self._local_stt_pending_peer_enable_after_install = False
 
     def _clear_local_stt_pending_enable_if_provider_switched_away(self) -> None:
         if self.settings is None:
             return
         if self.settings.provider.stt != STTProviderName.LOCAL_QWEN:
             self._reset_local_stt_pending_enable_after_install()
+        if not self._peer_local_stt_requested(self.settings):
+            self._reset_local_stt_pending_peer_enable_after_install()
 
     def _sync_local_stt_notice(self) -> None:
         dash = getattr(self.app, "view_dashboard", None)
@@ -1185,7 +1631,11 @@ class GuiController:
             return
         status = self._current_local_stt_runtime_status()
         should_show = status == "downloading" or (
-            self.settings.provider.stt == STTProviderName.LOCAL_QWEN and status != "ready"
+            (
+                self.settings.provider.stt == STTProviderName.LOCAL_QWEN
+                or self._peer_local_stt_requested(self.settings)
+            )
+            and status != "ready"
         )
         with contextlib.suppress(Exception):
             dash.set_local_stt_notice(
@@ -1246,12 +1696,20 @@ class GuiController:
         self._clear_local_stt_pending_enable_if_provider_switched_away()
         self._sync_local_stt_notice()
 
-        if (
+        should_resume_self_local_stt = (
             origin == "manual"
             and self.settings is not None
             and self.settings.provider.stt == STTProviderName.LOCAL_QWEN
             and self._local_stt_pending_enable_after_install
-        ):
+        )
+        should_resume_peer_local_stt = (
+            origin == "manual"
+            and self.settings is not None
+            and self._peer_local_stt_requested(self.settings)
+            and self._local_stt_pending_peer_enable_after_install
+        )
+
+        if should_resume_self_local_stt:
             self._reset_local_stt_pending_enable_after_install()
             await self._rebuild_stt_provider()
             self._stt_desired = True
@@ -1260,21 +1718,34 @@ class GuiController:
                 dash.set_stt_enabled(True)
             await self._ensure_stt_switch()
 
+        if should_resume_peer_local_stt:
+            self._reset_local_stt_pending_peer_enable_after_install()
+            await self._refresh_overlay_runtime_dependencies()
+
     async def _handle_local_stt_download_status(self, update: RuntimeLocalSTTStatusUpdate) -> None:
         self._local_stt_runtime_status = update.status
         self._local_stt_download_percent = update.percent
         self._sync_local_stt_notice()
 
-    def _handle_local_stt_unavailable(self, status: str) -> bool:
+    def _handle_local_stt_unavailable(
+        self,
+        status: str,
+        *,
+        resume_self: bool,
+        resume_peer: bool,
+    ) -> bool:
         if status in ("missing", "invalid"):
             self._local_stt_install_state = LocalSTTInstallState(status=status)
         if self._local_stt_runtime_status != "downloading":
             self._local_stt_runtime_status = status
             self._local_stt_download_percent = None
-        self._local_stt_pending_enable_after_install = True
-        self._stt_desired = False
+        if resume_self:
+            self._local_stt_pending_enable_after_install = True
+            self._stt_desired = False
+        if resume_peer:
+            self._local_stt_pending_peer_enable_after_install = True
         dash = getattr(self.app, "view_dashboard", None)
-        if dash is not None:
+        if resume_self and dash is not None:
             dash.set_stt_enabled(False)
             dash.set_stt_needs_key(False)
         self._sync_local_stt_notice()
@@ -1287,13 +1758,20 @@ class GuiController:
         current_status = self._current_local_stt_runtime_status()
         if current_status == "downloading":
             self._stt_desired = False
+            self._local_stt_pending_enable_after_install = True
+            if self._peer_local_stt_requested(self.settings):
+                self._local_stt_pending_peer_enable_after_install = True
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 dash.set_stt_enabled(False)
             self._show_short_stt_message("local_stt.download_in_progress")
             return False
         if current_status in ("missing", "invalid", "download_failed"):
-            return self._handle_local_stt_unavailable(current_status)
+            return self._handle_local_stt_unavailable(
+                current_status,
+                resume_self=True,
+                resume_peer=self._peer_local_stt_requested(self.settings),
+            )
         if self.hub is None or self.hub.stt is None:
             self._stt_desired = False
             dash = getattr(self.app, "view_dashboard", None)
@@ -1310,14 +1788,73 @@ class GuiController:
             self._sync_local_stt_notice()
             return True
         except LocalSTTModelMissingError:
-            return self._handle_local_stt_unavailable("missing")
+            return self._handle_local_stt_unavailable(
+                "missing",
+                resume_self=True,
+                resume_peer=self._peer_local_stt_requested(self.settings),
+            )
         except (LocalSTTManifestInvalidError, LocalQwenSherpaLoadError):
-            return self._handle_local_stt_unavailable("invalid")
+            return self._handle_local_stt_unavailable(
+                "invalid",
+                resume_self=True,
+                resume_peer=self._peer_local_stt_requested(self.settings),
+            )
+
+    async def _ensure_peer_local_stt_ready(self) -> bool:
+        if self.settings is None or not self._peer_local_stt_requested(self.settings):
+            return True
+        current_status = self._current_local_stt_runtime_status()
+        if current_status == "downloading":
+            self._local_stt_pending_peer_enable_after_install = True
+            self._sync_local_stt_notice()
+            return False
+        if current_status in ("missing", "invalid", "download_failed"):
+            return self._handle_local_stt_unavailable(
+                current_status,
+                resume_self=False,
+                resume_peer=True,
+            )
+        try:
+            await self._probe_peer_local_stt_runtime_load()
+            self._local_stt_install_state = LocalSTTInstallState(status="ready")
+            if self._local_stt_runtime_status != "downloading":
+                self._local_stt_runtime_status = "ready"
+            self._sync_local_stt_notice()
+            return True
+        except LocalSTTModelMissingError:
+            return self._handle_local_stt_unavailable(
+                "missing",
+                resume_self=False,
+                resume_peer=True,
+            )
+        except (LocalSTTManifestInvalidError, LocalQwenSherpaLoadError):
+            return self._handle_local_stt_unavailable(
+                "invalid",
+                resume_self=False,
+                resume_peer=True,
+            )
+
+    async def _probe_peer_local_stt_runtime_load(self) -> None:
+        assert self.settings is not None
+        secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+        peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
+        session = None
+        try:
+            session = await peer_backend.open_session()
+        finally:
+            if session is not None:
+                with contextlib.suppress(Exception):
+                    await session.close()
+            close_backend = getattr(peer_backend, "close", None)
+            if callable(close_backend):
+                with contextlib.suppress(Exception):
+                    await close_backend()
 
     async def _cancel_local_stt_download(self) -> None:
         task = self._local_stt_download_task
         cancel_event = self._local_stt_download_cancel_event
         self._reset_local_stt_pending_enable_after_install()
+        self._reset_local_stt_pending_peer_enable_after_install()
         if cancel_event is not None:
             cancel_event.set()
         if task is None:
@@ -1394,7 +1931,28 @@ class GuiController:
         except Exception as exc:
             self._log_error(f"Submit failed: {exc}")
 
+    async def on_dashboard_language_change(
+        self,
+        *,
+        source_code: str,
+        target_code: str,
+        peer_source_code: str = "",
+        peer_target_code: str = "",
+    ) -> None:
+        if self.settings is None:
+            return
+
+        updated = copy.deepcopy(self.settings)
+        updated.languages.source_language = source_code
+        updated.languages.target_language = target_code
+        updated.languages.peer_source_language = peer_source_code
+        updated.languages.peer_target_language = peer_target_code
+        await self.apply_settings(updated)
+
     async def apply_settings(self, settings: AppSettings) -> None:
+        def _effective_peer_language(language: str, peer_language: str) -> str:
+            return peer_language or language
+
         prev_locale = get_locale()
         prev_overlay_enabled = (
             self.settings.ui.overlay_enabled if self.settings is not None else False
@@ -1404,6 +1962,15 @@ class GuiController:
             if self._last_peer_translation_enabled is not None
             else (self.settings.ui.peer_translation_enabled if self.settings is not None else False)
         )
+        prev_peer_activation_requested = (
+            self._last_peer_translation_activation_requested
+            if self._last_peer_translation_activation_requested is not None
+            else (
+                self._peer_translation_activation_requested_for(self.settings)
+                if self.settings is not None
+                else False
+            )
+        )
         prev_self_signature = (
             self._last_self_stt_runtime_signature or self._last_stt_runtime_signature
         )
@@ -1411,12 +1978,44 @@ class GuiController:
         # hub.source_language를 기준으로 비교 (settings 객체는 이미 수정되어 전달될 수 있음)
         prev_source_lang = self.hub.source_language if self.hub else None
         prev_target_lang = self.hub.target_language if self.hub else None
+        prev_peer_source_lang = (
+            getattr(self.hub, "peer_source_language", None) if self.hub else None
+        )
+        prev_peer_target_lang = (
+            getattr(self.hub, "peer_target_language", None) if self.hub else None
+        )
+        prev_effective_peer_source = (
+            _effective_peer_language(prev_source_lang, prev_peer_source_lang)
+            if prev_source_lang is not None and prev_peer_source_lang is not None
+            else None
+        )
+        prev_effective_peer_target = (
+            _effective_peer_language(prev_target_lang, prev_peer_target_lang)
+            if prev_target_lang is not None and prev_peer_target_lang is not None
+            else None
+        )
         prev_low_latency = self.hub.low_latency_mode if self.hub else None
         source_language_changed = (
             prev_source_lang is not None and prev_source_lang != settings.languages.source_language
         )
         target_language_changed = (
             prev_target_lang is not None and prev_target_lang != settings.languages.target_language
+        )
+        effective_peer_source_changed = (
+            prev_effective_peer_source is not None
+            and prev_effective_peer_source
+            != _effective_peer_language(
+                settings.languages.source_language,
+                settings.languages.peer_source_language,
+            )
+        )
+        effective_peer_target_changed = (
+            prev_effective_peer_target is not None
+            and prev_effective_peer_target
+            != _effective_peer_language(
+                settings.languages.target_language,
+                settings.languages.peer_target_language,
+            )
         )
         if source_language_changed or target_language_changed:
             presenter = self._overlay_presenter
@@ -1434,6 +2033,7 @@ class GuiController:
                 f"{self.hub is not None and presenter is not None and getattr(self.hub, 'overlay_sink', None) is presenter}"
             )
         self.settings = settings
+        self._sync_overlay_calibration_cache(settings)
         self._save_settings()
         self._refresh_local_stt_runtime_state()
         self._clear_local_stt_pending_enable_if_provider_switched_away()
@@ -1468,11 +2068,22 @@ class GuiController:
             self.hub.chatbox_include_source = settings.osc.chatbox_include_source
             self._sync_effective_hub_flags(settings)
 
+            async def _clear_language_runtime_state(channel: str) -> None:
+                try:
+                    await self.hub.clear_language_runtime_state(channel=channel)
+                except Exception as exc:
+                    self._log_error(f"Failed to clear language runtime state for {channel}: {exc}")
+
+            if source_language_changed or target_language_changed:
+                await _clear_language_runtime_state("self")
+            if effective_peer_source_changed or effective_peer_target_changed:
+                await _clear_language_runtime_state("peer")
+
         presenter = self._overlay_presenter
         if presenter is not None:
             await presenter.update_display_preferences(
-                show_translation=settings.ui.show_overlay_translation,
-                show_peer_original=settings.ui.show_overlay_peer_original,
+                show_translation=settings.overlay.show_translation,
+                show_peer_original=settings.overlay.show_peer_original,
             )
 
         if prev_overlay_enabled != settings.ui.overlay_enabled:
@@ -1486,6 +2097,7 @@ class GuiController:
 
         current_self_signature = self._build_self_stt_runtime_signature(settings)
         current_peer_signature = self._build_peer_stt_runtime_signature(settings)
+        next_peer_activation_requested = self._peer_translation_activation_requested_for(settings)
         should_restart_stt = (
             prev_self_signature is not None and current_self_signature != prev_self_signature
         )
@@ -1493,6 +2105,7 @@ class GuiController:
             prev_peer_signature is None
             or current_peer_signature != prev_peer_signature
             or prev_peer_translation_enabled != settings.ui.peer_translation_enabled
+            or prev_peer_activation_requested != next_peer_activation_requested
         )
 
         self._sync_signature_caches(settings)
@@ -1513,7 +2126,7 @@ class GuiController:
         if should_restart_stt:
             await self._replace_runtime_stt_provider()
 
-        if source_language_changed:
+        if source_language_changed or target_language_changed:
             view_settings = getattr(self.app, "view_settings", None)
             if view_settings is not None:
                 with contextlib.suppress(Exception):
@@ -1532,6 +2145,8 @@ class GuiController:
                 except Exception as exc:
                     self._log_error(f"Failed to apply locale: {exc}")
 
+        self._refresh_overlay_peer_consumers()
+
     async def verify_api_key(self, provider: str, key: str) -> tuple[bool, str]:
         """Verify API key using the respective provider's static check. Returns (success, error_msg)."""
         if not key:
@@ -1543,6 +2158,8 @@ class GuiController:
                 success = await GeminiLLMProvider.verify_api_key(key)
             elif provider == "openrouter":
                 success = await OpenRouterLLMProvider.verify_api_key(key)
+            elif provider == "deepseek":
+                success = await DeepSeekLLMProvider.verify_api_key(key)
             elif provider == "alibaba_beijing":
                 return await self._verify_qwen_key_with_model_fallback(
                     key,
@@ -1569,8 +2186,17 @@ class GuiController:
             self._log_error(msg)
             return False, str(exc)
 
-    async def apply_providers(self, settings: AppSettings | None = None) -> None:
-        next_settings = settings or self.settings
+    async def apply_providers(
+        self,
+        settings: AppSettings | None = None,
+        *,
+        force_rebuild_llm: bool = False,
+    ) -> None:
+        next_settings = (
+            self.settings
+            if settings is None
+            else self.merge_settings_tab_apply_with_current_languages(settings)
+        )
         if next_settings is None:
             return
 
@@ -1595,7 +2221,7 @@ class GuiController:
         next_peer_provider_signature = self._build_peer_stt_provider_signature(next_settings)
         next_llm_provider_signature = self._build_llm_provider_signature(next_settings)
 
-        should_rebuild_llm = (
+        should_rebuild_llm = force_rebuild_llm or (
             prev_llm_provider_signature is None
             or next_llm_provider_signature != prev_llm_provider_signature
         )
@@ -1611,6 +2237,14 @@ class GuiController:
         self.settings = next_settings
         self._save_settings()
         self._clear_local_stt_pending_enable_if_provider_switched_away()
+        self._sync_local_stt_notice()
+        if (
+            next_settings.provider.llm != LLMProviderName.OPENROUTER
+            or next_settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED
+        ):
+            self._set_managed_trial_pending_auth(False)
+        else:
+            self._sync_managed_auth_dashboard_notice()
 
         if self.hub is not None:
             self.hub.source_language = next_settings.languages.source_language
@@ -1635,6 +2269,7 @@ class GuiController:
         if should_refresh_peer:
             await self._refresh_peer_stt_runtime()
             self._sync_effective_hub_flags(next_settings)
+            self._refresh_overlay_peer_consumers()
 
         if should_refresh_self_stt:
             if self._stt_desired:
@@ -1647,7 +2282,7 @@ class GuiController:
     def _load_or_init_settings(self, path: Path) -> AppSettings:
         if path.exists():
             return load_settings(path)
-        settings = AppSettings()
+        settings = new_settings_for_first_run()
         path.parent.mkdir(parents=True, exist_ok=True)
         save_settings(path, settings)
         return settings
@@ -1691,7 +2326,7 @@ class GuiController:
         if dash is not None:
             dash.set_translation_needs_key(llm is None)
 
-        await self._refresh_managed_trial_usage_state()
+        await self._refresh_managed_trial_usage_state_best_effort()
 
         if llm is None:
             message = "LLM provider not available"
@@ -1781,6 +2416,8 @@ class GuiController:
 
         config = self._build_peer_runtime_config(self.settings)
         desired_active = self._peer_runtime_should_be_active(self.settings)
+        if desired_active and not await self._ensure_peer_local_stt_ready():
+            desired_active = False
         await self._peer_runtime.apply_policy(config=config, desired_active=desired_active)
         self._last_peer_stt_runtime_signature = config.runtime_signature
         self._sync_effective_hub_flags(self.settings)
@@ -1890,12 +2527,10 @@ class GuiController:
             chatbox_send=self.settings.osc.chatbox_send,
             chatbox_clear=self.settings.osc.chatbox_clear,
         )
-        osc = SmartOscQueue(
+        osc = ChatboxPaginator(
             sender=sender,
             clock=self.clock,
             max_chars=self.settings.osc.chatbox_max_chars,
-            cooldown_s=self.settings.osc.cooldown_s,
-            ttl_s=self.settings.osc.ttl_s,
             runtime_logging=self.runtime_logging,
         )
 
@@ -2036,14 +2671,26 @@ class GuiController:
                     )
                     return None
 
-            def _open_source(dev_idx: int | None) -> SoundDeviceAudioSource:
+            def _open_source(
+                dev_idx: int | None,
+                *,
+                wasapi_auto_convert: bool = False,
+                wasapi_exclusive: bool = False,
+            ) -> SoundDeviceAudioSource:
                 return SoundDeviceAudioSource(
                     sample_rate_hz=None,
                     channels=self.settings.audio.internal_channels,
                     device=dev_idx,
+                    wasapi_auto_convert=wasapi_auto_convert,
+                    wasapi_exclusive=wasapi_exclusive,
                 )
 
-            host_api = self.settings.audio.input_host_api
+            saved_host_api = self.settings.audio.input_host_api
+            host_api_profile = normalize_input_host_api(saved_host_api)
+            host_api = host_api_profile.actual_host_api
+            first_open_used_wasapi_flags = (
+                host_api_profile.wasapi_auto_convert or host_api_profile.wasapi_exclusive
+            )
             device_name = self.settings.audio.input_device
 
             # 1차 시도: 설정된 Host API + 마이크
@@ -2051,8 +2698,20 @@ class GuiController:
             source: SoundDeviceAudioSource | None = None
 
             try:
-                source = _open_source(device_idx)
-                self.log_detailed(f"[STT] Microphone opened: device_idx={device_idx}")
+                source = _open_source(
+                    device_idx,
+                    wasapi_auto_convert=host_api_profile.wasapi_auto_convert,
+                    wasapi_exclusive=host_api_profile.wasapi_exclusive,
+                )
+                self.log_detailed(
+                    "[STT] Microphone opened: "
+                    f"saved_host_api={saved_host_api!r} "
+                    f"actual_host_api={host_api!r} "
+                    f"device={device_name!r} "
+                    f"device_idx={device_idx} "
+                    f"wasapi_auto_convert={host_api_profile.wasapi_auto_convert} "
+                    f"wasapi_exclusive={host_api_profile.wasapi_exclusive}"
+                )
             except Exception as exc:
                 self.log_detailed(
                     "[STT] Microphone open detail: "
@@ -2063,9 +2722,13 @@ class GuiController:
             # 2차 시도: Host API 무시, 마이크 이름만
             if source is None and device_name:
                 fallback_idx = _resolve_device("", device_name)
-                if fallback_idx != device_idx:
+                if fallback_idx != device_idx or first_open_used_wasapi_flags:
                     try:
-                        source = _open_source(fallback_idx)
+                        source = _open_source(
+                            fallback_idx,
+                            wasapi_auto_convert=False,
+                            wasapi_exclusive=False,
+                        )
                         self.log_detailed(
                             f"[STT] Microphone opened with fallback: device_idx={fallback_idx}"
                         )
@@ -2078,7 +2741,11 @@ class GuiController:
             # 3차 시도: 시스템 기본 장치
             if source is None:
                 try:
-                    source = _open_source(None)
+                    source = _open_source(
+                        None,
+                        wasapi_auto_convert=False,
+                        wasapi_exclusive=False,
+                    )
                     self.log_detailed("[STT] Microphone opened with system default")
                 except Exception as exc:
                     self.log_detailed(
@@ -2175,6 +2842,90 @@ class GuiController:
         if self.vrc_mic_audio_gate is not None:
             self.vrc_mic_audio_gate.set_receiver_active(False)
 
+    def _create_openrouter_pkce_client(self) -> OpenRouterPKCEClient:
+        return OpenRouterPKCEClient(callback_origin="http://localhost:3000")
+
+    def reopen_openrouter_pkce_authorization_url(self) -> bool:
+        if self._openrouter_pkce_client is None:
+            return False
+        return self._openrouter_pkce_client.reopen_authorization_url()
+
+    async def connect_openrouter_via_pkce(
+        self,
+        *,
+        target_settings: AppSettings,
+        launch_source: str,
+    ) -> bool:
+        assert self.settings is not None
+        selection_alias = target_settings.openrouter.selection_alias
+        if selection_alias is None:
+            raise ValueError("PKCE connection requires a BYOK OpenRouter alias")
+
+        profile = profile_for_alias(selection_alias.value)
+        if profile.openrouter_source != OpenRouterCredentialSource.BYOK.value:
+            raise ValueError("PKCE connection requires a BYOK OpenRouter alias")
+        if profile.openrouter_model is None:
+            raise ValueError("PKCE connection requires a BYOK OpenRouter model")
+        previous_settings = copy.deepcopy(self.settings)
+
+        try:
+            pkce_client = self._create_openrouter_pkce_client()
+            self._openrouter_pkce_client = pkce_client
+            try:
+                result = await pkce_client.run_desktop_flow()
+            finally:
+                self._openrouter_pkce_client = None
+        except Exception as exc:
+            self._show_short_message("openrouter.pkce.failed")
+            self._log_error(f"OpenRouter PKCE failed: {exc}")
+            if launch_source == "letter":
+                show_founder_letter_dialog = getattr(self.app, "show_founder_letter_dialog", None)
+                if callable(show_founder_letter_dialog):
+                    with contextlib.suppress(Exception):
+                        show_founder_letter_dialog()
+            return False
+
+        try:
+            if not await OpenRouterLLMProvider.verify_api_key(result.api_key):
+                raise RuntimeError("OpenRouter PKCE key verification failed")
+            secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
+            previous_api_key = secrets.get(OPENROUTER_BYOK_API_KEY_SECRET)
+            secrets.set(OPENROUTER_BYOK_API_KEY_SECRET, result.api_key)
+            updated = copy.deepcopy(target_settings)
+            updated.provider.llm = LLMProviderName.OPENROUTER
+            updated.openrouter.selection_alias = OpenRouterSelectionAlias(profile.alias)
+            updated.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+            updated.openrouter.llm_model = OpenRouterLLMModel(profile.openrouter_model)
+            updated.api_key_verified.openrouter = True
+            try:
+                await self.apply_providers(updated, force_rebuild_llm=True)
+                self.settings.api_key_verified.openrouter = True
+                self._save_settings()
+            except Exception:
+                with contextlib.suppress(Exception):
+                    if previous_api_key is None:
+                        secrets.delete(OPENROUTER_BYOK_API_KEY_SECRET)
+                    else:
+                        secrets.set(OPENROUTER_BYOK_API_KEY_SECRET, previous_api_key)
+                try:
+                    await self.apply_providers(previous_settings, force_rebuild_llm=True)
+                except Exception as rollback_exc:
+                    self.settings = previous_settings
+                    with contextlib.suppress(Exception):
+                        self._save_settings()
+                    self._log_error(f"OpenRouter PKCE rollback failed: {rollback_exc}")
+                raise
+        except Exception as exc:
+            self._show_short_message("openrouter.pkce.failed")
+            self._log_error(f"OpenRouter PKCE apply failed: {exc}")
+            if launch_source == "letter":
+                show_founder_letter_dialog = getattr(self.app, "show_founder_letter_dialog", None)
+                if callable(show_founder_letter_dialog):
+                    with contextlib.suppress(Exception):
+                        show_founder_letter_dialog()
+            return False
+        return True
+
     def _save_settings(self) -> None:
         assert self.settings is not None
         try:
@@ -2192,7 +2943,10 @@ class GuiController:
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 dash.set_languages_from_codes(
-                    settings.languages.source_language, settings.languages.target_language
+                    settings.languages.source_language,
+                    settings.languages.target_language,
+                    settings.languages.peer_source_language,
+                    settings.languages.peer_target_language,
                 )
                 # Load recent languages from settings
                 dash.set_recent_languages(
@@ -2207,6 +2961,8 @@ class GuiController:
             if view_settings is not None:
                 view_settings.load_from_settings(settings, config_path=self.config_path)
                 view_settings.set_overlay_calibration(self.overlay_calibration)
+
+        self._refresh_overlay_peer_consumers()
 
     def _on_recent_languages_change(self, source: list[str], target: list[str]) -> None:
         """Callback when recent languages change in dashboard."""
@@ -2296,6 +3052,29 @@ class GuiController:
             return self.runtime_logging.emit_detailed(rendered_message, level=level)
         except Exception:
             logger.log(level, message, exc_info=exc_info)
+            return True
+
+    def log_detailed_lazy(
+        self,
+        build_message: Callable[[], str],
+        *,
+        level: int = logging.INFO,
+        exception: BaseException | None = None,
+    ) -> bool:
+        exc_info = None
+        if exception is not None:
+            exc_info = (type(exception), exception, exception.__traceback__)
+
+        def render_message() -> str:
+            rendered_message = build_message()
+            if exc_info is None:
+                return rendered_message
+            return f"{rendered_message}\n{''.join(traceback.format_exception(*exc_info)).rstrip()}"
+
+        try:
+            return self.runtime_logging.emit_detailed_lazy(render_message, level=level)
+        except Exception:
+            logger.log(level, build_message(), exc_info=exc_info)
             return True
 
     def _log_error(self, message: str) -> None:
@@ -2458,6 +3237,13 @@ class GuiController:
                             else ""
                         )
                         llm_valid = bool(key) and await OpenRouterLLMProvider.verify_api_key(key)
+                elif provider_name == LLMProviderName.DEEPSEEK:
+                    key = (
+                        (secrets.get("deepseek_api_key") if secrets is not None else None)
+                        or os.getenv("DEEPSEEK_API_KEY")
+                        or ""
+                    )
+                    llm_valid = bool(key) and await DeepSeekLLMProvider.verify_api_key(key)
                 elif provider_name == "qwen":
                     llm_valid = await _verify_alibaba_selected()
                 else:
@@ -2508,4 +3294,4 @@ class GuiController:
         else:
             dash.set_stt_needs_key(False)
 
-        await self._refresh_managed_trial_usage_state()
+        await self._refresh_managed_trial_usage_state_impl(auto_show_founder_letter=False)

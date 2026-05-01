@@ -5,7 +5,9 @@ import type { BrokerEnv } from './contract';
 import {
   BROKER_RUNTIME_CONFIG_KEYS,
   DEFAULT_BROKER_ABUSE_CONTROLS,
+  DEFAULT_BROKER_ABUSE_RUNTIME_STATE,
   type BrokerAbuseControlsConfigValue,
+  type BrokerAbuseRuntimeStateValue,
   type BrokerEndpointRateLimitConfig,
   type OpenRouterEntitlementRecord,
 } from './persistence';
@@ -26,6 +28,19 @@ export interface AbuseDecision {
   subcode: string | null;
   retryAfterMs: number | null;
 }
+
+export interface RequestNetworkMetadata {
+  ipHash: string | null;
+  ipPrefixHash: string | null;
+  asn: number | null;
+  country: string | null;
+  httpProtocol: string | null;
+  tlsVersion: string | null;
+  tlsCipher: string | null;
+  riskLabel: 'low' | 'medium' | 'high';
+}
+
+export type BrokerAsnKind = 'cloud_or_vps' | 'other';
 
 export interface SubjectHookMatch extends AbuseDecision {
   hookKind: 'denylist' | 'reputation' | 'revocation';
@@ -90,6 +105,198 @@ export async function getBrokerAbuseControlsConfig(
   }
 }
 
+export async function getBrokerAbuseRuntimeState(
+  db: D1Database,
+): Promise<BrokerAbuseRuntimeStateValue> {
+  const row = await db
+    .prepare('SELECT value FROM broker_config WHERE key = ?')
+    .bind(BROKER_RUNTIME_CONFIG_KEYS.abuseRuntimeState)
+    .first<{ value: string }>();
+
+  if (!row) {
+    return DEFAULT_BROKER_ABUSE_RUNTIME_STATE;
+  }
+
+  try {
+    const parsed = JSON.parse(row.value) as unknown;
+    return (
+      validateBrokerAbuseRuntimeState(parsed) ?? DEFAULT_BROKER_ABUSE_RUNTIME_STATE
+    );
+  } catch {
+    return DEFAULT_BROKER_ABUSE_RUNTIME_STATE;
+  }
+}
+
+export async function persistBrokerAbuseRuntimeState(
+  db: D1Database,
+  before: BrokerAbuseRuntimeStateValue,
+  after: BrokerAbuseRuntimeStateValue,
+): Promise<boolean> {
+  const sectionsToPersist: Array<[
+    '$.brake' | '$.alertLatches' | '$.dailyReport',
+    | BrokerAbuseRuntimeStateValue['brake']
+    | BrokerAbuseRuntimeStateValue['alertLatches']
+    | BrokerAbuseRuntimeStateValue['dailyReport'],
+  ]> = [];
+
+  if (!jsonEquals(before.brake, after.brake)) {
+    sectionsToPersist.push(['$.brake', after.brake]);
+  }
+  if (!jsonEquals(before.alertLatches, after.alertLatches)) {
+    sectionsToPersist.push(['$.alertLatches', after.alertLatches]);
+  }
+  if (!jsonEquals(before.dailyReport, after.dailyReport)) {
+    sectionsToPersist.push(['$.dailyReport', after.dailyReport]);
+  }
+
+  if (sectionsToPersist.length === 0) {
+    return true;
+  }
+
+  const jsonSetArguments = sectionsToPersist.flatMap(([path, value]) => [
+    path,
+    JSON.stringify(value),
+  ]);
+  const guardClauses: string[] = [];
+  const guardArguments: Array<string | number | null> = [];
+
+  for (const [path, value] of sectionsToPersist) {
+    switch (path) {
+      case '$.brake': {
+        guardClauses.push(
+          `json_extract(value, '$.brake.active') = ?`,
+          `json_extract(value, '$.brake.reason') IS ?`,
+          `json_extract(value, '$.brake.changedAt') IS ?`,
+          `json_extract(value, '$.brake.changedBy') IS ?`,
+        );
+        guardArguments.push(
+          sqliteBoolean(before.brake.active),
+          before.brake.reason,
+          before.brake.changedAt,
+          before.brake.changedBy,
+        );
+        break;
+      }
+      case '$.alertLatches': {
+        guardClauses.push(
+          `json_extract(value, '$.alertLatches.warn1') = ?`,
+          `json_extract(value, '$.alertLatches.warn2') = ?`,
+          `json_extract(value, '$.alertLatches.warn3') = ?`,
+          `json_extract(value, '$.alertLatches.critical') = ?`,
+        );
+        guardArguments.push(
+          sqliteBoolean(before.alertLatches.warn1),
+          sqliteBoolean(before.alertLatches.warn2),
+          sqliteBoolean(before.alertLatches.warn3),
+          sqliteBoolean(before.alertLatches.critical),
+        );
+        break;
+      }
+      case '$.dailyReport': {
+        guardClauses.push(
+          `json_extract(value, '$.dailyReport.lastDeliveredAt') IS ?`,
+          `json_extract(value, '$.dailyReport.lastDeliveredDateUtc') IS ?`,
+        );
+        guardArguments.push(
+          before.dailyReport.lastDeliveredAt,
+          before.dailyReport.lastDeliveredDateUtc,
+        );
+        break;
+      }
+    }
+  }
+
+  const result = await db
+    .prepare(
+      `UPDATE broker_config
+           SET value = json_set(value, ${sectionsToPersist.map(() => '?, json(?)').join(', ')}),
+               updated_at = ?
+         WHERE key = ?
+           AND ${guardClauses.join('\n           AND ')}`,
+    )
+    .bind(
+      ...jsonSetArguments,
+      new Date().toISOString(),
+      BROKER_RUNTIME_CONFIG_KEYS.abuseRuntimeState,
+      ...guardArguments,
+    )
+    .run();
+
+  return Number(result.meta.changes ?? 0) > 0;
+}
+
+function jsonEquals(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function sqliteBoolean(value: boolean): number {
+  return value ? 1 : 0;
+}
+
+export async function checkActiveIssuanceBrake(
+  db: D1Database,
+  currentEntitlement: OpenRouterEntitlementRecord | null,
+): Promise<AbuseDecision | null> {
+  const runtimeState = await getBrokerAbuseRuntimeState(db);
+  if (!runtimeState.brake.active) {
+    return null;
+  }
+
+  if (currentEntitlement?.status === 'active') {
+    return null;
+  }
+
+  return {
+    status: 503,
+    code: 'issuance_suspended',
+    class: 'retryable',
+    message: 'new entitlement issuance is temporarily suspended',
+    subcode: runtimeState.brake.reason ?? 'manual',
+    retryAfterMs: null,
+  };
+}
+
+export async function extractRequestNetworkMetadata(
+  c: Context<BrokerEnv>,
+  db: D1Database,
+): Promise<RequestNetworkMetadata> {
+  const ip = resolveClientIp(c);
+  const cf = getCloudflareMetadata(c);
+  const asn = normalizePositiveInteger(cf.asn);
+  const controls = await getBrokerAbuseControlsConfig(db);
+  const httpProtocol = nonEmptyString(cf.httpProtocol);
+  const tlsVersion = nonEmptyString(cf.tlsVersion);
+
+  return {
+    ipHash: ip ? await hashNetworkValue(ip) : null,
+    ipPrefixHash: ip ? await hashNetworkValue(deriveIpPrefix(ip)) : null,
+    asn,
+    country: nonEmptyString(cf.country),
+    httpProtocol,
+    tlsVersion,
+    tlsCipher: nonEmptyString(cf.tlsCipher),
+    riskLabel: deriveRiskLabel({
+      asnKind: classifyAsn(asn, controls),
+      httpProtocol,
+      tlsVersion,
+    }),
+  };
+}
+
+export function classifyAsn(
+  asn: number | null,
+  controls: BrokerAbuseControlsConfigValue,
+): BrokerAsnKind {
+  if (
+    asn !== null &&
+    controls.asnClassifications.some((entry) => entry.asn === asn && entry.kind === 'cloud_or_vps')
+  ) {
+    return 'cloud_or_vps';
+  }
+
+  return 'other';
+}
+
 export async function recordRequestEvent(
   db: D1Database,
   context: RequestAbuseContext,
@@ -121,52 +328,56 @@ export async function checkEndpointRateLimit(
   context: RequestAbuseContext,
 ): Promise<AbuseDecision | null> {
   const controls = await getBrokerAbuseControlsConfig(db);
-  const endpointConfig = getEndpointRateLimitConfig(controls, context.endpoint);
-  if (!endpointConfig) {
+  const endpointConfigs = getEndpointRateLimitConfigs(controls, context.endpoint);
+  if (endpointConfigs.length === 0) {
     return null;
   }
 
-  const scopeValue =
-    endpointConfig.scope === 'ip' ? context.ip : context.installationId;
-  if (!scopeValue) {
-    return null;
+  for (const endpointConfig of endpointConfigs) {
+    const scopeValue =
+      endpointConfig.scope === 'ip' ? context.ip : context.installationId;
+    if (!scopeValue) {
+      continue;
+    }
+
+    const windowStartIso = new Date(
+      context.now.getTime() - endpointConfig.windowMinutes * 60_000,
+    ).toISOString();
+    const scopeColumn = endpointConfig.scope === 'ip' ? 'ip' : 'installation_id';
+    const row = await db
+      .prepare(
+        `SELECT COUNT(*) AS count, MIN(observed_at) AS oldest
+           FROM broker_request_events
+          WHERE endpoint = ?
+            AND ${scopeColumn} = ?
+            AND observed_at >= ?`,
+      )
+      .bind(context.endpoint, scopeValue, windowStartIso)
+      .first<{ count: number; oldest: string | null }>();
+
+    const count = Number(row?.count ?? 0);
+    if (count <= endpointConfig.maxRequests) {
+      continue;
+    }
+
+    return {
+      status: 429,
+      code: 'rate_limited',
+      class: 'retryable',
+      message: `request rate limit exceeded for ${context.endpoint}`,
+      subcode:
+        endpointConfig.scope === 'ip'
+          ? 'ip_rate_limited'
+          : 'installation_rate_limited',
+      retryAfterMs: retryAfterFromIso(
+        row?.oldest,
+        endpointConfig.windowMinutes * 60_000,
+        context.now,
+      ),
+    };
   }
 
-  const windowStartIso = new Date(
-    context.now.getTime() - endpointConfig.windowMinutes * 60_000,
-  ).toISOString();
-  const scopeColumn = endpointConfig.scope === 'ip' ? 'ip' : 'installation_id';
-  const row = await db
-    .prepare(
-      `SELECT COUNT(*) AS count, MIN(observed_at) AS oldest
-         FROM broker_request_events
-        WHERE endpoint = ?
-          AND ${scopeColumn} = ?
-          AND observed_at >= ?`,
-    )
-    .bind(context.endpoint, scopeValue, windowStartIso)
-    .first<{ count: number; oldest: string | null }>();
-
-  const count = Number(row?.count ?? 0);
-  if (count <= endpointConfig.maxRequests) {
-    return null;
-  }
-
-  return {
-    status: 429,
-    code: 'rate_limited',
-    class: 'retryable',
-    message: `request rate limit exceeded for ${context.endpoint}`,
-    subcode:
-      endpointConfig.scope === 'ip'
-        ? 'ip_rate_limited'
-        : 'installation_rate_limited',
-    retryAfterMs: retryAfterFromIso(
-      row?.oldest,
-      endpointConfig.windowMinutes * 60_000,
-      context.now,
-    ),
-  };
+  return null;
 }
 
 export async function checkVelocityCapHook(
@@ -174,6 +385,10 @@ export async function checkVelocityCapHook(
   context: RequestAbuseContext,
 ): Promise<AbuseDecision | null> {
   const matchingHooks = await listMatchingVelocityCapHooks(db, context);
+  const excludedEndpoints = [
+    'POST /v1/trial/challenge/verify/success',
+    'POST /v1/trial/challenge/verify/fail',
+  ] as const;
 
   for (const hook of matchingHooks) {
     const windowStartIso = new Date(
@@ -184,10 +399,16 @@ export async function checkVelocityCapHook(
       .prepare(
         `SELECT COUNT(*) AS count, MIN(observed_at) AS oldest
            FROM broker_request_events
-          WHERE ${column} = ?
-            AND observed_at >= ?`,
+           WHERE ${column} = ?
+             AND observed_at >= ?
+             AND endpoint NOT IN (?, ?)`,
       )
-      .bind(hook.subject_value, windowStartIso)
+      .bind(
+        hook.subject_value,
+        windowStartIso,
+        excludedEndpoints[0],
+        excludedEndpoints[1],
+      )
       .first<{ count: number; oldest: string | null }>();
 
     const count = Number(row?.count ?? 0);
@@ -356,21 +577,28 @@ export async function hasConflictingHardwareDuplicate(
   return legacyReservedRow !== null;
 }
 
-function getEndpointRateLimitConfig(
+function getEndpointRateLimitConfigs(
   controls: BrokerAbuseControlsConfigValue,
   endpoint: string,
-): BrokerEndpointRateLimitConfig | null {
+): BrokerEndpointRateLimitConfig[] {
   switch (endpoint) {
     case 'POST /v1/trial/challenge':
-      return controls.trialChallenge;
+      return [controls.trialChallenge];
     case 'POST /v1/trial/challenge/verify':
-      return controls.trialChallengeVerify;
+      return [controls.trialChallengeVerify];
     case 'POST /v1/providers/openrouter/issue':
-      return controls.openrouterIssue;
+      return [controls.openrouterIssue];
     case 'GET /v1/trial/status':
-      return controls.trialStatus;
+      return [controls.trialStatus];
+    case 'POST /v1/auth/discord/start':
+      return [controls.discordAuthStartIp, controls.discordAuthStartInstallation];
+    case 'POST /v1/providers/openrouter/discord/issue':
+      return [
+        controls.discordOpenrouterIssueIp,
+        controls.discordOpenrouterIssueInstallation,
+      ];
     default:
-      return null;
+      return [];
   }
 }
 
@@ -577,16 +805,54 @@ function validateBrokerAbuseControlsConfig(
     'GET /v1/trial/status',
     'installation_id',
   );
+  const discordAuthStartIp = validateEndpointRateLimitConfig(
+    value.discordAuthStartIp,
+    'POST /v1/auth/discord/start',
+    'ip',
+  );
+  const discordAuthStartInstallation = validateEndpointRateLimitConfig(
+    value.discordAuthStartInstallation,
+    'POST /v1/auth/discord/start',
+    'installation_id',
+  );
+  const discordOpenrouterIssueIp = validateEndpointRateLimitConfig(
+    value.discordOpenrouterIssueIp,
+    'POST /v1/providers/openrouter/discord/issue',
+    'ip',
+  );
+  const discordOpenrouterIssueInstallation = validateEndpointRateLimitConfig(
+    value.discordOpenrouterIssueInstallation,
+    'POST /v1/providers/openrouter/discord/issue',
+    'installation_id',
+  );
+  const pendingDiscordOAuthSessions = validatePendingDiscordOAuthSessionsConfig(
+    value.pendingDiscordOAuthSessions,
+  );
   const newActiveEntitlementsPerDay = validateDailyIssuanceCapConfig(
     value.newActiveEntitlementsPerDay,
   );
+  const immediateAlerts = validateImmediateAlertsConfig(value.immediateAlerts);
+  const asnFastPath = validateAsnFastPathConfig(value.asnFastPath);
+  const asnClassifications = validateAsnClassificationsConfig(value.asnClassifications);
+  const retention = validateRetentionConfig(value.retention);
+  const dailyReport = validateDailyReportConfig(value.dailyReport);
 
   if (
     !trialChallenge ||
     !trialChallengeVerify ||
     !openrouterIssue ||
     !trialStatus ||
-    !newActiveEntitlementsPerDay
+    !discordAuthStartIp ||
+    !discordAuthStartInstallation ||
+    !discordOpenrouterIssueIp ||
+    !discordOpenrouterIssueInstallation ||
+    !pendingDiscordOAuthSessions ||
+    !newActiveEntitlementsPerDay ||
+    !immediateAlerts ||
+    !asnFastPath ||
+    !asnClassifications ||
+    !retention ||
+    !dailyReport
   ) {
     return null;
   }
@@ -596,7 +862,70 @@ function validateBrokerAbuseControlsConfig(
     trialChallengeVerify,
     openrouterIssue,
     trialStatus,
+    discordAuthStartIp,
+    discordAuthStartInstallation,
+    discordOpenrouterIssueIp,
+    discordOpenrouterIssueInstallation,
+    pendingDiscordOAuthSessions,
     newActiveEntitlementsPerDay,
+    immediateAlerts,
+    asnFastPath,
+    asnClassifications,
+    retention,
+    dailyReport,
+  };
+}
+
+function validateBrokerAbuseRuntimeState(
+  value: unknown,
+): BrokerAbuseRuntimeStateValue | null {
+  if (!isJsonObject(value) || !isJsonObject(value.brake) || !isJsonObject(value.alertLatches) || !isJsonObject(value.dailyReport)) {
+    return null;
+  }
+
+  const brakeReason = value.brake.reason;
+  const brakeChangedBy = value.brake.changedBy;
+  const brakeChangedAt = value.brake.changedAt;
+  const lastDeliveredAt = value.dailyReport.lastDeliveredAt;
+  const lastDeliveredDateUtc = value.dailyReport.lastDeliveredDateUtc;
+
+  if (
+    !isBoolean(value.brake.active) ||
+    !(
+      brakeReason === null ||
+      brakeReason === 'global_threshold' ||
+      brakeReason === 'asn_fast_path' ||
+      brakeReason === 'manual'
+    ) ||
+    !(brakeChangedBy === null || brakeChangedBy === 'system' || brakeChangedBy === 'operator') ||
+    !(brakeChangedAt === null || typeof brakeChangedAt === 'string') ||
+    !isBoolean(value.alertLatches.warn1) ||
+    !isBoolean(value.alertLatches.warn2) ||
+    !isBoolean(value.alertLatches.warn3) ||
+    !isBoolean(value.alertLatches.critical) ||
+    !(lastDeliveredAt === null || typeof lastDeliveredAt === 'string') ||
+    !(lastDeliveredDateUtc === null || typeof lastDeliveredDateUtc === 'string')
+  ) {
+    return null;
+  }
+
+  return {
+    brake: {
+      active: value.brake.active,
+      reason: brakeReason,
+      changedAt: brakeChangedAt,
+      changedBy: brakeChangedBy,
+    },
+    alertLatches: {
+      warn1: value.alertLatches.warn1,
+      warn2: value.alertLatches.warn2,
+      warn3: value.alertLatches.warn3,
+      critical: value.alertLatches.critical,
+    },
+    dailyReport: {
+      lastDeliveredAt,
+      lastDeliveredDateUtc,
+    },
   };
 }
 
@@ -633,8 +962,12 @@ function validateDailyIssuanceCapConfig(
     return null;
   }
 
+  const endpoint = value.endpoint;
   if (
-    value.endpoint !== 'POST /v1/providers/openrouter/issue' ||
+    !(
+      endpoint === 'POST /v1/providers/openrouter/issue' ||
+      endpoint === 'POST /v1/providers/openrouter/discord/issue'
+    ) ||
     value.scope !== 'global' ||
     !(value.maxCount === null || isPositiveInteger(value.maxCount)) ||
     !isPositiveInteger(value.windowDays)
@@ -643,11 +976,242 @@ function validateDailyIssuanceCapConfig(
   }
 
   return {
-    endpoint: 'POST /v1/providers/openrouter/issue',
+    endpoint,
     scope: 'global',
     maxCount: value.maxCount,
     windowDays: value.windowDays,
   };
+}
+
+function validatePendingDiscordOAuthSessionsConfig(
+  value: unknown,
+): BrokerAbuseControlsConfigValue['pendingDiscordOAuthSessions'] | null {
+  if (!isJsonObject(value)) {
+    return null;
+  }
+
+  if (
+    !isPositiveInteger(value.maxPerInstallation) ||
+    !isPositiveInteger(value.maxPerIp) ||
+    !isPositiveInteger(value.windowMinutes)
+  ) {
+    return null;
+  }
+
+  return {
+    maxPerInstallation: value.maxPerInstallation,
+    maxPerIp: value.maxPerIp,
+    windowMinutes: value.windowMinutes,
+  };
+}
+
+function validateImmediateAlertsConfig(
+  value: unknown,
+): BrokerAbuseControlsConfigValue['immediateAlerts'] | null {
+  if (!isJsonObject(value)) {
+    return null;
+  }
+
+  if (
+    !isPositiveInteger(value.warn1) ||
+    !isPositiveInteger(value.warn2) ||
+    !isPositiveInteger(value.warn3) ||
+    !isPositiveInteger(value.critical) ||
+    !(value.warn1 < value.warn2 && value.warn2 < value.warn3 && value.warn3 < value.critical)
+  ) {
+    return null;
+  }
+
+  return {
+    warn1: value.warn1,
+    warn2: value.warn2,
+    warn3: value.warn3,
+    critical: value.critical,
+  };
+}
+
+function validateAsnFastPathConfig(
+  value: unknown,
+): BrokerAbuseControlsConfigValue['asnFastPath'] | null {
+  if (!isJsonObject(value)) {
+    return null;
+  }
+
+  if (
+    !isBoolean(value.enabled) ||
+    !isPositiveInteger(value.minIssueSuccess1h) ||
+    !isIntegerInRange(value.minTopAsnSharePct, 1, 100)
+  ) {
+    return null;
+  }
+
+  return {
+    enabled: value.enabled,
+    minIssueSuccess1h: value.minIssueSuccess1h,
+    minTopAsnSharePct: value.minTopAsnSharePct,
+  };
+}
+
+function validateAsnClassificationsConfig(
+  value: unknown,
+): BrokerAbuseControlsConfigValue['asnClassifications'] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const normalized: BrokerAbuseControlsConfigValue['asnClassifications'] = [];
+  const seenAsns = new Set<number>();
+
+  for (const entry of value) {
+    if (!isJsonObject(entry) || !isPositiveInteger(entry.asn) || entry.kind !== 'cloud_or_vps') {
+      return null;
+    }
+
+    if (seenAsns.has(entry.asn)) {
+      return null;
+    }
+    seenAsns.add(entry.asn);
+
+    normalized.push(
+      typeof entry.displayName === 'string'
+        ? {
+            asn: entry.asn,
+            kind: 'cloud_or_vps',
+            displayName: entry.displayName,
+          }
+        : {
+            asn: entry.asn,
+            kind: 'cloud_or_vps',
+          },
+    );
+  }
+
+  return normalized;
+}
+
+function validateRetentionConfig(
+  value: unknown,
+): BrokerAbuseControlsConfigValue['retention'] | null {
+  if (!isJsonObject(value)) {
+    return null;
+  }
+
+  if (
+    !isPositiveInteger(value.requestEventsDays) ||
+    !isPositiveInteger(value.issueSuccessDays) ||
+    !isPositiveInteger(value.runtimeAuditDays)
+  ) {
+    return null;
+  }
+
+  return {
+    requestEventsDays: value.requestEventsDays,
+    issueSuccessDays: value.issueSuccessDays,
+    runtimeAuditDays: value.runtimeAuditDays,
+  };
+}
+
+function validateDailyReportConfig(
+  value: unknown,
+): BrokerAbuseControlsConfigValue['dailyReport'] | null {
+  if (!isJsonObject(value)) {
+    return null;
+  }
+
+  if (
+    !isBoolean(value.enabled) ||
+    !isIntegerInRange(value.hourUtc, 0, 23) ||
+    !isIntegerInRange(value.minuteUtc, 0, 59) ||
+    !isBoolean(value.includeZeroActivity)
+  ) {
+    return null;
+  }
+
+  return {
+    enabled: value.enabled,
+    hourUtc: value.hourUtc,
+    minuteUtc: value.minuteUtc,
+    includeZeroActivity: value.includeZeroActivity,
+  };
+}
+
+function getCloudflareMetadata(c: Context<BrokerEnv>): {
+  asn: unknown;
+  country: unknown;
+  httpProtocol: unknown;
+  tlsVersion: unknown;
+  tlsCipher: unknown;
+} {
+  const rawRequest = c.req.raw as Request & {
+    cf?: Record<string, unknown>;
+  };
+  const cf = rawRequest.cf ?? {};
+
+  return {
+    asn: cf.asn,
+    country: cf.country ?? nonEmptyString(c.req.header('cf-ipcountry')),
+    httpProtocol: cf.httpProtocol,
+    tlsVersion: cf.tlsVersion,
+    tlsCipher: cf.tlsCipher,
+  };
+}
+
+function normalizePositiveInteger(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+
+  if (typeof value === 'string' && /^\d+$/u.test(value)) {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  return null;
+}
+
+async function hashNetworkValue(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(value),
+  );
+
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function deriveIpPrefix(ip: string): string {
+  if (ip.includes(':')) {
+    return ip
+      .split(':')
+      .filter((part) => part.length > 0)
+      .slice(0, 4)
+      .join(':');
+  }
+
+  return ip.split('.').slice(0, 3).join('.');
+}
+
+function deriveRiskLabel(input: {
+  asnKind: BrokerAsnKind;
+  httpProtocol: string | null;
+  tlsVersion: string | null;
+}): RequestNetworkMetadata['riskLabel'] {
+  if (
+    input.asnKind === 'cloud_or_vps' ||
+    (input.httpProtocol === 'HTTP/1.1' &&
+      input.tlsVersion !== null &&
+      /TLSv1(?:\.0|\.1|\.2)?$/u.test(input.tlsVersion))
+  ) {
+    return 'high';
+  }
+
+  if (
+    input.httpProtocol === 'HTTP/1.1' ||
+    (input.tlsVersion !== null && /TLSv1(?:\.0|\.1|\.2)?$/u.test(input.tlsVersion))
+  ) {
+    return 'medium';
+  }
+
+  return 'low';
 }
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
@@ -658,7 +1222,15 @@ function isPositiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
 
-function nonEmptyString(value: string | null | undefined): string | null {
+function isBoolean(value: unknown): value is boolean {
+  return typeof value === 'boolean';
+}
+
+function isIntegerInRange(value: unknown, min: number, max: number): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
+}
+
+function nonEmptyString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
 

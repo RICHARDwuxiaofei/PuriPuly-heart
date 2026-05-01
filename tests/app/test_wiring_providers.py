@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from puripuly_heart.app import wiring as wiring_module
 from puripuly_heart.app.wiring import (
+    _LazyFactoryLLMProvider,
     build_peer_stt_provider_signature,
     create_llm_provider,
     create_peer_stt_backend,
@@ -17,8 +19,10 @@ from puripuly_heart.config.settings import (
     LLMProviderName,
     LLMSettings,
     OpenRouterCredentialSource,
+    OpenRouterFallbackSelectionAlias,
     OpenRouterLLMModel,
     OpenRouterRoutingMode,
+    OpenRouterSelectionAlias,
     OpenRouterSettings,
     ProviderSettings,
     QwenASRSTTSettings,
@@ -33,10 +37,17 @@ from puripuly_heart.core.language import (
     get_deepgram_language,
     get_qwen_asr_language,
 )
+from puripuly_heart.core.llm import FallbackRacingLLMProvider
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.local_stt_assets import default_local_stt_model_dir
-from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterLLMProvider
+from puripuly_heart.core.managed_openrouter_release import (
+    ManagedOpenRouterLLMProvider,
+    ManagedOpenRouterReleaseService,
+    _resolve_managed_issue_model,
+)
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
+from puripuly_heart.core.stt.controller import ManagedSTTProvider
+from puripuly_heart.providers.llm.deepseek import DeepSeekLLMProvider
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
@@ -197,6 +208,38 @@ def test_create_llm_provider_qwen_standard_mode_singapore() -> None:
     assert provider.inner.model == "qwen3.5-flash"
 
 
+def test_create_llm_provider_deepseek_uses_secret_and_model() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.DEEPSEEK),
+        llm=LLMSettings(concurrency_limit=4),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("deepseek_api_key", "ds-key")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, DeepSeekLLMProvider)
+    assert provider.inner.api_key == "ds-key"
+    assert provider.inner.model == "deepseek-v4-flash"
+    assert provider.inner.base_url == "https://api.deepseek.com"
+    assert provider.inner.max_tokens == 100
+    assert provider.semaphore._value == 4  # type: ignore[attr-defined]
+
+
+def test_create_llm_provider_deepseek_passes_runtime_logging() -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.DEEPSEEK))
+    secrets = InMemorySecretStore()
+    secrets.set("deepseek_api_key", "ds-key")
+    runtime_logging = object()
+
+    provider = create_llm_provider(settings, secrets=secrets, runtime_logging=runtime_logging)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, DeepSeekLLMProvider)
+    assert provider.inner.runtime_logging is runtime_logging
+
+
 def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
@@ -204,6 +247,7 @@ def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
         openrouter=OpenRouterSettings(
             llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
             routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
             selected_source=OpenRouterCredentialSource.BYOK,
         ),
     )
@@ -221,10 +265,35 @@ def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
     assert provider.semaphore._value == 4  # type: ignore[attr-defined]
 
 
+def test_create_llm_provider_openrouter_byok_still_uses_user_owned_secret_after_pkce_storage() -> (
+    None
+):
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.BYOK,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "pkce-user-key")
+    secrets.set("openrouter_managed_api_key", "managed-key")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, OpenRouterLLMProvider)
+    assert provider.inner.api_key == "pkce-user-key"
+
+
 def test_create_llm_provider_openrouter_passes_runtime_logging() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
-        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.BYOK),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.BYOK,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
     )
     secrets = InMemorySecretStore()
     secrets.set("openrouter_api_key", "or-key")
@@ -241,7 +310,10 @@ def test_create_llm_provider_openrouter_uses_env_fallback(monkeypatch: pytest.Mo
     monkeypatch.setenv("OPENROUTER_API_KEY", "env-or-key")
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
-        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.BYOK),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.BYOK,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
     )
     secrets = InMemorySecretStore()
 
@@ -255,7 +327,10 @@ def test_create_llm_provider_openrouter_uses_env_fallback(monkeypatch: pytest.Mo
 def test_create_llm_provider_openrouter_uses_selected_managed_key() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
-        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.MANAGED),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
     )
     secrets = InMemorySecretStore()
     secrets.set("openrouter_api_key", "byok-key")
@@ -273,10 +348,56 @@ def test_create_llm_provider_openrouter_uses_selected_managed_key() -> None:
     assert provider.inner.api_key == "managed-key"
 
 
+def test_create_llm_provider_openrouter_direct_managed_reuse_forwards_cached_user_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_managed_api_key", "managed-key")
+    calls: list[OpenRouterCredentialSource] = []
+
+    def fake_load_managed_openrouter_user_identifier(
+        loaded_settings: AppSettings,
+        *,
+        secrets: InMemorySecretStore,
+    ) -> str:
+        _ = secrets
+        calls.append(loaded_settings.openrouter.selected_source)
+        return "managed-user-123"
+
+    monkeypatch.setattr(
+        wiring_module,
+        "load_managed_openrouter_user_identifier",
+        fake_load_managed_openrouter_user_identifier,
+        raising=False,
+    )
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=object(),
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, OpenRouterLLMProvider)
+    assert provider.inner.api_key == "managed-key"
+    assert provider.inner.user_identifier == "managed-user-123"
+    assert calls == [OpenRouterCredentialSource.MANAGED]
+
+
 def test_create_llm_provider_openrouter_requires_release_service_for_managed_mode() -> None:
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
-        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.MANAGED),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
     )
     secrets = InMemorySecretStore()
     secrets.set("openrouter_api_key", "byok-key")
@@ -291,7 +412,10 @@ def test_create_llm_provider_openrouter_uses_managed_wrapper_when_release_servic
 ):
     settings = AppSettings(
         provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
-        openrouter=OpenRouterSettings(selected_source=OpenRouterCredentialSource.MANAGED),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
     )
     secrets = InMemorySecretStore()
     managed_release_service = object()
@@ -312,8 +436,388 @@ def test_create_llm_provider_openrouter_uses_managed_wrapper_when_release_servic
     assert delegate.runtime_logging is runtime_logging
 
 
+def test_create_llm_provider_openrouter_managed_delegate_factory_loads_user_identifier_lazily(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.NONE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    current_user_identifier: str | None = None
+    load_calls = 0
+
+    def fake_load_managed_openrouter_user_identifier(
+        loaded_settings: AppSettings,
+        *,
+        secrets: InMemorySecretStore,
+    ) -> str | None:
+        nonlocal load_calls
+        _ = loaded_settings, secrets
+        load_calls += 1
+        return current_user_identifier
+
+    monkeypatch.setattr(
+        wiring_module,
+        "load_managed_openrouter_user_identifier",
+        fake_load_managed_openrouter_user_identifier,
+        raising=False,
+    )
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=object(),
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, ManagedOpenRouterLLMProvider)
+    assert load_calls == 0
+
+    current_user_identifier = "managed-user-123"
+    delegate = provider.inner.delegate_factory("delegate-key")
+
+    assert isinstance(delegate, OpenRouterLLMProvider)
+    assert delegate.user_identifier == "managed-user-123"
+    assert load_calls == 1
+
+
+def test_create_llm_provider_openrouter_wraps_primary_with_source_locked_openrouter_fallback() -> (
+    None
+):
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source=OpenRouterCredentialSource.BYOK,
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "or-key")
+    runtime_logging = object()
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        runtime_logging=runtime_logging,
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.primary, OpenRouterLLMProvider)
+    assert provider.inner.primary.api_key == "or-key"
+    assert provider.inner.primary.model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value
+    assert provider.inner.primary.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+    assert provider.inner.primary.runtime_logging is runtime_logging
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+    assert provider.inner.fallback._delegate is None
+
+    fallback_delegate = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_delegate, OpenRouterLLMProvider)
+    assert fallback_delegate.api_key == "or-key"
+    assert fallback_delegate.model == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
+    assert fallback_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+    assert fallback_delegate.runtime_logging is runtime_logging
+
+
+def test_create_llm_provider_openrouter_byok_paths_omit_managed_user_identifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source=OpenRouterCredentialSource.BYOK,
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "or-key")
+
+    def unexpected_load_managed_openrouter_user_identifier(
+        loaded_settings: AppSettings,
+        *,
+        secrets: InMemorySecretStore,
+    ) -> str:
+        _ = loaded_settings, secrets
+        raise AssertionError("managed user identifier should not be loaded for BYOK paths")
+
+    monkeypatch.setattr(
+        wiring_module,
+        "load_managed_openrouter_user_identifier",
+        unexpected_load_managed_openrouter_user_identifier,
+        raising=False,
+    )
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.primary, OpenRouterLLMProvider)
+    assert provider.inner.primary.user_identifier is None
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+
+    fallback_delegate = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_delegate, OpenRouterLLMProvider)
+    assert fallback_delegate.user_identifier is None
+
+
+def test_create_llm_provider_openrouter_managed_qwen_fallback_uses_fallback_specific_release_service() -> (
+    None
+):
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.QWEN35_FLASH,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    managed_release_service = ManagedOpenRouterReleaseService(
+        settings=settings,
+        secrets=secrets,
+        client=object(),
+        persist_settings=lambda _updated: None,
+        app_version="2.0.0",
+        raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
+    )
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=managed_release_service,
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.primary, ManagedOpenRouterLLMProvider)
+    assert provider.inner.primary.release_service is managed_release_service
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+    assert provider.inner.fallback._delegate is None
+
+    fallback_delegate = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
+    assert isinstance(fallback_delegate.release_service, ManagedOpenRouterReleaseService)
+    assert fallback_delegate.release_service is not managed_release_service
+    assert fallback_delegate.release_service.settings is not settings
+    assert fallback_delegate.release_service.settings.openrouter is not settings.openrouter
+    assert fallback_delegate.release_service.settings.openrouter.selection_alias is None
+    assert (
+        fallback_delegate.release_service.settings.openrouter.llm_model
+        == OpenRouterLLMModel.QWEN_35_FLASH_02_23
+    )
+    assert (
+        _resolve_managed_issue_model(fallback_delegate.release_service.settings)
+        == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
+    )
+    assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
+    assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+
+    fallback_openrouter_delegate = fallback_delegate.delegate_factory("managed-key")
+
+    assert isinstance(fallback_openrouter_delegate, OpenRouterLLMProvider)
+    assert fallback_openrouter_delegate.model == OpenRouterLLMModel.QWEN_35_FLASH_02_23.value
+    assert fallback_openrouter_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+
+
+def test_create_llm_provider_openrouter_managed_deepseek_fallback_uses_fallback_specific_release_service() -> (
+    None
+):
+    deepseek_model = getattr(OpenRouterLLMModel, "DEEPSEEK_V4_FLASH", None)
+    deepseek_fallback = getattr(OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH", None)
+
+    assert deepseek_model is not None
+    assert deepseek_fallback is not None
+
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_MANAGED,
+            fallback_selection_alias=deepseek_fallback,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    managed_release_service = ManagedOpenRouterReleaseService(
+        settings=settings,
+        secrets=secrets,
+        client=object(),
+        persist_settings=lambda _updated: None,
+        app_version="2.0.0",
+        raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
+    )
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=managed_release_service,
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.primary, ManagedOpenRouterLLMProvider)
+    assert provider.inner.primary.release_service is managed_release_service
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+
+    fallback_delegate = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
+    assert isinstance(fallback_delegate.release_service, ManagedOpenRouterReleaseService)
+    assert fallback_delegate.release_service is not managed_release_service
+    assert fallback_delegate.release_service.settings is not settings
+    assert fallback_delegate.release_service.settings.openrouter is not settings.openrouter
+    assert fallback_delegate.release_service.settings.openrouter.selection_alias is None
+    assert fallback_delegate.release_service.settings.openrouter.llm_model == deepseek_model
+    assert (
+        _resolve_managed_issue_model(fallback_delegate.release_service.settings)
+        == deepseek_model.value
+    )
+    assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
+    assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+
+    fallback_openrouter_delegate = fallback_delegate.delegate_factory("managed-key")
+
+    assert isinstance(fallback_openrouter_delegate, OpenRouterLLMProvider)
+    assert fallback_openrouter_delegate.model == deepseek_model.value
+    assert fallback_openrouter_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+
+
+def test_create_llm_provider_openrouter_managed_fallback_delegate_factory_loads_user_identifier_lazily(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    current_user_identifier: str | None = None
+    load_calls = 0
+
+    def fake_load_managed_openrouter_user_identifier(
+        loaded_settings: AppSettings,
+        *,
+        secrets: InMemorySecretStore,
+    ) -> str | None:
+        nonlocal load_calls
+        _ = loaded_settings, secrets
+        load_calls += 1
+        return current_user_identifier
+
+    monkeypatch.setattr(
+        wiring_module,
+        "load_managed_openrouter_user_identifier",
+        fake_load_managed_openrouter_user_identifier,
+        raising=False,
+    )
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=object(),
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+    assert load_calls == 0
+
+    fallback_provider = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_provider, ManagedOpenRouterLLMProvider)
+    assert load_calls == 0
+
+    current_user_identifier = "managed-user-456"
+    fallback_delegate = fallback_provider.delegate_factory("delegate-key")
+
+    assert isinstance(fallback_delegate, OpenRouterLLMProvider)
+    assert fallback_delegate.user_identifier == "managed-user-456"
+    assert load_calls == 1
+
+
+def test_create_llm_provider_openrouter_managed_gemini_fallback_clears_primary_alias_for_issue_identity() -> (
+    None
+):
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    managed_release_service = ManagedOpenRouterReleaseService(
+        settings=settings,
+        secrets=secrets,
+        client=object(),
+        persist_settings=lambda _updated: None,
+        app_version="2.0.0",
+        raw_hardware_fingerprint_provider=lambda: "raw-hardware-fingerprint-test",
+    )
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=managed_release_service,
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+
+    fallback_delegate = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_delegate, ManagedOpenRouterLLMProvider)
+    assert isinstance(fallback_delegate.release_service, ManagedOpenRouterReleaseService)
+    assert fallback_delegate.release_service is not managed_release_service
+    assert fallback_delegate.release_service.settings.openrouter.selection_alias is None
+    assert (
+        fallback_delegate.release_service.settings.openrouter.llm_model
+        == OpenRouterLLMModel.GEMINI_25_FLASH_LITE
+    )
+    assert (
+        _resolve_managed_issue_model(fallback_delegate.release_service.settings)
+        == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
+    )
+    assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
+    assert settings.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+
+    fallback_openrouter_delegate = fallback_delegate.delegate_factory("managed-key")
+
+    assert isinstance(fallback_openrouter_delegate, OpenRouterLLMProvider)
+    assert fallback_openrouter_delegate.model == OpenRouterLLMModel.GEMINI_25_FLASH_LITE.value
+    assert fallback_openrouter_delegate.routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST
+
+
 def test_create_llm_provider_openrouter_rejects_none_selected_source_even_with_keys() -> None:
-    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.OPENROUTER))
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.NONE,
+            selection_alias=None,
+        ),
+    )
     secrets = InMemorySecretStore()
     secrets.set("openrouter_api_key", "byok-key")
     secrets.set("openrouter_managed_api_key", "managed-key")
@@ -335,6 +839,7 @@ def test_create_stt_backend_deepgram_uses_settings_and_secret() -> None:
         provider=ProviderSettings(stt=STTProviderName.DEEPGRAM),
         deepgram_stt=DeepgramSTTSettings(model="nova-3"),
     )
+    settings.audio.internal_sample_rate_hz = 8000
     secrets = InMemorySecretStore()
     secrets.set("deepgram_api_key", "k3")
 
@@ -342,7 +847,7 @@ def test_create_stt_backend_deepgram_uses_settings_and_secret() -> None:
     assert isinstance(backend, DeepgramRealtimeSTTBackend)
     assert backend.api_key == "k3"
     assert backend.model == "nova-3"
-    assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
+    assert backend.sample_rate_hz == 16000
     assert backend.language == get_deepgram_language(settings.languages.source_language)
     assert list(backend.keyterms) == ["아이리", "시나노"]
 
@@ -369,17 +874,18 @@ def test_create_stt_backend_local_qwen_uses_shared_model_path_without_secret() -
     settings = AppSettings(
         provider=ProviderSettings(stt=STTProviderName.LOCAL_QWEN),
     )
+    settings.audio.internal_sample_rate_hz = 8000
     secrets = InMemorySecretStore()
 
     backend = create_stt_backend(settings, secrets=secrets)
 
     assert isinstance(backend, LocalQwenSherpaSTTBackend)
     assert backend.model_dir == default_local_stt_model_dir()
-    assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
+    assert backend.sample_rate_hz == 16000
     assert backend.stream_label == "self"
 
 
-def test_create_stt_backend_local_qwen_passes_language_hint_and_capped_hotwords() -> None:
+def test_create_stt_backend_local_qwen_passes_language_hint_without_hotwords() -> None:
     settings = AppSettings(provider=ProviderSettings(stt=STTProviderName.LOCAL_QWEN))
     settings.languages.source_language = "ko-KR"
     settings.stt.custom_vocabulary_enabled = True
@@ -392,15 +898,15 @@ def test_create_stt_backend_local_qwen_passes_language_hint_and_capped_hotwords(
 
     assert isinstance(backend, LocalQwenSherpaSTTBackend)
     assert getattr(backend, "language_hint", None) == "Korean"
-    assert getattr(backend, "hotwords", ())[:2] == ("Puripuly", "VRChat Japan")
-    assert len(getattr(backend, "hotwords", ())) == 12
+    assert getattr(backend, "hotwords", ()) == ()
 
 
-def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None:
+def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration_without_hint_terms() -> None:
     settings = AppSettings(
         provider=ProviderSettings(stt=STTProviderName.SONIOX),
         deepgram_stt=DeepgramSTTSettings(model="nova-3"),
     )
+    settings.audio.internal_sample_rate_hz = 8000
     secrets = InMemorySecretStore()
     secrets.set("deepgram_api_key", "peer-k")
 
@@ -409,13 +915,13 @@ def test_create_peer_stt_backend_uses_dedicated_deepgram_configuration() -> None
     assert isinstance(backend, DeepgramRealtimeSTTBackend)
     assert backend.api_key == "peer-k"
     assert backend.model == "nova-3"
-    assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
+    assert backend.sample_rate_hz == 16000
     assert backend.language == get_deepgram_language(settings.languages.source_language)
-    assert list(backend.keyterms) == ["아이리", "시나노"]
+    assert list(backend.keyterms) == []
     assert backend.stream_label == "peer"
 
 
-def test_create_peer_stt_backend_uses_effective_peer_source_language_and_terms() -> None:
+def test_create_peer_stt_backend_uses_effective_peer_source_language_without_hint_terms() -> None:
     settings = AppSettings(
         provider=ProviderSettings(stt=STTProviderName.SONIOX),
         deepgram_stt=DeepgramSTTSettings(model="nova-3"),
@@ -429,7 +935,7 @@ def test_create_peer_stt_backend_uses_effective_peer_source_language_and_terms()
 
     assert isinstance(backend, DeepgramRealtimeSTTBackend)
     assert backend.language == get_deepgram_language(settings.languages.effective_peer_source)
-    assert list(backend.keyterms) == ["airi", "shinano"]
+    assert list(backend.keyterms) == []
 
 
 def test_self_stt_provider_setting_does_not_change_peer_backend_choice() -> None:
@@ -461,7 +967,7 @@ def test_create_peer_stt_backend_uses_peer_selected_soniox_provider() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.SONIOX
     settings.languages.peer_source_language = "ko"
-    settings.peer_soniox_stt.model = "stt-rt-v4"
+    settings.soniox_stt.model = "stt-rt-v4"
     secrets = InMemorySecretStore()
     secrets.set("soniox_api_key", "peer-soniox")
 
@@ -472,10 +978,10 @@ def test_create_peer_stt_backend_uses_peer_selected_soniox_provider() -> None:
     assert backend.model == "stt-rt-v4"
 
 
-def test_create_peer_stt_backend_uses_peer_qwen_region_for_endpoint_and_secret() -> None:
+def test_create_peer_stt_backend_uses_shared_qwen_region_for_endpoint_and_secret() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.QWEN_ASR
-    settings.peer_qwen_asr_stt.region = QwenRegion.SINGAPORE
+    settings.qwen.region = QwenRegion.SINGAPORE
     secrets = InMemorySecretStore()
     secrets.set("alibaba_api_key_singapore", "peer-qwen")
 
@@ -490,8 +996,8 @@ def test_build_peer_stt_provider_signature_includes_backend_affecting_values() -
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.SONIOX
     settings.languages.peer_source_language = "zh-CN"
-    settings.peer_soniox_stt.model = "stt-rt-v4"
-    settings.peer_soniox_stt.trailing_silence_ms = 350
+    settings.soniox_stt.model = "stt-rt-v4"
+    settings.soniox_stt.trailing_silence_ms = 350
 
     signature = build_peer_stt_provider_signature(settings)
 
@@ -501,48 +1007,54 @@ def test_build_peer_stt_provider_signature_includes_backend_affecting_values() -
     assert 350 in signature
 
 
-def test_build_peer_stt_provider_signature_includes_sample_rate_hz() -> None:
+def test_build_peer_stt_provider_signature_uses_fixed_16khz_runtime_contract() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.QWEN_ASR
-    settings.audio.internal_sample_rate_hz = 48000
+    settings.audio.internal_sample_rate_hz = 8000
 
     signature = build_peer_stt_provider_signature(settings)
 
-    assert 48000 in signature
+    assert signature[2] == 16000
 
 
-def test_resolve_peer_stt_config_inherits_peer_qwen_model_until_override() -> None:
+def test_resolve_peer_stt_config_uses_shared_qwen_model_only() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.QWEN_ASR
     settings.qwen_asr_stt.model = "self-qwen-asr"
-    settings.peer_qwen_asr_stt.model = None
 
     resolved = resolve_peer_stt_config(settings)
 
     assert resolved.qwen_model == "self-qwen-asr"
 
-    settings.peer_qwen_asr_stt.model = "peer-qwen-asr"
 
-    resolved = resolve_peer_stt_config(settings)
-
-    assert resolved.qwen_model == "peer-qwen-asr"
-
-
-def test_create_peer_stt_backend_uses_peer_local_qwen_provider_and_sample_rate() -> None:
+def test_create_peer_stt_backend_uses_peer_local_qwen_provider_and_fixed_sample_rate() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
-    settings.audio.internal_sample_rate_hz = 44100
+    settings.audio.internal_sample_rate_hz = 8000
     secrets = InMemorySecretStore()
 
     backend = create_peer_stt_backend(settings, secrets=secrets)
 
     assert isinstance(backend, LocalQwenSherpaSTTBackend)
     assert backend.model_dir == default_local_stt_model_dir()
-    assert backend.sample_rate_hz == 44100
+    assert backend.sample_rate_hz == 16000
     assert backend.stream_label == "peer"
 
 
-def test_create_peer_stt_backend_local_qwen_uses_peer_language_and_capped_hotwords() -> None:
+def test_managed_stt_provider_rejects_legacy_8khz_runtime_sample_rate() -> None:
+    with pytest.raises(ValueError, match="16000"):
+        ManagedSTTProvider(backend=None, sample_rate_hz=8000)  # type: ignore[arg-type]
+
+
+def test_local_qwen_sherpa_backend_rejects_legacy_8khz_runtime_sample_rate() -> None:
+    with pytest.raises(ValueError, match="16000"):
+        LocalQwenSherpaSTTBackend(
+            model_dir=default_local_stt_model_dir(),
+            sample_rate_hz=8000,
+        )
+
+
+def test_create_peer_stt_backend_local_qwen_uses_peer_language_without_hotwords() -> None:
     settings = AppSettings()
     settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
     settings.languages.source_language = "ko"
@@ -557,11 +1069,10 @@ def test_create_peer_stt_backend_local_qwen_uses_peer_language_and_capped_hotwor
 
     assert isinstance(backend, LocalQwenSherpaSTTBackend)
     assert getattr(backend, "language_hint", None) == "Chinese"
-    assert getattr(backend, "hotwords", ())[:2] == ("airi", "shinano")
-    assert len(getattr(backend, "hotwords", ())) == 12
+    assert getattr(backend, "hotwords", ()) == ()
 
 
-def test_resolve_peer_stt_config_inherits_soniox_endpoint_keepalive_and_trailing_silence_until_override() -> (
+def test_resolve_peer_stt_config_uses_shared_soniox_endpoint_keepalive_and_trailing_silence() -> (
     None
 ):
     settings = AppSettings()
@@ -570,10 +1081,6 @@ def test_resolve_peer_stt_config_inherits_soniox_endpoint_keepalive_and_trailing
     settings.soniox_stt.endpoint = "wss://self-soniox.example/realtime"
     settings.soniox_stt.keepalive_interval_s = 12.5
     settings.soniox_stt.trailing_silence_ms = 900
-    settings.peer_soniox_stt.model = None
-    settings.peer_soniox_stt.endpoint = None
-    settings.peer_soniox_stt.keepalive_interval_s = None
-    settings.peer_soniox_stt.trailing_silence_ms = None
 
     resolved = resolve_peer_stt_config(settings)
 
@@ -581,18 +1088,6 @@ def test_resolve_peer_stt_config_inherits_soniox_endpoint_keepalive_and_trailing
     assert resolved.soniox_endpoint == "wss://self-soniox.example/realtime"
     assert resolved.soniox_keepalive_interval_s == 12.5
     assert resolved.soniox_trailing_silence_ms == 900
-
-    settings.peer_soniox_stt.model = "peer-soniox"
-    settings.peer_soniox_stt.endpoint = "wss://peer-soniox.example/realtime"
-    settings.peer_soniox_stt.keepalive_interval_s = 6.0
-    settings.peer_soniox_stt.trailing_silence_ms = 250
-
-    resolved = resolve_peer_stt_config(settings)
-
-    assert resolved.soniox_model == "peer-soniox"
-    assert resolved.soniox_endpoint == "wss://peer-soniox.example/realtime"
-    assert resolved.soniox_keepalive_interval_s == 6.0
-    assert resolved.soniox_trailing_silence_ms == 250
 
 
 def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:
@@ -602,6 +1097,7 @@ def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:
             model="qwen3-asr-flash-realtime",
         ),
     )
+    settings.audio.internal_sample_rate_hz = 8000
     secrets = InMemorySecretStore()
     # Default region is Beijing, so we need alibaba_api_key_beijing
     secrets.set("alibaba_api_key_beijing", "k4")
@@ -612,7 +1108,7 @@ def test_create_stt_backend_qwen_asr_uses_settings_and_secret() -> None:
     assert backend.model == "qwen3-asr-flash-realtime"
     # Endpoint is derived from region (Beijing default)
     assert backend.endpoint == "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
-    assert backend.sample_rate_hz == settings.audio.internal_sample_rate_hz
+    assert backend.sample_rate_hz == 16000
     assert backend.language == get_qwen_asr_language(settings.languages.source_language)
 
 

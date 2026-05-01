@@ -114,6 +114,11 @@ jobs:
           uv-version: ${{ env.UV_VERSION }}
           sync-args: --extra build
 
+      - name: Prepare soxr release inputs
+        shell: pwsh
+        run: |
+          ./scripts/ci/prepare-soxr-release-inputs.ps1
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -134,6 +139,7 @@ jobs:
           path: |
             installer_output/PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe
             installer_output/PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe.sha256
+            build/soxr-release-inputs/PuriPulyHeart-soxr-third-party-source-bundle.zip
           if-no-files-found: error
 
   publish-release:
@@ -143,6 +149,9 @@ jobs:
       - verify-version
       - build-installer
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
@@ -157,5 +166,6 @@ jobs:
           draft: true
           body_path: .github/release-template.md
           files: |
-            release-artifacts/PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe
-            release-artifacts/PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe.sha256
+            release-artifacts/installer_output/PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe
+            release-artifacts/installer_output/PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe.sha256
+            release-artifacts/build/soxr-release-inputs/PuriPulyHeart-soxr-third-party-source-bundle.zip

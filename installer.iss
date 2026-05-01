@@ -11,7 +11,7 @@
 #define MyOverlayExeName "PuriPulyHeartOverlay.exe"
 #define MyPackagedAppDir "dist\PuriPulyHeart"
 #define MyStagedOverlayDir "build\overlay"
-#define LocalSttManifestRelativePath "_internal\puripuly_heart\data\models\qwen3-asr-0.6b-int8-sherpa.manifest.json"
+#define LocalSttManifestRelativePath "puripuly_heart\data\models\qwen3-asr-0.6b-int8-sherpa.manifest.json"
 
 #ifndef MyAppId
   #define MyAppId "{{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
@@ -80,7 +80,9 @@ chinesetraditional.LocalSttReinstall=即使已有有效安裝也重新安裝模�
 [Files]
 Source: "{#MyPackagedAppDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyStagedOverlayDir}\{#MyOverlayExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#MyPackagedAppDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Vendored OpenVR runtime DLL comes from dist\PuriPulyHeart\openvr_api.dll in the packaged tree built by build.spec.
+; Installer build/install never resolves SteamVR paths for openvr_api.dll.
+Source: "{#MyPackagedAppDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "{#MyAppExeName},{#MyOverlayExeName}"
 Source: "scripts\installer\install-local-stt-model.ps1"; Flags: dontcopy
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
@@ -96,6 +98,9 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 [InstallDelete]
 ; Remove the managed default-path VAD cache so the app can rehydrate it from the bundled model.
 Type: files; Name: "{localappdata}\puripuly-heart\silero_vad.onnx"
+; Remove stale legacy soxr runtime names before laying down the current packaged tree.
+Type: files; Name: "{app}\soxr.dll"
+Type: files; Name: "{app}\soxr\libsoxr.dll"
 
 [UninstallDelete]
 ; Clean up user config on uninstall (optional)

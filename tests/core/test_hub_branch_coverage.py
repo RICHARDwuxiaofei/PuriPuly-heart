@@ -10,7 +10,12 @@ import numpy as np
 import pytest
 
 from puripuly_heart.core.clock import FakeClock
+from puripuly_heart.core.managed_openrouter_release import (
+    ManagedOpenRouterReleaseDiagnostics,
+    ManagedOpenRouterUserFacingError,
+)
 from puripuly_heart.core.orchestrator.hub import ClientHub, ContextEntry, _MergeBuffer
+from puripuly_heart.core.overlay.state import ActiveSelfOverlayMetadata
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd
@@ -47,6 +52,61 @@ class StubLLM:
         if self.should_fail:
             raise RuntimeError("llm failed")
         return Translation(utterance_id=utterance_id, text=f"T:{text}")
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@dataclass(slots=True)
+class RecordingLanguageLLM:
+    calls: list[dict[str, str]] = field(default_factory=list)
+
+    async def translate(
+        self,
+        *,
+        utterance_id: UUID,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ) -> Translation:
+        _ = system_prompt
+        self.calls.append(
+            {
+                "text": text,
+                "source_language": source_language,
+                "target_language": target_language,
+                "context": context,
+            }
+        )
+        return Translation(utterance_id=utterance_id, text=f"{target_language}:{text}")
+
+    async def close(self) -> None:
+        return None
+
+
+@dataclass(slots=True)
+class ManagedAuthFailingLLM:
+    diagnostics: ManagedOpenRouterReleaseDiagnostics
+    closed: bool = False
+
+    async def translate(
+        self,
+        *,
+        utterance_id: UUID,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ) -> Translation:
+        _ = (utterance_id, text, system_prompt, source_language, target_language, context)
+        raise ManagedOpenRouterUserFacingError(
+            message_key="managed_release.retry_after_ms",
+            message_kwargs={"retry_after_ms": 9000},
+            diagnostics=self.diagnostics,
+        )
 
     async def close(self) -> None:
         self.closed = True
@@ -98,11 +158,73 @@ class BlockingOverlaySink:
     events: list[object] = field(default_factory=list)
     started: asyncio.Event = field(default_factory=asyncio.Event)
     release: asyncio.Event = field(default_factory=asyncio.Event)
+    active_self_metadata: ActiveSelfOverlayMetadata | None = None
 
     async def emit(self, event: object) -> None:
         self.events.append(event)
+        self._capture_active_self_metadata(event)
         self.started.set()
         await self.release.wait()
+
+    def _capture_active_self_metadata(self, event: object) -> None:
+        if getattr(event, "type", None) != "self_active_update":
+            return
+        utterance_id = getattr(event, "utterance_id", None)
+        if not isinstance(utterance_id, UUID):
+            return
+        self.active_self_metadata = ActiveSelfOverlayMetadata(
+            text=getattr(event, "text", ""),
+            secondary_text=getattr(event, "secondary_text", ""),
+            utterance_id=utterance_id,
+            occupant_key=getattr(event, "occupant_key", ""),
+            update_id=getattr(event, "update_id", None),
+            origin_wall_clock_ms=getattr(event, "origin_wall_clock_ms", None),
+            session_scope=getattr(event, "session_scope", None),
+            source_text_hash=getattr(event, "source_text_hash", None),
+            source_text_len=getattr(event, "source_text_len", None),
+            logical_turn_key=getattr(event, "logical_turn_key", None),
+        )
+
+    def active_self_overlay_metadata(self) -> ActiveSelfOverlayMetadata | None:
+        return self.active_self_metadata
+
+
+@dataclass(slots=True)
+class MetadataOverlaySink:
+    active_self_metadata: ActiveSelfOverlayMetadata | None = None
+    events: list[object] = field(default_factory=list)
+
+    async def emit(self, event: object) -> None:
+        self.events.append(event)
+        event_type = getattr(event, "type", None)
+        if event_type == "self_active_clear":
+            self.active_self_metadata = None
+        elif event_type == "self_transcript_final" and self.active_self_metadata is not None:
+            if self.active_self_metadata.utterance_id == getattr(event, "utterance_id", None):
+                self.active_self_metadata = None
+
+    def active_self_overlay_metadata(self) -> ActiveSelfOverlayMetadata | None:
+        return self.active_self_metadata
+
+
+def active_self_metadata_for_merge(
+    merge_id: UUID,
+    *,
+    text: str,
+    secondary_text: str,
+) -> ActiveSelfOverlayMetadata:
+    return ActiveSelfOverlayMetadata(
+        text=text,
+        secondary_text=secondary_text,
+        utterance_id=merge_id,
+        occupant_key=f"self:{merge_id}",
+        update_id=None,
+        origin_wall_clock_ms=None,
+        session_scope=None,
+        source_text_hash=None,
+        source_text_len=None,
+        logical_turn_key=None,
+    )
 
 
 @dataclass(slots=True)
@@ -158,6 +280,24 @@ def _make_runtime_logging_capture() -> tuple[SessionRuntimeLoggingService, io.St
 
 def _runtime_log_messages(stream: io.StringIO) -> list[str]:
     return [line for line in stream.getvalue().splitlines() if line]
+
+
+def test_peer_translation_disclosure_enqueues_chatbox_notice_without_context_history() -> None:
+    osc = RecordingOscQueue()
+    hub = ClientHub(stt=None, llm=None, osc=osc, clock=FakeClock(12.0))
+    hub.self_runtime.remember_context(
+        "existing context",
+        timestamp=10.0,
+        source_language="ko",
+        target_language="en",
+    )
+    before_history = list(hub._translation_history)
+
+    hub.enqueue_peer_translation_disclosure("Peer translation is on")
+
+    assert [message.text for message in osc.messages] == ["Peer translation is on"]
+    assert osc.messages[0].created_at == 12.0
+    assert hub._translation_history == before_history
 
 
 @pytest.mark.asyncio
@@ -306,6 +446,135 @@ async def test_replace_stt_provider_none_stops_event_loop_and_clears_runtime_sta
 
 
 @pytest.mark.asyncio
+async def test_clear_language_runtime_state_self_preserves_stt_task_and_clears_overlay_preview() -> (
+    None
+):
+    preview_merge_id = uuid4()
+    overlay_sink = MetadataOverlaySink(
+        active_self_metadata=active_self_metadata_for_merge(
+            preview_merge_id,
+            text="preview",
+            secondary_text="secondary",
+        )
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=overlay_sink,
+        clock=FakeClock(),
+    )
+    self_id = uuid4()
+    standalone_id = uuid4()
+    peer_id = uuid4()
+    stt_task = asyncio.create_task(asyncio.sleep(60.0))
+    translation_task = asyncio.create_task(asyncio.sleep(60.0))
+    standalone_translation_task = asyncio.create_task(asyncio.sleep(60.0))
+    spec_task = asyncio.create_task(asyncio.sleep(60.0))
+    finalize_wait_task = asyncio.create_task(asyncio.sleep(60.0))
+    awaiting_vad_timeout_task = asyncio.create_task(asyncio.sleep(60.0))
+    resume_end_timeout_task = asyncio.create_task(asyncio.sleep(60.0))
+    all_tasks = [
+        stt_task,
+        translation_task,
+        standalone_translation_task,
+        spec_task,
+        finalize_wait_task,
+        awaiting_vad_timeout_task,
+        resume_end_timeout_task,
+    ]
+
+    hub.self_runtime.stt_task = stt_task
+    hub.self_runtime.translation_tasks[self_id] = translation_task
+    hub.self_runtime.translation_tasks[standalone_id] = standalone_translation_task
+    hub.self_runtime.get_or_create_bundle(self_id)
+    hub.self_runtime.get_or_create_bundle(standalone_id)
+    hub.self_runtime.utterance_sources[self_id] = "Mic"
+    hub.self_runtime.utterance_sources[standalone_id] = "Mic"
+    hub.self_runtime.utterance_start_times[self_id] = 1.0
+    hub.self_runtime.utterance_start_times[standalone_id] = 1.5
+    hub.self_runtime.speech_ended_ids.add(self_id)
+    hub.self_runtime.speech_ended_ids.add(standalone_id)
+    hub.self_runtime.translation_history.append(ContextEntry("history", "ko", "en", 1.0))
+    hub.self_runtime.merge_buffer = _MergeBuffer(
+        merge_id=preview_merge_id,
+        utterance_ids=[self_id],
+        spec_task=spec_task,
+        finalize_wait_task=finalize_wait_task,
+        awaiting_vad_timeout_task=awaiting_vad_timeout_task,
+        resume_end_timeout_task=resume_end_timeout_task,
+    )
+    hub._record_latency_stage(
+        channel="self",
+        utterance_id=self_id,
+        stage="speech_end",
+        timestamp=1.0,
+        publish_now=False,
+    )
+    hub._record_latency_stage(
+        channel="peer",
+        utterance_id=peer_id,
+        stage="speech_end",
+        timestamp=2.0,
+        publish_now=False,
+    )
+
+    try:
+        await hub.clear_language_runtime_state(channel="self")
+
+        assert hub.self_runtime.stt_task is stt_task
+        assert hub._stt_task is stt_task
+        assert hub.self_runtime.translation_tasks == {}
+        assert hub.self_runtime.merge_buffer is None
+        assert standalone_id in hub.self_runtime.utterances
+        assert hub.self_runtime.utterance_sources == {standalone_id: "Mic"}
+        assert hub.self_runtime.utterance_start_times == {}
+        assert hub.self_runtime.speech_ended_ids == set()
+        assert hub.self_runtime.translation_history == [ContextEntry("history", "ko", "en", 1.0)]
+        assert overlay_sink.active_self_overlay_metadata() is None
+        assert ("self", self_id) not in hub._latency_timelines
+        assert ("peer", peer_id) in hub._latency_timelines
+        assert translation_task.cancelled() is True
+        assert standalone_translation_task.cancelled() is True
+        assert spec_task.cancelled() is True
+        assert finalize_wait_task.cancelled() is True
+        assert awaiting_vad_timeout_task.cancelled() is True
+        assert resume_end_timeout_task.cancelled() is True
+        assert stt_task.done() is False
+    finally:
+        for task in all_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*all_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_language_change_updates_next_self_translation_request_target() -> None:
+    llm = RecordingLanguageLLM()
+    hub = ClientHub(stt=None, llm=llm, osc=RecordingOscQueue(), clock=FakeClock())
+
+    await hub._translate_text(uuid4(), "hello")
+    hub.target_language = "ja"
+    await hub.clear_language_runtime_state(channel="self")
+    await hub._translate_text(uuid4(), "world")
+
+    assert llm.calls == [
+        {
+            "text": "hello",
+            "source_language": "ko",
+            "target_language": "en",
+            "context": "",
+        },
+        {
+            "text": "world",
+            "source_language": "ko",
+            "target_language": "ja",
+            "context": "",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_replace_peer_stt_provider_running_restarts_event_loop_and_clears_runtime_state() -> (
     None
 ):
@@ -435,14 +704,22 @@ def test_prepare_llm_request_routes_context_logs_by_runtime_visibility() -> None
 
         basic_messages = _runtime_log_messages(basic_stream)
         detailed_messages = _runtime_log_messages(detailed_stream)
+        expected_context_chars = len('- [self, 1s ago] "안녕"')
+        expected_context_apply_log = (
+            "[Hub] Context apply: channel=self mode=local "
+            "request_chars=2 entries=1 self_entries=1 peer_entries=0 "
+            f"context_chars={expected_context_chars}"
+        )
 
         assert "[Hub] Context mode: channel=self mode=local" in basic_messages
-        assert "[Hub] Context apply: channel=self text='입력' entries=1" in basic_messages
-        assert '[Hub] Context[0]: [1s ago] "안녕"' in basic_messages
+        assert expected_context_apply_log in basic_messages
+        assert not any("입력" in message for message in basic_messages)
+        assert not any("안녕" in message for message in basic_messages)
 
         assert "[Hub] Context mode: channel=self mode=local" in detailed_messages
-        assert "[Hub] Context apply: channel=self text='입력' entries=1" in detailed_messages
-        assert '[Hub] Context[0]: [1s ago] "안녕"' in detailed_messages
+        assert expected_context_apply_log in detailed_messages
+        assert not any("입력" in message for message in detailed_messages)
+        assert not any("안녕" in message for message in detailed_messages)
     finally:
         basic_runtime_logging.close()
         detailed_runtime_logging.close()
@@ -608,6 +885,45 @@ async def test_translate_and_enqueue_emits_error_and_fallback_transcript() -> No
         assert (
             "[Hub] Translation failed (stage=final, channel=self): llm failed"
             in _runtime_log_messages(log_stream)
+        )
+    finally:
+        runtime_logging.close()
+
+
+@pytest.mark.asyncio
+async def test_translate_and_enqueue_logs_managed_auth_diagnostics() -> None:
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    hub = ClientHub(
+        stt=None,
+        llm=ManagedAuthFailingLLM(
+            diagnostics=ManagedOpenRouterReleaseDiagnostics(
+                operation="issue",
+                code="trial_unavailable",
+                error_class="retryable",
+                subcode="broker_backoff",
+                retry_after_ms=9000,
+                message="broker is temporarily unavailable",
+            )
+        ),
+        osc=RecordingOscQueue(),
+        clock=FakeClock(),
+        fallback_transcript_only=True,
+        runtime_logging=runtime_logging,
+    )
+    utterance_id = uuid4()
+
+    try:
+        await hub._translate_and_enqueue(utterance_id, "hello")
+
+        events = [await hub.ui_events.get() for _ in range(2)]
+        assert [event.type for event in events] == [UIEventType.ERROR, UIEventType.OSC_SENT]
+        assert events[0].runtime_log_handled is True
+        assert isinstance(events[0].payload, ManagedOpenRouterUserFacingError)
+        messages = _runtime_log_messages(log_stream)
+        assert any(
+            "operation=issue code=trial_unavailable class=retryable subcode=broker_backoff retry_after_ms=9000"
+            in message
+            for message in messages
         )
     finally:
         runtime_logging.close()
@@ -821,8 +1137,11 @@ async def test_handle_vad_event_forwards_resume_confirming_chunk_before_overlay_
         resume_utterance_id=resumed_utterance_id,
         resume_chunk_count=2,
     )
-    hub._overlay_active_self_text = "stale preview"
-    hub._overlay_active_self_secondary_text = "translated live"
+    sink.active_self_metadata = active_self_metadata_for_merge(
+        merge_id,
+        text="stale preview",
+        secondary_text="translated live",
+    )
 
     task = asyncio.create_task(hub.handle_vad_event(chunk))
     await sink.started.wait()
@@ -837,6 +1156,7 @@ async def test_handle_vad_event_forwards_resume_confirming_chunk_before_overlay_
     assert sink.events[-1].type == "self_active_update"
     assert sink.events[-1].text == "hello live"
     assert sink.events[-1].secondary_text == "translated live"
+    assert sink.events[-1].utterance_id == merge_id
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,10 @@ import {
   handleTrialStatus,
 } from './trial-handshake';
 import { handleOpenRouterIssue } from './openrouter-issue';
+import {
+  handleDiscordAuthStart,
+  handleDiscordOpenRouterIssue,
+} from './discord-managed-issue';
 
 export const app = new Hono<BrokerEnv>();
 
@@ -33,6 +37,8 @@ app.get('/v1/foundation', (c: Context<BrokerEnv>) => {
 app.post('/v1/trial/challenge', handleTrialChallenge);
 app.post('/v1/trial/challenge/verify', handleTrialChallengeVerify);
 app.get('/v1/trial/status', handleTrialStatus);
+app.post('/v1/auth/discord/start', handleDiscordAuthStart);
 app.post('/v1/providers/openrouter/issue', handleOpenRouterIssue);
+app.post('/v1/providers/openrouter/discord/issue', handleDiscordOpenRouterIssue);
 
 export default app;

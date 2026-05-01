@@ -13,22 +13,35 @@ from puripuly_heart.ui.theme import (
 
 # CJK (Chinese, Japanese, Korean) characters start at this Unicode point
 _CJK_START = 0x3000
+_CAPTION_TEXT_SIZE = 16
+_ARROW_SIZE_DELTA = 4
 
 
 def _weighted_len(text: str) -> int:
-    """Calculate weighted length for CJK-aware font sizing.
-
-    CJK characters are rendered ~2x wider than Latin characters,
-    so we weight them accordingly for accurate size calculations.
-    """
+    """Calculate weighted length for CJK-aware font sizing."""
     return sum(2 if ord(c) >= _CJK_START else 1 for c in text)
 
 
-class LanguageCard(ft.Container):
-    """Language pair display card with clickable source/target areas."""
+def _row_text_size(source: str, target: str) -> int:
+    total_len = _weighted_len(source) + _weighted_len(target)
+    if total_len < 16:
+        return 34
+    if total_len < 22:
+        return 30
+    if total_len < 28:
+        return 26
+    if total_len < 34:
+        return 22
+    if total_len < 42:
+        return 18
+    return 16
 
+
+class _LanguageRow(ft.Container):
     def __init__(
         self,
+        *,
+        label: str,
         on_source_click: Callable[[], None],
         on_target_click: Callable[[], None],
         on_swap_click: Callable[[], None] | None = None,
@@ -36,81 +49,160 @@ class LanguageCard(ft.Container):
         self._on_source_click = on_source_click
         self._on_target_click = on_target_click
         self._on_swap_click = on_swap_click
-        self._source = "Korean"
-        self._target = "English"
 
-        # Source language text
+        self._label_text = ft.Text(
+            label,
+            size=_CAPTION_TEXT_SIZE,
+            weight=ft.FontWeight.W_600,
+            color=COLOR_SECONDARY,
+            no_wrap=True,
+        )
         self._source_text = ft.Text(
-            self._source,
-            size=48,
+            "",
+            size=34,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL_DARK,
-            no_wrap=True,  # Prevent text from wrapping to next line
-            overflow=ft.TextOverflow.ELLIPSIS,  # Fallback: truncate with ... if still too long
+            text_align=ft.TextAlign.CENTER,
+            no_wrap=True,
+            overflow=ft.TextOverflow.ELLIPSIS,
         )
-
-        # Target language text
         self._target_text = ft.Text(
-            self._target,
-            size=48,
+            "",
+            size=34,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL_DARK,
-            no_wrap=True,  # Prevent text from wrapping to next line
-            overflow=ft.TextOverflow.ELLIPSIS,  # Fallback: truncate with ... if still too long
+            text_align=ft.TextAlign.CENTER,
+            no_wrap=True,
+            overflow=ft.TextOverflow.ELLIPSIS,
         )
-
-        # Arrow icon (clickable swap button)
         self._arrow_icon = ft.Icon(
             name=ft.Icons.ARROW_RIGHT_ALT,
-            size=48,
+            size=34 + _ARROW_SIZE_DELTA,
             color=COLOR_SECONDARY,
+        )
+
+        caption = ft.Container(
+            content=self._label_text,
+            alignment=ft.alignment.top_left,
+            padding=ft.padding.only(left=12),
         )
         self._arrow = ft.Container(
             content=self._arrow_icon,
-            padding=ft.padding.symmetric(vertical=12),
+            padding=ft.padding.symmetric(horizontal=6, vertical=8),
+            border_radius=14,
             on_click=lambda _: self._on_swap_click() if self._on_swap_click else None,
             on_hover=self._on_arrow_hover,
         )
-
-        # Source button area (left side)
         self._source_btn = ft.Container(
             content=self._source_text,
-            padding=ft.padding.symmetric(horizontal=12, vertical=12),
-            border_radius=12,
+            padding=ft.padding.symmetric(horizontal=12, vertical=10),
+            border_radius=14,
             bgcolor=ft.Colors.TRANSPARENT,
             on_hover=self._on_source_hover,
             on_click=lambda _: self._on_source_click(),
-            expand_loose=True,  # Fill space but give loose constraints to child
+            expand=True,
             alignment=ft.alignment.center,
         )
-
-        # Target button area (right side)
         self._target_btn = ft.Container(
             content=self._target_text,
-            padding=ft.padding.symmetric(horizontal=12, vertical=12),
-            border_radius=12,
+            padding=ft.padding.symmetric(horizontal=12, vertical=10),
+            border_radius=14,
             bgcolor=ft.Colors.TRANSPARENT,
             on_hover=self._on_target_hover,
             on_click=lambda _: self._on_target_click(),
-            expand_loose=True,  # Fill space but give loose constraints to child
+            expand=True,
             alignment=ft.alignment.center,
         )
 
-        # Main content layout
-        main_content = ft.Row(
-            [self._source_btn, self._arrow, self._target_btn],
-            alignment=ft.MainAxisAlignment.CENTER,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=16,
+        pair = ft.Container(
+            content=ft.Row(
+                [self._source_btn, self._arrow, self._target_btn],
+                spacing=10,
+                alignment=ft.MainAxisAlignment.CENTER,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            alignment=ft.alignment.center,
         )
 
-        # Use the reusable glow stack wrapper
-        # The content container handles formatting
+        row_content = ft.Column(
+            [caption, pair],
+            spacing=10,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
+
+        super().__init__(
+            content=row_content,
+            padding=ft.padding.symmetric(vertical=4),
+        )
+
+    def _on_source_hover(self, e):
+        self._source_text.color = COLOR_PRIMARY if e.data == "true" else COLOR_NEUTRAL_DARK
+        self._source_text.update()
+
+    def _on_target_hover(self, e):
+        self._target_text.color = COLOR_PRIMARY if e.data == "true" else COLOR_NEUTRAL_DARK
+        self._target_text.update()
+
+    def _on_arrow_hover(self, e):
+        self._arrow_icon.color = COLOR_PRIMARY if e.data == "true" else COLOR_SECONDARY
+        self._arrow_icon.update()
+
+    def set_label(self, label: str) -> None:
+        self._label_text.value = label
+        if self._label_text.page is not None:
+            self._label_text.update()
+
+    def set_languages(self, source: str, target: str) -> None:
+        size = _row_text_size(source, target)
+        self._source_text.size = size
+        self._target_text.size = size
+        self._arrow_icon.size = size + _ARROW_SIZE_DELTA
+        self._source_text.value = source
+        self._target_text.value = target
+
+        if self._source_text.page is not None:
+            self._source_text.update()
+        if self._target_text.page is not None:
+            self._target_text.update()
+        if self._arrow_icon.page is not None:
+            self._arrow_icon.update()
+
+
+class LanguageCard(ft.Container):
+    """Language display card with explicit self and peer rows."""
+
+    def __init__(
+        self,
+        on_self_source_click: Callable[[], None],
+        on_self_target_click: Callable[[], None],
+        on_self_swap_click: Callable[[], None] | None = None,
+        on_peer_source_click: Callable[[], None] = lambda: None,
+        on_peer_target_click: Callable[[], None] = lambda: None,
+        on_peer_swap_click: Callable[[], None] | None = None,
+    ):
+        self._self_row = _LanguageRow(
+            label="",
+            on_source_click=on_self_source_click,
+            on_target_click=on_self_target_click,
+            on_swap_click=on_self_swap_click,
+        )
+        self._peer_row = _LanguageRow(
+            label="",
+            on_source_click=on_peer_source_click,
+            on_target_click=on_peer_target_click,
+            on_swap_click=on_peer_swap_click,
+        )
+
         content_with_glow = create_glow_stack(
             ft.Container(
-                content=main_content,
+                content=ft.Column(
+                    [self._self_row, self._peer_row],
+                    spacing=20,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                ),
                 expand=True,
                 alignment=ft.alignment.center,
+                padding=16,
             )
         )
 
@@ -124,54 +216,16 @@ class LanguageCard(ft.Container):
             shadow=get_card_shadow(),
         )
 
-    def _on_source_hover(self, e):
-        """Handle hover state for source language."""
-        self._source_text.color = COLOR_PRIMARY if e.data == "true" else COLOR_NEUTRAL_DARK
-        self._source_text.update()
+    def set_row_labels(self, self_label: str, peer_label: str) -> None:
+        self._self_row.set_label(self_label)
+        self._peer_row.set_label(peer_label)
 
-    def _on_target_hover(self, e):
-        """Handle hover state for target language."""
-        self._target_text.color = COLOR_PRIMARY if e.data == "true" else COLOR_NEUTRAL_DARK
-        self._target_text.update()
-
-    def _on_arrow_hover(self, e):
-        """Handle hover state for swap arrow."""
-        self._arrow_icon.color = COLOR_PRIMARY if e.data == "true" else COLOR_SECONDARY
-        self._arrow_icon.update()
-
-    def set_languages(self, source: str, target: str):
-        """Update displayed languages with dynamic sizing."""
-        self._source = source
-        self._target = target
-
-        # Calculate weighted total length (CJK chars count as 2x)
-        total_len = _weighted_len(source) + _weighted_len(target)
-
-        # Fine-grained Sum-based Scaling (adjusted for weighted length)
-        if total_len < 16:
-            new_size = 48  # Safe zone (e.g., English ↔ Korean)
-        elif total_len < 22:
-            new_size = 40  # Caution zone
-        elif total_len < 28:
-            new_size = 34  # Danger zone
-        elif total_len < 34:
-            new_size = 28  # Extreme zone
-        elif total_len < 42:
-            new_size = 24  # Critical zone
-        else:
-            new_size = 20  # Fallback for very long names
-
-        # Apply size to text and arrow for synchronization
-        self._source_text.size = new_size
-        self._target_text.size = new_size
-        self._arrow_icon.size = new_size
-
-        self._source_text.value = source
-        self._target_text.value = target
-
-        if self._source_text.page is not None:
-            self._source_text.update()
-        if self._target_text.page is not None:
-            self._target_text.update()
-        if self._arrow_icon.page is not None:
-            self._arrow_icon.update()
+    def set_languages(
+        self,
+        self_source: str,
+        self_target: str,
+        peer_source: str,
+        peer_target: str,
+    ):
+        self._self_row.set_languages(self_source, self_target)
+        self._peer_row.set_languages(peer_source, peer_target)

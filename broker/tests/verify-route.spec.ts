@@ -26,6 +26,8 @@ interface VerifyBoundsCase {
   message: string;
 }
 
+type DiscordBlockedIssueStatus = 'issuing' | 'cleanup_required';
+
 function createDeferred(): {
   promise: Promise<void>;
   resolve: () => void;
@@ -37,6 +39,36 @@ function createDeferred(): {
     }),
     resolve,
   };
+}
+
+function readEntitlementSnapshot(
+  env: ReturnType<typeof createTestBrokerEnv>,
+  installationId: string,
+): Record<string, unknown> {
+  return env.__db
+    .prepare(
+      `SELECT status, managed_credential_ref, release_session_ref,
+              release_token_hash, release_token_expires_at,
+              verified_hardware_hash, verified_hardware_hash_salt_version,
+              discord_issue_status, discord_issue_reserved_at
+         FROM openrouter_entitlements
+        WHERE installation_id = ?`,
+    )
+    .get(installationId) as Record<string, unknown>;
+}
+
+function readInstallationChallengeSnapshot(
+  env: ReturnType<typeof createTestBrokerEnv>,
+  installationId: string,
+): Record<string, unknown> {
+  return env.__db
+    .prepare(
+      `SELECT challenge, challenge_expires_at, challenge_salt_version,
+              hardware_hash, hardware_hash_salt_version
+         FROM installations
+        WHERE installation_id = ?`,
+    )
+    .get(installationId) as Record<string, unknown>;
 }
 
 describe('POST /v1/trial/challenge/verify route contract', () => {
@@ -228,6 +260,141 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
     });
   });
 
+  it.each([
+    { discordIssueStatus: 'issuing', managedCredentialRef: null },
+    {
+      discordIssueStatus: 'cleanup_required',
+      managedCredentialRef: 'hash_orphaned_discord_cleanup_required_verify',
+    },
+  ] satisfies Array<{
+    discordIssueStatus: DiscordBlockedIssueStatus;
+    managedCredentialRef: string | null;
+  }>)(
+    'rejects verify release-token minting for Discord $discordIssueStatus pending_release without mutating entitlement metadata',
+    async ({ discordIssueStatus, managedCredentialRef }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+      const env = createTestBrokerEnv();
+      const keyPair = await createDeviceKeyPair();
+      const installationId = `install-discord-${discordIssueStatus}-verify-guard`;
+      const challenge = await issueChallenge({
+        env,
+        installationId,
+        devicePublicKey: keyPair.devicePublicKey,
+        appVersion: '1.2.3',
+      });
+      insertEntitlement(env, {
+        installation_id: installationId,
+        status: 'pending_release',
+        budget_usd: 0.07,
+        managed_credential_ref: managedCredentialRef,
+        release_session_ref: `release-session-${discordIssueStatus}-verify-guard`,
+        release_token_hash: `release-token-hash-${discordIssueStatus}-verify-guard`,
+        release_token_expires_at: '2026-04-08T06:10:00.000Z',
+        verified_hardware_hash: `hardware-hash-${discordIssueStatus}-verify-guard`,
+        verified_hardware_hash_salt_version: 7,
+        discord_issue_status: discordIssueStatus,
+        discord_issue_reserved_at: '2026-04-08T06:00:00.000Z',
+      });
+      const entitlementBefore = readEntitlementSnapshot(env, installationId);
+      const installationBefore = readInstallationChallengeSnapshot(env, installationId);
+      const requestBody = await signCanonicalVerifyRequest(keyPair.privateKey, {
+        installation_id: installationId,
+        device_public_key: keyPair.devicePublicKey,
+        challenge: challenge.challenge,
+        challenge_expires_at: challenge.challenge_expires_at,
+        hardware_hash: `hardware-hash-${discordIssueStatus}-verify-attempt`,
+        app_version: '1.2.4',
+        signed_at: '2026-04-08T06:00:30.000Z',
+      });
+
+      const response = await postVerify(env, requestBody);
+
+      expect(response.status).toBe(409);
+      const payload = (await response.json()) as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('release_token');
+      expect(readEntitlementSnapshot(env, installationId)).toEqual(entitlementBefore);
+      expect(readInstallationChallengeSnapshot(env, installationId)).toEqual(
+        installationBefore,
+      );
+    },
+  );
+
+  it('records verify outcome markers for both successful and failed verify attempts', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const env = createTestBrokerEnv();
+
+    const successKeyPair = await createDeviceKeyPair();
+    const successChallenge = await issueChallenge({
+      env,
+      installationId: 'install-verify-outcome-success',
+      devicePublicKey: successKeyPair.devicePublicKey,
+      appVersion: '1.2.3',
+    });
+    const successRequest = await signCanonicalVerifyRequest(successKeyPair.privateKey, {
+      installation_id: 'install-verify-outcome-success',
+      device_public_key: successKeyPair.devicePublicKey,
+      challenge: successChallenge.challenge,
+      challenge_expires_at: successChallenge.challenge_expires_at,
+      hardware_hash: 'hardware-hash-verify-outcome-success',
+      app_version: '1.2.3',
+      signed_at: '2026-04-08T06:00:30.000Z',
+    });
+
+    const successResponse = await postVerify(env, successRequest);
+    expect(successResponse.status).toBe(200);
+
+    const failKeyPair = await createDeviceKeyPair();
+    const failChallenge = await issueChallenge({
+      env,
+      installationId: 'install-verify-outcome-fail',
+      devicePublicKey: failKeyPair.devicePublicKey,
+      appVersion: '1.2.3',
+    });
+    insertEntitlement(env, {
+      installation_id: 'install-verify-outcome-fail',
+      status: 'active',
+      budget_usd: 0.07,
+      managed_credential_ref: 'existing-managed-key',
+      issued_at: '2026-04-01T00:00:00.000Z',
+      expires_at: '2026-07-01T00:00:00.000Z',
+    });
+    const failRequest = await signCanonicalVerifyRequest(failKeyPair.privateKey, {
+      installation_id: 'install-verify-outcome-fail',
+      device_public_key: failKeyPair.devicePublicKey,
+      challenge: failChallenge.challenge,
+      challenge_expires_at: failChallenge.challenge_expires_at,
+      hardware_hash: 'hardware-hash-verify-outcome-fail',
+      app_version: '1.2.3',
+      signed_at: '2026-04-08T06:00:30.000Z',
+    });
+
+    const failResponse = await postVerify(env, failRequest);
+    expect(failResponse.status).toBe(409);
+
+    const endpointCounts = Object.fromEntries(
+      (
+        env.__db
+          .prepare(
+            `SELECT endpoint, COUNT(*) AS count
+               FROM broker_request_events
+              GROUP BY endpoint`,
+          )
+          .all() as Array<{ endpoint: string; count: number }>
+      ).map(({ endpoint, count }) => [endpoint, Number(count)]),
+    );
+
+    expect(endpointCounts).toMatchObject({
+      'POST /v1/trial/challenge': 2,
+      'POST /v1/trial/challenge/verify': 2,
+      'POST /v1/trial/challenge/verify/success': 1,
+      'POST /v1/trial/challenge/verify/fail': 1,
+    });
+  });
+
   it('rejects non-object JSON bodies with invalid_request instead of throwing', async () => {
     const env = createTestBrokerEnv();
     const response = await postVerify(env, 'null');
@@ -393,34 +560,36 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
 
-    let armConsumePause = false;
-    let pausedOnce = false;
-    let installationReadCount = 0;
-    const consumeStarted = createDeferred();
-    const secondReadStarted = createDeferred();
+    let armRaceHooks = false;
+    let pausedConsumeOnce = false;
+    let pendingReleaseClearCount = 0;
+    const consumePaused = createDeferred();
     const releaseConsume = createDeferred();
+    const staleClearPaused = createDeferred();
+    const releaseStaleClear = createDeferred();
     const env = createTestBrokerEnv({
-      beforeFirst: async ({ sql }) => {
+      beforeRun: async ({ sql, params }) => {
         if (
-          armConsumePause &&
-          sql.includes('FROM installations') &&
-          sql.includes('WHERE installation_id = ?')
+          armRaceHooks &&
+          sql.includes('UPDATE openrouter_entitlements') &&
+          sql.includes('SET release_session_ref = NULL') &&
+          params[0] === 'install-race'
         ) {
-          installationReadCount += 1;
-          if (installationReadCount === 2) {
-            secondReadStarted.resolve();
+          pendingReleaseClearCount += 1;
+          if (pendingReleaseClearCount === 2) {
+            staleClearPaused.resolve();
+            await releaseStaleClear.promise;
           }
         }
-      },
-      beforeRun: async ({ sql }) => {
+
         if (
-          armConsumePause &&
-          !pausedOnce &&
+          armRaceHooks &&
+          !pausedConsumeOnce &&
           sql.includes('UPDATE installations') &&
           sql.includes('challenge = NULL')
         ) {
-          pausedOnce = true;
-          consumeStarted.resolve();
+          pausedConsumeOnce = true;
+          consumePaused.resolve();
           await releaseConsume.promise;
         }
       },
@@ -461,18 +630,17 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
       signed_at: '2026-04-08T06:00:40.000Z',
     });
 
-    armConsumePause = true;
-    installationReadCount = 0;
+    armRaceHooks = true;
+    pendingReleaseClearCount = 0;
     const firstRacingResponsePromise = postVerify(env, racingRequest);
-    await consumeStarted.promise;
+    await consumePaused.promise;
     const secondRacingResponsePromise = postVerify(env, racingRequest);
-    await secondReadStarted.promise;
+    await staleClearPaused.promise;
     releaseConsume.resolve();
 
-    const [firstRacingResponse, secondRacingResponse] = await Promise.all([
-      firstRacingResponsePromise,
-      secondRacingResponsePromise,
-    ]);
+    const firstRacingResponse = await firstRacingResponsePromise;
+    releaseStaleClear.resolve();
+    const secondRacingResponse = await secondRacingResponsePromise;
     const responses = [firstRacingResponse, secondRacingResponse];
     const statuses = responses.map(({ status }) => status).sort();
 
@@ -483,7 +651,11 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
 
     expect(successResponse).toBeDefined();
     expect(conflictResponse).toBeDefined();
-    await expect(successResponse!.json()).resolves.toEqual(
+    const successPayload = (await successResponse!.json()) as {
+      release_token: string;
+      release_token_expires_at: string;
+    };
+    expect(successPayload).toEqual(
       expect.objectContaining({
         release_token: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
         release_token_expires_at: '2026-04-08T06:15:00.000Z',
@@ -523,7 +695,9 @@ describe('POST /v1/trial/challenge/verify route contract', () => {
 
     expect(entitlement.status).toBe('pending_release');
     expect(entitlement.release_session_ref).toBeTypeOf('string');
-    expect(entitlement.release_token_hash).toBeTypeOf('string');
+    await expect(sha256Base64Url(successPayload.release_token)).resolves.toBe(
+      entitlement.release_token_hash,
+    );
     expect(entitlement.release_token_expires_at).toBe('2026-04-08T06:15:00.000Z');
   });
 

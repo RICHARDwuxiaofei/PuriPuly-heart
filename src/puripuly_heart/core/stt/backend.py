@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import AsyncIterator, Protocol
+from typing import AsyncIterator, Protocol, runtime_checkable
+
+import numpy as np
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +20,11 @@ class STTBackendSession(Protocol):
     async def stop(self) -> None: ...
     async def close(self) -> None: ...
     async def events(self) -> AsyncIterator[STTBackendTranscriptEvent]: ...
+
+
+@runtime_checkable
+class STTBackendFloat32Session(Protocol):
+    async def send_audio_f32(self, samples_f32: np.ndarray) -> None: ...
 
 
 class STTBackend(Protocol):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import uuid
@@ -24,6 +25,7 @@ from puripuly_heart.config.settings import (
 from puripuly_heart.core.managed_identity import (
     MANAGED_DEVICE_PRIVATE_KEY_SECRET,
     MANAGED_DEVICE_PUBLIC_KEY_SECRET,
+    canonical_discord_issue_payload,
     canonical_issue_payload,
     canonical_status_payload,
     canonical_verify_payload,
@@ -34,6 +36,9 @@ from puripuly_heart.core.managed_identity import (
 from puripuly_heart.core.openrouter_credentials import (
     OPENROUTER_BYOK_API_KEY_SECRET,
     OPENROUTER_MANAGED_API_KEY_SECRET,
+    OPENROUTER_MANAGED_USER_ID_SECRET,
+    OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+    load_managed_openrouter_user_identifier,
 )
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 
@@ -75,6 +80,9 @@ def test_ensure_managed_identity_bundle_generates_uuid7_and_keeps_secret_boundar
     ).decode("ascii").rstrip("=")
     assert persisted_snapshots == [persisted]
     assert persisted["managed_identity"] == {
+        "active_managed_credential_ref": None,
+        "active_managed_expires_at": None,
+        "founder_letter_seen_credential_ref": None,
         "installation_id": bundle.installation_id,
         "release_token": None,
         "release_token_expires_at": None,
@@ -141,6 +149,8 @@ def test_regenerate_managed_identity_bundle_rotates_bundle_and_clears_managed_re
     settings.managed_identity.verified_hardware_hash_salt_version = 7
     store.set(OPENROUTER_BYOK_API_KEY_SECRET, "byok-key")
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")
+    store.set(OPENROUTER_MANAGED_USER_ID_SECRET, "user-123")
+    store.set(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET, first.installation_id)
 
     second = regenerate_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
 
@@ -152,6 +162,9 @@ def test_regenerate_managed_identity_bundle_rotates_bundle_and_clears_managed_re
     assert settings.managed_identity.verified_hardware_hash_salt_version is None
     assert store.get(OPENROUTER_BYOK_API_KEY_SECRET) == "byok-key"
     assert store.get(OPENROUTER_MANAGED_API_KEY_SECRET) is None
+    assert store.get(OPENROUTER_MANAGED_USER_ID_SECRET) is None
+    assert store.get(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET) is None
+    assert load_managed_openrouter_user_identifier(settings, secrets=store) is None
 
 
 def test_corrupted_secret_material_regenerates_bundle_and_clears_release_state() -> None:
@@ -274,6 +287,8 @@ def test_regeneration_rolls_back_secret_and_settings_when_persist_fails(tmp_path
     )
     old_private_key = store.get(MANAGED_DEVICE_PRIVATE_KEY_SECRET)
     store.set(OPENROUTER_MANAGED_API_KEY_SECRET, "managed-key")
+    store.set(OPENROUTER_MANAGED_USER_ID_SECRET, "user-123")
+    store.set(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET, first.installation_id)
     settings.managed_identity.release_token = "release-1"
     settings.managed_identity.release_token_expires_at = "2026-04-08T06:00:45.000Z"
     save_settings(path, settings)
@@ -292,11 +307,15 @@ def test_regeneration_rolls_back_secret_and_settings_when_persist_fails(tmp_path
     assert settings.managed_identity.release_token_expires_at == "2026-04-08T06:00:45.000Z"
     assert store.get(MANAGED_DEVICE_PRIVATE_KEY_SECRET) == old_private_key
     assert store.get(OPENROUTER_MANAGED_API_KEY_SECRET) == "managed-key"
+    assert store.get(OPENROUTER_MANAGED_USER_ID_SECRET) == "user-123"
+    assert store.get(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET) == first.installation_id
+    assert load_managed_openrouter_user_identifier(settings, secrets=store) == "user-123"
     assert json.loads(path.read_text(encoding="utf-8")) == persisted_before
     restored = load_settings(path)
     restored_bundle = ensure_managed_identity_bundle(restored, store)
     assert restored_bundle.installation_id == first.installation_id
     assert restored_bundle.device_public_key == first.device_public_key
+    assert load_managed_openrouter_user_identifier(restored, secrets=store) == "user-123"
 
 
 @pytest.mark.parametrize(
@@ -350,6 +369,50 @@ def test_issue_payload_matches_landed_broker_field_order() -> None:
                 "1",
                 "google/gemma-4-26b-a4b-it",
                 "2026-04-08T06:00:45.000Z",
+            ]
+        )
+    ).encode("utf-8")
+
+
+def test_discord_issue_payload_matches_landed_broker_field_order_and_hashes_code() -> None:
+    code_hash = base64.urlsafe_b64encode(
+        hashlib.sha256("discord-oauth-code".encode("utf-8")).digest()
+    ).decode("ascii").rstrip("=")
+
+    payload = canonical_discord_issue_payload(
+        installation_id="01961ad7-a7c1-7000-8000-0123456789ab",
+        device_public_key="device-public-key",
+        state="discord-state-1",
+        code="discord-oauth-code",
+        redirect_uri="http://127.0.0.1:62187/discord/callback",
+        hardware_hash="hardware-hash",
+        hardware_hash_salt_version=7,
+        app_version="2.0.0",
+        reason="llm_start",
+        budget_usd=0.07,
+        model="google/gemma-4-26b-a4b-it",
+        issue_nonce="issue-nonce-1",
+        signed_at="2026-04-30T06:00:30.000Z",
+    )
+
+    assert payload == (
+        "\n".join(
+            [
+                "POST",
+                "/v1/providers/openrouter/discord/issue",
+                "01961ad7-a7c1-7000-8000-0123456789ab",
+                "device-public-key",
+                "discord-state-1",
+                code_hash,
+                "http://127.0.0.1:62187/discord/callback",
+                "hardware-hash",
+                "7",
+                "2.0.0",
+                "llm_start",
+                "0.07",
+                "google/gemma-4-26b-a4b-it",
+                "issue-nonce-1",
+                "2026-04-30T06:00:30.000Z",
             ]
         )
     ).encode("utf-8")
@@ -435,3 +498,59 @@ def test_bundle_signing_matches_canonical_payload_contracts() -> None:
     )
     assert signed_issue["hardware_hash"] == "hardware-hash"
     public_key.verify(decode_base64url(signed_issue["signature"]), issue_payload)
+
+
+def test_bundle_signs_discord_issue_request_without_sending_code_hash_field() -> None:
+    settings = AppSettings()
+    store = InMemorySecretStore()
+    bundle = ensure_managed_identity_bundle(settings, store, persist_settings=lambda _: None)
+    public_key = Ed25519PublicKey.from_public_bytes(decode_base64url(bundle.device_public_key))
+
+    payload = canonical_discord_issue_payload(
+        installation_id=bundle.installation_id,
+        device_public_key=bundle.device_public_key,
+        state="discord-state-1",
+        code="discord-oauth-code",
+        redirect_uri="http://127.0.0.1:62187/discord/callback",
+        hardware_hash="hardware-hash",
+        hardware_hash_salt_version=7,
+        app_version="2.0.0",
+        reason="llm_start",
+        budget_usd=0.07,
+        model="google/gemma-4-26b-a4b-it",
+        issue_nonce="issue-nonce-1",
+        signed_at="2026-04-30T06:00:30.000Z",
+    )
+    signed_request = bundle.sign_discord_issue_request(
+        code="discord-oauth-code",
+        state="discord-state-1",
+        redirect_uri="http://127.0.0.1:62187/discord/callback",
+        hardware_hash="hardware-hash",
+        hardware_hash_salt_version=7,
+        app_version="2.0.0",
+        reason="llm_start",
+        budget_usd=0.07,
+        model="google/gemma-4-26b-a4b-it",
+        issue_nonce="issue-nonce-1",
+        signed_at="2026-04-30T06:00:30.000Z",
+    )
+
+    assert signed_request == {
+        "code": "discord-oauth-code",
+        "state": "discord-state-1",
+        "installation_id": bundle.installation_id,
+        "device_public_key": bundle.device_public_key,
+        "redirect_uri": "http://127.0.0.1:62187/discord/callback",
+        "hardware_hash": "hardware-hash",
+        "hardware_hash_salt_version": 7,
+        "app_version": "2.0.0",
+        "reason": "llm_start",
+        "budget_usd": 0.07,
+        "model": "google/gemma-4-26b-a4b-it",
+        "issue_nonce": "issue-nonce-1",
+        "signed_at": "2026-04-30T06:00:30.000Z",
+        "signature_alg": "ed25519",
+        "signature": signed_request["signature"],
+    }
+    assert "code_hash" not in signed_request
+    public_key.verify(decode_base64url(signed_request["signature"]), payload)

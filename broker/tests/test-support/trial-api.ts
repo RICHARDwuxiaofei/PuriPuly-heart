@@ -7,6 +7,12 @@ export interface ChallengeResponse {
   challenge_expires_at: string;
 }
 
+export interface TestExecutionContext {
+  props: unknown;
+  waitUntil(promise: Promise<unknown>): void;
+  passThroughOnException(): void;
+}
+
 export async function issueChallenge(options: {
   env: TestBrokerEnv;
   installationId: string;
@@ -79,6 +85,59 @@ export async function postIssue(
 ): Promise<Response> {
   return app.request(
     'http://broker.test/v1/providers/openrouter/issue',
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    },
+    env,
+  );
+}
+
+export async function postIssueWithExecutionContext(
+  env: TestBrokerEnv,
+  body: object | string,
+  executionCtx: TestExecutionContext,
+): Promise<Response> {
+  return app.fetch(
+    new Request('http://broker.test/v1/providers/openrouter/issue', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    }),
+    env,
+    executionCtx,
+  );
+}
+
+export async function postDiscordStart(
+  env: TestBrokerEnv,
+  body: object | string,
+): Promise<Response> {
+  return app.request(
+    'http://broker.test/v1/auth/discord/start',
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'cf-connecting-ip': '203.0.113.20',
+      },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    },
+    env,
+  );
+}
+
+export async function postDiscordIssue(
+  env: TestBrokerEnv,
+  body: object | string,
+): Promise<Response> {
+  return app.request(
+    'http://broker.test/v1/providers/openrouter/discord/issue',
     {
       method: 'POST',
       headers: {

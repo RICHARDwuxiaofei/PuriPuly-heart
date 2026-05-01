@@ -109,7 +109,10 @@ class PeerChannelRuntime:
             self._desired_active = desired_active
             if not desired_active:
                 self._state = PeerChannelRuntimeState.STOPPING
-            elif self._signature == config.runtime_signature and self._state == PeerChannelRuntimeState.RUNNING:
+            elif (
+                self._signature == config.runtime_signature
+                and self._state == PeerChannelRuntimeState.RUNNING
+            ):
                 return
             else:
                 self._state = PeerChannelRuntimeState.STARTING
@@ -258,6 +261,15 @@ class PeerChannelRuntime:
     ) -> None:
         _ = exc
         target_generation = self._generation if generation is None else generation
+        async with self._lock:
+            if self._is_superseded(target_generation):
+                return
+            if (
+                self._desired_active
+                and self._state == PeerChannelRuntimeState.RUNNING
+                and self._stt is not None
+            ):
+                return
         await self._mark_faulted_if_current(target_generation, detach_provider=True)
 
     async def _mark_faulted_if_current(self, generation: int, *, detach_provider: bool) -> None:

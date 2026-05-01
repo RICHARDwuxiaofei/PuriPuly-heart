@@ -6,7 +6,7 @@ from importlib import resources
 import flet as ft
 
 from puripuly_heart import __version__
-from puripuly_heart.ui.components.glow import GLOW_CARD, create_glow_stack
+from puripuly_heart.ui.components.shared_card_wrapper import SharedCardWrapper
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import (
     COLOR_DIVIDER,
@@ -14,8 +14,9 @@ from puripuly_heart.ui.theme import (
     COLOR_ON_BACKGROUND,
     COLOR_PRIMARY,
     COLOR_SURFACE,
-    get_card_shadow,
 )
+
+_CENTER_ALIGNMENT = ft.alignment.Alignment(0, 0)
 
 
 def _load_third_party_notices() -> str:
@@ -64,7 +65,6 @@ class AboutView(ft.Column):
                 spacing=16,
                 expand=True,
             ),
-            height=280,
         )
 
         self.controls = [
@@ -85,7 +85,7 @@ class AboutView(ft.Column):
                     weight=ft.FontWeight.BOLD,
                     color=COLOR_PRIMARY,
                 ),
-                alignment=ft.alignment.center,
+                alignment=_CENTER_ALIGNMENT,
             )
         )
 
@@ -104,7 +104,7 @@ class AboutView(ft.Column):
                 color=COLOR_ON_BACKGROUND,
                 text_align=ft.TextAlign.CENTER,
             ),
-            alignment=ft.alignment.center,
+            alignment=_CENTER_ALIGNMENT,
             expand=True,
             on_click=lambda _: webbrowser.open("https://github.com/kapitalismho/PuriPuly-heart"),
             on_hover=self._on_version_hover,
@@ -122,7 +122,6 @@ class AboutView(ft.Column):
                 spacing=16,
                 expand=True,
             ),
-            height=280,
         )
 
     def _build_credits_card(self) -> ft.Control:
@@ -155,7 +154,7 @@ class AboutView(ft.Column):
                 weight=ft.FontWeight.BOLD,
                 color=COLOR_ON_BACKGROUND,
             ),
-            on_click=lambda _: webbrowser.open("https://discord.com/users/377814093182140416"),
+            on_click=lambda _: webbrowser.open("https://x.com/kapitalismho"),
             on_hover=self._on_name_hover,
         )
 
@@ -262,7 +261,7 @@ class AboutView(ft.Column):
             spacing=8,
         )
 
-        return self._wrap_card(card_content)
+        return self._wrap_card(card_content, height=None)
 
     def _build_licenses_card(self) -> ft.Control:
         """Build Open Source Licenses section."""
@@ -293,33 +292,17 @@ class AboutView(ft.Column):
             ],
         )
 
-        return self._wrap_card(card_content)
+        return self._wrap_card(card_content, height=None)
 
-    def _wrap_card(self, content: ft.Control) -> ft.Control:
-        """Wrap content in a styled card with glow effect.
-
-        Uses the same pattern as Dashboard cards: glow stack is inside the
-        container as content, with HARD_EDGE clipping to contain the glow.
-        """
-        # Wrap content in glow stack (glow layer beneath, content on top)
-        content_with_glow = create_glow_stack(
-            ft.Container(
-                content=content,
-                expand=True,
-                padding=24,
-            ),
-            config=GLOW_CARD,
-        )
-
-        # Outer container provides styling and clips the glow
-        return ft.Container(
-            content=content_with_glow,
-            bgcolor=COLOR_SURFACE,
-            border_radius=16,
-            border=ft.border.all(1, ft.Colors.with_opacity(0.4, ft.Colors.WHITE)),
-            expand=True,
-            clip_behavior=ft.ClipBehavior.HARD_EDGE,
-            shadow=get_card_shadow(),
+    def _wrap_card(
+        self,
+        content: ft.Control,
+        *,
+        height: float | int | None = SharedCardWrapper.DEFAULT_HEIGHT,
+    ) -> SharedCardWrapper:
+        return SharedCardWrapper(
+            content,
+            height=height,
         )
 
     def _on_name_hover(self, e):

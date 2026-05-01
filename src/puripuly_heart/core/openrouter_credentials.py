@@ -9,6 +9,9 @@ from puripuly_heart.core.storage.secrets import SecretStore
 
 OPENROUTER_BYOK_API_KEY_SECRET = "openrouter_api_key"
 OPENROUTER_MANAGED_API_KEY_SECRET = "openrouter_managed_api_key"
+OPENROUTER_MANAGED_USER_ID_SECRET = "openrouter_managed_user_id"
+OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET = "openrouter_managed_user_installation_id"
+OPENROUTER_MANAGED_USER_ID_MAX_LENGTH = 256
 OPENROUTER_BYOK_API_KEY_ENV = "OPENROUTER_API_KEY"
 
 
@@ -73,6 +76,68 @@ def require_openrouter_execution_api_key(settings: AppSettings, *, secrets: Secr
     raise ValueError(
         f"Missing secret `{OPENROUTER_BYOK_API_KEY_SECRET}` (or env var {OPENROUTER_BYOK_API_KEY_ENV})"
     )
+
+
+def normalize_managed_openrouter_user_identifier(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized or len(normalized) > OPENROUTER_MANAGED_USER_ID_MAX_LENGTH:
+        return None
+    return normalized
+
+
+def load_managed_openrouter_user_identifier(
+    settings: AppSettings,
+    *,
+    secrets: SecretStore,
+) -> str | None:
+    current_installation_id = _normalize_secret(settings.managed_identity.installation_id)
+    if current_installation_id is None:
+        return None
+
+    try:
+        cached_user_id = normalize_managed_openrouter_user_identifier(
+            secrets.get(OPENROUTER_MANAGED_USER_ID_SECRET)
+        )
+        cached_installation_id = _normalize_secret(
+            secrets.get(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET)
+        )
+    except Exception:
+        return None
+
+    if cached_user_id is None or cached_installation_id != current_installation_id:
+        return None
+    return cached_user_id
+
+
+def best_effort_store_managed_openrouter_user_identifier(
+    settings: AppSettings,
+    *,
+    secrets: SecretStore,
+    openrouter_user_id: object,
+) -> None:
+    normalized_user_id = normalize_managed_openrouter_user_identifier(openrouter_user_id)
+    current_installation_id = _normalize_secret(settings.managed_identity.installation_id)
+    if normalized_user_id is None or current_installation_id is None:
+        return
+
+    try:
+        secrets.set(OPENROUTER_MANAGED_USER_ID_SECRET, normalized_user_id)
+        secrets.set(OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET, current_installation_id)
+    except Exception:
+        best_effort_clear_managed_openrouter_user_identifier(secrets)
+
+
+def best_effort_clear_managed_openrouter_user_identifier(secrets: SecretStore) -> None:
+    for key in (
+        OPENROUTER_MANAGED_USER_ID_SECRET,
+        OPENROUTER_MANAGED_USER_INSTALLATION_ID_SECRET,
+    ):
+        try:
+            secrets.delete(key)
+        except Exception:
+            pass
 
 
 def clear_temporary_managed_release_state(settings: AppSettings) -> None:

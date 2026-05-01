@@ -6,6 +6,13 @@
 
 ## Change logs
 
+## License and notices
+
+- Project license: [AGPL-3.0-or-later](https://github.com/kapitalismho/PuriPuly-heart/blob/main/LICENSE)
+- Source code: https://github.com/kapitalismho/PuriPuly-heart
+- Third-party notices: [`src/puripuly_heart/data/THIRD_PARTY_NOTICES.txt`](https://github.com/kapitalismho/PuriPuly-heart/blob/main/src/puripuly_heart/data/THIRD_PARTY_NOTICES.txt)
+- Previously published MIT versions remain available under MIT.
+
 ---
 **If PuriPuly has made your world a bit wider,
 please consider hitting the ⭐ Star button at the top of the GitHub page — it would mean a lot**

@@ -25,11 +25,36 @@ def _collect_click_handlers(control) -> list:
     return handlers
 
 
+def _row_cards(container) -> list:
+    return [child.content for child in container.content.controls]
+
+
+def test_about_view_uses_shared_card_wrapper_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    from puripuly_heart.ui.components.shared_card_wrapper import SharedCardWrapper
+
+    monkeypatch.setattr(about_module, "_get_profile_image_path", lambda: "")
+    monkeypatch.setattr(about_module, "_load_third_party_notices", lambda: "licenses")
+
+    view = AboutView()
+
+    default_cards = [*_row_cards(view.controls[0]), *_row_cards(view.controls[1])]
+    full_width_cards = [view.controls[2], view.controls[3]]
+
+    assert len(default_cards) == 4
+    assert all(isinstance(card, SharedCardWrapper) for card in default_cards)
+    assert {card.height for card in default_cards} == {300}
+    assert all(card.expand is True for card in default_cards)
+    assert all(isinstance(card, SharedCardWrapper) for card in full_width_cards)
+    assert all(card.height is None for card in full_width_cards)
+    assert all(card.expand is False for card in full_width_cards)
+    assert all(card.content.expand is False for card in full_width_cards)
+    assert all(card.content.controls[1].expand is False for card in full_width_cards)
+
+
 def test_about_view_link_actions_handle_missing_page_gracefully(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     opened: list[str] = []
-    monkeypatch.setattr(about_module, "create_glow_stack", lambda content, config=None: content)
     monkeypatch.setattr(about_module, "_get_profile_image_path", lambda: "")
     monkeypatch.setattr(about_module, "_load_third_party_notices", lambda: "licenses")
     monkeypatch.setattr(about_module.webbrowser, "open", lambda url: opened.append(url))
@@ -43,14 +68,13 @@ def test_about_view_link_actions_handle_missing_page_gracefully(
         handler(None)
 
     assert "https://github.com/kapitalismho/PuriPuly-heart" in opened
-    assert "https://discord.com/users/377814093182140416" in opened
+    assert "https://x.com/kapitalismho" in opened
     assert "https://github.com/misyaguziya/VRCT" in opened
     assert "https://github.com/naeruru/mimiuchi" in opened
     assert "https://github.com/febilly/Yakutan" in opened
 
 
 def test_about_view_hover_handlers_and_locale_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(about_module, "create_glow_stack", lambda content, config=None: content)
     monkeypatch.setattr(about_module, "_get_profile_image_path", lambda: "")
     monkeypatch.setattr(about_module, "_load_third_party_notices", lambda: "licenses")
     monkeypatch.setattr(AboutView, "update", lambda self: setattr(self, "_updated", True))

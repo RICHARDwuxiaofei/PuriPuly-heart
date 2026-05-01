@@ -4,14 +4,18 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from puripuly_heart.app.headless_mic import HeadlessMicInitializationError, HeadlessMicRunner
 from puripuly_heart.app.headless_stdin import HeadlessStdinRunner
 from puripuly_heart.app.local_qwen_runtime_check import run_local_qwen_runtime_check
+from puripuly_heart.app.soxr_runtime_check import run_soxr_runtime_check
 from puripuly_heart.app.wiring import create_llm_provider, create_secret_store
 from puripuly_heart.config.paths import default_settings_path, default_vad_model_path
-from puripuly_heart.config.settings import AppSettings, load_settings
+from puripuly_heart.config.settings import AppSettings, load_settings, new_settings_for_first_run
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.runtime_logging import configure_main_logging
+from puripuly_heart.core.soxr_runtime import (
+    SoxrRuntimeAvailabilityError,
+    ensure_soxr_runtime_available_for_startup,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,6 +27,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=default_settings_path(),
         help="Path to settings JSON (default: user config dir)",
+    )
+    parser.add_argument(
+        "--debug-ui-preview",
+        action="store_true",
+        default=False,
+        help="Show developer-only GUI preview controls for hidden UI states",
     )
 
     sub = parser.add_subparsers(dest="command")
@@ -54,8 +64,18 @@ def build_parser() -> argparse.ArgumentParser:
         "local-qwen-runtime-check",
         help="Verify the Local Qwen Windows runtime DLL directory",
     )
+    sub.add_parser(
+        "soxr-runtime-check",
+        help="Verify the packaged soxr runtime contract and smoke resample",
+    )
 
-    sub.add_parser("run-gui", help="Run the Graphical User Interface (Flet)")
+    run_gui = sub.add_parser("run-gui", help="Run the Graphical User Interface (Flet)")
+    run_gui.add_argument(
+        "--debug-ui-preview",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Show developer-only GUI preview controls for hidden UI states",
+    )
 
     return parser
 
@@ -63,6 +83,38 @@ def build_parser() -> argparse.ArgumentParser:
 def _print_initialization_error(component: str, exc: Exception) -> int:
     print(f"Error: failed to initialize {component}: {exc}", flush=True)
     return 2
+
+
+def _print_runtime_error(component: str, exc: Exception) -> int:
+    print(f"Error: failed to verify {component}: {exc}", flush=True)
+    return 2
+
+
+def _load_headless_mic_types():
+    from puripuly_heart.app.headless_mic import HeadlessMicInitializationError, HeadlessMicRunner
+
+    return HeadlessMicRunner, HeadlessMicInitializationError
+
+
+def _requires_soxr_runtime_startup_check(args: argparse.Namespace) -> bool:
+    return args.command == "run-mic"
+
+
+def _run_gui(config_path: Path, *, debug_ui_preview: bool) -> int:
+    import flet as ft
+
+    from puripuly_heart.ui.app import main_gui
+    from puripuly_heart.ui.fonts import assets_dir
+
+    async def _target(page: ft.Page):
+        return await main_gui(
+            page,
+            config_path=config_path,
+            debug_ui_preview=debug_ui_preview,
+        )
+
+    ft.app(target=_target, assets_dir=str(assets_dir()))
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,22 +128,23 @@ def main(argv: list[str] | None = None) -> int:
         print(__version__)
         return 0
 
+    try:
+        if _requires_soxr_runtime_startup_check(args):
+            ensure_soxr_runtime_available_for_startup()
+    except SoxrRuntimeAvailabilityError as exc:
+        return _print_runtime_error("packaged soxr runtime", exc)
+
     if args.command == "run-gui":
-        import flet as ft
-
-        from puripuly_heart.ui.app import main_gui
-        from puripuly_heart.ui.fonts import assets_dir
-
-        config_path = args.config
-
-        async def _target(page: ft.Page):
-            return await main_gui(page, config_path=config_path)
-
-        ft.app(target=_target, assets_dir=str(assets_dir()))
-        return 0
+        return _run_gui(
+            args.config,
+            debug_ui_preview=bool(getattr(args, "debug_ui_preview", False)),
+        )
 
     if args.command == "local-qwen-runtime-check":
         return run_local_qwen_runtime_check()
+
+    if args.command == "soxr-runtime-check":
+        return run_soxr_runtime_check()
 
     settings = _load_settings_or_default(args.config)
 
@@ -122,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(runner.run())
 
     if args.command == "run-mic":
+        HeadlessMicRunner, HeadlessMicInitializationError = _load_headless_mic_types()
         runner = HeadlessMicRunner(
             settings=settings,
             config_path=args.config,
@@ -135,18 +189,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Default: run GUI when no command specified (e.g., double-clicking EXE)
     if args.command is None:
-        import flet as ft
-
-        from puripuly_heart.ui.app import main_gui
-        from puripuly_heart.ui.fonts import assets_dir
-
-        config_path = args.config
-
-        async def _target(page: ft.Page):
-            return await main_gui(page, config_path=config_path)
-
-        ft.app(target=_target, assets_dir=str(assets_dir()))
-        return 0
+        return _run_gui(
+            args.config,
+            debug_ui_preview=bool(getattr(args, "debug_ui_preview", False)),
+        )
 
     parser.print_help()
     return 2
@@ -155,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
 def _load_settings_or_default(path: Path) -> AppSettings:
     if path.exists():
         return load_settings(path)
-    return AppSettings()
+    return new_settings_for_first_run()
 
 
 if __name__ == "__main__":

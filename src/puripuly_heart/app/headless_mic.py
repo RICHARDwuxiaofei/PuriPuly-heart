@@ -14,22 +14,23 @@ from puripuly_heart.app.wiring import (
     create_secret_store,
     create_stt_backend,
 )
+from puripuly_heart.config.audio_host_api import normalize_input_host_api
 from puripuly_heart.config.paths import default_vad_model_path
 from puripuly_heart.config.settings import AppSettings
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
-from puripuly_heart.core.audio.format import normalize_audio_f32
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.audio.source import (
     AudioSource,
     SoundDeviceAudioSource,
     resolve_sounddevice_input_device,
 )
+from puripuly_heart.core.audio.streaming_resampler import MonoFirstStreamingResampler
 from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.orchestrator.hub import ClientHub
+from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
 from puripuly_heart.core.osc.receiver import VrcMicState, VrcOscReceiver
-from puripuly_heart.core.osc.smart_queue import SmartOscQueue
 from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.storage.secrets import SecretStore
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
@@ -126,12 +127,10 @@ class HeadlessMicRunner:
             chatbox_send=self.settings.osc.chatbox_send,
             chatbox_clear=self.settings.osc.chatbox_clear,
         )
-        osc = SmartOscQueue(
+        osc = ChatboxPaginator(
             sender=sender,
             clock=self.clock,
             max_chars=self.settings.osc.chatbox_max_chars,
-            cooldown_s=self.settings.osc.cooldown_s,
-            ttl_s=self.settings.osc.ttl_s,
         )
 
         hub = ClientHub(
@@ -189,14 +188,26 @@ class HeadlessMicRunner:
                 )
                 return None
 
-        def _open_source(dev_idx: int | None) -> SoundDeviceAudioSource:
+        def _open_source(
+            dev_idx: int | None,
+            *,
+            wasapi_auto_convert: bool = False,
+            wasapi_exclusive: bool = False,
+        ) -> SoundDeviceAudioSource:
             return SoundDeviceAudioSource(
                 sample_rate_hz=None,
                 channels=self.settings.audio.internal_channels,
                 device=dev_idx,
+                wasapi_auto_convert=wasapi_auto_convert,
+                wasapi_exclusive=wasapi_exclusive,
             )
 
-        host_api = self.settings.audio.input_host_api
+        saved_host_api = self.settings.audio.input_host_api
+        host_api_profile = normalize_input_host_api(saved_host_api)
+        host_api = host_api_profile.actual_host_api
+        first_open_used_wasapi_flags = (
+            host_api_profile.wasapi_auto_convert or host_api_profile.wasapi_exclusive
+        )
         device_name = self.settings.audio.input_device
 
         # 1차 시도: 설정된 Host API + 마이크
@@ -204,8 +215,22 @@ class HeadlessMicRunner:
         source: AudioSource | None = None
 
         try:
-            source = _open_source(device_idx)
-            logger.info("Microphone opened (device_idx=%s)", device_idx)
+            source = _open_source(
+                device_idx,
+                wasapi_auto_convert=host_api_profile.wasapi_auto_convert,
+                wasapi_exclusive=host_api_profile.wasapi_exclusive,
+            )
+            logger.info(
+                "Microphone opened "
+                "(saved_host_api=%r, actual_host_api=%r, device=%r, device_idx=%s, "
+                "wasapi_auto_convert=%s, wasapi_exclusive=%s)",
+                saved_host_api,
+                host_api,
+                device_name,
+                device_idx,
+                host_api_profile.wasapi_auto_convert,
+                host_api_profile.wasapi_exclusive,
+            )
         except Exception as exc:
             logger.error(
                 "Failed to open microphone (host_api=%r, device=%r): %s", host_api, device_name, exc
@@ -214,9 +239,13 @@ class HeadlessMicRunner:
         # 2차 시도: Host API 무시, 마이크 이름만
         if source is None and device_name:
             fallback_idx = _resolve_device("", device_name)
-            if fallback_idx != device_idx:
+            if fallback_idx != device_idx or first_open_used_wasapi_flags:
                 try:
-                    source = _open_source(fallback_idx)
+                    source = _open_source(
+                        fallback_idx,
+                        wasapi_auto_convert=False,
+                        wasapi_exclusive=False,
+                    )
                     logger.info("Microphone opened with fallback (device_idx=%s)", fallback_idx)
                 except Exception as exc:
                     logger.error("Fallback microphone failed: %s", exc)
@@ -224,7 +253,11 @@ class HeadlessMicRunner:
         # 3차 시도: 시스템 기본 장치
         if source is None:
             try:
-                source = _open_source(None)
+                source = _open_source(
+                    None,
+                    wasapi_auto_convert=False,
+                    wasapi_exclusive=False,
+                )
                 logger.info("Microphone opened with system default")
             except Exception as exc:
                 logger.error("System default microphone failed: %s", exc)
@@ -321,14 +354,11 @@ async def run_audio_vad_loop(
 ) -> None:
     chunk_samples = vad.chunk_samples
     buffer = np.empty((0,), dtype=np.float32)
+    resampler: MonoFirstStreamingResampler | None = None
+    source_format: tuple[int, int] | None = None
 
-    async for frame in source.frames():
-        normalized = normalize_audio_f32(
-            frame.samples,
-            input_sample_rate_hz=frame.sample_rate_hz,
-            target_sample_rate_hz=target_sample_rate_hz,
-        )
-        buffer = np.concatenate([buffer, normalized.samples.reshape(-1)])
+    async def _process_buffered_chunks() -> None:
+        nonlocal buffer
         while buffer.size >= chunk_samples:
             chunk = buffer[:chunk_samples]
             buffer = buffer[chunk_samples:]
@@ -336,3 +366,33 @@ async def run_audio_vad_loop(
                 chunk = audio_gate.process_chunk(chunk)
             for ev in vad.process_chunk(chunk):
                 await sink.handle_vad_event(ev)
+
+    async for frame in source.frames():
+        frame_format = (frame.sample_rate_hz, frame.channels)
+        if source_format is None:
+            source_format = frame_format
+            resampler = MonoFirstStreamingResampler(
+                input_sample_rate_hz=frame.sample_rate_hz,
+                output_sample_rate_hz=target_sample_rate_hz,
+                input_channels=frame.channels,
+            )
+        elif frame_format != source_format:
+            raise ValueError(
+                "source audio format changed during streaming: "
+                f"expected {source_format[0]}Hz/{source_format[1]}ch, "
+                f"got {frame.sample_rate_hz}Hz/{frame.channels}ch"
+            )
+
+        assert resampler is not None
+        normalized = resampler.resample_chunk(frame.samples)
+        if normalized.size:
+            buffer = np.concatenate([buffer, normalized.reshape(-1)])
+            await _process_buffered_chunks()
+
+    if resampler is None:
+        return
+
+    tail = resampler.flush()
+    if tail.size:
+        buffer = np.concatenate([buffer, tail.reshape(-1)])
+    await _process_buffered_chunks()

@@ -28,6 +28,7 @@ describe('broker hosting assumptions', () => {
 
     expect(wranglerConfig).toContain('"main": "src/index.ts"');
     expect(wranglerConfig).toContain(`"binding": "${REQUIRED_BINDINGS.d1}"`);
+    expect(wranglerConfig).toMatch(/"crons"\s*:\s*\[\s*"\* \* \* \* \*"\s*\]/u);
     expect(wranglerConfig).not.toContain('"location_hint":');
   });
 

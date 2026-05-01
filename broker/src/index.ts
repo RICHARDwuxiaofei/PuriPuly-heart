@@ -1,4 +1,15 @@
-export { app } from './app';
-export * from './contract';
+import { app } from './app';
+import { handleScheduled } from './scheduled';
 
-export { default } from './app';
+export * from './contract';
+export { app };
+export { handleScheduled } from './scheduled';
+
+const worker = {
+  fetch: app.fetch.bind(app),
+  request: app.request.bind(app),
+  scheduled: handleScheduled,
+};
+
+export { worker };
+export default worker;

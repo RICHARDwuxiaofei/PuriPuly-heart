@@ -3,17 +3,25 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("flet")
+import flet as ft
 
 from puripuly_heart.ui.components.managed_trial_usage_bar import ManagedTrialUsageBar
-from puripuly_heart.ui.i18n import t
+from puripuly_heart.ui.i18n import get_locale, set_locale, t
 
 
-def test_managed_trial_usage_bar_renders_placeholder_when_percent_unknown() -> None:
+def test_managed_trial_usage_bar_renders_inline_placeholder_when_percent_unknown() -> None:
+    set_locale("en")
     bar = ManagedTrialUsageBar()
 
+    assert isinstance(bar, ft.Row)
     assert bar.percent is None
-    assert bar._remaining_text.value == t("settings.managed_trial_usage.remaining_placeholder")
-    assert bar._fill.height == 0
+    assert len(bar.controls) == 2
+    assert bar.spacing == 10
+    assert bar.controls[0] is bar._track
+    assert bar.controls[1] is bar._status_icon
+    assert bar._status_icon.name == ft.Icons.HOURGLASS_TOP_ROUNDED
+    assert bar._status_icon.size == 36
+    assert bar._remaining_text.value == "Checking"
 
 
 @pytest.mark.parametrize(
@@ -28,11 +36,52 @@ def test_managed_trial_usage_bar_formats_and_clamps_percent(
     percent: int,
     expected_percent: int,
 ) -> None:
+    set_locale("en")
     bar = ManagedTrialUsageBar(percent=percent)
 
     assert bar.percent == expected_percent
     assert bar._remaining_text.value == t(
-        "settings.managed_trial_usage.remaining",
-        percent=expected_percent,
+        "settings.managed_trial_usage.remaining", percent=expected_percent
     )
-    assert bar._fill.height == bar._fill_height_for_percent(expected_percent)
+
+
+def test_managed_trial_usage_bar_distributes_fill_horizontally() -> None:
+    bar = ManagedTrialUsageBar(percent=42)
+
+    assert bar._fill_segment.expand == 42
+    assert bar._empty_segment.expand == 58
+
+
+def test_managed_trial_usage_bar_handles_empty_and_full_states() -> None:
+    empty_bar = ManagedTrialUsageBar(percent=0)
+    full_bar = ManagedTrialUsageBar(percent=100)
+
+    assert empty_bar._fill_segments.controls == [empty_bar._empty_segment]
+    assert full_bar._fill_segments.controls == [full_bar._fill_segment]
+    assert empty_bar._status_icon.name == ft.Icons.CHECK_CIRCLE_ROUNDED
+    assert full_bar._status_icon.name == ft.Icons.CHECK_CIRCLE_ROUNDED
+
+
+def test_managed_trial_usage_bar_apply_locale_refreshes_overlay_text() -> None:
+    previous_locale = get_locale()
+    try:
+        set_locale("en")
+        bar = ManagedTrialUsageBar(percent=71)
+
+        set_locale("ko")
+        bar.apply_locale()
+        assert bar._remaining_text.value == "사용량 71% 남음"
+
+        bar.set_percent(None)
+        bar.apply_locale()
+        assert bar._remaining_text.value == "확인 중"
+    finally:
+        set_locale(previous_locale)
+
+
+def test_managed_trial_usage_bar_uses_real_status_icon_for_known_and_unknown_states() -> None:
+    unknown_bar = ManagedTrialUsageBar()
+    known_bar = ManagedTrialUsageBar(percent=71)
+
+    assert unknown_bar._status_icon.name == ft.Icons.HOURGLASS_TOP_ROUNDED
+    assert known_bar._status_icon.name == ft.Icons.CHECK_CIRCLE_ROUNDED

@@ -137,7 +137,7 @@ async def test_e2e_latency_5_iterations():
 
     from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
     from puripuly_heart.core.orchestrator.hub import ClientHub
-    from puripuly_heart.core.osc.smart_queue import SmartOscQueue
+    from puripuly_heart.core.osc.chatbox_paginator import ChatboxPaginator
     from puripuly_heart.core.stt.controller import ManagedSTTProvider
     from puripuly_heart.domain.events import UIEventType
     from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
@@ -182,12 +182,10 @@ async def test_e2e_latency_5_iterations():
         llm = SemaphoreLLMProvider(inner=llm_base, semaphore=asyncio.Semaphore(1))
 
         mock_sender = MockOscSender()
-        osc = SmartOscQueue(
+        osc = ChatboxPaginator(
             sender=mock_sender,
             clock=SimpleClock(),
             max_chars=144,
-            cooldown_s=0.1,
-            ttl_s=10.0,
         )
 
         # Load default prompt

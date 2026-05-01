@@ -8,7 +8,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator
 
-from puripuly_heart.core.audio.format import pcm16le_bytes_to_float32, resample_f32_linear
+import numpy as np
+
+from puripuly_heart.core.audio.format import pcm16le_bytes_to_float32
 from puripuly_heart.core.local_qwen_runtime import (
     LocalQwenRuntimeBootstrapError,
     ensure_local_qwen_windows_runtime,
@@ -47,9 +49,14 @@ def _log_prefix(stream_label: str | None) -> str:
 
 
 def _pcm16le_duration_ms(pcm16le_size_bytes: int, sample_rate_hz: int) -> float:
-    if pcm16le_size_bytes <= 0 or sample_rate_hz <= 0:
+    if pcm16le_size_bytes <= 0:
         return 0.0
-    sample_count = pcm16le_size_bytes / 2.0
+    return _sample_count_duration_ms(pcm16le_size_bytes // 2, sample_rate_hz)
+
+
+def _sample_count_duration_ms(sample_count: int, sample_rate_hz: int) -> float:
+    if sample_count <= 0 or sample_rate_hz <= 0:
+        return 0.0
     return sample_count * 1000.0 / float(sample_rate_hz)
 
 
@@ -57,10 +64,12 @@ def create_local_qwen_sherpa_recognizer(
     *,
     model_dir: Path,
     num_threads: int,
-    sample_rate_hz: int = 16000,
+    sample_rate_hz: int = LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ,
     feature_dim: int = 128,
     provider: str = "cpu",
 ) -> object:
+    if sample_rate_hz != LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ:
+        raise ValueError(f"sample_rate_hz must be {LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ}")
     ensure_local_qwen_windows_runtime()
     try:
         import sherpa_onnx
@@ -114,15 +123,14 @@ class LocalQwenSherpaSTTBackend(STTBackend):
     _decode_lock: asyncio.Lock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.sample_rate_hz != LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ:
+            raise ValueError(f"sample_rate_hz must be {LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ}")
+        if self.num_threads <= 0:
+            raise ValueError("num_threads must be > 0")
         self._load_lock = asyncio.Lock()
         self._decode_lock = asyncio.Lock()
 
     async def open_session(self) -> STTBackendSession:
-        if self.sample_rate_hz not in (8000, 16000):
-            raise ValueError("sample_rate_hz must be 8000 or 16000")
-        if self.num_threads <= 0:
-            raise ValueError("num_threads must be > 0")
-
         await self._ensure_recognizer()
         return _LocalQwenSherpaSession(backend=self)
 
@@ -157,25 +165,22 @@ class LocalQwenSherpaSTTBackend(STTBackend):
             raise LocalQwenSherpaLoadError(str(exc)) from exc
 
     async def decode_pcm16le(self, pcm16le: bytes) -> str:
+        return await self.decode_f32(pcm16le_bytes_to_float32(pcm16le))
+
+    async def decode_f32(self, samples_f32: np.ndarray) -> str:
         recognizer = await self._ensure_recognizer()
         async with self._decode_lock:
             try:
                 return await asyncio.to_thread(
-                    self._decode_pcm16le_sync,
+                    self._decode_f32_sync,
                     recognizer,
-                    pcm16le,
+                    samples_f32,
                 )
             except Exception as exc:
                 raise LocalQwenSherpaInferenceError(str(exc)) from exc
 
-    def _decode_pcm16le_sync(self, recognizer: object, pcm16le: bytes) -> str:
-        samples = pcm16le_bytes_to_float32(pcm16le)
-        if self.sample_rate_hz != LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ:
-            samples = resample_f32_linear(
-                samples,
-                from_rate_hz=self.sample_rate_hz,
-                to_rate_hz=LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ,
-            )
+    def _decode_f32_sync(self, recognizer: object, samples_f32: np.ndarray) -> str:
+        samples = np.asarray(samples_f32, dtype=np.float32).reshape(-1).copy()
         stream = recognizer.create_stream()
         set_option = getattr(stream, "set_option", None)
         if callable(set_option):
@@ -183,6 +188,7 @@ class LocalQwenSherpaSTTBackend(STTBackend):
                 set_option("language", self.language_hint)
             if self.hotwords:
                 set_option("hotwords", ",".join(self.hotwords))
+        np.clip(samples, -1.0, 1.0, out=samples)
         stream.accept_waveform(LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ, samples)
         recognizer.decode_stream(stream)
         result = getattr(stream, "result", None)
@@ -193,7 +199,7 @@ class LocalQwenSherpaSTTBackend(STTBackend):
 @dataclass(slots=True)
 class _LocalQwenSherpaSession(STTBackendSession):
     backend: LocalQwenSherpaSTTBackend
-    _buffer: bytearray = field(init=False, repr=False)
+    _buffer_f32: list[np.ndarray] = field(init=False, repr=False)
     _events: asyncio.Queue[STTBackendTranscriptEvent | BaseException | None] = field(
         init=False,
         repr=False,
@@ -207,26 +213,34 @@ class _LocalQwenSherpaSession(STTBackendSession):
     _summary_logged: bool = field(init=False, default=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._buffer = bytearray()
+        self._buffer_f32 = []
         self._events = asyncio.Queue()
 
     async def send_audio(self, pcm16le: bytes) -> None:
         if self._closed:
             return
-        self._buffer.extend(pcm16le)
+        await self.send_audio_f32(pcm16le_bytes_to_float32(pcm16le))
+
+    async def send_audio_f32(self, samples_f32: np.ndarray) -> None:
+        if self._closed:
+            return
+        samples = np.asarray(samples_f32, dtype=np.float32).reshape(-1)
+        if samples.size == 0:
+            return
+        self._buffer_f32.append(samples.copy())
 
     async def on_speech_end(self, *, trailing_silence_ms: int | None = None) -> None:
         _ = trailing_silence_ms
-        if self._closed or not self._buffer:
+        if self._closed or not self._buffer_f32:
             return
 
-        pcm16le = bytes(self._buffer)
-        self._buffer.clear()
-        audio_ms = _pcm16le_duration_ms(len(pcm16le), self.backend.sample_rate_hz)
+        samples_f32 = np.concatenate(self._buffer_f32)
+        self._buffer_f32.clear()
+        audio_ms = _sample_count_duration_ms(samples_f32.size, self.backend.sample_rate_hz)
 
         try:
             started_at = time.perf_counter()
-            text = await self.backend.decode_pcm16le(pcm16le)
+            text = await self.backend.decode_f32(samples_f32)
             inference_ms = (time.perf_counter() - started_at) * 1000.0
         except Exception as exc:
             await self._events.put(exc)
@@ -256,7 +270,7 @@ class _LocalQwenSherpaSession(STTBackendSession):
     async def close(self) -> None:
         self._log_summary_once()
         self._closed = True
-        self._buffer.clear()
+        self._buffer_f32.clear()
         if self._closed_event_enqueued:
             return
         self._closed_event_enqueued = True

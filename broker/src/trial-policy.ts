@@ -1,8 +1,17 @@
+export const MANAGED_TRIAL_ALLOWED_MODELS = [
+  'google/gemma-4-26b-a4b-it',
+  'qwen/qwen3.5-flash-02-23',
+  'deepseek/deepseek-v4-flash',
+  'google/gemini-2.5-flash-lite',
+] as const;
+
+const MANAGED_FREE_TRIAL_POLICY = {
+  provider: 'OpenRouter',
+  models: MANAGED_TRIAL_ALLOWED_MODELS,
+} as const;
+
 export const TRIAL_PROVIDER_POLICY = {
-  managedFreeTrial: {
-    provider: 'OpenRouter',
-    model: 'google/gemma-4-26b-a4b-it',
-  },
+  managedFreeTrial: MANAGED_FREE_TRIAL_POLICY,
   upstreamProviderRouting: 'unpinned-by-broker',
   excludedProviders: ['Alibaba'],
 } as const;
@@ -20,7 +29,6 @@ export const MANAGED_TRIAL_COST_ACCOUNTING_POLICY = {
     outputTokens: 15,
     llmCallsPerUtterance: 1.3,
   },
-  theoreticalUsesAtHardLimit: 396,
   operationalBufferPercent: {
     min: 5,
     max: 10,
@@ -48,7 +56,7 @@ export const MANAGED_TRIAL_ENTITLEMENT_POLICY = {
     keyScope: 'user-specific',
     maxManagedKeysPerEligibleInstallation: 1,
     expiry: {
-      durationMonths: 6,
+      durationMonths: 3,
       anchor: 'issued_at',
     },
   },
@@ -64,7 +72,7 @@ export const MANAGED_TRIAL_LIVE_USAGE_POLICY = {
 } as const;
 
 export const MANAGED_TRIAL_POLICY = {
-  managedPath: TRIAL_PROVIDER_POLICY.managedFreeTrial,
+  managedPath: MANAGED_FREE_TRIAL_POLICY,
   budget: MANAGED_TRIAL_BUDGET_POLICY,
   onboardingCostAccounting: MANAGED_TRIAL_COST_ACCOUNTING_POLICY,
   entitlement: MANAGED_TRIAL_ENTITLEMENT_POLICY,

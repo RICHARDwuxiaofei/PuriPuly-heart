@@ -41,6 +41,10 @@ impl Default for OverlayPresentationCalibration {
 #[serde(rename_all = "snake_case")]
 pub enum OverlayPresentationBlockVariant {
     ActiveSelf,
+    // Reserved compatibility/fallback variant. Normal product peer rows become
+    // primary-visible through translated finalized blocks, not source-only
+    // active_peer rows.
+    ActivePeer,
     #[default]
     Finalized,
 }
@@ -57,6 +61,12 @@ pub struct OverlayPresentationBlock {
     pub secondary_text: String,
     #[serde(default = "default_secondary_enabled")]
     pub secondary_enabled: bool,
+    #[serde(default)]
+    pub update_id: Option<String>,
+    #[serde(default)]
+    pub origin_wall_clock_ms: Option<u64>,
+    #[serde(default)]
+    pub session_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -84,6 +94,9 @@ pub struct OverlaySlot {
     pub primary_text: String,
     pub secondary_text: String,
     pub secondary_enabled: bool,
+    pub update_id: Option<String>,
+    pub origin_wall_clock_ms: Option<u64>,
+    pub session_scope: Option<String>,
     pub slot_entry_order: u64,
 }
 
@@ -104,6 +117,9 @@ impl OverlaySlot {
             primary_text: block.primary_text.clone(),
             secondary_text: block.secondary_text.clone(),
             secondary_enabled: block.secondary_enabled,
+            update_id: block.update_id.clone(),
+            origin_wall_clock_ms: block.origin_wall_clock_ms,
+            session_scope: block.session_scope.clone(),
             slot_entry_order,
         }
     }
@@ -117,6 +133,9 @@ impl OverlaySlot {
         self.primary_text = block.primary_text.clone();
         self.secondary_text = block.secondary_text.clone();
         self.secondary_enabled = block.secondary_enabled;
+        self.update_id = block.update_id.clone();
+        self.origin_wall_clock_ms = block.origin_wall_clock_ms;
+        self.session_scope = block.session_scope.clone();
     }
 }
 
@@ -319,6 +338,9 @@ mod tests {
             primary_text: "hello".to_string(),
             secondary_text: String::new(),
             secondary_enabled: true,
+            update_id: None,
+            origin_wall_clock_ms: None,
+            session_scope: None,
         }
     }
 

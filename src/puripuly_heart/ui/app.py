@@ -1,12 +1,31 @@
+import asyncio
+import contextlib
+import copy
+import inspect
 import logging
 import webbrowser
 
 import flet as ft
 
-from puripuly_heart.config.settings import save_settings
+from puripuly_heart.config.llm_profiles import (
+    get_openrouter_selection_alias_for_model_and_source,
+    profile_for_alias,
+)
+from puripuly_heart.config.settings import (
+    AppSettings,
+    LLMProviderName,
+    OpenRouterCredentialSource,
+    OpenRouterLLMModel,
+    OpenRouterSelectionAlias,
+    save_settings,
+)
 from puripuly_heart.core.language import get_stt_compatibility_warning
 from puripuly_heart.core.updater import check_for_update
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
+from puripuly_heart.ui.components.debug_preview_panel import DebugPreviewPanel
+from puripuly_heart.ui.components.discord_managed_auth_dialog import DiscordManagedAuthDialog
+from puripuly_heart.ui.components.founder_letter_dialog import FounderLetterDialog
+from puripuly_heart.ui.components.peer_translation_eula_dialog import PeerTranslationEulaDialog
 from puripuly_heart.ui.components.title_bar import TitleBar
 from puripuly_heart.ui.controller import GuiController
 from puripuly_heart.ui.fonts import font_for_language, register_fonts
@@ -28,13 +47,42 @@ from puripuly_heart.ui.views.settings import SettingsView
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_WINDOW_WIDTH = 1136
+DEFAULT_WINDOW_HEIGHT = 850
+MIN_WINDOW_WIDTH = 1024
+MIN_WINDOW_HEIGHT = 760
+APP_CONTENT_PADDING = 16
+FOUNDER_CONTACT_URL = "https://x.com/kapitalismho"
+FOUNDER_README_BASE_URL = "https://github.com/kapitalismho/PuriPuly-heart/blob/main"
+FOUNDER_README_PATH_BY_LOCALE = {
+    "ko": "README.ko.md",
+    "zh-CN": "README.zh-CN.md",
+    "ja": "README.ja.md",
+}
+
+
+def founder_readme_url_for_locale(locale: str | None) -> str:
+    readme_path = FOUNDER_README_PATH_BY_LOCALE.get(locale or "", "README.md")
+    return f"{FOUNDER_README_BASE_URL}/{readme_path}"
+
 
 class TranslatorApp:
-    def __init__(self, page: ft.Page, *, config_path):
+    def __init__(self, page: ft.Page, *, config_path, debug_ui_preview: bool = False):
         self.page = page
-        self.controller = GuiController(page=page, app=self, config_path=config_path)
+        self.controller = GuiController(
+            page=page,
+            app=self,
+            config_path=config_path,
+        )
         self.overlay_state = "off"
         self.overlay_failure_reason: str | None = None
+        self.overlay_peer_contract = None
+        self.debug_ui_preview = bool(debug_ui_preview)
+        self.debug_preview_panel: DebugPreviewPanel | None = None
+        self._openrouter_pkce_request_active = False
+        self._discord_managed_auth_generation = 0
+        self._discord_managed_auth_cancelled = False
+        self._discord_managed_auth_task_handle = None
         self._setup_page()
         self._build_layout()
 
@@ -42,11 +90,14 @@ class TranslatorApp:
         self.view_dashboard.on_send_message = self._on_manual_submit
         self.view_dashboard.on_toggle_translation = self._on_translation_toggle
         self.view_dashboard.on_toggle_stt = self._on_stt_toggle
+        self.view_dashboard.on_toggle_overlay = self._on_overlay_toggle
+        self.view_dashboard.on_toggle_peer_translation = self._on_peer_translation_toggle
         self.view_dashboard.on_language_change = self._on_language_change
 
         self.view_settings.on_settings_changed = self._on_settings_changed
-        self.view_settings.on_overlay_toggle = self._on_overlay_toggle
+        self.view_settings.on_prompt_apply_settings = self._on_prompt_apply_settings
         self.view_settings.on_providers_changed = self._on_providers_changed
+        self.view_settings.on_request_openrouter_pkce = self._on_request_openrouter_pkce
         self.view_settings.on_verify_api_key = self._on_verify_api_key
         self.view_settings.on_secret_cleared = self._on_secret_cleared
         self.view_settings.show_snackbar = self._show_snackbar
@@ -58,6 +109,7 @@ class TranslatorApp:
             self.view_settings.runtime_log_basic = runtime_log_basic
         if callable(runtime_log_detailed):
             self.view_settings.runtime_log_detailed = runtime_log_detailed
+        self.view_dashboard.runtime_log_detailed = self._log_detailed
 
         calibration_begin = getattr(self.controller, "begin_overlay_calibration", None)
         calibration_change = getattr(self.controller, "set_overlay_calibration_field", None)
@@ -86,10 +138,10 @@ class TranslatorApp:
         self.page.padding = 0
         self.page.window.frameless = True
         self.page.window.resizable = True  # Ensure resizing is allowed
-        self.page.window.width = 960
-        self.page.window.height = 780  # 16:13 ratio (approx)
-        self.page.window.min_width = 800
-        self.page.window.min_height = 600
+        self.page.window.width = DEFAULT_WINDOW_WIDTH
+        self.page.window.height = DEFAULT_WINDOW_HEIGHT
+        self.page.window.min_width = MIN_WINDOW_WIDTH
+        self.page.window.min_height = MIN_WINDOW_HEIGHT
         self.page.window.icon = "icons/icon.ico"
 
     def _build_layout(self):
@@ -108,7 +160,7 @@ class TranslatorApp:
         # Content area
         self.content_area = ft.Container(
             expand=True,
-            padding=16,
+            padding=APP_CONTENT_PADDING,
             content=self.view_dashboard,
         )
 
@@ -123,11 +175,118 @@ class TranslatorApp:
             spacing=0,
         )
 
-        self.page.add(ft.Container(content=self.layout, expand=True, padding=0))
+        root_content = ft.Container(content=self.layout, expand=True, padding=0)
+        if self.debug_ui_preview:
+            self.debug_preview_panel = self._build_debug_preview_panel()
+            self.page.add(
+                ft.Container(
+                    content=ft.Stack(
+                        controls=[root_content, self.debug_preview_panel],
+                        fit=ft.StackFit.EXPAND,
+                        expand=True,
+                    ),
+                    expand=True,
+                    padding=0,
+                )
+            )
+        else:
+            self.page.add(root_content)
+
+    def _build_debug_preview_panel(self) -> DebugPreviewPanel:
+        return DebugPreviewPanel(
+            on_brake_notice=self._preview_brake_notice,
+            on_revoked_notice=self._preview_revoked_notice,
+            on_founder_letter=self._preview_founder_letter,
+            on_pkce_failure=self._preview_pkce_failure,
+            on_discord_auth=self._preview_discord_auth,
+            on_peer_translation_eula=self._preview_peer_translation_eula,
+        )
+
+    def _preview_brake_notice(self) -> None:
+        self._show_snackbar(t("managed_release.brake"), ft.Colors.ORANGE_700)
+
+    def _preview_revoked_notice(self) -> None:
+        self._show_snackbar(t("managed_release.revoked_contact"), ft.Colors.ORANGE_700)
+
+    def _debug_preview_noop(self) -> None:
+        return None
+
+    def _preview_founder_letter(self) -> None:
+        dialog = FounderLetterDialog(self.page, on_readme=self._on_founder_letter_readme)
+        self._founder_letter_dialog = dialog
+        dialog.open()
+
+    def _preview_pkce_failure(self) -> None:
+        self._show_snackbar(t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)
+
+    def _preview_discord_auth(self) -> None:
+        self.show_discord_managed_auth_dialog(preview=True)
+
+    def _preview_peer_translation_eula(self) -> None:
+        self._show_peer_translation_eula(self._debug_preview_noop)
+
+    def _show_peer_translation_eula(self, on_accept) -> None:
+        dialog = PeerTranslationEulaDialog(
+            self.page,
+            on_accept=on_accept,
+            on_cancel=self._debug_preview_noop,
+        )
+        self._peer_translation_eula_dialog = dialog
+        dialog.open()
+
+    def _accept_peer_translation_eula_and_enable(self) -> None:
+        async def _task():
+            settings = getattr(self.controller, "settings", None)
+            if settings is not None:
+                settings.ui.peer_translation_eula_accepted = True
+                config_path = getattr(self.controller, "config_path", None)
+                if config_path is not None:
+                    save_settings(config_path, settings)
+            await self.controller.set_peer_translation_enabled(True)
+
+        self.page.run_task(_task)
+
+    def _close_open_dialog_for_navigation(self) -> None:
+        dialog = getattr(self.page, "dialog", None)
+        close_dialog = getattr(self.page, "close", None)
+        if dialog is None or not callable(close_dialog):
+            return
+        try:
+            close_dialog(dialog)
+        except Exception:
+            logger.exception("Failed to close dialog during navigation")
+
+    def _queue_settings_mutation_task(self, task_factory) -> None:
+        queue = getattr(self, "_settings_mutation_queue", None)
+        if queue is None:
+            queue = []
+            self._settings_mutation_queue = queue
+        queue.append(task_factory)
+        if getattr(self, "_settings_mutation_worker_active", False):
+            return
+        self._settings_mutation_worker_active = True
+
+        async def _worker():
+            try:
+                while self._settings_mutation_queue:
+                    next_task = self._settings_mutation_queue.pop(0)
+                    try:
+                        await next_task()
+                    except Exception:
+                        logger.exception("Settings mutation task failed")
+            finally:
+                self._settings_mutation_worker_active = False
+
+        self.page.run_task(_worker)
+
+    def _content_padding_for_index(self, index: int) -> int:
+        return 0 if index == 1 else APP_CONTENT_PADDING
 
     def _on_nav_change(self, index: int):
         # Track previous tab for Settings auto-apply
         previous_tab = getattr(self, "_current_tab", 0)
+        if previous_tab != index:
+            self._close_open_dialog_for_navigation()
         self._current_tab = index
 
         # Auto-apply Settings changes when leaving Settings (tab 1)
@@ -140,15 +299,20 @@ class TranslatorApp:
                     async def _task():
                         await self.controller.apply_providers(pending_settings)
 
-                    self.page.run_task(_task)
+                    self._queue_settings_mutation_task(_task)
             elif getattr(self.view_settings, "has_pending_prompt_changes", False):
                 pending_settings = self.view_settings.consume_prompt_apply_settings()
                 if pending_settings is not None:
 
                     async def _task():
-                        await self.controller.apply_settings(pending_settings)
+                        merged_settings = (
+                            self.controller.merge_settings_tab_apply_with_current_languages(
+                                pending_settings
+                            )
+                        )
+                        await self.controller.apply_settings(merged_settings)
 
-                    self.page.run_task(_task)
+                    self._queue_settings_mutation_task(_task)
 
         if index == 0:
             self.content_area.content = self.view_dashboard
@@ -159,6 +323,7 @@ class TranslatorApp:
         elif index == 3:
             self.content_area.content = self.view_about
 
+        self.content_area.padding = self._content_padding_for_index(index)
         self.content_area.update()
         if index == 1:
             self.view_settings.refresh_prompt_if_empty()
@@ -178,8 +343,31 @@ class TranslatorApp:
         self.title_bar.set_title(t("app.title"))
         self.view_dashboard.apply_locale()
         self.view_settings.apply_locale()
+        self.refresh_overlay_peer_contract()
         self.view_logs.apply_locale()
+        debug_preview_panel = getattr(self, "debug_preview_panel", None)
+        apply_debug_locale = getattr(debug_preview_panel, "apply_locale", None)
+        if callable(apply_debug_locale):
+            apply_debug_locale()
         self.page.update()
+
+    def refresh_overlay_peer_contract(self) -> None:
+        controller = getattr(self, "controller", None)
+        build_contract = getattr(controller, "build_overlay_peer_consumer_contract", None)
+        if not callable(build_contract):
+            return
+        contract = build_contract()
+        self.overlay_peer_contract = contract
+        if contract is None:
+            return
+        view_settings = getattr(self, "view_settings", None)
+        set_settings_contract = getattr(view_settings, "set_overlay_peer_contract", None)
+        if callable(set_settings_contract):
+            set_settings_contract(contract)
+        view_dashboard = getattr(self, "view_dashboard", None)
+        set_dashboard_contract = getattr(view_dashboard, "set_overlay_peer_contract", None)
+        if callable(set_dashboard_contract):
+            set_dashboard_contract(contract)
 
     def _on_manual_submit(self, _source: str, text: str) -> None:
         async def _task():
@@ -203,18 +391,48 @@ class TranslatorApp:
             return
         logger.log(level, message)
 
-    def _on_translation_toggle(self, enabled: bool) -> None:
+    def _revert_dashboard_translation_toggle(self) -> None:
+        self._set_dashboard_translation_visual_state(False)
+
+    def _set_dashboard_translation_visual_state(self, enabled: bool) -> None:
+        dash = getattr(self, "view_dashboard", None)
+        set_translation_enabled = getattr(dash, "set_translation_enabled", None)
+        if callable(set_translation_enabled):
+            try:
+                set_translation_enabled(enabled)
+            except Exception:
+                logger.exception("Failed to update dashboard translation toggle")
+
+    def _dashboard_managed_auth_action(self) -> str:
+        action = getattr(self.controller, "dashboard_managed_auth_action", None)
+        if not callable(action):
+            return "continue"
+        try:
+            return str(action())
+        except Exception:
+            logger.exception("Failed to evaluate managed auth dashboard gate")
+            return "prompt"
+
+    def _on_translation_toggle(self, enabled: bool) -> bool:
         self._log_basic(f"[Dashboard] Translation toggle requested: enabled={enabled}")
         self._log_detailed(
             "[Dashboard] Translation toggle detail: "
             f"dashboard_state={getattr(getattr(self, 'view_dashboard', None), 'is_translation_on', None)} "
             f"overlay_state={getattr(self, 'overlay_state', 'unknown')}"
         )
+        if enabled:
+            managed_auth_action = self._dashboard_managed_auth_action()
+            if managed_auth_action in {"prompt", "in_progress"}:
+                self._revert_dashboard_translation_toggle()
+                if managed_auth_action == "prompt":
+                    self.show_discord_managed_auth_dialog(preview=False)
+                return False
 
         async def _task():
             await self.controller.set_translation_enabled(enabled)
 
         self.page.run_task(_task)
+        return True
 
     def _on_stt_toggle(self, enabled: bool) -> None:
         self._log_basic(f"[Dashboard] STT toggle requested: enabled={enabled}")
@@ -230,9 +448,9 @@ class TranslatorApp:
         self.page.run_task(_task)
 
     def _on_overlay_toggle(self, enabled: bool) -> None:
-        self._log_basic(f"[Settings] Overlay toggle requested: enabled={enabled}")
+        self._log_basic(f"[Dashboard] Overlay toggle requested: enabled={enabled}")
         self._log_detailed(
-            "[Settings] Overlay toggle detail: "
+            "[Dashboard] Overlay toggle detail: "
             f"overlay_state={getattr(self, 'overlay_state', 'unknown')} "
             f"failure_reason={getattr(self, 'overlay_failure_reason', None)}"
         )
@@ -242,25 +460,60 @@ class TranslatorApp:
 
         self.page.run_task(_task)
 
-    def _on_language_change(self, source_code: str, target_code: str) -> None:
+    def _on_peer_translation_toggle(self, enabled: bool) -> None:
+        self._log_basic(f"[Dashboard] Peer toggle requested: enabled={enabled}")
+        self._log_detailed(
+            "[Dashboard] Peer toggle detail: "
+            f"overlay_state={getattr(self, 'overlay_state', 'unknown')} "
+            f"failure_reason={getattr(self, 'overlay_failure_reason', None)}"
+        )
+
+        controller = getattr(self, "controller", None)
+        settings = getattr(controller, "settings", None)
+        ui_settings = getattr(settings, "ui", None)
+        if (
+            enabled
+            and ui_settings is not None
+            and not getattr(ui_settings, "peer_translation_eula_accepted", False)
+        ):
+            self._show_peer_translation_eula(self._accept_peer_translation_eula_and_enable)
+            return
+
+        async def _task():
+            await self.controller.set_peer_translation_enabled(enabled)
+
+        self.page.run_task(_task)
+
+    def _on_language_change(
+        self,
+        source_code: str,
+        target_code: str,
+        peer_source_code: str = "",
+        peer_target_code: str = "",
+    ) -> None:
         if self.controller.settings is None:
             return
         settings = self.controller.settings
         previous_source_code = settings.languages.source_language
         previous_target_code = settings.languages.target_language
+        previous_peer_source_code = getattr(settings.languages, "peer_source_language", "")
+        previous_peer_target_code = getattr(settings.languages, "peer_target_language", "")
         self._log_basic(
             "[Dashboard] Language change requested: "
-            f"source={previous_source_code}->{source_code} target={previous_target_code}->{target_code}"
+            f"source={previous_source_code}->{source_code} "
+            f"target={previous_target_code}->{target_code} "
+            f"peer_source={previous_peer_source_code}->{peer_source_code} "
+            f"peer_target={previous_peer_target_code}->{peer_target_code}"
         )
         self._log_detailed(
             f"[Dashboard] Language change detail: overlay_state={getattr(self, 'overlay_state', 'unknown')}"
         )
-        settings.languages.source_language = source_code
-        settings.languages.target_language = target_code
 
         # Check STT provider compatibility and show warning if needed
-        stt_provider = settings.provider.stt.value
-        warning = get_stt_compatibility_warning(source_code, stt_provider)
+        warning = None
+        if source_code != previous_source_code:
+            stt_provider = settings.provider.stt.value
+            warning = get_stt_compatibility_warning(source_code, stt_provider)
         if warning:
             self.page.open(
                 ft.SnackBar(
@@ -274,15 +527,29 @@ class TranslatorApp:
             )
 
         async def _task():
-            await self.controller.apply_settings(settings)
+            await self.controller.on_dashboard_language_change(
+                source_code=source_code,
+                target_code=target_code,
+                peer_source_code=peer_source_code,
+                peer_target_code=peer_target_code,
+            )
 
-        self.page.run_task(_task)
+        self._queue_settings_mutation_task(_task)
 
     def _on_settings_changed(self, settings) -> None:
         async def _task():
             await self.controller.apply_settings(settings)
 
-        self.page.run_task(_task)
+        self._queue_settings_mutation_task(_task)
+
+    def _on_prompt_apply_settings(self, settings) -> None:
+        async def _task():
+            merged_settings = self.controller.merge_settings_tab_apply_with_current_languages(
+                settings
+            )
+            await self.controller.apply_settings(merged_settings)
+
+        self._queue_settings_mutation_task(_task)
 
     def _on_runtime_logging_mode_change(self, mode: str) -> None:
         self.controller.set_runtime_logging_mode(mode)
@@ -292,7 +559,241 @@ class TranslatorApp:
         async def _task():
             await self.controller.apply_providers()
 
-        self.page.run_task(_task)
+        self._queue_settings_mutation_task(_task)
+
+    def _on_request_openrouter_pkce(
+        self,
+        target_settings: AppSettings,
+        *,
+        launch_source: str = "settings",
+    ) -> None:
+        if getattr(self, "_openrouter_pkce_request_active", False):
+            reopen_authorization_url = getattr(
+                self.controller,
+                "reopen_openrouter_pkce_authorization_url",
+                None,
+            )
+            if callable(reopen_authorization_url):
+                reopen_authorization_url()
+            return
+        self._openrouter_pkce_request_active = True
+
+        async def _task() -> None:
+            try:
+                ok = await self.controller.connect_openrouter_via_pkce(
+                    target_settings=target_settings,
+                    launch_source=launch_source,
+                )
+                if ok:
+                    refresh_after_openrouter_pkce_success = getattr(
+                        self.view_settings,
+                        "refresh_after_openrouter_pkce_success",
+                        None,
+                    )
+                    if callable(refresh_after_openrouter_pkce_success):
+                        refresh_after_openrouter_pkce_success(
+                            self.controller.settings,
+                            config_path=self.controller.config_path,
+                        )
+                    else:
+                        self.view_settings.load_from_settings(
+                            self.controller.settings,
+                            config_path=self.controller.config_path,
+                            preserve_custom_vocab_draft=True,
+                        )
+                    self._show_snackbar(t("openrouter.pkce.connected"), COLOR_SUCCESS)
+            finally:
+                self._openrouter_pkce_request_active = False
+
+        self._queue_settings_mutation_task(_task)
+
+    def _close_discord_managed_auth_dialog(self) -> None:
+        dialog = getattr(self, "_discord_managed_auth_dialog", None)
+        close = getattr(dialog, "close", None)
+        if callable(close):
+            close()
+
+    def show_discord_managed_auth_dialog(self, preview: bool = False) -> None:
+        if preview:
+            on_continue = self._close_discord_managed_auth_dialog
+            on_byok = self._close_discord_managed_auth_dialog
+            on_close = self._close_discord_managed_auth_dialog
+            on_reopen_browser = self._close_discord_managed_auth_dialog
+            on_cancel = self._close_discord_managed_auth_dialog
+        else:
+            on_continue = self._start_discord_managed_auth
+            on_byok = self._on_discord_managed_auth_byok
+            on_close = self._close_discord_managed_auth_dialog
+            on_reopen_browser = (
+                self._reopen_discord_managed_auth_browser
+                if self._supports_discord_managed_auth_reopen()
+                else None
+            )
+            on_cancel = self._cancel_discord_managed_auth
+
+        dialog = DiscordManagedAuthDialog(
+            self.page,
+            on_continue=on_continue,
+            on_byok=on_byok,
+            on_close=on_close,
+            on_reopen_browser=on_reopen_browser,
+            on_cancel=on_cancel,
+        )
+        self._discord_managed_auth_dialog = dialog
+        dialog.open()
+
+    def _run_optional_discord_auth_controller_hook(self, hook_name: str) -> None:
+        controller = getattr(self, "controller", None)
+        hook = getattr(controller, hook_name, None)
+        if not callable(hook):
+            return
+        result = hook()
+        if inspect.isawaitable(result):
+
+            async def _task() -> None:
+                await result
+
+            self.page.run_task(_task)
+
+    def _supports_discord_managed_auth_reopen(self) -> bool:
+        controller = getattr(self, "controller", None)
+        reopen = getattr(controller, "reopen_discord_managed_auth_browser", None)
+        return callable(reopen)
+
+    def _next_discord_managed_auth_generation(self) -> int:
+        generation = int(getattr(self, "_discord_managed_auth_generation", 0)) + 1
+        self._discord_managed_auth_generation = generation
+        self._discord_managed_auth_cancelled = False
+        return generation
+
+    def _is_current_discord_managed_auth_generation(self, generation: int) -> bool:
+        return bool(
+            generation == getattr(self, "_discord_managed_auth_generation", None)
+            and not getattr(self, "_discord_managed_auth_cancelled", False)
+        )
+
+    def _translation_enable_succeeded(self, controller: object, result: object) -> bool:
+        if result is False:
+            return False
+        hub = getattr(controller, "hub", None)
+        if hub is not None:
+            return bool(
+                getattr(hub, "llm", None) is not None and getattr(hub, "translation_enabled", False)
+            )
+        return result is True
+
+    def _start_discord_managed_auth(self) -> None:
+        dialog = getattr(self, "_discord_managed_auth_dialog", None)
+        set_waiting = getattr(dialog, "set_waiting", None)
+        if callable(set_waiting):
+            set_waiting()
+        generation = self._next_discord_managed_auth_generation()
+
+        async def _task() -> None:
+            controller = getattr(self, "controller", None)
+            start_auth = getattr(controller, "start_discord_managed_auth_from_dialog", None)
+            if not callable(start_auth):
+                return
+            try:
+                ok = await start_auth()
+                if not ok or not self._is_current_discord_managed_auth_generation(generation):
+                    return
+                enable_translation = getattr(controller, "set_translation_enabled", None)
+                if not callable(enable_translation):
+                    return
+                enable_result = await enable_translation(True)
+                if not self._is_current_discord_managed_auth_generation(generation):
+                    return
+                if not self._translation_enable_succeeded(controller, enable_result):
+                    return
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Discord managed auth task failed")
+                return
+            self._close_discord_managed_auth_dialog()
+            self._show_snackbar(t("discord_auth.success"), COLOR_SUCCESS)
+            self._set_dashboard_translation_visual_state(True)
+            if self._is_current_discord_managed_auth_generation(generation):
+                self._discord_managed_auth_task_handle = None
+
+        self._discord_managed_auth_task_handle = self.page.run_task(_task)
+
+    def _reopen_discord_managed_auth_browser(self) -> None:
+        self._run_optional_discord_auth_controller_hook("reopen_discord_managed_auth_browser")
+
+    def _cancel_discord_managed_auth(self) -> None:
+        self._discord_managed_auth_cancelled = True
+        task_handle = getattr(self, "_discord_managed_auth_task_handle", None)
+        cancel = getattr(task_handle, "cancel", None)
+        if callable(cancel):
+            with contextlib.suppress(Exception):
+                cancel()
+        self._discord_managed_auth_task_handle = None
+        self._close_discord_managed_auth_dialog()
+
+    def _build_managed_openrouter_byok_target_settings(self) -> AppSettings | None:
+        current_settings = getattr(getattr(self, "controller", None), "settings", None)
+        if current_settings is None:
+            return None
+        if current_settings.provider.llm != LLMProviderName.OPENROUTER:
+            return None
+        if current_settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED:
+            return None
+
+        openrouter_model = None
+        selection_alias = current_settings.openrouter.selection_alias
+        if selection_alias is not None:
+            try:
+                profile = profile_for_alias(selection_alias.value)
+            except KeyError:
+                profile = None
+            if profile is not None:
+                openrouter_model = profile.openrouter_model
+        if openrouter_model is None:
+            openrouter_model = current_settings.openrouter.llm_model.value
+
+        alias_value = get_openrouter_selection_alias_for_model_and_source(
+            openrouter_model,
+            OpenRouterCredentialSource.BYOK.value,
+        )
+        if alias_value is None:
+            return None
+
+        target_settings = copy.deepcopy(current_settings)
+        target_settings.provider.llm = LLMProviderName.OPENROUTER
+        target_settings.openrouter.selection_alias = OpenRouterSelectionAlias(alias_value)
+        target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+        target_settings.openrouter.llm_model = OpenRouterLLMModel(openrouter_model)
+        return target_settings
+
+    def _build_founder_letter_target_settings(self) -> AppSettings | None:
+        return self._build_managed_openrouter_byok_target_settings()
+
+    def _on_discord_managed_auth_byok(self) -> None:
+        target_settings = self._build_managed_openrouter_byok_target_settings()
+        if target_settings is None:
+            self._show_snackbar(t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)
+            return
+        self._on_request_openrouter_pkce(target_settings, launch_source="discord_auth")
+
+    def _on_founder_letter_connect(self) -> None:
+        target_settings = self._build_founder_letter_target_settings()
+        if target_settings is None:
+            self._show_snackbar(t("openrouter.pkce.failed"), ft.Colors.ORANGE_700)
+            return
+        self._on_request_openrouter_pkce(target_settings, launch_source="letter")
+
+    def _on_founder_letter_contact(self) -> None:
+        webbrowser.open(FOUNDER_CONTACT_URL)
+
+    def _on_founder_letter_readme(self) -> None:
+        webbrowser.open(founder_readme_url_for_locale(get_locale()))
+
+    def show_founder_letter_dialog(self) -> None:
+        dialog = FounderLetterDialog(self.page, on_readme=self._on_founder_letter_readme)
+        self._founder_letter_dialog = dialog
+        dialog.open()
 
     async def _on_verify_api_key(self, provider: str, key: str) -> tuple[bool, str]:
         success, msg = await self.controller.verify_api_key(provider, key)
@@ -304,7 +805,13 @@ class TranslatorApp:
         # Sync verification result with dashboard needs_key flags (UI update on user click)
         if provider in ("deepgram", "soniox", "qwen_asr"):
             self.view_dashboard.set_stt_needs_key(not success, update_ui=False)
-        elif provider in ("google", "openrouter", "alibaba_beijing", "alibaba_singapore"):
+        elif provider in (
+            "google",
+            "openrouter",
+            "deepseek",
+            "alibaba_beijing",
+            "alibaba_singapore",
+        ):
             self.view_dashboard.set_translation_needs_key(not success, update_ui=False)
 
         return success, msg
@@ -317,6 +824,7 @@ class TranslatorApp:
             "soniox_api_key": "soniox",
             "google_api_key": "google",
             "openrouter_api_key": "openrouter",
+            "deepseek_api_key": "deepseek",
             "alibaba_api_key": "alibaba_beijing",  # Use beijing as default
             "alibaba_api_key_beijing": "alibaba_beijing",
             "alibaba_api_key_singapore": "alibaba_singapore",
@@ -329,7 +837,13 @@ class TranslatorApp:
             # Update dashboard needs_key flag
             if provider in ("deepgram", "soniox"):
                 self.view_dashboard.set_stt_needs_key(True, update_ui=False)
-            elif provider in ("google", "openrouter", "alibaba_beijing", "alibaba_singapore"):
+            elif provider in (
+                "google",
+                "openrouter",
+                "deepseek",
+                "alibaba_beijing",
+                "alibaba_singapore",
+            ):
                 self.view_dashboard.set_translation_needs_key(True, update_ui=False)
 
     def _show_snackbar(self, message: str, bgcolor, duration: int = 4000) -> None:
@@ -359,10 +873,15 @@ class TranslatorApp:
             f"[Overlay] State detail: overlay_state={state} failure_reason={failure_reason}"
         )
         self.view_settings.set_overlay_runtime_state(state, failure_reason=failure_reason)
+        self.refresh_overlay_peer_contract()
 
 
-async def main_gui(page: ft.Page, *, config_path):
-    app = TranslatorApp(page, config_path=config_path)
+async def main_gui(page: ft.Page, *, config_path, debug_ui_preview: bool = False):
+    app = TranslatorApp(
+        page,
+        config_path=config_path,
+        debug_ui_preview=debug_ui_preview,
+    )
     await app.controller.start()
 
     # Check for updates in background

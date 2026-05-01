@@ -6,7 +6,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-2.0.0-blue" alt="Version" />
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
+  <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
 </p>
@@ -320,9 +320,22 @@ python -m pytest         # 테스트 (가상환경에서 실행 권장)
 
 ### 빌드
 
+실행 파일 전용 / 수동 패키징 단계:
+
+이 경로는 실행 파일/수동 인스톨러만 만드는 직접 패키징 경로이며, 릴리스 완료(compliance) 패키징 경로가 아닙니다. 또한 `build.spec`가 검사하는 스테이징된 오버레이 실행 파일 `build/overlay/PuriPulyHeartOverlay.exe`와 벤더링된 OpenVR 번들 `third_party/openvr/`가 필요합니다.
+
 ```bash
+.\scripts\ci\prepare-soxr-release-inputs.ps1
 .venv\Scripts\pyinstaller build.spec   # 실행 파일
-ISCC installer.iss       # 인스톨러
+ISCC installer.iss                      # 수동 인스톨러 패키징
+```
+
+릴리스 완료(compliance) Windows 패키징 경로는 먼저 `scripts/ci/prepare-soxr-release-inputs.ps1`를 실행한 뒤 `scripts/ci/build-release-artifacts.ps1`를 실행합니다:
+
+```bash
+$env:APP_VERSION = (& ".\.venv\Scripts\python.exe" scripts/ci/read-project-version.py).Trim()
+.\scripts\ci\prepare-soxr-release-inputs.ps1
+.\scripts\ci\build-release-artifacts.ps1 -AppVersion $env:APP_VERSION -InnoSetupVersion 6.6.1
 ```
 ---
 
@@ -338,8 +351,8 @@ ISCC installer.iss       # 인스톨러
 
 ---
 
-## 라이센스
+## 라이선스
 
-[MIT](LICENSE)
+[AGPL-3.0-or-later](LICENSE)
 
-타사 라이센스: `THIRD_PARTY_NOTICES.txt`
+타사 라이선스 및 고지: `src/puripuly_heart/data/THIRD_PARTY_NOTICES.txt`

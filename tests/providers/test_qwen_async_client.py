@@ -123,7 +123,9 @@ async def test_httpx_client_builds_correct_request(monkeypatch):
     assert "SYSTEM" in body["messages"][0]["content"]
     assert body["messages"][1]["role"] == "user"
     assert "<context>" in body["messages"][1]["content"]
-    assert "Input: hello" in body["messages"][1]["content"]
+    assert "</context>" in body["messages"][1]["content"]
+    assert "<input>\nhello\n</input>" in body["messages"][1]["content"]
+    assert "Input: hello" not in body["messages"][1]["content"]
 
 
 @pytest.mark.asyncio
@@ -143,7 +145,7 @@ async def test_httpx_client_omits_empty_options(monkeypatch):
     body = fake_client.last_request["json"]
     assert body["messages"] == [
         {"role": "system", "content": "SYSTEM"},
-        {"role": "user", "content": "hello"},
+        {"role": "user", "content": "<input>\nhello\n</input>"},
     ]
 
 
@@ -202,8 +204,8 @@ async def test_httpx_client_reuses_cached_async_client(monkeypatch):
 
     assert created_clients == [fake_client]
     assert len(fake_client.requests) == 2
-    assert fake_client.requests[0]["json"]["messages"][1]["content"] == "hello"
-    assert fake_client.requests[1]["json"]["messages"][1]["content"] == "world"
+    assert fake_client.requests[0]["json"]["messages"][1]["content"] == "<input>\nhello\n</input>"
+    assert fake_client.requests[1]["json"]["messages"][1]["content"] == "<input>\nworld\n</input>"
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,10 @@ import logging
 import pytest
 
 import puripuly_heart.app.headless_mic as headless_mic
+from puripuly_heart.config.audio_host_api import (
+    WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
+    WINDOWS_WASAPI_HOST_API,
+)
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
@@ -14,6 +18,46 @@ from puripuly_heart.config.settings import (
     STTProviderName,
 )
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
+
+
+def _patch_headless_mic_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    vad_path,
+    *,
+    resolve_device,
+    source_factory,
+) -> None:
+    class FakeSender:
+        def close(self):
+            return None
+
+    class FakeHub:
+        def __init__(self, *args, **kwargs):
+            self.peer_stt = kwargs.get("peer_stt")
+
+        async def start(self, *args, **kwargs):
+            return None
+
+        async def stop(self):
+            return None
+
+    async def fake_run_audio_vad_loop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
+    monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
+    monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
+    monkeypatch.setattr(headless_mic, "create_llm_provider", lambda *_a, **_k: "llm")
+    monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
+    monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
+    monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "ClientHub", FakeHub)
+    monkeypatch.setattr(headless_mic, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "SoundDeviceAudioSource", source_factory)
+    monkeypatch.setattr(headless_mic, "run_audio_vad_loop", fake_run_audio_vad_loop)
+    monkeypatch.setattr(headless_mic, "resolve_sounddevice_input_device", resolve_device)
 
 
 @pytest.mark.asyncio
@@ -58,7 +102,7 @@ async def test_headless_mic_runner_handles_keyboard_interrupt(monkeypatch, tmp_p
     monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", FakeSender)
-    monkeypatch.setattr(headless_mic, "SmartOscQueue", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "ClientHub", FakeHub)
     monkeypatch.setattr(headless_mic, "SileroVadOnnx", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VadGating", lambda *a, **k: object())
@@ -76,6 +120,226 @@ async def test_headless_mic_runner_handles_keyboard_interrupt(monkeypatch, tmp_p
 
     assert result == 0
     assert sender_ref["instance"].closed is True
+
+
+@pytest.mark.asyncio
+async def test_headless_mic_runner_normalizes_wasapi_compatibility_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    settings = AppSettings()
+    settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    settings.audio.input_device = "Compat Mic"
+    settings.osc.vrc_mic_intercept = False
+    config_path = tmp_path / "settings.json"
+    vad_path = tmp_path / "vad.onnx"
+    vad_path.write_text("dummy", encoding="utf-8")
+    resolve_calls: list[dict[str, object]] = []
+    source_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        async def close(self):
+            return None
+
+    def fake_resolve(*, host_api: str, device: str) -> int:
+        resolve_calls.append({"host_api": host_api, "device": device})
+        return 9
+
+    def fake_source(*_args, **kwargs) -> FakeSource:
+        source_calls.append(dict(kwargs))
+        return FakeSource()
+
+    _patch_headless_mic_startup(
+        monkeypatch,
+        vad_path,
+        resolve_device=fake_resolve,
+        source_factory=fake_source,
+    )
+
+    runner = headless_mic.HeadlessMicRunner(
+        settings=settings,
+        config_path=config_path,
+        vad_model_path=vad_path,
+        use_llm=True,
+    )
+    result = await runner.run()
+
+    assert result == 0
+    assert resolve_calls == [{"host_api": WINDOWS_WASAPI_HOST_API, "device": "Compat Mic"}]
+    assert source_calls[0]["device"] == 9
+    assert source_calls[0].get("wasapi_auto_convert") is True
+    assert source_calls[0].get("wasapi_exclusive") is False
+
+
+@pytest.mark.asyncio
+async def test_headless_mic_runner_does_not_apply_wasapi_flags_to_name_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    settings = AppSettings()
+    settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    settings.audio.input_device = "Compat Mic"
+    settings.osc.vrc_mic_intercept = False
+    config_path = tmp_path / "settings.json"
+    vad_path = tmp_path / "vad.onnx"
+    vad_path.write_text("dummy", encoding="utf-8")
+    resolve_calls: list[dict[str, object]] = []
+    source_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        async def close(self):
+            return None
+
+    def fake_resolve(*, host_api: str, device: str) -> int:
+        resolve_calls.append({"host_api": host_api, "device": device})
+        if host_api == WINDOWS_WASAPI_HOST_API:
+            return 9
+        if host_api == "":
+            return 10
+        return 99
+
+    def fake_source(*_args, **kwargs) -> FakeSource:
+        source_calls.append(dict(kwargs))
+        if len(source_calls) == 1:
+            raise RuntimeError("first open failed")
+        return FakeSource()
+
+    _patch_headless_mic_startup(
+        monkeypatch,
+        vad_path,
+        resolve_device=fake_resolve,
+        source_factory=fake_source,
+    )
+
+    runner = headless_mic.HeadlessMicRunner(
+        settings=settings,
+        config_path=config_path,
+        vad_model_path=vad_path,
+        use_llm=True,
+    )
+    result = await runner.run()
+
+    assert result == 0
+    assert resolve_calls == [
+        {"host_api": WINDOWS_WASAPI_HOST_API, "device": "Compat Mic"},
+        {"host_api": "", "device": "Compat Mic"},
+    ]
+    assert source_calls[0].get("wasapi_auto_convert") is True
+    assert source_calls[1]["device"] == 10
+    assert source_calls[1].get("wasapi_auto_convert") is False
+    assert source_calls[1].get("wasapi_exclusive") is False
+
+
+@pytest.mark.asyncio
+async def test_headless_mic_runner_retries_same_device_name_fallback_without_wasapi_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    settings = AppSettings()
+    settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    settings.audio.input_device = "Compat Mic"
+    settings.osc.vrc_mic_intercept = False
+    config_path = tmp_path / "settings.json"
+    vad_path = tmp_path / "vad.onnx"
+    vad_path.write_text("dummy", encoding="utf-8")
+    resolve_calls: list[dict[str, object]] = []
+    source_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        async def close(self):
+            return None
+
+    def fake_resolve(*, host_api: str, device: str) -> int:
+        resolve_calls.append({"host_api": host_api, "device": device})
+        return 9
+
+    def fake_source(*_args, **kwargs) -> FakeSource:
+        source_calls.append(dict(kwargs))
+        if len(source_calls) == 1:
+            raise RuntimeError("first open failed")
+        return FakeSource()
+
+    _patch_headless_mic_startup(
+        monkeypatch,
+        vad_path,
+        resolve_device=fake_resolve,
+        source_factory=fake_source,
+    )
+
+    runner = headless_mic.HeadlessMicRunner(
+        settings=settings,
+        config_path=config_path,
+        vad_model_path=vad_path,
+        use_llm=True,
+    )
+    result = await runner.run()
+
+    assert result == 0
+    assert resolve_calls == [
+        {"host_api": WINDOWS_WASAPI_HOST_API, "device": "Compat Mic"},
+        {"host_api": "", "device": "Compat Mic"},
+    ]
+    assert len(source_calls) == 2
+    assert source_calls[0]["device"] == 9
+    assert source_calls[0].get("wasapi_auto_convert") is True
+    assert source_calls[0].get("wasapi_exclusive") is False
+    assert source_calls[1]["device"] == 9
+    assert source_calls[1].get("wasapi_auto_convert") is False
+    assert source_calls[1].get("wasapi_exclusive") is False
+
+
+@pytest.mark.asyncio
+async def test_headless_mic_runner_does_not_apply_wasapi_flags_to_system_default_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    settings = AppSettings()
+    settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    settings.audio.input_device = ""
+    settings.osc.vrc_mic_intercept = False
+    config_path = tmp_path / "settings.json"
+    vad_path = tmp_path / "vad.onnx"
+    vad_path.write_text("dummy", encoding="utf-8")
+    resolve_calls: list[dict[str, object]] = []
+    source_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        async def close(self):
+            return None
+
+    def fake_resolve(*, host_api: str, device: str) -> int:
+        resolve_calls.append({"host_api": host_api, "device": device})
+        if host_api == WINDOWS_WASAPI_HOST_API:
+            return 9
+        return 99
+
+    def fake_source(*_args, **kwargs) -> FakeSource:
+        source_calls.append(dict(kwargs))
+        if len(source_calls) == 1:
+            raise RuntimeError("first open failed")
+        return FakeSource()
+
+    _patch_headless_mic_startup(
+        monkeypatch,
+        vad_path,
+        resolve_device=fake_resolve,
+        source_factory=fake_source,
+    )
+
+    runner = headless_mic.HeadlessMicRunner(
+        settings=settings,
+        config_path=config_path,
+        vad_model_path=vad_path,
+        use_llm=True,
+    )
+    result = await runner.run()
+
+    assert result == 0
+    assert resolve_calls == [{"host_api": WINDOWS_WASAPI_HOST_API, "device": ""}]
+    assert source_calls[0].get("wasapi_auto_convert") is True
+    assert source_calls[1]["device"] is None
+    assert source_calls[1].get("wasapi_auto_convert") is False
+    assert source_calls[1].get("wasapi_exclusive") is False
 
 
 @pytest.mark.asyncio
@@ -167,7 +431,7 @@ async def test_headless_mic_runner_starts_and_stops_vrc_receiver_when_enabled(
     monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
-    monkeypatch.setattr(headless_mic, "SmartOscQueue", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "ClientHub", FakeHub)
     monkeypatch.setattr(headless_mic, "SileroVadOnnx", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VadGating", lambda *a, **k: object())
@@ -244,7 +508,7 @@ async def test_headless_mic_runner_continues_when_vrc_receiver_start_raises_oser
     monkeypatch.setattr(headless_mic, "create_stt_backend", lambda *_a, **_k: "backend")
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
-    monkeypatch.setattr(headless_mic, "SmartOscQueue", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "ClientHub", FakeHub)
     monkeypatch.setattr(headless_mic, "SileroVadOnnx", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VadGating", lambda *a, **k: object())
@@ -321,7 +585,7 @@ async def test_headless_mic_runner_starts_peer_desktop_loop_when_peer_translatio
     monkeypatch.setattr(headless_mic, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend")
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
-    monkeypatch.setattr(headless_mic, "SmartOscQueue", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "ClientHub", FakeHub)
     monkeypatch.setattr(headless_mic, "SileroVadOnnx", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VadGating", lambda *a, **k: object())
@@ -402,7 +666,7 @@ async def test_headless_mic_runner_isolates_peer_loop_runtime_failures(
     monkeypatch.setattr(headless_mic, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend")
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
-    monkeypatch.setattr(headless_mic, "SmartOscQueue", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "ClientHub", FakeHub)
     monkeypatch.setattr(headless_mic, "SileroVadOnnx", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VadGating", lambda *a, **k: object())
@@ -498,7 +762,7 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
     monkeypatch.setattr(headless_mic, "create_peer_stt_backend", lambda *_a, **_k: "peer-backend")
     monkeypatch.setattr(headless_mic, "ManagedSTTProvider", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "VrchatOscUdpSender", lambda *a, **k: FakeSender())
-    monkeypatch.setattr(headless_mic, "SmartOscQueue", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "ClientHub", FakeHub)
     monkeypatch.setattr(headless_mic, "SileroVadOnnx", lambda *a, **k: engine)
     monkeypatch.setattr(headless_mic, "VadGating", lambda *a, **k: object())

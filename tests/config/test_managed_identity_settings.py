@@ -7,10 +7,13 @@ from puripuly_heart.config.settings import (
     SETTINGS_SCHEMA_VERSION,
     AppSettings,
     OpenRouterCredentialSource,
+    _migrate_settings_dict,
     from_dict,
     load_settings,
     to_dict,
 )
+
+PRE_MANAGED_HANDOFF_SETTINGS_SCHEMA_VERSION = 15
 
 
 def test_managed_identity_settings_round_trip() -> None:
@@ -24,6 +27,20 @@ def test_managed_identity_settings_round_trip() -> None:
     restored = from_dict(to_dict(settings))
 
     assert restored.managed_identity == settings.managed_identity
+
+
+def test_managed_identity_settings_round_trip_includes_handoff_fields() -> None:
+    settings = AppSettings()
+    settings.managed_identity.installation_id = "01961ad7-a7c1-7000-8000-0123456789ab"
+    settings.managed_identity.active_managed_credential_ref = "hash_123"
+    settings.managed_identity.active_managed_expires_at = "2026-10-17T12:34:56Z"
+    settings.managed_identity.founder_letter_seen_credential_ref = "hash_123"
+
+    restored = from_dict(to_dict(settings))
+
+    assert restored.managed_identity.active_managed_credential_ref == "hash_123"
+    assert restored.managed_identity.active_managed_expires_at == "2026-10-17T12:34:56Z"
+    assert restored.managed_identity.founder_letter_seen_credential_ref == "hash_123"
 
 
 def test_openrouter_selected_source_round_trip() -> None:
@@ -49,8 +66,6 @@ def test_load_settings_backfills_managed_identity_defaults(tmp_path) -> None:
     legacy = to_dict(AppSettings())
     legacy["settings_version"] = SETTINGS_SCHEMA_VERSION - 1
     legacy.pop("managed_identity", None)
-    legacy["openrouter"].pop("selected_source", None)
-    legacy["openrouter"].pop("broker_base_url", None)
     path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
 
     loaded = load_settings(path)
@@ -61,8 +76,6 @@ def test_load_settings_backfills_managed_identity_defaults(tmp_path) -> None:
     assert loaded.managed_identity.release_token_expires_at is None
     assert loaded.managed_identity.verified_hardware_hash is None
     assert loaded.managed_identity.verified_hardware_hash_salt_version is None
-    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.NONE
-    assert loaded.openrouter.broker_base_url == DEFAULT_OPENROUTER_BROKER_BASE_URL
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["managed_identity"] == {
         "installation_id": "",
@@ -70,6 +83,72 @@ def test_load_settings_backfills_managed_identity_defaults(tmp_path) -> None:
         "release_token_expires_at": None,
         "verified_hardware_hash": None,
         "verified_hardware_hash_salt_version": None,
+        "active_managed_credential_ref": None,
+        "active_managed_expires_at": None,
+        "founder_letter_seen_credential_ref": None,
     }
-    assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.NONE.value
+
+
+def test_load_settings_backfills_openrouter_defaults(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["settings_version"] = SETTINGS_SCHEMA_VERSION - 1
+    legacy["openrouter"].pop("selected_source", None)
+    legacy["openrouter"].pop("broker_base_url", None)
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert loaded.openrouter.broker_base_url == DEFAULT_OPENROUTER_BROKER_BASE_URL
+    assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.MANAGED.value
     assert persisted["openrouter"]["broker_base_url"] == DEFAULT_OPENROUTER_BROKER_BASE_URL
+
+
+def test_load_settings_backfills_managed_handoff_defaults(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["settings_version"] = PRE_MANAGED_HANDOFF_SETTINGS_SCHEMA_VERSION
+    legacy["managed_identity"].pop("active_managed_credential_ref", None)
+    legacy["managed_identity"].pop("active_managed_expires_at", None)
+    legacy["managed_identity"].pop("founder_letter_seen_credential_ref", None)
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.managed_identity.active_managed_credential_ref is None
+    assert loaded.managed_identity.active_managed_expires_at is None
+    assert loaded.managed_identity.founder_letter_seen_credential_ref is None
+    assert persisted["managed_identity"]["active_managed_credential_ref"] is None
+    assert persisted["managed_identity"]["active_managed_expires_at"] is None
+    assert persisted["managed_identity"]["founder_letter_seen_credential_ref"] is None
+
+
+def test_load_settings_normalizes_invalid_managed_handoff_values_to_none(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    current = to_dict(AppSettings())
+    current["settings_version"] = SETTINGS_SCHEMA_VERSION
+    current["managed_identity"]["active_managed_credential_ref"] = "   "
+    current["managed_identity"]["active_managed_expires_at"] = 123
+    current["managed_identity"]["founder_letter_seen_credential_ref"] = "\t"
+
+    migrated, changed = _migrate_settings_dict(current)
+
+    assert changed is True
+    assert migrated["managed_identity"]["active_managed_credential_ref"] is None
+    assert migrated["managed_identity"]["active_managed_expires_at"] is None
+    assert migrated["managed_identity"]["founder_letter_seen_credential_ref"] is None
+
+    path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.managed_identity.active_managed_credential_ref is None
+    assert loaded.managed_identity.active_managed_expires_at is None
+    assert loaded.managed_identity.founder_letter_seen_credential_ref is None
+    assert persisted["managed_identity"]["active_managed_credential_ref"] is None
+    assert persisted["managed_identity"]["active_managed_expires_at"] is None
+    assert persisted["managed_identity"]["founder_letter_seen_credential_ref"] is None

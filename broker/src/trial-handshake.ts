@@ -1,14 +1,15 @@
 import type { Context } from 'hono';
 
 import type {
-  FingerprintSaltConfigValue,
   InstallationRecord,
   OpenRouterEntitlementRecord,
 } from './persistence';
 import type { BrokerEnv } from './contract';
+import { getFingerprintSaltConfig } from './fingerprint-salt';
 import { deleteExpiredChallengePreflightInstallations } from './preflight-retention';
 import { nonEmptyString, stringValue, validatePublicInput } from './public-input';
 import {
+  checkActiveIssuanceBrake,
   checkDailyIssuanceCap,
   checkEndpointRateLimit,
   checkVelocityCapHook,
@@ -36,6 +37,8 @@ export const TRIAL_STATUS_TIMESTAMP_HEADER = 'X-Puripuly-Timestamp';
 export const TRIAL_STATUS_SIGNATURE_HEADER = 'X-Puripuly-Signature';
 export const TRIAL_STATUS_MAX_CLOCK_SKEW_SECONDS =
   TRIAL_VERIFY_MAX_CLOCK_SKEW_SECONDS;
+const VERIFY_OUTCOME_SUCCESS_ENDPOINT = 'POST /v1/trial/challenge/verify/success';
+const VERIFY_OUTCOME_FAIL_ENDPOINT = 'POST /v1/trial/challenge/verify/fail';
 export const TRIAL_STATUS_SIGNATURE_PAYLOAD_FIELDS = [
   'installation_id',
   'timestamp',
@@ -168,6 +171,21 @@ export async function handleTrialChallenge(
     });
   }
 
+  const issuanceBrakeDecision = await checkActiveIssuanceBrake(
+    c.env.BROKER_DB,
+    entitlement,
+  );
+  if (issuanceBrakeDecision) {
+    return publicErrorResponse(c, issuanceBrakeDecision.status, {
+      code: issuanceBrakeDecision.code,
+      class: issuanceBrakeDecision.class,
+      subcode: issuanceBrakeDecision.subcode,
+      retryAfterMs: issuanceBrakeDecision.retryAfterMs,
+      message: issuanceBrakeDecision.message,
+      entitlement,
+    });
+  }
+
   await recordRequestEvent(c.env.BROKER_DB, requestContext);
 
   const rateLimitDecision = await checkEndpointRateLimit(c.env.BROKER_DB, requestContext);
@@ -224,6 +242,10 @@ export async function handleTrialChallenge(
     });
   }
 
+  if (entitlement && isDiscordManagedPendingRelease(entitlement)) {
+    return releaseNotAllowedResponse(c, entitlement);
+  }
+
   const issuanceCapDecision = await checkDailyIssuanceCap(
     c.env.BROKER_DB,
     now,
@@ -259,7 +281,7 @@ export async function handleTrialChallenge(
 
   if (existingInstallation) {
     if (entitlement?.status === 'pending_release') {
-      await clearPendingReleaseSessionTokenState(c.env.BROKER_DB, installationId);
+      await clearPendingReleaseSessionTokenState(c.env.BROKER_DB, entitlement);
     }
 
     const updateSucceeded = await updateChallengeForInstallation(c.env.BROKER_DB, {
@@ -449,6 +471,21 @@ export async function handleTrialChallengeVerify(
     });
   }
 
+  const issuanceBrakeDecision = await checkActiveIssuanceBrake(
+    c.env.BROKER_DB,
+    currentEntitlement,
+  );
+  if (issuanceBrakeDecision) {
+    return publicErrorResponse(c, issuanceBrakeDecision.status, {
+      code: issuanceBrakeDecision.code,
+      class: issuanceBrakeDecision.class,
+      subcode: issuanceBrakeDecision.subcode,
+      retryAfterMs: issuanceBrakeDecision.retryAfterMs,
+      message: issuanceBrakeDecision.message,
+      entitlement: currentEntitlement,
+    });
+  }
+
   const installation = await getInstallation(c.env.BROKER_DB, installationId);
   if (!installation || !installation.challenge || !installation.challenge_expires_at) {
     return errorResponse(
@@ -539,32 +576,50 @@ export async function handleTrialChallengeVerify(
 
   await recordRequestEvent(c.env.BROKER_DB, requestContext);
 
+  const respondVerifyFailure = async (response: Response): Promise<Response> => {
+    await recordVerifyOutcomeEvent(c.env.BROKER_DB, requestContext, 'fail');
+    return response;
+  };
+
+  const respondVerifySuccess = async (response: Response): Promise<Response> => {
+    await recordVerifyOutcomeEvent(c.env.BROKER_DB, requestContext, 'success');
+    return response;
+  };
+
   const rateLimitDecision = await checkEndpointRateLimit(c.env.BROKER_DB, requestContext);
   if (rateLimitDecision) {
-    return publicErrorResponse(c, rateLimitDecision.status, {
-      code: rateLimitDecision.code,
-      class: rateLimitDecision.class,
-      subcode: rateLimitDecision.subcode,
-      retryAfterMs: rateLimitDecision.retryAfterMs,
-      message: rateLimitDecision.message,
-      entitlement,
-    });
+    return respondVerifyFailure(
+      publicErrorResponse(c, rateLimitDecision.status, {
+        code: rateLimitDecision.code,
+        class: rateLimitDecision.class,
+        subcode: rateLimitDecision.subcode,
+        retryAfterMs: rateLimitDecision.retryAfterMs,
+        message: rateLimitDecision.message,
+        entitlement,
+      }),
+    );
   }
 
   const velocityCapDecision = await checkVelocityCapHook(c.env.BROKER_DB, requestContext);
   if (velocityCapDecision) {
-    return publicErrorResponse(c, velocityCapDecision.status, {
-      code: velocityCapDecision.code,
-      class: velocityCapDecision.class,
-      subcode: velocityCapDecision.subcode,
-      retryAfterMs: velocityCapDecision.retryAfterMs,
-      message: velocityCapDecision.message,
-      entitlement,
-    });
+    return respondVerifyFailure(
+      publicErrorResponse(c, velocityCapDecision.status, {
+        code: velocityCapDecision.code,
+        class: velocityCapDecision.class,
+        subcode: velocityCapDecision.subcode,
+        retryAfterMs: velocityCapDecision.retryAfterMs,
+        message: velocityCapDecision.message,
+        entitlement,
+      }),
+    );
   }
 
   if (entitlement && entitlement.status !== 'pending_release') {
-    return releaseNotAllowedResponse(c, entitlement);
+    return respondVerifyFailure(releaseNotAllowedResponse(c, entitlement));
+  }
+
+  if (entitlement && isDiscordManagedPendingRelease(entitlement)) {
+    return respondVerifyFailure(releaseNotAllowedResponse(c, entitlement));
   }
 
   const fingerprintSalt = await getFingerprintSaltConfig(c.env.BROKER_DB);
@@ -575,13 +630,15 @@ export async function handleTrialChallengeVerify(
     currentSaltVersion: fingerprintSalt.current.version,
   });
   if (duplicateHardware) {
-    return publicErrorResponse(c, 409, {
-      code: 'trial_not_eligible',
-      class: 'terminal',
-      subcode: 'hardware_duplicate',
-      message: 'hardware_hash is already reserved by another entitlement',
-      entitlement,
-    });
+    return respondVerifyFailure(
+      publicErrorResponse(c, 409, {
+        code: 'trial_not_eligible',
+        class: 'terminal',
+        subcode: 'hardware_duplicate',
+        message: 'hardware_hash is already reserved by another entitlement',
+        entitlement,
+      }),
+    );
   }
 
   const issuanceCapDecision = await checkDailyIssuanceCap(
@@ -590,18 +647,20 @@ export async function handleTrialChallengeVerify(
     entitlement,
   );
   if (issuanceCapDecision) {
-    return publicErrorResponse(c, issuanceCapDecision.status, {
-      code: issuanceCapDecision.code,
-      class: issuanceCapDecision.class,
-      subcode: issuanceCapDecision.subcode,
-      retryAfterMs: issuanceCapDecision.retryAfterMs,
-      message: issuanceCapDecision.message,
-      entitlement,
-    });
+    return respondVerifyFailure(
+      publicErrorResponse(c, issuanceCapDecision.status, {
+        code: issuanceCapDecision.code,
+        class: issuanceCapDecision.class,
+        subcode: issuanceCapDecision.subcode,
+        retryAfterMs: issuanceCapDecision.retryAfterMs,
+        message: issuanceCapDecision.message,
+        entitlement,
+      }),
+    );
   }
 
   if (entitlement?.status === 'pending_release') {
-    await clearPendingReleaseSessionTokenState(c.env.BROKER_DB, installationId);
+    await clearPendingReleaseSessionTokenState(c.env.BROKER_DB, entitlement);
   }
 
   const challengeConsumed = await consumeChallenge(c.env.BROKER_DB, {
@@ -616,11 +675,13 @@ export async function handleTrialChallengeVerify(
   });
 
   if (!challengeConsumed) {
-    return errorResponse(
-      c,
-      409,
-      'challenge_consumed',
-      'challenge has already been consumed or replaced',
+    return respondVerifyFailure(
+      errorResponse(
+        c,
+        409,
+        'challenge_consumed',
+        'challenge has already been consumed or replaced',
+      ),
     );
   }
 
@@ -640,7 +701,11 @@ export async function handleTrialChallengeVerify(
               verified_hardware_hash = ?,
               verified_hardware_hash_salt_version = ?
         WHERE installation_id = ?
-          AND status = ?`,
+          AND status = ?
+          AND (
+            discord_issue_status IS NULL
+            OR discord_issue_status NOT IN ('issuing', 'cleanup_required')
+          )`,
     )
       .bind(
         releaseSessionRef,
@@ -656,7 +721,9 @@ export async function handleTrialChallengeVerify(
     if ((updateResult.meta.changes ?? 0) !== 1) {
       const currentEntitlement = await getEntitlement(c.env.BROKER_DB, installationId);
       if (currentEntitlement) {
-        return releaseNotAllowedResponse(c, currentEntitlement);
+        return respondVerifyFailure(
+          releaseNotAllowedResponse(c, currentEntitlement),
+        );
       }
 
       throw new Error('pending_release entitlement missing after challenge consumption');
@@ -695,11 +762,13 @@ export async function handleTrialChallengeVerify(
 
   const nextEntitlement = await getEntitlement(c.env.BROKER_DB, installationId);
 
-  return c.json({
-    release_token: releaseToken,
-    release_token_expires_at: releaseTokenExpiresAt,
-    ...normalizeManagedState(nextEntitlement),
-  });
+  return respondVerifySuccess(
+    c.json({
+      release_token: releaseToken,
+      release_token_expires_at: releaseTokenExpiresAt,
+      ...normalizeManagedState(nextEntitlement),
+    }),
+  );
 }
 
 export async function handleTrialStatus(c: Context<BrokerEnv>): Promise<Response> {
@@ -927,6 +996,47 @@ function releaseNotAllowedResponse(
       'verify may only mint release_token for lifecycle none or pending_release',
     entitlement,
   });
+}
+
+function isDiscordManagedPendingRelease(
+  entitlement: OpenRouterEntitlementRecord | null,
+): boolean {
+  return (
+    entitlement?.status === 'pending_release' &&
+    (entitlement.discord_issue_status === 'issuing' ||
+      entitlement.discord_issue_status === 'cleanup_required')
+  );
+}
+
+async function recordVerifyOutcomeEvent(
+  db: D1Database,
+  context: {
+    now: Date;
+    ip: string | null;
+    installationId: string | null;
+    hardwareHash: string | null;
+  },
+  outcome: 'success' | 'fail',
+): Promise<void> {
+  try {
+    await recordRequestEvent(db, {
+      endpoint:
+        outcome === 'success'
+          ? VERIFY_OUTCOME_SUCCESS_ENDPOINT
+          : VERIFY_OUTCOME_FAIL_ENDPOINT,
+      now: context.now,
+      ip: context.ip,
+      installationId: context.installationId,
+      hardwareHash: context.hardwareHash,
+    });
+  } catch (error) {
+    console.error('verify_outcome_event_record_failed', {
+      installation_id: context.installationId,
+      outcome,
+      error_message: error instanceof Error ? error.message : String(error),
+      broker_timestamp: new Date().toISOString(),
+    });
+  }
 }
 
 function randomBase64Url(byteLength: number): string {
@@ -1163,8 +1273,23 @@ async function updateChallengeForInstallation(
 
 async function clearPendingReleaseSessionTokenState(
   db: D1Database,
-  installationId: string,
+  entitlement: Pick<
+    OpenRouterEntitlementRecord,
+    | 'installation_id'
+    | 'managed_credential_ref'
+    | 'release_session_ref'
+    | 'release_token_hash'
+    | 'release_token_expires_at'
+    | 'discord_issue_status'
+  >,
 ): Promise<void> {
+  if (
+    entitlement.discord_issue_status === 'issuing' ||
+    entitlement.discord_issue_status === 'cleanup_required'
+  ) {
+    return;
+  }
+
   await db
     .prepare(
       `UPDATE openrouter_entitlements
@@ -1186,12 +1311,26 @@ async function clearPendingReleaseSessionTokenState(
                   SELECT hardware_hash_salt_version
                     FROM installations
                    WHERE installations.installation_id = openrouter_entitlements.installation_id
-                )
-              )
+               )
+               )
         WHERE installation_id = ?
-          AND status = 'pending_release'`,
+          AND status = 'pending_release'
+          AND (
+            discord_issue_status IS NULL
+            OR discord_issue_status NOT IN ('issuing', 'cleanup_required')
+          )
+          AND release_session_ref IS ?
+          AND release_token_hash IS ?
+          AND release_token_expires_at IS ?
+          AND managed_credential_ref IS ?`,
     )
-    .bind(installationId)
+    .bind(
+      entitlement.installation_id,
+      entitlement.release_session_ref,
+      entitlement.release_token_hash,
+      entitlement.release_token_expires_at,
+      entitlement.managed_credential_ref,
+    )
     .run();
 }
 
@@ -1233,7 +1372,7 @@ async function resolveExistingInstallationChallengeReissue(
 
   const latestEntitlement = await getEntitlement(db, input.installationId);
   if (latestEntitlement?.status === 'pending_release') {
-    await clearPendingReleaseSessionTokenState(db, input.installationId);
+    await clearPendingReleaseSessionTokenState(db, latestEntitlement);
   }
 
   const retriedUpdateSucceeded = await updateChallengeForInstallation(db, {
@@ -1316,21 +1455,6 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   ) as ArrayBuffer;
 }
 
-async function getFingerprintSaltConfig(
-  db: D1Database,
-): Promise<FingerprintSaltConfigValue> {
-  const row = await db
-    .prepare('SELECT value FROM broker_config WHERE key = ?')
-    .bind('fingerprint_salt')
-    .first<{ value: string }>();
-
-  if (!row) {
-    throw new Error('missing fingerprint_salt config');
-  }
-
-  return JSON.parse(row.value) as FingerprintSaltConfigValue;
-}
-
 async function getInstallation(
   db: D1Database,
   installationId: string,
@@ -1355,7 +1479,9 @@ async function getEntitlement(
     .prepare(
       `SELECT installation_id, status, budget_usd, managed_credential_ref, issued_at,
               expires_at, release_session_ref, release_token_hash, release_token_expires_at,
-              verified_hardware_hash, verified_hardware_hash_salt_version
+              verified_hardware_hash, verified_hardware_hash_salt_version,
+              discord_user_ref, discord_issue_status, discord_issue_reserved_at,
+              discord_issue_delivered_at
          FROM openrouter_entitlements
          WHERE installation_id = ?`,
     )

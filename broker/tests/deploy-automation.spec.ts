@@ -179,6 +179,24 @@ describe('broker direct deploy automation', () => {
     const smokeSpec = readFileSync(deploySmokeSpec, 'utf8');
     const readme = readFileSync(brokerReadme, 'utf8');
     const checklist = readFileSync(rolloutChecklist, 'utf8');
+    const managedUserHmacBlankCheckIndex = workflow.indexOf(
+      'OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION is required and must not be blank.',
+    );
+    const discordWebhookBlankCheckIndex = workflow.indexOf(
+      'DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION is required and must not be blank.',
+    );
+    const remoteD1MigrationIndex = workflow.indexOf(
+      'wrangler d1 migrations apply',
+    );
+    const managedUserHmacSyncIndex = workflow.indexOf(
+      'wrangler secret put OPENROUTER_MANAGED_USER_HMAC_SECRET',
+    );
+    const discordImmediateWebhookSyncIndex = workflow.indexOf(
+      'wrangler secret put DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL',
+    );
+    const discordDailyWebhookSyncIndex = workflow.indexOf(
+      'wrangler secret put DISCORD_DAILY_REPORT_WEBHOOK_URL',
+    );
 
     expect(workflow).toContain('workflow_dispatch:');
     expect(workflow).not.toContain('\npush:');
@@ -188,12 +206,14 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toContain('OPENROUTER_MANAGED_API_KEY_PRODUCTION');
     expect(workflow).toContain('OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION');
     expect(workflow).toContain('OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION');
+    expect(workflow).toContain('OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION');
+    expect(workflow).toContain('DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION');
     expect(workflow).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION');
     expect(workflow).toContain('BROKER_CANONICAL_WORKERS_DEV_URL');
     expect(workflow).toContain(
       'BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION is required',
     );
-    expect(workflow).toContain('must differ from the managed allowlisted model');
+    expect(workflow).toContain('must differ from the managed allowlisted models.');
     expect(workflow).toContain('ref: refs/heads/dev');
     expect(workflow).toContain('render-production-wrangler-config.mjs');
     expect(workflow).toContain('render-fingerprint-bootstrap-sql.mjs');
@@ -204,6 +224,16 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toMatch(/wrangler types --config/u);
     expect(workflow).toContain('BROKER_CANONICAL_WORKERS_DEV_URL is required');
     expect(workflow).toContain('refs/heads/dev');
+    expect(workflow).toContain("broker/src/trial-policy.ts");
+    expect(workflow).toContain('MANAGED_TRIAL_ALLOWED_MODELS was not found');
+    expect(workflow).toContain('https://openrouter.ai/api/v1/guardrails/');
+    expect(workflow).toContain('PATCH "$guardrail_url"');
+    expect(workflow).toContain('allowed_models');
+    expect(workflow).toContain('allowed_providers');
+    expect(workflow).toContain('ignored_providers');
+    expect(workflow).toContain('enforce_zdr');
+    expect(workflow).toContain('must be cleared (null or [])');
+    expect(workflow).toContain('GET guardrail');
     expect(workflow).toMatch(
       /wrangler d1 migrations apply\s+puripuly-heart-broker\s+--remote\s+--config/u,
     );
@@ -220,6 +250,25 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toMatch(
       /wrangler secret put OPENROUTER_MANAGED_GUARDRAIL_ID --config/u,
     );
+    expect(workflow).toMatch(
+      /wrangler secret put OPENROUTER_MANAGED_USER_HMAC_SECRET --config/u,
+    );
+    expect(workflow).toMatch(
+      /wrangler secret put DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL --config/u,
+    );
+    expect(workflow).toMatch(
+      /wrangler secret put DISCORD_DAILY_REPORT_WEBHOOK_URL --config/u,
+    );
+    expect(managedUserHmacBlankCheckIndex).toBeGreaterThanOrEqual(0);
+    expect(discordWebhookBlankCheckIndex).toBeGreaterThanOrEqual(0);
+    expect(remoteD1MigrationIndex).toBeGreaterThanOrEqual(0);
+    expect(managedUserHmacBlankCheckIndex).toBeLessThan(remoteD1MigrationIndex);
+    expect(managedUserHmacSyncIndex).toBeGreaterThanOrEqual(0);
+    expect(managedUserHmacBlankCheckIndex).toBeLessThan(managedUserHmacSyncIndex);
+    expect(discordImmediateWebhookSyncIndex).toBeGreaterThanOrEqual(0);
+    expect(discordDailyWebhookSyncIndex).toBeGreaterThanOrEqual(0);
+    expect(discordWebhookBlankCheckIndex).toBeLessThan(discordImmediateWebhookSyncIndex);
+    expect(discordWebhookBlankCheckIndex).toBeLessThan(discordDailyWebhookSyncIndex);
     expect(workflow).toMatch(/wrangler deploy --config/u);
     expect(workflow).toContain(
       'broker/tests/deploy-smoke/canonical-production.spec.ts',
@@ -231,20 +280,50 @@ describe('broker direct deploy automation', () => {
     expect(workflow).toContain('transitional runtime compatibility');
     expect(workflow).toContain('managed child-key creation and cleanup');
     expect(workflow).toContain('assign the canonical production guardrail');
+    expect(workflow).toContain('positive Qwen/DeepSeek/Gemini routing');
     expect(smokeSpec).toContain("process.env.CI === 'true'");
     expect(smokeSpec).toContain('/api/v1/key');
     expect(smokeSpec).toContain('/api/v1/chat/completions');
     expect(smokeSpec).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL');
     expect(smokeSpec).toContain('reads issued child-key metadata');
     expect(smokeSpec).toContain('recognizes model-routing failures as guardrail enforcement');
+    expect(smokeSpec).toContain('assertSuccessfulChatCompletionResponse');
+    expect(smokeSpec).toContain('assertManagedOpenRouterUserId');
+    expect(smokeSpec).toContain('issue.body.openrouter_user_id');
+    expect(smokeSpec).toContain('MANAGED_OPENROUTER_USER_ID_PATTERN');
+    expect(smokeSpec).toContain('ph-or-user-v');
+    expect(smokeSpec).toContain('MANAGED_TRIAL_ALLOWED_MODELS');
+    expect(smokeSpec).toContain('qwen/qwen3.5-flash-02-23');
+    expect(smokeSpec).toContain('deepseek/deepseek-v4-flash');
+    expect(smokeSpec).toContain('google/gemini-2.5-flash-lite');
+    expect(smokeSpec).toContain('MANAGED_TRIAL_ALLOWED_MODELS');
+    expect(smokeSpec).toContain('must differ from the managed allowlisted models');
     expect(readme).toContain('per-installation OpenRouter child key');
     expect(readme).toContain('not the shared worker secret');
     expect(readme).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION');
     expect(readme).toContain('OPENROUTER_MANAGED_API_KEY_PRODUCTION` remains transitional');
+    expect(readme).toContain('reconciles the production OpenRouter guardrail');
+    expect(readme).toContain('OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION');
+    expect(readme).toContain('OPENROUTER_MANAGED_USER_HMAC_SECRET');
+    expect(readme).toContain('DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION');
+    expect(readme).toContain('DISCORD_IMMEDIATE_ALERT_WEBHOOK_URL');
+    expect(readme).toContain('DISCORD_DAILY_REPORT_WEBHOOK_URL');
+    expect(readme).toContain('daily Discord heartbeat');
+    expect(readme).toContain('three-month expiry');
+    expect(readme).not.toContain('six-month expiry');
+    expect(readme).toContain('optional `openrouter_user_id`');
+    expect(readme).toContain('qwen/qwen3.5-flash-02-23');
+    expect(readme).toContain('deepseek/deepseek-v4-flash');
+    expect(readme).toContain('google/gemini-2.5-flash-lite');
     expect(checklist).toContain('OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION');
     expect(checklist).toContain('OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION');
+    expect(checklist).toContain('OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION');
+    expect(checklist).toContain('DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION');
+    expect(checklist).toContain('daily Discord heartbeat');
     expect(checklist).toContain('BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION');
     expect(checklist).toContain('transitional compatibility only');
+    expect(checklist).toContain('guardrail reconcile');
+    expect(checklist).toContain('positive routing for');
   });
 });
 

@@ -10,10 +10,15 @@ import {
 import {
   activatePendingReleaseSession,
   createPendingReleaseSession,
+  mockOpenRouterManagementApi,
 } from './test-support/openrouter-issue';
 import { createTestBrokerEnv } from './test-support/sqlite-d1';
 import { getTrialStatus, issueChallenge, postIssue, postVerify } from './test-support/trial-api';
-import { updateAbuseControls } from './test-support/abuse-controls';
+import {
+  updateAbuseControls,
+  updateAbuseRuntimeState,
+} from './test-support/abuse-controls';
+import { normalizedErrorEnvelope } from './test-support/errors';
 
 describe('broker daily issuance cap enforcement', () => {
   afterEach(() => {
@@ -95,11 +100,12 @@ describe('broker daily issuance cap enforcement', () => {
         provider: 'OpenRouter',
         budget_usd: 0.07,
         issued_at: '2026-04-08T06:00:00.000Z',
-        expires_at: '2026-10-08T06:00:00.000Z',
+        expires_at: '2026-07-08T06:00:00.000Z',
       },
       onboarding_eligibility: {
         eligible: false,
         reason: 'active',
+        requires_discord_oauth: false,
       },
     });
   });
@@ -197,7 +203,7 @@ describe('broker daily issuance cap enforcement', () => {
           lifecycle: 'active',
           managed_availability: true,
         },
-        expires_at: '2026-10-08T06:00:00.000Z',
+        expires_at: '2026-07-08T06:00:00.000Z',
         budget_usd: 0.07,
       }),
     );
@@ -316,5 +322,191 @@ describe('broker daily issuance cap enforcement', () => {
         current_entitlement: null,
       }),
     );
+  });
+
+  it('returns issuance_suspended from challenge when the automatic brake is active while active status remains available', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const env = createTestBrokerEnv();
+    const active = await activatePendingReleaseSession({
+      env,
+      installationId: 'install-brake-active',
+      appVersion: '1.2.3',
+      hardwareHash: 'hardware-hash-brake-active',
+    });
+    expect(active.response.status).toBe(200);
+
+    updateAbuseRuntimeState(env, (state) => {
+      state.brake.active = true;
+      state.brake.reason = 'global_threshold';
+      state.brake.changedAt = '2026-04-08T06:01:00.000Z';
+      state.brake.changedBy = 'system';
+    });
+
+    const blockedKeyPair = await createDeviceKeyPair();
+    const blockedResponse = await app.request(
+      'http://broker.test/v1/trial/challenge',
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'cf-connecting-ip': '203.0.113.30',
+        },
+        body: JSON.stringify({
+          installation_id: 'install-brake-blocked-challenge',
+          device_public_key: blockedKeyPair.devicePublicKey,
+          app_version: '1.2.3',
+        }),
+      },
+      env,
+    );
+
+    expect(blockedResponse.status).toBe(503);
+    await expect(blockedResponse.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'issuance_suspended',
+        class: 'retryable',
+        subcode: 'global_threshold',
+        message: 'new entitlement issuance is temporarily suspended',
+      }),
+    );
+
+    const signedStatus = await signCanonicalStatusRequest(active.keyPair.privateKey, {
+      installation_id: 'install-brake-active',
+      timestamp: '2026-04-08T06:00:30.000Z',
+    });
+    const statusResponse = await getTrialStatus({
+      env,
+      installationId: 'install-brake-active',
+      headers: {
+        'X-Puripuly-Timestamp': signedStatus.timestamp,
+        'X-Puripuly-Signature': signedStatus.signature,
+      },
+    });
+
+    expect(statusResponse.status).toBe(200);
+    await expect(statusResponse.json()).resolves.toEqual({
+      managed_state: {
+        lifecycle: 'active',
+        managed_availability: true,
+      },
+      current_entitlement: {
+        provider: 'OpenRouter',
+        budget_usd: 0.07,
+        issued_at: '2026-04-08T06:00:00.000Z',
+        expires_at: '2026-07-08T06:00:00.000Z',
+      },
+      onboarding_eligibility: {
+        eligible: false,
+        reason: 'active',
+        requires_discord_oauth: false,
+      },
+    });
+  });
+
+  it('rechecks the automatic brake at verify time and blocks new issue responses for pending_release installations', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const env = createTestBrokerEnv();
+
+    const waitingKeyPair = await createDeviceKeyPair();
+    const waitingChallenge = await issueChallenge({
+      env,
+      installationId: 'install-brake-waiting',
+      devicePublicKey: waitingKeyPair.devicePublicKey,
+      appVersion: '1.2.3',
+    });
+
+    const pendingRelease = await createPendingReleaseSession({
+      env,
+      installationId: 'install-brake-pending',
+      appVersion: '1.2.3',
+      hardwareHash: 'hardware-hash-brake-pending',
+    });
+
+    updateAbuseRuntimeState(env, (state) => {
+      state.brake.active = true;
+      state.brake.reason = 'asn_fast_path';
+      state.brake.changedAt = '2026-04-08T06:01:00.000Z';
+      state.brake.changedBy = 'system';
+    });
+    const managementApi = mockOpenRouterManagementApi();
+
+    const waitingVerify = await signCanonicalVerifyRequest(waitingKeyPair.privateKey, {
+      installation_id: 'install-brake-waiting',
+      device_public_key: waitingKeyPair.devicePublicKey,
+      challenge: waitingChallenge.challenge,
+      challenge_expires_at: waitingChallenge.challenge_expires_at,
+      hardware_hash: 'hardware-hash-brake-waiting',
+      app_version: '1.2.3',
+      signed_at: '2026-04-08T06:00:30.000Z',
+    });
+    const blockedVerifyResponse = await postVerify(env, waitingVerify);
+
+    expect(blockedVerifyResponse.status).toBe(503);
+    await expect(blockedVerifyResponse.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'issuance_suspended',
+        class: 'retryable',
+        subcode: 'asn_fast_path',
+        message: 'new entitlement issuance is temporarily suspended',
+      }),
+    );
+
+    const pendingIssueRequest = await signCanonicalIssueRequest(
+      pendingRelease.keyPair.privateKey,
+      {
+        installation_id: 'install-brake-pending',
+        device_public_key: pendingRelease.keyPair.devicePublicKey,
+        release_token: pendingRelease.releaseToken,
+        hardware_hash: pendingRelease.hardwareHash,
+        reason: 'llm_start',
+        budget_usd: 0.07,
+        model: 'google/gemma-4-26b-a4b-it',
+        signed_at: '2026-04-08T06:00:45.000Z',
+      },
+    );
+    const pendingIssueResponse = await postIssue(env, pendingIssueRequest);
+
+    expect(pendingIssueResponse.status).toBe(503);
+    await expect(pendingIssueResponse.json()).resolves.toEqual(
+      normalizedErrorEnvelope({
+        code: 'issuance_suspended',
+        class: 'retryable',
+        subcode: 'asn_fast_path',
+        message: 'new entitlement issuance is temporarily suspended',
+        managedState: {
+          lifecycle: 'pending_release',
+          managed_availability: true,
+        },
+        currentEntitlement: {
+          provider: 'OpenRouter',
+          budget_usd: 0.07,
+          issued_at: null,
+          expires_at: null,
+        },
+      }),
+    );
+    expect(managementApi.fetchMock).not.toHaveBeenCalled();
+
+    const pendingEntitlement = env.__db
+      .prepare(
+        `SELECT status, managed_credential_ref, issued_at, expires_at,
+                release_token_hash, release_token_expires_at
+           FROM openrouter_entitlements
+          WHERE installation_id = ?`,
+      )
+      .get('install-brake-pending') as Record<string, unknown>;
+
+    expect(pendingEntitlement).toEqual({
+      status: 'pending_release',
+      managed_credential_ref: null,
+      issued_at: null,
+      expires_at: null,
+      release_token_hash: expect.any(String),
+      release_token_expires_at: pendingRelease.releaseTokenExpiresAt,
+    });
   });
 });

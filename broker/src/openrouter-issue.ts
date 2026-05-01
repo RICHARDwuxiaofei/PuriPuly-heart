@@ -8,12 +8,19 @@ import type { BrokerEnv } from './contract';
 import { deleteExpiredChallengePreflightInstallations } from './preflight-retention';
 import { nonEmptyString, stringValue, validatePublicInput } from './public-input';
 import {
+  checkActiveIssuanceBrake,
+  extractRequestNetworkMetadata,
   checkEndpointRateLimit,
   checkVelocityCapHook,
   matchSubjectHook,
   recordRequestEvent,
   resolveClientIp,
 } from './abuse-controls';
+import {
+  deliverImmediateMonitoringSideEffects,
+  evaluateImmediateAbuseState,
+  recordIssueSuccess,
+} from './abuse-monitoring';
 import {
   errorResponse as publicErrorResponse,
   internalErrorResponseWithEntitlement,
@@ -24,6 +31,7 @@ import {
   cleanupManagedChildKey,
   createManagedChildKey,
 } from './openrouter-management';
+import { deriveManagedOpenRouterUserId } from './openrouter-user-id';
 import {
   MANAGED_TRIAL_BUDGET_POLICY,
   MANAGED_TRIAL_POLICY,
@@ -43,6 +51,25 @@ const ISSUE_SIGNATURE_PAYLOAD_FIELDS = [
   'signed_at',
 ] as const;
 const ISSUE_SINGLE_FLIGHT_LOCK_PREFIX = '__issue_lock__:';
+const MANAGED_TRIAL_ALLOWED_MODEL_SET = new Set<string>(
+  TRIAL_PROVIDER_POLICY.managedFreeTrial.models,
+);
+const MANAGED_TRIAL_ALLOWED_MODEL_LIST =
+  TRIAL_PROVIDER_POLICY.managedFreeTrial.models.join(', ');
+
+class PostActivationMonitoringStateError extends Error {
+  readonly issueSuccessRecorded: boolean;
+
+  constructor(input: { cause: unknown; issueSuccessRecorded: boolean }) {
+    super(
+      input.cause instanceof Error
+        ? input.cause.message
+        : 'post-activation monitoring state update failed',
+    );
+    this.name = 'PostActivationMonitoringStateError';
+    this.issueSuccessRecorded = input.issueSuccessRecorded;
+  }
+}
 
 const STRICT_ISO_8601_TIMESTAMP =
   /^(?<year>\d{4})-(?<month>0[1-9]|1[0-2])-(?<day>0[1-9]|[12]\d|3[01])T(?<hour>[01]\d|2[0-3]):(?<minute>[0-5]\d):(?<second>[0-5]\d)(?:\.(?<millisecond>\d{3}))?(?:(?<utc>Z)|(?<offsetSign>[+-])(?<offsetHour>[01]\d|2[0-3]):(?<offsetMinute>[0-5]\d))$/u;
@@ -131,12 +158,12 @@ export async function handleOpenRouterIssue(
     );
   }
 
-  if (model !== TRIAL_PROVIDER_POLICY.managedFreeTrial.model) {
+  if (!MANAGED_TRIAL_ALLOWED_MODEL_SET.has(model)) {
     return errorResponse(
       c,
       400,
       'invalid_request',
-      `model must equal ${TRIAL_PROVIDER_POLICY.managedFreeTrial.model}`,
+      `model must be one of ${MANAGED_TRIAL_ALLOWED_MODEL_LIST}`,
     );
   }
 
@@ -242,6 +269,10 @@ export async function handleOpenRouterIssue(
     return releaseTokenInvalidResponse(c, entitlement);
   }
 
+  if (isDiscordManagedPendingRelease(entitlement)) {
+    return releaseTokenInvalidResponse(c, entitlement);
+  }
+
   if (!entitlement.release_session_ref || !entitlement.release_token_expires_at) {
     return releaseTokenInvalidResponse(c, entitlement);
   }
@@ -257,6 +288,21 @@ export async function handleOpenRouterIssue(
     entitlement.verified_hardware_hash_salt_version !== installation.hardware_hash_salt_version
   ) {
     return hardwareSnapshotMismatchResponse(c, entitlement);
+  }
+
+  const issuanceBrakeDecision = await checkActiveIssuanceBrake(
+    c.env.BROKER_DB,
+    entitlement,
+  );
+  if (issuanceBrakeDecision) {
+    return publicErrorResponse(c, issuanceBrakeDecision.status, {
+      code: issuanceBrakeDecision.code,
+      class: issuanceBrakeDecision.class,
+      subcode: issuanceBrakeDecision.subcode,
+      retryAfterMs: issuanceBrakeDecision.retryAfterMs,
+      message: issuanceBrakeDecision.message,
+      entitlement,
+    });
   }
 
   await recordRequestEvent(c.env.BROKER_DB, requestContext);
@@ -306,6 +352,7 @@ export async function handleOpenRouterIssue(
   ).toISOString();
 
   let childKey: { rawKey: string; hash: string } | null = null;
+  let activationCommitted = false;
   try {
     childKey = await createManagedChildKey({
       managementApiKey: c.env.OPENROUTER_MANAGEMENT_API_KEY,
@@ -337,9 +384,34 @@ export async function handleOpenRouterIssue(
       throw new Error('active entitlement missing after successful issue activation');
     }
 
-    return issueSuccessResponse(c, activeEntitlement, childKey.rawKey);
+    activationCommitted = true;
+
+    await runPostActivationMonitoring(c, {
+      installationId,
+      managedCredentialRef: activeEntitlement.managed_credential_ref!,
+      issuedAt,
+      now,
+    });
+
+    return await issueSuccessResponse(
+      c,
+      activeEntitlement,
+      childKey.rawKey,
+      model,
+      installationId,
+    );
   } catch (error) {
     if (childKey) {
+      if (activationCommitted && error instanceof PostActivationMonitoringStateError) {
+        return handlePostActivationMonitoringFailure(c, {
+          installationId,
+          releaseSessionRef: entitlement.release_session_ref,
+          childKey,
+          issuedAt,
+          issueSuccessRecorded: error.issueSuccessRecorded,
+        });
+      }
+
       return handleManagedChildKeyFailure(c, {
         installationId,
         releaseSessionRef: entitlement.release_session_ref,
@@ -378,7 +450,11 @@ async function activatePendingEntitlement(
            AND status = ?
            AND release_token_hash = ?
            AND release_token_expires_at = ?
-           AND managed_credential_ref = ?`,
+           AND managed_credential_ref = ?
+           AND (
+             discord_issue_status IS NULL
+             OR discord_issue_status NOT IN ('issuing', 'cleanup_required')
+           )`,
      )
      .bind(
        'active',
@@ -424,7 +500,11 @@ async function acquireIssueSingleFlight(
           AND release_session_ref = ?
           AND release_token_hash = ?
           AND release_token_expires_at = ?
-          AND managed_credential_ref IS NULL`,
+          AND managed_credential_ref IS NULL
+          AND (
+            discord_issue_status IS NULL
+            OR discord_issue_status NOT IN ('issuing', 'cleanup_required')
+          )`,
     )
     .bind(
       lockValue,
@@ -478,10 +558,117 @@ async function invalidatePendingRelease(
                 )
               )
         WHERE installation_id = ?
-          AND status = 'pending_release'`,
+          AND status = 'pending_release'
+          AND (
+            discord_issue_status IS NULL
+            OR discord_issue_status NOT IN ('issuing', 'cleanup_required')
+          )`,
     )
     .bind(input.installationId)
     .run();
+}
+
+async function runPostActivationMonitoring(
+  c: Context<BrokerEnv>,
+  input: {
+    installationId: string;
+    managedCredentialRef: string;
+    issuedAt: string;
+    now: Date;
+  },
+): Promise<void> {
+  try {
+    let monitoringResult: Awaited<ReturnType<typeof evaluateImmediateAbuseState>> | null =
+      null;
+    let issueSuccessRecorded = false;
+
+    try {
+      const network = await extractRequestNetworkMetadata(c, c.env.BROKER_DB);
+      await recordIssueSuccess(c.env.BROKER_DB, {
+        installationId: input.installationId,
+        managedCredentialRef: input.managedCredentialRef,
+        observedAt: input.issuedAt,
+        network,
+      });
+      issueSuccessRecorded = true;
+      monitoringResult = await evaluateImmediateAbuseState(c.env.BROKER_DB, input.now);
+    } catch (error) {
+      logPostActivationMonitoringFailure({
+        installationId: input.installationId,
+        managedCredentialRef: input.managedCredentialRef,
+        stage: 'record_or_evaluate',
+        error,
+      });
+      throw new PostActivationMonitoringStateError({
+        cause: error,
+        issueSuccessRecorded,
+      });
+    }
+
+    const sideEffectPromise = deliverImmediateMonitoringSideEffects(
+      c.env,
+      monitoringResult,
+    ).catch((error) => {
+      logPostActivationMonitoringFailure({
+        installationId: input.installationId,
+        managedCredentialRef: input.managedCredentialRef,
+        stage: 'deliver_side_effects',
+        error,
+      });
+    });
+
+    const waitUntil = resolveExecutionWaitUntil(c);
+    if (waitUntil) {
+      try {
+        waitUntil(sideEffectPromise);
+        return;
+      } catch {
+        // Fall through and await inline when the request context does not support waitUntil.
+      }
+    }
+
+    await sideEffectPromise;
+  } catch (error) {
+    if (error instanceof PostActivationMonitoringStateError) {
+      throw error;
+    }
+
+    logPostActivationMonitoringFailure({
+      installationId: input.installationId,
+      managedCredentialRef: input.managedCredentialRef,
+      stage: 'unexpected',
+      error,
+    });
+  }
+}
+
+function logPostActivationMonitoringFailure(input: {
+  installationId: string;
+  managedCredentialRef: string;
+  stage: 'record_or_evaluate' | 'deliver_side_effects' | 'unexpected';
+  error: unknown;
+}): void {
+  console.error('post_activation_monitoring_failed', {
+    installation_id: input.installationId,
+    managed_credential_ref: input.managedCredentialRef,
+    stage: input.stage,
+    error_message: input.error instanceof Error ? input.error.message : String(input.error),
+    broker_timestamp: new Date().toISOString(),
+  });
+}
+
+function resolveExecutionWaitUntil(
+  c: Context<BrokerEnv>,
+): ((promise: Promise<unknown>) => void) | null {
+  try {
+    if (typeof c.executionCtx?.waitUntil !== 'function') {
+      return null;
+    }
+
+    return c.executionCtx.waitUntil.bind(c.executionCtx);
+  } catch {
+    return null;
+  }
 }
 
 async function getInstallation(
@@ -508,7 +695,9 @@ async function getEntitlement(
     .prepare(
       `SELECT installation_id, status, budget_usd, managed_credential_ref, issued_at,
               expires_at, release_session_ref, release_token_hash, release_token_expires_at,
-              verified_hardware_hash, verified_hardware_hash_salt_version
+              verified_hardware_hash, verified_hardware_hash_salt_version,
+              discord_user_ref, discord_issue_status, discord_issue_reserved_at,
+              discord_issue_delivered_at
          FROM openrouter_entitlements
          WHERE installation_id = ?`,
     )
@@ -516,17 +705,35 @@ async function getEntitlement(
     .first<OpenRouterEntitlementRecord>();
 }
 
-function issueSuccessResponse(
+async function issueSuccessResponse(
   c: Context<BrokerEnv>,
   entitlement: OpenRouterEntitlementRecord,
   rawKey: string,
-): Response {
+  model: string,
+  installationId: string,
+): Promise<Response> {
   if (!entitlement.managed_credential_ref || !entitlement.expires_at) {
     throw new Error('active entitlement missing managed release metadata');
   }
 
+  const managedUserHmacSecret = nonEmptyString(
+    c.env.OPENROUTER_MANAGED_USER_HMAC_SECRET,
+  );
+  let openRouterUserId: string | null = null;
+  if (managedUserHmacSecret) {
+    try {
+      openRouterUserId = await deriveManagedOpenRouterUserId({
+        installationId,
+        secret: managedUserHmacSecret,
+      });
+    } catch {
+      openRouterUserId = null;
+    }
+  }
+
   return c.json({
     openrouter_api_key: rawKey,
+    ...(openRouterUserId ? { openrouter_user_id: openRouterUserId } : {}),
     managed_credential_ref: entitlement.managed_credential_ref,
     managed_state: {
       lifecycle: 'active',
@@ -534,7 +741,7 @@ function issueSuccessResponse(
     },
     expires_at: entitlement.expires_at,
     budget_usd: entitlement.budget_usd,
-    model: TRIAL_PROVIDER_POLICY.managedFreeTrial.model,
+    model,
   });
 }
 
@@ -621,6 +828,54 @@ async function handleManagedChildKeyFailure(
   );
 }
 
+async function handlePostActivationMonitoringFailure(
+  c: Context<BrokerEnv>,
+  input: {
+    installationId: string;
+    releaseSessionRef: string;
+    childKey: {
+      rawKey: string;
+      hash: string;
+    };
+    issuedAt: string;
+    issueSuccessRecorded: boolean;
+  },
+): Promise<Response> {
+  if (input.issueSuccessRecorded) {
+    await deleteIssueSuccessRecord(c.env.BROKER_DB, {
+      installationId: input.installationId,
+      managedCredentialRef: input.childKey.hash,
+      observedAt: input.issuedAt,
+    });
+  }
+
+  await rollbackActivatedEntitlement(c.env.BROKER_DB, {
+    installationId: input.installationId,
+    managedCredentialRef: input.childKey.hash,
+  });
+
+  const cleanup = await cleanupManagedChildKey({
+    managementApiKey: c.env.OPENROUTER_MANAGEMENT_API_KEY,
+    keyHash: input.childKey.hash,
+  });
+
+  if (!cleanup.ok) {
+    console.error('managed_child_key_orphan_audit', {
+      installation_id: input.installationId,
+      release_session_ref: input.releaseSessionRef,
+      managed_credential_ref: input.childKey.hash,
+      cleanup_outcome: cleanup.reason,
+      failure_stage: 'post_activation_monitoring',
+      broker_timestamp: new Date().toISOString(),
+    });
+  }
+
+  return internalErrorResponseWithEntitlement(
+    c,
+    await getEntitlement(c.env.BROKER_DB, input.installationId),
+  );
+}
+
 async function handleAmbiguousManagedChildKeyCreateFailure(
   c: Context<BrokerEnv>,
   input: {
@@ -644,6 +899,50 @@ async function handleAmbiguousManagedChildKeyCreateFailure(
     c,
     await getEntitlement(c.env.BROKER_DB, input.installationId),
   );
+}
+
+async function deleteIssueSuccessRecord(
+  db: D1Database,
+  input: {
+    installationId: string;
+    managedCredentialRef: string;
+    observedAt: string;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM broker_issue_success_events
+         WHERE installation_id = ?
+           AND managed_credential_ref = ?
+           AND observed_at = ?`,
+    )
+    .bind(input.installationId, input.managedCredentialRef, input.observedAt)
+    .run();
+}
+
+async function rollbackActivatedEntitlement(
+  db: D1Database,
+  input: {
+    installationId: string;
+    managedCredentialRef: string;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE openrouter_entitlements
+          SET status = 'pending_release',
+              managed_credential_ref = NULL,
+              issued_at = NULL,
+              expires_at = NULL,
+              release_session_ref = NULL,
+              release_token_hash = NULL,
+              release_token_expires_at = NULL
+        WHERE installation_id = ?
+          AND status = 'active'
+          AND managed_credential_ref = ?`,
+    )
+    .bind(input.installationId, input.managedCredentialRef)
+    .run();
 }
 
 function normalizeCreateFailure(error: unknown): {
@@ -711,6 +1010,16 @@ function validateReleaseTokenWindow(
   }
 
   return null;
+}
+
+function isDiscordManagedPendingRelease(
+  entitlement: OpenRouterEntitlementRecord | null,
+): boolean {
+  return (
+    entitlement?.status === 'pending_release' &&
+    (entitlement.discord_issue_status === 'issuing' ||
+      entitlement.discord_issue_status === 'cleanup_required')
+  );
 }
 
 async function readJsonBody<T>(

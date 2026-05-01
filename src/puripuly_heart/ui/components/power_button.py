@@ -49,10 +49,13 @@ class PowerButton(ft.Container):
         content_with_glow = create_glow_stack(
             ft.Container(
                 content=ft.Column(
-                    [self._icon_control, self._label_control],
+                    [
+                        self._icon_control,
+                        self._label_control,
+                    ],
                     alignment=ft.MainAxisAlignment.CENTER,
                     horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    spacing=16,
+                    spacing=10,
                 ),
                 alignment=ft.alignment.center,
             )
@@ -69,8 +72,16 @@ class PowerButton(ft.Container):
             shadow=get_card_shadow(),
         )
 
-    def set_state(self, is_on: bool, needs_key: bool = False):
+    def set_state(
+        self,
+        is_on: bool,
+        needs_key: bool = False,
+        *,
+        status_text: str | None = None,
+        helper_text: str | None = None,
+    ):
         """Update button visual state."""
+        _ = (status_text, helper_text)
         self._is_on = is_on
         self._needs_key = needs_key
 

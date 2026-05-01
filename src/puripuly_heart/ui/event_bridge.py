@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
 
-from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
+import flet as ft
+
+from puripuly_heart.core.managed_openrouter_release import ManagedOpenRouterUserFacingError
+from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.domain.events import STTSessionState, UIEvent, UIEventType
 from puripuly_heart.domain.models import OSCMessage, Transcript, Translation
 from puripuly_heart.ui.i18n import t
 
 logger = logging.getLogger(__name__)
+
+
+def _short_visual_debug_token(value: object | None) -> str:
+    text = "" if value is None else str(value).strip()
+    normalized = "".join(char for char in text if char.isalnum())
+    return (normalized[:4] or "none").lower()
 
 
 class UIEventBridge:
@@ -23,6 +34,7 @@ class UIEventBridge:
         self.event_queue = event_queue
         self.runtime_logging = runtime_logging
         self._running = False
+        self._primary_first_partial_emitted: set[str] = set()
 
     def _get_language_codes(self) -> tuple[str | None, str | None]:
         controller = getattr(self.app, "controller", None)
@@ -35,6 +47,44 @@ class UIEventBridge:
         controller = getattr(self.app, "controller", None)
         hub = getattr(controller, "hub", None)
         return bool(getattr(hub, "translation_enabled", False))
+
+    def _visual_debug_prefix(
+        self,
+        *,
+        channel: str | None,
+        utterance_id: object | None,
+        update_id: str | None = None,
+    ) -> str | None:
+        if channel != "peer" or utterance_id is None:
+            return None
+        mode = getattr(self.runtime_logging, "mode", None)
+        mode_value = getattr(mode, "value", mode)
+        if mode_value != SessionLoggingMode.DETAILED.value:
+            return None
+        turn_token = _short_visual_debug_token(utterance_id)
+        stage_token = _short_visual_debug_token(update_id) if update_id else "src"
+        return f"[P {turn_token}/{stage_token}]"
+
+    def _emit_dashboard_translation_applied_detailed(
+        self,
+        *,
+        translation: Translation,
+        source_label: str,
+        dashboard_target_language: str | None,
+    ) -> None:
+        if self.runtime_logging is None:
+            return
+        message = (
+            "[Detailed][UIEventBridge] dashboard_translation_applied "
+            f"utterance_id={translation.utterance_id} "
+            f"channel={translation.channel} "
+            f"source_label={json.dumps(source_label, ensure_ascii=False)} "
+            f"dashboard_target_language={dashboard_target_language} "
+            f"translation_target_language={translation.target_language} "
+            f"text_len={len(translation.text)}"
+        )
+        with contextlib.suppress(Exception):
+            self.runtime_logging.emit_detailed(message)
 
     def report_overlay_state(
         self,
@@ -86,11 +136,35 @@ class UIEventBridge:
             source = event.source or "Mic"
             source_lang, _ = self._get_language_codes()
 
+            is_final = event.type == UIEventType.TRANSCRIPT_FINAL
+            utterance_key = str(transcript.utterance_id)
+            if is_final:
+                self._primary_first_partial_emitted.discard(utterance_key)
+                should_log = True
+                transcript_kind = "final"
+            else:
+                should_log = utterance_key not in self._primary_first_partial_emitted
+                if should_log:
+                    self._primary_first_partial_emitted.add(utterance_key)
+                transcript_kind = "partial"
+
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
-                dash.set_display_text(transcript.text, language_code=source_lang)
+                dash.set_display_text(
+                    transcript.text,
+                    language_code=source_lang,
+                    utterance_id=transcript.utterance_id,
+                    channel=transcript.channel,
+                    source_text_len=len(transcript.text),
+                    transcript_kind=transcript_kind,
+                    should_log=should_log,
+                    debug_prefix=self._visual_debug_prefix(
+                        channel=transcript.channel,
+                        utterance_id=transcript.utterance_id,
+                    ),
+                )
 
-            if event.type == UIEventType.TRANSCRIPT_FINAL:
+            if is_final:
                 add_history = getattr(self.app, "add_history_entry", None)
                 if add_history is not None:
                     add_history(source, transcript.text, language_code=source_lang)
@@ -104,7 +178,28 @@ class UIEventBridge:
             _, target_lang = self._get_language_codes()
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
-                dash.set_display_translation_text(translation.text, language_code=target_lang)
+                dash.set_display_translation_text(
+                    translation.text,
+                    language_code=target_lang,
+                    update_id=translation.update_id,
+                    origin_wall_clock_ms=translation.origin_wall_clock_ms,
+                    utterance_id=translation.utterance_id,
+                    channel=translation.channel,
+                    session_scope=translation.session_scope,
+                    source_text_hash=translation.source_text_hash,
+                    source_text_len=translation.source_text_len,
+                    logical_turn_key=translation.logical_turn_key,
+                    debug_prefix=self._visual_debug_prefix(
+                        channel=translation.channel,
+                        utterance_id=translation.utterance_id,
+                        update_id=translation.update_id,
+                    ),
+                )
+                self._emit_dashboard_translation_applied_detailed(
+                    translation=translation,
+                    source_label=source,
+                    dashboard_target_language=target_lang,
+                )
             add_history = getattr(self.app, "add_history_entry", None)
             if add_history is not None:
                 add_history(source, translation.text, translated=True, language_code=target_lang)
@@ -124,6 +219,7 @@ class UIEventBridge:
         if event.type == UIEventType.ERROR:
             payload = event.payload
             text = str(payload) if payload is not None else t("error.unknown")
+            controller = getattr(self.app, "controller", None)
             try:
                 if self.runtime_logging is not None:
                     if not event.runtime_log_handled:
@@ -132,6 +228,20 @@ class UIEventBridge:
                     logger.error(text)
             except Exception:
                 logger.error(text)
+            if isinstance(payload, ManagedOpenRouterUserFacingError):
+                clear_pending = (
+                    getattr(controller, "clear_managed_auth_pending_state", None)
+                    if controller is not None
+                    else None
+                )
+                if callable(clear_pending):
+                    with contextlib.suppress(Exception):
+                        clear_pending()
+                show_snackbar = getattr(self.app, "_show_snackbar", None)
+                if callable(show_snackbar):
+                    with contextlib.suppress(Exception):
+                        show_snackbar(text, ft.Colors.ORANGE_700)
+                        return
             dash = getattr(self.app, "view_dashboard", None)
             if dash is not None:
                 msg_lower = text.lower()

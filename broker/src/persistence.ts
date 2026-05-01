@@ -1,6 +1,7 @@
 export const BROKER_RUNTIME_CONFIG_KEYS = {
   fingerprintSalt: 'fingerprint_salt',
   abuseControls: 'abuse_controls',
+  abuseRuntimeState: 'abuse_runtime_state',
 } as const;
 
 export interface BrokerEndpointRateLimitConfig {
@@ -10,11 +11,53 @@ export interface BrokerEndpointRateLimitConfig {
   windowMinutes: number;
 }
 
+export type BrokerDailyIssuanceCapEndpoint =
+  | 'POST /v1/providers/openrouter/issue'
+  | 'POST /v1/providers/openrouter/discord/issue';
+
 export interface BrokerDailyIssuanceCapConfig {
-  endpoint: 'POST /v1/providers/openrouter/issue';
+  endpoint: BrokerDailyIssuanceCapEndpoint;
   scope: 'global';
   maxCount: number | null;
   windowDays: number;
+}
+
+export interface BrokerPendingDiscordOAuthSessionsConfig {
+  maxPerInstallation: number;
+  maxPerIp: number;
+  windowMinutes: number;
+}
+
+export interface BrokerImmediateAlertsConfig {
+  warn1: number;
+  warn2: number;
+  warn3: number;
+  critical: number;
+}
+
+export interface BrokerAsnFastPathConfig {
+  enabled: boolean;
+  minIssueSuccess1h: number;
+  minTopAsnSharePct: number;
+}
+
+export interface BrokerAsnClassificationEntry {
+  asn: number;
+  kind: 'cloud_or_vps';
+  displayName?: string;
+}
+
+export interface BrokerAbuseRetentionConfig {
+  requestEventsDays: number;
+  issueSuccessDays: number;
+  runtimeAuditDays: number;
+}
+
+export interface BrokerDailyReportConfig {
+  enabled: boolean;
+  hourUtc: number;
+  minuteUtc: number;
+  includeZeroActivity: boolean;
 }
 
 export interface BrokerAbuseControlsConfigValue {
@@ -22,7 +65,17 @@ export interface BrokerAbuseControlsConfigValue {
   trialChallengeVerify: BrokerEndpointRateLimitConfig;
   openrouterIssue: BrokerEndpointRateLimitConfig;
   trialStatus: BrokerEndpointRateLimitConfig;
+  discordAuthStartIp: BrokerEndpointRateLimitConfig;
+  discordAuthStartInstallation: BrokerEndpointRateLimitConfig;
+  discordOpenrouterIssueIp: BrokerEndpointRateLimitConfig;
+  discordOpenrouterIssueInstallation: BrokerEndpointRateLimitConfig;
+  pendingDiscordOAuthSessions: BrokerPendingDiscordOAuthSessionsConfig;
   newActiveEntitlementsPerDay: BrokerDailyIssuanceCapConfig;
+  immediateAlerts: BrokerImmediateAlertsConfig;
+  asnFastPath: BrokerAsnFastPathConfig;
+  asnClassifications: BrokerAsnClassificationEntry[];
+  retention: BrokerAbuseRetentionConfig;
+  dailyReport: BrokerDailyReportConfig;
 }
 
 export const DEFAULT_BROKER_ABUSE_CONTROLS: BrokerAbuseControlsConfigValue = {
@@ -50,17 +103,114 @@ export const DEFAULT_BROKER_ABUSE_CONTROLS: BrokerAbuseControlsConfigValue = {
     maxRequests: 30,
     windowMinutes: 15,
   },
+  discordAuthStartIp: {
+    endpoint: 'POST /v1/auth/discord/start',
+    scope: 'ip',
+    maxRequests: 20,
+    windowMinutes: 15,
+  },
+  discordAuthStartInstallation: {
+    endpoint: 'POST /v1/auth/discord/start',
+    scope: 'installation_id',
+    maxRequests: 5,
+    windowMinutes: 15,
+  },
+  discordOpenrouterIssueIp: {
+    endpoint: 'POST /v1/providers/openrouter/discord/issue',
+    scope: 'ip',
+    maxRequests: 10,
+    windowMinutes: 15,
+  },
+  discordOpenrouterIssueInstallation: {
+    endpoint: 'POST /v1/providers/openrouter/discord/issue',
+    scope: 'installation_id',
+    maxRequests: 3,
+    windowMinutes: 15,
+  },
+  pendingDiscordOAuthSessions: {
+    maxPerInstallation: 2,
+    maxPerIp: 20,
+    windowMinutes: 15,
+  },
   newActiveEntitlementsPerDay: {
-    endpoint: 'POST /v1/providers/openrouter/issue',
+    endpoint: 'POST /v1/providers/openrouter/discord/issue',
     scope: 'global',
-    maxCount: null,
+    maxCount: 500,
     windowDays: 1,
+  },
+  immediateAlerts: {
+    warn1: 10,
+    warn2: 25,
+    warn3: 50,
+    critical: 70,
+  },
+  asnFastPath: {
+    enabled: true,
+    minIssueSuccess1h: 20,
+    minTopAsnSharePct: 70,
+  },
+  asnClassifications: [],
+  retention: {
+    requestEventsDays: 30,
+    issueSuccessDays: 30,
+    runtimeAuditDays: 90,
+  },
+  dailyReport: {
+    enabled: true,
+    hourUtc: 13,
+    minuteUtc: 0,
+    includeZeroActivity: false,
+  },
+};
+
+export interface BrokerAbuseRuntimeBrakeState {
+  active: boolean;
+  reason: 'global_threshold' | 'asn_fast_path' | 'manual' | null;
+  changedAt: string | null;
+  changedBy: 'system' | 'operator' | null;
+}
+
+export interface BrokerAbuseRuntimeAlertLatches {
+  warn1: boolean;
+  warn2: boolean;
+  warn3: boolean;
+  critical: boolean;
+}
+
+export interface BrokerAbuseRuntimeDailyReportState {
+  lastDeliveredAt: string | null;
+  lastDeliveredDateUtc: string | null;
+}
+
+export interface BrokerAbuseRuntimeStateValue {
+  brake: BrokerAbuseRuntimeBrakeState;
+  alertLatches: BrokerAbuseRuntimeAlertLatches;
+  dailyReport: BrokerAbuseRuntimeDailyReportState;
+}
+
+export const DEFAULT_BROKER_ABUSE_RUNTIME_STATE: BrokerAbuseRuntimeStateValue = {
+  brake: {
+    active: false,
+    reason: null,
+    changedAt: null,
+    changedBy: null,
+  },
+  alertLatches: {
+    warn1: false,
+    warn2: false,
+    warn3: false,
+    critical: false,
+  },
+  dailyReport: {
+    lastDeliveredAt: null,
+    lastDeliveredDateUtc: null,
   },
 };
 
 export const BROKER_RUNTIME_CONFIG_SCHEMA = {
   [BROKER_RUNTIME_CONFIG_KEYS.fingerprintSalt]: ['current', 'previous', 'rotated_at'],
   [BROKER_RUNTIME_CONFIG_KEYS.abuseControls]: DEFAULT_BROKER_ABUSE_CONTROLS,
+  [BROKER_RUNTIME_CONFIG_KEYS.abuseRuntimeState]: DEFAULT_BROKER_ABUSE_RUNTIME_STATE,
 } as const;
 
 export type BrokerRuntimeConfigKey =
@@ -132,8 +282,39 @@ export const OPENROUTER_ENTITLEMENT_STATUS_VALUES = [
   'revoked',
 ] as const;
 
+export const DISCORD_OAUTH_SESSION_STATUS_VALUES = [
+  'pending',
+  'processing',
+  'consumed',
+  'canceled',
+  'failed',
+  'expired',
+] as const;
+
 export type OpenRouterEntitlementStatus =
   (typeof OPENROUTER_ENTITLEMENT_STATUS_VALUES)[number];
+
+export type DiscordOAuthSessionStatus =
+  (typeof DISCORD_OAUTH_SESSION_STATUS_VALUES)[number];
+
+export interface DiscordOAuthSessionRecord {
+  state_hash: string;
+  installation_id: string;
+  device_public_key: string;
+  redirect_uri: string;
+  pkce_code_verifier: string | null;
+  issue_nonce_hash: string;
+  fingerprint_salt_version: number;
+  discord_user_ref: string | null;
+  discord_email_verified: 0 | 1 | null;
+  discord_account_created_at: string | null;
+  eligibility_checked_at: string | null;
+  status: DiscordOAuthSessionStatus;
+  created_at: string;
+  expires_at: string;
+  processing_started_at: string | null;
+  consumed_at: string | null;
+}
 
 export interface OpenRouterEntitlementRecord {
   installation_id: string;
@@ -147,6 +328,10 @@ export interface OpenRouterEntitlementRecord {
   release_token_expires_at: string | null;
   verified_hardware_hash: string | null;
   verified_hardware_hash_salt_version: number | null;
+  discord_user_ref: string | null;
+  discord_issue_status: 'issuing' | 'active' | 'failed' | 'cleanup_required' | null;
+  discord_issue_reserved_at: string | null;
+  discord_issue_delivered_at: string | null;
 }
 
 export interface BrokerRequestEventRecord {
@@ -155,6 +340,29 @@ export interface BrokerRequestEventRecord {
   ip: string | null;
   installation_id: string | null;
   observed_at: string;
+}
+
+export interface BrokerIssueSuccessEventRecord {
+  id: number;
+  installation_id: string;
+  managed_credential_ref: string | null;
+  ip_hash: string | null;
+  ip_prefix_hash: string | null;
+  asn: number | null;
+  country: string | null;
+  http_protocol: string | null;
+  tls_version: string | null;
+  tls_cipher: string | null;
+  risk_label: string | null;
+  observed_at: string;
+}
+
+export interface BrokerAbuseRuntimeAuditRecord {
+  id: number;
+  event_kind: string;
+  reason: string | null;
+  payload_json: string;
+  created_at: string;
 }
 
 export interface BrokerVelocityCapHookRecord {
@@ -199,15 +407,15 @@ export const BROKER_PERSISTENCE_MODEL = {
     brokerConfig: {
       name: 'broker_config',
       primaryKey: 'key',
-      columns: ['key', 'value', 'updated_at'],
-      valueEncoding: 'JSON',
-      supportedKeys: ['fingerprint_salt', 'abuse_controls'],
-      constraints: {
-        key: 'supported-keys-only',
-        value: 'valid-json',
+        columns: ['key', 'value', 'updated_at'],
+        valueEncoding: 'JSON',
+        supportedKeys: ['fingerprint_salt', 'abuse_controls', 'abuse_runtime_state'],
+        constraints: {
+          key: 'supported-keys-only',
+          value: 'valid-json',
+        },
+        seedRows: ['fingerprint_salt', 'abuse_controls', 'abuse_runtime_state'],
       },
-      seedRows: ['fingerprint_salt', 'abuse_controls'],
-    },
     installations: {
       name: 'installations',
       primaryKey: 'installation_id',
@@ -270,14 +478,23 @@ export const BROKER_PERSISTENCE_MODEL = {
         'release_token_expires_at',
         'verified_hardware_hash',
         'verified_hardware_hash_salt_version',
+        'discord_user_ref',
+        'discord_issue_status',
+        'discord_issue_reserved_at',
+        'discord_issue_delivered_at',
       ],
-      unique: ['managed_credential_ref'],
-      indexed: ['status', 'expires_at'],
+      unique: ['managed_credential_ref', 'discord_user_ref'],
+      indexed: ['status', 'expires_at', 'discord_issue_reserved_at'],
       partialUniqueIndexes: [
         {
           name: 'idx_openrouter_entitlements_release_token_hash',
           columns: ['release_token_hash'],
           predicate: 'release_token_hash IS NOT NULL',
+        },
+        {
+          name: 'idx_openrouter_entitlements_discord_user_ref',
+          columns: ['discord_user_ref'],
+          predicate: 'discord_user_ref IS NOT NULL',
         },
       ],
       updateStrategy: 'in-place',
@@ -298,6 +515,48 @@ export const BROKER_PERSISTENCE_MODEL = {
         },
       },
     },
+    discordOAuthSessions: {
+      name: 'discord_oauth_sessions',
+      purpose:
+        'bounded OAuth PKCE/session state for Discord-gated managed OpenRouter issuance',
+      primaryKey: 'state_hash',
+      columns: [
+        'state_hash',
+        'installation_id',
+        'device_public_key',
+        'redirect_uri',
+        'pkce_code_verifier',
+        'issue_nonce_hash',
+        'fingerprint_salt_version',
+        'discord_user_ref',
+        'discord_email_verified',
+        'discord_account_created_at',
+        'eligibility_checked_at',
+        'status',
+        'created_at',
+        'expires_at',
+        'processing_started_at',
+        'consumed_at',
+      ],
+      storedStatuses: DISCORD_OAUTH_SESSION_STATUS_VALUES,
+      retention: 'expires_at cleanup only; durable entitlement and identity evidence is separate',
+      indexed: ['installation_id + status + created_at', 'expires_at'],
+    },
+    discordIdentities: {
+      name: 'discord_identities',
+      purpose: 'durable HMAC Discord user reference uniqueness for managed issuance',
+      primaryKey: 'discord_user_ref',
+      columns: [
+        'discord_user_ref',
+        'entitlement_installation_id',
+        'status',
+        'ref_secret_version',
+        'created_at',
+        'updated_at',
+      ],
+      storedStatuses: ['issuing', 'active', 'failed', 'cleanup_required'],
+      foreignKeys: ['entitlement_installation_id -> installations.installation_id'],
+    },
     brokerRequestEvents: {
       name: 'broker_request_events',
       purpose: ['per-endpoint rate limits', 'cross-endpoint velocity hooks'],
@@ -308,7 +567,42 @@ export const BROKER_PERSISTENCE_MODEL = {
         'endpoint + installation_id + observed_at',
         'ip + observed_at',
         'installation_id + observed_at',
+        ],
+      },
+    brokerIssueSuccessEvents: {
+      name: 'broker_issue_success_events',
+      purpose: ['issue success alerting', 'daily reporting', 'asn-based heuristics'],
+      columns: [
+        'id',
+        'installation_id',
+        'managed_credential_ref',
+        'ip_hash',
+        'ip_prefix_hash',
+        'asn',
+        'country',
+        'http_protocol',
+        'tls_version',
+        'tls_cipher',
+        'risk_label',
+        'observed_at',
       ],
+      appendOnly: true,
+      indexed: [
+        'installation_id + observed_at',
+        'managed_credential_ref + observed_at',
+        'ip_hash + observed_at',
+        'ip_prefix_hash + observed_at',
+        'asn + observed_at',
+        'observed_at',
+      ],
+    },
+    brokerAbuseRuntimeAudit: {
+      name: 'broker_abuse_runtime_audit',
+      purpose:
+        'append-only audit trail for runtime-state changes and abuse-monitoring decisions',
+      columns: ['id', 'event_kind', 'reason', 'payload_json', 'created_at'],
+      appendOnly: true,
+      indexed: ['event_kind + created_at', 'created_at'],
     },
     brokerVelocityCapHooks: {
       name: 'broker_velocity_cap_hooks',

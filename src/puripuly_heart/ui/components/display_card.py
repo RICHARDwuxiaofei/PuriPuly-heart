@@ -1,3 +1,5 @@
+import logging
+import time
 from typing import Callable
 
 import flet as ft
@@ -44,6 +46,13 @@ def _status_label(status: str) -> str:
     return t("display.disconnected")
 
 
+def _apply_debug_prefix(text: str, debug_prefix: str | None) -> str:
+    prefix = (debug_prefix or "").strip()
+    if not prefix or not text:
+        return text
+    return f"{prefix} {text}"
+
+
 class DisplayCard(ft.Container):
     """Multi-purpose display card with input field and decorative gradient."""
 
@@ -55,6 +64,7 @@ class DisplayCard(ft.Container):
         self._secondary_value: str | None = None
         self._primary_font_family: str | None = None
         self._secondary_font_family: str | None = None
+        self._debug_prefix: str | None = None
         self._notice_value: str | None = None
         self._notice_tone: str | None = None
 
@@ -179,21 +189,87 @@ class DisplayCard(ft.Container):
             e.control.update()
             e.control.focus()
 
-    def set_display(self, text: str, is_error: bool = False, font_family: str | None = None):
+    def set_display(
+        self,
+        text: str,
+        is_error: bool = False,
+        font_family: str | None = None,
+        *,
+        runtime_log_detailed: Callable[..., bool | None] | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        utterance_id: object | None = None,
+        channel: str | None = None,
+        source_text_len: int | None = None,
+        transcript_kind: str | None = None,
+        should_log: bool = False,
+        debug_prefix: str | None = None,
+    ):
         """Update the primary display text and clear any secondary text."""
         self._showing_status = False
         self._primary_value = text
         self._primary_font_family = font_family
         self._secondary_value = None
         self._secondary_font_family = None
-        self._sync_display(is_error=is_error)
+        self._debug_prefix = debug_prefix
+        measure = should_log and runtime_log_detailed is not None
+        primary_update_issued, _, flet_update_elapsed_us = self._sync_display(
+            is_error=is_error, measure_flet_update=measure
+        )
+        if should_log:
+            self._emit_dashboard_primary_applied(
+                runtime_log_detailed=runtime_log_detailed,
+                update_id=update_id,
+                origin_wall_clock_ms=origin_wall_clock_ms,
+                utterance_id=utterance_id,
+                channel=channel,
+                source_text_len=source_text_len,
+                transcript_kind=transcript_kind,
+                primary_update_issued=primary_update_issued,
+                flet_update_elapsed_us=flet_update_elapsed_us,
+            )
 
-    def set_display_translation(self, text: str | None, font_family: str | None = None) -> None:
-        """Update the secondary display text and sync font sizing."""
+    def set_display_translation(
+        self,
+        text: str | None,
+        font_family: str | None = None,
+        *,
+        runtime_log_detailed: Callable[..., bool | None] | None = None,
+        update_id: str | None = None,
+        origin_wall_clock_ms: int | None = None,
+        utterance_id: object | None = None,
+        channel: str | None = None,
+        session_scope: str | None = None,
+        source_text_hash: str | None = None,
+        source_text_len: int | None = None,
+        logical_turn_key: str | None = None,
+        debug_prefix: str | None = None,
+    ) -> None:
+        """Update the secondary display text and emit a post-update visual commit marker."""
         self._showing_status = False
         self._secondary_value = text or None
         self._secondary_font_family = font_family if text else None
-        self._sync_display()
+        self._debug_prefix = debug_prefix
+        measure = runtime_log_detailed is not None
+        (
+            primary_update_issued,
+            secondary_update_issued,
+            flet_update_elapsed_us,
+        ) = self._sync_display(measure_flet_update=measure)
+        self._emit_dashboard_translation_visual_commit(
+            runtime_log_detailed=runtime_log_detailed,
+            update_id=update_id,
+            origin_wall_clock_ms=origin_wall_clock_ms,
+            utterance_id=utterance_id,
+            channel=channel,
+            session_scope=session_scope,
+            source_text_hash=source_text_hash,
+            source_text_len=source_text_len,
+            logical_turn_key=logical_turn_key,
+            primary_update_issued=primary_update_issued,
+            secondary_update_issued=secondary_update_issued,
+            flet_update_elapsed_us=flet_update_elapsed_us,
+        )
 
     def set_status(self, status: str, font_family: str | None = None):
         """Update connection status display."""
@@ -203,6 +279,7 @@ class DisplayCard(ft.Container):
         self._primary_font_family = font_family
         self._secondary_value = None
         self._secondary_font_family = None
+        self._debug_prefix = None
         self._sync_display()
 
     def set_notice(self, text: str | None, tone: str | None = None) -> None:
@@ -251,9 +328,115 @@ class DisplayCard(ft.Container):
             self._secondary_font_family = None
             self._sync_display()
 
-    def _sync_display(self, *, is_error: bool = False) -> None:
-        primary_text = self._notice_value or self._primary_value or ""
-        secondary_text = "" if self._notice_value else self._secondary_value or ""
+    def _emit_dashboard_translation_visual_commit(
+        self,
+        *,
+        runtime_log_detailed: Callable[..., bool | None] | None,
+        update_id: str | None,
+        origin_wall_clock_ms: int | None,
+        utterance_id: object | None,
+        channel: str | None,
+        session_scope: str | None,
+        source_text_hash: str | None,
+        source_text_len: int | None,
+        logical_turn_key: str | None,
+        primary_update_issued: bool,
+        secondary_update_issued: bool,
+        flet_update_elapsed_us: int | None = None,
+    ) -> None:
+        if runtime_log_detailed is None or update_id is None:
+            return
+        if not (primary_update_issued or secondary_update_issued):
+            return
+        if not self._display_secondary.visible or not self._display_secondary.value:
+            return
+
+        elapsed_ms = None
+        if origin_wall_clock_ms is not None:
+            elapsed_ms = max(0, int(time.time() * 1000) - origin_wall_clock_ms)
+
+        parts = [
+            "[Detailed][DisplayCard] dashboard_translation_visual_commit",
+            f"utterance_id={utterance_id}",
+            f"channel={channel}",
+            f"update_id={update_id}",
+            f"origin_wall_clock_ms={origin_wall_clock_ms}",
+            f"session_scope={session_scope}",
+            f"source_text_hash={source_text_hash}",
+            f"source_text_len={source_text_len}",
+            f"logical_turn_key={logical_turn_key}",
+            f"primary_text_len={len(self._display_primary.value or '')}",
+            f"secondary_text_len={len(self._display_secondary.value or '')}",
+            f"secondary_visible={self._display_secondary.visible}",
+            f"showing_status={self._showing_status}",
+            f"primary_update_issued={primary_update_issued}",
+            f"secondary_update_issued={secondary_update_issued}",
+        ]
+        if elapsed_ms is not None:
+            parts.append(f"elapsed_ms={elapsed_ms}")
+        if flet_update_elapsed_us is not None:
+            parts.append(f"flet_update_elapsed_us={flet_update_elapsed_us}")
+
+        try:
+            runtime_log_detailed(" ".join(parts), level=logging.INFO)
+        except Exception:
+            return
+
+    def _emit_dashboard_primary_applied(
+        self,
+        *,
+        runtime_log_detailed: Callable[..., bool | None] | None,
+        update_id: str | None,
+        origin_wall_clock_ms: int | None,
+        utterance_id: object | None,
+        channel: str | None,
+        source_text_len: int | None,
+        transcript_kind: str | None,
+        primary_update_issued: bool,
+        flet_update_elapsed_us: int | None = None,
+    ) -> None:
+        if runtime_log_detailed is None:
+            return
+        if not primary_update_issued:
+            return
+
+        elapsed_ms = None
+        if origin_wall_clock_ms is not None:
+            elapsed_ms = max(0, int(time.time() * 1000) - origin_wall_clock_ms)
+
+        parts = [
+            "[Detailed][DisplayCard] dashboard_primary_applied",
+            f"utterance_id={utterance_id}",
+            f"channel={channel}",
+            f"update_id={update_id if update_id is not None else 'none'}",
+            f"origin_wall_clock_ms={origin_wall_clock_ms}",
+            f"transcript_kind={transcript_kind}",
+            f"source_text_len={source_text_len}",
+            f"primary_text_len={len(self._display_primary.value or '')}",
+            f"showing_status={self._showing_status}",
+            f"primary_update_issued={primary_update_issued}",
+        ]
+        if elapsed_ms is not None:
+            parts.append(f"elapsed_ms={elapsed_ms}")
+        if flet_update_elapsed_us is not None:
+            parts.append(f"flet_update_elapsed_us={flet_update_elapsed_us}")
+
+        try:
+            runtime_log_detailed(" ".join(parts), level=logging.INFO)
+        except Exception:
+            return
+
+    def _sync_display(
+        self, *, is_error: bool = False, measure_flet_update: bool = False
+    ) -> tuple[bool, bool, int | None]:
+        primary_text = self._notice_value or _apply_debug_prefix(
+            self._primary_value or "", self._debug_prefix
+        )
+        secondary_text = (
+            ""
+            if self._notice_value
+            else _apply_debug_prefix(self._secondary_value or "", self._debug_prefix)
+        )
         max_len = max(_weighted_len(primary_text), _weighted_len(secondary_text))
         new_size = _display_size_for_length(max_len)
 
@@ -270,7 +453,18 @@ class DisplayCard(ft.Container):
         self._display_secondary.color = text_color
         self._display_secondary.font_family = self._secondary_font_family
 
+        primary_update_issued = self._display_primary.page is not None
+        secondary_update_issued = self._display_secondary.page is not None
+
+        flet_update_elapsed_us: int | None = None
+        start_ns = time.perf_counter_ns() if measure_flet_update else 0
+
         if self._display_primary.page is not None:
             self._display_primary.update()
         if self._display_secondary.page is not None:
             self._display_secondary.update()
+
+        if measure_flet_update:
+            flet_update_elapsed_us = max(0, (time.perf_counter_ns() - start_ns) // 1000)
+
+        return primary_update_issued, secondary_update_issued, flet_update_elapsed_us

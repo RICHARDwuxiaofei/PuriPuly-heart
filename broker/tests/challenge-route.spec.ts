@@ -10,7 +10,7 @@ import {
 } from './test-support/ed25519';
 import { normalizedErrorEnvelope } from './test-support/errors';
 import { createPendingReleaseSession } from './test-support/openrouter-issue';
-import { createTestBrokerEnv } from './test-support/sqlite-d1';
+import { createTestBrokerEnv, insertEntitlement } from './test-support/sqlite-d1';
 import { issueChallenge, postIssue, postVerify } from './test-support/trial-api';
 
 const DEVICE_PUBLIC_KEY = Buffer.alloc(32, 7).toString('base64url');
@@ -28,6 +28,8 @@ interface ChallengeBoundsCase {
   message: string;
 }
 
+type DiscordBlockedIssueStatus = 'issuing' | 'cleanup_required';
+
 function createDeferred(): {
   promise: Promise<void>;
   resolve: () => void;
@@ -39,6 +41,22 @@ function createDeferred(): {
     }),
     resolve,
   };
+}
+
+function readEntitlementSnapshot(
+  env: ReturnType<typeof createTestBrokerEnv>,
+  installationId: string,
+): Record<string, unknown> {
+  return env.__db
+    .prepare(
+      `SELECT status, managed_credential_ref, release_session_ref,
+              release_token_hash, release_token_expires_at,
+              verified_hardware_hash, verified_hardware_hash_salt_version,
+              discord_issue_status, discord_issue_reserved_at
+         FROM openrouter_entitlements
+        WHERE installation_id = ?`,
+    )
+    .get(installationId) as Record<string, unknown>;
 }
 
 describe('POST /v1/trial/challenge', () => {
@@ -356,6 +374,75 @@ describe('POST /v1/trial/challenge', () => {
       verified_hardware_hash_salt_version: 7,
     });
   });
+
+  it.each([
+    { discordIssueStatus: 'issuing', managedCredentialRef: null },
+    {
+      discordIssueStatus: 'cleanup_required',
+      managedCredentialRef: 'hash_orphaned_discord_cleanup_required_challenge',
+    },
+  ] satisfies Array<{
+    discordIssueStatus: DiscordBlockedIssueStatus;
+    managedCredentialRef: string | null;
+  }>)(
+    'rejects challenge reissue for Discord $discordIssueStatus pending_release without mutating entitlement metadata',
+    async ({ discordIssueStatus, managedCredentialRef }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+      const env = createTestBrokerEnv();
+      const keyPair = await createDeviceKeyPair();
+      await issueChallenge({
+        env,
+        installationId: `install-discord-${discordIssueStatus}-challenge-guard`,
+        devicePublicKey: keyPair.devicePublicKey,
+        appVersion: '1.2.3',
+      });
+      insertEntitlement(env, {
+        installation_id: `install-discord-${discordIssueStatus}-challenge-guard`,
+        status: 'pending_release',
+        budget_usd: 0.07,
+        managed_credential_ref: managedCredentialRef,
+        release_session_ref: `release-session-${discordIssueStatus}-challenge-guard`,
+        release_token_hash: `release-token-hash-${discordIssueStatus}-challenge-guard`,
+        release_token_expires_at: '2026-04-08T06:10:00.000Z',
+        verified_hardware_hash: `hardware-hash-${discordIssueStatus}-challenge-guard`,
+        verified_hardware_hash_salt_version: 7,
+        discord_issue_status: discordIssueStatus,
+        discord_issue_reserved_at: '2026-04-08T06:00:00.000Z',
+      });
+      const before = readEntitlementSnapshot(
+        env,
+        `install-discord-${discordIssueStatus}-challenge-guard`,
+      );
+
+      vi.setSystemTime(new Date('2026-04-08T06:01:00Z'));
+
+      const response = await app.request(
+        'http://broker.test/v1/trial/challenge',
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            installation_id: `install-discord-${discordIssueStatus}-challenge-guard`,
+            device_public_key: keyPair.devicePublicKey,
+            app_version: '1.2.4',
+          }),
+        },
+        env,
+      );
+
+      expect(response.status).toBe(409);
+      expect(
+        readEntitlementSnapshot(
+          env,
+          `install-discord-${discordIssueStatus}-challenge-guard`,
+        ),
+      ).toEqual(before);
+    },
+  );
 
   it('rejects stale release tokens while challenge rotation is still in flight', async () => {
     vi.useFakeTimers();
