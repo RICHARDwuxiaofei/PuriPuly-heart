@@ -65,9 +65,7 @@ from puripuly_heart.ui.controller import GuiController
 from puripuly_heart.ui.i18n import set_locale, t
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-EXPECTED_PEER_DISCLOSURE = (
-    "Puri Puly Peer translation is on.\n" "Voice audio around me may be picked up and translated."
-)
+PEER_DISCLOSURE_KEY = "peer_translation.disclosure"
 
 
 class DummySecrets:
@@ -2353,7 +2351,9 @@ async def test_set_peer_translation_enabled_enqueues_peer_disclosure_once(
 
         await controller.set_peer_translation_enabled(True)
 
-        assert controller.hub.disclosures == [EXPECTED_PEER_DISCLOSURE]
+        expected_disclosure = t(PEER_DISCLOSURE_KEY)
+        assert expected_disclosure != PEER_DISCLOSURE_KEY
+        assert controller.hub.disclosures == [expected_disclosure]
     finally:
         set_locale("en")
 

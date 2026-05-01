@@ -25,7 +25,6 @@ DEBUG_PREVIEW_I18N_KEYS = {
     "debug_preview.pkce_failure",
     "debug_preview.discord_auth",
     "debug_preview.peer_translation_eula",
-    "peer_translation_eula.title",
     "peer_translation_eula.body",
     "peer_translation_eula.accept",
     "peer_translation_eula.cancel",
