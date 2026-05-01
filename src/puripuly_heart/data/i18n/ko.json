@@ -220,7 +220,7 @@
   "provider.alibaba_beijing": "Alibaba (베이징)",
   "provider.alibaba_singapore": "Alibaba (싱가포르)",
   "provider.deepgram": "Deepgram",
-  "provider.deepgram.description": "대부분의 상황에서 좋은 선택이에요",
+  "provider.deepgram.description": "",
   "provider.soniox": "Soniox",
   "provider.soniox.description": "한국어 사용자에게 권장해요",
   "provider.gemini": "Gemini",
