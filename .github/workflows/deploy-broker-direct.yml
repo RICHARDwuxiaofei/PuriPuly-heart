@@ -29,6 +29,10 @@ jobs:
       OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION: ${{ secrets.OPENROUTER_MANAGEMENT_API_KEY_PRODUCTION }}
       OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_GUARDRAIL_ID_PRODUCTION }}
       OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION: ${{ secrets.OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION }}
+      DISCORD_CLIENT_ID_PRODUCTION: ${{ secrets.DISCORD_CLIENT_ID_PRODUCTION }}
+      DISCORD_CLIENT_SECRET_PRODUCTION: ${{ secrets.DISCORD_CLIENT_SECRET_PRODUCTION }}
+      DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION: ${{ secrets.DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION }}
+      DISCORD_USER_REF_SECRET_PRODUCTION: ${{ secrets.DISCORD_USER_REF_SECRET_PRODUCTION }}
       DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION: ${{ secrets.DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION }}
       BROKER_CANONICAL_WORKERS_DEV_URL: ${{ vars.BROKER_CANONICAL_WORKERS_DEV_URL }}
       BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION: ${{ vars.BROKER_DEPLOY_SMOKE_DISALLOWED_MODEL_PRODUCTION }}
@@ -36,13 +40,15 @@ jobs:
     steps:
       - name: Guard production deploy ref and confirmation
         shell: bash
+        env:
+          CONFIRM_PRODUCTION_DEPLOY: ${{ github.event.inputs.confirm_production_deploy }}
         run: |
           if [[ "$GITHUB_REF" != 'refs/heads/dev' ]]; then
             echo 'Direct production broker deploys must be launched from refs/heads/dev.' >&2
             exit 1
           fi
 
-          if [[ "${{ github.event.inputs.confirm_production_deploy }}" != 'deploy puripuly-heart-broker from dev' ]]; then
+          if [[ "$CONFIRM_PRODUCTION_DEPLOY" != 'deploy puripuly-heart-broker from dev' ]]; then
             echo 'confirm_production_deploy must exactly match: deploy puripuly-heart-broker from dev' >&2
             exit 1
           fi
@@ -59,6 +65,46 @@ jobs:
 
           if [[ -z "${OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION//[[:space:]]/}" ]]; then
             echo 'OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION is required and must not be blank.' >&2
+            exit 1
+          fi
+
+          if [[ -z "${DISCORD_CLIENT_ID_PRODUCTION//[[:space:]]/}" ]]; then
+            echo 'DISCORD_CLIENT_ID_PRODUCTION is required and must not be blank.' >&2
+            exit 1
+          fi
+
+          if [[ -z "${DISCORD_CLIENT_SECRET_PRODUCTION//[[:space:]]/}" ]]; then
+            echo 'DISCORD_CLIENT_SECRET_PRODUCTION is required and must not be blank.' >&2
+            exit 1
+          fi
+
+          if [[ -z "${DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION//[[:space:]]/}" ]]; then
+            echo 'DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION is required and must not be blank.' >&2
+            exit 1
+          fi
+
+          IFS=',' read -ra configured_discord_redirects <<< "$DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION"
+          for required_discord_redirect in \
+            'http://127.0.0.1:62187/discord/callback' \
+            'http://127.0.0.1:62188/discord/callback' \
+            'http://127.0.0.1:62189/discord/callback'; do
+            found_discord_redirect=0
+            for configured_discord_redirect in "${configured_discord_redirects[@]}"; do
+              configured_discord_redirect="${configured_discord_redirect#"${configured_discord_redirect%%[![:space:]]*}"}"
+              configured_discord_redirect="${configured_discord_redirect%"${configured_discord_redirect##*[![:space:]]}"}"
+              if [[ "$configured_discord_redirect" == "$required_discord_redirect" ]]; then
+                found_discord_redirect=1
+                break
+              fi
+            done
+            if [[ "$found_discord_redirect" != '1' ]]; then
+              echo "DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION must include $required_discord_redirect." >&2
+              exit 1
+            fi
+          done
+
+          if [[ -z "${DISCORD_USER_REF_SECRET_PRODUCTION//[[:space:]]/}" ]]; then
+            echo 'DISCORD_USER_REF_SECRET_PRODUCTION is required and must not be blank.' >&2
             exit 1
           fi
 
@@ -334,7 +380,7 @@ jobs:
                   raise SystemExit(f'{label} enforce_zdr must be false')
           PY
 
-      - name: Sync worker secrets for managed issuance and Discord operations
+      - name: Sync worker secrets for managed issuance and Discord OAuth operations
         shell: bash
         working-directory: broker
         run: |
@@ -352,6 +398,15 @@ jobs:
           # for each installation at runtime via OPENROUTER_MANAGED_USER_HMAC_SECRET.
           printf '%s' "$OPENROUTER_MANAGED_USER_HMAC_SECRET_PRODUCTION" \
             | pnpm exec wrangler secret put OPENROUTER_MANAGED_USER_HMAC_SECRET --config "${{ steps.render.outputs.config_path }}"
+          # Discord OAuth runtime secrets are required for the GUI-managed onboarding flow.
+          printf '%s' "$DISCORD_CLIENT_ID_PRODUCTION" \
+            | pnpm exec wrangler secret put DISCORD_CLIENT_ID --config "${{ steps.render.outputs.config_path }}"
+          printf '%s' "$DISCORD_CLIENT_SECRET_PRODUCTION" \
+            | pnpm exec wrangler secret put DISCORD_CLIENT_SECRET --config "${{ steps.render.outputs.config_path }}"
+          printf '%s' "$DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION" \
+            | pnpm exec wrangler secret put DISCORD_REDIRECT_URI_ALLOWLIST --config "${{ steps.render.outputs.config_path }}"
+          printf '%s' "$DISCORD_USER_REF_SECRET_PRODUCTION" \
+            | pnpm exec wrangler secret put DISCORD_USER_REF_SECRET --config "${{ steps.render.outputs.config_path }}"
           # DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION fans out to both runtime webhook bindings so
           # immediate alerts and the daily heartbeat reach the operator-facing Discord destination.
           printf '%s' "$DISCORD_OPERATIONS_WEBHOOK_URL_PRODUCTION" \

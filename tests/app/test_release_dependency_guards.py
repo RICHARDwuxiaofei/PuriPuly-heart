@@ -793,6 +793,68 @@ def test_release_workflow_prepares_soxr_release_inputs_before_build_and_publishe
     )
 
 
+def test_broker_direct_deploy_syncs_discord_oauth_secrets() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "deploy-broker-direct.yml").read_text(
+        encoding="utf-8"
+    )
+
+    production_to_runtime_secret_names = {
+        "DISCORD_CLIENT_ID_PRODUCTION": "DISCORD_CLIENT_ID",
+        "DISCORD_CLIENT_SECRET_PRODUCTION": "DISCORD_CLIENT_SECRET",
+        "DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION": "DISCORD_REDIRECT_URI_ALLOWLIST",
+        "DISCORD_USER_REF_SECRET_PRODUCTION": "DISCORD_USER_REF_SECRET",
+    }
+    for production_name, runtime_name in production_to_runtime_secret_names.items():
+        assert f"{production_name}: ${{{{ secrets.{production_name} }}}}" in workflow
+        assert f'if [[ -z "${{{production_name}//[[:space:]]/}}" ]]; then' in workflow
+        assert f"{production_name} is required and must not be blank." in workflow
+        assert f"printf '%s' \"${production_name}\"" in workflow
+        assert f"pnpm exec wrangler secret put {runtime_name} --config" in workflow
+
+    assert (
+        "CONFIRM_PRODUCTION_DEPLOY: ${{ github.event.inputs.confirm_production_deploy }}"
+        in workflow
+    )
+    assert 'if [[ "$CONFIRM_PRODUCTION_DEPLOY" !=' in workflow
+    assert 'if [[ "${{ github.event.inputs.confirm_production_deploy }}"' not in workflow
+    for port in (62187, 62188, 62189):
+        assert f"http://127.0.0.1:{port}/discord/callback" in workflow
+    assert "DISCORD_REDIRECT_URI_ALLOWLIST_PRODUCTION must include" in workflow
+
+
+def test_broker_d1_cleanup_supports_installation_id_target() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "maintenance-broker-d1-cleanup.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "installation_id:" in workflow
+    assert "description: Target installation id" in workflow
+    assert "hardware_hash:" in workflow
+    assert "required: false" in workflow
+    assert "hardware_hash_salt_version:" in workflow
+    assert "installation_id and hardware hash inputs are mutually exclusive" in workflow
+    assert (
+        "either installation_id or both hardware_hash and hardware_hash_salt_version are required"
+        in workflow
+    )
+    assert "TARGET_MODE: ${{ github.event.inputs.mode }}" in workflow
+    assert "TARGET_INSTALLATION_ID: ${{ github.event.inputs.installation_id }}" in workflow
+    assert 'installation_id="${{ github.event.inputs.installation_id }}"' not in workflow
+
+    assert "SELECT {sql_literal(installation_id)} AS installation_id" in workflow
+    assert "COALESCE(e.discord_user_ref, di.discord_user_ref) AS discord_user_ref" in workflow
+    assert "LEFT JOIN discord_identities di" in workflow
+    assert "e.discord_issue_status" in workflow
+    assert 'json.loads(path.read_text(encoding="utf-8"))' in workflow
+    assert 'd1_rows(Path(".maintenance-inspect.json"))' in workflow
+    assert "def sql_literal(value: str) -> str:" in workflow
+    assert "DELETE FROM broker_request_events WHERE installation_id IN" in workflow
+    assert "DELETE FROM discord_oauth_sessions WHERE installation_id IN" in workflow
+    assert "DELETE FROM installations WHERE installation_id IN" in workflow
+    assert "DELETE FROM discord_identities " in workflow
+    assert "WHERE discord_user_ref IN" in workflow
+
+
 def test_readmes_require_prepare_soxr_release_inputs_before_pyinstaller() -> None:
     for readme_name in ("README.md", "README.ko.md", "README.ja.md", "README.zh-CN.md"):
         readme = (ROOT / readme_name).read_text(encoding="utf-8")
