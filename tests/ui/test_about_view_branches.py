@@ -6,6 +6,7 @@ import pytest
 
 pytest.importorskip("flet")
 
+from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.views import about as about_module
 from puripuly_heart.ui.views.about import AboutView
 
@@ -23,6 +24,21 @@ def _collect_click_handlers(control) -> list:
         for child in controls:
             handlers.extend(_collect_click_handlers(child))
     return handlers
+
+
+def _collect_text_values(control) -> list[str]:
+    values = []
+    value = getattr(control, "value", None)
+    if isinstance(value, str):
+        values.append(value)
+    content = getattr(control, "content", None)
+    if content is not None:
+        values.extend(_collect_text_values(content))
+    controls = getattr(control, "controls", None)
+    if controls:
+        for child in controls:
+            values.extend(_collect_text_values(child))
+    return values
 
 
 def _row_cards(container) -> list:
@@ -72,6 +88,74 @@ def test_about_view_link_actions_handle_missing_page_gracefully(
     assert "https://github.com/misyaguziya/VRCT" in opened
     assert "https://github.com/naeruru/mimiuchi" in opened
     assert "https://github.com/febilly/Yakutan" in opened
+
+
+def test_about_view_special_thanks_names_render_in_requested_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(about_module, "_get_profile_image_path", lambda: "")
+    monkeypatch.setattr(about_module, "_load_third_party_notices", lambda: "licenses")
+
+    view = AboutView()
+
+    expected_names = [
+        "SUI_32C",
+        "Nagikokoro",
+        "motoka96",
+        "_Ykol魚",
+        "kascr_",
+        "Just Monika V",
+    ]
+    rendered_names = [
+        value for value in _collect_text_values(view.controls[2]) if value in expected_names
+    ]
+    assert rendered_names == expected_names
+
+
+def test_about_view_special_thanks_names_render_from_i18n(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(about_module, "_get_profile_image_path", lambda: "")
+    monkeypatch.setattr(about_module, "_load_third_party_notices", lambda: "licenses")
+
+    localized_names = {
+        "about.special_thanks.name.sui_32c": "localized:SUI_32C",
+        "about.special_thanks.name.nagikokoro": "localized:Nagikokoro",
+        "about.special_thanks.name.motoka96": "localized:motoka96",
+        "about.special_thanks.name.ykol": "localized:_Ykol魚",
+        "about.special_thanks.name.kascr": "localized:kascr_",
+        "about.special_thanks.name.just_monika_v": "localized:Just Monika V",
+    }
+
+    monkeypatch.setattr(
+        about_module,
+        "t",
+        lambda key, **_params: localized_names.get(key, key),
+    )
+
+    view = AboutView()
+
+    rendered_names = [
+        value for value in _collect_text_values(view.controls[2]) if value.startswith("localized:")
+    ]
+    assert rendered_names == list(localized_names.values())
+
+
+@pytest.mark.parametrize("locale", ["en", "ko", "zh-CN", "ja"])
+def test_about_view_special_thanks_name_keys_exist_in_locale_bundles(locale: str) -> None:
+    expected_names = {
+        "about.special_thanks.name.sui_32c": "SUI_32C",
+        "about.special_thanks.name.nagikokoro": "Nagikokoro",
+        "about.special_thanks.name.motoka96": "motoka96",
+        "about.special_thanks.name.ykol": "_Ykol魚",
+        "about.special_thanks.name.kascr": "kascr_",
+        "about.special_thanks.name.just_monika_v": "Just Monika V",
+    }
+
+    bundle = i18n_module._load_bundle(locale)
+
+    for key, expected_name in expected_names.items():
+        assert bundle.get(key) == expected_name
 
 
 def test_about_view_hover_handlers_and_locale_refresh(monkeypatch: pytest.MonkeyPatch) -> None:

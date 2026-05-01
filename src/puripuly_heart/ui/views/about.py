@@ -224,13 +224,21 @@ class AboutView(ft.Column):
 
         return self._wrap_card(card_content)
 
-    # Special thanks names - add new names here
-    _SPECIAL_THANKS_NAMES = ["SUI_32C", "Nagikokoro"]
+    # Special thanks name keys - add new names here and update locale bundles
+    _SPECIAL_THANKS_NAME_KEYS = [
+        "about.special_thanks.name.sui_32c",
+        "about.special_thanks.name.nagikokoro",
+        "about.special_thanks.name.motoka96",
+        "about.special_thanks.name.ykol",
+        "about.special_thanks.name.kascr",
+        "about.special_thanks.name.just_monika_v",
+    ]
 
     def _build_special_thanks_card(self) -> ft.Control:
         """Build Special Thanks section."""
         thanks_items = []
-        for name in self._SPECIAL_THANKS_NAMES:
+        for name_key in self._SPECIAL_THANKS_NAME_KEYS:
+            name = t(name_key)
             item = ft.Container(
                 content=ft.Text(name, size=28, color=COLOR_ON_BACKGROUND),
                 on_hover=self._on_thanks_hover,
