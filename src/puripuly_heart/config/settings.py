@@ -599,7 +599,7 @@ class OpenRouterSettings:
     selected_source: OpenRouterCredentialSource = OpenRouterCredentialSource.MANAGED
     selection_alias: OpenRouterSelectionAlias | None = None
     fallback_selection_alias: OpenRouterFallbackSelectionAlias = (
-        OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+        OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
     )
     broker_base_url: str = DEFAULT_OPENROUTER_BROKER_BASE_URL
 
@@ -1096,7 +1096,7 @@ def _parse_openrouter_fallback_selection_alias(value: object) -> OpenRouterFallb
                 return OpenRouterFallbackSelectionAlias(normalized)
             except ValueError:
                 pass
-    return OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+    return OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
 
 
 def _resolve_openrouter_runtime_main_selection(

@@ -14,7 +14,7 @@ The OpenRouter managed rollout now makes OpenRouter the default LLM path for new
 
 - `AppSettings()` defaults `provider.llm` to `openrouter`
 - the default OpenRouter main selection is managed Gemma 4
-- the default OpenRouter fallback is Gemini 2.5 Flash Lite
+- the default OpenRouter fallback is DeepSeek V4 Flash
 
 ### 2. Supported fallback choices
 
@@ -23,13 +23,14 @@ The supported OpenRouter fallback aliases are exactly:
 - `none`
 - `gemini25_flash_lite`
 - `qwen35_flash`
+- `deepseek_v4_flash`
 
 Gemma 4 is no longer a selectable fallback option.
 
 ### 3. Compatibility rules
 
-- persisted `fallback_selection_alias = gemma4` migrates to `gemini25_flash_lite`
-- missing or invalid fallback aliases normalize to `gemini25_flash_lite`
+- persisted `fallback_selection_alias = gemma4`, `gemini31_flash_lite`, `gemma4_managed`, or `gemma4_byok` migrates to `deepseek_v4_flash`
+- missing or invalid fallback aliases normalize to `deepseek_v4_flash`
 - `selection_alias = null` remains valid only for legacy or inactive OpenRouter states and is no longer the new-user default
 
 ## Consequences

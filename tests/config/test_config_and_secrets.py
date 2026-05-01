@@ -340,7 +340,7 @@ def test_materialize_translation_settings_returns_mutated_settings() -> None:
     assert settings.deepseek.llm_model == DeepSeekLLMModel.DEEPSEEK_V4_FLASH
 
 
-def test_app_settings_defaults_to_managed_openrouter_gemma_with_gemini25_fallback() -> None:
+def test_app_settings_defaults_to_managed_openrouter_gemma_with_deepseek_fallback() -> None:
     settings = AppSettings()
 
     assert settings.translation.model == TranslationModel.GEMMA4
@@ -351,7 +351,7 @@ def test_app_settings_defaults_to_managed_openrouter_gemma_with_gemini25_fallbac
     assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
     assert (
         settings.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
     )
 
 
@@ -1729,23 +1729,34 @@ def test_openrouter_explicit_inactive_state_keeps_selection_alias_none(tmp_path)
     assert persisted["openrouter"]["selection_alias"] is None
 
 
-def test_from_dict_migrates_legacy_openrouter_gemma4_fallback_to_gemini25_flash_lite() -> None:
+@pytest.mark.parametrize(
+    "legacy_alias",
+    [
+        "gemma4",
+        "gemini31_flash_lite",
+        OpenRouterSelectionAlias.GEMMA4_MANAGED.value,
+        OpenRouterSelectionAlias.GEMMA4_BYOK.value,
+    ],
+)
+def test_from_dict_migrates_legacy_openrouter_fallbacks_to_deepseek_v4_flash(
+    legacy_alias: str,
+) -> None:
     data = to_dict(AppSettings())
-    data["openrouter"]["fallback_selection_alias"] = "gemma4"
+    data["openrouter"]["fallback_selection_alias"] = legacy_alias
 
     loaded = from_dict(data)
 
     assert (
         loaded.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
     )
     assert (
         to_dict(loaded)["openrouter"]["fallback_selection_alias"]
-        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value
+        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH.value
     )
 
 
-def test_from_dict_defaults_invalid_openrouter_fallback_to_gemini25_flash_lite() -> None:
+def test_from_dict_defaults_invalid_openrouter_fallback_to_deepseek_v4_flash() -> None:
     data = to_dict(AppSettings())
     data["openrouter"]["fallback_selection_alias"] = "broken-fallback"
 
@@ -1753,7 +1764,7 @@ def test_from_dict_defaults_invalid_openrouter_fallback_to_gemini25_flash_lite()
 
     assert (
         loaded.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
     )
 
 
@@ -1958,7 +1969,7 @@ def test_load_settings_backfills_openrouter_aliases_from_legacy_fields(tmp_path)
     assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_MANAGED
     assert (
         loaded.openrouter.fallback_selection_alias
-        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
     )
     assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert (
@@ -1966,7 +1977,7 @@ def test_load_settings_backfills_openrouter_aliases_from_legacy_fields(tmp_path)
     )
     assert (
         persisted["openrouter"]["fallback_selection_alias"]
-        == OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value
+        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH.value
     )
 
 

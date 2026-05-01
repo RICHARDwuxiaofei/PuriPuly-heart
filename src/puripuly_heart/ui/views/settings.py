@@ -1332,7 +1332,7 @@ class SettingsView(ft.Column):
             color=COLOR_NEUTRAL,
         )
         self._openrouter_fallback_text = self._build_clickable_text(
-            t("provider.gemini25_flash_lite"),
+            t("provider.deepseek_v4_flash_fallback"),
             self._on_openrouter_fallback_click,
         )
         self._openrouter_fallback_helper_text = ft.Text(
@@ -2438,7 +2438,7 @@ class SettingsView(ft.Column):
         current = (
             display_settings.openrouter.fallback_selection_alias.value
             if display_settings is not None
-            else OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE.value
+            else OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH.value
         )
         modal = SettingsModal(
             self.page,
@@ -2458,7 +2458,7 @@ class SettingsView(ft.Column):
         try:
             new_value = OpenRouterFallbackSelectionAlias(value)
         except ValueError:
-            new_value = OpenRouterFallbackSelectionAlias.GEMINI25_FLASH_LITE
+            new_value = OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
 
         old_value = current_settings.openrouter.fallback_selection_alias
         if old_value == new_value:

@@ -1344,6 +1344,34 @@ def test_on_openrouter_fallback_selected_updates_draft_and_helper_copy(
     )
 
 
+def test_on_openrouter_fallback_selected_defaults_invalid_value_to_deepseek(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.openrouter.fallback_selection_alias = OpenRouterFallbackSelectionAlias.NONE
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_openrouter_fallback_selected("broken-fallback")
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert (
+        pending.openrouter.fallback_selection_alias
+        == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH
+    )
+    assert view._openrouter_fallback_text.content.value == t("provider.deepseek_v4_flash_fallback")
+
+
+def test_openrouter_fallback_card_initializes_with_deepseek_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    assert view._openrouter_fallback_text.content.value == t("provider.deepseek_v4_flash_fallback")
+
+
 def test_fallback_card_stays_visible_when_non_openrouter_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
