@@ -187,6 +187,7 @@
   "discord_auth.reopen_browser": "Reopen browser",
   "discord_auth.cancel": "Cancel",
   "discord_auth.waiting_body": "After you finish Discord verification in your browser, PuriPuly will continue automatically.",
+  "discord_auth.callback_received_body": "Discord verification received\n\nPuriPuly is preparing your Managed key.\nThis window will close when translation starts.",
   "discord_auth.success": "Discord verification is complete.",
   "discord_auth.callback.title": "PuriPuly",
   "discord_auth.callback.line1": "We received your Discord verification",

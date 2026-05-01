@@ -169,6 +169,7 @@ def _make_service(
     raw_hardware_fingerprint_provider: Any | None = None,
     discord_oauth_listener_factory: Any | None = None,
     discord_oauth_callback_runner: Any | None = None,
+    on_discord_callback_received: Any | None = None,
 ) -> tuple[ManagedOpenRouterReleaseService, AppSettings, InMemorySecretStore]:
     resolved_settings = settings or AppSettings()
     resolved_settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
@@ -201,6 +202,8 @@ def _make_service(
         service_kwargs["discord_oauth_listener_factory"] = discord_oauth_listener_factory
     if discord_oauth_callback_runner is not None:
         service_kwargs["discord_oauth_callback_runner"] = discord_oauth_callback_runner
+    if on_discord_callback_received is not None:
+        service_kwargs["on_discord_callback_received"] = on_discord_callback_received
     service = ManagedOpenRouterReleaseService(**service_kwargs)
     return service, resolved_settings, resolved_secrets
 
@@ -272,6 +275,7 @@ def _make_discord_service(
     harness: FakeDiscordOAuthHarness | None = None,
     persist_calls: list[tuple[str | None, str | None]] | None = None,
     raw_hardware_fingerprint_provider: Any | None = None,
+    on_discord_callback_received: Any | None = None,
 ) -> tuple[
     ManagedOpenRouterReleaseService,
     AppSettings,
@@ -294,6 +298,7 @@ def _make_discord_service(
         raw_hardware_fingerprint_provider=raw_hardware_fingerprint_provider,
         discord_oauth_listener_factory=resolved_harness.bind_listener,
         discord_oauth_callback_runner=resolved_harness.run_callback_flow,
+        on_discord_callback_received=on_discord_callback_received,
     )
     return service, resolved_settings, resolved_secrets, resolved_client, resolved_harness
 
@@ -423,6 +428,28 @@ async def test_discord_oauth_flow_persists_managed_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_discord_callback_received_hook_runs_after_callback_before_issue() -> None:
+    observed_calls_at_hook: list[list[str]] = []
+    client = FakeManagedReleaseClient(
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
+    )
+
+    def on_callback_received() -> None:
+        observed_calls_at_hook.append([name for name, _payload in client.calls])
+
+    service, _settings, _secrets, client, _harness = _make_discord_service(
+        client=client,
+        on_discord_callback_received=on_callback_received,
+    )
+
+    await service.prepare_for_translation()
+
+    assert observed_calls_at_hook == [["discord_start"]]
+    assert [name for name, _payload in client.calls] == ["discord_start", "discord_issue"]
+
+
+@pytest.mark.asyncio
 async def test_discord_listener_bind_failure_maps_to_retry_result_without_broker_call() -> None:
     client = FakeManagedReleaseClient(
         discord_start_result=_make_discord_start_success(),
@@ -491,7 +518,9 @@ async def test_discord_redirect_mismatch_closes_listener_and_maps_terminal_resul
 
 
 @pytest.mark.asyncio
-async def test_discord_callback_error_maps_to_retry_result_and_closes_listener_without_issue() -> None:
+async def test_discord_callback_error_maps_to_retry_result_and_closes_listener_without_issue() -> (
+    None
+):
     harness = FakeDiscordOAuthHarness(
         callback_error=DiscordOAuthCallbackError("access_denied", "discord-state-1"),
     )
@@ -513,7 +542,9 @@ async def test_discord_callback_error_maps_to_retry_result_and_closes_listener_w
 
 
 @pytest.mark.asyncio
-async def test_discord_callback_timeout_maps_to_retry_result_and_closes_listener_without_issue() -> None:
+async def test_discord_callback_timeout_maps_to_retry_result_and_closes_listener_without_issue() -> (
+    None
+):
     harness = FakeDiscordOAuthHarness(
         callback_error=TimeoutError("timed out waiting for Discord OAuth callback"),
     )

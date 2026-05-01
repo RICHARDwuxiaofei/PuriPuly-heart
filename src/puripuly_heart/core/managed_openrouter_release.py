@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -272,6 +273,7 @@ class ManagedOpenRouterReleaseService:
     monotonic_ms_provider: Callable[[], int] = _default_monotonic_ms
     discord_oauth_listener_factory: DiscordOAuthListenerFactory = bind_first_available
     discord_oauth_callback_runner: DiscordOAuthCallbackRunner = run_discord_oauth_callback_flow
+    on_discord_callback_received: Callable[[], None] | None = None
     _prepare_task: asyncio.Task[ManagedOpenRouterReleaseResult] | None = field(
         init=False,
         default=None,
@@ -453,11 +455,16 @@ class ManagedOpenRouterReleaseService:
                 raise
             except ManagedOpenRouterReleaseError as exc:
                 return self._handle_release_error(exc, operation="discord_callback")
-            except (DiscordOAuthCallbackError, DiscordOAuthLoopbackClosedError, TimeoutError) as exc:
+            except (
+                DiscordOAuthCallbackError,
+                DiscordOAuthLoopbackClosedError,
+                TimeoutError,
+            ) as exc:
                 return self._handle_release_error(
                     _discord_callback_release_error(exc),
                     operation="discord_callback",
                 )
+            self._notify_discord_callback_received()
             try:
                 hardware_hash = await self._resolve_hardware_hash(
                     fingerprint_salt=start_response.fingerprint_salt,
@@ -491,6 +498,12 @@ class ManagedOpenRouterReleaseService:
         finally:
             if listener is not None:
                 listener.close()
+
+    def _notify_discord_callback_received(self) -> None:
+        if self.on_discord_callback_received is None:
+            return
+        with contextlib.suppress(Exception):
+            self.on_discord_callback_received()
 
     async def _await_or_start_issue_flow(self) -> ManagedOpenRouterReleaseResult:
         resolution = resolve_openrouter_credentials(

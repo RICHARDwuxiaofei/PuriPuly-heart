@@ -12,6 +12,7 @@ REQUIRED_DISCORD_AUTH_KEYS = [
     "discord_auth.reopen_browser",
     "discord_auth.cancel",
     "discord_auth.waiting_body",
+    "discord_auth.callback_received_body",
     "discord_auth.success",
     "discord_auth.error.email_unverified",
     "discord_auth.error.account_too_new",

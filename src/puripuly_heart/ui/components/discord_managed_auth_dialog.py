@@ -21,8 +21,8 @@ class DiscordManagedAuthDialog:
         "discord_auth.continue",
     ]
     waiting_action_labels = [
-        "discord_auth.reopen_browser",
         "discord_auth.cancel",
+        "discord_auth.reopen_browser",
     ]
 
     def __init__(
@@ -53,6 +53,14 @@ class DiscordManagedAuthDialog:
         self._close_button: ft.TextButton | None = None
         self._reopen_browser_button: ft.TextButton | None = None
         self._cancel_button: ft.TextButton | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self._is_open
+
+    @property
+    def is_waiting(self) -> bool:
+        return self._is_waiting
 
     def open(self) -> None:
         if self._dialog is not None and self._is_open:
@@ -100,10 +108,20 @@ class DiscordManagedAuthDialog:
         self._reopen_browser_button = None
         self._cancel_button = None
         if self._on_reopen_browser is not None:
-            self._reopen_browser_button = waiting_buttons[0]
-            self._cancel_button = waiting_buttons[1]
+            self._cancel_button = waiting_buttons[0]
+            self._reopen_browser_button = waiting_buttons[1]
         else:
             self._cancel_button = waiting_buttons[0]
+        self._update_page_if_possible()
+
+    def set_callback_received(self) -> None:
+        if not self._is_open or not self._is_waiting:
+            return
+        if self._dialog_result is None or self._body_text is None:
+            return
+        self._body_text.value = join_body_paragraphs(
+            split_body_paragraphs(t("discord_auth.callback_received_body"))
+        )
         self._update_page_if_possible()
 
     def close(self) -> None:
@@ -114,6 +132,13 @@ class DiscordManagedAuthDialog:
 
     def _build_waiting_actions(self) -> list[WarmDocumentDialogAction]:
         actions: list[WarmDocumentDialogAction] = []
+        actions.append(
+            WarmDocumentDialogAction(
+                label=t("discord_auth.cancel"),
+                on_select=self._cancel_waiting,
+                close_before_action=False,
+            )
+        )
         if self._on_reopen_browser is not None:
             actions.append(
                 WarmDocumentDialogAction(
@@ -122,13 +147,6 @@ class DiscordManagedAuthDialog:
                     close_before_action=False,
                 )
             )
-        actions.append(
-            WarmDocumentDialogAction(
-                label=t("discord_auth.cancel"),
-                on_select=self._cancel_waiting,
-                close_before_action=False,
-            )
-        )
         return actions
 
     def _close_then(self, action: Callable[[], None]) -> None:

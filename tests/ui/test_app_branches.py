@@ -317,6 +317,34 @@ def test_debug_preview_discord_callback_page_opens_local_preview_without_oauth(
     assert opened_urls == ["file:///tmp/puripuly-callback.html"]
 
 
+def test_mark_discord_managed_auth_callback_received_updates_open_dialog() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    calls: list[str] = []
+    app._discord_managed_auth_generation = 7
+    app._discord_managed_auth_cancelled = False
+    app._discord_managed_auth_dialog = SimpleNamespace(
+        set_callback_received=lambda: calls.append("received")
+    )
+
+    app.mark_discord_managed_auth_callback_received(7)
+
+    assert calls == ["received"]
+
+
+def test_mark_discord_managed_auth_callback_received_ignores_stale_generation() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    calls: list[str] = []
+    app._discord_managed_auth_generation = 2
+    app._discord_managed_auth_cancelled = False
+    app._discord_managed_auth_dialog = SimpleNamespace(
+        set_callback_received=lambda: calls.append("received")
+    )
+
+    app.mark_discord_managed_auth_callback_received(1)
+
+    assert calls == []
+
+
 def test_translator_app_keeps_debug_ui_preview_out_of_controller(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -857,7 +885,7 @@ async def test_start_discord_managed_auth_uses_run_task_and_success_enables_tran
     )
     app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
 
-    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+    async def fake_start_discord_managed_auth_from_dialog(**_kwargs) -> bool:
         start_calls.append("start")
         return True
 
@@ -901,7 +929,7 @@ async def test_start_discord_managed_auth_no_success_when_enable_fails() -> None
     )
     app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
 
-    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+    async def fake_start_discord_managed_auth_from_dialog(**_kwargs) -> bool:
         return True
 
     async def fake_set_translation_enabled(enabled: bool) -> bool:
@@ -935,7 +963,7 @@ async def test_start_discord_managed_auth_no_success_when_llm_unavailable_after_
     )
     app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
 
-    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+    async def fake_start_discord_managed_auth_from_dialog(**_kwargs) -> bool:
         return True
 
     async def fake_set_translation_enabled(enabled: bool) -> bool:
@@ -965,7 +993,7 @@ async def test_start_discord_managed_auth_failure_does_not_show_success_snackbar
     enable_calls: list[bool] = []
     app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
 
-    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+    async def fake_start_discord_managed_auth_from_dialog(**_kwargs) -> bool:
         return False
 
     async def fake_set_translation_enabled(enabled: bool) -> None:
@@ -1000,7 +1028,7 @@ async def test_cancel_discord_managed_auth_prevents_late_success_and_enable() ->
     start_entered = asyncio.Event()
     release_start = asyncio.Event()
 
-    async def fake_start_discord_managed_auth_from_dialog() -> bool:
+    async def fake_start_discord_managed_auth_from_dialog(**_kwargs) -> bool:
         start_entered.set()
         await release_start.wait()
         return True

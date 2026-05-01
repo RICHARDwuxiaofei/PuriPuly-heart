@@ -1700,6 +1700,51 @@ async def test_start_discord_managed_auth_from_dialog_success_rebuilds_missing_p
     assert dash.managed_auth_pending_calls == [True, False]
 
 
+def test_discord_managed_auth_callback_received_runs_active_hook_only() -> None:
+    calls: list[str] = []
+    controller = _make_controller(app=SimpleNamespace())
+    controller._discord_managed_auth_callback_received_hook = lambda: calls.append("received")
+
+    controller._on_discord_managed_auth_callback_received()
+
+    assert calls == ["received"]
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_from_dialog_routes_callback_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=None)
+    callback_calls: list[str] = []
+
+    async def fake_rebuild_llm_provider(self: GuiController) -> None:
+        self.hub.llm = object()
+
+    monkeypatch.setattr(GuiController, "_rebuild_llm_provider", fake_rebuild_llm_provider)
+    controller._managed_openrouter_release_service = InspectingManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+        ),
+        on_prepare=controller._on_discord_managed_auth_callback_received,
+    )
+
+    ok = await controller.start_discord_managed_auth_from_dialog(
+        on_callback_received=lambda: callback_calls.append("received")
+    )
+
+    assert ok is True
+    assert callback_calls == ["received"]
+    assert controller._discord_managed_auth_callback_received_hook is None
+
+
 @pytest.mark.asyncio
 async def test_start_discord_managed_auth_from_dialog_rebuild_failure_returns_false(
     monkeypatch: pytest.MonkeyPatch,

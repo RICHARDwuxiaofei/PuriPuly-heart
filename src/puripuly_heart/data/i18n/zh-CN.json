@@ -187,6 +187,7 @@
     "discord_auth.reopen_browser": "重新打开浏览器",
     "discord_auth.cancel": "取消",
     "discord_auth.waiting_body": "在浏览器中完成 Discord 验证后，PuriPuly 会自动继续。",
+    "discord_auth.callback_received_body": "已收到 Discord 确认\n\nPuriPuly 正在准备 Managed 密钥。\n完成后，此窗口会关闭并开始翻译。",
     "discord_auth.success": "Discord 认证已完成。",
     "discord_auth.callback.title": "PuriPuly",
     "discord_auth.callback.line1": "已收到 Discord 认证信息",

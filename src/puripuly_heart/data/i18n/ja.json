@@ -187,6 +187,7 @@
   "discord_auth.reopen_browser": "ブラウザを再度開く",
   "discord_auth.cancel": "キャンセル",
   "discord_auth.waiting_body": "ブラウザでDiscord認証を済ませると、PuriPulyが自動で続きに進みます。",
+  "discord_auth.callback_received_body": "Discord認証を確認しました\n\nPuriPulyがManagedキーを準備しています。\n完了すると、この画面は閉じて翻訳が始まります。",
   "discord_auth.success": "Discord認証が完了しました。",
   "discord_auth.callback.title": "PuriPuly",
   "discord_auth.callback.line1": "Discord認証情報を受け取りました",

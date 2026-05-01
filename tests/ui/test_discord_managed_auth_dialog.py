@@ -158,7 +158,7 @@ def test_discord_managed_auth_dialog_uses_warm_document_layout(
 
 
 def test_discord_managed_auth_dialog_waiting_state_uses_waiting_labels() -> None:
-    set_locale("en")
+    set_locale("ko")
     page = DummyPage()
     dialog = _dialog(page)
 
@@ -166,17 +166,61 @@ def test_discord_managed_auth_dialog_waiting_state_uses_waiting_labels() -> None
     dialog.set_waiting()
 
     assert dialog.waiting_action_labels == [
-        "discord_auth.reopen_browser",
         "discord_auth.cancel",
+        "discord_auth.reopen_browser",
     ]
     assert dialog._body_text is not None
     assert dialog._body_text.value == t("discord_auth.waiting_body")
     assert dialog._reopen_browser_button is not None
     assert dialog._cancel_button is not None
     assert [control.text for control in dialog._actions.controls] == [
-        t("discord_auth.reopen_browser"),
         t("discord_auth.cancel"),
+        t("discord_auth.reopen_browser"),
     ]
+    assert dialog._cancel_button is dialog._actions.controls[0]
+    assert dialog._reopen_browser_button is dialog._actions.controls[1]
+
+
+def test_discord_managed_auth_dialog_callback_received_expands_body() -> None:
+    set_locale("ko")
+    page = DummyPage()
+    dialog = _dialog(page)
+
+    dialog.open()
+    dialog.set_waiting()
+    dialog.set_callback_received()
+
+    assert dialog._body_text is not None
+    assert dialog._body_text.value == (
+        "Discord 확인을 받았어요\n\n"
+        "이제 PuriPuly가 Managed 키를 준비하고 있어요.\n"
+        "완료되면 이 창이 닫히고 번역이 시작돼요."
+    )
+    assert [control.text for control in dialog._actions.controls] == [
+        t("discord_auth.cancel"),
+        t("discord_auth.reopen_browser"),
+    ]
+
+
+def test_discord_managed_auth_dialog_callback_received_requires_open_waiting_dialog() -> None:
+    set_locale("ko")
+    page = DummyPage()
+    dialog = _dialog(page)
+
+    dialog.open()
+    assert dialog._body_text is not None
+    initial_body = dialog._body_text.value
+
+    dialog.set_callback_received()
+
+    assert dialog._body_text.value == initial_body
+
+    dialog.set_waiting()
+    waiting_body = dialog._body_text.value
+    dialog.close()
+    dialog.set_callback_received()
+
+    assert dialog._body_text.value == waiting_body
 
 
 def test_discord_managed_auth_dialog_opens_one_modal_dialog_on_page() -> None:

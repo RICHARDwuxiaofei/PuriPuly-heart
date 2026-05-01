@@ -716,8 +716,12 @@ class TranslatorApp:
             start_auth = getattr(controller, "start_discord_managed_auth_from_dialog", None)
             if not callable(start_auth):
                 return
+
+            def _mark_callback_received() -> None:
+                self.mark_discord_managed_auth_callback_received(generation)
+
             try:
-                ok = await start_auth()
+                ok = await start_auth(on_callback_received=_mark_callback_received)
                 if not ok or not self._is_current_discord_managed_auth_generation(generation):
                     return
                 enable_translation = getattr(controller, "set_translation_enabled", None)
@@ -740,6 +744,20 @@ class TranslatorApp:
                 self._discord_managed_auth_task_handle = None
 
         self._discord_managed_auth_task_handle = self.page.run_task(_task)
+
+    def mark_discord_managed_auth_callback_received(self, generation: int | None = None) -> None:
+        if generation is not None and not self._is_current_discord_managed_auth_generation(
+            generation
+        ):
+            return
+        dialog = getattr(self, "_discord_managed_auth_dialog", None)
+        if getattr(dialog, "is_open", True) is False:
+            return
+        if getattr(dialog, "is_waiting", True) is False:
+            return
+        set_callback_received = getattr(dialog, "set_callback_received", None)
+        if callable(set_callback_received):
+            set_callback_received()
 
     def _reopen_discord_managed_auth_browser(self) -> None:
         self._run_optional_discord_auth_controller_hook("reopen_discord_managed_auth_browser")
