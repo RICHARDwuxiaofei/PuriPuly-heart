@@ -4178,6 +4178,19 @@ def test_custom_vocabulary_loads_seeded_settings_defaults_for_zh_cn(
     assert view._custom_vocab_terms.helper_text == ""
 
 
+def test_custom_vocabulary_loads_seeded_settings_defaults_for_ja(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ja"
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._custom_vocab_terms.value == "airi\nshinano"
+    assert view._custom_vocab_terms.helper_text == ""
+
+
 def test_custom_vocabulary_info_icon_is_in_card_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4617,6 +4630,7 @@ def test_custom_vocabulary_caps_to_100_terms_and_shows_snackbar(
         "ko": terms[:100],
         "en": ["airi", "shinano"],
         "zh-CN": ["airi", "shinano"],
+        "ja": ["airi", "shinano"],
     }
     assert settings.stt.custom_vocabulary_enabled is True
     assert view._custom_vocab_terms.value == "\n".join(terms[:100])

@@ -692,6 +692,7 @@ def test_load_settings_backfills_v4_peer_blocks_from_schema3_fixture(tmp_path) -
                 "ko": ["아이리", "시나노"],
                 "en": ["airi", "shinano"],
                 "zh-CN": ["airi", "shinano"],
+                "ja": ["airi", "shinano"],
             },
         },
         "deepgram_stt": {"model": "nova-3"},
@@ -1104,6 +1105,7 @@ def test_stt_custom_vocabulary_missing_keys_default():
         "ko": ["아이리", "시나노"],
         "en": ["airi", "shinano"],
         "zh-CN": ["airi", "shinano"],
+        "ja": ["airi", "shinano"],
     }
 
 
@@ -1121,6 +1123,7 @@ def test_load_settings_backfills_seeded_custom_vocabulary_defaults(tmp_path):
         "ko": ["아이리", "시나노"],
         "en": ["airi", "shinano"],
         "zh-CN": ["airi", "shinano"],
+        "ja": ["airi", "shinano"],
     }
 
     persisted = json.loads(path.read_text(encoding="utf-8"))
@@ -1129,6 +1132,7 @@ def test_load_settings_backfills_seeded_custom_vocabulary_defaults(tmp_path):
         "ko": ["아이리", "시나노"],
         "en": ["airi", "shinano"],
         "zh-CN": ["airi", "shinano"],
+        "ja": ["airi", "shinano"],
     }
 
 

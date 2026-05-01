@@ -38,6 +38,7 @@ DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
     "ko": ("아이리", "시나노"),
     "en": ("airi", "shinano"),
     "zh-CN": ("airi", "shinano"),
+    "ja": ("airi", "shinano"),
 }
 LEGACY_QWEN_DEFAULT_PROMPT = (
     "VRChat social voice chat interpretation. Use spoken, conversational language and mirror "
