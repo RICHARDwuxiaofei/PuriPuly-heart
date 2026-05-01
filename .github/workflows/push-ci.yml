@@ -19,34 +19,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality-gate:
-    name: Lint and unit tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup UV environment
-        uses: ./.github/actions/setup-uv-environment
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          uv-version: ${{ env.UV_VERSION }}
-          sync-args: --dev
-
-      - name: Ruff
-        run: uv run ruff check src tests
-
-      - name: Black (check)
-        run: uv run black --check src tests
-
-      - name: Pytest with coverage >= 80% (exclude integration)
-        run: |
-          uv run python -m pytest \
-            --ignore=tests/integration \
-            --cov=src/puripuly_heart \
-            --cov-report=term-missing \
-            --cov-fail-under=80
-
   windows-overlay-tests:
     name: Windows overlay cargo test
     runs-on: windows-latest

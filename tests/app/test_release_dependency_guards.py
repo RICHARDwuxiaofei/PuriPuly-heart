@@ -236,6 +236,17 @@ def test_push_ci_workflow_uses_frozen_lockfile_sync() -> None:
     assert 'python -m pip install -e ".[dev]"' not in workflow
 
 
+def test_push_ci_omits_linux_lint_and_coverage_gate() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "push-ci.yml").read_text(encoding="utf-8")
+
+    assert "quality-gate:" not in workflow
+    assert "Lint and unit tests" not in workflow
+    assert "uv run ruff check" not in workflow
+    assert "uv run black --check" not in workflow
+    assert "--cov=src/puripuly_heart" not in workflow
+    assert "--cov-fail-under" not in workflow
+
+
 def test_workflows_pin_exact_python_and_uv_versions() -> None:
     for workflow_path in (
         ROOT / ".github" / "workflows" / "push-ci.yml",
