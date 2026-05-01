@@ -204,7 +204,7 @@
   "peer_translation_eula.body": "PuriPuly captures desktop audio via loopback to translate the other person's voice.\nThis means it may process someone's audio without their consent, or audio from conversations you are not part of.\nDepending on your region, this could violate local laws.\n\nYou are legally responsible for how you use this tool.\nWhenever possible, please use it only in conversations you're actively participating in, and make sure you have the other person's consent.\n\nPuriPuly does not store the other person's audio, transcripts, or translation results.\nHowever, your configured external speech recognition and translation providers may process the data.",
   "peer_translation_eula.accept": "I understand",
   "peer_translation_eula.cancel": "Cancel",
-  "peer_translation.disclosure": "Puri Puly Peer translation is on.\nVoice audio around me may be picked up and translated.",
+  "peer_translation.disclosure": "Peer translation is on.\nAudio around me may be captured.",
   "openrouter.handoff.letter.p1": "Thank you for using PuriPuly Heart.\nThe credits I added have run out.",
   "openrouter.handoff.letter.p2": "How was it?\nI hope it brought you moments of novelty, surprise,\nand joy along the way.",
   "openrouter.handoff.letter.p3": "If you'd like to keep using it,\nplease get your own API key.",

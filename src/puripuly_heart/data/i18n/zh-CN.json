@@ -204,7 +204,7 @@
     "peer_translation_eula.body": "PuriPuly 为了翻译对方的声音，会通过环回捕获桌面音频。\n这意味着，可能会在未经他人同意的情况下处理其声音，也可能会处理你并未参与的对话中的声音。\n此类行为可能因国家或地区不同而违反相关法律。\n\n使用产生的法律责任由用户自行承担。\n请尽可能只在自己参与的对话中，并在对方同意的情况下使用。\n\nPuriPuly 不会存储对方的音频、转写文本或翻译结果。\n但你配置的外部语音识别和翻译服务商可能会处理这些数据。",
     "peer_translation_eula.accept": "我理解",
     "peer_translation_eula.cancel": "取消",
-    "peer_translation.disclosure": "Puri Puly Peer translation is on.\nVoice audio around me may be picked up and translated.",
+    "peer_translation.disclosure": "Peer translation is on.\nAudio around me may be captured.",
     "openrouter.handoff.letter.p1": "感谢你使用 PuriPuly Heart。\n我预先充值的额度到这里就用完了。",
     "openrouter.handoff.letter.p2": "感觉怎么样？\n不管是新鲜感、惊喜，还是开心的瞬间，\n希望它们曾陪伴过你。",
     "openrouter.handoff.letter.p3": "如果你还想继续使用，\n请申请并使用自己的 API 密钥。",
