@@ -14,6 +14,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 
+from puripuly_heart.core.oauth_callback_page import render_oauth_callback_completion_page
+
 OPENROUTER_AUTH_URL = "https://openrouter.ai/auth"
 OPENROUTER_AUTH_EXCHANGE_URL = "https://openrouter.ai/api/v1/auth/keys"
 PKCE_CHALLENGE_METHOD = "S256"
@@ -178,8 +180,13 @@ class OpenRouterPKCEClient:
                 except queue.Full:
                     pass
 
-                self.send_response(http.HTTPStatus.NO_CONTENT)
+                body = render_oauth_callback_completion_page()
+                self.send_response(http.HTTPStatus.OK)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
+                self.wfile.write(body)
 
             def log_message(self, format: str, *args: object) -> None:  # noqa: A003
                 return

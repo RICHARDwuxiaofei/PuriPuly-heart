@@ -12,6 +12,7 @@ from puripuly_heart.core.openrouter_pkce import (
     OpenRouterPKCEExchangeResult,
     OpenRouterPKCESession,
 )
+from puripuly_heart.ui.i18n import get_locale, set_locale
 
 
 def _get_unused_loopback_port() -> int:
@@ -174,6 +175,7 @@ def test_callback_listener_ignores_invalid_requests_until_valid_code_arrives() -
     session = client.build_session()
     listener = client._create_callback_listener(session)
     result: dict[str, object] = {}
+    previous_locale = get_locale()
 
     def run_listener() -> None:
         result["code"] = listener.wait_for_code()
@@ -181,6 +183,8 @@ def test_callback_listener_ignores_invalid_requests_until_valid_code_arrives() -
     worker = threading.Thread(target=run_listener, daemon=True)
     worker.start()
     try:
+        set_locale("ko")
+
         unrelated = httpx.get(f"http://127.0.0.1:{port}/", timeout=1.0)
         assert unrelated.status_code == 404
         assert unrelated.text == ""
@@ -193,13 +197,21 @@ def test_callback_listener_ignores_invalid_requests_until_valid_code_arrives() -
         assert mismatched_state.text == ""
 
         valid = httpx.get(f"http://127.0.0.1:{port}/callback?code=code_123", timeout=1.0)
-        assert valid.status_code == 204
-        assert valid.text == ""
+        assert valid.status_code == 200
+        assert "text/html" in valid.headers.get("content-type", "")
+        assert "charset=utf-8" in valid.headers.get("content-type", "").lower()
+        assert valid.headers.get("cache-control") == "no-store"
+        assert "인증 정보를 받았어요" in valid.text
+        assert "PuriPuly 앱에서 연결을 마무리하고 있어요." in valid.text
+        assert "이 탭은 닫아도 괜찮아요." in valid.text
+        assert "<script" not in valid.text
+        assert "window.close" not in valid.text
 
         worker.join(timeout=2.0)
         assert worker.is_alive() is False
         assert result == {"code": "code_123"}
     finally:
+        set_locale(previous_locale)
         listener.close()
 
 

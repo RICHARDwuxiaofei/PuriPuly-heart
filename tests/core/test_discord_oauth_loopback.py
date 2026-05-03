@@ -64,9 +64,11 @@ def test_success_callback_returns_completion_page_and_wait_returns_code_state() 
         assert status == 200
         assert "text/html" in content_type
         assert "charset=utf-8" in content_type.lower()
-        assert "Discord 인증 정보를 받았어요" in body
-        assert "PuriPuly 앱에서 Managed 키 발급을 마무리하고 있어요." in body
+        assert "인증 정보를 받았어요" in body
+        assert "PuriPuly 앱에서 연결을 마무리하고 있어요." in body
         assert "이 탭은 닫아도 괜찮아요." in body
+        assert "Discord 인증" not in body
+        assert "Managed 키" not in body
         assert "window.close" not in body
         assert "<script" not in body
         assert "<button" not in body
@@ -132,10 +134,10 @@ def test_success_callback_delivers_result_even_when_browser_disconnects() -> Non
 @pytest.mark.parametrize(
     ("locale", "expected_text", "expected_font"),
     [
-        ("en", "We received your Discord verification", "system-ui"),
-        ("ko", "Discord 인증 정보를 받았어요", "NanumSquareRound"),
-        ("ja", "Discord認証情報を受け取りました", "M PLUS Rounded 1c"),
-        ("zh-CN", "已收到 Discord 认证信息", "ResourceHanRoundedCN"),
+        ("en", "We received your authentication", "system-ui"),
+        ("ko", "인증 정보를 받았어요", "NanumSquareRound"),
+        ("ja", "認証情報を受け取りました", "M PLUS Rounded 1c"),
+        ("zh-CN", "已收到认证信息", "ResourceHanRoundedCN"),
     ],
 )
 def test_success_callback_completion_page_matches_locale(
