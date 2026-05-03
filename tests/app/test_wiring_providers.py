@@ -21,6 +21,7 @@ from puripuly_heart.config.settings import (
     OpenRouterCredentialSource,
     OpenRouterFallbackSelectionAlias,
     OpenRouterLLMModel,
+    OpenRouterProviderRouting,
     OpenRouterRoutingMode,
     OpenRouterSelectionAlias,
     OpenRouterSettings,
@@ -346,6 +347,32 @@ def test_create_llm_provider_openrouter_uses_selected_managed_key() -> None:
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, OpenRouterLLMProvider)
     assert provider.inner.api_key == "managed-key"
+
+
+def test_create_llm_provider_openrouter_deepseek_only_skips_openrouter_fallback_racing() -> None:
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.DEEPSEEK_V4_FLASH,
+            selected_source=OpenRouterCredentialSource.MANAGED,
+            selection_alias=OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED,
+            fallback_selection_alias=OpenRouterFallbackSelectionAlias.QWEN35_FLASH,
+            provider_routing=OpenRouterProviderRouting.DEEPSEEK_ONLY,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_managed_api_key", "managed-key")
+
+    provider = create_llm_provider(
+        settings,
+        secrets=secrets,
+        managed_release_service=object(),
+    )
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, OpenRouterLLMProvider)
+    assert provider.inner.model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
+    assert provider.inner.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
 
 
 def test_create_llm_provider_openrouter_direct_managed_reuse_forwards_cached_user_identifier(

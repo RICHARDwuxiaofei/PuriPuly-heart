@@ -57,6 +57,8 @@
   "settings.translation_connection": "Translation Connection",
   "settings.translation_connection.managed": "Managed",
   "settings.translation_connection.managed.description": "Use PuriPuly's managed translation access",
+  "settings.translation_connection.managed_china": "Managed (China)",
+  "settings.translation_connection.managed_china.description": "Use managed OpenRouter access restricted to DeepSeek's provider",
   "settings.translation_connection.openrouter": "OpenRouter",
   "settings.translation_connection.openrouter.description": "Use your OpenRouter account and routing",
   "settings.translation_connection.official_byok": "Official API",

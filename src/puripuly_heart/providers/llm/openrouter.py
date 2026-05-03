@@ -9,7 +9,7 @@ from uuid import UUID
 
 import httpx
 
-from puripuly_heart.config.settings import OpenRouterRoutingMode
+from puripuly_heart.config.settings import OpenRouterProviderRouting, OpenRouterRoutingMode
 from puripuly_heart.core.openrouter_credentials import normalize_managed_openrouter_user_identifier
 from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
 from puripuly_heart.domain.models import Translation
@@ -142,7 +142,10 @@ def _has_length_finish_reason(data: object) -> bool:
 
 def _build_provider_preferences(
     routing_mode: OpenRouterRoutingMode,
+    provider_routing: OpenRouterProviderRouting = OpenRouterProviderRouting.DEFAULT,
 ) -> dict[str, object]:
+    if provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY:
+        return {"only": ["deepseek"], "allow_fallbacks": False}
     if routing_mode == OpenRouterRoutingMode.PARASAIL_FIRST:
         return {"order": ["Parasail", "Novita"], "allow_fallbacks": True}
     if routing_mode == OpenRouterRoutingMode.NOVITA_FIRST:
@@ -188,6 +191,7 @@ class OpenRouterLLMProvider:
     base_url: str = "https://openrouter.ai/api/v1"
     model: str = "google/gemma-4-26b-a4b-it"
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
+    provider_routing: OpenRouterProviderRouting = OpenRouterProviderRouting.DEFAULT
     max_tokens: int = 100
     timeout: float = 30.0
     runtime_logging: SessionRuntimeLoggingService | None = None
@@ -204,6 +208,7 @@ class OpenRouterLLMProvider:
                 model=self.model,
                 base_url=self.base_url,
                 routing_mode=self.routing_mode,
+                provider_routing=self.provider_routing,
                 max_tokens=self.max_tokens,
                 timeout=self.timeout,
                 runtime_logging=self.runtime_logging,
@@ -283,6 +288,7 @@ class HttpxOpenRouterClient:
     user_identifier: str | None = None
     base_url: str = "https://openrouter.ai/api/v1"
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
+    provider_routing: OpenRouterProviderRouting = OpenRouterProviderRouting.DEFAULT
     max_tokens: int = 100
     timeout: float = 30.0
     runtime_logging: SessionRuntimeLoggingService | None = None
@@ -321,7 +327,10 @@ class HttpxOpenRouterClient:
                 {"role": "user", "content": user_message},
             ],
             "reasoning": {"effort": "none"},
-            "provider": _build_provider_preferences(self.routing_mode),
+            "provider": _build_provider_preferences(
+                self.routing_mode,
+                self.provider_routing,
+            ),
             "max_tokens": self.max_tokens,
         }
         user_identifier = normalize_managed_openrouter_user_identifier(self.user_identifier)

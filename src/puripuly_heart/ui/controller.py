@@ -29,6 +29,7 @@ from puripuly_heart.config.settings import (
     LLMProviderName,
     OpenRouterCredentialSource,
     OpenRouterLLMModel,
+    OpenRouterProviderRouting,
     OpenRouterSelectionAlias,
     QwenLLMModel,
     QwenRegion,
@@ -834,6 +835,11 @@ class GuiController:
                 else None
             ),
             (
+                settings.openrouter.provider_routing
+                if settings.provider.llm == LLMProviderName.OPENROUTER
+                else OpenRouterProviderRouting.DEFAULT
+            ),
+            (
                 settings.openrouter.selected_source
                 if settings.provider.llm == LLMProviderName.OPENROUTER
                 else None
@@ -869,9 +875,11 @@ class GuiController:
         target.provider.stt = source.provider.stt
         target.provider.peer_stt = source.provider.peer_stt
         target.provider.llm = source.provider.llm
+        target.translation = copy.deepcopy(source.translation)
         target.gemini.llm_model = source.gemini.llm_model
         target.openrouter.llm_model = source.openrouter.llm_model
         target.openrouter.routing_mode = source.openrouter.routing_mode
+        target.openrouter.provider_routing = source.openrouter.provider_routing
         target.openrouter.selected_source = source.openrouter.selected_source
         target.openrouter.selection_alias = source.openrouter.selection_alias
         target.openrouter.fallback_selection_alias = source.openrouter.fallback_selection_alias

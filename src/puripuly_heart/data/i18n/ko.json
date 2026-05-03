@@ -57,6 +57,8 @@
   "settings.translation_connection": "번역 연결 방식",
   "settings.translation_connection.managed": "관리형",
   "settings.translation_connection.managed.description": "PuriPuly가 관리하는 번역 연결을 사용해요",
+  "settings.translation_connection.managed_china": "관리형 (중국)",
+  "settings.translation_connection.managed_china.description": "DeepSeek 제공사만 사용하도록 고정한 관리형 OpenRouter 연결을 사용해요",
   "settings.translation_connection.openrouter": "OpenRouter",
   "settings.translation_connection.openrouter.description": "내 OpenRouter 계정과 라우팅을 사용해요",
   "settings.translation_connection.official_byok": "공식 API",

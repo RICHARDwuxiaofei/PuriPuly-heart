@@ -101,6 +101,11 @@ class OpenRouterRoutingMode(str, Enum):
     NOVITA_FIRST = "novita_first"
 
 
+class OpenRouterProviderRouting(str, Enum):
+    DEFAULT = "default"
+    DEEPSEEK_ONLY = "deepseek_only"
+
+
 class OpenRouterCredentialSource(str, Enum):
     NONE = "none"
     MANAGED = "managed"
@@ -132,6 +137,7 @@ class TranslationModel(str, Enum):
 
 class TranslationConnection(str, Enum):
     MANAGED = "managed"
+    MANAGED_CHINA = "managed_china"
     OPENROUTER = "openrouter"
     OFFICIAL_BYOK = "official_byok"
 
@@ -170,6 +176,7 @@ TRANSLATION_CONNECTIONS_BY_MODEL: dict[TranslationModel, tuple[TranslationConnec
     ),
     TranslationModel.DEEPSEEK_V4_FLASH: (
         TranslationConnection.MANAGED,
+        TranslationConnection.MANAGED_CHINA,
         TranslationConnection.OPENROUTER,
         TranslationConnection.OFFICIAL_BYOK,
     ),
@@ -278,8 +285,14 @@ def _translation_connection_from_openrouter_source(
     selected_source: OpenRouterCredentialSource,
     *,
     model: TranslationModel,
+    provider_routing: OpenRouterProviderRouting = OpenRouterProviderRouting.DEFAULT,
 ) -> TranslationConnection:
     if selected_source == OpenRouterCredentialSource.MANAGED:
+        if (
+            model == TranslationModel.DEEPSEEK_V4_FLASH
+            and provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
+        ):
+            return TranslationConnection.MANAGED_CHINA
         return TranslationConnection.MANAGED
     if selected_source == OpenRouterCredentialSource.BYOK:
         return TranslationConnection.OPENROUTER
@@ -590,6 +603,7 @@ class DeepSeekSettings:
 class OpenRouterSettings:
     llm_model: OpenRouterLLMModel = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
+    provider_routing: OpenRouterProviderRouting = OpenRouterProviderRouting.DEFAULT
     selected_source: OpenRouterCredentialSource = OpenRouterCredentialSource.MANAGED
     selection_alias: OpenRouterSelectionAlias | None = None
     fallback_selection_alias: OpenRouterFallbackSelectionAlias = (
@@ -613,6 +627,8 @@ class OpenRouterSettings:
             raise ValueError("invalid openrouter llm model")
         if not isinstance(self.routing_mode, OpenRouterRoutingMode):
             raise ValueError("invalid openrouter routing mode")
+        if not isinstance(self.provider_routing, OpenRouterProviderRouting):
+            raise ValueError("invalid openrouter provider routing")
         if not isinstance(self.selected_source, OpenRouterCredentialSource):
             raise ValueError("invalid openrouter credential source")
         if self.selection_alias is not None and not isinstance(
@@ -880,6 +896,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         "openrouter": {
             "llm_model": normalized_openrouter_model.value,
             "routing_mode": settings.openrouter.routing_mode.value,
+            "provider_routing": settings.openrouter.provider_routing.value,
             "selected_source": normalized_openrouter_selected_source.value,
             "selection_alias": normalized_openrouter_selection_alias_value,
             "fallback_selection_alias": settings.openrouter.fallback_selection_alias.value,
@@ -1023,6 +1040,16 @@ def _parse_openrouter_routing_mode(value: object) -> OpenRouterRoutingMode:
         except ValueError:
             pass
     return OpenRouterRoutingMode.LATENCY
+
+
+def _parse_openrouter_provider_routing(value: object) -> OpenRouterProviderRouting:
+    if isinstance(value, str):
+        normalized = value.strip()
+        try:
+            return OpenRouterProviderRouting(normalized)
+        except ValueError:
+            pass
+    return OpenRouterProviderRouting.DEFAULT
 
 
 def _parse_openrouter_credential_source(
@@ -1234,6 +1261,7 @@ def _derive_translation_settings_from_runtime_values(
     provider_llm: LLMProviderName,
     openrouter_model: OpenRouterLLMModel,
     openrouter_selected_source: OpenRouterCredentialSource,
+    openrouter_provider_routing: OpenRouterProviderRouting,
     gemini_model: GeminiLLMModel,
     qwen_model: QwenLLMModel,
     history: object = None,
@@ -1247,6 +1275,7 @@ def _derive_translation_settings_from_runtime_values(
                 connection=_translation_connection_from_openrouter_source(
                     openrouter_selected_source,
                     model=TranslationModel.GEMMA4,
+                    provider_routing=openrouter_provider_routing,
                 ),
                 history=normalized_history,
             )
@@ -1256,6 +1285,7 @@ def _derive_translation_settings_from_runtime_values(
                 connection=_translation_connection_from_openrouter_source(
                     openrouter_selected_source,
                     model=TranslationModel.DEEPSEEK_V4_FLASH,
+                    provider_routing=openrouter_provider_routing,
                 ),
                 history=normalized_history,
             )
@@ -1313,6 +1343,7 @@ def _derive_translation_settings_from_runtime(
         provider_llm=settings.provider.llm,
         openrouter_model=settings.openrouter.llm_model,
         openrouter_selected_source=settings.openrouter.selected_source,
+        openrouter_provider_routing=settings.openrouter.provider_routing,
         gemini_model=settings.gemini.llm_model,
         qwen_model=settings.qwen.llm_model,
         history=history,
@@ -1331,6 +1362,7 @@ def materialize_translation_settings(settings: AppSettings) -> AppSettings:
     if model == TranslationModel.GEMMA4:
         settings.provider.llm = LLMProviderName.OPENROUTER
         settings.openrouter.llm_model = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+        settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
         settings.openrouter.selected_source = (
             OpenRouterCredentialSource.MANAGED
             if connection == TranslationConnection.MANAGED
@@ -1345,13 +1377,19 @@ def materialize_translation_settings(settings: AppSettings) -> AppSettings:
     if model == TranslationModel.DEEPSEEK_V4_FLASH:
         if connection == TranslationConnection.OFFICIAL_BYOK:
             settings.provider.llm = LLMProviderName.DEEPSEEK
+            settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
             settings.deepseek.llm_model = DeepSeekLLMModel.DEEPSEEK_V4_FLASH
             return settings
         settings.provider.llm = LLMProviderName.OPENROUTER
         settings.openrouter.llm_model = OpenRouterLLMModel.DEEPSEEK_V4_FLASH
+        settings.openrouter.provider_routing = (
+            OpenRouterProviderRouting.DEEPSEEK_ONLY
+            if connection == TranslationConnection.MANAGED_CHINA
+            else OpenRouterProviderRouting.DEFAULT
+        )
         settings.openrouter.selected_source = (
             OpenRouterCredentialSource.MANAGED
-            if connection == TranslationConnection.MANAGED
+            if connection in (TranslationConnection.MANAGED, TranslationConnection.MANAGED_CHINA)
             else OpenRouterCredentialSource.BYOK
         )
         settings.openrouter.selection_alias = _derive_openrouter_selection_alias(
@@ -1362,15 +1400,18 @@ def materialize_translation_settings(settings: AppSettings) -> AppSettings:
 
     if model == TranslationModel.GEMINI_3_FLASH:
         settings.provider.llm = LLMProviderName.GEMINI
+        settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
         settings.gemini.llm_model = GeminiLLMModel.GEMINI_3_FLASH
         return settings
 
     if model == TranslationModel.GEMINI_31_FLASH_LITE:
         settings.provider.llm = LLMProviderName.GEMINI
+        settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
         settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
         return settings
 
     settings.provider.llm = LLMProviderName.QWEN
+    settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
     settings.qwen.llm_model = QwenLLMModel.QWEN_35_PLUS
     return settings
 
@@ -1427,6 +1468,11 @@ def _apply_materialized_translation_to_data(
             "llm_model",
             OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value,
         )
+        changed |= _set_mapping_value(
+            openrouter_data,
+            "provider_routing",
+            OpenRouterProviderRouting.DEFAULT.value,
+        )
         changed |= _set_mapping_value(openrouter_data, "selected_source", selected_source.value)
         changed |= _set_mapping_value(openrouter_data, "selection_alias", selection_alias.value)
         return changed
@@ -1435,6 +1481,11 @@ def _apply_materialized_translation_to_data(
         if translation.connection == TranslationConnection.OFFICIAL_BYOK:
             changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.DEEPSEEK.value)
             changed |= _set_mapping_value(
+                openrouter_data,
+                "provider_routing",
+                OpenRouterProviderRouting.DEFAULT.value,
+            )
+            changed |= _set_mapping_value(
                 deepseek_data,
                 "llm_model",
                 DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value,
@@ -1442,8 +1493,14 @@ def _apply_materialized_translation_to_data(
             return changed
         selected_source = (
             OpenRouterCredentialSource.MANAGED
-            if translation.connection == TranslationConnection.MANAGED
+            if translation.connection
+            in (TranslationConnection.MANAGED, TranslationConnection.MANAGED_CHINA)
             else OpenRouterCredentialSource.BYOK
+        )
+        provider_routing = (
+            OpenRouterProviderRouting.DEEPSEEK_ONLY
+            if translation.connection == TranslationConnection.MANAGED_CHINA
+            else OpenRouterProviderRouting.DEFAULT
         )
         selection_alias = _derive_openrouter_selection_alias(
             OpenRouterLLMModel.DEEPSEEK_V4_FLASH,
@@ -1455,12 +1512,22 @@ def _apply_materialized_translation_to_data(
             "llm_model",
             OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value,
         )
+        changed |= _set_mapping_value(
+            openrouter_data,
+            "provider_routing",
+            provider_routing.value,
+        )
         changed |= _set_mapping_value(openrouter_data, "selected_source", selected_source.value)
         changed |= _set_mapping_value(openrouter_data, "selection_alias", selection_alias.value)
         return changed
 
     if translation.model == TranslationModel.GEMINI_3_FLASH:
         changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.GEMINI.value)
+        changed |= _set_mapping_value(
+            openrouter_data,
+            "provider_routing",
+            OpenRouterProviderRouting.DEFAULT.value,
+        )
         changed |= _set_mapping_value(
             gemini_data,
             "llm_model",
@@ -1471,6 +1538,11 @@ def _apply_materialized_translation_to_data(
     if translation.model == TranslationModel.GEMINI_31_FLASH_LITE:
         changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.GEMINI.value)
         changed |= _set_mapping_value(
+            openrouter_data,
+            "provider_routing",
+            OpenRouterProviderRouting.DEFAULT.value,
+        )
+        changed |= _set_mapping_value(
             gemini_data,
             "llm_model",
             GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
@@ -1478,6 +1550,11 @@ def _apply_materialized_translation_to_data(
         return changed
 
     changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.QWEN.value)
+    changed |= _set_mapping_value(
+        openrouter_data,
+        "provider_routing",
+        OpenRouterProviderRouting.DEFAULT.value,
+    )
     changed |= _set_mapping_value(qwen_data, "llm_model", QwenLLMModel.QWEN_35_PLUS.value)
     return changed
 
@@ -2088,6 +2165,14 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         openrouter_data["routing_mode"] = normalized_openrouter_routing_mode
         changed = True
 
+    raw_openrouter_provider_routing = openrouter_data.get("provider_routing")
+    normalized_openrouter_provider_routing = _parse_openrouter_provider_routing(
+        raw_openrouter_provider_routing
+    ).value
+    if raw_openrouter_provider_routing != normalized_openrouter_provider_routing:
+        openrouter_data["provider_routing"] = normalized_openrouter_provider_routing
+        changed = True
+
     if openrouter_data.get("selected_source") != normalized_openrouter_selected_source.value:
         openrouter_data["selected_source"] = normalized_openrouter_selected_source.value
         changed = True
@@ -2172,6 +2257,9 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             openrouter_selected_source=_parse_openrouter_credential_source(
                 openrouter_data.get("selected_source"),
                 fallback=_default_openrouter_credential_source_value(data),
+            ),
+            openrouter_provider_routing=_parse_openrouter_provider_routing(
+                openrouter_data.get("provider_routing")
             ),
             gemini_model=_parse_gemini_llm_model(gemini_data.get("llm_model")),
             qwen_model=_parse_qwen_llm_model(qwen_data.get("llm_model")),
@@ -2565,6 +2653,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                     "routing_mode",
                     OpenRouterRoutingMode.LATENCY.value,
                 )
+            ),
+            provider_routing=_parse_openrouter_provider_routing(
+                openrouter_raw.get("provider_routing")
             ),
             selected_source=openrouter_selected_source,
             selection_alias=openrouter_selection_alias,

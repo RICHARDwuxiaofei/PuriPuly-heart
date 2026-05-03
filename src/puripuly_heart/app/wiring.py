@@ -21,6 +21,7 @@ from puripuly_heart.config.settings import (
     OpenRouterCredentialSource,
     OpenRouterFallbackSelectionAlias,
     OpenRouterLLMModel,
+    OpenRouterProviderRouting,
     OpenRouterSelectionAlias,
     QwenRegion,
     SecretsBackend,
@@ -187,6 +188,7 @@ def _create_llm_provider_from_alias_profile(
                 ),
                 model=alias_settings.openrouter.llm_model.value,
                 routing_mode=settings.openrouter.routing_mode,
+                provider_routing=alias_settings.openrouter.provider_routing,
                 runtime_logging=runtime_logging,
             ),
             on_delegate_ready=managed_delegate_ready,
@@ -201,6 +203,7 @@ def _create_llm_provider_from_alias_profile(
         user_identifier=user_identifier,
         model=alias_settings.openrouter.llm_model.value,
         routing_mode=settings.openrouter.routing_mode,
+        provider_routing=alias_settings.openrouter.provider_routing,
         runtime_logging=runtime_logging,
     )
 
@@ -279,6 +282,7 @@ def _create_openrouter_fallback_provider(
                 ),
                 model=resolved_settings.openrouter.llm_model.value,
                 routing_mode=resolved_settings.openrouter.routing_mode,
+                provider_routing=resolved_settings.openrouter.provider_routing,
                 runtime_logging=runtime_logging,
             ),
             on_delegate_ready=managed_delegate_ready,
@@ -289,6 +293,7 @@ def _create_openrouter_fallback_provider(
         api_key=api_key,
         model=resolved_settings.openrouter.llm_model.value,
         routing_mode=resolved_settings.openrouter.routing_mode,
+        provider_routing=resolved_settings.openrouter.provider_routing,
         runtime_logging=runtime_logging,
     )
 
@@ -434,7 +439,10 @@ def create_llm_provider(
             managed_delegate_ready=managed_delegate_ready,
             runtime_logging=runtime_logging,
         )
-        if settings.openrouter.fallback_selection_alias != OpenRouterFallbackSelectionAlias.NONE:
+        if (
+            settings.openrouter.fallback_selection_alias != OpenRouterFallbackSelectionAlias.NONE
+            and settings.openrouter.provider_routing != OpenRouterProviderRouting.DEEPSEEK_ONLY
+        ):
             fallback_managed_release_service = _shared_managed_release_service_for_fallback(
                 base,
                 managed_release_service,

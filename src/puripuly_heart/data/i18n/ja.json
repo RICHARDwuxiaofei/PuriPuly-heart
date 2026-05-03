@@ -57,6 +57,8 @@
   "settings.translation_connection": "翻訳接続方式",
   "settings.translation_connection.managed": "マネージド",
   "settings.translation_connection.managed.description": "PuriPulyが管理する翻訳接続を使用します",
+  "settings.translation_connection.managed_china": "マネージド（中国）",
+  "settings.translation_connection.managed_china.description": "DeepSeekプロバイダーのみに制限したマネージドOpenRouter接続を使用します",
   "settings.translation_connection.openrouter": "OpenRouter",
   "settings.translation_connection.openrouter.description": "自分のOpenRouterアカウントとルーティングを使用します",
   "settings.translation_connection.official_byok": "公式API",

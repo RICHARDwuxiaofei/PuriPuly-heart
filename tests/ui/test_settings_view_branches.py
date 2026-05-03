@@ -18,6 +18,7 @@ from puripuly_heart.config.settings import (
     OpenRouterCredentialSource,
     OpenRouterFallbackSelectionAlias,
     OpenRouterLLMModel,
+    OpenRouterProviderRouting,
     OpenRouterSelectionAlias,
     QwenLLMModel,
     QwenRegion,
@@ -639,6 +640,11 @@ def test_deepseek_connection_selection_controls_api_key_visibility(
     view._on_translation_connection_selected(TranslationConnection.OPENROUTER.value)
     assert view._managed_trial_usage_bar.visible is False
     assert view._openrouter_key.visible is True
+    assert view._deepseek_key.visible is False
+
+    view._on_translation_connection_selected(TranslationConnection.MANAGED_CHINA.value)
+    assert view._managed_trial_usage_bar.visible is True
+    assert view._openrouter_key.visible is False
     assert view._deepseek_key.visible is False
 
     view._on_translation_connection_selected(TranslationConnection.OFFICIAL_BYOK.value)
@@ -1309,6 +1315,41 @@ def test_on_translation_connection_selected_updates_settings_and_flags(
     assert changed == []
 
 
+def test_on_translation_connection_selected_stages_deepseek_managed_china_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED,
+        connection_history={
+            TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.MANAGED,
+        },
+    )
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_translation_connection_selected(TranslationConnection.MANAGED_CHINA.value)
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.translation.connection == TranslationConnection.MANAGED_CHINA
+    assert (
+        pending.translation.connection_history[TranslationModel.DEEPSEEK_V4_FLASH.value]
+        == TranslationConnection.MANAGED_CHINA
+    )
+    assert pending.provider.llm == LLMProviderName.OPENROUTER
+    assert pending.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert pending.openrouter.selection_alias == OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
+    assert pending.openrouter.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
+    assert view._translation_connection_text.content.value == t(
+        "settings.translation_connection.managed_china"
+    )
+    assert view._managed_trial_usage_bar.visible is True
+
+
 def test_on_openrouter_fallback_selected_updates_draft_and_helper_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1777,15 +1818,17 @@ def test_translation_connection_modal_lists_supported_connections(
     options = captured["options"]
     assert [option.value for option in options] == [
         TranslationConnection.MANAGED.value,
+        TranslationConnection.MANAGED_CHINA.value,
         TranslationConnection.OPENROUTER.value,
         TranslationConnection.OFFICIAL_BYOK.value,
     ]
     assert [option.label for option in options] == [
         t("settings.translation_connection.managed"),
+        t("settings.translation_connection.managed_china"),
         t("settings.translation_connection.openrouter"),
         t("settings.translation_connection.official_byok"),
     ]
-    assert [option.description for option in options] == ["", "", ""]
+    assert [option.description for option in options] == ["", "", "", ""]
     assert captured["current"] == TranslationConnection.MANAGED.value
 
 
@@ -2471,6 +2514,8 @@ def test_translation_connection_and_model_copy_is_backed_by_i18n(locale: str) ->
         "settings.translation_connection",
         "settings.translation_connection.managed",
         "settings.translation_connection.managed.description",
+        "settings.translation_connection.managed_china",
+        "settings.translation_connection.managed_china.description",
         "settings.translation_connection.openrouter",
         "settings.translation_connection.openrouter.description",
         "settings.translation_connection.official_byok",
@@ -2492,6 +2537,15 @@ def test_translation_connection_and_model_copy_is_backed_by_i18n(locale: str) ->
     )
     if locale in {"ko", "zh-CN"}:
         assert bundle["settings.translation_connection.managed"] != "Managed"
+
+    assert (
+        bundle["settings.translation_connection.managed_china"]
+        == {
+            "en": "Managed (China)",
+            "ko": "관리형 (중국)",
+            "zh-CN": "托管（中国）",
+        }[locale]
+    )
 
     assert (
         bundle["settings.translation_connection.official_byok"]

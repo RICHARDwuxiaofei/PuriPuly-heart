@@ -15,7 +15,11 @@ from puripuly_heart.config.settings import (
     LLMProviderName,
     OpenRouterCredentialSource,
     OpenRouterLLMModel,
+    OpenRouterProviderRouting,
     OpenRouterSelectionAlias,
+    TranslationConnection,
+    TranslationModel,
+    TranslationSettings,
 )
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.app import TranslatorApp, _check_and_notify_update
@@ -865,6 +869,39 @@ def test_discord_managed_auth_byok_launches_openrouter_pkce_with_byok_target() -
     assert target_settings.openrouter.selection_alias is OpenRouterSelectionAlias.QWEN35_FLASH_BYOK
     assert target_settings.openrouter.llm_model is OpenRouterLLMModel.QWEN_35_FLASH_02_23
     assert settings.openrouter.selected_source is OpenRouterCredentialSource.MANAGED
+
+
+def test_discord_managed_auth_byok_clears_managed_china_translation_state() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.translation = TranslationSettings(
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED_CHINA,
+        connection_history={
+            TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.MANAGED_CHINA,
+        },
+    )
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.openrouter.selection_alias = OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
+    settings.openrouter.llm_model = OpenRouterLLMModel.DEEPSEEK_V4_FLASH
+    settings.openrouter.provider_routing = OpenRouterProviderRouting.DEEPSEEK_ONLY
+    app.controller = SimpleNamespace(settings=settings)
+
+    target_settings = app._build_managed_openrouter_byok_target_settings()
+
+    assert target_settings is not None
+    assert target_settings.openrouter.selected_source is OpenRouterCredentialSource.BYOK
+    assert (
+        target_settings.openrouter.selection_alias
+        is OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_BYOK
+    )
+    assert target_settings.openrouter.provider_routing is OpenRouterProviderRouting.DEFAULT
+    assert target_settings.translation.connection is TranslationConnection.OPENROUTER
+    assert (
+        target_settings.translation.connection_history[TranslationModel.DEEPSEEK_V4_FLASH.value]
+        is TranslationConnection.OPENROUTER
+    )
 
 
 @pytest.mark.asyncio

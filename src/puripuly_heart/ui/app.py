@@ -18,7 +18,9 @@ from puripuly_heart.config.settings import (
     LLMProviderName,
     OpenRouterCredentialSource,
     OpenRouterLLMModel,
+    OpenRouterProviderRouting,
     OpenRouterSelectionAlias,
+    TranslationConnection,
     save_settings,
 )
 from puripuly_heart.core.discord_oauth_loopback import (
@@ -805,6 +807,11 @@ class TranslatorApp:
         target_settings.openrouter.selection_alias = OpenRouterSelectionAlias(alias_value)
         target_settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
         target_settings.openrouter.llm_model = OpenRouterLLMModel(openrouter_model)
+        target_settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
+        target_settings.translation.connection = TranslationConnection.OPENROUTER
+        target_settings.translation.connection_history[target_settings.translation.model.value] = (
+            TranslationConnection.OPENROUTER
+        )
         return target_settings
 
     def _build_founder_letter_target_settings(self) -> AppSettings | None:

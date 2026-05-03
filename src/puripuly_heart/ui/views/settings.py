@@ -91,11 +91,13 @@ _TRANSLATION_MODEL_LABEL_KEYS = {
 }
 _TRANSLATION_CONNECTION_LABEL_KEYS = {
     TranslationConnection.MANAGED: "settings.translation_connection.managed",
+    TranslationConnection.MANAGED_CHINA: "settings.translation_connection.managed_china",
     TranslationConnection.OPENROUTER: "settings.translation_connection.openrouter",
     TranslationConnection.OFFICIAL_BYOK: "settings.translation_connection.official_byok",
 }
 _TRANSLATION_CONNECTION_DESCRIPTION_KEYS = {
     TranslationConnection.MANAGED: "settings.translation_connection.managed.description",
+    TranslationConnection.MANAGED_CHINA: "settings.translation_connection.managed_china.description",
     TranslationConnection.OPENROUTER: "settings.translation_connection.openrouter.description",
     TranslationConnection.OFFICIAL_BYOK: "settings.translation_connection.official_byok.description",
 }
@@ -1729,6 +1731,7 @@ class SettingsView(ft.Column):
         target.gemini.llm_model = source.gemini.llm_model
         target.openrouter.llm_model = source.openrouter.llm_model
         target.openrouter.routing_mode = source.openrouter.routing_mode
+        target.openrouter.provider_routing = source.openrouter.provider_routing
         target.openrouter.selected_source = source.openrouter.selected_source
         target.openrouter.selection_alias = source.openrouter.selection_alias
         target.openrouter.fallback_selection_alias = source.openrouter.fallback_selection_alias

@@ -24,11 +24,15 @@ from puripuly_heart.config.settings import (
     OpenRouterCredentialSource,
     OpenRouterFallbackSelectionAlias,
     OpenRouterLLMModel,
+    OpenRouterProviderRouting,
     OpenRouterRoutingMode,
     OpenRouterSelectionAlias,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
+    TranslationConnection,
+    TranslationModel,
+    TranslationSettings,
 )
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.clock import FakeClock
@@ -1964,6 +1968,52 @@ def test_build_llm_provider_signature_tracks_openrouter_fallback_alias_only() ->
     assert controller._build_llm_provider_signature(
         base
     ) != controller._build_llm_provider_signature(different_fallback)
+
+
+def test_build_llm_provider_signature_tracks_openrouter_provider_routing() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    base = AppSettings()
+    base.provider.llm = LLMProviderName.OPENROUTER
+    base.openrouter.selection_alias = OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
+    base.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
+
+    deepseek_only = copy.deepcopy(base)
+    deepseek_only.openrouter.provider_routing = OpenRouterProviderRouting.DEEPSEEK_ONLY
+
+    assert controller._build_llm_provider_signature(
+        base
+    ) != controller._build_llm_provider_signature(deepseek_only)
+
+
+def test_merge_settings_tab_apply_copies_translation_selection_for_provider_apply() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.translation = TranslationSettings(
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED,
+        connection_history={
+            TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.MANAGED,
+        },
+    )
+
+    pending = copy.deepcopy(controller.settings)
+    pending.translation = TranslationSettings(
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED_CHINA,
+        connection_history={
+            TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.MANAGED_CHINA,
+        },
+    )
+    pending.openrouter.provider_routing = OpenRouterProviderRouting.DEEPSEEK_ONLY
+
+    merged = controller.merge_settings_tab_apply_with_current_languages(pending)
+
+    assert merged.translation.connection == TranslationConnection.MANAGED_CHINA
+    assert (
+        merged.translation.connection_history[TranslationModel.DEEPSEEK_V4_FLASH.value]
+        == TranslationConnection.MANAGED_CHINA
+    )
+    assert merged.openrouter.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
 
 
 def test_stt_runtime_signature_includes_custom_vocabulary_state() -> None:

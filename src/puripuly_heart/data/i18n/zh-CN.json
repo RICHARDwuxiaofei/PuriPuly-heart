@@ -57,6 +57,8 @@
     "settings.translation_connection": "翻译连接方式",
     "settings.translation_connection.managed": "托管",
     "settings.translation_connection.managed.description": "使用 PuriPuly 托管的翻译连接",
+    "settings.translation_connection.managed_china": "托管（中国）",
+    "settings.translation_connection.managed_china.description": "使用仅限 DeepSeek 服务商的托管 OpenRouter 连接",
     "settings.translation_connection.openrouter": "OpenRouter",
     "settings.translation_connection.openrouter.description": "使用你的 OpenRouter 账户和路由",
     "settings.translation_connection.official_byok": "官方 API",

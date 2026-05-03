@@ -28,6 +28,7 @@ from puripuly_heart.config.settings import (
     OpenRouterCredentialSource,
     OpenRouterFallbackSelectionAlias,
     OpenRouterLLMModel,
+    OpenRouterProviderRouting,
     OpenRouterRoutingMode,
     OpenRouterSelectionAlias,
     OpenRouterSettings,
@@ -341,6 +342,7 @@ def test_public_translation_connection_helpers_match_model_matrix() -> None:
     )
     assert supported_translation_connections(TranslationModel.DEEPSEEK_V4_FLASH) == (
         TranslationConnection.MANAGED,
+        TranslationConnection.MANAGED_CHINA,
         TranslationConnection.OPENROUTER,
         TranslationConnection.OFFICIAL_BYOK,
     )
@@ -372,6 +374,53 @@ def test_materialize_translation_settings_returns_mutated_settings() -> None:
     assert returned is settings
     assert settings.provider.llm == LLMProviderName.DEEPSEEK
     assert settings.deepseek.llm_model == DeepSeekLLMModel.DEEPSEEK_V4_FLASH
+
+
+def test_materialize_translation_settings_maps_deepseek_managed_china_to_deepseek_only_openrouter() -> (
+    None
+):
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED_CHINA,
+        connection_history={
+            TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.MANAGED_CHINA,
+        },
+    )
+    settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
+
+    returned = materialize_translation_settings(settings)
+
+    assert returned is settings
+    assert settings.provider.llm == LLMProviderName.OPENROUTER
+    assert settings.openrouter.llm_model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH
+    assert settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert settings.openrouter.selection_alias == OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED
+    assert settings.openrouter.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
+
+
+def test_to_dict_roundtrips_deepseek_managed_china_provider_routing(tmp_path) -> None:
+    path = tmp_path / "settings.json"
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED_CHINA,
+        connection_history={
+            TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.MANAGED_CHINA,
+        },
+    )
+
+    save_settings(path, settings)
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.translation.model == TranslationModel.DEEPSEEK_V4_FLASH
+    assert loaded.translation.connection == TranslationConnection.MANAGED_CHINA
+    assert loaded.openrouter.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
+    assert persisted["translation"]["connection"] == TranslationConnection.MANAGED_CHINA.value
+    assert (
+        persisted["openrouter"]["provider_routing"] == OpenRouterProviderRouting.DEEPSEEK_ONLY.value
+    )
 
 
 def test_app_settings_defaults_to_managed_openrouter_gemma_with_deepseek_fallback() -> None:
@@ -1454,6 +1503,17 @@ def test_from_dict_migrates_openrouter_qwen_flash_main_preserving_routing_and_fa
         (
             TranslationModel.DEEPSEEK_V4_FLASH,
             TranslationConnection.MANAGED,
+            LLMProviderName.OPENROUTER,
+            OpenRouterLLMModel.DEEPSEEK_V4_FLASH,
+            OpenRouterCredentialSource.MANAGED,
+            OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED,
+            None,
+            None,
+            None,
+        ),
+        (
+            TranslationModel.DEEPSEEK_V4_FLASH,
+            TranslationConnection.MANAGED_CHINA,
             LLMProviderName.OPENROUTER,
             OpenRouterLLMModel.DEEPSEEK_V4_FLASH,
             OpenRouterCredentialSource.MANAGED,

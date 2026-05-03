@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from puripuly_heart.config.settings import OpenRouterRoutingMode
+from puripuly_heart.config.settings import OpenRouterProviderRouting, OpenRouterRoutingMode
 from puripuly_heart.providers.llm.openrouter import (
     HttpxOpenRouterClient,
     OpenRouterClient,
@@ -288,6 +288,34 @@ async def test_httpx_openrouter_client_latency_routing_ignores_venice_and_deepin
         "sort": "latency",
         "allow_fallbacks": True,
         "ignore": ["venice", "deepinfra", "google-vertex"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_httpx_openrouter_client_deepseek_only_routing_locks_provider_without_fallbacks(
+    monkeypatch,
+) -> None:
+    fake_client = FakeAsyncClient()
+    monkeypatch.setattr("httpx.AsyncClient", lambda **_kwargs: fake_client)
+
+    client = HttpxOpenRouterClient(
+        api_key="test-key",
+        model="deepseek/deepseek-v4-flash",
+        base_url="https://example",
+        routing_mode=OpenRouterRoutingMode.PARASAIL_FIRST,
+        provider_routing=OpenRouterProviderRouting.DEEPSEEK_ONLY,
+    )
+    await client.translate(
+        text="hello",
+        system_prompt="SYSTEM",
+        source_language="ko-KR",
+        target_language="zh-CN",
+    )
+
+    body = fake_client.last_request["json"]
+    assert body["provider"] == {
+        "only": ["deepseek"],
+        "allow_fallbacks": False,
     }
 
 
