@@ -59,6 +59,26 @@ def test_available_locales_use_product_display_order() -> None:
     assert available_locales() == ("en", "ko", "zh-CN", "ja")
 
 
+def test_logs_conversation_keys_are_localized() -> None:
+    bundles = _load_bundles()
+    required_keys = {
+        "logs.conversation.show",
+        "logs.conversation.hide",
+        "logs.conversation.empty",
+        "logs.conversation.original",
+        "logs.conversation.translation",
+    }
+
+    for locale, bundle in bundles.items():
+        missing = sorted(required_keys - set(bundle))
+        assert missing == [], locale
+        for key in required_keys:
+            assert bundle[key].strip()
+            assert bundle[key] != key
+
+    assert bundles["ko"]["logs.conversation.show"] == "대화록 보기"
+
+
 def test_i18n_bundles_do_not_keep_unused_runtime_keys() -> None:
     bundles = _load_bundles()
     all_keys = sorted(set().union(*(bundle.keys() for bundle in bundles.values())))

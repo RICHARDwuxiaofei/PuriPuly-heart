@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import PropertyMock, patch
 
+import pytest
+
 from puripuly_heart.ui.views import logs as logs_module
 from puripuly_heart.ui.views.logs import (
     CLEANUP_BATCH,
@@ -32,6 +34,252 @@ class TestLogsView:
         assert view._mode_button.text == logs_module.t("logs.mode.basic")
         assert view._mode_button.icon == logs_module.ft.Icons.ARTICLE
         assert view._mode_button.content is None
+
+    def test_logs_view_exposes_conversation_button_after_mode_button(self):
+        view = LogsView()
+
+        assert view._conversation_button.text == logs_module.t("logs.conversation.show")
+        assert view._conversation_button.icon == logs_module.ft.Icons.CHAT_BUBBLE_OUTLINE
+        assert view._conversation_button.content is None
+
+        assert view._header_button_row.controls == [
+            view._folder_button,
+            view._mode_button,
+            view._conversation_button,
+        ]
+
+    def test_conversation_toggle_shows_empty_state_and_returns_to_system_logs(self):
+        view = LogsView()
+
+        with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
+            view.append_log("system line")
+            view._on_conversation_button_click(SimpleNamespace())
+
+            assert view._log_text.value == logs_module.t("logs.conversation.empty")
+            assert view._conversation_button.text == logs_module.t("logs.conversation.hide")
+
+            view.set_runtime_logging_mode("detailed")
+            assert view._conversation_button.text == logs_module.t("logs.conversation.hide")
+            assert view._mode_button.text == logs_module.t("logs.mode.detailed")
+
+            view._on_conversation_button_click(SimpleNamespace())
+
+        assert view._log_text.value == "system line"
+        assert view._conversation_button.text == logs_module.t("logs.conversation.show")
+
+    def test_conversation_records_render_with_runtime_localized_source_labels(self):
+        view = LogsView()
+
+        with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
+            with patch.object(
+                logs_module,
+                "_format_conversation_timestamp",
+                return_value="18:06:12",
+            ):
+                view.append_conversation_record(
+                    source="Mic",
+                    channel="self",
+                    source_text="ありがとう",
+                    translated_text="고마워",
+                    origin_wall_clock_ms=1712345678901,
+                )
+            with patch.object(logs_module, "source_label", return_value="Mic"):
+                view._on_conversation_button_click(SimpleNamespace())
+                assert "[18:06:12] Mic" in view._log_text.value
+            with patch.object(logs_module, "source_label", return_value="마이크"):
+                view.apply_locale()
+
+        assert "[18:06:12] 마이크" in view._log_text.value
+        record = view.conversation_records[0]
+        assert record == logs_module.ConversationRecord(
+            timestamp_label="18:06:12",
+            source="Mic",
+            channel="self",
+            source_text="ありがとう",
+            translated_text="고마워",
+        )
+
+    def test_conversation_records_returns_read_only_snapshot(self):
+        view = LogsView()
+
+        with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
+            with patch.object(
+                logs_module,
+                "_format_conversation_timestamp",
+                return_value="18:06:12",
+            ):
+                view.append_conversation_record(
+                    source="Mic",
+                    channel="self",
+                    source_text="ありがとう",
+                    translated_text="고마워",
+                    origin_wall_clock_ms=1712345678901,
+                )
+
+        records = view.conversation_records
+        assert isinstance(records, tuple)
+        with pytest.raises(AttributeError):
+            records.append(  # type: ignore[attr-defined]
+                logs_module.ConversationRecord(
+                    "18:06:13",
+                    "Mic",
+                    "self",
+                    "bypass source",
+                    "bypass translation",
+                )
+            )
+        assert len(view.conversation_records) == 1
+
+    def test_append_conversation_record_rerenders_active_conversation_view(self):
+        view = LogsView()
+
+        with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
+            with patch.object(
+                logs_module,
+                "_format_conversation_timestamp",
+                side_effect=["18:06:12", "18:06:13"],
+            ):
+                view._on_conversation_button_click(SimpleNamespace())
+                assert view._log_text.value == logs_module.t("logs.conversation.empty")
+
+                view.append_conversation_record(
+                    source="Mic",
+                    channel="self",
+                    source_text="最初",
+                    translated_text="처음",
+                    origin_wall_clock_ms=1712345678901,
+                )
+                assert "最初" in view._log_text.value
+                assert "처음" in view._log_text.value
+                assert logs_module.t("logs.conversation.empty") not in view._log_text.value
+
+                view.append_conversation_record(
+                    source="Mic",
+                    channel="self",
+                    source_text="次",
+                    translated_text="다음",
+                    origin_wall_clock_ms=1712345679901,
+                )
+
+        assert "最初" in view._log_text.value
+        assert "처음" in view._log_text.value
+        assert "次" in view._log_text.value
+        assert "다음" in view._log_text.value
+
+    def test_append_conversation_record_skips_blank_original_or_translation(self):
+        view = LogsView()
+
+        with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
+            with patch.object(logs_module, "_format_conversation_timestamp") as timestamp:
+                view.append_conversation_record(
+                    source="Mic",
+                    channel="self",
+                    source_text="   ",
+                    translated_text="번역",
+                    origin_wall_clock_ms=1712345678901,
+                )
+                view.append_conversation_record(
+                    source="Mic",
+                    channel="self",
+                    source_text="원문",
+                    translated_text="\n\t ",
+                    origin_wall_clock_ms=1712345679901,
+                )
+
+        assert view.conversation_records == ()
+        timestamp.assert_not_called()
+
+    def test_format_conversation_timestamp_formats_origin_wall_clock_ms(self):
+        seen: dict[str, float | str] = {}
+
+        class FakeTimestamp:
+            def strftime(self, fmt: str) -> str:
+                seen["fmt"] = fmt
+                return "18:06:12"
+
+        class FakeDatetime:
+            @staticmethod
+            def fromtimestamp(timestamp_s: float) -> FakeTimestamp:
+                seen["timestamp_s"] = timestamp_s
+                return FakeTimestamp()
+
+        with patch.object(logs_module, "datetime", FakeDatetime):
+            formatted = logs_module._format_conversation_timestamp(1712345678901)
+
+        assert formatted == "18:06:12"
+        assert seen == {"timestamp_s": 1712345678.901, "fmt": "%H:%M:%S"}
+
+    def test_conversation_record_channel_is_stored_without_rendering(self):
+        view = LogsView()
+
+        with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
+            with patch.object(
+                logs_module,
+                "_format_conversation_timestamp",
+                return_value="18:06:12",
+            ):
+                view.append_conversation_record(
+                    source="Mic",
+                    channel="future-channel",
+                    source_text="こんにちは",
+                    translated_text="안녕",
+                    origin_wall_clock_ms=1712345678901,
+                )
+            view._on_conversation_button_click(SimpleNamespace())
+
+        assert view.conversation_records[0].channel == "future-channel"
+        assert "future-channel" not in view._log_text.value
+        assert "こんにちは" in view._log_text.value
+        assert "안녕" in view._log_text.value
+
+    def test_system_log_flush_does_not_mix_into_active_conversation_view(self):
+        view = LogsView()
+
+        with patch.object(type(view), "page", new_callable=PropertyMock, return_value=None):
+            with patch.object(
+                logs_module,
+                "_format_conversation_timestamp",
+                return_value="18:06:12",
+            ):
+                view.append_conversation_record(
+                    source="Mic",
+                    channel="self",
+                    source_text="あああ",
+                    translated_text="아아아",
+                    origin_wall_clock_ms=1712345678901,
+                )
+            view._on_conversation_button_click(SimpleNamespace())
+            conversation_text = view._log_text.value
+
+            view.append_log("system while conversation visible")
+
+            assert view._log_text.value == conversation_text
+            view._on_conversation_button_click(SimpleNamespace())
+
+        assert view._log_text.value == "system while conversation visible"
+
+    def test_conversation_model_cleanup_removes_oldest_records_first(self):
+        model = logs_module.ConversationViewModel(max_entries=2, cleanup_batch=1)
+
+        model.append(
+            logs_module.ConversationRecord("18:06:01", "Mic", "self", "source 1", "translated 1")
+        )
+        model.append(
+            logs_module.ConversationRecord("18:06:02", "Mic", "self", "source 2", "translated 2")
+        )
+        model.append(
+            logs_module.ConversationRecord("18:06:03", "Mic", "self", "source 3", "translated 3")
+        )
+        model.append(
+            logs_module.ConversationRecord("18:06:04", "Mic", "self", "source 4", "translated 4")
+        )
+
+        assert [record.source_text for record in model.records] == [
+            "source 2",
+            "source 3",
+            "source 4",
+        ]
+        assert model.cleanup_count == 1
 
     def test_logs_view_mode_button_toggles_mode_and_notifies_listener(self):
         view = LogsView()
