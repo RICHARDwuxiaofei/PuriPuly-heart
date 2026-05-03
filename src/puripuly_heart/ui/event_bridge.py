@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from collections import OrderedDict
 
 import flet as ft
 
@@ -14,6 +15,8 @@ from puripuly_heart.domain.models import OSCMessage, Transcript, Translation
 from puripuly_heart.ui.i18n import t
 
 logger = logging.getLogger(__name__)
+
+_FINAL_TRANSCRIPT_CACHE_LIMIT = 500
 
 
 def _short_visual_debug_token(value: object | None) -> str:
@@ -35,6 +38,7 @@ class UIEventBridge:
         self.runtime_logging = runtime_logging
         self._running = False
         self._primary_first_partial_emitted: set[str] = set()
+        self._final_self_transcripts: OrderedDict[str, Transcript] = OrderedDict()
 
     def _get_language_codes(self) -> tuple[str | None, str | None]:
         controller = getattr(self.app, "controller", None)
@@ -47,6 +51,49 @@ class UIEventBridge:
         controller = getattr(self.app, "controller", None)
         hub = getattr(controller, "hub", None)
         return bool(getattr(hub, "translation_enabled", False))
+
+    def _remember_final_self_transcript(self, transcript: Transcript) -> None:
+        if transcript.channel != "self" or not transcript.is_final:
+            return
+        key = str(transcript.utterance_id)
+        self._final_self_transcripts[key] = transcript
+        self._final_self_transcripts.move_to_end(key)
+        while len(self._final_self_transcripts) > _FINAL_TRANSCRIPT_CACHE_LIMIT:
+            self._final_self_transcripts.popitem(last=False)
+
+    def _source_text_for_translation(self, translation: Translation) -> str:
+        source_text = translation.source_text.strip()
+        if source_text:
+            return source_text
+        transcript = self._final_self_transcripts.get(str(translation.utterance_id))
+        if transcript is None:
+            return ""
+        return transcript.text.strip()
+
+    def _append_conversation_record(self, translation: Translation, *, source: str) -> None:
+        if translation.channel != "self":
+            return
+        translated_text = translation.text.strip()
+        if not translated_text:
+            return
+        source_text = self._source_text_for_translation(translation)
+        if not source_text:
+            return
+        append_record = getattr(
+            getattr(self.app, "view_logs", None), "append_conversation_record", None
+        )
+        if not callable(append_record):
+            return
+        try:
+            append_record(
+                source=source,
+                channel=translation.channel,
+                source_text=source_text,
+                translated_text=translated_text,
+                origin_wall_clock_ms=translation.origin_wall_clock_ms,
+            )
+        except Exception:
+            logger.exception("Failed to append conversation record")
 
     def _visual_debug_prefix(
         self,
@@ -165,6 +212,7 @@ class UIEventBridge:
                 )
 
             if is_final:
+                self._remember_final_self_transcript(transcript)
                 add_history = getattr(self.app, "add_history_entry", None)
                 if add_history is not None:
                     add_history(source, transcript.text, language_code=source_lang)
@@ -200,6 +248,7 @@ class UIEventBridge:
                     source_label=source,
                     dashboard_target_language=target_lang,
                 )
+            self._append_conversation_record(translation, source=source)
             add_history = getattr(self.app, "add_history_entry", None)
             if add_history is not None:
                 add_history(source, translation.text, translated=True, language_code=target_lang)

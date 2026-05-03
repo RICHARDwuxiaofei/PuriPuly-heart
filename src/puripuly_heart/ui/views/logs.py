@@ -6,6 +6,8 @@ import logging
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -13,7 +15,7 @@ import flet as ft
 
 from puripuly_heart.ui.components.glow import GLOW_CARD, create_glow_stack
 from puripuly_heart.ui.fonts import font_for_language
-from puripuly_heart.ui.i18n import get_locale, t
+from puripuly_heart.ui.i18n import get_locale, source_label, t
 from puripuly_heart.ui.theme import (
     COLOR_NEUTRAL,
     COLOR_ON_BACKGROUND,
@@ -24,6 +26,7 @@ from puripuly_heart.ui.theme import (
 
 MAX_LOG_ENTRIES = 4000
 CLEANUP_BATCH = 500
+MAX_CONVERSATION_RECORDS = 1000
 _UPDATE_INTERVAL = 0.2  # 200ms throttling
 _BASIC_MODE = "basic"
 _DETAILED_MODE = "detailed"
@@ -34,6 +37,11 @@ def _get_log_dir() -> Path:
     from puripuly_heart.config.paths import user_config_dir
 
     return user_config_dir()
+
+
+def _format_conversation_timestamp(origin_wall_clock_ms: int | None) -> str:
+    timestamp_s = origin_wall_clock_ms / 1000.0 if origin_wall_clock_ms is not None else time.time()
+    return datetime.fromtimestamp(timestamp_s).strftime("%H:%M:%S")
 
 
 class FletLogHandler(logging.Handler):
@@ -87,6 +95,57 @@ class LiveLogViewModel:
             self._cleanup_count += 1
 
 
+@dataclass(frozen=True, slots=True)
+class ConversationRecord:
+    timestamp_label: str
+    source: str
+    channel: str
+    source_text: str
+    translated_text: str
+
+
+class ConversationViewModel:
+    """Keeps session-only original/translation pairs for the Logs conversation view."""
+
+    def __init__(
+        self,
+        *,
+        max_entries: int = MAX_CONVERSATION_RECORDS,
+        cleanup_batch: int = CLEANUP_BATCH,
+    ) -> None:
+        self._max_entries = max_entries
+        self._cleanup_batch = cleanup_batch
+        self._records: list[ConversationRecord] = []
+        self._cleanup_count = 0
+
+    @property
+    def records(self) -> list[ConversationRecord]:
+        return self._records
+
+    @property
+    def cleanup_count(self) -> int:
+        return self._cleanup_count
+
+    def append(self, record: ConversationRecord) -> None:
+        self._records.append(record)
+        if len(self._records) > self._max_entries + self._cleanup_batch:
+            del self._records[: self._cleanup_batch]
+            self._cleanup_count += 1
+
+    def render(self) -> str:
+        if not self._records:
+            return t("logs.conversation.empty")
+
+        original_label = t("logs.conversation.original")
+        translation_label = t("logs.conversation.translation")
+        return "\n\n".join(
+            f"[{record.timestamp_label}] {source_label(record.source)}\n"
+            f"{original_label}: {record.source_text}\n"
+            f"{translation_label}: {record.translated_text}"
+            for record in self._records
+        )
+
+
 class _LogListProxy:
     """Compatibility proxy for tests expecting a list-style log view."""
 
@@ -112,6 +171,10 @@ class LogsView(ft.Column):
         self._log_text: ft.Text | None = None
         self._log_scroll: ft.Column | None = None
         self._folder_button: ft.TextButton | None = None
+        self._header_button_row: ft.Row | None = None
+        self._conversation_button: ft.TextButton | None = None
+        self._showing_conversation = False
+        self._conversation_model = ConversationViewModel()
         self._runtime_logging_mode = _BASIC_MODE
 
         # Log buffer and throttling state
@@ -169,18 +232,25 @@ class LogsView(ft.Column):
             style=self._get_button_style(font_family),
             on_click=self._on_mode_button_click,
         )
+        self._conversation_button = ft.TextButton(
+            text=self._conversation_button_label(),
+            icon=ft.Icons.CHAT_BUBBLE_OUTLINE,
+            style=self._get_button_style(font_family),
+            on_click=self._on_conversation_button_click,
+        )
 
         # Header rows
+        self._header_button_row = ft.Row(
+            controls=[self._folder_button, self._mode_button, self._conversation_button],
+            spacing=4,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
         header = ft.Container(
             content=ft.Row(
                 controls=[
                     self._title_text,
                     ft.Container(expand=True),
-                    ft.Row(
-                        controls=[self._folder_button, self._mode_button],
-                        spacing=4,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
+                    self._header_button_row,
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -274,6 +344,38 @@ class LogsView(ft.Column):
             return
         self._buffer_pending_log(record)
 
+    @property
+    def conversation_records(self) -> tuple[ConversationRecord, ...]:
+        return tuple(self._conversation_model.records)
+
+    def append_conversation_record(
+        self,
+        *,
+        source: str,
+        channel: str,
+        source_text: str,
+        translated_text: str,
+        origin_wall_clock_ms: int | None = None,
+    ) -> None:
+        cleaned_source = source_text.strip()
+        cleaned_translation = translated_text.strip()
+        if not cleaned_source or not cleaned_translation:
+            return
+
+        self._conversation_model.append(
+            ConversationRecord(
+                timestamp_label=_format_conversation_timestamp(origin_wall_clock_ms),
+                source=source.strip() or "Mic",
+                channel=channel,
+                source_text=cleaned_source,
+                translated_text=cleaned_translation,
+            )
+        )
+        if self._showing_conversation:
+            self._render_conversation_text()
+            if self.page and self._log_text is not None:
+                self._log_text.update()
+
     def _schedule_log_append(self, record: str) -> bool:
         page = self.page
         loop = getattr(page, "loop", None) if page is not None else None
@@ -306,6 +408,13 @@ class LogsView(ft.Column):
     def _flush_logs(self):
         """Flush pending logs to the UI."""
         if self._log_text is None:
+            return
+
+        if self._showing_conversation:
+            self._rendered_line_count = len(self._log_buffer)
+            self._last_cleanup_count = self._model.cleanup_count
+            self._last_update = time.time()
+            self._pending_update = False
             return
 
         cleanup_changed = self._model.cleanup_count != self._last_cleanup_count
@@ -341,6 +450,25 @@ class LogsView(ft.Column):
         self._rendered_line_count = len(self._log_buffer)
         self._last_cleanup_count = self._model.cleanup_count
 
+    def _render_conversation_text(self) -> None:
+        assert self._log_text is not None
+        self._log_text.value = self._conversation_model.render()
+
+    def _conversation_button_label(self) -> str:
+        key = "logs.conversation.hide" if self._showing_conversation else "logs.conversation.show"
+        return t(key)
+
+    def _on_conversation_button_click(self, _e: ft.ControlEvent | object) -> None:
+        self._showing_conversation = not self._showing_conversation
+        if self._conversation_button is not None:
+            self._conversation_button.text = self._conversation_button_label()
+        if self._showing_conversation:
+            self._render_conversation_text()
+        else:
+            self._rebuild_visible_text()
+        if self.page:
+            self.update()
+
     def apply_locale(self) -> None:
         """Refresh UI text when locale changes."""
         font_family = font_for_language(get_locale())
@@ -352,6 +480,11 @@ class LogsView(ft.Column):
         if self._mode_button:
             self._mode_button.text = self._mode_button_label()
             self._mode_button.style = self._get_button_style(font_family)
+        if self._conversation_button:
+            self._conversation_button.text = self._conversation_button_label()
+            self._conversation_button.style = self._get_button_style(font_family)
+        if self._showing_conversation and self._log_text is not None:
+            self._render_conversation_text()
         # Only update if added to page
         if self.page:
             self.update()
