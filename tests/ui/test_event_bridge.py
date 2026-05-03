@@ -628,10 +628,7 @@ async def test_event_bridge_appends_to_real_logs_view_conversation_text() -> Non
         app.view_logs._on_conversation_button_click(SimpleNamespace())
 
     assert app.view_logs._log_text.value == (
-        "[18:06:12] "
-        f"{logs_view_module.source_label('Mic')}\n"
-        f"{logs_view_module.t('logs.conversation.original')}: ありがとう\n"
-        f"{logs_view_module.t('logs.conversation.translation')}: 고마워"
+        "[18:06:12] " f"{logs_view_module.source_label('Mic')}\n" "ありがとう\n" "고마워"
     )
 
 

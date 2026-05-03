@@ -152,8 +152,6 @@
     "logs.conversation.show": "查看对话记录",
     "logs.conversation.hide": "查看系统日志",
     "logs.conversation.empty": "还没有对话记录。",
-    "logs.conversation.original": "原文",
-    "logs.conversation.translation": "译文",
     "update.available": "新版本 v{version} 可用！",
     "update.download": "下载",
     "snackbar.verification_ok": "{provider} 验证成功！",

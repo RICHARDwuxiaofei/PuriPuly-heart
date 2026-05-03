@@ -152,8 +152,6 @@
   "logs.conversation.show": "대화록 보기",
   "logs.conversation.hide": "시스템 로그 보기",
   "logs.conversation.empty": "아직 대화록이 없어요.",
-  "logs.conversation.original": "원문",
-  "logs.conversation.translation": "번역",
   "update.available": "새 버전 v{version}이 나왔어요!",
   "update.download": "다운로드",
   "snackbar.verification_ok": "{provider} API 키가 검증되었어요",

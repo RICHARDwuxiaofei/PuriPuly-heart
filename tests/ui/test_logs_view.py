@@ -85,11 +85,11 @@ class TestLogsView:
                 )
             with patch.object(logs_module, "source_label", return_value="Mic"):
                 view._on_conversation_button_click(SimpleNamespace())
-                assert "[18:06:12] Mic" in view._log_text.value
+                assert view._log_text.value == "[18:06:12] Mic\nありがとう\n고마워"
             with patch.object(logs_module, "source_label", return_value="마이크"):
                 view.apply_locale()
 
-        assert "[18:06:12] 마이크" in view._log_text.value
+        assert view._log_text.value == "[18:06:12] 마이크\nありがとう\n고마워"
         record = view.conversation_records[0]
         assert record == logs_module.ConversationRecord(
             timestamp_label="18:06:12",

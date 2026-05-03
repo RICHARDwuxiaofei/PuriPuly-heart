@@ -65,8 +65,6 @@ def test_logs_conversation_keys_are_localized() -> None:
         "logs.conversation.show",
         "logs.conversation.hide",
         "logs.conversation.empty",
-        "logs.conversation.original",
-        "logs.conversation.translation",
     }
 
     for locale, bundle in bundles.items():

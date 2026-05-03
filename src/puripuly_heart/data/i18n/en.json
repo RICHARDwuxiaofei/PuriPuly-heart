@@ -152,8 +152,6 @@
   "logs.conversation.show": "Conversation View",
   "logs.conversation.hide": "System Logs",
   "logs.conversation.empty": "No conversation records yet.",
-  "logs.conversation.original": "Original",
-  "logs.conversation.translation": "Translation",
   "update.available": "New version v{version} is available!",
   "update.download": "Download",
   "snackbar.verification_ok": "{provider} verified!",

@@ -136,12 +136,10 @@ class ConversationViewModel:
         if not self._records:
             return t("logs.conversation.empty")
 
-        original_label = t("logs.conversation.original")
-        translation_label = t("logs.conversation.translation")
         return "\n\n".join(
             f"[{record.timestamp_label}] {source_label(record.source)}\n"
-            f"{original_label}: {record.source_text}\n"
-            f"{translation_label}: {record.translated_text}"
+            f"{record.source_text}\n"
+            f"{record.translated_text}"
             for record in self._records
         )
 
