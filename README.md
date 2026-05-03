@@ -155,11 +155,11 @@ If Discord authentication is difficult, please reach out directly via [Twitter D
 
 Follow the guide that matches the service you want to use.
 
-While you're setting things up, why not configure STT too?
+By the way, while you're setting things up, why not configure STT too?
 PuriPuly delivers the best experience when paired with a cloud STT.
 For instance, even with the same Qwen ASR, local and cloud voice-recognition performance differ noticeably.
 
-How about starting with Deepgram?
+We recommend starting with Deepgram.
 Just signing up gets you $200 in free credits.
 
 <details>

@@ -688,7 +688,9 @@ def test_debug_preview_founder_letter_opens_dialog_with_readme_action(
         i18n_module.set_locale(previous_locale)
 
     assert app._founder_letter_dialog is not None
-    assert opened_urls == ["https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ko.md"]
+    assert opened_urls == [
+        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ko.md#자신의-api-키-사용하기"
+    ]
 
 
 def test_founder_readme_url_for_locale_uses_origin_readme_pages() -> None:
@@ -696,17 +698,23 @@ def test_founder_readme_url_for_locale_uses_origin_readme_pages() -> None:
 
     assert callable(resolver)
     assert resolver("ko") == (
-        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ko.md"
+        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ko.md#자신의-api-키-사용하기"
     )
     assert resolver("zh-CN") == (
-        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.zh-CN.md"
+        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.zh-CN.md#使用您自己的-api-密钥"
     )
     assert resolver("ja") == (
-        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ja.md"
+        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ja.md#自分のapiキーを使う"
     )
-    assert resolver("en") == ("https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.md")
-    assert resolver("fr") == ("https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.md")
-    assert resolver(None) == ("https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.md")
+    assert resolver("en") == (
+        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.md#using-your-own-api-keys"
+    )
+    assert resolver("fr") == (
+        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.md#using-your-own-api-keys"
+    )
+    assert resolver(None) == (
+        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.md#using-your-own-api-keys"
+    )
 
 
 def test_debug_preview_pkce_failure_only_shows_failure_snackbar(
@@ -2071,7 +2079,9 @@ def test_show_founder_letter_dialog_opens_with_locale_readme_action(
         i18n_module.set_locale(previous_locale)
 
     assert pkce_calls == []
-    assert opened_urls == ["https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ko.md"]
+    assert opened_urls == [
+        "https://github.com/kapitalismho/PuriPuly-heart/blob/main/README.ko.md#자신의-api-키-사용하기"
+    ]
 
 
 def test_show_founder_letter_dialog_does_not_prepare_byok_alias_when_opened(

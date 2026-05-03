@@ -66,11 +66,20 @@ FOUNDER_README_PATH_BY_LOCALE = {
     "zh-CN": "README.zh-CN.md",
     "ja": "README.ja.md",
 }
+FOUNDER_README_API_KEYS_ANCHOR_BY_LOCALE = {
+    "ko": "자신의-api-키-사용하기",
+    "zh-CN": "使用您自己的-api-密钥",
+    "ja": "自分のapiキーを使う",
+}
+FOUNDER_README_DEFAULT_API_KEYS_ANCHOR = "using-your-own-api-keys"
 
 
 def founder_readme_url_for_locale(locale: str | None) -> str:
     readme_path = FOUNDER_README_PATH_BY_LOCALE.get(locale or "", "README.md")
-    return f"{FOUNDER_README_BASE_URL}/{readme_path}"
+    anchor = FOUNDER_README_API_KEYS_ANCHOR_BY_LOCALE.get(
+        locale or "", FOUNDER_README_DEFAULT_API_KEYS_ANCHOR
+    )
+    return f"{FOUNDER_README_BASE_URL}/{readme_path}#{anchor}"
 
 
 def _write_discord_callback_preview_page(locale: str | None) -> str:
