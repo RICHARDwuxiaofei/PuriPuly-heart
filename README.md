@@ -42,85 +42,99 @@ can't carry what's truly in your heart.
 
 So I built one that can.
 
-- **LLM-Powered Localization** — Naturally translates slang, colloquialisms, and casual/formal tones.
-- **Deep Context Awareness** — Remembers the flow of conversation, keeping every response in context.
-- **Robust Input Handling** — Restores your true meaning even through typos or truncated speech.
-- **Personalized Persona** — Define your exact speaking style and vibe in the Prompt Editor.
+- **LLM-Powered Localization** — Slang, colloquialisms, and casual/formal speech, all rendered naturally.
+- **Context Memory** — Keeps the conversation flowing naturally with awareness of prior context.
+- **Two-way Voice Translation** — Translates the other person's voice too, with VR subtitle overlay support.
+- **Start via Discord** — Get going right away without a complex setup process.
+
+## Q&A
+
+- **How good is the translation quality?**
+→ When both you and the other person use this translator, you can have even the deepest kinds of conversations. Quantitatively, with Gemma 4 it scored 6× better than DeepL. See the 'Translation Comparison' section below for details.
+
+- **How long does it take from speaking to getting a translation?**
+→ With Gemma 4 and a cloud STT service, latency is typically in the mid-to-late 1-second range.
+
+- **Does it cost money to use?**
+→ Yes, but only later. New users get a free usage allowance, and even after that the pricing is very cheap — you can use it thousands of times for $1.
+
+- **Do I need to get an API key?**
+→ Yes, but again — only later. At first, just install and authenticate via Discord to start using it.
+
+- **How polished is the feature for translating the other person's voice?**
+→ It works well for one-on-one in low-noise environments. Up to three people is fine, but beyond that we can't guarantee usability. In those cases, only Deepgram — which is robust to noise — works, with limitations.
+
+- **Voice recognition is poor / slow.**
+→ If you're using local Qwen ASR, we recommend switching to a cloud STT service.
+
+- **How are voice and conversation contents handled?**
+→ Only your own transcripts and translation results are stored locally. Other people's voices, transcripts, and translation results are never recorded. That said, the STT service and translation provider may process the data.
 
 ### [📥 Download](https://github.com/kapitalismho/PuriPuly-heart/releases/latest)
 
 ---
 
-## Is there a cost?
+## Translation Comparison
+![comparison](docs/images/performance/1.png)
 
-> **⚠️ Correction (2026-03-12)**
-> - As of March 2, 2026, the GCP new-user free credit ($300) can no longer be used with the Gemini Developer API (AI Studio).
-> - Cloud credits included with Google AI Pro/Ultra paid subscriptions can still be used in AI Studio.
-> - Google AI Pro/Ultra subscribers receive monthly cloud credits. Follow the [guide](#api-key-setup-guide) below to set up.
-> - Support for Vertex AI API keys is coming soon.
-> - You can also try the free tier: Using the Gemini 3.1 Flash-Lite model, you can use it for free up to 15 requests per minute / 500 requests per day.
+- We ran the experiment using Microsoft's Gemba MQM framework.
+- It was set up as a multi-turn environment to better resemble real conversation.
+- For the full results, see [here](https://github.com/kapitalismho/korean-llm-context-translation-benchmark).
 
-~~You can use it for free for up to **250,000 times** using free credits provided upon signing up (Deepgram, Google AI Studio).~~
+## Cost
 
-After the free credits run out, a small fee is charged per utterance.
+### Uses per Dollar
 
-This app uses cloud AI services. You pay directly for what you use with your own API keys.
-
----
-
-### Recommended: Deepgram + Gemini
-
-| Status | Cost/Utterance (Gemini 3 Flash) | Cost/Utterance (Gemini 3.1 Flash-Lite) |
-|--------|----------------|----------------|
-| Using Free Credits | **$0.00** | **$0.00** |
-| After Free Credits | ~$0.0015 | ~$0.0011 |
-
-* Deepgram offers $200 ~~and Gemini offers $300~~ in free credits.
-
----
+| LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
+|---|---|---|---|---|
+| **Gemma 4 26B A4B** | 8,350 | 2,530 | 3,130 | 1,120 |
+| **DeepSeek V4 Flash** | 6,110 | 2,280 | 2,750 | 1,070 |
+| **Gemini 3 Flash** | 1,630 | 1,130 | 1,230 | 720 |
+| **Gemini 3.1 Flash-Lite** | 3,260 | 1,720 | 1,970 | 930 |
+| **Qwen 3.5 Plus** | 7,090 | 2,400 | — | — |
 
 ### Cost per Utterance
 
-| Combo | Full price | Deepgram Free Credit | Gemini Free Credit | Both Free Credits |
-| :--- | :--- | :--- | :--- | :--- |
-| **Deepgram + Gemini 3 Flash** | ~$0.0015 | ~$0.0007 | ~$0.0008 | $0.00 |
-| **Soniox + Gemini 3 Flash** | ~$0.0008 | - | ~$0.0002 | - |
-| **Deepgram + Gemini 3.1 Flash-Lite** | ~$0.0011 | ~$0.0003 | ~$0.0008 | $0.00 |
-| **Soniox + Gemini 3.1 Flash-Lite** | ~$0.0005 | - | ~$0.0002 | - |
-| **Qwen ASR + Qwen 3.5 Plus** | ~$0.0006 | - | - | $0.00 |
-| **Qwen ASR + Qwen 3.5 Flash** | ~$0.0005 | - | - | $0.00 |
+| LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
+|---|---|---|---|---|
+| **Gemma 4 26B A4B** | ~$0.0001 | ~$0.0004 | ~$0.0003 | ~$0.0009 |
+| **DeepSeek V4 Flash** | ~$0.0002 | ~$0.0004 | ~$0.0004 | ~$0.0009 |
+| **Gemini 3 Flash** | ~$0.0006 | ~$0.0009 | ~$0.0008 | ~$0.0014 |
+| **Gemini 3.1 Flash-Lite** | ~$0.0003 | ~$0.0006 | ~$0.0005 | ~$0.0011 |
+| **Qwen 3.5 Plus** | ~$0.0001 | ~$0.0004 | — | — |
 
-*   *Qwen API costs represent the Beijing region.*
-*   *Soniox charges per connection time.*
-*   *Based on: (Input 850 tokens + Output 20 tokens) x avg 1.3 LLM calls per utterance.*
-*   *Based on pricing as of Mar 5, 2026 / Fast Response mode active.*
-
----
+*   *Based on (Input 950 tokens + Output 12 tokens) × 1.2 avg LLM calls per utterance.*
+*   *Uses per Dollar is derived from the un-rounded values in the Cost per Utterance table.*
+*   *All costs and usage counts are approximate.*
+*   *Input cost reductions from cache hits are not factored in.*
+*   *Qwen API costs are based on the Beijing region.*
+*   *Pricing as of May 3, 2026 / Fast Response mode active.*
 
 ### Free Credits
 
 | Service | Free Credit | Duration | Note |
 |--------|------------|------|------|
 | **Deepgram** | $200 | None | - |
-| **Gemini** | ~~$300~~ | ~~90 days~~ | ~~Received after upgrading to paid tier~~ No longer available for AI Studio (2026-03-02~) |
 | **Gemini** | $10 | 1 year | Credited monthly |
-| **Qwen** | 1M tokens/model | 90 days | - |
+| **Qwen** | 1M tokens per model | 90 days | Singapore region |
 
 ---
 
-# If API keys are new to you, follow the [Guide](#api-key-setup-guide).
-
 ## Usage
 
-1. Download and install the latest version from the [Download Page](https://github.com/kapitalismho/PuriPuly-heart/releases/latest).
-2. Get a Deepgram API Key from [Deepgram](https://console.deepgram.com).
-3. Get a Gemini API Key from [Google AI Studio](https://aistudio.google.com/apikey).
-4. **Upgrade Gemini API plan** to paid tier (Recommended).
-5. Enter and verify API keys in the PuriPuly **Settings** tab.
-  - Paste the key and press Enter or unfocus the input box.
-6. Select Source/Target languages on the **Dashboard**.
-7. Click **STT** and **Trans** buttons.
-8. Enable OSC in VRChat: Settings → OSC → Enable.
+1. Download the latest version from the [Download page](https://github.com/kapitalismho/PuriPuly-heart/releases/latest).
+2. Install PuriPuly.
+3. Click the **STT** button.
+4. Click the **TRANS** button, then authenticate via Discord.
+
+   > Discord authentication is only available when the translation model is Gemma 4 or DeepSeek and the connection mode is Managed.
+
+5. Click the **Subtitles** button to turn on VR subtitles.
+6. (Optional) Click the **Peer** button to enable translation of the other person's voice.
+
+   > Peer voice translation needs a quiet space to work properly. We recommend it for 1-on-1 conversations.
+
+7. Enable OSC in VRChat: Action menu → Settings → OSC → Enable.
 
 * If voice is not recognized, select the correct microphone in the PuriPuly Settings tab.
 
@@ -128,18 +142,25 @@ This app uses cloud AI services. You pay directly for what you use with your own
 
 ### Note for Users in China
 
-If Gemini/Deepgram/Soniox are blocked in your region:
+If Soniox/Gemini/Deepgram are blocked in your region, please use the following combination:
 
-1. Get an API Key from [Alibaba Cloud Model Studio](https://bailian.console.aliyun.com/cn-beijing) (Select Beijing region for the key).
-2. Change providers in **Settings**:
-   - STT: **Qwen ASR**
-   - LLM: **Qwen 3.5 Plus**
-   - Qwen Server Region: **Beijing**
-3. Enter and verify your Qwen API key (Beijing).
+- STT: **Qwen ASR**
+- LLM: **DeepSeek V4 Flash** or **Qwen 3.5 Plus**
+
+If Discord authentication is difficult, please reach out directly via [Twitter DM](https://x.com/kapitalismho).
 
 ---
 
-## API Key Setup Guide
+### Using Your Own API Keys
+
+Follow the guide that matches the service you want to use.
+
+While you're setting things up, why not configure STT too?
+PuriPuly delivers the best experience when paired with a cloud STT.
+For instance, even with the same Qwen ASR, local and cloud voice-recognition performance differ noticeably.
+
+How about starting with Deepgram?
+Just signing up gets you $200 in free credits.
 
 <details>
 <summary><h3>Deepgram</h3></summary>
@@ -147,7 +168,7 @@ If Gemini/Deepgram/Soniox are blocked in your region:
 1. Login to the [Deepgram Console](https://console.deepgram.com/).
    ![step1](docs/images/deepgram/1.png)
 
-2. If you see a welcome message/survey, verify and click **Skip**.
+2. If you see a welcome message/survey, click **Skip**.
    ![step2](docs/images/deepgram/2.png)
 
 3. Select **STT (Speech-to-Text)** on the service selection screen.
@@ -186,16 +207,73 @@ If Gemini/Deepgram/Soniox are blocked in your region:
    ![step6](docs/images/gemini/6.png)
 
 7. (Recommended) Click the yellow **Set Up Billing** button to upgrade to the paid tier.
+The tier transition may take a moment.
    ![step7](docs/images/gemini/7.png)
 
 <details>
 <summary><h3>For Gemini paid subscribers</h3></summary>
 
 8. Go to [Google Developer Program](https://developers.google.com/program/my-benefits) and join the program.
-![step8](docs/images/gemini/8.png)
+   ![step8](docs/images/gemini/8.png)
 
 9. Select the paid tier project you set up in step 7.
-![step9](docs/images/gemini/9.png)
+   ![step9](docs/images/gemini/9.png)
+
+</details>
+
+</details>
+
+<details>
+<summary><h3>DeepSeek</h3></summary>
+
+1. Go to the [DeepSeek official homepage](https://www.deepseek.com/en/) and click the **Access API** button.
+   ![step1](docs/images/deepseek/1.png)
+
+2. Login on the homepage.
+   ![step2](docs/images/deepseek/2.png)
+
+3. Go to the API Keys tab and click **Create new API Keys**.
+   ![step3](docs/images/deepseek/3.png)
+
+4. Click the button to copy the API key, then paste it into the API tab of the translator.
+   ![step4](docs/images/deepseek/4.png)
+
+5. Go to the Top Up tab and prepay as much as you plan to use.
+   ![step5](docs/images/deepseek/5.png)
+
+</details>
+
+<details>
+<summary><h3>OpenRouter</h3></summary>
+
+1. In the app, click the button inside the red circle.
+   ![step1](docs/images/openrouter/1.png)
+
+2. Login at OpenRouter.
+   ![step2](docs/images/openrouter/2.png)
+
+3. Click the button inside the red circle to exit the payment screen.
+   ![step3](docs/images/openrouter/3.png)
+
+4. Click the **Authorize** button.
+   ![step4](docs/images/openrouter/4.png)
+
+5. Prepay as much as you plan to use.
+   ![step5](docs/images/openrouter/5.png)
+
+<details>
+<summary><h3>If clicking Authorize didn't authenticate you</h3></summary>
+
+If you clicked Authorize but you're still not authenticated, retry — or directly issue an API key as below and paste it in.
+
+6. Click your account in the top right, go to the API Keys tab on the left, then click the Create button in the center.
+   ![step6](docs/images/openrouter/6.png)
+
+7. Click the Create button.
+   ![step7](docs/images/openrouter/7.png)
+
+8. Click the button to copy the API key, then paste it into the API tab of the translator.
+   ![step8](docs/images/openrouter/8.png)
 
 </details>
 
@@ -251,37 +329,19 @@ If Gemini/Deepgram/Soniox are blocked in your region:
 
 </details>
 
-
----
-
-## Q&A
-
-- **How long does it take from speaking to getting a translation?**
-→ With Gemini 3 Flash, the latency is around 2 seconds. However, if the server is unstable, it can spike beyond the normal range. In that case, try using a Qwen model as an alternative.
-
-- **Voice recognition is poor**
-→ Try using Soniox as an alternative. It is especially recommended for Korean speakers. Also, Qwen ASR is recommended for Chinese speakers.
-
-- **I don't like the translation style**
-→ You can define your own style directly in Settings → Prompt Editor.
-
-- **What is Fast Response mode?**
-→ It starts translating before your sentence is finished to reduce latency. Switching to Stable mode can save costs slightly.
-
-- **Spacing or punctuation in voice recognition looks weird**
-→ That's fine. LLMs are robust to such noise and handle translation well regardless.
-
-- **Can I use my Gemini subscription instead of an API key?**
-→ The Gemini subscription and API are separate, but cloud credits included with Google AI Pro/Ultra subscriptions can be applied to API costs.
-
-- **Voice text appears but no translation follows.**
-→ Did you upgrade your Gemini API to the paid tier? The free tier is limited to 15 requests per minute. Heavy usage can lead to temporary blocks. We recommend using the paid tier.
-
 ---
 
 ## Development
 
-### Installation
+### Environment Summary
+
+| Area | Recommended Environment |
+|---|---|
+| Python app | Windows |
+| VR overlay | Windows |
+| Broker service | Linux / WSL |
+
+### Python App
 
 ```bash
 python -m venv .venv
@@ -300,14 +360,19 @@ uv sync --dev
 pre-commit install
 ```
 
-### Running
+### Running the GUI
 
 ```bash
 # After activating venv
 python -m puripuly_heart.main run-gui
 
-# or using uv run directly
+# or run via uv
 uv run python -m puripuly_heart.main run-gui
+```
+
+```bash
+# Reveals hidden UI for inspection
+python -m puripuly_heart.main run-gui --debug-ui-preview
 ```
 
 ### Testing & Linting
@@ -318,25 +383,39 @@ ruff check src tests     # Lint
 python -m pytest         # Test (recommended within venv)
 ```
 
-### Build
+### VR Overlay
 
-Direct executable-only / manual packaging steps:
+The VR subtitle overlay is built from the Rust project under `native/overlay/`.
 
-This direct executable/manual-installer path is not the release-complete compliance-packaging path. It also requires the staged overlay executable at `build/overlay/PuriPulyHeartOverlay.exe` plus the vendored OpenVR bundle under `third_party/openvr/`, as enforced by `build.spec`.
+```powershell
+cargo test --manifest-path native/overlay/Cargo.toml -q
 
-```bash
-.\scripts\ci\prepare-soxr-release-inputs.ps1
-.venv\Scripts\pyinstaller build.spec   # Executable
-ISCC installer.iss                      # Manual installer packaging
+cargo build `
+  --manifest-path native/overlay/Cargo.toml `
+  --locked `
+  --release `
+  --bin PuriPulyHeartOverlay `
+  --target-dir target
+
+New-Item -ItemType Directory -Force -Path build/overlay | Out-Null
+Copy-Item target/release/PuriPulyHeartOverlay.exe build/overlay/PuriPulyHeartOverlay.exe -Force
+Copy-Item third_party/openvr/win64/openvr_api.dll build/overlay/openvr_api.dll -Force
+
+.\build\overlay\PuriPulyHeartOverlay.exe --check-startup-contract
 ```
 
-For the release-complete compliance-packaging path, run `scripts/ci/prepare-soxr-release-inputs.ps1` first and then `scripts/ci/build-release-artifacts.ps1`:
+### Broker Service
+
+See `broker/README.md` for details.
 
 ```bash
-$env:APP_VERSION = (& ".\.venv\Scripts\python.exe" scripts/ci/read-project-version.py).Trim()
-.\scripts\ci\prepare-soxr-release-inputs.ps1
-.\scripts\ci\build-release-artifacts.ps1 -AppVersion $env:APP_VERSION -InnoSetupVersion 6.6.1
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm exec vitest run
+pnpm --filter @puripuly-heart/broker run verify:config
+pnpm --filter @puripuly-heart/broker run dev
 ```
+
 ---
 
 ## Developer

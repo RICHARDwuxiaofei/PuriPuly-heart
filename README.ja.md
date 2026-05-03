@@ -41,85 +41,100 @@
 
 だから、作ったんです。
 
-- **LLMベースのローカライズ** — スラングや話し言葉、タメ口や敬語まで自然に
-- **文脈の記憶** — 前後の脈絡を考慮し、自然な会話の流れを維持
-- **荒い入力でもOK** — スペースが間違っていたり、文字が途切れていても復元可能
-- **「私らしい」言葉で翻訳** — プロンプトエディタでスタイルを自由に指定
+- **LLMベースのローカライズ** — スラング、口語、タメ口/敬語まで自然に
+- **文脈の記憶** — 前後の流れを踏まえた自然な会話を維持
+- **双方向の音声翻訳** — 相手の音声も一緒に翻訳、VR字幕オーバーレイ対応
+- **Discordで始められる** — 複雑な設定なしですぐに使える
+
+## Q&A
+
+- **翻訳の品質はどのくらいですか？**
+→ お互いにこの翻訳機を使えば、深い話までできるくらいです。定量的にはGemma 4でDeepLより6倍良い結果でした。詳しくは下の「翻訳比較」をご覧ください。
+
+- **話してから翻訳されるまでどのくらいかかりますか？**
+→ Gemma 4とクラウドSTTを使った場合、遅延は通常1秒中盤〜後半くらいです。
+
+- **使うのにお金はかかりますか？**
+→ はい、でも後からです。新規ユーザーには無料の使用枠が用意されています。それ以降もとても安く、1ドルで数千回使えます。
+
+- **APIキーを発行する必要がありますか？**
+→ はい、でもこれも後からです。最初はインストールしてDiscordで認証するだけで使えます。
+
+- **相手の音声を翻訳する機能の完成度はどのくらいですか？**
+→ 騒音の少ない環境で2人なら良い体験ができます。3人までは問題ありませんが、それ以上は使い心地を保証できません。その場合はノイズに強いDeepgramのみが限定的に動作します。
+
+- **音声認識がうまくいきません / 遅いです**
+→ ローカルのQwen ASRを使っている場合は、クラウドSTTに切り替えるのをおすすめします。
+
+- **音声や会話の内容はどう扱われますか？**
+→ 自分の文字起こしと翻訳結果のみがローカルに保存されます。相手の音声・文字起こし・翻訳結果は記録しません。ただし、STTサービスと翻訳プロバイダーがデータを処理することがあります。
 
 ### [📥 ダウンロード](https://github.com/kapitalismho/PuriPuly-heart/releases/latest)
 
 ---
 
-## 使うのにお金はかかりますか？
+## 翻訳比較
+![comparison](docs/images/performance/1.png)
 
-> **⚠️ 訂正のお知らせ (2026-03-12)**
-> - 2026年3月2日より、GCP新規登録の無料クレジット（$300）はGemini Developer API（AI Studio）で使用できなくなりました。
-> - Google AI Pro/Ultraの有料サブスクリプションに含まれるクラウドクレジットはAI Studioで使用可能です。
-> - Google AI Pro/Ultraのサブスクリプションでは毎月クラウドクレジットが付与されますので、下記の[ガイド](#apiキー発行ガイド)に従って設定してください。
-> - Vertex AI経由のAPIキー使用も近日中にサポート予定です。
-> - 無料ティアを活用する方法もあります。Gemini 3.1 Flash-Liteモデルを使用すれば、1分あたり15回以内 / 1日500回まで無料で利用できます。
+- マイクロソフトのGemba MQMフレームワークを使って実験しました。
+- 実際の会話に近づけるため、マルチターン環境で構成しました。
+- 全体の実験結果は[こちら](https://github.com/kapitalismho/korean-llm-context-translation-benchmark)を参照してください。
 
-~~新規登録時（Deepgram、Google AI Studio）に提供される無料クレジットを利用することで、**約25万回まで無料**で使用できます。~~
+## コスト
 
-無料クレジットを使い切った後は、発話1回ごとに少額の料金が発生します。
+### 1ドルあたりの使用可能回数
 
-このアプリはクラウドAIサービスを活用しています。ユーザー自身が取得したAPIキーを使って、使用した分だけ直接課金される仕組みです。
+| LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
+|---|---|---|---|---|
+| **Gemma 4 26B A4B** | 8,350回 | 2,530回 | 3,130回 | 1,120回 |
+| **DeepSeek V4 Flash** | 6,110回 | 2,280回 | 2,750回 | 1,070回 |
+| **Gemini 3 Flash** | 1,630回 | 1,130回 | 1,230回 | 720回 |
+| **Gemini 3.1 Flash-Lite** | 3,260回 | 1,720回 | 1,970回 | 930回 |
+| **Qwen 3.5 Plus** | 7,090回 | 2,400回 | — | — |
 
----
+### 発話あたりのコスト
 
-### おすすめの組み合わせ：Deepgram + Gemini
+| LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
+|---|---|---|---|---|
+| **Gemma 4 26B A4B** | ~$0.0001 (約0.02円) | ~$0.0004 (約0.06円) | ~$0.0003 (約0.05円) | ~$0.0009 (約0.14円) |
+| **DeepSeek V4 Flash** | ~$0.0002 (約0.03円) | ~$0.0004 (約0.06円) | ~$0.0004 (約0.06円) | ~$0.0009 (約0.14円) |
+| **Gemini 3 Flash** | ~$0.0006 (約0.09円) | ~$0.0009 (約0.14円) | ~$0.0008 (約0.12円) | ~$0.0014 (約0.21円) |
+| **Gemini 3.1 Flash-Lite** | ~$0.0003 (約0.05円) | ~$0.0006 (約0.09円) | ~$0.0005 (約0.08円) | ~$0.0011 (約0.17円) |
+| **Qwen 3.5 Plus** | ~$0.0001 (約0.02円) | ~$0.0004 (約0.06円) | — | — |
 
-| Status | Cost/Utterance (Gemini 3 Flash) | Cost/Utterance (Gemini 3.1 Flash-Lite) |
-|--------|----------------|----------------|
-| 無料クレジット使用時 | **$0.00** | **$0.00** |
-| クレジット消費後 | ~$0.0015 (約0.23円) | ~$0.0011 (約0.17円) |
-
-* Deepgramは$200 ~~、Geminiは$300~~ の無料クレジットを提供しています。
----
-
-### 発話ごとのコスト
-
-| Combo | Full price | Deepgram Free Credit | Gemini Free Credit | Both Free Credits |
-| :--- | :--- | :--- | :--- | :--- |
-| **Deepgram + Gemini 3 Flash** | ~$0.0015 (約0.23円) | ~$0.0007 (約0.11円) | ~$0.0008 (約0.12円) | $0.00 |
-| **Soniox + Gemini 3 Flash** | ~$0.0008 (約0.12円) | - | ~$0.0002 (約0.03円) | - |
-| **Deepgram + Gemini 3.1 Flash-Lite** | ~$0.0011 (約0.17円) | ~$0.0003 (約0.05円) | ~$0.0008 (約0.12円) | $0.00 |
-| **Soniox + Gemini 3.1 Flash-Lite** | ~$0.0005 (約0.08円) | - | ~$0.0002 (約0.03円) | - |
-| **Qwen ASR + Qwen 3.5 Plus** | ~$0.0006 (約0.09円) | - | - | $0.00 |
-| **Qwen ASR + Qwen 3.5 Flash** | ~$0.0005 (約0.08円) | - | - | $0.00 |
-
-*   *QwenのAPIコストは北京リージョン基準*
-*   *Sonioxは接続時間ごとの課金が発生します*
-*   *（入力 850トークン + 出力 20トークン）× 発話1回あたりの平均LLM呼び出し回数 1.3回と仮定*
-*   *料金表基準：2026年3月5日 / 高速応答モード有効時*
+*   *（入力 950トークン + 出力 12トークン）× 発話1回あたりの平均LLM呼び出し回数 1.2回と仮定*
+*   *1ドルあたりの使用可能回数は、発話あたりのコスト表の四捨五入前の値を基準に算出*
+*   *すべてのコストと使用可能回数は概算*
+*   *キャッシュヒットによる入力コスト削減は考慮していません*
+*   *Qwen APIコストは北京リージョン基準*
+*   *料金表基準: 2026年5月3日 / 高速応答モード有効時*
 *   *1ドル = 150円*
-
----
 
 ### 無料クレジット
 
 | サービス | 無料クレジット | 期限 | 備考 |
 |--------|------------|------|------|
 | **Deepgram** | $200 | なし | - |
-| **Gemini** | ~~$300~~ | ~~90日~~ | ~~有料プランへ移行後に付与~~ AI Studio使用不可 (2026-03-02~) |
 | **Gemini** | $10 | 1年 | 毎月付与 |
-| **Qwen** | モデルごと100万トークン | 90日 | - |
+| **Qwen** | モデルごと100万トークン | 90日 | シンガポールリージョン基準 |
 
 ---
 
-# APIキーに馴染みがない場合は、[ガイド](#apiキー発行ガイド)を見ながら進めてください
-
 ## 使い方
 
-1. [ダウンロードページ](https://github.com/kapitalismho/PuriPuly-heart/releases/latest)から最新バージョンをダウンロードしてインストール
-2. [Deepgram](https://console.deepgram.com)でDeepgram APIキーを発行
-3. [Google AI Studio](https://aistudio.google.com/apikey)でGemini APIキーを発行
-4. **Gemini APIの支払いプラン**を有料プランに切り替え（推奨）
-5. PuriPulyの **Settings** タブにAPIキーを入力して検証
-  - 入力欄にAPIキーを貼り付けた後、Enterキーを押すか、フォーカスを外してください。
-6. **Dashboard** で元の言語/対象の言語を選択
-7. **STT**と**Trans**ボタンをクリック
-8. VRChatでOSCを有効化：Settings → OSC → Enable
+1. [ダウンロードページ](https://github.com/kapitalismho/PuriPuly-heart/releases/latest)から最新バージョンをダウンロード
+2. PuriPulyをインストール
+3. **STT** ボタンをクリック
+4. **TRANS** ボタンをクリックしてDiscord認証
+
+   > 翻訳モデルがGemma 4またはDeepSeekで、接続方式がマネージドの場合のみDiscord認証が可能です。
+
+5. **Subtitles** ボタンを押してVR字幕をオン
+6. （任意）**Peer** ボタンを押して相手の音声翻訳をオン
+
+   > 相手の音声翻訳機能がきちんと動作するには、騒がしくない環境が必要です。1対1の会話での使用をおすすめします。
+
+7. VRChatでOSCを有効化: Action menu → Settings → OSC → Enable
 
 * 音声が認識されない場合は、PuriPulyの設定タブで正しいマイクを選択してください。
 
@@ -127,18 +142,25 @@
 
 ### 中国のユーザーへ向けた案内
 
-Gemini / Deepgram / Sonioxへのアクセスがブロックされている地域の場合
+Soniox / Gemini / Deepgramへのアクセスがブロックされている地域の場合は、以下の組み合わせをお使いください。
 
-1. [Alibaba Cloud Model Studio](https://bailian.console.aliyun.com/cn-beijing)でAPIキーを発行（北京リージョン）
-2. **Settings** でプロバイダーを変更：
-   - STT: **Qwen ASR**
-   - LLM: **Qwen 3.5 Plus**
-   - Qwenサーバーリージョン: **Beijing**
-3. Qwen APIキー（Beijing）を入力して検証
+- STT: **Qwen ASR**
+- LLM: **DeepSeek V4 Flash** または **Qwen 3.5 Plus**
+
+Discord認証が難しい場合は、[Twitter DM](https://x.com/kapitalismho)から直接ご連絡ください。
 
 ---
 
-## APIキー発行ガイド
+### 自分のAPIキーを使う
+
+利用するサービスに合わせて、適切なガイドを見ながら進めてください。
+
+設定するついでに、STT側も一緒に設定しませんか？
+PuriPulyはクラウドSTTと組み合わせると最良の体験になります。
+たとえば同じQwen ASRでも、ローカルとクラウドでは音声認識性能にかなり差があります。
+
+まずはDeepgramから始めるのはいかがでしょう？
+登録するだけで200ドル分の無料クレジットがもらえます。
 
 <details>
 <summary><h3>Deepgram</h3></summary>
@@ -184,17 +206,74 @@ Gemini / Deepgram / Sonioxへのアクセスがブロックされている地域
 6. 丸で囲まれた部分を押してキーをコピーします。
    ![step6](docs/images/gemini/6.png)
 
-7. （推奨）黄色で強調表示されている **Set Up Billing** ボタンを押し、有料プランへ移行します。
+7. （推奨）黄色で強調表示されている **Set Up Billing** ボタンを押し、有料プランに切り替えます。
+プラン切り替えには少し時間がかかることがあります。
    ![step7](docs/images/gemini/7.png)
 
 <details>
-<summary><h3>Gemini有料サブスクリプションをお持ちの方</h3></summary>
+<summary><h3>Geminiの有料サブスクリプションをお持ちの方</h3></summary>
 
 8. [Google Developer Program](https://developers.google.com/program/my-benefits) にアクセスし、プログラムに参加してください。
-![step8](docs/images/gemini/8.png)
+   ![step8](docs/images/gemini/8.png)
 
 9. ステップ7で設定した有料プランのプロジェクトを選択してください。
-![step9](docs/images/gemini/9.png)
+   ![step9](docs/images/gemini/9.png)
+
+</details>
+
+</details>
+
+<details>
+<summary><h3>DeepSeek</h3></summary>
+
+1. [DeepSeek公式サイト](https://www.deepseek.com/en/)にアクセスし、**Access API** ボタンをクリックします。
+   ![step1](docs/images/deepseek/1.png)
+
+2. サイトでログインします。
+   ![step2](docs/images/deepseek/2.png)
+
+3. API Keysタブに移動して **Create new API Keys** を押します。
+   ![step3](docs/images/deepseek/3.png)
+
+4. ボタンを押してAPIキーをコピーし、翻訳機のAPIタブに貼り付けます。
+   ![step4](docs/images/deepseek/4.png)
+
+5. Top Upタブに移動し、使う分だけ前払いでチャージします。
+   ![step5](docs/images/deepseek/5.png)
+
+</details>
+
+<details>
+<summary><h3>OpenRouter</h3></summary>
+
+1. アプリ内で赤い丸の中のボタンを押します。
+   ![step1](docs/images/openrouter/1.png)
+
+2. OpenRouterでログインします。
+   ![step2](docs/images/openrouter/2.png)
+
+3. 赤い丸の中のボタンを押して決済画面を抜けます。
+   ![step3](docs/images/openrouter/3.png)
+
+4. **Authorize** ボタンを押します。
+   ![step4](docs/images/openrouter/4.png)
+
+5. 使う分だけ前払いでチャージします。
+   ![step5](docs/images/openrouter/5.png)
+
+<details>
+<summary><h3>Authorizeボタンを押しても認証されない場合</h3></summary>
+
+Authorizeボタンを押しても認証されない場合は、再試行するか、以下の手順で直接APIキーを発行して貼り付けてください。
+
+6. 右上のアカウントをクリックし、左のAPI Keysタブを開いて、中央のCreateボタンを押します。
+   ![step6](docs/images/openrouter/6.png)
+
+7. Createボタンを押します。
+   ![step7](docs/images/openrouter/7.png)
+
+8. ボタンを押してAPIキーをコピーし、翻訳機のAPIタブに貼り付けます。
+   ![step8](docs/images/openrouter/8.png)
 
 </details>
 
@@ -250,37 +329,19 @@ Gemini / Deepgram / Sonioxへのアクセスがブロックされている地域
 
 </details>
 
-
----
-
-## Q&A
-
-- **話してから翻訳されるまでどのくらいかかりますか？**
-→ Gemini 3 Flash 使用時で遅延は約2秒前半です。ただし、サーバーが不安定な場合は通常範囲を超えることがあります。その場合は代わりにQwenモデルをお使いください。
-
-- **音声認識がうまくいきません**
-→ 代わりとしてSonioxを試してみてください。特に韓国語ユーザーに推奨しています。また、中国語ユーザーには Qwen ASR を推奨しています。
-
-- **翻訳の口調が気に入りません**
-→ Settings → Prompt Editor で、好みの口調を直接指定できます。
-
-- **高速応答モードでは何が変わりますか？**
-→ 発話が終わる前に翻訳を開始することで、遅延を減らします。安定モードに切り替えると、若干コストを節約できます。
-
-- **音声認識のスペースや句読点がおかしくなります**
-→ 問題ありません。LLMはこういったノイズに強く、翻訳にはほとんど影響しません。
-
-- **Geminiの有料サブスクリプションを契約しているのですが、APIキーの代わりに使えますか？**
-→ GeminiのサブスクリプションとAPIは別物ですが、Google AI Pro/Ultraサブスクリプションに含まれるクラウドクレジットはAPI費用に充てることができます。
-
-- **音声認識されたテキストは出ますが、翻訳は出ません**
-→ Gemini APIを有料プランに切り替えましたか？ 無料枠では1分あたりのリクエスト数が15回に制限されています。リクエストが多いと一時的に制限がかかる可能性があります。有料プランへの切り替えをおすすめします。
-
 ---
 
 ## 開発
 
-### インストール
+### 開発環境のまとめ
+
+| 領域 | 推奨環境 |
+|---|---|
+| Python アプリ | Windows |
+| VR オーバーレイ | Windows |
+| Broker サービス | Linux / WSL |
+
+### Python アプリ
 
 ```bash
 python -m venv .venv
@@ -299,17 +360,22 @@ uv sync --dev
 pre-commit install
 ```
 
-### 実行
+### GUI 実行
 
 ```bash
-# 仮想環境を有効にした後
+# 仮想環境を有効化した後
 python -m puripuly_heart.main run-gui
 
-# または uv run で直接実行
+# または uv で実行
 uv run python -m puripuly_heart.main run-gui
 ```
 
-### 開発用コマンド
+```bash
+# 隠れたUIを確認可能
+python -m puripuly_heart.main run-gui --debug-ui-preview
+```
+
+### テストとリント
 
 ```bash
 black src tests          # フォーマット
@@ -317,25 +383,39 @@ ruff check src tests     # リント
 python -m pytest         # テスト（仮想環境での実行を推奨）
 ```
 
-### ビルド
+### VR オーバーレイ
 
-実行ファイル単体 / 手動パッケージング手順:
+VR字幕オーバーレイは `native/overlay/` のRustプロジェクトでビルドします。
 
-この手順は実行ファイル/手動インストーラ向けの直接パッケージング専用で、リリース完了のコンプライアンスパッケージング手順ではありません。さらに、`build.spec` が検証するステージ済みオーバーレイ実行ファイル `build/overlay/PuriPulyHeartOverlay.exe` と、ベンダリングされた OpenVR バンドル `third_party/openvr/` が必要です。
+```powershell
+cargo test --manifest-path native/overlay/Cargo.toml -q
 
-```bash
-.\scripts\ci\prepare-soxr-release-inputs.ps1
-.venv\Scripts\pyinstaller build.spec   # 実行ファイル作成
-ISCC installer.iss                      # 手動インストーラ作成
+cargo build `
+  --manifest-path native/overlay/Cargo.toml `
+  --locked `
+  --release `
+  --bin PuriPulyHeartOverlay `
+  --target-dir target
+
+New-Item -ItemType Directory -Force -Path build/overlay | Out-Null
+Copy-Item target/release/PuriPulyHeartOverlay.exe build/overlay/PuriPulyHeartOverlay.exe -Force
+Copy-Item third_party/openvr/win64/openvr_api.dll build/overlay/openvr_api.dll -Force
+
+.\build\overlay\PuriPulyHeartOverlay.exe --check-startup-contract
 ```
 
-リリース完了のコンプライアンスパッケージングでは、先に `scripts/ci/prepare-soxr-release-inputs.ps1` を実行し、その後 `scripts/ci/build-release-artifacts.ps1` を実行します:
+### Broker サービス
+
+詳しくは `broker/README.md` を参照してください。
 
 ```bash
-$env:APP_VERSION = (& ".\.venv\Scripts\python.exe" scripts/ci/read-project-version.py).Trim()
-.\scripts\ci\prepare-soxr-release-inputs.ps1
-.\scripts\ci\build-release-artifacts.ps1 -AppVersion $env:APP_VERSION -InnoSetupVersion 6.6.1
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm exec vitest run
+pnpm --filter @puripuly-heart/broker run verify:config
+pnpm --filter @puripuly-heart/broker run dev
 ```
+
 ---
 
 ## 開発者
