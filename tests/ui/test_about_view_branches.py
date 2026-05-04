@@ -105,6 +105,7 @@ def test_about_view_special_thanks_names_render_in_requested_order(
         "_Ykol魚",
         "kascr_",
         "Just Monika V",
+        "FLUVIA",
     ]
     rendered_names = [
         value for value in _collect_text_values(view.controls[2]) if value in expected_names
@@ -125,6 +126,7 @@ def test_about_view_special_thanks_names_render_from_i18n(
         "about.special_thanks.name.ykol": "localized:_Ykol魚",
         "about.special_thanks.name.kascr": "localized:kascr_",
         "about.special_thanks.name.just_monika_v": "localized:Just Monika V",
+        "about.special_thanks.name.fluvia": "localized:FLUVIA",
     }
 
     monkeypatch.setattr(
@@ -150,6 +152,7 @@ def test_about_view_special_thanks_name_keys_exist_in_locale_bundles(locale: str
         "about.special_thanks.name.ykol": "_Ykol魚",
         "about.special_thanks.name.kascr": "kascr_",
         "about.special_thanks.name.just_monika_v": "Just Monika V",
+        "about.special_thanks.name.fluvia": "FLUVIA",
     }
 
     bundle = i18n_module._load_bundle(locale)
