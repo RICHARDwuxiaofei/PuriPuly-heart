@@ -56,8 +56,13 @@ def _apply_debug_prefix(text: str, debug_prefix: str | None) -> str:
 class DisplayCard(ft.Container):
     """Multi-purpose display card with input field and decorative gradient."""
 
-    def __init__(self, on_submit: Callable[[str], None]):
+    def __init__(
+        self,
+        on_submit: Callable[[str], None],
+        on_input_focus_change: Callable[[bool], None] | None = None,
+    ):
         self._on_submit = on_submit
+        self._on_input_focus_change = on_input_focus_change
         self._status = "disconnected"
         self._showing_status = True
         self._primary_value = _status_label(self._status)
@@ -67,6 +72,7 @@ class DisplayCard(ft.Container):
         self._debug_prefix: str | None = None
         self._notice_value: str | None = None
         self._notice_tone: str | None = None
+        self.input_is_focused = False
 
         self._display_primary = ft.Text(
             self._primary_value,
@@ -113,6 +119,8 @@ class DisplayCard(ft.Container):
             hint_style=ft.TextStyle(color=COLOR_SECONDARY, italic=True),
             expand=True,
             on_submit=self._handle_submit,
+            on_focus=self._handle_input_focus,
+            on_blur=self._handle_input_blur,
         )
 
         main_content = ft.Column(
@@ -188,6 +196,20 @@ class DisplayCard(ft.Container):
             e.control.value = ""
             e.control.update()
             e.control.focus()
+
+    def _handle_input_focus(self, _e) -> None:
+        self._set_input_focus(True)
+
+    def _handle_input_blur(self, _e) -> None:
+        self._set_input_focus(False)
+
+    def _set_input_focus(self, focused: bool) -> None:
+        self.input_is_focused = bool(focused)
+        if self._on_input_focus_change is not None:
+            self._on_input_focus_change(self.input_is_focused)
+
+    def focus_input(self) -> None:
+        self._input_field.focus()
 
     def set_display(
         self,

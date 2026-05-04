@@ -87,6 +87,26 @@ def test_display_card_submit_and_state_transitions(monkeypatch: pytest.MonkeyPat
     assert card._display_primary.font_family == "font-c"
 
 
+def test_display_card_tracks_input_focus_and_can_refocus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    focus_changes: list[bool] = []
+    focus_calls: list[str] = []
+    card = DisplayCard(
+        on_submit=lambda _text: None,
+        on_input_focus_change=focus_changes.append,
+    )
+    monkeypatch.setattr(type(card._input_field), "focus", lambda self: focus_calls.append("focus"))
+
+    card._handle_input_focus(SimpleNamespace(control=card._input_field))
+    card._handle_input_blur(SimpleNamespace(control=card._input_field))
+    card.focus_input()
+
+    assert focus_changes == [True, False]
+    assert card.input_is_focused is False
+    assert focus_calls == ["focus"]
+
+
 def test_display_card_input_font_locale_and_sync_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     card = DisplayCard(on_submit=lambda _text: None)
     monkeypatch.setattr(type(card._input_field), "update", lambda self: None)

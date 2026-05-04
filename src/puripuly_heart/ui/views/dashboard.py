@@ -52,6 +52,7 @@ class DashboardView(ft.Column):
         self._target_lang_code = "en"
         self._peer_source_lang_code = "en"
         self._peer_target_lang_code = "ko"
+        self._message_input_focused = False
 
         # Recent languages (max 3 each)
         self._recent_source_langs: list[str] = []
@@ -104,7 +105,10 @@ class DashboardView(ft.Column):
         self._sync_overlay_peer_buttons()
 
         # Right-side information stack
-        self.display_card = DisplayCard(on_submit=self._on_submit)
+        self.display_card = DisplayCard(
+            on_submit=self._on_submit,
+            on_input_focus_change=self._set_message_input_focused,
+        )
         self.language_card = LanguageCard(
             on_self_source_click=self._open_source_dialog,
             on_self_target_click=self._open_target_dialog,
@@ -268,6 +272,17 @@ class DashboardView(ft.Column):
         self.set_display_text(text, language_code=self._source_lang_code)
         if self.on_send_message:
             self.on_send_message("You", text)
+
+    def _set_message_input_focused(self, focused: bool) -> None:
+        self._message_input_focused = bool(focused)
+
+    def handle_message_input_tab_key(self) -> bool:
+        if not self._message_input_focused:
+            return False
+
+        self._swap_languages()
+        self.display_card.focus_input()
+        return True
 
     def _open_source_dialog(self):
         modal = LanguageModal(

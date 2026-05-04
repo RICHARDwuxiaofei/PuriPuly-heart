@@ -44,8 +44,9 @@ class FakePowerButton:
 
 
 class FakeDisplayCard:
-    def __init__(self, on_submit):
+    def __init__(self, on_submit, on_input_focus_change=None):
         self._on_submit = on_submit
+        self._on_input_focus_change = on_input_focus_change
         self.statuses: list[tuple[str, str | None]] = []
         self.display_calls: list[tuple[str, bool, str | None]] = []
         self.translation_calls: list[tuple[str | None, str | None]] = []
@@ -53,6 +54,8 @@ class FakeDisplayCard:
         self.notice_calls: list[tuple[str | None, str | None]] = []
         self.input_fonts: list[str | None] = []
         self.locale_calls: list[tuple[str | None, str | None]] = []
+        self.input_is_focused = False
+        self.focus_calls = 0
 
     def set_status(self, status: str, font_family: str | None = None) -> None:
         self.statuses.append((status, font_family))
@@ -84,6 +87,14 @@ class FakeDisplayCard:
 
     def apply_locale(self, display_font_family: str | None, input_font_family: str | None) -> None:
         self.locale_calls.append((display_font_family, input_font_family))
+
+    def set_input_focus_for_test(self, focused: bool) -> None:
+        self.input_is_focused = focused
+        if self._on_input_focus_change is not None:
+            self._on_input_focus_change(focused)
+
+    def focus_input(self) -> None:
+        self.focus_calls += 1
 
 
 class FakeLanguageCard:
@@ -302,6 +313,49 @@ def test_dashboard_submit_and_language_selection_paths(monkeypatch: pytest.Monke
     assert view._recent_target_langs == ["fr"]
     assert lang_changes[-1] == ("fr", "ja", "en", "ko")
     assert view.language_card.languages[-1] == ("name-fr", "name-ja", "name-en", "name-ko")
+
+
+def test_dashboard_tab_in_focused_message_input_swaps_self_languages_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    changes: list[tuple[str, str, str, str]] = []
+    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: changes.append(
+        (src, tgt, peer_src, peer_tgt)
+    )
+    view.set_languages_from_codes("ko", "en", "ja", "fr")
+    view.display_card.set_input_focus_for_test(True)
+
+    handled = view.handle_message_input_tab_key()
+
+    assert handled is True
+    assert view._source_lang_code == "en"
+    assert view._target_lang_code == "ko"
+    assert view._peer_source_lang_code == "ja"
+    assert view._peer_target_lang_code == "fr"
+    assert changes[-1] == ("en", "ko", "ja", "fr")
+    assert view.language_card.languages[-1] == ("name-en", "name-ko", "name-ja", "name-fr")
+    assert view.display_card.focus_calls == 1
+
+
+def test_dashboard_tab_ignored_when_message_input_is_not_focused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    changes: list[tuple[str, str, str, str]] = []
+    view.on_language_change = lambda src, tgt, peer_src, peer_tgt: changes.append(
+        (src, tgt, peer_src, peer_tgt)
+    )
+    view.set_languages_from_codes("ko", "en", "ja", "fr")
+    view.display_card.set_input_focus_for_test(False)
+
+    handled = view.handle_message_input_tab_key()
+
+    assert handled is False
+    assert view._source_lang_code == "ko"
+    assert view._target_lang_code == "en"
+    assert changes == []
+    assert view.display_card.focus_calls == 0
 
 
 def test_dashboard_recent_languages_caps_and_notifies(monkeypatch: pytest.MonkeyPatch) -> None:

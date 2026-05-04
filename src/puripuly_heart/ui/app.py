@@ -172,6 +172,7 @@ class TranslatorApp:
         self.page.window.min_width = MIN_WINDOW_WIDTH
         self.page.window.min_height = MIN_WINDOW_HEIGHT
         self.page.window.icon = "icons/icon.ico"
+        self.page.on_keyboard_event = self._on_keyboard_event
 
     def _build_layout(self):
         self.view_dashboard = DashboardView()
@@ -407,6 +408,23 @@ class TranslatorApp:
             await self.controller.submit_text(text)
 
         self.page.run_task(_task)
+
+    def _on_keyboard_event(self, event) -> None:
+        if getattr(event, "key", None) != "Tab":
+            return
+        if any(
+            bool(getattr(event, modifier, False)) for modifier in ("shift", "ctrl", "alt", "meta")
+        ):
+            return
+
+        dashboard = getattr(self, "view_dashboard", None)
+        content_area = getattr(self, "content_area", None)
+        if dashboard is None or getattr(content_area, "content", None) is not dashboard:
+            return
+
+        handler = getattr(dashboard, "handle_message_input_tab_key", None)
+        if callable(handler):
+            handler()
 
     def _log_basic(self, message: str, *, level: int = logging.INFO) -> None:
         controller = getattr(self, "controller", None)

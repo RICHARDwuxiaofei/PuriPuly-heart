@@ -494,6 +494,29 @@ def test_translator_app_4x3_window_keeps_shell_navigation_usable(
     assert len(page.tasks) == 1
 
 
+def test_app_tab_key_reverses_message_input_languages_only_on_dashboard() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    calls: list[str] = []
+    dashboard = SimpleNamespace(handle_message_input_tab_key=lambda: calls.append("tab") or True)
+    app.view_dashboard = dashboard
+    app.content_area = DummyContent(content=dashboard)
+
+    app._on_keyboard_event(
+        SimpleNamespace(key="Tab", shift=False, ctrl=False, alt=False, meta=False)
+    )
+    app._on_keyboard_event(
+        SimpleNamespace(key="Tab", shift=True, ctrl=False, alt=False, meta=False)
+    )
+
+    app.content_area.content = SimpleNamespace()
+    app._on_keyboard_event(
+        SimpleNamespace(key="Tab", shift=False, ctrl=False, alt=False, meta=False)
+    )
+    app._on_keyboard_event(SimpleNamespace(key="A", shift=False, ctrl=False, alt=False, meta=False))
+
+    assert calls == ["tab"]
+
+
 def test_on_runtime_logging_mode_change_updates_controller_and_logs_view() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     seen: list[str] = []
