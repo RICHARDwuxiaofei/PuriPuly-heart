@@ -489,17 +489,23 @@ def test_from_dict_backfills_missing_deepseek_settings_and_verification() -> Non
 
 def test_openrouter_fallback_aliases_include_curated_openrouter_models() -> None:
     deepseek_fallback = getattr(OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH", None)
+    deepseek_china_fallback = getattr(
+        OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH_CHINA", None
+    )
     assert deepseek_fallback is not None
+    assert deepseek_china_fallback is not None
 
     assert tuple(alias.value for alias in OpenRouterFallbackSelectionAlias) == (
         OpenRouterFallbackSelectionAlias.NONE.value,
         OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value,
         deepseek_fallback.value,
+        deepseek_china_fallback.value,
     )
     assert OPENROUTER_FALLBACK_SELECTION_ALIASES == (
         OpenRouterFallbackSelectionAlias.NONE.value,
         OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value,
         deepseek_fallback.value,
+        deepseek_china_fallback.value,
     )
 
 
@@ -1891,11 +1897,15 @@ def test_openrouter_deepseek_v4_flash_aliases_use_stable_slug() -> None:
     deepseek_managed = getattr(OpenRouterSelectionAlias, "DEEPSEEK_V4_FLASH_MANAGED", None)
     deepseek_byok = getattr(OpenRouterSelectionAlias, "DEEPSEEK_V4_FLASH_BYOK", None)
     deepseek_fallback = getattr(OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH", None)
+    deepseek_china_fallback = getattr(
+        OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH_CHINA", None
+    )
 
     assert deepseek_model is not None
     assert deepseek_managed is not None
     assert deepseek_byok is not None
     assert deepseek_fallback is not None
+    assert deepseek_china_fallback is not None
 
     assert deepseek_model.value == expected
     assert (
@@ -1913,6 +1923,34 @@ def test_openrouter_deepseek_v4_flash_aliases_use_stable_slug() -> None:
         == deepseek_byok.value
     )
     assert resolve_openrouter_fallback_model(deepseek_fallback.value) == expected
+    assert resolve_openrouter_fallback_model(deepseek_china_fallback.value) == expected
+
+
+def test_openrouter_settings_roundtrip_persists_deepseek_china_fallback(
+    tmp_path,
+) -> None:
+    path = tmp_path / "settings.json"
+    deepseek_china_fallback = getattr(
+        OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH_CHINA", None
+    )
+    assert deepseek_china_fallback is not None
+
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            selected_source=OpenRouterCredentialSource.BYOK,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
+            fallback_selection_alias=deepseek_china_fallback,
+        ),
+    )
+
+    save_settings(path, settings)
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.openrouter.fallback_selection_alias == deepseek_china_fallback
+    assert persisted["openrouter"]["fallback_selection_alias"] == deepseek_china_fallback.value
 
 
 def test_openrouter_settings_roundtrip_persists_deepseek_selection_and_fallback(

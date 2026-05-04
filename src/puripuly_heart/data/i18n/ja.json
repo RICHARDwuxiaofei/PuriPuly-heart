@@ -263,6 +263,8 @@
   "provider.deepseek_v4_flash_openrouter.description": "",
   "provider.deepseek_v4_flash_fallback": "DeepSeek V4 Flash",
   "provider.deepseek_v4_flash_fallback.description": "",
+  "provider.deepseek_v4_flash_china_fallback": "DeepSeek V4 Flash (中国)",
+  "provider.deepseek_v4_flash_china_fallback.description": "",
   "provider.openrouter_qwen35_flash": "OpenRouter Qwen 3.5 Flash",
   "provider.openrouter_qwen35_flash.description": "自分のOpenRouter APIキーで使うQwen 3.5 Flash 02-23です",
   "provider.qwen": "Qwen 3.5",

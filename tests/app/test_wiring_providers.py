@@ -375,6 +375,42 @@ def test_create_llm_provider_openrouter_deepseek_only_skips_openrouter_fallback_
     assert provider.inner.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
 
 
+def test_create_llm_provider_openrouter_deepseek_china_fallback_uses_deepseek_only_routing() -> (
+    None
+):
+    deepseek_china_fallback = getattr(
+        OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH_CHINA", None
+    )
+    assert deepseek_china_fallback is not None
+
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.OPENROUTER),
+        openrouter=OpenRouterSettings(
+            llm_model=OpenRouterLLMModel.GEMMA_4_26B_A4B_IT,
+            selected_source=OpenRouterCredentialSource.BYOK,
+            selection_alias=OpenRouterSelectionAlias.GEMMA4_BYOK,
+            fallback_selection_alias=deepseek_china_fallback,
+            provider_routing=OpenRouterProviderRouting.DEFAULT,
+        ),
+    )
+    secrets = InMemorySecretStore()
+    secrets.set("openrouter_api_key", "byok-key")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, FallbackRacingLLMProvider)
+    assert isinstance(provider.inner.primary, OpenRouterLLMProvider)
+    assert provider.inner.primary.provider_routing == OpenRouterProviderRouting.DEFAULT
+    assert isinstance(provider.inner.fallback, _LazyFactoryLLMProvider)
+
+    fallback_provider = provider.inner.fallback.factory()
+
+    assert isinstance(fallback_provider, OpenRouterLLMProvider)
+    assert fallback_provider.model == OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
+    assert fallback_provider.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
+
+
 def test_create_llm_provider_openrouter_direct_managed_reuse_forwards_cached_user_identifier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1713,17 +1713,23 @@ def test_openrouter_fallback_modal_lists_curated_openrouter_fallbacks(
     assert captured["show_description"] is True
     options = captured["options"]
     deepseek_fallback = getattr(OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH", None)
+    deepseek_china_fallback = getattr(
+        OpenRouterFallbackSelectionAlias, "DEEPSEEK_V4_FLASH_CHINA", None
+    )
     assert deepseek_fallback is not None
+    assert deepseek_china_fallback is not None
 
     assert [option.value for option in options] == [
         OpenRouterFallbackSelectionAlias.NONE.value,
         OpenRouterFallbackSelectionAlias.QWEN35_FLASH.value,
         deepseek_fallback.value,
+        deepseek_china_fallback.value,
     ]
     assert [option.label for option in options] == [
         t("settings.openrouter_fallback.none"),
         t("provider.qwen35_flash_fallback"),
         t("provider.deepseek_v4_flash_fallback"),
+        t("provider.deepseek_v4_flash_china_fallback"),
     ]
 
 
@@ -2504,6 +2510,18 @@ def test_deepseek_provider_copy_is_backed_by_i18n(locale: str) -> None:
         "provider.deepseek_v4_flash.description",
     ):
         assert bundle.get(key) and bundle[key] != key
+
+
+@pytest.mark.parametrize("locale", ["en", "ko", "zh-CN", "ja"])
+def test_deepseek_china_fallback_copy_is_backed_by_i18n(locale: str) -> None:
+    bundle = i18n_module._load_bundle(locale)
+
+    for key in (
+        "provider.deepseek_v4_flash_china_fallback",
+        "provider.deepseek_v4_flash_china_fallback.description",
+    ):
+        assert key in bundle
+        assert bundle[key] != key
 
 
 @pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])

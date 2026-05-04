@@ -130,13 +130,26 @@ def _settings_for_openrouter_alias(settings: AppSettings, *, alias: str) -> AppS
 
 
 def _settings_for_openrouter_fallback_model(
-    settings: AppSettings, *, fallback_model: str
+    settings: AppSettings,
+    *,
+    fallback_model: str,
+    provider_routing: OpenRouterProviderRouting | None = None,
 ) -> AppSettings:
     resolved_settings = replace(settings)
     resolved_settings.openrouter = replace(settings.openrouter)
     resolved_settings.openrouter.llm_model = OpenRouterLLMModel(fallback_model)
     resolved_settings.openrouter.selection_alias = None
+    if provider_routing is not None:
+        resolved_settings.openrouter.provider_routing = provider_routing
     return resolved_settings
+
+
+def _provider_routing_for_openrouter_fallback(
+    fallback_selection_alias: OpenRouterFallbackSelectionAlias,
+) -> OpenRouterProviderRouting:
+    if fallback_selection_alias == OpenRouterFallbackSelectionAlias.DEEPSEEK_V4_FLASH_CHINA:
+        return OpenRouterProviderRouting.DEEPSEEK_ONLY
+    return OpenRouterProviderRouting.DEFAULT
 
 
 def _create_llm_provider_from_alias_profile(
@@ -259,6 +272,9 @@ def _create_openrouter_fallback_provider(
     resolved_settings = _settings_for_openrouter_fallback_model(
         settings,
         fallback_model=fallback_model,
+        provider_routing=_provider_routing_for_openrouter_fallback(
+            settings.openrouter.fallback_selection_alias
+        ),
     )
 
     if settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
