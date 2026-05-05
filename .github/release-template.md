@@ -8,4 +8,5 @@
 
 ---
 **If PuriPuly has made your world a bit wider,
-please consider hitting the ⭐ Star button at the top of the GitHub page — it would mean a lot**
+please consider hitting the ⭐ Star button at the top of the GitHub page.
+It would mean a lot**

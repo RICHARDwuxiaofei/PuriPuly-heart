@@ -35,7 +35,7 @@
 
 You've been there.  
 Wanting to comfort a friend,  
-but only managing — "Are you okay?"
+but only managing: "Are you okay?"
 
 You already know a 'translator'  
 can't carry what's truly in your heart.
@@ -56,13 +56,13 @@ So I built one that can.
 → With Gemma 4 and a cloud STT service, latency is typically in the mid-to-late 1-second range.
 
 - **Does it cost money to use?**
-→ Yes, but only later. New users get a free usage allowance, and even after that the pricing is very cheap — you can use it thousands of times for $1.
+→ Yes, but only later. New users get a free usage allowance, and even after that the pricing is very cheap; you can use it thousands of times for $1.
 
 - **Do I need to get an API key?**
-→ Yes, but again — only later. At first, just install and authenticate via Discord to start using it.
+→ Yes, but again, only later. At first, just install and authenticate via Discord to start using it.
 
 - **How polished is the feature for translating the other person's voice?**
-→ It works well for one-on-one in low-noise environments. Up to three people is fine, but beyond that we can't guarantee usability. In those cases, only Deepgram — which is robust to noise — works, with limitations.
+→ It works well for one-on-one in low-noise environments. Up to three people is fine, but beyond that we can't guarantee usability. In those cases, only Deepgram, which is robust to noise, works, with limitations.
 
 - **Voice recognition is poor / slow.**
 → If you're using local Qwen ASR, we recommend switching to a cloud STT service.
@@ -266,7 +266,7 @@ The tier transition may take a moment.
 <details>
 <summary><h3>If clicking Authorize didn't authenticate you</h3></summary>
 
-If you clicked Authorize but you're still not authenticated, retry — or directly issue an API key as below and paste it in.
+If you clicked Authorize but you're still not authenticated, retry, or directly issue an API key as below and paste it in.
 
 6. Click your account in the top right, go to the API Keys tab on the left, then click the Create button in the center.
    ![step6](docs/images/openrouter/6.png)

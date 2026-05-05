@@ -198,6 +198,19 @@ def test_release_template_omits_license_and_notices_boilerplate() -> None:
     assert "----" not in template
 
 
+def test_release_template_uses_expected_star_request_copy() -> None:
+    template = (ROOT / ".github" / "release-template.md").read_text(encoding="utf-8")
+
+    expected_copy = (
+        "**If PuriPuly has made your world a bit wider,\n"
+        "please consider hitting the ⭐ Star button at the top of the GitHub page.\n"
+        "It would mean a lot**"
+    )
+
+    assert expected_copy in template
+    assert "it would mean a lot" not in template
+
+
 def test_push_ci_workflow_uses_frozen_lockfile_sync() -> None:
     workflow = (ROOT / ".github" / "workflows" / "push-ci.yml").read_text(encoding="utf-8")
 
