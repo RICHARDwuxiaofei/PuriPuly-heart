@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.0-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.0.1-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -147,6 +147,8 @@
 
 - STT：**Qwen ASR**
 - LLM：**DeepSeek V4 Flash** 或 **Qwen 3.5 Plus**
+
+   > 使用托管连接方式时，请选择 **托管（中国）**，而不是 **托管**。
 
 如果 Discord 验证较为困难，请通过 [Twitter DM](https://x.com/kapitalismho) 直接联系。
 

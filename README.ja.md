@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.0-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.0.1-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -146,6 +146,8 @@ Soniox / Gemini / Deepgramへのアクセスがブロックされている地域
 
 - STT: **Qwen ASR**
 - LLM: **DeepSeek V4 Flash** または **Qwen 3.5 Plus**
+
+   > マネージド接続方式を使う場合は、**マネージド** ではなく **マネージド（中国）** を選んでください。
 
 Discord認証が難しい場合は、[Twitter DM](https://x.com/kapitalismho)から直接ご連絡ください。
 

@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.0-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.0.1-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -146,6 +146,8 @@ If Soniox/Gemini/Deepgram are blocked in your region, please use the following c
 
 - STT: **Qwen ASR**
 - LLM: **DeepSeek V4 Flash** or **Qwen 3.5 Plus**
+
+   > When using the managed connection mode, choose **Managed (China)** instead of **Managed**.
 
 If Discord authentication is difficult, please reach out directly via [Twitter DM](https://x.com/kapitalismho).
 
