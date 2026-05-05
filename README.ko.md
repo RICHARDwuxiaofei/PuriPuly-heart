@@ -406,6 +406,26 @@ Copy-Item third_party/openvr/win64/openvr_api.dll build/overlay/openvr_api.dll -
 .\build\overlay\PuriPulyHeartOverlay.exe --check-startup-contract
 ```
 
+### 빌드 / 패키징
+
+실행 파일 전용 / 수동 패키징 단계:
+
+이 경로는 실행 파일/수동 인스톨러만 만드는 직접 패키징 경로이며, 릴리스 완료(compliance) 패키징 경로가 아닙니다. 또한 `build.spec`가 검사하는 스테이징된 오버레이 실행 파일 `build/overlay/PuriPulyHeartOverlay.exe`와 벤더링된 OpenVR 번들 `third_party/openvr/`가 필요합니다.
+
+```powershell
+.\scripts\ci\prepare-soxr-release-inputs.ps1
+.venv\Scripts\pyinstaller build.spec
+ISCC installer.iss
+```
+
+릴리스 완료(compliance) Windows 패키징 경로는 먼저 `scripts/ci/prepare-soxr-release-inputs.ps1`를 실행한 뒤 `scripts/ci/build-release-artifacts.ps1`를 실행합니다:
+
+```powershell
+$env:APP_VERSION = (& ".\.venv\Scripts\python.exe" scripts/ci/read-project-version.py).Trim()
+.\scripts\ci\prepare-soxr-release-inputs.ps1
+.\scripts\ci\build-release-artifacts.ps1 -AppVersion $env:APP_VERSION -InnoSetupVersion 6.6.1
+```
+
 ### Broker 서비스
 
 자세한 내용은 `broker/README.md`를 참고하세요.

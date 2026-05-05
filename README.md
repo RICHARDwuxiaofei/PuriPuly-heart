@@ -406,6 +406,26 @@ Copy-Item third_party/openvr/win64/openvr_api.dll build/overlay/openvr_api.dll -
 .\build\overlay\PuriPulyHeartOverlay.exe --check-startup-contract
 ```
 
+### Build / Packaging
+
+Direct executable-only / manual packaging steps:
+
+This direct executable/manual-installer path is not the release-complete compliance-packaging path. It also requires the staged overlay executable at `build/overlay/PuriPulyHeartOverlay.exe` plus the vendored OpenVR bundle under `third_party/openvr/`, as enforced by `build.spec`.
+
+```powershell
+.\scripts\ci\prepare-soxr-release-inputs.ps1
+.venv\Scripts\pyinstaller build.spec
+ISCC installer.iss
+```
+
+For the release-complete compliance-packaging path, run `scripts/ci/prepare-soxr-release-inputs.ps1` first and then `scripts/ci/build-release-artifacts.ps1`:
+
+```powershell
+$env:APP_VERSION = (& ".\.venv\Scripts\python.exe" scripts/ci/read-project-version.py).Trim()
+.\scripts\ci\prepare-soxr-release-inputs.ps1
+.\scripts\ci\build-release-artifacts.ps1 -AppVersion $env:APP_VERSION -InnoSetupVersion 6.6.1
+```
+
 ### Broker Service
 
 See `broker/README.md` for details.

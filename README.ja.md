@@ -406,6 +406,26 @@ Copy-Item third_party/openvr/win64/openvr_api.dll build/overlay/openvr_api.dll -
 .\build\overlay\PuriPulyHeartOverlay.exe --check-startup-contract
 ```
 
+### ビルド / パッケージング
+
+実行ファイル単体 / 手動パッケージング手順:
+
+この手順は実行ファイル/手動インストーラ向けの直接パッケージング専用で、リリース完了のコンプライアンスパッケージング手順ではありません。さらに、`build.spec` が検証するステージ済みオーバーレイ実行ファイル `build/overlay/PuriPulyHeartOverlay.exe` と、ベンダリングされた OpenVR バンドル `third_party/openvr/` が必要です。
+
+```powershell
+.\scripts\ci\prepare-soxr-release-inputs.ps1
+.venv\Scripts\pyinstaller build.spec
+ISCC installer.iss
+```
+
+リリース完了のコンプライアンスパッケージングでは、先に `scripts/ci/prepare-soxr-release-inputs.ps1` を実行し、その後 `scripts/ci/build-release-artifacts.ps1` を実行します:
+
+```powershell
+$env:APP_VERSION = (& ".\.venv\Scripts\python.exe" scripts/ci/read-project-version.py).Trim()
+.\scripts\ci\prepare-soxr-release-inputs.ps1
+.\scripts\ci\build-release-artifacts.ps1 -AppVersion $env:APP_VERSION -InnoSetupVersion 6.6.1
+```
+
 ### Broker サービス
 
 詳しくは `broker/README.md` を参照してください。
