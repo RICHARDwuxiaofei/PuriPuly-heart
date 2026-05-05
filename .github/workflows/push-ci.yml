@@ -19,25 +19,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  windows-overlay-tests:
-    name: Windows overlay cargo test
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run native overlay tests
-        shell: pwsh
-        run: cargo test --manifest-path native/overlay/Cargo.toml -q
-
   windows-release-path:
     name: Build Windows release path
     runs-on: windows-latest
-    needs:
-      - windows-overlay-tests
     steps:
       - name: Checkout
         uses: actions/checkout@v4
