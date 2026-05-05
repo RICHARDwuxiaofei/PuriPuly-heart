@@ -1388,6 +1388,94 @@ def test_to_dict_explicit_translation_wins_over_conflicting_runtime_fields() -> 
     assert serialized["deepseek"]["llm_model"] == DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value
 
 
+def test_load_settings_translation_block_wins_over_stale_openrouter_deepseek_fields(tmp_path):
+    path = tmp_path / "settings.json"
+    data = to_dict(AppSettings())
+    data["translation"] = {
+        "model": TranslationModel.GEMMA4.value,
+        "connection": TranslationConnection.OPENROUTER.value,
+        "connection_history": {
+            TranslationModel.GEMMA4.value: TranslationConnection.OPENROUTER.value,
+            TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.MANAGED.value,
+        },
+    }
+    data["provider"]["llm"] = LLMProviderName.OPENROUTER.value
+    data["openrouter"]["llm_model"] = OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
+    data["openrouter"]["selected_source"] = OpenRouterCredentialSource.MANAGED.value
+    data["openrouter"]["selection_alias"] = OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED.value
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.translation.model == TranslationModel.GEMMA4
+    assert loaded.translation.connection == TranslationConnection.OPENROUTER
+    assert loaded.provider.llm == LLMProviderName.OPENROUTER
+    assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.BYOK
+    assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
+    assert persisted["translation"]["model"] == TranslationModel.GEMMA4.value
+    assert persisted["translation"]["connection"] == TranslationConnection.OPENROUTER.value
+    assert persisted["openrouter"]["llm_model"] == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT.value
+    assert persisted["openrouter"]["selected_source"] == OpenRouterCredentialSource.BYOK.value
+    assert persisted["openrouter"]["selection_alias"] == OpenRouterSelectionAlias.GEMMA4_BYOK.value
+
+
+def test_load_settings_translation_block_wins_for_gemini_over_stale_openrouter_fields(tmp_path):
+    path = tmp_path / "settings.json"
+    data = to_dict(AppSettings())
+    data["translation"] = {
+        "model": TranslationModel.GEMINI_31_FLASH_LITE.value,
+        "connection": TranslationConnection.OFFICIAL_BYOK.value,
+        "connection_history": {
+            TranslationModel.GEMINI_31_FLASH_LITE.value: TranslationConnection.OFFICIAL_BYOK.value,
+            TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.MANAGED.value,
+        },
+    }
+    data["provider"]["llm"] = LLMProviderName.OPENROUTER.value
+    data["openrouter"]["llm_model"] = OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
+    data["openrouter"]["selected_source"] = OpenRouterCredentialSource.MANAGED.value
+    data["openrouter"]["selection_alias"] = OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED.value
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.translation.model == TranslationModel.GEMINI_31_FLASH_LITE
+    assert loaded.translation.connection == TranslationConnection.OFFICIAL_BYOK
+    assert loaded.provider.llm == LLMProviderName.GEMINI
+    assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
+    assert persisted["translation"]["model"] == TranslationModel.GEMINI_31_FLASH_LITE.value
+    assert persisted["translation"]["connection"] == TranslationConnection.OFFICIAL_BYOK.value
+    assert persisted["provider"]["llm"] == LLMProviderName.GEMINI.value
+    assert persisted["gemini"]["llm_model"] == GeminiLLMModel.GEMINI_31_FLASH_LITE.value
+
+
+def test_from_dict_translation_block_wins_over_stale_openrouter_deepseek_fields() -> None:
+    data = to_dict(AppSettings())
+    data["translation"] = {
+        "model": TranslationModel.GEMMA4.value,
+        "connection": TranslationConnection.OPENROUTER.value,
+        "connection_history": {
+            TranslationModel.GEMMA4.value: TranslationConnection.OPENROUTER.value,
+            TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.MANAGED.value,
+        },
+    }
+    data["provider"]["llm"] = LLMProviderName.OPENROUTER.value
+    data["openrouter"]["llm_model"] = OpenRouterLLMModel.DEEPSEEK_V4_FLASH.value
+    data["openrouter"]["selected_source"] = OpenRouterCredentialSource.MANAGED.value
+    data["openrouter"]["selection_alias"] = OpenRouterSelectionAlias.DEEPSEEK_V4_FLASH_MANAGED.value
+
+    loaded = from_dict(data)
+
+    assert loaded.translation.model == TranslationModel.GEMMA4
+    assert loaded.translation.connection == TranslationConnection.OPENROUTER
+    assert loaded.provider.llm == LLMProviderName.OPENROUTER
+    assert loaded.openrouter.llm_model == OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
+    assert loaded.openrouter.selected_source == OpenRouterCredentialSource.BYOK
+    assert loaded.openrouter.selection_alias == OpenRouterSelectionAlias.GEMMA4_BYOK
+
+
 def test_from_dict_infers_legacy_gemma_managed_translation_selection() -> None:
     data = to_dict(AppSettings())
     data.pop("translation", None)
