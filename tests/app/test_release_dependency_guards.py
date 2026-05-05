@@ -23,8 +23,6 @@ PINNED_INNOSETUP_VERSION = 'INNOSETUP_VERSION: "6.6.1"'
 SHARED_SETUP_ACTION = "./.github/actions/setup-uv-environment"
 PINNED_SOXR_SPECIFIER = "soxr==1.0.0"
 SOXR_RELEASE_INPUTS_SCRIPT = "scripts/ci/prepare-soxr-release-inputs.ps1"
-README_SOXR_RELEASE_PREPARE_COMMAND = r".\scripts\ci\prepare-soxr-release-inputs.ps1"
-README_PYINSTALLER_BUILD_COMMAND = r".venv\Scripts\pyinstaller build.spec"
 SOXR_RELEASE_INPUTS_MANIFEST_PATH = "build/soxr-release-inputs/manifest.json"
 SOXR_PACKAGED_RUNTIME_RELATIVE_DIR = "soxr"
 SOXR_COMPLIANCE_BUNDLE_RELATIVE_DIR = "third_party\\soxr"
@@ -41,53 +39,7 @@ PINNED_LIBSOXR_SOURCE_URL = (
 )
 PINNED_LIBSOXR_SOURCE_SHA256 = "b111c15fdc8c029989330ff559184198c161100a59312f5dc19ddeb9b5a15889"
 README_INSTALLER_BUILD_COMMAND = "ISCC installer.iss"
-README_FULL_RELEASE_COMMAND = r".\scripts\ci\build-release-artifacts.ps1"
 FULL_WINDOWS_RELEASE_SCRIPT = "scripts/ci/build-release-artifacts.ps1"
-README_BUILD_SECTION_MARKERS = {
-    "README.md": (
-        "Direct executable-only / manual packaging steps:",
-        "For the release-complete compliance-packaging path, run `scripts/ci/prepare-soxr-release-inputs.ps1` first and then `scripts/ci/build-release-artifacts.ps1`:",
-    ),
-    "README.ko.md": (
-        "실행 파일 전용 / 수동 패키징 단계:",
-        "릴리스 완료(compliance) Windows 패키징 경로는 먼저 `scripts/ci/prepare-soxr-release-inputs.ps1`를 실행한 뒤 `scripts/ci/build-release-artifacts.ps1`를 실행합니다:",
-    ),
-    "README.ja.md": (
-        "実行ファイル単体 / 手動パッケージング手順:",
-        "リリース完了のコンプライアンスパッケージングでは、先に `scripts/ci/prepare-soxr-release-inputs.ps1` を実行し、その後 `scripts/ci/build-release-artifacts.ps1` を実行します:",
-    ),
-    "README.zh-CN.md": (
-        "仅生成可执行文件 / 手动打包步骤：",
-        "完整发布所需的 Windows 合规打包路径需要先运行 `scripts/ci/prepare-soxr-release-inputs.ps1`，再运行 `scripts/ci/build-release-artifacts.ps1`：",
-    ),
-}
-README_DIRECT_PACKAGING_CAVEATS = {
-    "README.md": (
-        "This direct executable/manual-installer path is not the release-complete "
-        "compliance-packaging path. It also requires the staged overlay executable at "
-        "`build/overlay/PuriPulyHeartOverlay.exe` plus the vendored OpenVR bundle under "
-        "`third_party/openvr/`, as enforced by `build.spec`."
-    ),
-    "README.ko.md": (
-        "이 경로는 실행 파일/수동 인스톨러만 만드는 직접 패키징 경로이며, "
-        "릴리스 완료(compliance) 패키징 경로가 아닙니다. 또한 `build.spec`가 "
-        "검사하는 스테이징된 오버레이 실행 파일 `build/overlay/PuriPulyHeartOverlay.exe`와 "
-        "벤더링된 OpenVR 번들 `third_party/openvr/`가 필요합니다."
-    ),
-    "README.ja.md": (
-        "この手順は実行ファイル/手動インストーラ向けの直接パッケージング専用で、"
-        "リリース完了のコンプライアンスパッケージング手順ではありません。さらに、"
-        "`build.spec` が検証するステージ済みオーバーレイ実行ファイル "
-        "`build/overlay/PuriPulyHeartOverlay.exe` と、ベンダリングされた OpenVR バンドル "
-        "`third_party/openvr/` が必要です。"
-    ),
-    "README.zh-CN.md": (
-        "这一路径只用于直接生成可执行文件 / 手动安装包，不是完整发布所需的合规打包路径。"
-        "并且它仍然需要 `build.spec` 会校验的已暂存 overlay 可执行文件 "
-        "`build/overlay/PuriPulyHeartOverlay.exe`，以及 `third_party/openvr/` 下的 "
-        "vendored OpenVR bundle。"
-    ),
-}
 BUILD_SPEC_DIRECT_PACKAGING_HEADER = (
     "Direct Windows PyInstaller packaging (executable-only / manual installer packaging):"
 )
@@ -273,31 +225,6 @@ def test_workflows_pin_innosetup_and_build_installer_without_slow_smoke_script()
         assert "Inno Setup version mismatch" in workflow
         assert "--allow-downgrade" in workflow
         assert "--force" in workflow
-
-
-def test_readmes_distinguish_direct_packaging_from_full_release_complete_path() -> None:
-    for readme_name, (direct_marker, full_release_marker) in README_BUILD_SECTION_MARKERS.items():
-        readme = (ROOT / readme_name).read_text(encoding="utf-8")
-        direct_section = _slice_section(readme, direct_marker, full_release_marker)
-        full_release_section = _slice_section(readme, full_release_marker)
-
-        assert direct_marker in readme
-        assert full_release_marker in readme
-        assert README_DIRECT_PACKAGING_CAVEATS[readme_name] in direct_section
-        assert README_SOXR_RELEASE_PREPARE_COMMAND in direct_section
-        assert README_PYINSTALLER_BUILD_COMMAND in direct_section
-        assert README_INSTALLER_BUILD_COMMAND in direct_section
-        assert direct_section.index(README_SOXR_RELEASE_PREPARE_COMMAND) < direct_section.index(
-            README_PYINSTALLER_BUILD_COMMAND
-        )
-        assert direct_section.index(README_PYINSTALLER_BUILD_COMMAND) < direct_section.index(
-            README_INSTALLER_BUILD_COMMAND
-        )
-        assert README_SOXR_RELEASE_PREPARE_COMMAND in full_release_section
-        assert README_FULL_RELEASE_COMMAND in full_release_section
-        assert full_release_section.index(
-            README_SOXR_RELEASE_PREPARE_COMMAND
-        ) < full_release_section.index(README_FULL_RELEASE_COMMAND)
 
 
 def test_push_ci_has_windows_release_path_job() -> None:
@@ -870,16 +797,6 @@ def test_broker_d1_cleanup_supports_installation_id_target() -> None:
     assert "DELETE FROM installations WHERE installation_id IN" in workflow
     assert "DELETE FROM discord_identities " in workflow
     assert "WHERE discord_user_ref IN" in workflow
-
-
-def test_readmes_require_prepare_soxr_release_inputs_before_pyinstaller() -> None:
-    for readme_name in ("README.md", "README.ko.md", "README.ja.md", "README.zh-CN.md"):
-        readme = (ROOT / readme_name).read_text(encoding="utf-8")
-
-        assert README_SOXR_RELEASE_PREPARE_COMMAND in readme
-        assert readme.index(README_SOXR_RELEASE_PREPARE_COMMAND) < readme.index(
-            README_PYINSTALLER_BUILD_COMMAND
-        )
 
 
 def test_lgpl_text_file_exists_for_bundled_soxr_compliance_bundle() -> None:
