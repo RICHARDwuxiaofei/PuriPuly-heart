@@ -31,8 +31,9 @@ from puripuly_heart.config.llm_profiles import (
 )
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 20
+SETTINGS_SCHEMA_VERSION = 21
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000
+DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS = 500
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
@@ -384,7 +385,7 @@ class AudioSettings:
 class DesktopAudioSettings:
     output_device: str = ""
     vad_speech_threshold: float = 0.6
-    vad_hangover_ms: int = 600
+    vad_hangover_ms: int = DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS
     vad_pre_roll_ms: int = 500
 
     def validate(self) -> None:
@@ -2051,6 +2052,17 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         changed = True
         version = 20
 
+    if version < 21:
+        desktop_audio_data = data.get("desktop_audio")
+        if not isinstance(desktop_audio_data, dict):
+            desktop_audio_data = {}
+            data["desktop_audio"] = desktop_audio_data
+            changed = True
+        if desktop_audio_data.get("vad_hangover_ms") != DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS:
+            desktop_audio_data["vad_hangover_ms"] = DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS
+            changed = True
+        version = 21
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -2547,7 +2559,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                 else ""
             ),
             vad_speech_threshold=float(desktop_audio_data.get("vad_speech_threshold", 0.6)),
-            vad_hangover_ms=int(desktop_audio_data.get("vad_hangover_ms", 600)),
+            vad_hangover_ms=int(
+                desktop_audio_data.get("vad_hangover_ms", DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS)
+            ),
             vad_pre_roll_ms=int(desktop_audio_data.get("vad_pre_roll_ms", 500)),
         ),
         overlay=OverlaySettings(
