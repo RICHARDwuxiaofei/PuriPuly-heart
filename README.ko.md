@@ -13,9 +13,12 @@
 
 <p align="center">LLM-based real-time translator for VRChat</p>
 
-<p align="center">
-  <a href="README.md">English</a> | <b>한국어</b> | <a href="README.ja.md">日本語</a> | <a href="README.zh-CN.md">简体中文</a>
-</p>
+<h2 align="center">
+  <a href="README.md">🇺🇸 English</a> ·
+  🇰🇷 한국어 ·
+  <a href="README.ja.md">🇯🇵 日本語</a> ·
+  <a href="README.zh-CN.md">🇨🇳 简体中文</a>
+</h2>
 
 ---
 
