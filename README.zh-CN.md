@@ -13,9 +13,12 @@
 
 <p align="center">LLM-based real-time translator for VRChat</p>
 
-<p align="center">
-  <a href="README.md">English</a> | <a href="README.ko.md">한국어</a> | <a href="README.ja.md">日本語</a> | <b>简体中文</b>
-</p>
+<h2 align="center">
+  <a href="README.md">🇺🇸 English</a> ·
+  <a href="README.ko.md">🇰🇷 한국어</a> ·
+  <a href="README.ja.md">🇯🇵 日本語</a> ·
+  🇨🇳 简体中文
+</h2>
 
 ---
 
@@ -25,9 +28,11 @@
 
 ---
 
-<video src="https://github.com/user-attachments/assets/3709c36d-7b27-4a10-b669-1c79ddb43ae0" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/c667f44d-b91d-42a9-b24a-e6a993b392d3" controls width="100%"></video>
 
-<video src="https://github.com/user-attachments/assets/86e847dc-0c7d-4eed-8125-9b219b8dde96" controls width="100%"></video>
+演示视频 YouTube 链接:
+- [演示 1](https://www.youtube.com/watch?v=3p0CamYui0o)
+- [演示 2](https://youtu.be/DoX36Y7J_lc?si=YjbeVTS8v3jGQB1w)
 
 ---
 
@@ -161,9 +166,6 @@
 如果方便的话，既然要设置，何不顺便把 STT 也一起配置好呢？
 PuriPuly 与云端 STT 结合时能提供最佳体验。
 例如即使同样是 Qwen ASR，本地与云端的语音识别性能也有相当差距。
-
-推荐先从 Deepgram 开始。
-仅需注册即可获得价值 200 美元的免费额度。
 
 <details>
 <summary><h3>Deepgram</h3></summary>

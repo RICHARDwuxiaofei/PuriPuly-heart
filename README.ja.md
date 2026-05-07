@@ -13,9 +13,12 @@
 
 <p align="center">LLM-based real-time translator for VRChat</p>
 
-<p align="center">
-  <a href="README.md">English</a> | <a href="README.ko.md">한국어</a> | <b>日本語</b> | <a href="README.zh-CN.md">简体中文</a>
-</p>
+<h2 align="center">
+  <a href="README.md">🇺🇸 English</a> ·
+  <a href="README.ko.md">🇰🇷 한국어</a> ·
+  🇯🇵 日本語 ·
+  <a href="README.zh-CN.md">🇨🇳 简体中文</a>
+</h2>
 
 ---
 
@@ -25,9 +28,11 @@
 
 ---
 
-<video src="https://github.com/user-attachments/assets/0a3a8893-e9a6-4ecb-a2f1-bba3a49d2603" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/c667f44d-b91d-42a9-b24a-e6a993b392d3" controls width="100%"></video>
 
-<video src="https://github.com/user-attachments/assets/5e1ed02d-f1c5-46b3-98d1-3b34bafc6597" controls width="100%"></video>
+デモ動画のYouTubeリンク:
+- [デモ 1](https://www.youtube.com/watch?v=3p0CamYui0o)
+- [デモ 2](https://youtu.be/DoX36Y7J_lc?si=YjbeVTS8v3jGQB1w)
 
 ---
 

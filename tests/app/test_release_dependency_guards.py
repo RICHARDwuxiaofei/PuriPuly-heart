@@ -181,6 +181,36 @@ def test_release_workflow_uses_frozen_lockfile_sync() -> None:
     assert 'python -m pip install -e ".[build]"' not in workflow
 
 
+def test_release_workflow_uses_tag_name_as_release_title() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+
+    assert "name: ${{ github.ref_name }}" in workflow
+    assert "name: PuriPuly Heart v${{ needs.verify-version.outputs.version }}" not in workflow
+
+
+def test_release_template_omits_license_and_notices_boilerplate() -> None:
+    template = (ROOT / ".github" / "release-template.md").read_text(encoding="utf-8")
+
+    assert "License and notices" not in template
+    assert "Project license:" not in template
+    assert "Third-party notices:" not in template
+    assert "Previously published MIT versions remain available under MIT." not in template
+    assert "----" not in template
+
+
+def test_release_template_uses_expected_star_request_copy() -> None:
+    template = (ROOT / ".github" / "release-template.md").read_text(encoding="utf-8")
+
+    expected_copy = (
+        "**If PuriPuly has made your world a bit wider,\n"
+        "please consider hitting the ⭐ Star button at the top of the GitHub page.\n"
+        "It would mean a lot**"
+    )
+
+    assert expected_copy in template
+    assert "it would mean a lot" not in template
+
+
 def test_push_ci_workflow_uses_frozen_lockfile_sync() -> None:
     workflow = (ROOT / ".github" / "workflows" / "push-ci.yml").read_text(encoding="utf-8")
 

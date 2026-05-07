@@ -68,6 +68,39 @@ def test_settings_roundtrip(tmp_path):
     assert loaded == expected
 
 
+def test_peer_vad_hangover_default_is_500_ms_and_self_default_stays_600_ms() -> None:
+    settings = AppSettings()
+
+    assert settings.desktop_audio.vad_hangover_ms == 500
+    assert settings.stt.low_latency_vad_hangover_ms == 600
+    assert (
+        from_dict(
+            {"settings_version": SETTINGS_SCHEMA_VERSION, "desktop_audio": {}}
+        ).desktop_audio.vad_hangover_ms
+        == 500
+    )
+
+
+@pytest.mark.parametrize("legacy_hangover_ms", [450, 500, 600, 700, 900])
+def test_schema21_migration_forces_existing_peer_vad_hangover_to_500_ms(
+    tmp_path, legacy_hangover_ms: int
+) -> None:
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["settings_version"] = 20
+    legacy["desktop_audio"]["vad_hangover_ms"] = legacy_hangover_ms
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
+    assert loaded.desktop_audio.vad_hangover_ms == 500
+    assert loaded.stt.low_latency_vad_hangover_ms == 600
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
+    assert persisted["desktop_audio"]["vad_hangover_ms"] == 500
+
+
 def test_new_user_defaults_peer_voice_to_english_to_korean_local_qwen() -> None:
     settings = AppSettings()
 
@@ -209,7 +242,7 @@ def test_migrate_v17_strips_directsound_host_api_before_migration_and_preserves_
 
 
 def test_migrate_v18_preserves_directsound_when_removing_legacy_osc_rate_limits() -> None:
-    assert SETTINGS_SCHEMA_VERSION == 20
+    assert SETTINGS_SCHEMA_VERSION == 21
 
     raw = to_dict(AppSettings())
     raw["settings_version"] = 17
@@ -253,7 +286,7 @@ def test_load_settings_persists_v17_directsound_migration(tmp_path) -> None:
 
 
 def test_load_settings_persists_v18_osc_rate_limit_key_removal(tmp_path) -> None:
-    assert SETTINGS_SCHEMA_VERSION == 20
+    assert SETTINGS_SCHEMA_VERSION == 21
 
     path = tmp_path / "settings.json"
     raw = to_dict(AppSettings())

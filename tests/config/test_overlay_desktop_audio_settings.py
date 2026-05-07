@@ -116,7 +116,7 @@ def test_desktop_audio_settings_round_trip_with_defaults() -> None:
 
     assert settings.desktop_audio.output_device == ""
     assert settings.desktop_audio.vad_speech_threshold == 0.6
-    assert settings.desktop_audio.vad_hangover_ms == 600
+    assert settings.desktop_audio.vad_hangover_ms == 500
     assert settings.desktop_audio.vad_pre_roll_ms == 500
 
 
@@ -270,12 +270,12 @@ def test_load_settings_migrates_legacy_desktop_vad_hangover_to_new_default(tmp_p
     reloaded = json.loads(path.read_text(encoding="utf-8"))
 
     assert settings.settings_version == SETTINGS_SCHEMA_VERSION
-    assert settings.desktop_audio.vad_hangover_ms == 600
+    assert settings.desktop_audio.vad_hangover_ms == 500
     assert reloaded["settings_version"] == SETTINGS_SCHEMA_VERSION
-    assert reloaded["desktop_audio"]["vad_hangover_ms"] == 600
+    assert reloaded["desktop_audio"]["vad_hangover_ms"] == 500
 
 
-def test_load_settings_migrates_desktop_vad_hangover_700_to_600(tmp_path) -> None:
+def test_load_settings_migrates_desktop_vad_hangover_700_to_500(tmp_path) -> None:
     from puripuly_heart.config.settings import SETTINGS_SCHEMA_VERSION, load_settings
 
     path = tmp_path / "settings.json"
@@ -295,6 +295,6 @@ def test_load_settings_migrates_desktop_vad_hangover_700_to_600(tmp_path) -> Non
     reloaded = json.loads(path.read_text(encoding="utf-8"))
 
     assert settings.settings_version == SETTINGS_SCHEMA_VERSION
-    assert settings.desktop_audio.vad_hangover_ms == 600
+    assert settings.desktop_audio.vad_hangover_ms == 500
     assert reloaded["settings_version"] == SETTINGS_SCHEMA_VERSION
-    assert reloaded["desktop_audio"]["vad_hangover_ms"] == 600
+    assert reloaded["desktop_audio"]["vad_hangover_ms"] == 500
