@@ -28,9 +28,11 @@
 
 ---
 
-<video src="https://github.com/user-attachments/assets/06ac600d-8c8b-49a4-bd8d-c74481b589a2" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/c667f44d-b91d-42a9-b24a-e6a993b392d3" controls width="100%"></video>
 
-<video src="https://github.com/user-attachments/assets/3c0ea34b-2c43-41d1-a6c6-60fe100646af" controls width="100%"></video>
+Demo video YouTube links:
+- [Demo 1](https://www.youtube.com/watch?v=3p0CamYui0o)
+- [Demo 2](https://youtu.be/DoX36Y7J_lc?si=YjbeVTS8v3jGQB1w)
 
 ---
 

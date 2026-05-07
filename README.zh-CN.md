@@ -28,9 +28,11 @@
 
 ---
 
-<video src="https://github.com/user-attachments/assets/3709c36d-7b27-4a10-b669-1c79ddb43ae0" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/c667f44d-b91d-42a9-b24a-e6a993b392d3" controls width="100%"></video>
 
-<video src="https://github.com/user-attachments/assets/86e847dc-0c7d-4eed-8125-9b219b8dde96" controls width="100%"></video>
+演示视频 YouTube 链接:
+- [演示 1](https://www.youtube.com/watch?v=3p0CamYui0o)
+- [演示 2](https://youtu.be/DoX36Y7J_lc?si=YjbeVTS8v3jGQB1w)
 
 ---
 
