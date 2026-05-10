@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import json
 import logging
 from pathlib import Path
 from typing import Callable
@@ -18,6 +19,8 @@ from puripuly_heart.config.llm_profiles import (
 )
 from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
+    LOCAL_LLM_RESERVED_EXTRA_BODY_KEYS,
+    LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS,
     MAX_CUSTOM_VOCAB_TERMS,
     AppSettings,
     LLMProviderName,
@@ -29,6 +32,7 @@ from puripuly_heart.config.settings import (
     STTProviderName,
     TranslationConnection,
     TranslationModel,
+    _normalize_local_llm_base_url,
     default_translation_connection,
     materialize_translation_settings,
     supported_translation_connections,
@@ -88,18 +92,21 @@ _TRANSLATION_MODEL_LABEL_KEYS = {
     TranslationModel.GEMINI_3_FLASH: "provider.gemini3_flash",
     TranslationModel.GEMINI_31_FLASH_LITE: "provider.gemini31_flash_lite",
     TranslationModel.QWEN_35_PLUS: "provider.qwen35_plus",
+    TranslationModel.LOCAL_LLM: "provider.local_llms",
 }
 _TRANSLATION_CONNECTION_LABEL_KEYS = {
     TranslationConnection.MANAGED: "settings.translation_connection.managed",
     TranslationConnection.MANAGED_CHINA: "settings.translation_connection.managed_china",
     TranslationConnection.OPENROUTER: "settings.translation_connection.openrouter",
     TranslationConnection.OFFICIAL_BYOK: "settings.translation_connection.official_byok",
+    TranslationConnection.OLLAMA: "settings.translation_connection.ollama",
 }
 _TRANSLATION_CONNECTION_DESCRIPTION_KEYS = {
     TranslationConnection.MANAGED: "settings.translation_connection.managed.description",
     TranslationConnection.MANAGED_CHINA: "settings.translation_connection.managed_china.description",
     TranslationConnection.OPENROUTER: "settings.translation_connection.openrouter.description",
     TranslationConnection.OFFICIAL_BYOK: "settings.translation_connection.official_byok.description",
+    TranslationConnection.OLLAMA: "settings.translation_connection.ollama.description",
 }
 _TRANSLATION_CONNECTION_ONLY_SUPPORTED_KEY = "settings.translation_connection.only_supported"
 
@@ -112,9 +119,13 @@ def _set_text_button_label(button: ft.TextButton, label: str) -> None:
     button.text = label
 
 
+def _reject_json_constant(value: str) -> None:
+    raise json.JSONDecodeError(f"invalid JSON constant: {value}", value, 0)
+
+
 def _update_control_if_mounted(control: ft.Control) -> None:
     """Update a Flet control only while it is attached to a page."""
-    if control.page is None:
+    if getattr(control, "page", None) is None:
         return
     try:
         control.update()
@@ -1360,6 +1371,87 @@ class SettingsView(ft.Column):
         )
         self._openrouter_routing_row = self._translation_connection_row
 
+        self._local_llm_connection_title = ft.Text(
+            t("settings.local_llm.connection"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._local_llm_base_url = ft.TextField(
+            label=t("settings.local_llm.base_url"),
+            value="http://127.0.0.1:11434/v1",
+            border_radius=12,
+            border_color=COLOR_DIVIDER,
+            focused_border_color=COLOR_PRIMARY,
+            expand=True,
+            text_size=24,
+            color=COLOR_NEUTRAL_DARK,
+            label_style=ft.TextStyle(size=18, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL_DARK),
+            on_change=self._on_local_llm_field_change,
+            on_blur=self._on_local_llm_base_url_change_end,
+            on_submit=self._on_local_llm_base_url_change_end,
+        )
+        self._local_llm_model = ft.TextField(
+            label=t("settings.local_llm.model"),
+            value="llama3.1:8b",
+            border_radius=12,
+            border_color=COLOR_DIVIDER,
+            focused_border_color=COLOR_PRIMARY,
+            expand=True,
+            text_size=24,
+            color=COLOR_NEUTRAL_DARK,
+            label_style=ft.TextStyle(size=18, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL_DARK),
+            on_change=self._on_local_llm_field_change,
+            on_blur=self._on_local_llm_model_change_end,
+            on_submit=self._on_local_llm_model_change_end,
+        )
+        self._local_llm_extra_body = ft.TextField(
+            label=t("settings.local_llm.extra_body"),
+            value=json.dumps({"reasoning_effort": "none"}, ensure_ascii=False, indent=2),
+            multiline=True,
+            min_lines=3,
+            max_lines=6,
+            border_radius=12,
+            border_color=COLOR_DIVIDER,
+            focused_border_color=COLOR_PRIMARY,
+            expand=True,
+            text_size=24,
+            color=COLOR_NEUTRAL_DARK,
+            label_style=ft.TextStyle(size=18, weight=ft.FontWeight.BOLD, color=COLOR_NEUTRAL_DARK),
+            on_change=self._on_local_llm_field_change,
+            on_blur=self._on_local_llm_extra_body_change_end,
+            on_submit=self._on_local_llm_extra_body_change_end,
+        )
+        self._local_llm_extra_body_helper = ft.Text(
+            t("settings.local_llm.extra_body.description"),
+            size=15,
+            color=COLOR_NEUTRAL,
+        )
+        self._local_llm_extra_body_error = ft.Text(
+            "",
+            size=13,
+            color=ft.Colors.RED_600,
+            visible=False,
+        )
+        self._local_llm_extra_body_error_key = ""
+        self._local_llm_extra_body_error_kwargs: dict[str, object] = {}
+        self._local_llm_connection_card = self._wrap_card(
+            ft.Column(
+                [
+                    self._local_llm_connection_title,
+                    ft.Container(height=4),
+                    self._local_llm_extra_body_helper,
+                    self._local_llm_base_url,
+                    self._local_llm_model,
+                    self._local_llm_extra_body,
+                    self._local_llm_extra_body_error,
+                ],
+                spacing=8,
+            ),
+            height=None,
+        )
+        self._local_llm_connection_card.visible = False
+
         # === Row 8: Persona (2x2) - Licenses style ===
         self._prompt_editor = PromptEditor(
             on_change=self._on_prompt_change,
@@ -1476,7 +1568,12 @@ class SettingsView(ft.Column):
 
         self._settings_subtab_shell = self._build_settings_subtab_shell(
             {
-                "api": [row1, self._translation_connection_row, api_keys_row],
+                "api": [
+                    row1,
+                    self._translation_connection_row,
+                    self._local_llm_connection_card,
+                    api_keys_row,
+                ],
                 "general": [general_primary_row, general_audio_row, general_vad_row],
                 "prompt": [row7, persona_card],
                 "overlay": [overlay_row1, overlay_row2, overlay_row3],
@@ -1629,6 +1726,8 @@ class SettingsView(ft.Column):
             return "openrouter"
         if settings.provider.llm == LLMProviderName.DEEPSEEK:
             return "deepseek"
+        if settings.provider.llm == LLMProviderName.LOCAL_LLM:
+            return "local_llm"
         return "qwen"
 
     def _active_prompt_key(self) -> str:
@@ -1738,6 +1837,7 @@ class SettingsView(ft.Column):
         target.qwen.llm_model = source.qwen.llm_model
         target.qwen.region = source.qwen.region
         target.deepseek.llm_model = source.deepseek.llm_model
+        target.local_llm = copy.deepcopy(source.local_llm)
         if source.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
             target.managed_identity.verified_hardware_hash = (
                 source.managed_identity.verified_hardware_hash
@@ -1778,6 +1878,154 @@ class SettingsView(ft.Column):
             description=t(f"provider.{provider.value}.description", default=""),
         )
 
+    def _local_llm_extra_body_error_message(
+        self,
+        message_key: str,
+        **kwargs: object,
+    ) -> str:
+        if "key" not in kwargs:
+            return t(message_key, **kwargs)
+        template = t(message_key)
+        with contextlib.suppress(Exception):
+            return template.format(**kwargs)
+        return template
+
+    def _show_local_llm_extra_body_error(self, message_key: str, **kwargs: object) -> None:
+        message = self._local_llm_extra_body_error_message(message_key, **kwargs)
+        self._local_llm_extra_body_error_key = message_key
+        self._local_llm_extra_body_error_kwargs = dict(kwargs)
+        self._local_llm_extra_body_error.value = message
+        self._local_llm_extra_body_error.visible = True
+        self._local_llm_extra_body.error_text = message
+        _update_control_if_mounted(self._local_llm_extra_body)
+        _update_control_if_mounted(self._local_llm_extra_body_error)
+
+    def _on_local_llm_field_change(self, e) -> None:
+        _ = e
+        if not self._settings:
+            return
+        current = self._provider_settings_draft or self._settings
+        if current.provider.llm != LLMProviderName.LOCAL_LLM:
+            return
+        self._ensure_provider_settings_draft()
+        self.has_provider_changes = True
+
+    def _clear_local_llm_extra_body_error(self) -> None:
+        self._local_llm_extra_body_error_key = ""
+        self._local_llm_extra_body_error_kwargs = {}
+        self._local_llm_extra_body_error.value = ""
+        self._local_llm_extra_body_error.visible = False
+        self._local_llm_extra_body.error_text = None
+        _update_control_if_mounted(self._local_llm_extra_body)
+        _update_control_if_mounted(self._local_llm_extra_body_error)
+
+    def _on_local_llm_base_url_change_end(self, e) -> None:
+        _ = e
+        if not self._settings:
+            return
+        raw_value = self._local_llm_base_url.value or ""
+        try:
+            normalized = _normalize_local_llm_base_url(raw_value)
+        except ValueError:
+            self._local_llm_base_url.error_text = t("settings.local_llm.base_url.invalid")
+            _update_control_if_mounted(self._local_llm_base_url)
+            return
+
+        self._local_llm_base_url.error_text = None
+        self._local_llm_base_url.value = normalized
+        current = self._provider_settings_draft or self._settings
+        if current.local_llm.base_url != normalized:
+            draft = self._ensure_provider_settings_draft()
+            draft.local_llm.base_url = normalized
+            self.has_provider_changes = True
+        _update_control_if_mounted(self._local_llm_base_url)
+
+    def _on_local_llm_model_change_end(self, e) -> None:
+        _ = e
+        if not self._settings:
+            return
+        model = (self._local_llm_model.value or "").strip()
+        if not model:
+            self._local_llm_model.error_text = t("settings.local_llm.model.required")
+            _update_control_if_mounted(self._local_llm_model)
+            return
+
+        self._local_llm_model.error_text = None
+        self._local_llm_model.value = model
+        current = self._provider_settings_draft or self._settings
+        if current.local_llm.model != model:
+            draft = self._ensure_provider_settings_draft()
+            draft.local_llm.model = model
+            self.has_provider_changes = True
+        _update_control_if_mounted(self._local_llm_model)
+
+    def _on_local_llm_extra_body_change_end(self, e) -> None:
+        _ = e
+        if not self._settings:
+            return
+        raw = (self._local_llm_extra_body.value or "").strip()
+        try:
+            parsed = (
+                {"reasoning_effort": "none"}
+                if not raw
+                else json.loads(raw, parse_constant=_reject_json_constant)
+            )
+        except json.JSONDecodeError:
+            self._show_local_llm_extra_body_error("settings.local_llm.extra_body.invalid_json")
+            return
+
+        if not isinstance(parsed, dict):
+            self._show_local_llm_extra_body_error("settings.local_llm.extra_body.must_be_object")
+            return
+
+        lowered = {str(key).lower() for key in parsed}
+        reserved = LOCAL_LLM_RESERVED_EXTRA_BODY_KEYS.intersection(lowered)
+        if reserved:
+            self._show_local_llm_extra_body_error(
+                "settings.local_llm.extra_body.reserved_key",
+                key=sorted(reserved)[0],
+            )
+            return
+
+        sensitive = LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS.intersection(lowered)
+        if sensitive:
+            self._show_local_llm_extra_body_error(
+                "settings.local_llm.extra_body.sensitive_key",
+                key=sorted(sensitive)[0],
+            )
+            return
+
+        try:
+            json.dumps(parsed, allow_nan=False)
+        except (TypeError, ValueError):
+            self._show_local_llm_extra_body_error("settings.local_llm.extra_body.not_serializable")
+            return
+
+        normalized = copy.deepcopy(parsed)
+        current = self._provider_settings_draft or self._settings
+        if current.local_llm.extra_body != normalized:
+            draft = self._ensure_provider_settings_draft()
+            draft.local_llm.extra_body = normalized
+            self.has_provider_changes = True
+        self._local_llm_extra_body.value = json.dumps(
+            normalized,
+            ensure_ascii=False,
+            indent=2,
+            allow_nan=False,
+        )
+        self._clear_local_llm_extra_body_error()
+        _update_control_if_mounted(self._local_llm_extra_body)
+
+    def _commit_local_llm_fields_from_controls(self) -> None:
+        if not self._settings:
+            return
+        current = self._provider_settings_draft or self._settings
+        if current.provider.llm != LLMProviderName.LOCAL_LLM:
+            return
+        self._on_local_llm_base_url_change_end(None)
+        self._on_local_llm_model_change_end(None)
+        self._on_local_llm_extra_body_change_end(None)
+
     def _sanitize_provider_apply_settings(self, settings: AppSettings | None) -> AppSettings | None:
         if settings is not None:
             settings.system_prompts = {}
@@ -1800,6 +2048,7 @@ class SettingsView(ft.Column):
         return self._settings.system_prompt
 
     def build_provider_apply_settings(self) -> AppSettings | None:
+        self._commit_local_llm_fields_from_controls()
         return self._sanitize_provider_apply_settings(self._build_settings_with_provider_draft())
 
     def consume_provider_apply_settings(self) -> AppSettings | None:
@@ -1865,6 +2114,16 @@ class SettingsView(ft.Column):
             self._get_translation_connection_display_label(settings),
         )
         self._sync_openrouter_fallback_card(settings)
+        self._local_llm_base_url.value = settings.local_llm.base_url
+        self._local_llm_base_url.error_text = None
+        self._local_llm_model.value = settings.local_llm.model
+        self._local_llm_model.error_text = None
+        self._local_llm_extra_body.value = json.dumps(
+            settings.local_llm.extra_body,
+            ensure_ascii=False,
+            indent=2,
+        )
+        self._clear_local_llm_extra_body_error()
 
         # Qwen Region
         region_label = t(f"region.{settings.qwen.region.value}")
@@ -2095,6 +2354,7 @@ class SettingsView(ft.Column):
         self._deepseek_key.visible = llm == LLMProviderName.DEEPSEEK
         self._sync_openrouter_pkce_button_state(settings)
         self._translation_connection_row.visible = True
+        self._local_llm_connection_card.visible = llm == LLMProviderName.LOCAL_LLM
         self._sync_openrouter_fallback_card(settings)
 
         qwen_regions: set[QwenRegion] = set()
@@ -2235,6 +2495,7 @@ class SettingsView(ft.Column):
                 TranslationModel.GEMINI_3_FLASH,
                 TranslationModel.GEMINI_31_FLASH_LITE,
                 TranslationModel.QWEN_35_PLUS,
+                TranslationModel.LOCAL_LLM,
             )
         ]
         display_settings = self._build_settings_with_provider_draft()
@@ -2341,6 +2602,7 @@ class SettingsView(ft.Column):
             self._api_keys_column.update()
             self._llm_text.update()
             self._translation_connection_row.update()
+            self._local_llm_connection_card.update()
 
     def _on_llm_selected(self, value: str) -> None:
         """Handle LLM provider selection from modal."""
@@ -3307,6 +3569,22 @@ class SettingsView(ft.Column):
         self._low_latency_title.value = t("settings.low_latency_mode")
         self._translation_connection_title.value = t("settings.translation_connection")
         self._openrouter_fallback_title.value = t("settings.openrouter_fallback")
+        self._local_llm_connection_title.value = t("settings.local_llm.connection")
+        self._local_llm_base_url.label = t("settings.local_llm.base_url")
+        self._local_llm_model.label = t("settings.local_llm.model")
+        self._local_llm_extra_body.label = t("settings.local_llm.extra_body")
+        self._local_llm_extra_body_helper.value = t("settings.local_llm.extra_body.description")
+        if self._local_llm_base_url.error_text:
+            self._local_llm_base_url.error_text = t("settings.local_llm.base_url.invalid")
+        if self._local_llm_model.error_text:
+            self._local_llm_model.error_text = t("settings.local_llm.model.required")
+        if self._local_llm_extra_body_error.visible:
+            error_key = self._local_llm_extra_body_error_key
+            error_kwargs = self._local_llm_extra_body_error_kwargs
+            if error_key:
+                message = self._local_llm_extra_body_error_message(error_key, **error_kwargs)
+                self._local_llm_extra_body_error.value = message
+                self._local_llm_extra_body.error_text = message
         self._persona_title.value = t("settings.section.persona")
         self._custom_vocab_title.value = t("settings.section.custom_vocabulary")
         self._custom_vocab_info_icon.tooltip = t("settings.custom_vocabulary_tooltip")

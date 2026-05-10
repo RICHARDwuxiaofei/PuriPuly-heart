@@ -21,6 +21,11 @@ from puripuly_heart.providers.llm.gemini import (
     GeminiLLMProvider,
     GoogleGenaiGeminiClient,
 )
+from puripuly_heart.providers.llm.local_openai import (
+    HttpxLocalOpenAIClient,
+    LocalOpenAIClient,
+    LocalOpenAICompatibleLLMProvider,
+)
 from puripuly_heart.providers.llm.openrouter import (
     HttpxOpenRouterClient,
     OpenRouterClient,
@@ -93,6 +98,8 @@ class TranslateOnlyLLMProvider(LLMProvider):
         HttpxQwenClient,
         DeepSeekLLMProvider,
         HttpxDeepSeekClient,
+        LocalOpenAICompatibleLLMProvider,
+        HttpxLocalOpenAIClient,
     ],
 )
 def test_production_llm_classes_do_not_expose_stream_translate(provider_type: type) -> None:
@@ -107,6 +114,7 @@ def test_production_llm_classes_do_not_expose_stream_translate(provider_type: ty
         QwenClient,
         AsyncQwenClient,
         DeepSeekClient,
+        LocalOpenAIClient,
     ],
 )
 def test_llm_client_contracts_do_not_require_stream_translate(client_contract: type) -> None:

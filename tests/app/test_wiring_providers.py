@@ -50,6 +50,7 @@ from puripuly_heart.core.storage.secrets import InMemorySecretStore
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.providers.llm.deepseek import DeepSeekLLMProvider
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
+from puripuly_heart.providers.llm.local_openai import LocalOpenAICompatibleLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -239,6 +240,57 @@ def test_create_llm_provider_deepseek_passes_runtime_logging() -> None:
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, DeepSeekLLMProvider)
     assert provider.inner.runtime_logging is runtime_logging
+
+
+def test_create_llm_provider_local_llm_uses_settings_without_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    settings.local_llm.base_url = "http://127.0.0.1:11434/v1"
+    settings.local_llm.model = "llama3.1:8b"
+    settings.local_llm.extra_body = {"think": False}
+    settings.llm.concurrency_limit = 2
+    secrets = InMemorySecretStore()
+    monkeypatch.delenv("LOCAL_LLM_API_KEY", raising=False)
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, LocalOpenAICompatibleLLMProvider)
+    assert provider.inner.base_url == "http://127.0.0.1:11434/v1"
+    assert provider.inner.model == "llama3.1:8b"
+    assert provider.inner.api_key == ""
+    assert provider.inner.extra_body == {"think": False}
+    assert provider.semaphore._value == 2  # type: ignore[attr-defined]
+
+
+def test_create_llm_provider_local_llm_uses_optional_env_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    secrets = InMemorySecretStore()
+    monkeypatch.setenv("LOCAL_LLM_API_KEY", "local-secret")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, LocalOpenAICompatibleLLMProvider)
+    assert provider.inner.api_key == "local-secret"
+
+
+def test_create_llm_provider_local_llm_secret_store_key_takes_precedence_over_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    secrets = InMemorySecretStore()
+    secrets.set("local_llm_api_key", "store-secret")
+    monkeypatch.setenv("LOCAL_LLM_API_KEY", "env-secret")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, LocalOpenAICompatibleLLMProvider)
+    assert provider.inner.api_key == "store-secret"
 
 
 def test_create_llm_provider_openrouter_uses_secret_and_model() -> None:
