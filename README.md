@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.1-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.0.2-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -67,7 +67,7 @@ So I built one that can.
 → Yes, but again, only later. At first, just install and authenticate via Discord to start using it.
 
 - **How polished is the feature for translating the other person's voice?**
-→ It works well for one-on-one in low-noise environments. Up to three people is fine, but beyond that we can't guarantee usability. In those cases, only Deepgram, which is robust to noise, works, with limitations.
+→ It works best for one-on-one conversations in low-noise environments. Up to three people may be okay, but usability is not guaranteed. When using it in VRChat, use Earmuff to control the environment.
 
 - **Voice recognition is poor / slow.**
 → If you're using local Qwen ASR, we recommend switching to a cloud STT service.
@@ -97,6 +97,7 @@ So I built one that can.
 | **Gemini 3 Flash** | 1,630 | 1,130 | 1,230 | 720 |
 | **Gemini 3.1 Flash-Lite** | 3,260 | 1,720 | 1,970 | 930 |
 | **Qwen 3.5 Plus** | 7,090 | 2,400 | — | — |
+| **Local LLMs (Ollama)** | Unlimited | 3,660 | 5,000 | 1,290 |
 
 ### Cost per Utterance
 
@@ -107,6 +108,7 @@ So I built one that can.
 | **Gemini 3 Flash** | ~$0.0006 | ~$0.0009 | ~$0.0008 | ~$0.0014 |
 | **Gemini 3.1 Flash-Lite** | ~$0.0003 | ~$0.0006 | ~$0.0005 | ~$0.0011 |
 | **Qwen 3.5 Plus** | ~$0.0001 | ~$0.0004 | — | — |
+| **Local LLMs (Ollama)** | $0 | ~$0.0003 | ~$0.0002 | ~$0.0008 |
 
 *   *Based on (Input 950 tokens + Output 12 tokens) × 1.2 avg LLM calls per utterance.*
 *   *Uses per Dollar is derived from the un-rounded values in the Cost per Utterance table.*
@@ -125,6 +127,8 @@ So I built one that can.
 
 ---
 
+# If you run into problems or anything feels unclear, feel free to DM me on [Twitter/X](https://x.com/kapitalismho).
+
 ## Usage
 
 1. Download the latest version from the [Download page](https://github.com/kapitalismho/PuriPuly-heart/releases/latest).
@@ -137,7 +141,7 @@ So I built one that can.
 5. Click the **Subtitles** button to turn on VR subtitles.
 6. (Optional) Click the **Peer** button to enable translation of the other person's voice.
 
-   > Peer voice translation needs a quiet space to work properly. We recommend it for 1-on-1 conversations.
+   > Peer voice translation needs a low-noise space to work properly. When using it in VRChat, use Earmuff to control the environment.
 
 7. Enable OSC in VRChat: Action menu → Settings → OSC → Enable.
 
@@ -154,13 +158,13 @@ If Soniox/Gemini/Deepgram are blocked in your region, please use the following c
 
    > When using the managed connection mode, choose **Managed (China)** instead of **Managed**.
 
-If Discord authentication is difficult, please reach out directly via [Twitter DM](https://x.com/kapitalismho).
-
 ---
 
 ### Using Your Own API Keys
 
 Follow the guide that matches the service you want to use.
+
+We recommend using the Gemma 4 model through OpenRouter.
 
 By the way, while you're setting things up, why not configure STT too?
 PuriPuly delivers the best experience when paired with a cloud STT.

@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.1-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.0.2-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -67,7 +67,7 @@
 → 是的，但同样是稍后再说。一开始只需安装并通过 Discord 验证即可使用。
 
 - **翻译对方语音的功能完成度如何？**
-→ 在噪音少的环境下两人对话时可以提供良好体验。三人也尚可，但更多人时无法保证可用性。这种情况下只有抗噪能力强的 Deepgram 可在有限范围内工作。
+→ 在噪音较少的 1 对 1 环境下效果最好。三人对话也可能可用，但无法保证体验。若在 VRChat 中使用，请通过 Earmuff 功能控制环境。
 
 - **语音识别不准 / 速度慢**
 → 如果您正在使用本地 Qwen ASR，建议改用云端 STT 服务。
@@ -97,6 +97,7 @@
 | **Gemini 3 Flash** | 1,630 次 | 1,130 次 | 1,230 次 | 720 次 |
 | **Gemini 3.1 Flash-Lite** | 3,260 次 | 1,720 次 | 1,970 次 | 930 次 |
 | **Qwen 3.5 Plus** | 7,090 次 | 2,400 次 | — | — |
+| **Local LLMs (Ollama)** | 无限制 | 3,660 次 | 5,000 次 | 1,290 次 |
 
 ### 每次发言成本
 
@@ -107,6 +108,7 @@
 | **Gemini 3 Flash** | ~0.004 元 | ~0.006 元 | ~0.006 元 | ~0.010 元 |
 | **Gemini 3.1 Flash-Lite** | ~0.002 元 | ~0.004 元 | ~0.004 元 | ~0.008 元 |
 | **Qwen 3.5 Plus** | ~0.001 元 | ~0.003 元 | — | — |
+| **Local LLMs (Ollama)** | 0 元 | ~0.002 元 | ~0.001 元 | ~0.006 元 |
 
 *   *(假设输入 950 token + 输出 12 token) × 每次发言平均 LLM 调用次数 1.2 次*
 *   *每 1 美元可用次数以「每次发言成本」表中四舍五入前的计算值为准*
@@ -126,6 +128,8 @@
 
 ---
 
+# 如果遇到问题或有不明确的地方，欢迎随时通过 [Twitter/X](https://x.com/kapitalismho) 发 DM 联系我。
+
 ## 使用方法
 
 1. 从[下载页面](https://github.com/kapitalismho/PuriPuly-heart/releases/latest)下载最新版本
@@ -138,7 +142,7 @@
 5. 点击 **Subtitles** 按钮开启 VR 字幕
 6. （可选）点击 **Peer** 按钮开启对方语音翻译
 
-   > 对方语音翻译功能正常工作需要安静的环境。建议在 1 对 1 对话中使用。
+   > 对方语音翻译功能正常工作需要噪音较少的环境。若在 VRChat 中使用，请通过 Earmuff 功能控制环境。
 
 7. 在 VRChat 中启用 OSC：Action menu → Settings → OSC → Enable
 
@@ -155,13 +159,13 @@
 
    > 使用托管连接方式时，请选择 **托管（中国）**，而不是 **托管**。
 
-如果 Discord 验证较为困难，请通过 [Twitter DM](https://x.com/kapitalismho) 直接联系。
-
 ---
 
 ### 使用您自己的 API 密钥
 
 请根据您要使用的服务，参考对应指南操作。
+
+建议通过 OpenRouter 使用 Gemma 4 模型。
 
 如果方便的话，既然要设置，何不顺便把 STT 也一起配置好呢？
 PuriPuly 与云端 STT 结合时能提供最佳体验。

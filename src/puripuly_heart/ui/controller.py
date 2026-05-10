@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import json
 import logging
 import os
 import secrets
@@ -101,6 +102,7 @@ from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
 from puripuly_heart.providers.llm.deepseek import DeepSeekLLMProvider
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
+from puripuly_heart.providers.llm.local_openai import LocalOpenAICompatibleLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterKeyMetadata, OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -153,6 +155,10 @@ DISCORD_AUTH_ERROR_KEY_BY_SUBCODE = {
     "oauth_session_expired": "discord_auth.error.expired",
     "loopback_unavailable": "discord_auth.error.loopback_unavailable",
 }
+
+
+def _canonical_json_signature(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass(slots=True)
@@ -380,20 +386,23 @@ class GuiController:
 
             # LLM: check current provider's verification status
             llm_provider = self.settings.provider.llm.value
-            # Map llm provider to api_key_verified field name
-            llm_key_map = {
-                "gemini": "google",
-                "openrouter": "openrouter",
-                "deepseek": "deepseek",
-                "qwen": self._get_alibaba_verified_key(),
-            }
-            llm_verified_key = llm_key_map.get(llm_provider, llm_provider)
-            llm_verified = getattr(self.settings.api_key_verified, llm_verified_key, False)
-            dash.translation_needs_key = (
-                False
-                if self._managed_openrouter_can_attempt_translation()
-                else (self.hub.llm is None) or (not llm_verified)
-            )
+            if self._llm_provider_requires_secret(self.settings.provider.llm):
+                # Map llm provider to api_key_verified field name
+                llm_key_map = {
+                    "gemini": "google",
+                    "openrouter": "openrouter",
+                    "deepseek": "deepseek",
+                    "qwen": self._get_alibaba_verified_key(),
+                }
+                llm_verified_key = llm_key_map.get(llm_provider, llm_provider)
+                llm_verified = getattr(self.settings.api_key_verified, llm_verified_key, False)
+                dash.translation_needs_key = (
+                    False
+                    if self._managed_openrouter_can_attempt_translation()
+                    else (self.hub.llm is None) or (not llm_verified)
+                )
+            else:
+                dash.translation_needs_key = False
 
             # Set initial enabled states (all start as off/gray)
             dash.set_translation_enabled(False)
@@ -431,6 +440,14 @@ class GuiController:
             STTProviderName.DEEPGRAM,
             STTProviderName.QWEN_ASR,
             STTProviderName.SONIOX,
+        )
+
+    def _llm_provider_requires_secret(self, provider: LLMProviderName) -> bool:
+        return provider in (
+            LLMProviderName.GEMINI,
+            LLMProviderName.OPENROUTER,
+            LLMProviderName.QWEN,
+            LLMProviderName.DEEPSEEK,
         )
 
     def _selected_stt_provider(self) -> STTProviderName | None:
@@ -856,6 +873,16 @@ class GuiController:
                 if settings.provider.llm == LLMProviderName.DEEPSEEK
                 else None
             ),
+            (
+                (
+                    settings.local_llm.backend,
+                    settings.local_llm.base_url,
+                    settings.local_llm.model,
+                    _canonical_json_signature(settings.local_llm.extra_body),
+                )
+                if settings.provider.llm == LLMProviderName.LOCAL_LLM
+                else None
+            ),
         )
 
     def _sync_signature_caches(self, settings: AppSettings) -> None:
@@ -886,6 +913,7 @@ class GuiController:
         target.qwen.llm_model = source.qwen.llm_model
         target.qwen.region = source.qwen.region
         target.deepseek.llm_model = source.deepseek.llm_model
+        target.local_llm = copy.deepcopy(source.local_llm)
         if source.openrouter.selected_source == OpenRouterCredentialSource.MANAGED:
             target.managed_identity.verified_hardware_hash = (
                 source.managed_identity.verified_hardware_hash
@@ -2345,7 +2373,9 @@ class GuiController:
         # Update dashboard status
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
-            dash.set_translation_needs_key(llm is None)
+            dash.set_translation_needs_key(
+                (llm is None) and self._llm_provider_requires_secret(self.settings.provider.llm)
+            )
 
         await self._refresh_managed_trial_usage_state_best_effort()
 
@@ -2479,7 +2509,10 @@ class GuiController:
 
         dash = getattr(self.app, "view_dashboard", None)
         if dash is not None:
-            dash.set_translation_needs_key(self.hub.llm is None)
+            dash.set_translation_needs_key(
+                (self.hub.llm is None)
+                and self._llm_provider_requires_secret(self.settings.provider.llm)
+            )
             dash.set_stt_needs_key(
                 self._dashboard_stt_needs_key(stt_available=self.hub.stt is not None)
             )
@@ -3274,15 +3307,28 @@ class GuiController:
                     llm_valid = bool(key) and await DeepSeekLLMProvider.verify_api_key(key)
                 elif provider_name == "qwen":
                     llm_valid = await _verify_alibaba_selected()
+                elif provider_name == LLMProviderName.LOCAL_LLM:
+                    key = (
+                        (secrets.get("local_llm_api_key") if secrets is not None else None)
+                        or os.getenv("LOCAL_LLM_API_KEY")
+                        or ""
+                    )
+                    llm_valid = await LocalOpenAICompatibleLLMProvider.verify_connection(
+                        base_url=self.settings.local_llm.base_url,
+                        model=self.settings.local_llm.model,
+                        api_key=key,
+                        extra_body=self.settings.local_llm.extra_body,
+                    )
                 else:
                     # Assume valid for others or if no key usage known
                     llm_valid = True
             except Exception:
                 llm_valid = False
 
-        # If LLM verification failed, force needs_key = True even if provider object exists
+        llm_requires_secret = self._llm_provider_requires_secret(self.settings.provider.llm)
+        # If LLM verification failed, only key-backed providers should show needs-key state.
         if not llm_valid:
-            dash.set_translation_needs_key(True)
+            dash.set_translation_needs_key(llm_requires_secret)
             # If it was enabled, we potentially disable it or just let the warning show on next interaction
             # User request: "Validation Fail -> Orange". Implicitly, if it's ON and fails, maybe we should turn it OFF?
             # For now, setting needs_key=True ensures that if they try to toggle, it warns.
@@ -3292,6 +3338,8 @@ class GuiController:
             dash.set_translation_enabled(False)  # Visually turn off
         else:
             dash.set_translation_needs_key(False)
+            if self.settings.provider.llm == LLMProviderName.LOCAL_LLM and self.hub is not None:
+                dash.set_translation_enabled(bool(self.hub.translation_enabled))
 
         # 2. Verify STT
         stt_requires_secret = self._stt_provider_requires_secret(self.settings.provider.stt)

@@ -21,6 +21,8 @@ from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
     AppSettings,
     LLMProviderName,
+    LocalLLMBackend,
+    LocalLLMSettings,
     OpenRouterCredentialSource,
     OpenRouterFallbackSelectionAlias,
     OpenRouterLLMModel,
@@ -535,6 +537,52 @@ def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[s
 
 
 @pytest.mark.asyncio
+async def test_start_local_llm_without_runtime_does_not_show_api_key_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.LOCAL_LLM
+    settings.translation = TranslationSettings(
+        model=TranslationModel.LOCAL_LLM,
+        connection=TranslationConnection.OLLAMA,
+    )
+    dash = DummyDashboard()
+    hub = DummyHub(llm=None, stt=object())
+
+    class FakeBridge:
+        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
+            _ = (app, event_queue, runtime_logging)
+
+        async def run(self) -> None:
+            await asyncio.sleep(0)
+
+    async def fake_init_pipeline(self: GuiController) -> None:
+        self.hub = hub
+
+    monkeypatch.delenv("LOCAL_LLM_API_KEY", raising=False)
+    monkeypatch.setattr(GuiController, "_load_or_init_settings", lambda self, path: settings)
+    monkeypatch.setattr(GuiController, "_sync_ui_from_settings", lambda self: None)
+    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+    monkeypatch.setattr(controller_module, "set_locale", lambda _locale: None)
+    monkeypatch.setattr(controller_module, "UIEventBridge", FakeBridge)
+    monkeypatch.setattr(
+        controller_module, "create_secret_store", lambda *_a, **_k: DummySecrets({})
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "inspect_local_stt_install_state",
+        lambda *_a, **_k: controller_module.LocalSTTInstallState(status="ready"),
+    )
+
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    await controller.start()
+    await asyncio.sleep(0)
+
+    assert dash.translation_needs_key is False
+    assert dash.translation_enabled is False
+
+
+@pytest.mark.asyncio
 async def test_verify_and_update_status_handles_mixed_provider_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -768,6 +816,7 @@ async def test_set_translation_enabled_disables_when_llm_missing() -> None:
     dash = DummyDashboard()
     controller = _make_controller(app=SimpleNamespace(view_dashboard=dash, view_logs=logs))
     controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.GEMINI
     controller.hub = DummyHub(llm=None)
 
     await controller.set_translation_enabled(True)
@@ -1985,6 +2034,35 @@ def test_build_llm_provider_signature_tracks_openrouter_provider_routing() -> No
     ) != controller._build_llm_provider_signature(deepseek_only)
 
 
+def test_build_llm_provider_signature_tracks_local_llm_runtime_fields() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    base = AppSettings()
+    base.provider.llm = LLMProviderName.LOCAL_LLM
+    base.local_llm = LocalLLMSettings(
+        backend=LocalLLMBackend.OLLAMA,
+        base_url="http://127.0.0.1:11434/v1",
+        model="llama3.1:8b",
+        extra_body={"thinking": {"type": "disabled", "budget": 0}},
+    )
+
+    same_json_different_order = copy.deepcopy(base)
+    same_json_different_order.local_llm.extra_body = {"thinking": {"budget": 0, "type": "disabled"}}
+    changed_model = copy.deepcopy(base)
+    changed_model.local_llm.model = "qwen2.5:7b"
+    changed_body = copy.deepcopy(base)
+    changed_body.local_llm.extra_body = {"enable_thinking": False}
+
+    assert controller._build_llm_provider_signature(
+        base
+    ) == controller._build_llm_provider_signature(same_json_different_order)
+    assert controller._build_llm_provider_signature(
+        base
+    ) != controller._build_llm_provider_signature(changed_model)
+    assert controller._build_llm_provider_signature(
+        base
+    ) != controller._build_llm_provider_signature(changed_body)
+
+
 def test_merge_settings_tab_apply_copies_translation_selection_for_provider_apply() -> None:
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
@@ -2014,6 +2092,35 @@ def test_merge_settings_tab_apply_copies_translation_selection_for_provider_appl
         == TranslationConnection.MANAGED_CHINA
     )
     assert merged.openrouter.provider_routing == OpenRouterProviderRouting.DEEPSEEK_ONLY
+
+
+def test_merge_settings_tab_apply_copies_local_llm_settings_for_provider_apply() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.GEMINI
+
+    pending = copy.deepcopy(controller.settings)
+    pending.provider.llm = LLMProviderName.LOCAL_LLM
+    pending.translation = TranslationSettings(
+        model=TranslationModel.LOCAL_LLM,
+        connection=TranslationConnection.OLLAMA,
+        connection_history={TranslationModel.LOCAL_LLM.value: TranslationConnection.OLLAMA},
+    )
+    pending.local_llm = LocalLLMSettings(
+        backend=LocalLLMBackend.OLLAMA,
+        base_url="http://mac-studio.local:11434/v1",
+        model="gemma3:4b",
+        extra_body={"think": False},
+    )
+
+    merged = controller.merge_settings_tab_apply_with_current_languages(pending)
+
+    assert merged.provider.llm == LLMProviderName.LOCAL_LLM
+    assert merged.translation.model == TranslationModel.LOCAL_LLM
+    assert merged.translation.connection == TranslationConnection.OLLAMA
+    assert merged.local_llm.base_url == "http://mac-studio.local:11434/v1"
+    assert merged.local_llm.model == "gemma3:4b"
+    assert merged.local_llm.extra_body == {"think": False}
 
 
 def test_stt_runtime_signature_includes_custom_vocabulary_state() -> None:
@@ -2556,6 +2663,43 @@ async def test_rebuild_pipeline_closes_previous_peer_runtime_before_replacement(
 
     assert controller._peer_runtime is new_runtime
     assert controller._peer_runtime.closed is False
+
+
+@pytest.mark.asyncio
+async def test_rebuild_pipeline_local_llm_without_runtime_does_not_show_api_key_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.LOCAL_LLM
+    controller.hub = DummyHub(llm=object(), stt=object())
+    new_hub = DummyHub(llm=None, stt=object())
+
+    class FakeUIEventBridge:
+        def __init__(self, *, app, event_queue, runtime_logging=None) -> None:
+            _ = (app, event_queue, runtime_logging)
+
+        async def run(self) -> None:
+            return None
+
+    async def fake_init_pipeline(self: GuiController) -> None:
+        self.hub = new_hub
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", lambda self, value: asyncio.sleep(0))
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, *, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(controller_module, "UIEventBridge", FakeUIEventBridge)
+    monkeypatch.setattr(GuiController, "_verify_and_update_status", lambda self: asyncio.sleep(0))
+    monkeypatch.setattr(GuiController, "_init_pipeline", fake_init_pipeline)
+
+    await controller._rebuild_pipeline(rebuild_stt=True)
+
+    assert dash.translation_needs_key is False
+    assert dash.translation_enabled is False
 
 
 @pytest.mark.asyncio
@@ -7264,6 +7408,31 @@ async def test_rebuild_llm_provider_logs_basic_failure_when_secret_store_setup_f
     assert dash.translation_needs_key is True
     assert controller._runtime_logging.basic_messages == [
         (logging.ERROR, "LLM provider not available: boom")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rebuild_llm_provider_local_llm_unavailable_does_not_show_api_key_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.LOCAL_LLM
+    controller.hub = DummyHub(llm=object())
+
+    monkeypatch.setattr(
+        controller_module, "create_secret_store", lambda *_a, **_k: DummySecrets({})
+    )
+    monkeypatch.setattr(controller_module, "create_llm_provider", lambda *_a, **_k: None)
+
+    await controller._rebuild_llm_provider()
+
+    assert controller.hub.llm is None
+    assert dash.translation_needs_key is False
+    assert controller._runtime_logging.basic_messages == [
+        (logging.ERROR, "LLM provider not available")
     ]
 
 

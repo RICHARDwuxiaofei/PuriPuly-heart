@@ -77,6 +77,18 @@ def test_settings_view_switches_prompt_on_llm_change(monkeypatch) -> None:
     assert pending.provider.llm == LLMProviderName.QWEN
     assert pending.qwen.llm_model == QwenLLMModel.QWEN_35_PLUS
 
+    view._on_llm_selected(TranslationModel.LOCAL_LLM.value)
+    pending = view.build_provider_apply_settings()
+
+    assert view._prompt_editor.value == load_prompt_for_provider("local_llm")
+    assert view._prompt_for_text.value == t(
+        "settings.prompt_for",
+        provider=provider_label(LLMProviderName.LOCAL_LLM.value),
+    )
+    assert settings.provider.llm == LLMProviderName.OPENROUTER
+    assert pending is not None
+    assert pending.provider.llm == LLMProviderName.LOCAL_LLM
+
     view._on_llm_selected(TranslationModel.GEMINI_3_FLASH.value)
     pending = view.build_provider_apply_settings()
 
@@ -324,8 +336,10 @@ def test_settings_view_llm_modal_lists_logical_translation_models_once(monkeypat
         TranslationModel.GEMINI_3_FLASH.value,
         TranslationModel.GEMINI_31_FLASH_LITE.value,
         TranslationModel.QWEN_35_PLUS.value,
+        TranslationModel.LOCAL_LLM.value,
     ]
     assert TranslationModel.QWEN_35_PLUS.value in values
+    assert TranslationModel.LOCAL_LLM.value in values
     assert all("qwen35_flash" not in value for value in values)
 
 

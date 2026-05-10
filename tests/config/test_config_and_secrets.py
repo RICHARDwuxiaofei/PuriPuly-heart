@@ -18,6 +18,8 @@ from puripuly_heart.config.llm_profiles import (
 from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
     LEGACY_QWEN_DEFAULT_PROMPT,
+    LOCAL_LLM_RESERVED_EXTRA_BODY_KEYS,
+    LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS,
     SETTINGS_SCHEMA_VERSION,
     AppSettings,
     AudioSettings,
@@ -25,6 +27,8 @@ from puripuly_heart.config.settings import (
     DeepSeekSettings,
     GeminiLLMModel,
     LLMProviderName,
+    LocalLLMBackend,
+    LocalLLMSettings,
     OpenRouterCredentialSource,
     OpenRouterFallbackSelectionAlias,
     OpenRouterLLMModel,
@@ -242,7 +246,7 @@ def test_migrate_v17_strips_directsound_host_api_before_migration_and_preserves_
 
 
 def test_migrate_v18_preserves_directsound_when_removing_legacy_osc_rate_limits() -> None:
-    assert SETTINGS_SCHEMA_VERSION == 21
+    assert SETTINGS_SCHEMA_VERSION == 22
 
     raw = to_dict(AppSettings())
     raw["settings_version"] = 17
@@ -286,7 +290,7 @@ def test_load_settings_persists_v17_directsound_migration(tmp_path) -> None:
 
 
 def test_load_settings_persists_v18_osc_rate_limit_key_removal(tmp_path) -> None:
-    assert SETTINGS_SCHEMA_VERSION == 21
+    assert SETTINGS_SCHEMA_VERSION == 22
 
     path = tmp_path / "settings.json"
     raw = to_dict(AppSettings())
@@ -348,7 +352,50 @@ def test_translation_model_public_member_names_and_values_match_plan() -> None:
         ("GEMINI_3_FLASH", "gemini3_flash"),
         ("GEMINI_31_FLASH_LITE", "gemini31_flash_lite"),
         ("QWEN_35_PLUS", "qwen35_plus"),
+        ("LOCAL_LLM", "local_llm"),
     )
+
+
+def test_local_llm_enum_values_are_stable() -> None:
+    assert LLMProviderName.LOCAL_LLM.value == "local_llm"
+    assert TranslationModel.LOCAL_LLM.value == "local_llm"
+    assert TranslationConnection.OLLAMA.value == "ollama"
+    assert LocalLLMBackend.OLLAMA.value == "ollama"
+
+
+def test_local_llm_settings_default_and_roundtrip() -> None:
+    settings = from_dict({})
+
+    assert settings.local_llm.backend == LocalLLMBackend.OLLAMA
+    assert settings.local_llm.base_url == "http://127.0.0.1:11434/v1"
+    assert settings.local_llm.model == "llama3.1:8b"
+    assert settings.local_llm.extra_body == {"reasoning_effort": "none"}
+
+    settings.translation = TranslationSettings(
+        model=TranslationModel.LOCAL_LLM,
+        connection=TranslationConnection.OLLAMA,
+    )
+    settings.local_llm.base_url = "http://192.168.0.25:11434/v1/"
+    settings.local_llm.model = "qwen2.5:7b"
+    settings.local_llm.extra_body = {"enable_thinking": False}
+    materialize_translation_settings(settings)
+
+    persisted = to_dict(settings)
+    assert persisted["provider"]["llm"] == LLMProviderName.LOCAL_LLM.value
+    assert persisted["local_llm"] == {
+        "backend": LocalLLMBackend.OLLAMA.value,
+        "base_url": "http://192.168.0.25:11434/v1",
+        "model": "qwen2.5:7b",
+        "extra_body": {"enable_thinking": False},
+    }
+
+    loaded = from_dict(persisted)
+    assert loaded.provider.llm == LLMProviderName.LOCAL_LLM
+    assert loaded.translation.model == TranslationModel.LOCAL_LLM
+    assert loaded.translation.connection == TranslationConnection.OLLAMA
+    assert loaded.local_llm.base_url == "http://192.168.0.25:11434/v1"
+    assert loaded.local_llm.model == "qwen2.5:7b"
+    assert loaded.local_llm.extra_body == {"enable_thinking": False}
 
 
 def test_translation_settings_defaults_to_gemma_managed_with_only_gemma_history() -> None:
@@ -388,11 +435,249 @@ def test_public_translation_connection_helpers_match_model_matrix() -> None:
     assert supported_translation_connections(TranslationModel.QWEN_35_PLUS) == (
         TranslationConnection.OFFICIAL_BYOK,
     )
+    assert supported_translation_connections(TranslationModel.LOCAL_LLM) == (
+        TranslationConnection.OLLAMA,
+    )
     assert default_translation_connection(TranslationModel.GEMMA4) == TranslationConnection.MANAGED
     assert (
         default_translation_connection(TranslationModel.GEMINI_3_FLASH)
         == TranslationConnection.OFFICIAL_BYOK
     )
+    assert (
+        default_translation_connection(TranslationModel.LOCAL_LLM) == TranslationConnection.OLLAMA
+    )
+
+
+def test_supported_translation_connections_include_ollama_for_local_model() -> None:
+    assert supported_translation_connections(TranslationModel.LOCAL_LLM) == (
+        TranslationConnection.OLLAMA,
+    )
+    assert (
+        default_translation_connection(TranslationModel.LOCAL_LLM) == TranslationConnection.OLLAMA
+    )
+
+
+def test_from_dict_local_llm_provider_infers_translation_settings() -> None:
+    data = to_dict(AppSettings())
+    data["provider"]["llm"] = LLMProviderName.LOCAL_LLM.value
+    data["local_llm"] = {
+        "backend": "ollama",
+        "base_url": "http://127.0.0.1:11434/v1",
+        "model": "llama3.1:8b",
+        "extra_body": {"think": False},
+    }
+    data.pop("translation", None)
+
+    loaded = from_dict(data)
+
+    assert loaded.translation.model == TranslationModel.LOCAL_LLM
+    assert loaded.translation.connection == TranslationConnection.OLLAMA
+    assert loaded.provider.llm == LLMProviderName.LOCAL_LLM
+
+
+def test_from_dict_roundtrips_raw_local_llm_strings() -> None:
+    loaded = from_dict(
+        {
+            "provider": {"llm": "local_llm"},
+            "translation": {"model": "local_llm", "connection": "ollama"},
+            "local_llm": {
+                "backend": "ollama",
+                "base_url": "http://mac-studio.local:11434/v1/",
+                "model": "gemma3:4b",
+                "extra_body": {"thinking": {"type": "disabled"}},
+            },
+        }
+    )
+
+    assert loaded.provider.llm == LLMProviderName.LOCAL_LLM
+    assert loaded.translation.model == TranslationModel.LOCAL_LLM
+    assert loaded.translation.connection == TranslationConnection.OLLAMA
+    assert loaded.local_llm.backend == LocalLLMBackend.OLLAMA
+    assert loaded.local_llm.base_url == "http://mac-studio.local:11434/v1"
+    assert loaded.local_llm.model == "gemma3:4b"
+    assert loaded.local_llm.extra_body == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.parametrize("key", sorted(LOCAL_LLM_RESERVED_EXTRA_BODY_KEYS))
+def test_local_llm_rejects_reserved_extra_body_keys(key: str) -> None:
+    with pytest.raises(ValueError, match=key):
+        LocalLLMSettings(extra_body={key: True}).validate()
+
+
+@pytest.mark.parametrize("key", sorted(LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS))
+def test_local_llm_rejects_sensitive_extra_body_keys(key: str) -> None:
+    with pytest.raises(ValueError, match=key):
+        LocalLLMSettings(extra_body={key: "do-not-persist"}).validate()
+
+
+def test_local_llm_rejects_non_json_serializable_extra_body() -> None:
+    with pytest.raises(ValueError, match="JSON serializable"):
+        LocalLLMSettings(extra_body={"callback": object()}).validate()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=["nan", "infinity", "negative_infinity"],
+)
+def test_local_llm_validate_rejects_non_standard_json_constants_extra_body(value: float) -> None:
+    with pytest.raises(ValueError, match="JSON serializable"):
+        LocalLLMSettings(extra_body={"temperature": value}).validate()
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "ftp://127.0.0.1:11434/v1",
+        "http://127.0.0.1:11434/v1?debug=true",
+        "http://127.0.0.1:11434/v1#fragment",
+        "http://user@127.0.0.1:11434/v1",
+        "http://user:pass@127.0.0.1:11434/v1",
+        "http://@127.0.0.1:11434/v1",
+        "http://127.0.0.1:99999/v1",
+    ],
+)
+def test_local_llm_validate_rejects_invalid_base_url(base_url: str) -> None:
+    with pytest.raises(ValueError, match="base url"):
+        LocalLLMSettings(base_url=base_url).validate()
+
+
+def test_local_llm_validate_rejects_empty_model() -> None:
+    with pytest.raises(ValueError, match="model"):
+        LocalLLMSettings(model="   ").validate()
+
+
+def test_local_llm_extra_body_key_sets_match_provider_constants() -> None:
+    from puripuly_heart.providers.llm.local_openai import (
+        LOCAL_OPENAI_RESERVED_EXTRA_BODY_KEYS,
+        LOCAL_OPENAI_SENSITIVE_EXTRA_BODY_KEYS,
+    )
+
+    assert LOCAL_LLM_RESERVED_EXTRA_BODY_KEYS == LOCAL_OPENAI_RESERVED_EXTRA_BODY_KEYS
+    assert LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS == LOCAL_OPENAI_SENSITIVE_EXTRA_BODY_KEYS
+
+
+def test_from_dict_defaults_malformed_local_llm_settings() -> None:
+    loaded = from_dict(
+        {
+            "provider": {"llm": "local_llm"},
+            "local_llm": {
+                "backend": "unknown",
+                "base_url": "",
+                "model": "",
+                "extra_body": ["not", "a", "dict"],
+            },
+        }
+    )
+
+    assert loaded.local_llm.backend == LocalLLMBackend.OLLAMA
+    assert loaded.local_llm.base_url == "http://127.0.0.1:11434/v1"
+    assert loaded.local_llm.model == "llama3.1:8b"
+    assert loaded.local_llm.extra_body == {"reasoning_effort": "none"}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=["nan", "infinity", "negative_infinity"],
+)
+def test_from_dict_defaults_local_llm_non_standard_json_constants_extra_body(value: float) -> None:
+    loaded = from_dict(
+        {
+            "provider": {"llm": "local_llm"},
+            "local_llm": {
+                "backend": "ollama",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "model": "llama3.1:8b",
+                "extra_body": {"temperature": value},
+            },
+        }
+    )
+
+    assert loaded.local_llm.extra_body == {"reasoning_effort": "none"}
+
+
+def test_schema21_migration_adds_local_llm_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    data = to_dict(AppSettings())
+    data["settings_version"] = 21
+    data.pop("local_llm", None)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.settings_version == 22
+    assert loaded.local_llm.extra_body == {"reasoning_effort": "none"}
+    assert persisted["settings_version"] == 22
+    assert persisted["local_llm"]["base_url"] == "http://127.0.0.1:11434/v1"
+
+
+def test_schema22_repair_persists_malformed_local_llm(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    data = to_dict(AppSettings())
+    data["settings_version"] = 22
+    data["provider"]["llm"] = "local_llm"
+    data["local_llm"] = {
+        "backend": "bad",
+        "base_url": "ftp://bad",
+        "model": "",
+        "extra_body": {"stream": True},
+    }
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.local_llm.base_url == "http://127.0.0.1:11434/v1"
+    assert loaded.local_llm.model == "llama3.1:8b"
+    assert loaded.local_llm.extra_body == {"reasoning_effort": "none"}
+    assert persisted["local_llm"]["extra_body"] == {"reasoning_effort": "none"}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [float("nan"), float("inf"), float("-inf")],
+    ids=["nan", "infinity", "negative_infinity"],
+)
+def test_schema22_repair_persists_default_for_local_llm_non_standard_json_constants_extra_body(
+    tmp_path: Path,
+    value: float,
+) -> None:
+    path = tmp_path / "settings.json"
+    data = to_dict(AppSettings())
+    data["settings_version"] = 22
+    data["provider"]["llm"] = "local_llm"
+    data["local_llm"]["extra_body"] = {"temperature": value}
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.local_llm.extra_body == {"reasoning_effort": "none"}
+    assert persisted["local_llm"]["extra_body"] == {"reasoning_effort": "none"}
+
+
+def test_schema22_repair_persists_missing_local_llm(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    data = to_dict(AppSettings())
+    data["settings_version"] = 22
+    data.pop("local_llm", None)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert loaded.local_llm.backend == LocalLLMBackend.OLLAMA
+    assert loaded.local_llm.base_url == "http://127.0.0.1:11434/v1"
+    assert loaded.local_llm.model == "llama3.1:8b"
+    assert loaded.local_llm.extra_body == {"reasoning_effort": "none"}
+    assert persisted["local_llm"] == {
+        "backend": "ollama",
+        "base_url": "http://127.0.0.1:11434/v1",
+        "model": "llama3.1:8b",
+        "extra_body": {"reasoning_effort": "none"},
+    }
 
 
 def test_materialize_translation_settings_returns_mutated_settings() -> None:

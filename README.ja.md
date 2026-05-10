@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.1-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.0.2-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -66,7 +66,7 @@
 → はい、でもこれも後からです。最初はインストールしてDiscordで認証するだけで使えます。
 
 - **相手の音声を翻訳する機能の完成度はどのくらいですか？**
-→ 騒音の少ない環境で2人なら良い体験ができます。3人までは問題ありませんが、それ以上は使い心地を保証できません。その場合はノイズに強いDeepgramのみが限定的に動作します。
+→ 騒音の少ない1対1の環境で最もよく動作します。3人までなら問題ない場合もありますが、保証はできません。VRChatで使う場合は、Earmuff機能を使って環境をコントロールしてください。
 
 - **音声認識がうまくいきません / 遅いです**
 → ローカルのQwen ASRを使っている場合は、クラウドSTTに切り替えるのをおすすめします。
@@ -96,6 +96,7 @@
 | **Gemini 3 Flash** | 1,630回 | 1,130回 | 1,230回 | 720回 |
 | **Gemini 3.1 Flash-Lite** | 3,260回 | 1,720回 | 1,970回 | 930回 |
 | **Qwen 3.5 Plus** | 7,090回 | 2,400回 | — | — |
+| **Local LLMs (Ollama)** | 無制限 | 3,660回 | 5,000回 | 1,290回 |
 
 ### 発話あたりのコスト
 
@@ -106,6 +107,7 @@
 | **Gemini 3 Flash** | ~0.09円 | ~0.14円 | ~0.12円 | ~0.21円 |
 | **Gemini 3.1 Flash-Lite** | ~0.05円 | ~0.09円 | ~0.08円 | ~0.17円 |
 | **Qwen 3.5 Plus** | ~0.02円 | ~0.06円 | — | — |
+| **Local LLMs (Ollama)** | 0円 | ~0.04円 | ~0.03円 | ~0.12円 |
 
 *   *（入力 950トークン + 出力 12トークン）× 発話1回あたりの平均LLM呼び出し回数 1.2回と仮定*
 *   *1ドルあたりの使用可能回数は、発話あたりのコスト表の四捨五入前の値を基準に算出*
@@ -125,6 +127,8 @@
 
 ---
 
+# 問題が起きたり、分かりにくいところがあれば、気軽に[Twitter/X](https://x.com/kapitalismho)でDMしてください。
+
 ## 使い方
 
 1. [ダウンロードページ](https://github.com/kapitalismho/PuriPuly-heart/releases/latest)から最新バージョンをダウンロード
@@ -137,7 +141,7 @@
 5. **Subtitles** ボタンを押してVR字幕をオン
 6. （任意）**Peer** ボタンを押して相手の音声翻訳をオン
 
-   > 相手の音声翻訳機能がきちんと動作するには、騒がしくない環境が必要です。1対1の会話での使用をおすすめします。
+   > 相手の音声翻訳機能がきちんと動作するには、騒がしくない環境が必要です。VRChatで使う場合は、Earmuff機能を使って環境をコントロールしてください。
 
 7. VRChatでOSCを有効化: Action menu → Settings → OSC → Enable
 
@@ -154,13 +158,13 @@ Soniox / Gemini / Deepgramへのアクセスがブロックされている地域
 
    > マネージド接続方式を使う場合は、**マネージド** ではなく **マネージド（中国）** を選んでください。
 
-Discord認証が難しい場合は、[Twitter DM](https://x.com/kapitalismho)から直接ご連絡ください。
-
 ---
 
 ### 自分のAPIキーを使う
 
 利用するサービスに合わせて、適切なガイドを見ながら進めてください。
+
+OpenRouter経由でGemma 4モデルを使うことをおすすめします。
 
 もしよければ、設定するついでに、STT側も一緒に設定しませんか？
 PuriPulyはクラウドSTTと組み合わせると最良の体験になります。

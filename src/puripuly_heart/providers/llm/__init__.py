@@ -1,1 +1,1 @@
-__all__ = ["deepseek", "gemini", "openrouter", "qwen"]
+__all__ = ["deepseek", "gemini", "local_openai", "openrouter", "qwen"]
