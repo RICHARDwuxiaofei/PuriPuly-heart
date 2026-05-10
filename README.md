@@ -97,6 +97,7 @@ So I built one that can.
 | **Gemini 3 Flash** | 1,630 | 1,130 | 1,230 | 720 |
 | **Gemini 3.1 Flash-Lite** | 3,260 | 1,720 | 1,970 | 930 |
 | **Qwen 3.5 Plus** | 7,090 | 2,400 | — | — |
+| **Local LLMs (Ollama)** | Unlimited | 3,660 | 5,000 | 1,290 |
 
 ### Cost per Utterance
 
@@ -107,6 +108,7 @@ So I built one that can.
 | **Gemini 3 Flash** | ~$0.0006 | ~$0.0009 | ~$0.0008 | ~$0.0014 |
 | **Gemini 3.1 Flash-Lite** | ~$0.0003 | ~$0.0006 | ~$0.0005 | ~$0.0011 |
 | **Qwen 3.5 Plus** | ~$0.0001 | ~$0.0004 | — | — |
+| **Local LLMs (Ollama)** | $0 | ~$0.0003 | ~$0.0002 | ~$0.0008 |
 
 *   *Based on (Input 950 tokens + Output 12 tokens) × 1.2 avg LLM calls per utterance.*
 *   *Uses per Dollar is derived from the un-rounded values in the Cost per Utterance table.*
