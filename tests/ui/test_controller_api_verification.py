@@ -18,6 +18,7 @@ from puripuly_heart.config.settings import (
 )
 from puripuly_heart.core.local_stt_assets import LocalSTTInstallState
 from puripuly_heart.providers.llm.deepseek import DeepSeekLLMProvider
+from puripuly_heart.providers.llm.local_openai import LocalOpenAICompatibleLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -445,6 +446,113 @@ async def test_verify_and_update_status_uses_deepseek_env_key(monkeypatch) -> No
     await controller._verify_and_update_status()
 
     assert seen == ["env-secret"]
+    assert app.view_dashboard.translation_needs_key is False
+
+
+@pytest.mark.asyncio
+async def test_local_llm_verification_failure_does_not_set_needs_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.LOCAL_LLM
+    app = SimpleNamespace(view_dashboard=DummyDashboard())
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyHub()
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.delenv("LOCAL_LLM_API_KEY", raising=False)
+
+    async def fake_verify_connection(**kwargs):
+        assert kwargs["api_key"] == ""
+        return False
+
+    monkeypatch.setattr(
+        LocalOpenAICompatibleLLMProvider,
+        "verify_connection",
+        staticmethod(fake_verify_connection),
+    )
+
+    await controller._verify_and_update_status()
+
+    assert app.view_dashboard.translation_needs_key is False
+    assert app.view_dashboard.translation_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_local_llm_successful_verification_with_empty_key_does_not_set_needs_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.LOCAL_LLM
+    app = SimpleNamespace(view_dashboard=DummyDashboard())
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyHub()
+    monkeypatch.setattr(
+        controller_module, "create_secret_store", lambda *_a, **_k: DummySecrets({})
+    )
+    monkeypatch.delenv("LOCAL_LLM_API_KEY", raising=False)
+
+    async def fake_verify_connection(**kwargs):
+        assert kwargs["api_key"] == ""
+        return True
+
+    monkeypatch.setattr(
+        LocalOpenAICompatibleLLMProvider,
+        "verify_connection",
+        staticmethod(fake_verify_connection),
+    )
+
+    await controller._verify_and_update_status()
+
+    assert app.view_dashboard.translation_needs_key is False
+    assert app.view_dashboard.translation_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_local_llm_verification_uses_secret_store_key_before_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.LOCAL_LLM
+    settings.local_llm.base_url = "http://mac-studio.local:11434/v1"
+    settings.local_llm.model = "gemma3:4b"
+    settings.local_llm.extra_body = {"thinking": {"type": "disabled"}}
+    app = SimpleNamespace(view_dashboard=DummyDashboard())
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyHub()
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_a, **_k: DummySecrets({"local_llm_api_key": "store-secret"}),
+    )
+    monkeypatch.setenv("LOCAL_LLM_API_KEY", "env-secret")
+    seen: dict[str, object] = {}
+
+    async def fake_verify_connection(**kwargs):
+        seen.update(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        LocalOpenAICompatibleLLMProvider,
+        "verify_connection",
+        staticmethod(fake_verify_connection),
+    )
+
+    await controller._verify_and_update_status()
+
+    assert seen == {
+        "base_url": "http://mac-studio.local:11434/v1",
+        "model": "gemma3:4b",
+        "api_key": "store-secret",
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
     assert app.view_dashboard.translation_needs_key is False
 
 

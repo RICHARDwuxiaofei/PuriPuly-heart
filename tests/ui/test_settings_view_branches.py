@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,15 +12,20 @@ pytest.importorskip("flet")
 
 from puripuly_heart.config.audio_host_api import WINDOWS_WASAPI_COMPATIBILITY_HOST_API
 from puripuly_heart.config.settings import (
+    LOCAL_LLM_RESERVED_EXTRA_BODY_KEYS,
+    LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS,
     AppSettings,
     DeepSeekLLMModel,
     GeminiLLMModel,
     LLMProviderName,
+    LocalLLMBackend,
+    LocalLLMSettings,
     OpenRouterCredentialSource,
     OpenRouterFallbackSelectionAlias,
     OpenRouterLLMModel,
     OpenRouterProviderRouting,
     OpenRouterSelectionAlias,
+    ProviderSettings,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
@@ -91,6 +97,31 @@ def _make_llm_selection_view(
     view._openrouter_fallback_helper_text = SimpleNamespace(value="", update=lambda: None)
     view._translation_connection_row = SimpleNamespace(visible=False, update=lambda: None)
     view._openrouter_routing_row = view._translation_connection_row
+    view._local_llm_base_url = SimpleNamespace(
+        value=settings.local_llm.base_url,
+        label="",
+        error_text=None,
+        update=lambda: None,
+    )
+    view._local_llm_model = SimpleNamespace(
+        value=settings.local_llm.model,
+        label="",
+        error_text=None,
+        update=lambda: None,
+    )
+    view._local_llm_extra_body = SimpleNamespace(
+        value=json.dumps(settings.local_llm.extra_body, ensure_ascii=False),
+        label="",
+        error_text=None,
+        update=lambda: None,
+    )
+    view._local_llm_extra_body_helper = SimpleNamespace(value="", update=lambda: None)
+    view._local_llm_extra_body_error = SimpleNamespace(
+        value="",
+        visible=False,
+        update=lambda: None,
+    )
+    view._local_llm_connection_card = SimpleNamespace(visible=False, update=lambda: None)
     view._managed_trial_usage_bar = SimpleNamespace(
         visible=False, percent=None, update=lambda: None
     )
@@ -651,6 +682,359 @@ def test_deepseek_connection_selection_controls_api_key_visibility(
     assert view._managed_trial_usage_bar.visible is False
     assert view._openrouter_key.visible is False
     assert view._deepseek_key.visible is True
+
+
+def test_on_llm_selected_updates_to_local_llms_with_ollama_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
+    settings.provider.llm = LLMProviderName.GEMINI
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view._on_llm_selected(TranslationModel.LOCAL_LLM.value)
+
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.translation.model == TranslationModel.LOCAL_LLM
+    assert pending.translation.connection == TranslationConnection.OLLAMA
+    assert pending.provider.llm == LLMProviderName.LOCAL_LLM
+    assert view._llm_text.content.value == t("provider.local_llms")
+    assert view._translation_connection_text.content.value == t(
+        "settings.translation_connection.ollama"
+    )
+    assert view.has_provider_changes is True
+
+
+def test_local_llm_visibility_shows_connection_card_without_api_key_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view._update_api_visibility()
+
+    assert view._local_llm_connection_card.visible is True
+    assert view._google_key.visible is False
+    assert view._openrouter_key.visible is False
+    assert view._deepseek_key.visible is False
+    assert view._alibaba_key_beijing.visible is False
+    assert view._alibaba_key_singapore.visible is False
+
+
+def test_local_llm_connection_card_matches_api_field_scale_and_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_locale = i18n_module.get_locale()
+    i18n_module.set_locale("ko")
+    try:
+        view, _ = _make_settings_view(monkeypatch)
+        column = _wrapped_card_column(view._local_llm_connection_card)
+        controls = list(column.controls)
+        api_field = view._google_key._text_field
+
+        assert view._local_llm_base_url.label == "연결 주소"
+        assert view._local_llm_extra_body.label == "JSON extra body"
+        assert view._local_llm_extra_body_helper.value == (
+            "빠른 지연시간을 위해 추론을 끄고 사용하는 것을 권장해요. "
+            "JSON extra body에 알맞은 파라미터를 입력해서 추론 레벨을 제어하세요."
+        )
+        assert view._local_llm_extra_body_helper.size == 15
+        assert view._local_llm_extra_body.value == json.dumps(
+            {"reasoning_effort": "none"}, ensure_ascii=False, indent=2
+        )
+        assert controls[2] is view._local_llm_extra_body_helper
+        assert controls[3] is view._local_llm_base_url
+
+        for field in (
+            view._local_llm_base_url,
+            view._local_llm_model,
+            view._local_llm_extra_body,
+        ):
+            assert field.border_radius == api_field.border_radius
+            assert field.text_size == 24
+            assert field.color == api_field.color
+            assert field.label_style.size == 18
+            assert field.label_style.weight == api_field.label_style.weight
+            assert field.label_style.color == api_field.label_style.color
+            assert field.expand is True
+            assert field.dense is not True
+    finally:
+        i18n_module.set_locale(old_locale)
+
+
+def test_local_llm_fields_update_provider_draft(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    settings.translation = TranslationSettings(
+        model=TranslationModel.LOCAL_LLM,
+        connection=TranslationConnection.OLLAMA,
+    )
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view._local_llm_base_url.value = "http://127.0.0.1:11434/v1/"
+    view._on_local_llm_base_url_change_end(None)
+    view._local_llm_model.value = "qwen2.5:7b"
+    view._on_local_llm_model_change_end(None)
+    view._local_llm_extra_body.value = '{"enable_thinking": false}'
+    view._on_local_llm_extra_body_change_end(None)
+
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.local_llm.base_url == "http://127.0.0.1:11434/v1"
+    assert pending.local_llm.model == "qwen2.5:7b"
+    assert pending.local_llm.extra_body == {"enable_thinking": False}
+    assert view.has_provider_changes is True
+
+
+def test_local_llm_unblurred_fields_commit_when_building_provider_apply_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._local_llm_base_url.value = "http://mac-studio.local:11434/v1"
+    view._local_llm_model.value = "gemma3:4b"
+    view._local_llm_extra_body.value = '{"think": false}'
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.local_llm.base_url == "http://mac-studio.local:11434/v1"
+    assert pending.local_llm.model == "gemma3:4b"
+    assert pending.local_llm.extra_body == {"think": False}
+
+
+def test_local_llm_field_on_change_marks_dirty_and_consume_commits_unblurred_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    settings.translation = TranslationSettings(
+        model=TranslationModel.LOCAL_LLM,
+        connection=TranslationConnection.OLLAMA,
+    )
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._local_llm_base_url.value = "http://mac-studio.local:11434/v1"
+    view._local_llm_model.value = "gemma3:4b"
+    view._local_llm_extra_body.value = '{"enable_thinking": false}'
+
+    assert view._local_llm_base_url.on_change is not None
+    assert view._local_llm_model.on_change is not None
+    assert view._local_llm_extra_body.on_change is not None
+    view._local_llm_model.on_change(None)
+
+    assert view.has_provider_changes is True
+
+    pending = view.consume_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.local_llm.base_url == "http://mac-studio.local:11434/v1"
+    assert pending.local_llm.model == "gemma3:4b"
+    assert pending.local_llm.extra_body == {"enable_thinking": False}
+    assert view.has_provider_changes is False
+
+
+def test_local_llm_invalid_base_url_shows_error_without_saving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._local_llm_base_url.value = "ftp://127.0.0.1:11434/v1"
+
+    view._on_local_llm_base_url_change_end(None)
+
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.local_llm.base_url == "http://127.0.0.1:11434/v1"
+    assert view.has_provider_changes is False
+    assert view._local_llm_base_url.value == "ftp://127.0.0.1:11434/v1"
+    assert view._local_llm_base_url.error_text == t("settings.local_llm.base_url.invalid")
+
+
+def test_local_llm_empty_model_shows_error_without_saving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._local_llm_model.value = "   "
+
+    view._on_local_llm_model_change_end(None)
+
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.local_llm.model == "llama3.1:8b"
+    assert view.has_provider_changes is False
+    assert view._local_llm_model.value == "   "
+    assert view._local_llm_model.error_text == t("settings.local_llm.model.required")
+
+
+def test_local_llm_settings_survive_provider_draft_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    settings.translation = TranslationSettings(
+        model=TranslationModel.LOCAL_LLM,
+        connection=TranslationConnection.OLLAMA,
+    )
+    settings.local_llm = LocalLLMSettings(
+        backend=LocalLLMBackend.OLLAMA,
+        base_url="http://127.0.0.1:11434/v1",
+        model="llama3.1:8b",
+        extra_body={"think": False},
+    )
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view._local_llm_base_url.value = "http://127.0.0.1:11434/v1"
+    view._on_local_llm_base_url_change_end(None)
+    view._local_llm_model.value = "qwen2.5:7b"
+    view._on_local_llm_model_change_end(None)
+    view._local_llm_extra_body.value = '{"enable_thinking": false}'
+    view._on_local_llm_extra_body_change_end(None)
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.local_llm.backend == LocalLLMBackend.OLLAMA
+    assert pending.local_llm.base_url == "http://127.0.0.1:11434/v1"
+    assert pending.local_llm.model == "qwen2.5:7b"
+    assert pending.local_llm.extra_body == {"enable_thinking": False}
+
+
+def test_local_llm_extra_body_invalid_json_does_not_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._local_llm_extra_body.value = "{invalid-json"
+
+    view._on_local_llm_extra_body_change_end(None)
+
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.local_llm.extra_body == {"reasoning_effort": "none"}
+    assert view.has_provider_changes is False
+    assert view._local_llm_extra_body.value == "{invalid-json"
+    assert view._local_llm_extra_body_error.visible is True
+    assert view._local_llm_extra_body_error.value == t("settings.local_llm.extra_body.invalid_json")
+
+
+def test_local_llm_blank_extra_body_uses_current_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._local_llm_extra_body.value = "  "
+
+    view._on_local_llm_extra_body_change_end(None)
+
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.local_llm.extra_body == {"reasoning_effort": "none"}
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_local_llm_extra_body_rejects_non_standard_json_constants(
+    monkeypatch: pytest.MonkeyPatch,
+    constant: str,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._local_llm_extra_body.value = f'{{"temperature": {constant}}}'
+
+    view._on_local_llm_extra_body_change_end(None)
+
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.local_llm.extra_body == {"reasoning_effort": "none"}
+    assert view.has_provider_changes is False
+    assert view._local_llm_extra_body.value == f'{{"temperature": {constant}}}'
+    assert view._local_llm_extra_body_error.visible is True
+    assert view._local_llm_extra_body_error.value == t("settings.local_llm.extra_body.invalid_json")
+
+
+def test_local_llm_extra_body_non_object_json_does_not_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._local_llm_extra_body.value = '["not", "an", "object"]'
+
+    view._on_local_llm_extra_body_change_end(None)
+
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.local_llm.extra_body == {"reasoning_effort": "none"}
+    assert view.has_provider_changes is False
+    assert view._local_llm_extra_body.value == '["not", "an", "object"]'
+    assert view._local_llm_extra_body_error.visible is True
+    assert view._local_llm_extra_body_error.value == t(
+        "settings.local_llm.extra_body.must_be_object"
+    )
+
+
+def test_local_llm_extra_body_non_serializable_value_does_not_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._local_llm_extra_body.value = '{"callback": "not actually serializable"}'
+    monkeypatch.setattr(settings_view.json, "loads", lambda _raw, **_kwargs: {"callback": object()})
+
+    view._on_local_llm_extra_body_change_end(None)
+
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.local_llm.extra_body == {"reasoning_effort": "none"}
+    assert view.has_provider_changes is False
+    assert view._local_llm_extra_body_error.visible is True
+    assert view._local_llm_extra_body_error.value == t(
+        "settings.local_llm.extra_body.not_serializable"
+    )
+
+
+@pytest.mark.parametrize("key", sorted(LOCAL_LLM_RESERVED_EXTRA_BODY_KEYS))
+def test_local_llm_extra_body_reserved_key_does_not_save(
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._local_llm_extra_body.value = json.dumps({key: True})
+
+    view._on_local_llm_extra_body_change_end(None)
+
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.local_llm.extra_body == {"reasoning_effort": "none"}
+    assert view.has_provider_changes is False
+    assert view._local_llm_extra_body_error.visible is True
+    assert view._local_llm_extra_body_error.value == t(
+        "settings.local_llm.extra_body.reserved_key"
+    ).format(key=key)
+
+
+@pytest.mark.parametrize("key", sorted(LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS))
+def test_local_llm_extra_body_sensitive_key_does_not_save(
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view._local_llm_extra_body.value = json.dumps({key: "do-not-save"})
+
+    view._on_local_llm_extra_body_change_end(None)
+
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.local_llm.extra_body == {"reasoning_effort": "none"}
+    assert view.has_provider_changes is False
+    assert view._local_llm_extra_body_error.visible is True
+    assert view._local_llm_extra_body_error.value == t(
+        "settings.local_llm.extra_body.sensitive_key"
+    ).format(key=key)
 
 
 def test_official_api_connection_hides_openrouter_key_even_with_saved_fallback(
@@ -1778,11 +2162,13 @@ def test_llm_modal_lists_logical_translation_models_once(
         TranslationModel.GEMINI_3_FLASH.value,
         TranslationModel.GEMINI_31_FLASH_LITE.value,
         TranslationModel.QWEN_35_PLUS.value,
+        TranslationModel.LOCAL_LLM.value,
     ]
     assert captured["current"] == TranslationModel.GEMINI_3_FLASH.value
     assert OpenRouterSelectionAlias.GEMMA4_MANAGED.value not in option_by_value
     assert OpenRouterSelectionAlias.GEMMA4_BYOK.value not in option_by_value
     assert TranslationModel.QWEN_35_PLUS.value in option_by_value
+    assert TranslationModel.LOCAL_LLM.value in option_by_value
     assert all("qwen35_flash" not in value for value in option_by_value)
     assert deepseek_managed.value not in option_by_value
     assert deepseek_byok.value not in option_by_value
@@ -1791,6 +2177,7 @@ def test_llm_modal_lists_logical_translation_models_once(
     assert option_by_value[TranslationModel.DEEPSEEK_V4_FLASH.value].label == t(
         "provider.deepseek_v4_flash"
     )
+    assert option_by_value[TranslationModel.LOCAL_LLM.value].label == t("provider.local_llms")
 
 
 def test_translation_connection_modal_lists_supported_connections(
@@ -2926,7 +3313,7 @@ def test_api_tab_uses_three_row_layout_with_response_mode_and_api_keys(
     view, _ = _make_settings_view(monkeypatch)
     api_controls = _subtab_controls(view, "api")
 
-    assert len(api_controls) == 3
+    assert len(api_controls) == 4
     assert _row_card_titles(api_controls[0]) == [
         t("settings.section.stt"),
         t("settings.section.peer_stt"),
@@ -2937,7 +3324,10 @@ def test_api_tab_uses_three_row_layout_with_response_mode_and_api_keys(
         t("settings.translation_connection"),
         t("settings.openrouter_fallback"),
     ]
-    assert _row_card_titles(api_controls[2]) == [t("settings.section.api_keys")]
+    assert _row_card_titles(api_controls[2]) == [t("settings.local_llm.connection")]
+    assert api_controls[2] is view._local_llm_connection_card
+    assert api_controls[3] is not view._api_keys_column
+    assert _row_card_titles(api_controls[3]) == [t("settings.section.api_keys")]
 
 
 def test_api_tab_primary_value_typography_is_consistent_across_rows(

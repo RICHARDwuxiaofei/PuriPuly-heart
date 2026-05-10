@@ -46,6 +46,7 @@ from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.domain.models import Translation
 from puripuly_heart.providers.llm.deepseek import DeepSeekLLMProvider
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
+from puripuly_heart.providers.llm.local_openai import LocalOpenAICompatibleLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -521,6 +522,15 @@ def create_llm_provider(
         base = DeepSeekLLMProvider(
             api_key=api_key,
             model=settings.deepseek.llm_model.value,
+            runtime_logging=runtime_logging,
+        )
+    elif settings.provider.llm == LLMProviderName.LOCAL_LLM:
+        api_key = secrets.get("local_llm_api_key") or os.getenv("LOCAL_LLM_API_KEY") or ""
+        base = LocalOpenAICompatibleLLMProvider(
+            base_url=settings.local_llm.base_url,
+            model=settings.local_llm.model,
+            extra_body=settings.local_llm.extra_body,
+            api_key=api_key,
             runtime_logging=runtime_logging,
         )
     else:

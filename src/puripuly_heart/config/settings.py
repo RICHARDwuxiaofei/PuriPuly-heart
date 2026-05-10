@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from puripuly_heart.config.audio_host_api import (
     WINDOWS_DIRECTSOUND_HOST_API,
@@ -31,7 +32,7 @@ from puripuly_heart.config.llm_profiles import (
 )
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 21
+SETTINGS_SCHEMA_VERSION = 22
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000
 DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS = 500
 MAX_CUSTOM_VOCAB_TERMS = 100
@@ -47,6 +48,25 @@ LEGACY_QWEN_DEFAULT_PROMPT = (
     "the speaker's tone and formality. Fix voice recognition errors like missing punctuation "
     "and typos."
 )
+LOCAL_LLM_RESERVED_EXTRA_BODY_KEYS = frozenset(
+    {
+        "model",
+        "messages",
+        "stream",
+        "tools",
+        "tool_choice",
+        "functions",
+        "function_call",
+        "max_tokens",
+    }
+)
+LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS = frozenset(
+    {"api_key", "authorization", "headers", "token", "secret", "password"}
+)
+
+
+def _default_local_llm_extra_body() -> dict[str, object]:
+    return {"reasoning_effort": "none"}
 
 
 def _default_custom_terms() -> dict[str, list[str]]:
@@ -65,6 +85,7 @@ class LLMProviderName(str, Enum):
     OPENROUTER = "openrouter"
     QWEN = "qwen"
     DEEPSEEK = "deepseek"
+    LOCAL_LLM = "local_llm"
 
 
 class SecretsBackend(str, Enum):
@@ -89,6 +110,10 @@ class QwenLLMModel(str, Enum):
 
 class DeepSeekLLMModel(str, Enum):
     DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
+
+
+class LocalLLMBackend(str, Enum):
+    OLLAMA = "ollama"
 
 
 class OpenRouterLLMModel(str, Enum):
@@ -136,6 +161,7 @@ class TranslationModel(str, Enum):
     GEMINI_3_FLASH = "gemini3_flash"
     GEMINI_31_FLASH_LITE = "gemini31_flash_lite"
     QWEN_35_PLUS = "qwen35_plus"
+    LOCAL_LLM = "local_llm"
 
 
 class TranslationConnection(str, Enum):
@@ -143,6 +169,7 @@ class TranslationConnection(str, Enum):
     MANAGED_CHINA = "managed_china"
     OPENROUTER = "openrouter"
     OFFICIAL_BYOK = "official_byok"
+    OLLAMA = "ollama"
 
 
 @dataclass(slots=True)
@@ -186,6 +213,7 @@ TRANSLATION_CONNECTIONS_BY_MODEL: dict[TranslationModel, tuple[TranslationConnec
     TranslationModel.GEMINI_3_FLASH: (TranslationConnection.OFFICIAL_BYOK,),
     TranslationModel.GEMINI_31_FLASH_LITE: (TranslationConnection.OFFICIAL_BYOK,),
     TranslationModel.QWEN_35_PLUS: (TranslationConnection.OFFICIAL_BYOK,),
+    TranslationModel.LOCAL_LLM: (TranslationConnection.OLLAMA,),
 }
 TRANSLATION_CONNECTION_PRIORITY: tuple[TranslationConnection, ...] = (
     TranslationConnection.MANAGED,
@@ -603,6 +631,43 @@ class DeepSeekSettings:
 
 
 @dataclass(slots=True)
+class LocalLLMSettings:
+    backend: LocalLLMBackend = LocalLLMBackend.OLLAMA
+    base_url: str = "http://127.0.0.1:11434/v1"
+    model: str = "llama3.1:8b"
+    extra_body: dict[str, object] = field(default_factory=_default_local_llm_extra_body)
+
+    def validate(self) -> None:
+        if not isinstance(self.backend, LocalLLMBackend):
+            raise ValueError("invalid local llm backend")
+        self.base_url = _normalize_local_llm_base_url(self.base_url)
+        if not isinstance(self.base_url, str) or not self.base_url.strip():
+            raise ValueError("invalid local llm base url")
+        self.model = _normalize_local_llm_model(self.model)
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ValueError("invalid local llm model")
+        if not isinstance(self.extra_body, dict):
+            raise ValueError("invalid local llm extra body")
+        normalized = {key: value for key, value in self.extra_body.items() if isinstance(key, str)}
+        if len(normalized) != len(self.extra_body):
+            raise ValueError("local llm extra body keys must be strings")
+        lowered = {key.lower() for key in normalized}
+        reserved = LOCAL_LLM_RESERVED_EXTRA_BODY_KEYS.intersection(lowered)
+        if reserved:
+            key = sorted(reserved)[0]
+            raise ValueError(f"reserved local llm extra_body key: {key}")
+        sensitive = LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS.intersection(lowered)
+        if sensitive:
+            key = sorted(sensitive)[0]
+            raise ValueError(f"sensitive local llm extra_body key: {key}")
+        try:
+            json.dumps(normalized, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("local llm extra body must be JSON serializable") from exc
+        self.extra_body = copy.deepcopy(normalized)
+
+
+@dataclass(slots=True)
 class OpenRouterSettings:
     llm_model: OpenRouterLLMModel = OpenRouterLLMModel.GEMMA_4_26B_A4B_IT
     routing_mode: OpenRouterRoutingMode = OpenRouterRoutingMode.LATENCY
@@ -752,6 +817,7 @@ class AppSettings:
     openrouter: OpenRouterSettings = field(default_factory=OpenRouterSettings)
     qwen: QwenSettings = field(default_factory=QwenSettings)
     deepseek: DeepSeekSettings = field(default_factory=DeepSeekSettings)
+    local_llm: LocalLLMSettings = field(default_factory=LocalLLMSettings)
     llm: LLMSettings = field(default_factory=LLMSettings)
     osc: OSCSettings = field(default_factory=OSCSettings)
     secrets: SecretsSettings = field(default_factory=SecretsSettings)
@@ -788,6 +854,7 @@ class AppSettings:
         self.openrouter.validate()
         self.qwen.validate()
         self.deepseek.validate()
+        self.local_llm.validate()
         self.llm.validate()
         self.osc.validate()
         self.secrets.validate()
@@ -911,6 +978,12 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
         },
         "deepseek": {
             "llm_model": settings.deepseek.llm_model.value,
+        },
+        "local_llm": {
+            "backend": settings.local_llm.backend.value,
+            "base_url": _parse_local_llm_base_url(settings.local_llm.base_url),
+            "model": _parse_local_llm_model(settings.local_llm.model),
+            "extra_body": _parse_local_llm_extra_body(settings.local_llm.extra_body),
         },
         "llm": {"concurrency_limit": settings.llm.concurrency_limit},
         "osc": {
@@ -1182,6 +1255,96 @@ def _parse_openrouter_broker_base_url(value: object) -> str:
     return DEFAULT_OPENROUTER_BROKER_BASE_URL
 
 
+def _parse_local_llm_backend(value: object) -> LocalLLMBackend:
+    if isinstance(value, str):
+        try:
+            return LocalLLMBackend(value.strip())
+        except ValueError:
+            pass
+    return LocalLLMBackend.OLLAMA
+
+
+def _normalize_local_llm_base_url(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("invalid local llm base url")
+    try:
+        parsed = urlsplit(value.strip())
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid local llm base url") from exc
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("invalid local llm base url")
+    if not parsed.hostname:
+        raise ValueError("invalid local llm base url")
+    if (
+        "@" in parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("invalid local llm base url")
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
+
+
+def _parse_local_llm_base_url(value: object) -> str:
+    if isinstance(value, str):
+        try:
+            return _normalize_local_llm_base_url(value)
+        except ValueError:
+            pass
+    return "http://127.0.0.1:11434/v1"
+
+
+def _normalize_local_llm_model(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("invalid local llm model")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("invalid local llm model")
+    return normalized
+
+
+def _parse_local_llm_model(value: object) -> str:
+    if isinstance(value, str):
+        try:
+            return _normalize_local_llm_model(value)
+        except ValueError:
+            pass
+    return "llama3.1:8b"
+
+
+def _parse_local_llm_extra_body(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return _default_local_llm_extra_body()
+    normalized = {key: val for key, val in value.items() if isinstance(key, str)}
+    lowered = {key.lower() for key in normalized}
+    if LOCAL_LLM_RESERVED_EXTRA_BODY_KEYS.intersection(lowered):
+        return _default_local_llm_extra_body()
+    if LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS.intersection(lowered):
+        return _default_local_llm_extra_body()
+    try:
+        json.dumps(normalized, allow_nan=False)
+    except (TypeError, ValueError):
+        return _default_local_llm_extra_body()
+    return copy.deepcopy(normalized)
+
+
+def _normalize_local_llm_data(data: dict[str, Any]) -> bool:
+    raw_local_llm = data.get("local_llm")
+    local_llm_data = raw_local_llm if isinstance(raw_local_llm, dict) else {}
+    normalized = {
+        "backend": _parse_local_llm_backend(local_llm_data.get("backend")).value,
+        "base_url": _parse_local_llm_base_url(local_llm_data.get("base_url")),
+        "model": _parse_local_llm_model(local_llm_data.get("model")),
+        "extra_body": _parse_local_llm_extra_body(local_llm_data.get("extra_body")),
+    }
+    if raw_local_llm != normalized:
+        data["local_llm"] = normalized
+        return True
+    return False
+
+
 def _loaded_llm_provider(settings_data: dict[str, Any]) -> LLMProviderName:
     provider_data = settings_data.get("provider")
     provider_llm_value = (
@@ -1302,6 +1465,13 @@ def _derive_translation_settings_from_runtime_values(
                 history=normalized_history,
             )
 
+    if provider_llm == LLMProviderName.LOCAL_LLM:
+        return _normalize_translation_settings(
+            model=TranslationModel.LOCAL_LLM,
+            connection=TranslationConnection.OLLAMA,
+            history=normalized_history,
+        )
+
     if provider_llm == LLMProviderName.DEEPSEEK:
         return _normalize_translation_settings(
             model=TranslationModel.DEEPSEEK_V4_FLASH,
@@ -1411,6 +1581,11 @@ def materialize_translation_settings(settings: AppSettings) -> AppSettings:
         settings.provider.llm = LLMProviderName.GEMINI
         settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
         settings.gemini.llm_model = GeminiLLMModel.GEMINI_31_FLASH_LITE
+        return settings
+
+    if model == TranslationModel.LOCAL_LLM:
+        settings.provider.llm = LLMProviderName.LOCAL_LLM
+        settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
         return settings
 
     settings.provider.llm = LLMProviderName.QWEN
@@ -1550,6 +1725,10 @@ def _apply_materialized_translation_to_data(
             "llm_model",
             GeminiLLMModel.GEMINI_31_FLASH_LITE.value,
         )
+        return changed
+
+    if translation.model == TranslationModel.LOCAL_LLM:
+        changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.LOCAL_LLM.value)
         return changed
 
     changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.QWEN.value)
@@ -2063,6 +2242,14 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             changed = True
         version = 21
 
+    if version < 22:
+        if _normalize_local_llm_data(data):
+            changed = True
+        version = 22
+
+    if _normalize_local_llm_data(data):
+        changed = True
+
     stt_data = data.get("stt")
     if not isinstance(stt_data, dict):
         stt_data = {}
@@ -2505,6 +2692,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
 
     qwen_raw = data.get("qwen") if isinstance(data.get("qwen"), dict) else {}
     deepseek_raw = data.get("deepseek") if isinstance(data.get("deepseek"), dict) else {}
+    local_llm_raw = data.get("local_llm") if isinstance(data.get("local_llm"), dict) else {}
     qwen_asr_raw = data.get("qwen_asr_stt") if isinstance(data.get("qwen_asr_stt"), dict) else {}
     openrouter_raw = data.get("openrouter") if isinstance(data.get("openrouter"), dict) else {}
     openrouter_model, openrouter_selected_source, openrouter_selection_alias = (
@@ -2687,6 +2875,12 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             llm_model=_parse_deepseek_llm_model(
                 deepseek_raw.get("llm_model", DeepSeekLLMModel.DEEPSEEK_V4_FLASH.value)
             ),
+        ),
+        local_llm=LocalLLMSettings(
+            backend=_parse_local_llm_backend(local_llm_raw.get("backend")),
+            base_url=_parse_local_llm_base_url(local_llm_raw.get("base_url")),
+            model=_parse_local_llm_model(local_llm_raw.get("model")),
+            extra_body=_parse_local_llm_extra_body(local_llm_raw.get("extra_body")),
         ),
         llm=LLMSettings(concurrency_limit=int(data.get("llm", {}).get("concurrency_limit", 5))),
         osc=OSCSettings(

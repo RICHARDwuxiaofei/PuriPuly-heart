@@ -77,6 +77,45 @@ def test_logs_conversation_keys_are_localized() -> None:
     assert bundles["ko"]["logs.conversation.show"] == "대화록 보기"
 
 
+def test_local_llm_keys_are_localized() -> None:
+    bundles = _load_bundles()
+    required_keys = {
+        "provider.local_llms",
+        "provider.local_llm",
+        "settings.translation_model.local_llm.description",
+        "settings.translation_connection.ollama",
+        "settings.translation_connection.ollama.description",
+        "settings.local_llm.connection",
+        "settings.local_llm.base_url",
+        "settings.local_llm.base_url.invalid",
+        "settings.local_llm.model",
+        "settings.local_llm.model.required",
+        "settings.local_llm.extra_body",
+        "settings.local_llm.extra_body.description",
+        "settings.local_llm.extra_body.invalid_json",
+        "settings.local_llm.extra_body.must_be_object",
+        "settings.local_llm.extra_body.reserved_key",
+        "settings.local_llm.extra_body.sensitive_key",
+        "settings.local_llm.extra_body.not_serializable",
+    }
+
+    for locale in ("en", "ko", "ja", "zh-CN"):
+        bundle = bundles[locale]
+        missing = sorted(required_keys - set(bundle))
+        assert missing == [], locale
+        for key in required_keys:
+            if key == "settings.translation_model.local_llm.description":
+                assert bundle[key] == ""
+                continue
+            assert bundle[key].strip()
+            assert bundle[key] != key
+
+    assert bundles["ko"]["settings.local_llm.connection"] == "로컬 LLM 연결"
+    assert bundles["ko"]["settings.local_llm.base_url"] == "연결 주소"
+    assert bundles["ko"]["settings.local_llm.model"] == "모델명"
+    assert bundles["ko"]["settings.local_llm.extra_body"] == "JSON extra body"
+
+
 def test_i18n_bundles_do_not_keep_unused_runtime_keys() -> None:
     bundles = _load_bundles()
     all_keys = sorted(set().union(*(bundle.keys() for bundle in bundles.values())))
