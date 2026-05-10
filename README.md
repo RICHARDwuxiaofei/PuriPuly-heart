@@ -67,7 +67,7 @@ So I built one that can.
 → Yes, but again, only later. At first, just install and authenticate via Discord to start using it.
 
 - **How polished is the feature for translating the other person's voice?**
-→ It works well for one-on-one in low-noise environments. Up to three people is fine, but beyond that we can't guarantee usability. In those cases, only Deepgram, which is robust to noise, works, with limitations.
+→ It works best for one-on-one conversations in low-noise environments. Up to three people may be okay, but usability is not guaranteed. When using it in VRChat, use Earmuff to control the environment.
 
 - **Voice recognition is poor / slow.**
 → If you're using local Qwen ASR, we recommend switching to a cloud STT service.
@@ -125,6 +125,8 @@ So I built one that can.
 
 ---
 
+# If you run into problems or anything feels unclear, feel free to DM me on [Twitter/X](https://x.com/kapitalismho).
+
 ## Usage
 
 1. Download the latest version from the [Download page](https://github.com/kapitalismho/PuriPuly-heart/releases/latest).
@@ -137,7 +139,7 @@ So I built one that can.
 5. Click the **Subtitles** button to turn on VR subtitles.
 6. (Optional) Click the **Peer** button to enable translation of the other person's voice.
 
-   > Peer voice translation needs a quiet space to work properly. We recommend it for 1-on-1 conversations.
+   > Peer voice translation needs a low-noise space to work properly. When using it in VRChat, use Earmuff to control the environment.
 
 7. Enable OSC in VRChat: Action menu → Settings → OSC → Enable.
 
@@ -154,13 +156,13 @@ If Soniox/Gemini/Deepgram are blocked in your region, please use the following c
 
    > When using the managed connection mode, choose **Managed (China)** instead of **Managed**.
 
-If Discord authentication is difficult, please reach out directly via [Twitter DM](https://x.com/kapitalismho).
-
 ---
 
 ### Using Your Own API Keys
 
 Follow the guide that matches the service you want to use.
+
+We recommend using the Gemma 4 model through OpenRouter.
 
 By the way, while you're setting things up, why not configure STT too?
 PuriPuly delivers the best experience when paired with a cloud STT.
