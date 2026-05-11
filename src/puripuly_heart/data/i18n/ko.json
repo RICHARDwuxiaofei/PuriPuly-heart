@@ -201,7 +201,7 @@
   "debug_preview.peer_translation_eula": "상대 번역 EULA",
   "debug_preview.discord_auth": "Discord 인증",
   "debug_preview.discord_callback_page": "Discord 콜백 페이지",
-  "discord_auth.body": "PuriPuly는 신규 사용자에게 무료 사용량을 제공해요.\n발화 기준 약 400회를 번역할 수 있어요.\nDiscord 인증 후 바로 발급돼요.",
+  "discord_auth.body": "PuriPuly는 신규 사용자에게 무료 사용량을 제공해요.\n발화 기준 약 750회를 번역할 수 있어요.\nDiscord 인증 후 바로 발급돼요.",
   "discord_auth.continue": "디스코드 OAuth 인증",
   "discord_auth.close": "취소",
   "discord_auth.reopen_browser": "브라우저 다시 열기",

@@ -201,7 +201,7 @@
   "debug_preview.peer_translation_eula": "Peer translation EULA",
   "debug_preview.discord_auth": "Discord auth",
   "debug_preview.discord_callback_page": "Discord callback page",
-  "discord_auth.body": "PuriPuly gives new users a free usage allowance.\nThat's about 400 translated utterances.\nYou'll receive it right after Discord verification.",
+  "discord_auth.body": "PuriPuly gives new users a free usage allowance.\nThat's about 750 translated utterances.\nYou'll receive it right after Discord verification.",
   "discord_auth.continue": "Discord OAuth verification",
   "discord_auth.close": "Cancel",
   "discord_auth.reopen_browser": "Reopen browser",

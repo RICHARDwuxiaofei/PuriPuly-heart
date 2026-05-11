@@ -201,7 +201,7 @@
     "debug_preview.peer_translation_eula": "对方翻译 EULA",
     "debug_preview.discord_auth": "Discord 认证",
     "debug_preview.discord_callback_page": "Discord 回调页面",
-    "discord_auth.body": "PuriPuly 会为新用户提供免费使用额度。\n按发言计算，可翻译约 400 次。\n完成 Discord 认证后会立即发放。",
+    "discord_auth.body": "PuriPuly 会为新用户提供免费使用额度。\n按发言计算，可翻译约 750 次。\n完成 Discord 认证后会立即发放。",
     "discord_auth.continue": "Discord OAuth 认证",
     "discord_auth.close": "取消",
     "discord_auth.reopen_browser": "重新打开浏览器",
