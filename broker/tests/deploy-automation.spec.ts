@@ -22,6 +22,10 @@ const deployWorkflow = new URL(
   '../../.github/workflows/deploy-broker-direct.yml',
   import.meta.url,
 );
+const abuseControlsWorkflow = new URL(
+  '../../.github/workflows/maintenance-broker-abuse-controls.yml',
+  import.meta.url,
+);
 const deploySmokeSpec = new URL(
   './deploy-smoke/canonical-production.spec.ts',
   import.meta.url,
@@ -324,6 +328,31 @@ describe('broker direct deploy automation', () => {
     expect(checklist).toContain('transitional compatibility only');
     expect(checklist).toContain('guardrail reconcile');
     expect(checklist).toContain('positive routing for');
+  });
+
+  it('ships a manual production workflow that updates only the broker daily auth cap runtime config', () => {
+    const workflow = readFileSync(abuseControlsWorkflow, 'utf8');
+
+    expect(workflow).toContain('workflow_dispatch:');
+    expect(workflow).not.toContain('\npush:');
+    expect(workflow).toContain('environment: production');
+    expect(workflow).toContain('max_count');
+    expect(workflow).toContain('default: "1000"');
+    expect(workflow).toContain('confirm_update');
+    expect(workflow).toContain('update broker daily auth cap');
+    expect(workflow).toContain('CLOUDFLARE_API_TOKEN');
+    expect(workflow).toContain('CLOUDFLARE_ACCOUNT_ID');
+    expect(workflow).toContain('BROKER_D1_DATABASE_ID_PRODUCTION');
+    expect(workflow).toContain('render-production-wrangler-config.mjs');
+    expect(workflow).toContain('wrangler.production.jsonc');
+    expect(workflow).toContain('wrangler d1 execute');
+    expect(workflow).toContain('puripuly-heart-broker --remote --config');
+    expect(workflow).toContain("json_set(value, '$.newActiveEntitlementsPerDay.maxCount'");
+    expect(workflow).toContain("json_extract(value, '$.newActiveEntitlementsPerDay.maxCount')");
+    expect(workflow).toContain('Daily auth cap verification failed');
+    expect(workflow).not.toContain('wrangler deploy');
+    expect(workflow).not.toContain('wrangler d1 migrations apply');
+    expect(workflow).not.toContain('wrangler secret put');
   });
 });
 
