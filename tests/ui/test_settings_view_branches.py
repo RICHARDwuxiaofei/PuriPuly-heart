@@ -423,6 +423,64 @@ def test_load_from_settings_peer_stt_card_has_no_peer_subsetting_controls(
     assert not hasattr(view, "_peer_soniox_model_text")
 
 
+def test_load_from_settings_shows_clipboard_auto_translate_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _store = _make_settings_view(monkeypatch)
+    settings = AppSettings()
+    settings.ui.clipboard_auto_translate_enabled = True
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._clipboard_auto_translate_text.content.value == t(
+        "settings.clipboard_auto_translate.on"
+    )
+
+
+def test_clipboard_auto_translate_selection_updates_settings_and_emits_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _store = _make_settings_view(monkeypatch)
+    settings = AppSettings()
+    emitted: list[AppSettings] = []
+    view.on_settings_changed = emitted.append
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view._on_clipboard_auto_translate_selected("on")
+
+    assert settings.ui.clipboard_auto_translate_enabled is True
+    assert view._clipboard_auto_translate_text.content.value == t(
+        "settings.clipboard_auto_translate.on"
+    )
+    assert emitted[-1].ui.clipboard_auto_translate_enabled is True
+
+
+def test_clipboard_auto_translate_click_toggles_immediately_without_modal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _store = _make_settings_view(monkeypatch)
+    settings = AppSettings()
+    emitted: list[AppSettings] = []
+    view.on_settings_changed = emitted.append
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view._on_clipboard_auto_translate_click(None)
+
+    assert settings.ui.clipboard_auto_translate_enabled is True
+    assert view._clipboard_auto_translate_text.content.value == t(
+        "settings.clipboard_auto_translate.on"
+    )
+    assert emitted[-1].ui.clipboard_auto_translate_enabled is True
+
+    view._on_clipboard_auto_translate_click(None)
+
+    assert settings.ui.clipboard_auto_translate_enabled is False
+    assert view._clipboard_auto_translate_text.content.value == t(
+        "settings.clipboard_auto_translate.off"
+    )
+    assert emitted[-1].ui.clipboard_auto_translate_enabled is False
+
+
 def test_load_from_settings_uses_system_prompt_when_provider_prompt_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3243,16 +3301,17 @@ def test_audio_change_updates_desktop_loopback_controls(monkeypatch: pytest.Monk
     assert changed == [settings, settings, settings, settings]
 
 
-def test_general_tab_uses_three_row_layout_with_split_audio_and_vad_cards(
+def test_general_tab_uses_four_row_layout_with_clipboard_card_in_final_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
     general_controls = _subtab_controls(view, "general")
 
-    assert len(general_controls) == 3
+    assert len(general_controls) == 4
     assert len(general_controls[0].content.controls) == 3
     assert len(general_controls[1].content.controls) == 3
     assert len(general_controls[2].content.controls) == 3
+    assert len(general_controls[3].content.controls) == 3
     assert _row_card_titles(general_controls[0]) == [
         t("settings.section.ui"),
         t("settings.chatbox_include_source"),
@@ -3267,6 +3326,9 @@ def test_general_tab_uses_three_row_layout_with_split_audio_and_vad_cards(
         t("settings.vrc_mic_intercept"),
         t("settings.section.self_vad_sensitivity"),
         t("settings.section.peer_vad_sensitivity"),
+    ]
+    assert _row_card_titles(general_controls[3]) == [
+        t("settings.clipboard_auto_translate"),
     ]
 
 
@@ -3499,6 +3561,7 @@ def test_general_tab_labels_and_section_headings_render_from_i18n(
         assert view._peer_pre_roll_field.label == t("settings.vad.peer_pre_roll_ms")
         assert view._vrc_mic_title.value == t("settings.vrc_mic_intercept")
         assert view._chatbox_source_title.value == t("settings.chatbox_include_source")
+        assert view._clipboard_auto_translate_title.value == t("settings.clipboard_auto_translate")
     finally:
         i18n_module.set_locale(old_locale)
 
@@ -4804,6 +4867,7 @@ def test_general_cards_use_settings_unit_card_defaults(
     general_cards = [
         _general_tab_card(view, t("settings.section.ui")),
         _general_tab_card(view, t("settings.chatbox_include_source")),
+        _general_tab_card(view, t("settings.clipboard_auto_translate")),
         _general_tab_card(view, t("settings.integrated_context")),
         _general_tab_card(view, t("settings.vrc_mic_intercept")),
         _general_tab_card(view, t("settings.audio_host_api")),

@@ -139,6 +139,31 @@ def test_from_dict_preserves_explicit_integrated_context_disabled() -> None:
     assert settings.ui.integrated_context_enabled is False
 
 
+def test_clipboard_auto_translate_defaults_off_for_new_and_partial_settings() -> None:
+    assert AppSettings().ui.clipboard_auto_translate_enabled is False
+    assert from_dict({}).ui.clipboard_auto_translate_enabled is False
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_clipboard_auto_translate_roundtrips_through_ui_settings(enabled: bool) -> None:
+    settings = AppSettings()
+    settings.ui.clipboard_auto_translate_enabled = enabled
+
+    data = to_dict(settings)
+
+    assert data["ui"]["clipboard_auto_translate_enabled"] is enabled
+    assert from_dict(data).ui.clipboard_auto_translate_enabled is enabled
+
+
+def test_from_dict_defaults_missing_clipboard_auto_translate_to_false() -> None:
+    raw = to_dict(AppSettings())
+    raw["ui"].pop("clipboard_auto_translate_enabled", None)
+
+    loaded = from_dict(raw)
+
+    assert loaded.ui.clipboard_auto_translate_enabled is False
+
+
 def test_save_settings_writes_via_temp_replace(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "settings.json"
     settings = AppSettings()

@@ -719,10 +719,13 @@ class UiSettings:
     peer_translation_eula_accepted: bool = False
     integrated_context_enabled: bool = True
     integrated_context_bootstrapped: bool = False
+    clipboard_auto_translate_enabled: bool = False
 
     def validate(self) -> None:
         if not self.locale:
             raise ValueError("locale must be non-empty")
+        if not isinstance(self.clipboard_auto_translate_enabled, bool):
+            raise ValueError("clipboard_auto_translate_enabled must be a bool")
 
 
 @dataclass(slots=True)
@@ -1005,6 +1008,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "peer_translation_eula_accepted": settings.ui.peer_translation_eula_accepted,
             "integrated_context_enabled": settings.ui.integrated_context_enabled,
             "integrated_context_bootstrapped": settings.ui.integrated_context_bootstrapped,
+            "clipboard_auto_translate_enabled": settings.ui.clipboard_auto_translate_enabled,
         },
         "api_key_verified": {
             "deepgram": settings.api_key_verified.deepgram,
@@ -2909,6 +2913,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             integrated_context_enabled=bool(ui_data.get("integrated_context_enabled", True)),
             integrated_context_bootstrapped=bool(
                 ui_data.get("integrated_context_bootstrapped", False)
+            ),
+            clipboard_auto_translate_enabled=bool(
+                ui_data.get("clipboard_auto_translate_enabled", False)
             ),
         ),
         api_key_verified=ApiKeyVerificationSettings(

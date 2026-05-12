@@ -237,6 +237,7 @@ class DummyHub:
         self.start_calls: list[bool] = []
         self.stop_calls = 0
         self.submit_calls: list[tuple[str, str]] = []
+        self.submit_event = asyncio.Event()
         self.reset_overlay_preview_calls = 0
         self.clear_language_runtime_state_calls: list[str] = []
         self.clear_language_runtime_state_errors: dict[str, Exception] = {}
@@ -256,6 +257,7 @@ class DummyHub:
 
     async def submit_text(self, text: str, *, source: str) -> None:
         self.submit_calls.append((text, source))
+        self.submit_event.set()
 
     async def reset_overlay_preview(self) -> None:
         self.reset_overlay_preview_calls += 1
@@ -278,6 +280,22 @@ class DummyHub:
         if old_stt is not None and hasattr(old_stt, "close"):
             await old_stt.close()
         self.peer_stt = stt
+
+
+class FakeClipboardWatcher:
+    def __init__(self, on_text: Callable[[str], None]) -> None:
+        self.on_text = on_text
+        self.started = False
+        self.stopped = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def emit(self, text: str) -> None:
+        self.on_text(text)
 
 
 class DisclosureDummyHub(DummyHub):
@@ -534,6 +552,167 @@ def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[s
     monkeypatch.setattr(controller_module, "ClientHub", fake_hub)
 
     return created
+
+
+@pytest.mark.asyncio
+async def test_clipboard_watcher_starts_and_stops_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    watchers: list[FakeClipboardWatcher] = []
+
+    def watcher_factory(on_text: Callable[[str], None]) -> FakeClipboardWatcher:
+        watcher = FakeClipboardWatcher(on_text)
+        watchers.append(watcher)
+        return watcher
+
+    monkeypatch.setattr(controller_module, "create_clipboard_watcher", watcher_factory)
+    monkeypatch.setattr(controller_module.sys, "platform", "win32")
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=tmp_path / "settings.json",
+    )
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    controller.settings.ui.clipboard_auto_translate_enabled = True
+    await controller._sync_clipboard_watcher()
+
+    assert len(watchers) == 1
+    assert watchers[0].started is True
+
+    controller.settings.ui.clipboard_auto_translate_enabled = False
+    await controller._sync_clipboard_watcher()
+
+    assert watchers[0].stopped is True
+
+
+@pytest.mark.asyncio
+async def test_clipboard_watcher_submits_valid_text_through_existing_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    watchers: list[FakeClipboardWatcher] = []
+
+    def watcher_factory(on_text: Callable[[str], None]) -> FakeClipboardWatcher:
+        watcher = FakeClipboardWatcher(on_text)
+        watchers.append(watcher)
+        return watcher
+
+    monkeypatch.setattr(controller_module, "create_clipboard_watcher", watcher_factory)
+    monkeypatch.setattr(controller_module.sys, "platform", "win32")
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=tmp_path / "settings.json",
+    )
+    controller.settings = AppSettings()
+    controller.settings.ui.clipboard_auto_translate_enabled = True
+    controller.hub = DummyHub()
+
+    await controller._sync_clipboard_watcher()
+    watchers[0].emit("  hello clipboard  ")
+    await asyncio.wait_for(controller.hub.submit_event.wait(), timeout=1.0)
+
+    assert controller.hub.submit_calls == [("hello clipboard", "Clipboard")]
+
+
+@pytest.mark.asyncio
+async def test_clipboard_watcher_does_not_block_manual_fallback_when_translation_off(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    watchers: list[FakeClipboardWatcher] = []
+
+    def watcher_factory(on_text: Callable[[str], None]) -> FakeClipboardWatcher:
+        watcher = FakeClipboardWatcher(on_text)
+        watchers.append(watcher)
+        return watcher
+
+    monkeypatch.setattr(controller_module, "create_clipboard_watcher", watcher_factory)
+    monkeypatch.setattr(controller_module.sys, "platform", "win32")
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=tmp_path / "settings.json",
+    )
+    controller.settings = AppSettings()
+    controller.settings.ui.clipboard_auto_translate_enabled = True
+    controller.hub = DummyHub(llm=None)
+    controller.hub.translation_enabled = False
+
+    await controller._sync_clipboard_watcher()
+    watchers[0].emit("source fallback")
+    await asyncio.wait_for(controller.hub.submit_event.wait(), timeout=1.0)
+
+    assert controller.hub.submit_calls == [("source fallback", "Clipboard")]
+
+
+@pytest.mark.asyncio
+async def test_clipboard_watcher_ignores_empty_and_long_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    watchers: list[FakeClipboardWatcher] = []
+
+    def watcher_factory(on_text: Callable[[str], None]) -> FakeClipboardWatcher:
+        watcher = FakeClipboardWatcher(on_text)
+        watchers.append(watcher)
+        return watcher
+
+    monkeypatch.setattr(controller_module, "create_clipboard_watcher", watcher_factory)
+    monkeypatch.setattr(controller_module.sys, "platform", "win32")
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=tmp_path / "settings.json",
+    )
+    controller.settings = AppSettings()
+    controller.settings.ui.clipboard_auto_translate_enabled = True
+    controller.hub = DummyHub()
+
+    await controller._sync_clipboard_watcher()
+    watchers[0].emit("   ")
+    watchers[0].emit("x" * 301)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert controller.hub.submit_calls == []
+
+
+@pytest.mark.asyncio
+async def test_clipboard_watcher_not_started_on_non_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    called = False
+
+    def watcher_factory(on_text: Callable[[str], None]) -> FakeClipboardWatcher:
+        nonlocal called
+        called = True
+        return FakeClipboardWatcher(on_text)
+
+    monkeypatch.setattr(controller_module, "create_clipboard_watcher", watcher_factory)
+    monkeypatch.setattr(controller_module.sys, "platform", "linux")
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=tmp_path / "settings.json",
+    )
+    controller.settings = AppSettings()
+    controller.settings.ui.clipboard_auto_translate_enabled = True
+    controller.hub = DummyHub()
+
+    await controller._sync_clipboard_watcher()
+
+    assert called is False
+    assert controller._clipboard_watcher is None
 
 
 @pytest.mark.asyncio

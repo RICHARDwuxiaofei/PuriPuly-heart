@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from puripuly_heart.ui.i18n import available_locales
+from puripuly_heart.ui import i18n as i18n_module
+from puripuly_heart.ui.i18n import available_locales, source_label
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 I18N_DIR = REPO_ROOT / "src" / "puripuly_heart" / "data" / "i18n"
@@ -57,6 +58,30 @@ def test_i18n_bundles_share_the_same_keys() -> None:
 
 def test_available_locales_use_product_display_order() -> None:
     assert available_locales() == ("en", "ko", "zh-CN", "ja")
+
+
+def test_clipboard_source_and_setting_keys_are_localized() -> None:
+    bundles = _load_bundles()
+    required_keys = {
+        "source.clipboard",
+        "settings.clipboard_auto_translate",
+        "settings.clipboard_auto_translate.on",
+        "settings.clipboard_auto_translate.off",
+    }
+
+    for locale, bundle in bundles.items():
+        missing = sorted(required_keys - set(bundle))
+        assert missing == [], locale
+        for key in required_keys:
+            assert bundle[key].strip()
+            assert bundle[key] != key
+
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale("ko")
+        assert source_label("Clipboard") == "클립보드"
+    finally:
+        i18n_module.set_locale(previous_locale)
 
 
 def test_logs_conversation_keys_are_localized() -> None:

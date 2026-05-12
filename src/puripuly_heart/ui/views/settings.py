@@ -345,6 +345,7 @@ class SettingsView(ft.Column):
             self._llm_text,
             self._ui_text,
             self._chatbox_source_text,
+            self._clipboard_auto_translate_text,
             self._vrc_mic_text,
             self._mic_audio_text,
             self._audio_host_api_text,
@@ -926,6 +927,21 @@ class SettingsView(ft.Column):
             value=self._chatbox_source_text,
         )
 
+        self._clipboard_auto_translate_text = self._build_clickable_text(
+            t("settings.clipboard_auto_translate.off"),
+            self._on_clipboard_auto_translate_click,
+        )
+        self._clipboard_auto_translate_title = ft.Text(
+            t("settings.clipboard_auto_translate"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        clipboard_auto_translate_card = self._wrap_unit_card(
+            title=self._clipboard_auto_translate_title,
+            value=self._clipboard_auto_translate_text,
+        )
+
         self._vrc_mic_text = self._build_clickable_text(
             t("settings.vrc_mic.on"),
             self._on_vrc_mic_click,
@@ -945,7 +961,11 @@ class SettingsView(ft.Column):
 
         general_primary_row = ft.Container(
             content=ft.Row(
-                [ui_card, chatbox_source_card, integrated_context_card],
+                [
+                    ui_card,
+                    chatbox_source_card,
+                    integrated_context_card,
+                ],
                 spacing=16,
                 expand=True,
             ),
@@ -1083,6 +1103,17 @@ class SettingsView(ft.Column):
         general_vad_row = ft.Container(
             content=ft.Row(
                 [vrc_mic_card, self._self_vad_card, self._peer_vad_card],
+                spacing=16,
+                expand=True,
+            ),
+        )
+        general_clipboard_row = ft.Container(
+            content=ft.Row(
+                [
+                    clipboard_auto_translate_card,
+                    self._wrap_empty_unit_card(),
+                    self._wrap_empty_unit_card(),
+                ],
                 spacing=16,
                 expand=True,
             ),
@@ -1574,7 +1605,12 @@ class SettingsView(ft.Column):
                     self._local_llm_connection_card,
                     api_keys_row,
                 ],
-                "general": [general_primary_row, general_audio_row, general_vad_row],
+                "general": [
+                    general_primary_row,
+                    general_audio_row,
+                    general_vad_row,
+                    general_clipboard_row,
+                ],
                 "prompt": [row7, persona_card],
                 "overlay": [overlay_row1, overlay_row2, overlay_row3],
             }
@@ -2154,6 +2190,11 @@ class SettingsView(ft.Column):
             "settings.chatbox_source.on"
             if settings.osc.chatbox_include_source
             else "settings.chatbox_source.off"
+        )
+        self._clipboard_auto_translate_text.content.value = t(
+            "settings.clipboard_auto_translate.on"
+            if settings.ui.clipboard_auto_translate_enabled
+            else "settings.clipboard_auto_translate.off"
         )
         # Prompt
         provider_name = self._active_prompt_key()
@@ -3399,6 +3440,29 @@ class SettingsView(ft.Column):
             self._chatbox_source_text.update()
         self._emit_settings_changed()
 
+    def _on_clipboard_auto_translate_click(self, e) -> None:
+        """Toggle clipboard auto-translate immediately from the unit card."""
+        if not self._settings:
+            return
+        next_value = "off" if self._settings.ui.clipboard_auto_translate_enabled else "on"
+        self._on_clipboard_auto_translate_selected(next_value)
+
+    def _on_clipboard_auto_translate_selected(self, value: str) -> None:
+        """Handle clipboard auto-translate selection result."""
+        if not self._settings:
+            return
+        new_value = value == "on"
+        self._emit_runtime_basic(f"[Settings] Clipboard auto translate toggled: {new_value}")
+        self._settings.ui.clipboard_auto_translate_enabled = new_value
+        self._clipboard_auto_translate_text.content.value = t(
+            "settings.clipboard_auto_translate.on"
+            if new_value
+            else "settings.clipboard_auto_translate.off"
+        )
+        if self.page:
+            self._clipboard_auto_translate_text.update()
+        self._emit_settings_changed()
+
     def _on_low_latency_click(self, e) -> None:
         """Open low latency mode selection modal."""
         if not self.page:
@@ -3590,6 +3654,7 @@ class SettingsView(ft.Column):
         self._custom_vocab_info_icon.tooltip = t("settings.custom_vocabulary_tooltip")
         self._vrc_mic_title.value = t("settings.vrc_mic_intercept")
         self._chatbox_source_title.value = t("settings.chatbox_include_source")
+        self._clipboard_auto_translate_title.value = t("settings.clipboard_auto_translate")
         self._peer_provider_title.value = t("settings.section.peer_stt")
         self._dashboard_language_redirect_text.value = t("settings.dashboard_language_redirect")
         self._peer_stt_label.value = t("settings.peer_stt_provider")
@@ -3666,6 +3731,11 @@ class SettingsView(ft.Column):
                 "settings.chatbox_source.on"
                 if display_settings.osc.chatbox_include_source
                 else "settings.chatbox_source.off"
+            )
+            self._clipboard_auto_translate_text.content.value = t(
+                "settings.clipboard_auto_translate.on"
+                if display_settings.ui.clipboard_auto_translate_enabled
+                else "settings.clipboard_auto_translate.off"
             )
             self._sync_overlay_controls()
             self._sync_overlay_calibration_controls()
