@@ -17,6 +17,7 @@ from puripuly_heart.config.settings import (
     OpenRouterLLMModel,
     OpenRouterProviderRouting,
     OpenRouterSelectionAlias,
+    ProviderSettings,
     TranslationConnection,
     TranslationModel,
     TranslationSettings,
@@ -139,6 +140,7 @@ class ConstructionDummySettingsView(ft.Container):
         self.on_request_openrouter_pkce = None
         self.on_verify_api_key = None
         self.on_secret_cleared = None
+        self.on_local_llm_secret_changed = None
         self.show_snackbar = None
         self.overlay_peer_contract = None
         self.has_provider_changes = False
@@ -1887,6 +1889,52 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
     ]
 
 
+@pytest.mark.asyncio
+async def test_local_llm_secret_changed_forces_local_llm_rebuild() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    calls: list[bool] = []
+
+    async def fake_apply_providers(
+        _settings=None,
+        *,
+        force_rebuild_llm: bool = False,
+    ) -> None:
+        calls.append(force_rebuild_llm)
+
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    app.controller = SimpleNamespace(settings=settings, apply_providers=fake_apply_providers)
+
+    app._on_local_llm_secret_changed()
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_local_llm_secret_changed_ignores_non_local_llm_provider() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    calls: list[bool] = []
+
+    async def fake_apply_providers(
+        _settings=None,
+        *,
+        force_rebuild_llm: bool = False,
+    ) -> None:
+        calls.append(force_rebuild_llm)
+
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.GEMINI))
+    app.controller = SimpleNamespace(settings=settings, apply_providers=fake_apply_providers)
+
+    app._on_local_llm_secret_changed()
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert calls == []
+
+
 def test_toggle_handlers_route_basic_and_detailed_runtime_logs() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
@@ -2037,6 +2085,50 @@ async def test_on_verify_api_key_persists_and_updates_dashboard_flags(
     assert app.view_dashboard.stt_calls[-1] == (False, False)
     assert app.view_dashboard.trans_calls[-1] == (False, False)
     assert len(saves) == 4
+
+
+@pytest.mark.asyncio
+async def test_on_verify_api_key_skips_persistence_for_stale_field_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.view_settings = SimpleNamespace(_google_key=SimpleNamespace(value="new-key"))
+    app.view_dashboard = SimpleNamespace(
+        stt_calls=[],
+        trans_calls=[],
+        set_stt_needs_key=lambda value, update_ui=False: app.view_dashboard.stt_calls.append(
+            (value, update_ui)
+        ),
+        set_translation_needs_key=lambda value, update_ui=False: app.view_dashboard.trans_calls.append(
+            (value, update_ui)
+        ),
+    )
+
+    async def fake_verify(provider: str, key: str):
+        assert (provider, key) == ("google", "old-key")
+        return True, "ok"
+
+    settings = SimpleNamespace(
+        api_key_verified=SimpleNamespace(
+            google=False,
+        )
+    )
+    app.controller = SimpleNamespace(
+        verify_api_key=fake_verify,
+        settings=settings,
+        config_path="settings.json",
+    )
+
+    saves: list[tuple[object, object]] = []
+    monkeypatch.setattr(app_module, "save_settings", lambda path, cfg: saves.append((path, cfg)))
+
+    result = await app._on_verify_api_key("google", "old-key")
+
+    assert result == (True, "ok")
+    assert settings.api_key_verified.google is False
+    assert saves == []
+    assert app.view_dashboard.stt_calls == []
+    assert app.view_dashboard.trans_calls == []
 
 
 def test_show_snackbar_opens_page_snackbar() -> None:

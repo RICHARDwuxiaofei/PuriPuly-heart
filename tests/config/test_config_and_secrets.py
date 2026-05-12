@@ -53,7 +53,11 @@ from puripuly_heart.config.settings import (
     supported_translation_connections,
     to_dict,
 )
-from puripuly_heart.core.storage.secrets import EncryptedFileSecretStore, mask_secret
+from puripuly_heart.core.storage.secrets import (
+    EncryptedFileSecretStore,
+    KeyringSecretStore,
+    mask_secret,
+)
 
 
 def test_settings_roundtrip(tmp_path):
@@ -421,6 +425,27 @@ def test_local_llm_settings_default_and_roundtrip() -> None:
     assert loaded.local_llm.base_url == "http://192.168.0.25:11434/v1"
     assert loaded.local_llm.model == "qwen2.5:7b"
     assert loaded.local_llm.extra_body == {"enable_thinking": False}
+
+
+def test_local_llm_api_key_is_not_serialized_in_settings() -> None:
+    settings = AppSettings()
+    persisted = to_dict(settings)
+
+    assert "local_llm_api_key" not in persisted
+    assert "api_key" not in persisted["local_llm"]
+    assert "local_llm" not in persisted["api_key_verified"]
+
+
+def test_local_llm_stray_api_key_settings_are_ignored_on_roundtrip() -> None:
+    raw = to_dict(AppSettings())
+    raw["local_llm"]["api_key"] = "do-not-persist"
+    raw["api_key_verified"]["local_llm"] = True
+
+    loaded = from_dict(raw)
+    persisted = to_dict(loaded)
+
+    assert "api_key" not in persisted["local_llm"]
+    assert "local_llm" not in persisted["api_key_verified"]
 
 
 def test_translation_settings_defaults_to_gemma_managed_with_only_gemma_history() -> None:
@@ -2761,6 +2786,100 @@ def test_encrypted_file_secret_store_roundtrip(tmp_path):
     assert store.get("google_api_key") == "sk-SECRET"
     store.delete("google_api_key")
     assert store.get("google_api_key") is None
+
+
+def test_keyring_secret_store_delete_propagates_unexpected_backend_exceptions() -> None:
+    class PasswordDeleteError(Exception):
+        pass
+
+    class BrokenKeyring:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+            self.errors = type("errors", (), {"PasswordDeleteError": PasswordDeleteError})
+
+        def delete_password(self, service_name: str, key: str) -> None:
+            self.calls.append((service_name, key))
+            raise RuntimeError("keyring delete failed")
+
+    fake_keyring = BrokenKeyring()
+
+    class FakeKeyringSecretStore(KeyringSecretStore):
+        def _keyring(self):
+            return fake_keyring
+
+    store = FakeKeyringSecretStore(service_name="test-service")
+
+    with pytest.raises(RuntimeError, match="keyring delete failed"):
+        store.delete("local_llm_api_key")
+
+    assert fake_keyring.calls == [("test-service", "local_llm_api_key")]
+
+
+def test_keyring_secret_store_delete_ignores_password_delete_error() -> None:
+    class PasswordDeleteError(Exception):
+        pass
+
+    class MissingPasswordKeyring:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str]] = []
+            self.errors = type("errors", (), {"PasswordDeleteError": PasswordDeleteError})
+
+        def delete_password(self, service_name: str, key: str) -> None:
+            self.calls.append(("delete", service_name, key))
+            raise PasswordDeleteError("password not found")
+
+        def get_password(self, service_name: str, key: str) -> str | None:
+            self.calls.append(("get", service_name, key))
+            return None
+
+    fake_keyring = MissingPasswordKeyring()
+
+    class FakeKeyringSecretStore(KeyringSecretStore):
+        def _keyring(self):
+            return fake_keyring
+
+    store = FakeKeyringSecretStore(service_name="test-service")
+
+    store.delete("local_llm_api_key")
+
+    assert fake_keyring.calls == [
+        ("delete", "test-service", "local_llm_api_key"),
+        ("get", "test-service", "local_llm_api_key"),
+    ]
+
+
+def test_keyring_secret_store_delete_reraises_password_delete_error_when_secret_remains() -> None:
+    class PasswordDeleteError(Exception):
+        pass
+
+    class StillPresentKeyring:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str]] = []
+            self.errors = type("errors", (), {"PasswordDeleteError": PasswordDeleteError})
+
+        def delete_password(self, service_name: str, key: str) -> None:
+            self.calls.append(("delete", service_name, key))
+            raise PasswordDeleteError("delete failed")
+
+        def get_password(self, service_name: str, key: str) -> str | None:
+            self.calls.append(("get", service_name, key))
+            return "still-present"
+
+    fake_keyring = StillPresentKeyring()
+
+    class FakeKeyringSecretStore(KeyringSecretStore):
+        def _keyring(self):
+            return fake_keyring
+
+    store = FakeKeyringSecretStore(service_name="test-service")
+
+    with pytest.raises(PasswordDeleteError, match="delete failed"):
+        store.delete("local_llm_api_key")
+
+    assert fake_keyring.calls == [
+        ("delete", "test-service", "local_llm_api_key"),
+        ("get", "test-service", "local_llm_api_key"),
+    ]
 
 
 def test_encrypted_file_secret_store_does_not_store_plaintext(tmp_path):

@@ -208,6 +208,7 @@ class SettingsView(ft.Column):
         self.on_settings_changed: Callable[[AppSettings], None] | None = None
         self.on_prompt_apply_settings: Callable[[AppSettings], None] | None = None
         self.on_providers_changed: Callable[[], None] | None = None
+        self.on_local_llm_secret_changed: Callable[[], None] | None = None
         self.on_request_openrouter_pkce: Callable[[AppSettings], None] | None = None
         self.on_verify_api_key: Callable[[str, str], object] | None = None
         self.on_secret_cleared: Callable[[str], None] | None = None  # key name
@@ -1436,6 +1437,24 @@ class SettingsView(ft.Column):
             on_blur=self._on_local_llm_model_change_end,
             on_submit=self._on_local_llm_model_change_end,
         )
+        self._local_llm_api_key = ApiKeyField(
+            "settings.local_llm.api_key",
+            "local_llm_api_key",
+            "local_llm",
+            on_verify=None,
+            on_save=self._on_local_llm_secret_change,
+            show_snackbar=lambda msg, bg: (
+                self.show_snackbar(msg, bg) if self.show_snackbar else None
+            ),
+            show_status=False,
+        )
+        local_llm_api_key_description = t("settings.local_llm.api_key.description")
+        self._local_llm_api_key_helper = ft.Text(
+            local_llm_api_key_description,
+            size=15,
+            color=COLOR_NEUTRAL,
+            visible=bool(local_llm_api_key_description.strip()),
+        )
         self._local_llm_extra_body = ft.TextField(
             label=t("settings.local_llm.extra_body"),
             value=json.dumps({"reasoning_effort": "none"}, ensure_ascii=False, indent=2),
@@ -1474,6 +1493,8 @@ class SettingsView(ft.Column):
                     self._local_llm_extra_body_helper,
                     self._local_llm_base_url,
                     self._local_llm_model,
+                    self._local_llm_api_key,
+                    self._local_llm_api_key_helper,
                     self._local_llm_extra_body,
                     self._local_llm_extra_body_error,
                 ],
@@ -2281,6 +2302,7 @@ class SettingsView(ft.Column):
         self._deepseek_key.value = store.get("deepseek_api_key") or ""
         self._deepgram_key.value = store.get("deepgram_api_key") or ""
         self._soniox_key.value = store.get("soniox_api_key") or ""
+        self._local_llm_api_key.value = store.get("local_llm_api_key") or ""
 
         # Alibaba keys with legacy fallback
         beijing_key = _load_secret_value(
@@ -2875,21 +2897,47 @@ class SettingsView(ft.Column):
         target.system_prompt = self._ensure_provider_prompt_value(target, "openrouter")
         self.on_request_openrouter_pkce(target)
 
-    def _on_secret_change(self, key: str, value: str) -> None:
+    def _write_secret_value(self, key: str, value: str) -> bool:
         if not self._settings or not self._config_path:
-            return
+            return False
 
-        with contextlib.suppress(Exception):
+        try:
             store = create_secret_store(self._settings.secrets, config_path=self._config_path)
             if value:
                 store.set(key, value)
             else:
                 store.delete(key)
-                # Notify app to reset verification status
-                if self.on_secret_cleared:
-                    self.on_secret_cleared(key)
-            if key == "openrouter_api_key":
-                self._sync_openrouter_pkce_button_state()
+            return True
+        except Exception as exc:
+            self._emit_runtime_basic(
+                f"Failed to update secret {key}: {type(exc).__name__}",
+                level=logging.WARNING,
+            )
+            return False
+
+    def _on_local_llm_secret_change(self, key: str, value: str) -> None:
+        if key != "local_llm_api_key":
+            return
+        stripped = value.strip()
+        if not self._write_secret_value(key, stripped):
+            if self.show_snackbar:
+                self.show_snackbar(t("settings.local_llm.api_key.save_failed"), ft.Colors.RED_400)
+            return
+        self._local_llm_api_key.value = stripped
+        if self.on_local_llm_secret_changed:
+            self.on_local_llm_secret_changed()
+
+    def _on_secret_change(self, key: str, value: str) -> None:
+        if not self._settings or not self._config_path:
+            return
+
+        if not self._write_secret_value(key, value):
+            return
+        if not value and self.on_secret_cleared:
+            with contextlib.suppress(Exception):
+                self.on_secret_cleared(key)
+        if key == "openrouter_api_key":
+            self._sync_openrouter_pkce_button_state()
 
     def _on_audio_change(self) -> None:
         if not self._settings:
@@ -3636,6 +3684,10 @@ class SettingsView(ft.Column):
         self._local_llm_connection_title.value = t("settings.local_llm.connection")
         self._local_llm_base_url.label = t("settings.local_llm.base_url")
         self._local_llm_model.label = t("settings.local_llm.model")
+        self._local_llm_api_key.apply_locale()
+        local_llm_api_key_description = t("settings.local_llm.api_key.description")
+        self._local_llm_api_key_helper.value = local_llm_api_key_description
+        self._local_llm_api_key_helper.visible = bool(local_llm_api_key_description.strip())
         self._local_llm_extra_body.label = t("settings.local_llm.extra_body")
         self._local_llm_extra_body_helper.value = t("settings.local_llm.extra_body.description")
         if self._local_llm_base_url.error_text:

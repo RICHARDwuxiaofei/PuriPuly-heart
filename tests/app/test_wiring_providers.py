@@ -264,7 +264,7 @@ def test_create_llm_provider_local_llm_uses_settings_without_secret(
     assert provider.semaphore._value == 2  # type: ignore[attr-defined]
 
 
-def test_create_llm_provider_local_llm_uses_optional_env_key(
+def test_create_llm_provider_local_llm_ignores_optional_env_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
@@ -275,10 +275,10 @@ def test_create_llm_provider_local_llm_uses_optional_env_key(
 
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, LocalOpenAICompatibleLLMProvider)
-    assert provider.inner.api_key == "local-secret"
+    assert provider.inner.api_key == ""
 
 
-def test_create_llm_provider_local_llm_secret_store_key_takes_precedence_over_env(
+def test_create_llm_provider_local_llm_uses_secret_store_key_even_when_env_is_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))

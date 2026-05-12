@@ -55,8 +55,14 @@ class KeyringSecretStore:
         keyring = self._keyring()
         try:
             keyring.delete_password(self.service_name, key)
-        except Exception:
-            return
+        except Exception as exc:
+            errors = getattr(keyring, "errors", None)
+            password_delete_error = getattr(errors, "PasswordDeleteError", None)
+            if password_delete_error is not None and isinstance(exc, password_delete_error):
+                if keyring.get_password(self.service_name, key) is None:
+                    return
+                raise
+            raise
 
 
 def mask_secret(value: str, *, unmasked_prefix: int = 3) -> str:

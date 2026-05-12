@@ -525,7 +525,7 @@ def create_llm_provider(
             runtime_logging=runtime_logging,
         )
     elif settings.provider.llm == LLMProviderName.LOCAL_LLM:
-        api_key = secrets.get("local_llm_api_key") or os.getenv("LOCAL_LLM_API_KEY") or ""
+        api_key = (secrets.get("local_llm_api_key") or "").strip()
         base = LocalOpenAICompatibleLLMProvider(
             base_url=settings.local_llm.base_url,
             model=settings.local_llm.model,
