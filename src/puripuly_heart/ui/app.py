@@ -129,6 +129,7 @@ class TranslatorApp:
         self.view_settings.on_request_openrouter_pkce = self._on_request_openrouter_pkce
         self.view_settings.on_verify_api_key = self._on_verify_api_key
         self.view_settings.on_secret_cleared = self._on_secret_cleared
+        self.view_settings.on_local_llm_secret_changed = self._on_local_llm_secret_changed
         self.view_settings.show_snackbar = self._show_snackbar
         self.view_logs.on_mode_change = self._on_runtime_logging_mode_change
         self.view_logs.set_runtime_logging_mode(self.controller.runtime_logging_mode)
@@ -612,6 +613,15 @@ class TranslatorApp:
 
         self._queue_settings_mutation_task(_task)
 
+    def _on_local_llm_secret_changed(self) -> None:
+        async def _task():
+            settings = getattr(self.controller, "settings", None)
+            if settings is None or settings.provider.llm != LLMProviderName.LOCAL_LLM:
+                return
+            await self.controller.apply_providers(force_rebuild_llm=True)
+
+        self._queue_settings_mutation_task(_task)
+
     def _on_request_openrouter_pkce(
         self,
         target_settings: AppSettings,
@@ -869,8 +879,35 @@ class TranslatorApp:
         self._founder_letter_dialog = dialog
         dialog.open()
 
+    def _api_key_verification_matches_current_field(self, provider: str, key: str) -> bool:
+        field_by_provider = {
+            "deepgram": "_deepgram_key",
+            "soniox": "_soniox_key",
+            "google": "_google_key",
+            "openrouter": "_openrouter_key",
+            "deepseek": "_deepseek_key",
+            "alibaba_beijing": "_alibaba_key_beijing",
+            "alibaba_singapore": "_alibaba_key_singapore",
+        }
+        field_name = field_by_provider.get(provider)
+        if field_name is None:
+            return True
+
+        field = getattr(getattr(self, "view_settings", None), field_name, None)
+        if field is None:
+            return True
+
+        current_key = getattr(field, "value", None)
+        if current_key is None:
+            return True
+
+        return current_key == key
+
     async def _on_verify_api_key(self, provider: str, key: str) -> tuple[bool, str]:
         success, msg = await self.controller.verify_api_key(provider, key)
+
+        if not self._api_key_verification_matches_current_field(provider, key):
+            return success, msg
 
         # Save verification result to settings
         setattr(self.controller.settings.api_key_verified, provider, success)

@@ -258,6 +258,42 @@ async def test_httpx_local_client_adds_auth_only_when_key_present(monkeypatch) -
     }
 
 
+@pytest.mark.asyncio
+async def test_httpx_local_client_treats_whitespace_key_as_empty(monkeypatch) -> None:
+    fake_client = FakeAsyncClient()
+    monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: fake_client)
+    client = HttpxLocalOpenAIClient(base_url="http://localhost:11434/v1", model="m", api_key="   ")
+
+    await client.translate(
+        text="hello", system_prompt="SYSTEM", source_language="ko", target_language="en"
+    )
+
+    assert fake_client.last_request["headers"] == {"Content-Type": "application/json"}
+
+
+@pytest.mark.asyncio
+async def test_local_translate_redacts_trimmed_configured_api_key(monkeypatch) -> None:
+    fake_client = FakeAsyncClient(
+        response_status=500,
+        response_data={"error": {"message": "plain leaked token local-secret"}},
+    )
+    monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: fake_client)
+    client = HttpxLocalOpenAIClient(
+        base_url="http://localhost:11434/v1",
+        model="m",
+        api_key="  local-secret  ",
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.translate(
+            text="hello", system_prompt="SYSTEM", source_language="ko", target_language="en"
+        )
+
+    message = str(exc_info.value)
+    assert "local-secret" not in message
+    assert "[redacted]" in message
+
+
 def test_httpx_local_client_disables_env_proxy_and_redirects(monkeypatch) -> None:
     fake_client = FakeAsyncClient()
     seen_kwargs: dict[str, object] = {}

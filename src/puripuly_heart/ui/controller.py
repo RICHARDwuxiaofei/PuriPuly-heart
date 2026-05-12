@@ -3309,10 +3309,8 @@ class GuiController:
                     llm_valid = await _verify_alibaba_selected()
                 elif provider_name == LLMProviderName.LOCAL_LLM:
                     key = (
-                        (secrets.get("local_llm_api_key") if secrets is not None else None)
-                        or os.getenv("LOCAL_LLM_API_KEY")
-                        or ""
-                    )
+                        (secrets.get("local_llm_api_key") if secrets is not None else None) or ""
+                    ).strip()
                     llm_valid = await LocalOpenAICompatibleLLMProvider.verify_connection(
                         base_url=self.settings.local_llm.base_url,
                         model=self.settings.local_llm.model,

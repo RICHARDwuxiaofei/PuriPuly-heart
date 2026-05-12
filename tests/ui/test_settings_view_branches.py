@@ -109,6 +109,13 @@ def _make_llm_selection_view(
         error_text=None,
         update=lambda: None,
     )
+    view._local_llm_api_key = SimpleNamespace(
+        value="",
+        visible=True,
+        apply_locale=lambda: None,
+        update=lambda: None,
+    )
+    view._local_llm_api_key_helper = SimpleNamespace(value="", update=lambda: None)
     view._local_llm_extra_body = SimpleNamespace(
         value=json.dumps(settings.local_llm.extra_body, ensure_ascii=False),
         label="",
@@ -709,7 +716,7 @@ def test_on_llm_selected_updates_to_local_llms_with_ollama_connection(
     assert view.has_provider_changes is True
 
 
-def test_local_llm_visibility_shows_connection_card_without_api_key_field(
+def test_local_llm_visibility_shows_connection_card_with_server_api_key_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
@@ -718,6 +725,7 @@ def test_local_llm_visibility_shows_connection_card_without_api_key_field(
     view._update_api_visibility()
 
     assert view._local_llm_connection_card.visible is True
+    assert view._local_llm_api_key.visible is True
     assert view._google_key.visible is False
     assert view._openrouter_key.visible is False
     assert view._deepseek_key.visible is False
@@ -736,10 +744,11 @@ def test_local_llm_connection_card_matches_api_field_scale_and_copy(
         controls = list(column.controls)
         api_field = view._google_key._text_field
 
-        assert view._local_llm_base_url.label == "연결 주소"
+        assert view._local_llm_base_url.label == "Base URL"
+        assert view._local_llm_model.label == "모델 ID"
         assert view._local_llm_extra_body.label == "JSON extra body"
         assert view._local_llm_extra_body_helper.value == (
-            "빠른 지연시간을 위해 추론을 끄고 사용하는 것을 권장해요. "
+            "낮은 지연시간을 위해 추론을 끄고 사용하는 것을 권장해요. "
             "JSON extra body에 알맞은 파라미터를 입력해서 추론 레벨을 제어하세요."
         )
         assert view._local_llm_extra_body_helper.size == 15
@@ -748,6 +757,10 @@ def test_local_llm_connection_card_matches_api_field_scale_and_copy(
         )
         assert controls[2] is view._local_llm_extra_body_helper
         assert controls[3] is view._local_llm_base_url
+        assert controls[4] is view._local_llm_model
+        assert controls[5] is view._local_llm_api_key
+        assert controls[6] is view._local_llm_api_key_helper
+        assert controls[7] is view._local_llm_extra_body
 
         for field in (
             view._local_llm_base_url,
@@ -762,6 +775,163 @@ def test_local_llm_connection_card_matches_api_field_scale_and_copy(
             assert field.label_style.color == api_field.label_style.color
             assert field.expand is True
             assert field.dense is not True
+    finally:
+        i18n_module.set_locale(old_locale)
+
+
+def test_load_from_settings_loads_local_llm_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    store = DummySecretStore({"local_llm_api_key": "server-secret"})
+    view, _ = _make_settings_view(monkeypatch, store)
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._local_llm_api_key.value == "server-secret"
+
+
+def test_load_from_settings_without_local_llm_api_key_shows_empty_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    store = DummySecretStore()
+    view, _ = _make_settings_view(monkeypatch, store)
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._local_llm_api_key.value == ""
+
+
+def test_load_from_settings_does_not_touch_existing_local_llm_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.GEMINI))
+    store = DummySecretStore({"local_llm_api_key": "server-secret"})
+    view, _ = _make_settings_view(monkeypatch, store)
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert store.set_calls == []
+    assert store.delete_calls == []
+
+
+def test_local_llm_secret_change_trims_saves_and_requests_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    store = DummySecretStore()
+    view, _ = _make_settings_view(monkeypatch, store)
+    view._settings = settings
+    view._config_path = Path("settings.json")
+    callbacks: list[str] = []
+    view.on_local_llm_secret_changed = lambda: callbacks.append("changed")
+
+    view._on_local_llm_secret_change("local_llm_api_key", "  server-secret  ")
+
+    assert store.set_calls == [("local_llm_api_key", "server-secret")]
+    assert store.delete_calls == []
+    assert callbacks == ["changed"]
+
+
+def test_local_llm_secret_change_whitespace_deletes_and_requests_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    store = DummySecretStore({"local_llm_api_key": "server-secret"})
+    view, _ = _make_settings_view(monkeypatch, store)
+    view._settings = settings
+    view._config_path = Path("settings.json")
+    callbacks: list[str] = []
+    view.on_local_llm_secret_changed = lambda: callbacks.append("changed")
+
+    view._on_local_llm_secret_change("local_llm_api_key", "   ")
+
+    assert store.set_calls == []
+    assert store.delete_calls == ["local_llm_api_key"]
+    assert callbacks == ["changed"]
+
+
+def test_local_llm_secret_change_failure_does_not_request_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingSecretStore(DummySecretStore):
+        def set(self, key: str, value: str) -> None:
+            raise RuntimeError("keyring unavailable")
+
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    store = FailingSecretStore()
+    view, _ = _make_settings_view(monkeypatch, store)
+    view._settings = settings
+    view._config_path = Path("settings.json")
+    snackbars: list[str] = []
+    callbacks: list[str] = []
+    view.show_snackbar = lambda message, _bg: snackbars.append(message)
+    view.on_local_llm_secret_changed = lambda: callbacks.append("changed")
+
+    view._on_local_llm_secret_change("local_llm_api_key", "server-secret")
+
+    assert callbacks == []
+    assert snackbars == [t("settings.local_llm.api_key.save_failed")]
+
+
+def test_local_llm_secret_delete_failure_does_not_request_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingDeleteSecretStore(DummySecretStore):
+        def delete(self, key: str) -> None:
+            raise RuntimeError("delete failed for server-secret")
+
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    store = FailingDeleteSecretStore({"local_llm_api_key": "server-secret"})
+    view, _ = _make_settings_view(monkeypatch, store)
+    view._settings = settings
+    view._config_path = Path("settings.json")
+    snackbars: list[str] = []
+    callbacks: list[str] = []
+    view.show_snackbar = lambda message, _bg: snackbars.append(message)
+    view.on_local_llm_secret_changed = lambda: callbacks.append("changed")
+
+    view._on_local_llm_secret_change("local_llm_api_key", "   ")
+
+    assert callbacks == []
+    assert snackbars == [t("settings.local_llm.api_key.save_failed")]
+
+
+def test_local_llm_secret_failure_logs_do_not_include_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class LeakyFailureSecretStore(DummySecretStore):
+        def set(self, key: str, value: str) -> None:
+            raise RuntimeError(f"backend echoed {value}")
+
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    store = LeakyFailureSecretStore()
+    view, _ = _make_settings_view(monkeypatch, store)
+    view._settings = settings
+    view._config_path = Path("settings.json")
+
+    with caplog.at_level(logging.WARNING):
+        view._on_local_llm_secret_change("local_llm_api_key", "server-secret")
+
+    assert "server-secret" not in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+def test_apply_locale_refreshes_local_llm_api_key_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_locale = i18n_module.get_locale()
+    i18n_module.set_locale("ko")
+    try:
+        view, _ = _make_settings_view(monkeypatch)
+
+        view.apply_locale()
+
+        assert view._local_llm_api_key._text_field.label == t("settings.local_llm.api_key")
+        assert view._local_llm_api_key_helper.value == ""
+        assert view._local_llm_api_key_helper.visible is False
     finally:
         i18n_module.set_locale(old_locale)
 

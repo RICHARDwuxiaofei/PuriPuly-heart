@@ -29,6 +29,7 @@ from puripuly_heart.config.settings import (
     OpenRouterProviderRouting,
     OpenRouterRoutingMode,
     OpenRouterSelectionAlias,
+    ProviderSettings,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
@@ -1519,6 +1520,60 @@ async def test_apply_providers_clears_dashboard_pending_notice_when_switching_aw
     assert controller._managed_trial_pending_auth is False
     assert dash.managed_auth_pending is False
     assert dash.managed_auth_pending_calls == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_apply_providers_force_rebuild_local_llm_reads_updated_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ClosableLLM:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    async def noop_replace_managed_service(self, service) -> None:
+        _ = (self, service)
+
+    async def noop_refresh_managed_usage(self) -> None:
+        _ = self
+
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=DummySettingsView())
+    )
+    controller.settings = settings
+    previous_llm = ClosableLLM()
+    controller.hub = DummyHub(llm=previous_llm)
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_create_managed_openrouter_release_service",
+        lambda self, *, secrets: object(),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_replace_managed_openrouter_release_service",
+        noop_replace_managed_service,
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_refresh_managed_trial_usage_state_best_effort",
+        noop_refresh_managed_usage,
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_a, **_k: DummySecrets({"local_llm_api_key": "new-secret"}),
+    )
+
+    await controller.apply_providers(force_rebuild_llm=True)
+
+    assert previous_llm.closed is True
+    assert isinstance(controller.hub.llm, SemaphoreLLMProvider)
+    assert controller.hub.llm.inner.api_key == "new-secret"
 
 
 @pytest.mark.asyncio

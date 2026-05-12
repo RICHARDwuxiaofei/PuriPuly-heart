@@ -90,6 +90,9 @@ def test_local_llm_keys_are_localized() -> None:
         "settings.local_llm.base_url.invalid",
         "settings.local_llm.model",
         "settings.local_llm.model.required",
+        "settings.local_llm.api_key",
+        "settings.local_llm.api_key.description",
+        "settings.local_llm.api_key.save_failed",
         "settings.local_llm.extra_body",
         "settings.local_llm.extra_body.description",
         "settings.local_llm.extra_body.invalid_json",
@@ -104,16 +107,32 @@ def test_local_llm_keys_are_localized() -> None:
         missing = sorted(required_keys - set(bundle))
         assert missing == [], locale
         for key in required_keys:
-            if key == "settings.translation_model.local_llm.description":
+            if key in {
+                "settings.translation_model.local_llm.description",
+                "settings.local_llm.api_key.description",
+            }:
                 assert bundle[key] == ""
                 continue
             assert bundle[key].strip()
             assert bundle[key] != key
 
-    assert bundles["ko"]["settings.local_llm.connection"] == "로컬 LLM 연결"
-    assert bundles["ko"]["settings.local_llm.base_url"] == "연결 주소"
-    assert bundles["ko"]["settings.local_llm.model"] == "모델명"
-    assert bundles["ko"]["settings.local_llm.extra_body"] == "JSON extra body"
+    assert bundles["en"]["settings.translation_connection.ollama"] == "OpenAI-compatible API"
+    assert bundles["ko"]["settings.translation_connection.ollama"] == "OpenAI 호환 API"
+    assert bundles["ko"]["settings.local_llm.connection"] == "OpenAI 호환 LLM 서버"
+    assert bundles["ko"]["settings.local_llm.base_url"] == "Base URL"
+    expected_model_copy = {
+        "en": ("Model ID", "Enter a model ID."),
+        "ko": ("모델 ID", "모델 ID를 입력해 주세요."),
+        "ja": ("モデルID", "モデルIDを入力してください。"),
+        "zh-CN": ("模型 ID", "请输入模型 ID。"),
+    }
+    for locale, (model_label, required_label) in expected_model_copy.items():
+        assert bundles[locale]["settings.local_llm.model"] == model_label
+        assert bundles[locale]["settings.local_llm.model.required"] == required_label
+    assert bundles["ko"]["settings.local_llm.api_key"] == "서버 API 키 (선택)"
+    assert bundles["ko"]["settings.local_llm.api_key.description"] == ""
+    assert bundles["ko"]["settings.local_llm.extra_body.description"].startswith("낮은 지연시간")
+    assert "서버 API 키" in bundles["ko"]["settings.local_llm.extra_body.sensitive_key"]
 
 
 def test_i18n_bundles_do_not_keep_unused_runtime_keys() -> None:
