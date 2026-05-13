@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
 </p>
 
-<p align="center">LLM-based real-time translator for VRChat</p>
+<p align="center">LLM-based two-way real-time translator for VRChat</p>
 
 <h2 align="center">
   <a href="README.md">🇺🇸 English</a> ·
