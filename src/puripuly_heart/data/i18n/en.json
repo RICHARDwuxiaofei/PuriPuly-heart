@@ -69,7 +69,7 @@
   "settings.translation_model.gemma4.description": "Good for most situations We recommend using this model",
   "settings.translation_model.deepseek_v4_flash.description": "An option for people using PuriPuly in mainland China",
   "settings.translation_model.gemini3_flash.description": "Translation speed may be unstable",
-  "settings.translation_model.gemini31_flash_lite.description": "Translation speed may be unstable",
+  "settings.translation_model.gemini31_flash_lite.description": "Fast, lightweight Gemini translation",
   "settings.translation_model.qwen35_plus.description": "A strong alternative to DeepSeek",
   "settings.translation_model.local_llm.description": "",
   "settings.local_llm.connection": "OpenAI-compatible LLM server",

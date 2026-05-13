@@ -72,7 +72,7 @@ def test_create_llm_provider_gemini_uses_secret_and_concurrency_limit() -> None:
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, GeminiLLMProvider)
     assert provider.inner.api_key == "k"
-    assert provider.inner.model == "gemini-3.1-flash-lite-preview"
+    assert provider.inner.model == "gemini-3.1-flash-lite"
     assert provider.semaphore._value == 3  # type: ignore[attr-defined]
 
 
@@ -87,7 +87,7 @@ def test_create_llm_provider_gemini_uses_selected_model() -> None:
     provider = create_llm_provider(settings, secrets=secrets)
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, GeminiLLMProvider)
-    assert provider.inner.model == "gemini-3.1-flash-lite-preview"
+    assert provider.inner.model == "gemini-3.1-flash-lite"
 
 
 def test_create_llm_provider_gemini_passes_runtime_logging() -> None:

@@ -2283,7 +2283,10 @@ class GuiController:
         try:
             success = False
             if provider == "google":
-                success = await GeminiLLMProvider.verify_api_key(key)
+                success = await GeminiLLMProvider.verify_api_key(
+                    key,
+                    model=self.settings.gemini.llm_model.value,
+                )
             elif provider == "openrouter":
                 success = await OpenRouterLLMProvider.verify_api_key(key)
             elif provider == "deepseek":
@@ -3358,7 +3361,10 @@ class GuiController:
                 key = ""
                 if provider_name == "gemini":
                     key = secrets.get("google_api_key") or "" if secrets is not None else ""
-                    llm_valid = await GeminiLLMProvider.verify_api_key(key)
+                    llm_valid = await GeminiLLMProvider.verify_api_key(
+                        key,
+                        model=self.settings.gemini.llm_model.value,
+                    )
                 elif provider_name == LLMProviderName.OPENROUTER:
                     resolution = (
                         resolve_openrouter_credentials(self.settings, secrets=secrets)

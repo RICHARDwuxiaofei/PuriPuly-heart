@@ -133,6 +133,135 @@ def _install_fake_google(monkeypatch, *, response_text: str | None) -> dict[str,
     return state
 
 
+def _install_fake_google_model_list(monkeypatch, *, names: list[str]) -> dict[str, object]:
+    state: dict[str, object] = {"list_configs": []}
+
+    class FakeModels:
+        async def list(self, config=None):
+            state["list_configs"].append(config)
+
+            async def _items():
+                for name in names:
+                    yield SimpleNamespace(name=name)
+
+            return _items()
+
+    class FakeAio:
+        def __init__(self):
+            self.models = FakeModels()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+            self.aio = FakeAio()
+
+    genai_module = ModuleType("google.genai")
+    genai_module.Client = FakeClient
+
+    google_module = ModuleType("google")
+    google_module.genai = genai_module
+
+    monkeypatch.setitem(sys.modules, "google", google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", genai_module)
+
+    return state
+
+
+def _install_fake_google_model_entries(
+    monkeypatch,
+    *,
+    entries: list[object],
+) -> dict[str, object]:
+    state: dict[str, object] = {"list_configs": []}
+
+    class FakeModels:
+        async def list(self, config=None):
+            state["list_configs"].append(config)
+
+            async def _items():
+                for entry in entries:
+                    yield entry
+
+            return _items()
+
+    class FakeAio:
+        def __init__(self):
+            self.models = FakeModels()
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.api_key = api_key
+            self.aio = FakeAio()
+
+    genai_module = ModuleType("google.genai")
+    genai_module.Client = FakeClient
+
+    google_module = ModuleType("google")
+    google_module.genai = genai_module
+
+    monkeypatch.setitem(sys.modules, "google", google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", genai_module)
+
+    return state
+
+
+@pytest.mark.asyncio
+async def test_gemini_verify_api_key_checks_requested_model(monkeypatch):
+    state = _install_fake_google_model_list(
+        monkeypatch,
+        names=["models/gemini-3.1-flash-lite"],
+    )
+
+    assert (
+        await GeminiLLMProvider.verify_api_key(
+            "secret",
+            model="gemini-3.1-flash-lite",
+        )
+        is True
+    )
+    assert (
+        await GeminiLLMProvider.verify_api_key(
+            "secret",
+            model="gemini-3.1-flash-lite-preview",
+        )
+        is False
+    )
+    assert state["list_configs"] == [{"page_size": 1000}, {"page_size": 1000}]
+
+
+@pytest.mark.asyncio
+async def test_gemini_verify_api_key_accepts_base_model_aliases(monkeypatch):
+    state = _install_fake_google_model_entries(
+        monkeypatch,
+        entries=[
+            SimpleNamespace(
+                name="models/gemini-3.1-flash-lite-001",
+                base_model_id="gemini-3.1-flash-lite",
+            ),
+            SimpleNamespace(
+                name="models/gemini-3-flash-001",
+                baseModelId="gemini-3-flash-preview",
+            ),
+        ],
+    )
+
+    assert (
+        await GeminiLLMProvider.verify_api_key(
+            "secret",
+            model="gemini-3.1-flash-lite",
+        )
+        is True
+    )
+    assert (
+        await GeminiLLMProvider.verify_api_key(
+            "secret",
+            model="gemini-3-flash-preview",
+        )
+        is True
+    )
+    assert state["list_configs"] == [{"page_size": 1000}, {"page_size": 1000}]
+
+
 @pytest.mark.asyncio
 async def test_gemini_provider_warmup_and_close_uses_client():
     fake = FakeGeminiClient()

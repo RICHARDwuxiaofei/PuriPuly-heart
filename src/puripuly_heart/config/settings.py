@@ -100,7 +100,7 @@ class QwenRegion(str, Enum):
 
 class GeminiLLMModel(str, Enum):
     GEMINI_3_FLASH = "gemini-3-flash-preview"
-    GEMINI_31_FLASH_LITE = "gemini-3.1-flash-lite-preview"
+    GEMINI_31_FLASH_LITE = "gemini-3.1-flash-lite"
 
 
 class QwenLLMModel(str, Enum):
@@ -1081,7 +1081,7 @@ def _parse_gemini_llm_model(value: object) -> GeminiLLMModel:
         normalized = value.strip()
         if normalized == "gemini-3-flash":
             normalized = GeminiLLMModel.GEMINI_3_FLASH.value
-        elif normalized == "gemini-3.1-flash-lite":
+        elif normalized in {"gemini-3.1-flash-lite", "gemini-3.1-flash-lite-preview"}:
             normalized = GeminiLLMModel.GEMINI_31_FLASH_LITE.value
         try:
             return GeminiLLMModel(normalized)

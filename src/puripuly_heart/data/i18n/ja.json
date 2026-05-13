@@ -69,7 +69,7 @@
   "settings.translation_model.gemma4.description": "ほとんどの場面で優秀です。このモデルの使用をおすすめします",
   "settings.translation_model.deepseek_v4_flash.description": "中国大陸で利用している方向けの選択肢です",
   "settings.translation_model.gemini3_flash.description": "翻訳速度が不安定になることがあります",
-  "settings.translation_model.gemini31_flash_lite.description": "翻訳速度が不安定になることがあります",
+  "settings.translation_model.gemini31_flash_lite.description": "高速で軽量な Gemini 翻訳です",
   "settings.translation_model.qwen35_plus.description": "DeepSeekの良い代替手段です",
   "settings.translation_model.local_llm.description": "",
   "settings.local_llm.connection": "OpenAI互換LLMサーバー",

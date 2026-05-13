@@ -1368,7 +1368,7 @@ def test_gemini_llm_model_roundtrip(tmp_path):
     assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
 
     persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite-preview"
+    assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite"
 
 
 def test_load_settings_migrates_legacy_qwen_mt_flash_model(tmp_path):
@@ -1394,7 +1394,20 @@ def test_load_settings_migrates_legacy_invalid_gemini_model(tmp_path):
     assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
 
     persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite-preview"
+    assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite"
+
+
+def test_load_settings_migrates_preview_gemini_flash_lite_to_ga(tmp_path):
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["gemini"]["llm_model"] = "gemini-3.1-flash-lite-preview"
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite"
 
 
 def test_from_dict_defaults_missing_gemini_model_to_flash_lite():

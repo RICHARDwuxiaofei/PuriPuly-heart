@@ -923,6 +923,26 @@ async def test_verify_api_key_handles_empty_unknown_and_exception(
     assert any("[ERROR]" in line and "bad key" in line for line in logs.logs)
 
 
+@pytest.mark.asyncio
+async def test_verify_api_key_google_checks_selected_gemini_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    calls: list[tuple[str, str]] = []
+
+    async def fake_verify(key: str, *, model: str) -> bool:
+        calls.append((key, model))
+        return True
+
+    monkeypatch.setattr(GeminiLLMProvider, "verify_api_key", staticmethod(fake_verify))
+
+    outcome = await controller.verify_api_key("google", "secret")
+
+    assert outcome == (True, "Verification successful")
+    assert calls == [("secret", "gemini-3.1-flash-lite")]
+
+
 def test_log_error_falls_back_to_standard_logger_without_direct_logs_view_append(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

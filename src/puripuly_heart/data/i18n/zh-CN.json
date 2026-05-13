@@ -69,7 +69,7 @@
     "settings.translation_model.gemma4.description": "适合大多数情况 建议使用此模型",
     "settings.translation_model.deepseek_v4_flash.description": "适合在中国大陆使用 PuriPuly 的用户",
     "settings.translation_model.gemini3_flash.description": "翻译速度可能不稳定",
-    "settings.translation_model.gemini31_flash_lite.description": "翻译速度可能不稳定",
+    "settings.translation_model.gemini31_flash_lite.description": "快速、轻量的 Gemini 翻译",
     "settings.translation_model.qwen35_plus.description": "DeepSeek 的不错替代选择",
     "settings.translation_model.local_llm.description": "",
     "settings.local_llm.connection": "OpenAI 兼容 LLM 服务器",
