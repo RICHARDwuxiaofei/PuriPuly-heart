@@ -204,7 +204,7 @@
   "debug_preview.peer_translation_eula": "相手翻訳EULA",
   "debug_preview.discord_auth": "Discord認証",
   "debug_preview.discord_callback_page": "Discordコールバックページ",
-  "discord_auth.body": "PuriPulyでは新規ユーザー向けに無料利用枠をご用意しています。\n発話ベースで約750回翻訳できます。\nDiscord認証後、すぐに付与されます。",
+  "discord_auth.body": "PuriPulyでは新規ユーザー向けに無料利用枠をご用意しています。\n発話ベースで約600〜700回翻訳できます。\nDiscord認証後、すぐに付与されます。",
   "discord_auth.continue": "Discord OAuth認証",
   "discord_auth.close": "キャンセル",
   "discord_auth.reopen_browser": "ブラウザを再度開く",
