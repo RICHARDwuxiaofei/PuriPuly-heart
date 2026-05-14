@@ -45,7 +45,9 @@ from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.audio.source import (
+    SelfMicCaptureChannelDecision,
     SoundDeviceAudioSource,
+    determine_self_mic_capture_channels,
     resolve_sounddevice_input_device,
 )
 from puripuly_heart.core.clipboard.watcher import create_clipboard_watcher
@@ -2815,19 +2817,138 @@ class GuiController:
                     )
                     return None
 
-            def _open_source(
+            def _source_int(source: SoundDeviceAudioSource, attr: str, fallback: int) -> int:
+                try:
+                    value = getattr(source, attr, fallback)
+                    return int(value)
+                except Exception:
+                    return fallback
+
+            def _log_mic_capture_format(
+                *,
+                attempt: str,
+                dev_idx: int | None,
+                requested_channels: int,
+                decision: SelfMicCaptureChannelDecision,
+                source: SoundDeviceAudioSource,
+                host_api_for_log: str,
+                device_for_log: str,
+                wasapi_auto_convert: bool,
+                wasapi_exclusive: bool,
+            ) -> None:
+                metadata = decision.metadata
+                opened_channels = _source_int(source, "opened_channels", requested_channels)
+                frame_channels = _source_int(source, "frame_channels", opened_channels)
+                frame_channels_source = "opened_fallback"
+                actual_sample_rate_hz = _source_int(source, "actual_sample_rate_hz", 0)
+                self.log_detailed(
+                    "[STT] Microphone capture format: "
+                    f"attempt={attempt!r} "
+                    f"internal_channels={decision.internal_channels} "
+                    f"preferred_capture_channels={decision.preferred_capture_channels} "
+                    f"requested_channels={requested_channels} "
+                    f"opened_channels={opened_channels} "
+                    f"frame_channels={frame_channels} "
+                    f"frame_channels_source={frame_channels_source!r} "
+                    f"saved_host_api={saved_host_api!r} "
+                    f"actual_host_api={host_api_for_log!r} "
+                    f"device={device_for_log!r} "
+                    f"device_idx={dev_idx} "
+                    f"wasapi_auto_convert={wasapi_auto_convert} "
+                    f"wasapi_exclusive={wasapi_exclusive} "
+                    f"actual_sample_rate_hz={actual_sample_rate_hz or None} "
+                    f"metadata_device_idx={metadata.device_idx} "
+                    f"metadata_device_name={metadata.name!r} "
+                    f"device_max_input_channels={metadata.max_input_channels} "
+                    f"device_default_samplerate={metadata.default_samplerate} "
+                    f"metadata_status={metadata.metadata_status!r} "
+                    f"metadata_error={metadata.metadata_error!r}"
+                )
+
+            def _open_source_once(
                 dev_idx: int | None,
                 *,
+                attempt: str,
+                requested_channels: int,
+                decision: SelfMicCaptureChannelDecision,
+                host_api_for_log: str,
+                device_for_log: str,
                 wasapi_auto_convert: bool = False,
                 wasapi_exclusive: bool = False,
             ) -> SoundDeviceAudioSource:
-                return SoundDeviceAudioSource(
+                source = SoundDeviceAudioSource(
                     sample_rate_hz=None,
-                    channels=self.settings.audio.internal_channels,
+                    channels=requested_channels,
                     device=dev_idx,
                     wasapi_auto_convert=wasapi_auto_convert,
                     wasapi_exclusive=wasapi_exclusive,
                 )
+                _log_mic_capture_format(
+                    attempt=attempt,
+                    dev_idx=dev_idx,
+                    requested_channels=requested_channels,
+                    decision=decision,
+                    source=source,
+                    host_api_for_log=host_api_for_log,
+                    device_for_log=device_for_log,
+                    wasapi_auto_convert=wasapi_auto_convert,
+                    wasapi_exclusive=wasapi_exclusive,
+                )
+                return source
+
+            def _open_source_with_mono_retry(
+                dev_idx: int | None,
+                *,
+                attempt: str,
+                host_api_for_log: str,
+                device_for_log: str,
+                wasapi_auto_convert: bool = False,
+                wasapi_exclusive: bool = False,
+            ) -> SoundDeviceAudioSource:
+                decision = determine_self_mic_capture_channels(
+                    device_idx=dev_idx,
+                    internal_channels=self.settings.audio.internal_channels,
+                )
+                try:
+                    return _open_source_once(
+                        dev_idx,
+                        attempt=attempt,
+                        requested_channels=decision.preferred_capture_channels,
+                        decision=decision,
+                        host_api_for_log=host_api_for_log,
+                        device_for_log=device_for_log,
+                        wasapi_auto_convert=wasapi_auto_convert,
+                        wasapi_exclusive=wasapi_exclusive,
+                    )
+                except Exception as exc:
+                    if decision.preferred_capture_channels <= self.settings.audio.internal_channels:
+                        raise
+                    self.log_detailed(
+                        "[STT] Microphone open detail: "
+                        f"attempt={attempt!r} "
+                        f"host_api={host_api_for_log!r} "
+                        f"device={device_for_log!r} "
+                        f"device_idx={dev_idx} "
+                        f"preferred_capture_channels={decision.preferred_capture_channels} "
+                        f"requested_channels={decision.preferred_capture_channels} "
+                        f"wasapi_auto_convert={wasapi_auto_convert} "
+                        f"wasapi_exclusive={wasapi_exclusive} "
+                        f"metadata_status={decision.metadata.metadata_status!r} "
+                        f"will_retry_mono=True "
+                        f"error={exc}",
+                        level=logging.WARNING,
+                    )
+                    retry_attempt = f"{attempt}_mono_retry"
+                    return _open_source_once(
+                        dev_idx,
+                        attempt=retry_attempt,
+                        requested_channels=self.settings.audio.internal_channels,
+                        decision=decision,
+                        host_api_for_log=host_api_for_log,
+                        device_for_log=device_for_log,
+                        wasapi_auto_convert=wasapi_auto_convert,
+                        wasapi_exclusive=wasapi_exclusive,
+                    )
 
             saved_host_api = self.settings.audio.input_host_api
             host_api_profile = normalize_input_host_api(saved_host_api)
@@ -2842,8 +2963,11 @@ class GuiController:
             source: SoundDeviceAudioSource | None = None
 
             try:
-                source = _open_source(
+                source = _open_source_with_mono_retry(
                     device_idx,
+                    attempt="primary",
+                    host_api_for_log=host_api,
+                    device_for_log=device_name,
                     wasapi_auto_convert=host_api_profile.wasapi_auto_convert,
                     wasapi_exclusive=host_api_profile.wasapi_exclusive,
                 )
@@ -2868,8 +2992,11 @@ class GuiController:
                 fallback_idx = _resolve_device("", device_name)
                 if fallback_idx != device_idx or first_open_used_wasapi_flags:
                     try:
-                        source = _open_source(
+                        source = _open_source_with_mono_retry(
                             fallback_idx,
+                            attempt="name_fallback",
+                            host_api_for_log="",
+                            device_for_log=device_name,
                             wasapi_auto_convert=False,
                             wasapi_exclusive=False,
                         )
@@ -2885,8 +3012,11 @@ class GuiController:
             # 3차 시도: 시스템 기본 장치
             if source is None:
                 try:
-                    source = _open_source(
+                    source = _open_source_with_mono_retry(
                         None,
+                        attempt="system_default",
+                        host_api_for_log="",
+                        device_for_log="",
                         wasapi_auto_convert=False,
                         wasapi_exclusive=False,
                     )
