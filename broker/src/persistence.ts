@@ -51,6 +51,29 @@ export interface BrokerAbuseRetentionConfig {
   requestEventsDays: number;
   issueSuccessDays: number;
   runtimeAuditDays: number;
+  referralSkippedDays: number;
+  referralFailedDays: number;
+}
+
+export interface BrokerReferralAttemptControlsConfig {
+  validShaped: {
+    maxPerInstallation: number;
+    maxPerIp: number;
+    windowMinutes: number;
+  };
+  unknown: {
+    maxPerInstallation: number;
+    maxPerIp: number;
+    windowMinutes: number;
+  };
+  perReferralIdVelocity: {
+    maxAttempts: number;
+    windowMinutes: number;
+  };
+  perReferrerRewardVelocity: {
+    maxRewards: number;
+    windowMinutes: number;
+  };
 }
 
 export interface BrokerDailyReportConfig {
@@ -75,6 +98,7 @@ export interface BrokerAbuseControlsConfigValue {
   asnFastPath: BrokerAsnFastPathConfig;
   asnClassifications: BrokerAsnClassificationEntry[];
   retention: BrokerAbuseRetentionConfig;
+  referralAttempts: BrokerReferralAttemptControlsConfig;
   dailyReport: BrokerDailyReportConfig;
 }
 
@@ -154,6 +178,28 @@ export const DEFAULT_BROKER_ABUSE_CONTROLS: BrokerAbuseControlsConfigValue = {
     requestEventsDays: 30,
     issueSuccessDays: 30,
     runtimeAuditDays: 90,
+    referralSkippedDays: 7,
+    referralFailedDays: 30,
+  },
+  referralAttempts: {
+    validShaped: {
+      maxPerInstallation: 8,
+      maxPerIp: 30,
+      windowMinutes: 15,
+    },
+    unknown: {
+      maxPerInstallation: 3,
+      maxPerIp: 10,
+      windowMinutes: 15,
+    },
+    perReferralIdVelocity: {
+      maxAttempts: 25,
+      windowMinutes: 60,
+    },
+    perReferrerRewardVelocity: {
+      maxRewards: 5,
+      windowMinutes: 1440,
+    },
   },
   dailyReport: {
     enabled: true,
@@ -350,6 +396,9 @@ export interface ReferralCodeRecord {
   owner_discord_user_ref: string;
   owner_installation_id: string | null;
   status: ReferralCodeStatus;
+  disabled_reason?: string | null;
+  disabled_by?: string | null;
+  disabled_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -369,6 +418,7 @@ export interface ReferralRewardRecord {
   failure_reason: string | null;
   referred_managed_credential_ref: string | null;
   referrer_managed_credential_ref: string | null;
+  attempt_ip_hash?: string | null;
   created_at: string;
   updated_at: string;
   credited_at: string | null;
@@ -612,6 +662,9 @@ export const BROKER_PERSISTENCE_MODEL = {
         'status',
         'created_at',
         'updated_at',
+        'disabled_reason',
+        'disabled_by',
+        'disabled_at',
       ],
       referralIdFormat: REFERRAL_ID_FORMAT_DESCRIPTION,
       storedStatuses: REFERRAL_CODE_STATUS_VALUES,
@@ -646,6 +699,7 @@ export const BROKER_PERSISTENCE_MODEL = {
         'created_at',
         'updated_at',
         'credited_at',
+        'attempt_ip_hash',
       ],
       referralIdFormat: REFERRAL_ID_FORMAT_DESCRIPTION,
       referredBonusStatuses: REFERRAL_REFERRED_BONUS_STATUS_VALUES,
@@ -654,7 +708,14 @@ export const BROKER_PERSISTENCE_MODEL = {
         skip_reason: '1-64 chars when present',
         failure_reason: '1-64 chars when present',
       },
-      indexed: ['referral_id', 'referrer_discord_user_ref + referred_bonus_status'],
+      indexed: [
+        'referral_id',
+        'referrer_discord_user_ref + referred_bonus_status',
+        'referred_installation_id + created_at',
+        'attempt_ip_hash + created_at',
+        'referral_id + created_at',
+        'referrer_discord_user_ref + created_at',
+      ],
       partialUniqueIndexes: [
         {
           name: 'idx_referral_rewards_counted_referred_discord_user',

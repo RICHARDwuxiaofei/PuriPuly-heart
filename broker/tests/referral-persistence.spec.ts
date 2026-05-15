@@ -41,6 +41,9 @@ describe('broker referral persistence foundation', () => {
         'status',
         'created_at',
         'updated_at',
+        'disabled_reason',
+        'disabled_by',
+        'disabled_at',
       ]);
 
       const referralRewardColumns = columnNames(db, 'referral_rewards');
@@ -62,6 +65,7 @@ describe('broker referral persistence foundation', () => {
         'created_at',
         'updated_at',
         'credited_at',
+        'attempt_ip_hash',
       ]);
 
       expect(columnNames(db, 'discord_oauth_sessions')).toContain('referral_id');
@@ -85,6 +89,10 @@ describe('broker referral persistence foundation', () => {
           'idx_referral_rewards_referrer_cap',
           'idx_referral_rewards_counted_referred_discord_user',
           'idx_referral_rewards_counted_referred_installation',
+          'idx_referral_rewards_attempt_installation_time',
+          'idx_referral_rewards_attempt_ip_hash_time',
+          'idx_referral_rewards_referral_velocity',
+          'idx_referral_rewards_referrer_velocity',
           'idx_discord_oauth_sessions_referral_id',
         ]),
       );

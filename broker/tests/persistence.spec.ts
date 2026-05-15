@@ -240,6 +240,9 @@ describe('broker persistent state model', () => {
             'status',
             'created_at',
             'updated_at',
+            'disabled_reason',
+            'disabled_by',
+            'disabled_at',
           ],
           referralIdFormat:
             'six uppercase approved-alphabet characters excluding 0/O/1/I/L',
@@ -275,6 +278,7 @@ describe('broker persistent state model', () => {
             'created_at',
             'updated_at',
             'credited_at',
+            'attempt_ip_hash',
           ],
           referralIdFormat:
             'six uppercase approved-alphabet characters excluding 0/O/1/I/L',
@@ -284,7 +288,14 @@ describe('broker persistent state model', () => {
             skip_reason: '1-64 chars when present',
             failure_reason: '1-64 chars when present',
           },
-          indexed: ['referral_id', 'referrer_discord_user_ref + referred_bonus_status'],
+          indexed: [
+            'referral_id',
+            'referrer_discord_user_ref + referred_bonus_status',
+            'referred_installation_id + created_at',
+            'attempt_ip_hash + created_at',
+            'referral_id + created_at',
+            'referrer_discord_user_ref + created_at',
+          ],
           partialUniqueIndexes: [
             {
               name: 'idx_referral_rewards_counted_referred_discord_user',
@@ -427,6 +438,7 @@ describe('broker persistent state model', () => {
       '0003_add_abuse_runtime_state_and_issue_success_events.sql',
       '0004_add_discord_oauth_managed_issue.sql',
       '0005_add_referral_persistence_foundation.sql',
+      '0006_harden_referral_reward_operations.sql',
     ]);
     expect(existsSync(FIRST_BROKER_MIGRATION)).toBe(true);
     expect(existsSync(LATEST_BROKER_MIGRATION)).toBe(true);
@@ -450,7 +462,10 @@ describe('broker persistent state model', () => {
     const discordManagedIssueMigration = readBrokerMigrationSql(
       '0004_add_discord_oauth_managed_issue.sql',
     );
-    const referralPersistenceMigration = readFileSync(LATEST_BROKER_MIGRATION, 'utf8');
+    const referralPersistenceMigration = readBrokerMigrationSql(
+      '0005_add_referral_persistence_foundation.sql',
+    );
+    const referralOperationsMigration = readFileSync(LATEST_BROKER_MIGRATION, 'utf8');
 
     expect(migration).toContain('CREATE TABLE broker_config');
     expect(migration).toContain('CREATE TABLE installations');
@@ -533,5 +548,24 @@ describe('broker persistent state model', () => {
       'CREATE UNIQUE INDEX idx_referral_rewards_counted_referred_installation',
     );
     expect(referralPersistenceMigration).not.toContain('ON DELETE CASCADE');
+    expect(referralOperationsMigration).toContain('ADD COLUMN disabled_reason TEXT');
+    expect(referralOperationsMigration).toContain('ADD COLUMN disabled_by TEXT');
+    expect(referralOperationsMigration).toContain('ADD COLUMN disabled_at TEXT');
+    expect(referralOperationsMigration).toContain('ADD COLUMN attempt_ip_hash TEXT');
+    expect(referralOperationsMigration).toContain(
+      'CREATE INDEX idx_referral_rewards_attempt_installation_time',
+    );
+    expect(referralOperationsMigration).toContain(
+      'CREATE INDEX idx_referral_rewards_attempt_ip_hash_time',
+    );
+    expect(referralOperationsMigration).toContain(
+      'CREATE INDEX idx_referral_rewards_referral_velocity',
+    );
+    expect(referralOperationsMigration).toContain(
+      'CREATE INDEX idx_referral_rewards_referrer_velocity',
+    );
+    expect(referralOperationsMigration).toContain('$.retention.referralSkippedDays');
+    expect(referralOperationsMigration).toContain('$.retention.referralFailedDays');
+    expect(referralOperationsMigration).toContain('$.referralAttempts');
   });
 });

@@ -19,6 +19,10 @@ import type {
   BrokerAbuseControlsConfigValue,
   BrokerAbuseRuntimeStateValue,
 } from './persistence';
+import {
+  applyReferralRewardRetention,
+  reconcileStaleReferralRewards,
+} from './referral';
 
 type AlertLevel = 'warn1' | 'warn2' | 'warn3' | 'critical';
 
@@ -68,6 +72,8 @@ export async function handleScheduled(
   const now = new Date(controller.scheduledTime);
 
   await applyAbuseMonitoringRetention(env.BROKER_DB, now);
+  await reconcileStaleReferralRewards(env.BROKER_DB, { nowIso: now.toISOString() });
+  await applyReferralRewardRetention(env.BROKER_DB, now);
 
   const controls = await getBrokerAbuseControlsConfig(env.BROKER_DB);
   const runtimeState = await getBrokerAbuseRuntimeState(env.BROKER_DB);

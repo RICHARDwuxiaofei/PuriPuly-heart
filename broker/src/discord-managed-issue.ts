@@ -43,6 +43,7 @@ import {
   assignManagedGuardrail,
   cleanupManagedChildKey,
   createManagedChildKey,
+  OpenRouterManagementError,
 } from './openrouter-management';
 import { deriveManagedOpenRouterUserId } from './openrouter-user-id';
 import {
@@ -51,8 +52,15 @@ import {
   TRIAL_PROVIDER_POLICY,
 } from './trial-policy';
 import {
+  applyCreditedIssueReferrerRewardLimitUpdate,
   ensureOwnedReferralIdForActiveDiscordManagedUser,
+  markReservedIssueReferralCredited,
+  markReservedIssueReferralFailed,
   normalizeReferralId,
+  recordSkippedIssueReferralReward,
+  reserveIssueReferralReward,
+  type IssueReferralReservationResult,
+  type IssueReferralSkipReason,
 } from './referral';
 
 export const DISCORD_OAUTH_SESSION_TTL_SECONDS = 300;
@@ -63,6 +71,8 @@ const DISCORD_OPENROUTER_ISSUE_PATH = '/v1/providers/openrouter/discord/issue';
 const DISCORD_ISSUE_MAX_CLOCK_SKEW_SECONDS = 60;
 const DISCORD_ISSUE_REASON = 'llm_start';
 const DISCORD_ACCOUNT_MIN_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const USD_CENTS = 100;
+const REFERRED_REFERRAL_REWARD_CENTS = 2;
 const MANAGED_TRIAL_ALLOWED_MODEL_SET = new Set<string>(
   TRIAL_PROVIDER_POLICY.managedFreeTrial.models,
 );
@@ -521,6 +531,7 @@ export async function handleDiscordOpenRouterIssue(
     discordAccountCreatedAt: eligibility.discordAccountCreatedAt,
   });
 
+  let referralReservation: IssueReferralReservationResult | null = null;
   const reservation = await reserveDiscordEntitlement(c.env.BROKER_DB, {
     installationId: input.value.installationId,
     devicePublicKey: input.value.devicePublicKey,
@@ -532,6 +543,19 @@ export async function handleDiscordOpenRouterIssue(
     nowIso,
   });
   if (!reservation.ok) {
+    await bestEffortRecordIneligibleIssueReferralSkip(c.env.BROKER_DB, {
+      referralId: session.referral_id,
+      referredDiscordUserRef: discordUserRef,
+      referredInstallationId: input.value.installationId,
+      referredHardwareHash: input.value.hardwareHash,
+      referredHardwareHashSaltVersion: input.value.hardwareHashSaltVersion,
+      skipReason: issueReferralSkipReasonForReservationFailure(
+        currentEntitlement,
+        reservation.subcode,
+      ),
+      clientIp: requestContext.ip,
+      nowIso,
+    });
     await failDiscordOAuthSession(c.env.BROKER_DB, {
       stateHash,
       nowIso,
@@ -541,18 +565,33 @@ export async function handleDiscordOpenRouterIssue(
     return discordReservationErrorResponse(c, reservation);
   }
 
+  referralReservation = await bestEffortReserveIssueReferralReward(c.env.BROKER_DB, {
+    referralId: session.referral_id,
+    referredDiscordUserRef: discordUserRef,
+    referredInstallationId: input.value.installationId,
+    referredHardwareHash: input.value.hardwareHash,
+    referredHardwareHashSaltVersion: input.value.hardwareHashSaltVersion,
+    clientIp: requestContext.ip,
+    nowIso,
+  });
+
   const issuedAt = nowIso;
   const expiresAt = addMonthsUtc(
     now,
     MANAGED_TRIAL_POLICY.entitlement.issuance.expiry.durationMonths,
   ).toISOString();
+  const issueLimitUsd = resolveReferredIssueLimitUsd(referralReservation);
+  const referralLimitVerificationRequired = referralReservation?.outcome === 'reserved';
   let childKey: { rawKey: string; hash: string } | null = null;
+  let issueSuccessRecorded = false;
   try {
     childKey = await createManagedChildKey({
       managementApiKey: c.env.OPENROUTER_MANAGEMENT_API_KEY,
       installationId: input.value.installationId,
       releaseSessionRef: stateHash,
       expiresAt,
+      limitUsd: issueLimitUsd,
+      requireEffectiveLimitVerification: referralLimitVerificationRequired,
     });
     await assignManagedGuardrail({
       managementApiKey: c.env.OPENROUTER_MANAGEMENT_API_KEY,
@@ -568,6 +607,7 @@ export async function handleDiscordOpenRouterIssue(
       managedCredentialRef: childKey.hash,
       issuedAt,
       expiresAt,
+      budgetUsd: issueLimitUsd,
       deliveredAt: nowIso,
     });
     if (!activationSucceeded) {
@@ -581,6 +621,7 @@ export async function handleDiscordOpenRouterIssue(
     if (!activeEntitlement) {
       throw new Error('Discord managed entitlement missing after activation');
     }
+    assertDiscordIssueEntitlementDeliverable(activeEntitlement);
 
     await runDiscordIssueSuccessMonitoring(c, {
       installationId: input.value.installationId,
@@ -595,6 +636,7 @@ export async function handleDiscordOpenRouterIssue(
         childKey,
       }),
     });
+    issueSuccessRecorded = true;
 
     const referralId = await bestEffortEnsureOwnedReferralIdForIssueResponse(
       c.env.BROKER_DB,
@@ -603,6 +645,23 @@ export async function handleDiscordOpenRouterIssue(
         nowIso,
       },
     );
+    const referralBonusApplied = await creditReservedIssueReferralReward(
+      c.env.BROKER_DB,
+      {
+        referralReservation,
+        referredDiscordUserRef: discordUserRef,
+        referredInstallationId: input.value.installationId,
+        referredManagedCredentialRef: childKey.hash,
+        nowIso,
+      },
+    );
+    await bestEffortApplyReferrerRewardLimitUpdate(c.env.BROKER_DB, {
+      referralReservation,
+      referredDiscordUserRef: discordUserRef,
+      referredInstallationId: input.value.installationId,
+      managementApiKey: c.env.OPENROUTER_MANAGEMENT_API_KEY,
+      nowIso,
+    });
 
     return await discordIssueSuccessResponse(c, {
       entitlement: activeEntitlement,
@@ -610,8 +669,16 @@ export async function handleDiscordOpenRouterIssue(
       model: input.value.model,
       installationId: input.value.installationId,
       referralId,
+      referralBonusApplied,
     });
   } catch (error) {
+    if (
+      !childKey &&
+      error instanceof OpenRouterManagementError &&
+      error.createdChildKey
+    ) {
+      childKey = error.createdChildKey;
+    }
     const sensitiveValues = collectDiscordIssueSensitiveValues({
       input: input.value,
       session,
@@ -626,6 +693,12 @@ export async function handleDiscordOpenRouterIssue(
       discordAccountCreatedAt: eligibility.discordAccountCreatedAt,
       sensitiveValues,
     });
+    await bestEffortMarkIssueReferralReservationFailed(c.env.BROKER_DB, {
+      referralReservation,
+      referredDiscordUserRef: discordUserRef,
+      referredInstallationId: input.value.installationId,
+      nowIso,
+    });
     if (!childKey) {
       await releaseDiscordReservation(c.env.BROKER_DB, {
         installationId: input.value.installationId,
@@ -633,8 +706,9 @@ export async function handleDiscordOpenRouterIssue(
       });
     } else {
       if (
-        error instanceof DiscordIssueSuccessMonitoringStateError &&
-        error.issueSuccessRecorded
+        (error instanceof DiscordIssueSuccessMonitoringStateError &&
+          error.issueSuccessRecorded) ||
+        issueSuccessRecorded
       ) {
         await bestEffortDeleteDiscordIssueSuccessRecord(c.env.BROKER_DB, {
           installationId: input.value.installationId,
@@ -1832,6 +1906,7 @@ async function activateDiscordReservation(
     managedCredentialRef: string;
     issuedAt: string;
     expiresAt: string;
+    budgetUsd: number;
     deliveredAt: string;
   },
 ): Promise<boolean> {
@@ -1839,6 +1914,7 @@ async function activateDiscordReservation(
     .prepare(
       `UPDATE openrouter_entitlements
           SET status = 'active',
+              budget_usd = ?,
               managed_credential_ref = ?,
               issued_at = ?,
               expires_at = ?,
@@ -1860,6 +1936,7 @@ async function activateDiscordReservation(
           )`,
     )
     .bind(
+      input.budgetUsd,
       input.managedCredentialRef,
       input.issuedAt,
       input.expiresAt,
@@ -1953,6 +2030,14 @@ async function getInstallationByPublicKey(
     .first<InstallationRecord>();
 }
 
+function assertDiscordIssueEntitlementDeliverable(
+  entitlement: OpenRouterEntitlementRecord,
+): void {
+  if (!entitlement.managed_credential_ref || !entitlement.expires_at) {
+    throw new Error('active Discord entitlement missing managed release metadata');
+  }
+}
+
 async function discordIssueSuccessResponse(
   c: Context<BrokerEnv>,
   input: {
@@ -1961,11 +2046,10 @@ async function discordIssueSuccessResponse(
     model: string;
     installationId: string;
     referralId: string | null;
+    referralBonusApplied: boolean;
   },
 ): Promise<Response> {
-  if (!input.entitlement.managed_credential_ref || !input.entitlement.expires_at) {
-    throw new Error('active Discord entitlement missing managed release metadata');
-  }
+  assertDiscordIssueEntitlementDeliverable(input.entitlement);
 
   const managedUserHmacSecret = nonEmptyString(
     c.env.OPENROUTER_MANAGED_USER_HMAC_SECRET,
@@ -1994,6 +2078,7 @@ async function discordIssueSuccessResponse(
     budget_usd: input.entitlement.budget_usd,
     model: input.model,
     ...(input.referralId ? { referral_id: input.referralId } : {}),
+    ...(input.referralBonusApplied ? { referral_bonus_applied: true } : {}),
   });
 }
 
@@ -2009,6 +2094,187 @@ async function bestEffortEnsureOwnedReferralIdForIssueResponse(
     return result.ok ? result.referralCode.referral_id : null;
   } catch {
     return null;
+  }
+}
+
+async function bestEffortReserveIssueReferralReward(
+  db: D1Database,
+  input: {
+    referralId: string | null;
+    referredDiscordUserRef: string;
+    referredInstallationId: string;
+    referredHardwareHash: string;
+    referredHardwareHashSaltVersion: number;
+    clientIp?: string | null;
+    nowIso: string;
+  },
+): Promise<IssueReferralReservationResult | null> {
+  try {
+    return await reserveIssueReferralReward(db, input);
+  } catch {
+    return null;
+  }
+}
+
+function resolveReferredIssueLimitUsd(
+  referralReservation: IssueReferralReservationResult | null,
+): number {
+  if (referralReservation?.outcome !== 'reserved') {
+    return MANAGED_TRIAL_BUDGET_POLICY.hardLimit;
+  }
+
+  return usdFromCents(
+    centsFromUsd(MANAGED_TRIAL_BUDGET_POLICY.hardLimit) +
+      REFERRED_REFERRAL_REWARD_CENTS,
+  );
+}
+
+function centsFromUsd(value: number): number {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error('managed budget must be a finite non-negative USD value');
+  }
+
+  return Math.round(value * USD_CENTS);
+}
+
+function usdFromCents(cents: number): number {
+  return Number((cents / USD_CENTS).toFixed(2));
+}
+
+async function creditReservedIssueReferralReward(
+  db: D1Database,
+  input: {
+    referralReservation: IssueReferralReservationResult | null;
+    referredDiscordUserRef: string;
+    referredInstallationId: string;
+    referredManagedCredentialRef: string;
+    nowIso: string;
+  },
+): Promise<boolean> {
+  if (input.referralReservation?.outcome !== 'reserved') {
+    return false;
+  }
+
+  const credited = await markReservedIssueReferralCredited(db, {
+    referralId: input.referralReservation.referralId,
+    referredDiscordUserRef: input.referredDiscordUserRef,
+    referredInstallationId: input.referredInstallationId,
+    referredManagedCredentialRef: input.referredManagedCredentialRef,
+    nowIso: input.nowIso,
+  });
+  if (!credited) {
+    throw new Error('reserved issue referral credit transition failed');
+  }
+
+  return true;
+}
+
+async function bestEffortApplyReferrerRewardLimitUpdate(
+  db: D1Database,
+  input: {
+    referralReservation: IssueReferralReservationResult | null;
+    referredDiscordUserRef: string;
+    referredInstallationId: string;
+    managementApiKey: string;
+    nowIso: string;
+  },
+): Promise<void> {
+  if (input.referralReservation?.outcome !== 'reserved') {
+    return;
+  }
+
+  try {
+    await applyCreditedIssueReferrerRewardLimitUpdate(db, {
+      referralId: input.referralReservation.referralId,
+      referredDiscordUserRef: input.referredDiscordUserRef,
+      referredInstallationId: input.referredInstallationId,
+      managementApiKey: input.managementApiKey,
+      nowIso: input.nowIso,
+    });
+  } catch {
+    // Referrer reward application is best-effort and must not replace a
+    // successfully delivered referred managed issue response.
+  }
+}
+
+async function bestEffortRecordIneligibleIssueReferralSkip(
+  db: D1Database,
+  input: {
+    referralId: string | null;
+    referredDiscordUserRef: string;
+    referredInstallationId: string;
+    referredHardwareHash: string;
+    referredHardwareHashSaltVersion: number;
+    skipReason: IssueReferralSkipReason | null;
+    clientIp?: string | null;
+    nowIso: string;
+  },
+): Promise<void> {
+  if (!input.skipReason) {
+    return;
+  }
+
+  try {
+    await recordSkippedIssueReferralReward(db, {
+      referralId: input.referralId,
+      referredDiscordUserRef: input.referredDiscordUserRef,
+      referredInstallationId: input.referredInstallationId,
+      referredHardwareHash: input.referredHardwareHash,
+      referredHardwareHashSaltVersion: input.referredHardwareHashSaltVersion,
+      skipReason: input.skipReason,
+      clientIp: input.clientIp,
+      nowIso: input.nowIso,
+    });
+  } catch {
+    // Referral skip accounting is best-effort and must not replace issue errors.
+  }
+}
+
+function issueReferralSkipReasonForReservationFailure(
+  currentEntitlement: OpenRouterEntitlementRecord | null,
+  subcode: DiscordReservationErrorSubcode,
+): IssueReferralSkipReason | null {
+  if (currentEntitlement?.status === 'active') {
+    return 'pre_existing_managed_user';
+  }
+
+  switch (subcode) {
+    case 'discord_lifetime_used':
+      return 'referred_not_first_successful';
+    case 'hardware_duplicate':
+      return 'duplicate_hardware';
+    case 'global_cap_reached':
+    case 'discord_installation_already_issuing':
+    case 'installation_binding_mismatch':
+    case 'device_public_key_registered':
+    case 'entitlement_reservation_failed':
+      return null;
+  }
+}
+
+async function bestEffortMarkIssueReferralReservationFailed(
+  db: D1Database,
+  input: {
+    referralReservation: IssueReferralReservationResult | null;
+    referredDiscordUserRef: string;
+    referredInstallationId: string;
+    nowIso: string;
+  },
+): Promise<void> {
+  if (input.referralReservation?.outcome !== 'reserved') {
+    return;
+  }
+
+  try {
+    await markReservedIssueReferralFailed(db, {
+      referralId: input.referralReservation.referralId,
+      referredDiscordUserRef: input.referredDiscordUserRef,
+      referredInstallationId: input.referredInstallationId,
+      failureReason: 'issue_delivery_failed',
+      nowIso: input.nowIso,
+    });
+  } catch {
+    // Referral accounting is best-effort during managed issue cleanup.
   }
 }
 

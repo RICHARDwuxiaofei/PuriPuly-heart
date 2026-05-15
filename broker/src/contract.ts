@@ -19,9 +19,12 @@ export {
   REFERRAL_REFERRER_BONUS_STATUS_VALUES,
 } from './persistence';
 export {
+  applyReferralRewardRetention,
+  disableReferralId,
   ensureOwnedReferralIdForActiveDiscordManagedUser,
   generateReferralId,
   normalizeReferralId,
+  reconcileStaleReferralRewards,
   REFERRAL_ID_ALPHABET,
   REFERRAL_ID_LENGTH,
 } from './referral';
@@ -42,6 +45,7 @@ export type {
   BrokerDailyIssuanceCapEndpoint,
   BrokerEndpointRateLimitConfig,
   BrokerPendingDiscordOAuthSessionsConfig,
+  BrokerReferralAttemptControlsConfig,
   BrokerAbuseControlsConfigValue,
   BrokerAbuseSubjectHookRecord,
   BrokerConfigRow,
@@ -64,8 +68,14 @@ export type {
 export type {
   OwnedReferralIdEnsureFailureReason,
   OwnedReferralIdEnsureResult,
+  DisableReferralIdResult,
+  IssueReferralFailureReason,
+  IssueReferralSkipReason,
+  ReferralDisableReason,
   ReferralIdGenerator,
   ReferralIdRandomBytes,
+  ReferralRewardRetentionResult,
+  StaleReferralRewardReconciliationResult,
 } from './referral';
 export type { ManagedTrialLifecycle } from './trial-policy';
 
