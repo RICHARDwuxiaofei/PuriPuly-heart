@@ -108,6 +108,8 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
 - `0001_harden_installation_public_inputs.sql` rebuilds `installations` (and the dependent `openrouter_entitlements` table) under deferred foreign-key checks so already-initialized clean schemas pick up the hardened public-input constraints.
 - `0002_add_entitlement_verified_hardware_snapshot.sql` adds `verified_hardware_hash` and `verified_hardware_hash_salt_version` to `openrouter_entitlements` for the verified release-session hardware snapshot consumed by `/v1/providers/openrouter/issue`.
 - `0003_add_abuse_runtime_state_and_issue_success_events.sql` adds the persisted abuse runtime-state row plus append-only issue-success and runtime-audit tables used by alerting, brake state, daily heartbeat delivery, and retention.
+- `0004_add_discord_oauth_managed_issue.sql` adds Discord OAuth session and identity storage plus Discord-managed issue columns on `openrouter_entitlements`.
+- `0005_add_referral_persistence_foundation.sql` adds nullable OAuth session `referral_id` storage plus the referral code and referral reward ledger foundation.
 
 - `broker_config`
   - columns: `key`, `value`, `updated_at`
@@ -146,12 +148,34 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
   - update rules: each challenge overwrites `challenge`, `challenge_expires_at`, `challenge_salt_version`, and `app_version`; it clears stored `hardware_hash` / `hardware_hash_salt_version` only when lifecycle is `none` or `pending_release`, and preserves fingerprint state for `active`, `expired`, and `revoked`; verify clears the challenge fields; `hardware_hash` stays `NULL` until verify succeeds
 - `openrouter_entitlements`
   - zero or one row per installation, keyed by `installation_id` when present
-  - columns: `installation_id`, `status`, `budget_usd`, `managed_credential_ref`, `issued_at`, `expires_at`, minimal release-session columns `release_session_ref`, `release_token_hash`, `release_token_expires_at`, `verified_hardware_hash`, `verified_hardware_hash_salt_version`
+  - columns: `installation_id`, `status`, `budget_usd`, `managed_credential_ref`, `issued_at`, `expires_at`, minimal release-session columns `release_session_ref`, `release_token_hash`, `release_token_expires_at`, `verified_hardware_hash`, `verified_hardware_hash_salt_version`, `discord_user_ref`, `discord_issue_status`, `discord_issue_reserved_at`, `discord_issue_delivered_at`
   - constraints: `managed_credential_ref` unique, `status` indexed, `expires_at` indexed
   - `release_token_hash` is protected by a partial unique index when non-`NULL`
   - stored `status` values are `pending_release`, `active`, `expired`, and `revoked`; `none` is represented by the absence of a row
   - update rules: entitlement status, release-session fields, verified hardware snapshot, and credential metadata are updated in place; append-only entitlement history is intentionally out of scope for the initial rollout
   - remaining live budget stays upstream in OpenRouter metadata instead of being mirrored into broker storage; the release token remains installation-bound, one-time, and `15` minutes TTL
+- `discord_oauth_sessions`
+  - bounded Discord OAuth PKCE/session rows keyed by `state_hash`
+  - columns include session/device/PKCE fields, Discord eligibility fields, lifecycle timestamps, and nullable normalized `referral_id`
+  - `referral_id` accepts only six uppercase approved-alphabet characters (`0`, `O`, `1`, `I`, and `L` excluded) or `NULL`
+  - indexed by installation/status/creation time, expiry, and non-`NULL` `referral_id`
+- `discord_identities`
+  - durable HMAC Discord user reference uniqueness for Discord-managed issuance
+  - columns: `discord_user_ref`, `entitlement_installation_id`, `status`, `ref_secret_version`, `created_at`, `updated_at`
+  - `entitlement_installation_id` uses `ON DELETE SET NULL` so identity evidence is not cascade-deleted with aged installation rows
+- `referral_codes`
+  - stable owned Referral ID rows keyed by `referral_id`
+  - columns: `referral_id`, `owner_discord_user_ref`, `owner_installation_id`, `status`, `created_at`, `updated_at`
+  - Referral IDs are exactly six characters from the approved uppercase alphabet excluding `0`, `O`, `1`, `I`, and `L`; statuses are `active` or `disabled`
+  - `owner_discord_user_ref` is unique and raw Discord IDs or email addresses do not belong in this table
+  - no `ON DELETE CASCADE` dependency on `installations`, preserving code history when installation rows age out
+- `referral_rewards`
+  - append-only referral attempt/reward ledger rows keyed by `id`
+  - columns: `id`, `referral_id`, referrer/referred identity and installation references, referred hardware hash/salt version, referred/referrer bonus statuses, bounded reason codes, managed credential refs, and lifecycle timestamps
+  - Referral IDs use the same approved six-character constraint; referred-side statuses are `reserved`, `credited`, `skipped`, and `failed`; referrer-side statuses are `pending`, `applying`, `credited`, `skipped`, and `failed`
+  - cap queries are indexed by `referrer_discord_user_ref` plus referred-side status, and referral lookup is indexed by `referral_id`
+  - partial unique indexes enforce one counted (`reserved`/`credited`) reward per referred Discord identity and per referred installation
+  - ledger rows do not cascade-delete with `installations`, preserving cap/accounting history when installation rows age out
 
 ## Retention and salt rotation
 
@@ -160,6 +184,7 @@ Broker verification is Linux-only. Run `pnpm install`, Vitest, and Wrangler from
 - Broker request handling opportunistically applies that preflight cleanup when the installation identity is touched again, so stale unauthenticated rows can age out without broadening retention into a separate store redesign.
 - Terminal `expired` or `revoked` installations may be deleted after `90` days from `max(last_seen_at, expires_at)`.
 - Retention cleanup deletes from `installations`; the entitlement row is removed by `ON DELETE CASCADE`.
+- Referral code and reward ledger rows are intentionally not cascade-deleted by installation retention cleanup, so cap/accounting history remains stable.
 - Because `hardware_hash` remains `NULL` until verify succeeds, preflight-row cleanup does not discard duplicate-detection fingerprint state.
 - `fingerprint_salt` remains one server-managed global salt shared across clients for duplicate detection.
 - Rotation keeps one current salt and one previous salt version. Duplicate matching only uses `hardware_hash` values tagged with the current version. In-flight challenges may complete on the previous version until their existing `challenge_expires_at`, after which stale hashes are refreshed in place on successful verify or cleared when the broker reissues a challenge for `none` / `pending_release` state.

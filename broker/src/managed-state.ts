@@ -25,6 +25,7 @@ export interface ManagedStateResponse {
 }
 
 export interface TrialStatusResponse extends ManagedStateResponse {
+  referral_id?: string;
   onboarding_eligibility: {
     eligible: boolean;
     reason: 'discord_required' | OpenRouterEntitlementStatus;
@@ -78,11 +79,13 @@ export function normalizeManagedState(
 
 export function normalizeTrialStatusResponse(
   entitlement: OpenRouterEntitlementRecord | null,
+  referralId: string | null = null,
 ): TrialStatusResponse {
   const managedState = normalizeManagedState(entitlement);
 
   return {
     ...managedState,
+    ...(referralId ? { referral_id: referralId } : {}),
     onboarding_eligibility: {
       eligible: entitlement === null,
       reason: entitlement === null ? 'discord_required' : entitlement.status,

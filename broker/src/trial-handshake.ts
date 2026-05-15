@@ -29,6 +29,7 @@ import {
   MANAGED_TRIAL_BUDGET_POLICY,
   TRIAL_PROVIDER_POLICY,
 } from './trial-policy';
+import { ensureOwnedReferralIdForActiveDiscordManagedUser } from './referral';
 
 export const TRIAL_CHALLENGE_TTL_SECONDS = 300;
 export const TRIAL_RELEASE_TOKEN_TTL_SECONDS = 900;
@@ -925,7 +926,27 @@ export async function handleTrialStatus(c: Context<BrokerEnv>): Promise<Response
     });
   }
 
-  return c.json(normalizeTrialStatusResponse(entitlement));
+  const referralId = await bestEffortEnsureOwnedReferralIdForStatus(c.env.BROKER_DB, {
+    installationId,
+    nowIso: now.toISOString(),
+  });
+
+  return c.json(normalizeTrialStatusResponse(entitlement, referralId));
+}
+
+async function bestEffortEnsureOwnedReferralIdForStatus(
+  db: D1Database,
+  input: {
+    installationId: string;
+    nowIso: string;
+  },
+): Promise<string | null> {
+  try {
+    const result = await ensureOwnedReferralIdForActiveDiscordManagedUser(db, input);
+    return result.ok ? result.referralCode.referral_id : null;
+  } catch {
+    return null;
+  }
 }
 
 async function readJsonBody<T>(

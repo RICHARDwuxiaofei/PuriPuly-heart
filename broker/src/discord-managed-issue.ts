@@ -50,6 +50,10 @@ import {
   MANAGED_TRIAL_POLICY,
   TRIAL_PROVIDER_POLICY,
 } from './trial-policy';
+import {
+  ensureOwnedReferralIdForActiveDiscordManagedUser,
+  normalizeReferralId,
+} from './referral';
 
 export const DISCORD_OAUTH_SESSION_TTL_SECONDS = 300;
 
@@ -93,6 +97,7 @@ interface DiscordAuthStartRequestBody {
   device_public_key?: unknown;
   redirect_uri?: unknown;
   app_version?: unknown;
+  referral_id?: unknown;
 }
 
 interface DiscordOpenRouterIssueRequestBody {
@@ -165,6 +170,7 @@ export async function handleDiscordAuthStart(
   const devicePublicKey = nonEmptyString(body.value.device_public_key);
   const redirectUri = stringValue(body.value.redirect_uri);
   const appVersion = stringValue(body.value.app_version);
+  const referralId = normalizeReferralId(body.value.referral_id);
 
   if (!installationId || !devicePublicKey || !redirectUri || !appVersion) {
     return invalidRequestResponse(
@@ -274,6 +280,7 @@ export async function handleDiscordAuthStart(
     pkceCodeVerifier: pkce.codeVerifier,
     issueNonceHash: await sha256Base64Url(issueNonce),
     fingerprintSaltVersion: fingerprintSalt.current.version,
+    referralId,
     nowIso: now.toISOString(),
     expiresAt,
     maxPendingPerInstallation: pendingControls.maxPerInstallation,
@@ -589,11 +596,20 @@ export async function handleDiscordOpenRouterIssue(
       }),
     });
 
+    const referralId = await bestEffortEnsureOwnedReferralIdForIssueResponse(
+      c.env.BROKER_DB,
+      {
+        installationId: input.value.installationId,
+        nowIso,
+      },
+    );
+
     return await discordIssueSuccessResponse(c, {
       entitlement: activeEntitlement,
       rawKey: childKey.rawKey,
       model: input.value.model,
       installationId: input.value.installationId,
+      referralId,
     });
   } catch (error) {
     const sensitiveValues = collectDiscordIssueSensitiveValues({
@@ -942,7 +958,8 @@ async function getDiscordOAuthSession(
               created_at,
               expires_at,
               processing_started_at,
-              consumed_at
+              consumed_at,
+              referral_id
          FROM discord_oauth_sessions
         WHERE state_hash = ?`,
     )
@@ -1943,6 +1960,7 @@ async function discordIssueSuccessResponse(
     rawKey: string;
     model: string;
     installationId: string;
+    referralId: string | null;
   },
 ): Promise<Response> {
   if (!input.entitlement.managed_credential_ref || !input.entitlement.expires_at) {
@@ -1975,7 +1993,23 @@ async function discordIssueSuccessResponse(
     expires_at: input.entitlement.expires_at,
     budget_usd: input.entitlement.budget_usd,
     model: input.model,
+    ...(input.referralId ? { referral_id: input.referralId } : {}),
   });
+}
+
+async function bestEffortEnsureOwnedReferralIdForIssueResponse(
+  db: D1Database,
+  input: {
+    installationId: string;
+    nowIso: string;
+  },
+): Promise<string | null> {
+  try {
+    const result = await ensureOwnedReferralIdForActiveDiscordManagedUser(db, input);
+    return result.ok ? result.referralCode.referral_id : null;
+  } catch {
+    return null;
+  }
 }
 
 async function runDiscordIssueSuccessMonitoring(
@@ -2547,6 +2581,7 @@ async function insertPendingDiscordOAuthSession(
     pkceCodeVerifier: string;
     issueNonceHash: string;
     fingerprintSaltVersion: number;
+    referralId: string | null;
     nowIso: string;
     expiresAt: string;
     maxPendingPerInstallation: number;
@@ -2562,11 +2597,12 @@ async function insertPendingDiscordOAuthSession(
           pkce_code_verifier,
           issue_nonce_hash,
           fingerprint_salt_version,
+          referral_id,
           status,
           created_at,
           expires_at
         )
-        SELECT ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?
          WHERE (
            SELECT COUNT(*)
              FROM discord_oauth_sessions
@@ -2583,6 +2619,7 @@ async function insertPendingDiscordOAuthSession(
       input.pkceCodeVerifier,
       input.issueNonceHash,
       input.fingerprintSaltVersion,
+      input.referralId,
       input.nowIso,
       input.expiresAt,
       input.installationId,
