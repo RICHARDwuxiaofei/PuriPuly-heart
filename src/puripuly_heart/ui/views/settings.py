@@ -35,6 +35,7 @@ from puripuly_heart.config.settings import (
     _normalize_local_llm_base_url,
     default_translation_connection,
     materialize_translation_settings,
+    normalize_owned_referral_id,
     supported_translation_connections,
 )
 from puripuly_heart.core.language import get_stt_compatibility_warning
@@ -69,6 +70,7 @@ from puripuly_heart.ui.theme import (
     COLOR_NEUTRAL_DARK,
     COLOR_ON_BACKGROUND,
     COLOR_PRIMARY,
+    COLOR_SUCCESS,
 )
 
 logger = logging.getLogger(__name__)
@@ -235,6 +237,7 @@ class SettingsView(ft.Column):
         self._overlay_calibration_session_active = False
         self._managed_trial_usage_visible = False
         self._managed_trial_usage_remaining_percent: int | None = None
+        self._managed_key_referral_id: str | None = None
         self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
 
         # Build UI components
@@ -830,6 +833,79 @@ class SettingsView(ft.Column):
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         self._managed_trial_usage_bar = ManagedTrialUsageBar()
+        self._managed_key_title = ft.Text(
+            t("settings.managed_key.title"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._managed_key_free_usage_label = ft.Text(
+            t("settings.managed_key.free_usage"),
+            size=16,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._managed_key_referral_id_label = ft.Text(
+            t("settings.managed_key.referral_id.label"),
+            size=16,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._managed_key_referral_id_value = ft.Text(
+            t("settings.managed_key.referral_id.empty"),
+            size=22,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_ON_BACKGROUND,
+            selectable=True,
+        )
+        self._managed_key_referral_copy_button = ft.IconButton(
+            icon=ft.Icons.CONTENT_COPY_ROUNDED,
+            icon_color=COLOR_PRIMARY,
+            disabled=True,
+            tooltip=t("settings.managed_key.referral_id.pending_helper"),
+            on_click=self._on_managed_key_referral_copy,
+        )
+        self._managed_key_referral_helper_text = ft.Text(
+            t("settings.managed_key.referral_id.pending_helper"),
+            size=14,
+            color=COLOR_NEUTRAL,
+        )
+        self._managed_key_card = self._wrap_card(
+            ft.Column(
+                [
+                    self._managed_key_title,
+                    ft.Container(height=4),
+                    ft.Column(
+                        [
+                            self._managed_key_free_usage_label,
+                            self._managed_trial_usage_bar,
+                        ],
+                        spacing=8,
+                    ),
+                    ft.Container(height=8),
+                    ft.Column(
+                        [
+                            ft.Row(
+                                [
+                                    self._managed_key_referral_id_label,
+                                    ft.Container(expand=True),
+                                    self._managed_key_referral_id_value,
+                                    self._managed_key_referral_copy_button,
+                                ],
+                                spacing=8,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            self._managed_key_referral_helper_text,
+                        ],
+                        spacing=4,
+                    ),
+                ],
+                spacing=0,
+            ),
+            height=None,
+            expand=False,
+        )
+        self._managed_key_card.visible = False
         self._alibaba_key_beijing = ApiKeyField(
             "settings.alibaba_api_key_beijing",
             "alibaba_api_key_beijing",
@@ -854,10 +930,10 @@ class SettingsView(ft.Column):
         self._api_keys_column = ft.Column(
             [
                 # self._qwen_region_row removed
+                self._managed_key_card,
                 self._deepgram_key,
                 self._soniox_key,
                 self._google_key,
-                self._managed_trial_usage_bar,
                 self._openrouter_key,
                 self._openrouter_pkce_button_row,
                 self._deepseek_key,
@@ -1866,6 +1942,100 @@ class SettingsView(ft.Column):
             "remaining_percent": self._managed_trial_usage_remaining_percent,
         }
 
+    def _is_managed_openrouter_selected(self, settings: AppSettings | None) -> bool:
+        return bool(
+            settings is not None
+            and settings.provider.llm == LLMProviderName.OPENROUTER
+            and settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+        )
+
+    def _managed_key_card_visible_for(self, settings: AppSettings | None) -> bool:
+        if settings is None:
+            return False
+        active_ref = getattr(settings.managed_identity, "active_managed_credential_ref", None)
+        owned_referral_id = normalize_owned_referral_id(
+            getattr(settings.managed_identity, "referral_id", None)
+        )
+        return bool(
+            self._is_managed_openrouter_selected(settings)
+            or (isinstance(active_ref, str) and bool(active_ref.strip()))
+            or owned_referral_id
+        )
+
+    def _sync_managed_key_referral_row_value(self, referral_id: str | None) -> None:
+        referral_id = normalize_owned_referral_id(referral_id)
+        self._managed_key_referral_id = referral_id
+
+        has_referral_id = referral_id is not None
+        self._managed_key_referral_id_value.value = referral_id or t(
+            "settings.managed_key.referral_id.empty"
+        )
+        self._managed_key_referral_copy_button.disabled = not has_referral_id
+        self._managed_key_referral_copy_button.icon_color = (
+            COLOR_PRIMARY if has_referral_id else COLOR_NEUTRAL
+        )
+        self._managed_key_referral_copy_button.tooltip = t(
+            "settings.managed_key.referral_id.copy_tooltip"
+            if has_referral_id
+            else "settings.managed_key.referral_id.pending_helper"
+        )
+        self._managed_key_referral_helper_text.value = t(
+            "settings.managed_key.referral_id.helper"
+            if has_referral_id
+            else "settings.managed_key.referral_id.pending_helper"
+        )
+
+    def _sync_managed_key_referral_row(self, settings: AppSettings | None) -> None:
+        referral_id = None
+        if settings is not None:
+            referral_id = normalize_owned_referral_id(
+                getattr(settings.managed_identity, "referral_id", None)
+            )
+        self._sync_managed_key_referral_row_value(referral_id)
+
+    def _sync_managed_key_card(self, settings: AppSettings | None = None) -> None:
+        if settings is None:
+            settings = self._build_settings_with_provider_draft()
+        visible = self._managed_key_card_visible_for(settings)
+        self._managed_key_card.visible = visible
+        self._sync_managed_key_referral_row(settings)
+        self._sync_managed_trial_usage_bar(settings)
+
+    def _repaint_managed_key_card(self) -> None:
+        _update_control_if_mounted(self._managed_key_card)
+        _update_control_if_mounted(self._api_keys_column)
+
+    def _show_managed_key_copy_snackbar(self, message: str) -> None:
+        if self.show_snackbar:
+            self.show_snackbar(message, COLOR_SUCCESS)
+            return
+        page = getattr(self, "page", None)
+        if page is None or not hasattr(page, "open"):
+            return
+        page.open(
+            ft.SnackBar(
+                ft.Text(message, size=18, color=ft.Colors.WHITE),
+                bgcolor=COLOR_SUCCESS,
+                duration=4000,
+                behavior=ft.SnackBarBehavior.FLOATING,
+                margin=ft.margin.only(bottom=90),
+                padding=20,
+            )
+        )
+
+    def _on_managed_key_referral_copy(self, _e) -> None:
+        referral_id = normalize_owned_referral_id(self._managed_key_referral_id)
+        if referral_id is None:
+            return
+        page = getattr(self, "page", None)
+        if page is None or not hasattr(page, "set_clipboard"):
+            return
+        try:
+            page.set_clipboard(referral_id)
+        except Exception:
+            return
+        self._show_managed_key_copy_snackbar(t("settings.managed_key.referral_id.copy_success"))
+
     def set_managed_trial_usage_state(
         self, *, visible: bool, remaining_percent: int | None = None
     ) -> None:
@@ -1874,10 +2044,32 @@ class SettingsView(ft.Column):
             self._managed_trial_usage_remaining_percent = max(0, min(100, int(remaining_percent)))
         else:
             self._managed_trial_usage_remaining_percent = None
-        self._sync_managed_trial_usage_bar()
+        self._sync_managed_key_card()
         if self.page:
             with contextlib.suppress(Exception):
-                self._managed_trial_usage_bar.update()
+                self._repaint_managed_key_card()
+
+    def set_managed_key_state(
+        self,
+        *,
+        visible: bool,
+        remaining_percent: int | None = None,
+        referral_id: str | None = None,
+    ) -> None:
+        card_visible = bool(visible)
+        self._managed_trial_usage_visible = card_visible
+        if card_visible and remaining_percent is not None:
+            self._managed_trial_usage_remaining_percent = max(0, min(100, int(remaining_percent)))
+        else:
+            self._managed_trial_usage_remaining_percent = None
+
+        self._managed_key_card.visible = card_visible
+        self._managed_trial_usage_bar.visible = card_visible
+        self._managed_trial_usage_bar.set_percent(
+            self._managed_trial_usage_remaining_percent if card_visible else None
+        )
+        self._sync_managed_key_referral_row_value(referral_id)
+        self._repaint_managed_key_card()
 
     def _copy_provider_draft_fields(self, source: AppSettings, target: AppSettings) -> None:
         target.provider.stt = source.provider.stt
@@ -2376,17 +2568,14 @@ class SettingsView(ft.Column):
             self._openrouter_pkce_button.update()
 
     # --- Visibility Updates ---
-    def _sync_managed_trial_usage_bar(self) -> None:
-        settings = self._build_settings_with_provider_draft()
-        managed_selected = bool(
-            settings is not None
-            and settings.provider.llm == LLMProviderName.OPENROUTER
-            and settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
-        )
-        self._managed_trial_usage_bar.visible = managed_selected
+    def _sync_managed_trial_usage_bar(self, settings: AppSettings | None = None) -> None:
+        if settings is None:
+            settings = self._build_settings_with_provider_draft()
+        managed_key_visible = self._managed_key_card_visible_for(settings)
+        self._managed_trial_usage_bar.visible = managed_key_visible
         self._managed_trial_usage_bar.set_percent(
             self._managed_trial_usage_remaining_percent
-            if managed_selected and self._managed_trial_usage_visible
+            if managed_key_visible and self._managed_trial_usage_visible
             else None
         )
 
@@ -2405,7 +2594,7 @@ class SettingsView(ft.Column):
         self._soniox_key.visible = STTProviderName.SONIOX in active_stt_providers
 
         self._google_key.visible = llm == LLMProviderName.GEMINI
-        self._sync_managed_trial_usage_bar()
+        self._sync_managed_key_card(settings)
         openrouter_byok_selected = bool(
             llm == LLMProviderName.OPENROUTER
             and settings.openrouter.selected_source == OpenRouterCredentialSource.BYOK
@@ -3666,6 +3855,9 @@ class SettingsView(ft.Column):
         self._stt_title.value = t("settings.section.stt")
         self._trans_title.value = t("settings.section.translation")
         self._api_title.value = t("settings.section.api_keys")
+        self._managed_key_title.value = t("settings.managed_key.title")
+        self._managed_key_free_usage_label.value = t("settings.managed_key.free_usage")
+        self._managed_key_referral_id_label.value = t("settings.managed_key.referral_id.label")
         self._stt_provider_label.value = t("settings.self_stt_provider")
         self._translation_provider_label.value = t("settings.shared_translation_provider")
         self._api_credentials_helper_text.value = t("settings.api_credentials_helper")
@@ -3770,6 +3962,7 @@ class SettingsView(ft.Column):
                 self._get_translation_connection_display_label(display_settings),
             )
             self._sync_openrouter_fallback_card(display_settings)
+            self._sync_managed_key_card(display_settings)
             self._ui_text.content.value = locale_label(display_settings.ui.locale)
             self._low_latency_text.content.value = t(
                 "toggle.on" if display_settings.stt.low_latency_mode else "toggle.off"

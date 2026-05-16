@@ -2052,6 +2052,183 @@ async def test_start_discord_managed_auth_from_dialog_passes_referral_id_without
     assert controller.settings.managed_identity.referral_id is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("referral_bonus_applied", "expected"),
+    [(True, True), (False, False), (None, False), ("true", False), (1, False)],
+)
+async def test_start_discord_managed_auth_from_dialog_exposes_only_boolean_true_referral_bonus(
+    referral_bonus_applied: object,
+    expected: bool,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+            referral_bonus_applied=referral_bonus_applied,  # type: ignore[arg-type]
+        )
+    )
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is True
+    assert controller.last_discord_managed_auth_referral_bonus_applied is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result_referral_id", "persisted_referral_id", "expected_referral_id"),
+    [
+        ("7kq9m2", None, "7KQ9M2"),
+        (None, "7KQ9M2", "7KQ9M2"),
+    ],
+)
+async def test_start_discord_managed_auth_from_dialog_updates_managed_key_referral_row_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+    result_referral_id: str | None,
+    persisted_referral_id: str | None,
+    expected_referral_id: str,
+) -> None:
+    dash = DummyDashboard()
+
+    class ManagedKeySettingsView(DummySettingsView):
+        def __init__(self) -> None:
+            super().__init__()
+            self.managed_key_state_calls: list[dict[str, object]] = []
+
+        def set_managed_key_state(
+            self,
+            *,
+            visible: bool,
+            remaining_percent: int | None = None,
+            referral_id: str | None = None,
+        ) -> None:
+            self.managed_key_state_calls.append(
+                {
+                    "visible": visible,
+                    "remaining_percent": remaining_percent,
+                    "referral_id": referral_id,
+                }
+            )
+
+    settings_view = ManagedKeySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.managed_identity.referral_id = persisted_referral_id
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+            referral_id=result_referral_id,
+        )
+    )
+    scheduled_refreshes: list[str] = []
+    monkeypatch.setattr(
+        GuiController,
+        "_schedule_managed_trial_usage_refresh",
+        lambda self: scheduled_refreshes.append("usage"),
+    )
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is True
+    assert settings_view.managed_key_state_calls == [
+        {
+            "visible": True,
+            "remaining_percent": None,
+            "referral_id": expected_referral_id,
+        }
+    ]
+    assert scheduled_refreshes == ["usage"]
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_from_dialog_issue_success_does_not_repaint_stale_usage_percent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+
+    class ManagedKeySettingsView(DummySettingsView):
+        def __init__(self) -> None:
+            super().__init__()
+            self.managed_key_state_calls: list[dict[str, object]] = []
+
+        def set_managed_key_state(
+            self,
+            *,
+            visible: bool,
+            remaining_percent: int | None = None,
+            referral_id: str | None = None,
+        ) -> None:
+            self.managed_key_state_calls.append(
+                {
+                    "visible": visible,
+                    "remaining_percent": remaining_percent,
+                    "referral_id": referral_id,
+                }
+            )
+
+    settings_view = ManagedKeySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.managed_identity.active_managed_credential_ref = "new-ref"
+    controller.hub = DummyHub(llm=object())
+    controller._managed_trial_usage_metadata = (
+        controller_module.OpenRouterKeyMetadata(  # noqa: SLF001
+            limit_usd=0.10,
+            remaining_usd=0.02,
+            usage_usd=0.08,
+        )
+    )
+    controller._managed_trial_usage_metadata_entitlement_ref = "old-ref"  # noqa: SLF001
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(  # noqa: SLF001
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+            referral_id="7KQ9M2",
+        )
+    )
+    scheduled_refreshes: list[str] = []
+    monkeypatch.setattr(
+        GuiController,
+        "_schedule_managed_trial_usage_refresh",
+        lambda self: scheduled_refreshes.append("usage"),
+    )
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is True
+    assert settings_view.managed_key_state_calls == [
+        {
+            "visible": True,
+            "remaining_percent": None,
+            "referral_id": "7KQ9M2",
+        }
+    ]
+    assert scheduled_refreshes == ["usage"]
+
+
 def test_discord_managed_auth_callback_received_runs_active_hook_only() -> None:
     calls: list[str] = []
     controller = _make_controller(app=SimpleNamespace())
@@ -5258,6 +5435,136 @@ async def test_refresh_managed_trial_usage_state_exposes_refreshed_referral_id_t
         "remaining_percent": 71,
         "referral_id": "7KQ9M2",
     }
+
+
+@pytest.mark.asyncio
+async def test_refresh_managed_trial_usage_state_preserves_known_referral_id_when_status_omits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+
+    class ManagedKeySettingsView(DummySettingsView):
+        def __init__(self) -> None:
+            super().__init__()
+            self.managed_key_state_calls: list[dict[str, object]] = []
+
+        def set_managed_key_state(
+            self,
+            *,
+            visible: bool,
+            remaining_percent: int | None = None,
+            referral_id: str | None = None,
+        ) -> None:
+            self.managed_key_state_calls.append(
+                {
+                    "visible": visible,
+                    "remaining_percent": remaining_percent,
+                    "referral_id": referral_id,
+                }
+            )
+
+    class OldBrokerStatusRefreshService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def refresh_owned_referral_id_from_status(self) -> str | None:
+            self.calls += 1
+            return None
+
+    settings_view = ManagedKeySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.managed_identity.referral_id = "7KQ9M2"
+    controller.hub = DummyHub(llm=object())
+    status_service = OldBrokerStatusRefreshService()
+    controller._managed_openrouter_release_service = status_service  # noqa: SLF001
+
+    class DummySecretsForTrial:
+        def get(self, key: str) -> str | None:
+            if key == "openrouter_managed_api_key":
+                return "managed-key"
+            return None
+
+    async def fake_fetch_key_metadata(_api_key: str):
+        return controller_module.OpenRouterKeyMetadata(
+            limit_usd=0.07,
+            remaining_usd=0.05,
+            usage_usd=0.02,
+        )
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecretsForTrial(),
+    )
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fake_fetch_key_metadata),
+    )
+
+    await controller._refresh_managed_trial_usage_state()
+
+    await _wait_until(lambda: status_service.calls == 1)
+    assert status_service.calls == 1
+    assert settings_view.managed_key_state_calls
+    assert all(call["referral_id"] == "7KQ9M2" for call in settings_view.managed_key_state_calls)
+    assert settings_view.managed_key_state_calls[-1] == {
+        "visible": True,
+        "remaining_percent": 71,
+        "referral_id": "7KQ9M2",
+    }
+
+
+@pytest.mark.asyncio
+async def test_refresh_managed_trial_usage_state_preserves_referral_card_when_openrouter_byok_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+
+    class ManagedKeySettingsView(DummySettingsView):
+        def __init__(self) -> None:
+            super().__init__()
+            self.managed_key_state_calls: list[dict[str, object]] = []
+
+        def set_managed_key_state(
+            self,
+            *,
+            visible: bool,
+            remaining_percent: int | None = None,
+            referral_id: str | None = None,
+        ) -> None:
+            self.managed_key_state_calls.append(
+                {
+                    "visible": visible,
+                    "remaining_percent": remaining_percent,
+                    "referral_id": referral_id,
+                }
+            )
+
+    settings_view = ManagedKeySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    controller.settings.managed_identity.referral_id = "7KQ9M2"
+    controller.hub = DummyHub(llm=object())
+
+    await controller._refresh_managed_trial_usage_state()
+
+    assert settings_view.managed_key_state_calls == [
+        {
+            "visible": True,
+            "remaining_percent": None,
+            "referral_id": "7KQ9M2",
+        }
+    ]
 
 
 @pytest.mark.asyncio

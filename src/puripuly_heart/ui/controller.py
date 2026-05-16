@@ -259,6 +259,10 @@ class GuiController:
         default=None,
         repr=False,
     )
+    last_discord_managed_auth_referral_bonus_applied: bool = field(
+        init=False,
+        default=False,
+    )
     _managed_trial_usage_metadata: OpenRouterKeyMetadata | None = field(init=False, default=None)
     _managed_trial_usage_metadata_entitlement_ref: str | None = field(
         init=False,
@@ -663,6 +667,7 @@ class GuiController:
         on_callback_received: Callable[[], None] | None = None,
         referral_id: str | None = None,
     ) -> bool:
+        self.last_discord_managed_auth_referral_bonus_applied = False
         service = self._managed_openrouter_release_service
         if service is None:
             self._discord_managed_auth_in_progress = False
@@ -689,6 +694,9 @@ class GuiController:
                 result.behavior == ManagedOpenRouterReleaseBehavior.READY
                 and result.local_key_available
             ):
+                self.last_discord_managed_auth_referral_bonus_applied = (
+                    getattr(result, "referral_bonus_applied", False) is True
+                )
                 if self.hub is None:
                     self._show_short_message("discord_auth.error.retry")
                     return False
@@ -697,6 +705,15 @@ class GuiController:
                 if self.hub.llm is None:
                     self._show_short_message("discord_auth.error.retry")
                     return False
+                result_referral_id = normalize_owned_referral_id(
+                    getattr(result, "referral_id", None)
+                )
+                self._set_managed_usage_view_state(
+                    view_settings=getattr(self.app, "view_settings", None),
+                    visible=True,
+                    remaining_percent=None,
+                    referral_id=result_referral_id or self._current_owned_referral_id(),
+                )
                 self._schedule_managed_trial_usage_refresh()
                 return True
 
@@ -759,6 +776,19 @@ class GuiController:
         if callable(usage_setter):
             usage_setter(visible=visible, remaining_percent=remaining_percent)
 
+    def _managed_key_card_visible_from_settings(self) -> bool:
+        if self.settings is None:
+            return False
+        active_ref = self.settings.managed_identity.active_managed_credential_ref
+        return bool(
+            (
+                self.settings.provider.llm == LLMProviderName.OPENROUTER
+                and self.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+            )
+            or (isinstance(active_ref, str) and bool(active_ref.strip()))
+            or self._current_owned_referral_id()
+        )
+
     async def _refresh_owned_referral_id_from_managed_status_best_effort(
         self,
         *,
@@ -766,19 +796,21 @@ class GuiController:
     ) -> str | None:
         if service is None:
             service = self._managed_openrouter_release_service
+        current_referral_id = self._current_owned_referral_id()
         if service is None:
-            return self._current_owned_referral_id()
+            return current_referral_id
         refresh_status = getattr(service, "refresh_owned_referral_id_from_status", None)
         if not callable(refresh_status):
-            return self._current_owned_referral_id()
+            return current_referral_id
         try:
-            return await refresh_status()
+            refreshed_referral_id = normalize_owned_referral_id(await refresh_status())
+            return refreshed_referral_id or current_referral_id
         except Exception as exc:
             self.log_basic(
                 f"[ManagedAuth] Referral ID status refresh failed: {exc}",
                 level=logging.WARNING,
             )
-            return self._current_owned_referral_id()
+            return current_referral_id
 
     def _schedule_owned_referral_id_status_refresh(
         self,
@@ -882,9 +914,9 @@ class GuiController:
             self._set_managed_trial_pending_auth(False)
             self._set_managed_usage_view_state(
                 view_settings=view_settings,
-                visible=False,
+                visible=self._managed_key_card_visible_from_settings(),
                 remaining_percent=None,
-                referral_id=None,
+                referral_id=self._current_owned_referral_id(),
             )
             return
 

@@ -745,6 +745,10 @@ class TranslatorApp:
 
     def _start_discord_managed_auth(self) -> None:
         dialog = getattr(self, "_discord_managed_auth_dialog", None)
+        raw_referral_id = getattr(dialog, "referral_id", "")
+        referral_id = (
+            raw_referral_id if isinstance(raw_referral_id, str) and raw_referral_id else None
+        )
         set_waiting = getattr(dialog, "set_waiting", None)
         if callable(set_waiting):
             set_waiting()
@@ -760,7 +764,10 @@ class TranslatorApp:
                 self.mark_discord_managed_auth_callback_received(generation)
 
             try:
-                ok = await start_auth(on_callback_received=_mark_callback_received)
+                ok = await start_auth(
+                    on_callback_received=_mark_callback_received,
+                    referral_id=referral_id,
+                )
                 if not ok or not self._is_current_discord_managed_auth_generation(generation):
                     return
                 enable_translation = getattr(controller, "set_translation_enabled", None)
@@ -778,6 +785,11 @@ class TranslatorApp:
                 return
             self._close_discord_managed_auth_dialog()
             self._show_snackbar(t("discord_auth.success"), COLOR_SUCCESS)
+            if (
+                getattr(controller, "last_discord_managed_auth_referral_bonus_applied", False)
+                is True
+            ):
+                self._show_snackbar(t("discord_auth.referral_reward_applied"), COLOR_SUCCESS)
             self._set_dashboard_translation_visual_state(True)
             if self._is_current_discord_managed_auth_generation(generation):
                 self._discord_managed_auth_task_handle = None

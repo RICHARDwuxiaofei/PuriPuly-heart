@@ -71,6 +71,7 @@ class WarmDocumentDialogResult:
     primary_button: ft.TextButton
     secondary_button: ft.TextButton
     body_text: ft.Text
+    body_column: ft.Column
     action_row: ft.Row
     initial_action_buttons: tuple[ft.TextButton, ...]
     set_actions: Callable[[Sequence[WarmDocumentDialogAction]], tuple[ft.TextButton, ...]]
@@ -88,6 +89,7 @@ def open_warm_document_dialog(
     page: ft.Page,
     *,
     body_paragraphs: Sequence[str],
+    extra_body_controls: Sequence[ft.Control] | None = None,
     primary_label: str | None = None,
     primary_action: Callable[[], None] | None = None,
     secondary_label: str | None = None,
@@ -148,7 +150,7 @@ def open_warm_document_dialog(
         selectable=True,
     )
     body = ft.Column(
-        controls=[body_text],
+        controls=[body_text, *(extra_body_controls or ())],
         spacing=PARAGRAPH_SPACING,
         tight=True,
     )
@@ -207,6 +209,7 @@ def open_warm_document_dialog(
         primary_button=primary_button,
         secondary_button=secondary_button,
         body_text=body_text,
+        body_column=body,
         action_row=action_row,
         initial_action_buttons=initial_action_buttons,
         set_actions=set_actions,

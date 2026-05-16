@@ -160,6 +160,38 @@ def test_local_llm_keys_are_localized() -> None:
     assert "서버 API 키" in bundles["ko"]["settings.local_llm.extra_body.sensitive_key"]
 
 
+def test_managed_key_card_keys_are_localized() -> None:
+    bundles = _load_bundles()
+    required_keys = {
+        "settings.managed_key.title",
+        "settings.managed_key.free_usage",
+        "settings.managed_key.referral_id.label",
+        "settings.managed_key.referral_id.empty",
+        "settings.managed_key.referral_id.pending_helper",
+        "settings.managed_key.referral_id.helper",
+        "settings.managed_key.referral_id.copy_tooltip",
+        "settings.managed_key.referral_id.copy_success",
+    }
+
+    for locale, bundle in bundles.items():
+        missing = sorted(required_keys - set(bundle))
+        assert missing == [], locale
+        for key in required_keys:
+            assert bundle[key].strip()
+            assert bundle[key] != key
+
+    assert bundles["en"]["settings.managed_key.title"] == "Managed Key"
+    assert bundles["en"]["settings.managed_key.free_usage"] == "Free usage"
+    assert bundles["en"]["settings.managed_key.referral_id.label"] == "Referral ID"
+    assert bundles["en"]["settings.managed_key.referral_id.empty"] == "—"
+    assert bundles["en"]["settings.managed_key.referral_id.copy_success"] == ("Referral ID copied.")
+    assert bundles["ko"]["settings.managed_key.title"] == "매니지드 키"
+    assert bundles["ko"]["settings.managed_key.free_usage"] == "무료 사용량"
+    assert bundles["ko"]["settings.managed_key.referral_id.copy_success"] == (
+        "Referral ID가 복사되었어요."
+    )
+
+
 def test_i18n_bundles_do_not_keep_unused_runtime_keys() -> None:
     bundles = _load_bundles()
     all_keys = sorted(set().union(*(bundle.keys() for bundle in bundles.values())))

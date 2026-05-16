@@ -45,6 +45,13 @@ def test_managed_trial_usage_bar_formats_and_clamps_percent(
     )
 
 
+def test_managed_trial_usage_bar_uses_free_usage_copy() -> None:
+    set_locale("en")
+    bar = ManagedTrialUsageBar(percent=71)
+
+    assert bar._remaining_text.value == "Free usage 71% remaining"
+
+
 def test_managed_trial_usage_bar_distributes_fill_horizontally() -> None:
     bar = ManagedTrialUsageBar(percent=42)
 
@@ -70,7 +77,7 @@ def test_managed_trial_usage_bar_apply_locale_refreshes_overlay_text() -> None:
 
         set_locale("ko")
         bar.apply_locale()
-        assert bar._remaining_text.value == "사용량 71% 남음"
+        assert bar._remaining_text.value == "무료 사용량 71% 남음"
 
         bar.set_percent(None)
         bar.apply_locale()
