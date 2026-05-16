@@ -439,6 +439,38 @@ pnpm --filter @puripuly-heart/broker run dev
 
 ---
 
+## Special Thanks
+
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+
+<table>
+  <tbody>
+
+    <tr>
+      <td align="center" valign="top" width="25%"><img src="https://placehold.co/160x160/FFF1EC/7A3B3B.png?text=SUI" width="80px" height="80px" alt="SUI_32C avatar"/><br /><sub><b>SUI_32C</b></sub></td>
+      <td align="center" valign="top" width="25%"><img src="https://placehold.co/160x160/FFF5E8/7A4732.png?text=NAGI" width="80px" height="80px" alt="Nagikokoro avatar"/><br /><sub><b>Nagikokoro</b></sub></td>
+      <td align="center" valign="top" width="25%"><img src="https://placehold.co/160x160/FFF0F5/733047.png?text=MOTO" width="80px" height="80px" alt="motoka96 avatar"/><br /><sub><b>motoka96</b></sub></td>
+      <td align="center" valign="top" width="25%"><img src="https://placehold.co/160x160/F5F0FF/4E397A.png?text=YKOL" width="80px" height="80px" alt="_Ykol魚 avatar"/><br /><sub><b>_Ykol魚</b></sub></td>
+    </tr><br />
+    <tr>
+      <td align="center" valign="top" width="25%"><img src="https://placehold.co/160x160/FFF6E5/6F451E.png?text=KAS" width="80px" height="80px" alt="kascr_ avatar"/><br /><sub><b>kascr_</b></sub></td>
+      <td align="center" valign="top" width="25%"><img src="https://placehold.co/160x160/ECFFF7/2E6656.png?text=JMV" width="80px" height="80px" alt="Just Monika V avatar"/><br /><sub><b>Just Monika V</b></sub></td>
+      <td align="center" valign="top" width="25%"><img src="https://placehold.co/160x160/EEF7FF/315C7A.png?text=FLU" width="80px" height="80px" alt="FLUVIA avatar"/><br /><sub><b>FLUVIA</b></sub></td>
+      <td align="center" valign="top" width="25%"><img src="https://placehold.co/160x160/FFFBEA/6C5525.png?text=HAN" width="80px" height="80px" alt="Han โชเล่ย์ avatar"/><br /><sub><b>Han โชเล่ย์</b></sub></td>
+    </tr>
+  </tbody>
+</table>
+
+
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+
+<!-- ALL-CONTRIBUTORS-LIST:END -->
+
+---
+
 ## 许可证
 
 [AGPL-3.0-or-later](LICENSE)
