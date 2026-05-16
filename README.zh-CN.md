@@ -444,11 +444,9 @@ pnpm --filter @puripuly-heart/broker run dev
 <!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
 <!-- prettier-ignore-start -->
 <!-- markdownlint-disable -->
-
 <table>
   <tbody>
-
-    <tr>
+<tr>
       <td align="center" valign="top" width="25%"><img src="https://placehold.co/160x160/FFF1EC/7A3B3B.png?text=SUI" width="80px" height="80px" alt="SUI_32C avatar"/><br /><sub><b>SUI_32C</b></sub></td>
       <td align="center" valign="top" width="25%"><img src="https://placehold.co/160x160/FFF5E8/7A4732.png?text=NAGI" width="80px" height="80px" alt="Nagikokoro avatar"/><br /><sub><b>Nagikokoro</b></sub></td>
       <td align="center" valign="top" width="25%"><img src="https://placehold.co/160x160/FFF0F5/733047.png?text=MOTO" width="80px" height="80px" alt="motoka96 avatar"/><br /><sub><b>motoka96</b></sub></td>

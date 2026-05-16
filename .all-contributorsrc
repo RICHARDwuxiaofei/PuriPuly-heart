@@ -14,7 +14,7 @@
   "contributorsSortAlphabetically": false,
   "badgeTemplate": "",
   "contributorTemplate": "<% if (contributor.profile) { %><a href=\"<%= contributor.profile %>\"><% } %><img src=\"<%= contributor.avatar_url %>\" width=\"<%= options.imageSize %>px\" height=\"<%= options.imageSize %>px\" alt=\"<%= contributor.name || contributor.login %> avatar\"/><br /><sub><b><%= contributor.name || contributor.login %></b></sub><% if (contributor.profile) { %></a><% } %>",
-  "wrapperTemplate": "\n<table>\n  <tbody>\n<%= bodyContent %>  </tbody>\n</table>\n",
+  "wrapperTemplate": "<table>\n  <tbody>\n<%= bodyContent.trim() %>\n  </tbody>\n</table>\n",
   "types": {
     "thanks": {
       "symbol": "💛",
