@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import threading
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseError,
     ManagedOpenRouterReleaseResult,
     ManagedOpenRouterReleaseService,
+    ManagedOpenRouterTrialStatusSuccess,
     ManagedOpenRouterUserFacingError,
     UnavailableManagedOpenRouterReleaseClient,
 )
@@ -48,12 +50,15 @@ class FakeManagedReleaseClient:
     issue_result: object | None = None
     discord_start_result: object | None = None
     discord_issue_result: object | None = None
+    trial_status_result: object | None = None
     challenge_gate: asyncio.Event | None = None
     discord_start_gate: asyncio.Event | None = None
     issue_gate: asyncio.Event | None = None
     issue_started: asyncio.Event | None = None
     discord_issue_gate: asyncio.Event | None = None
     discord_issue_started: asyncio.Event | None = None
+    trial_status_gate: asyncio.Event | None = None
+    trial_status_started: asyncio.Event | None = None
     calls: list[tuple[str, dict[str, object]]] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -108,18 +113,17 @@ class FakeManagedReleaseClient:
         device_public_key: str,
         redirect_uri: str,
         app_version: str,
+        referral_id: str | None = None,
     ):
-        self.calls.append(
-            (
-                "discord_start",
-                {
-                    "installation_id": installation_id,
-                    "device_public_key": device_public_key,
-                    "redirect_uri": redirect_uri,
-                    "app_version": app_version,
-                },
-            )
-        )
+        payload = {
+            "installation_id": installation_id,
+            "device_public_key": device_public_key,
+            "redirect_uri": redirect_uri,
+            "app_version": app_version,
+        }
+        if referral_id is not None:
+            payload["referral_id"] = referral_id
+        self.calls.append(("discord_start", payload))
         if self.discord_start_gate is not None:
             await self.discord_start_gate.wait()
         result = self.discord_start_result
@@ -134,6 +138,32 @@ class FakeManagedReleaseClient:
         if self.discord_issue_gate is not None:
             await self.discord_issue_gate.wait()
         result = self.discord_issue_result
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def get_trial_status(
+        self,
+        *,
+        installation_id: str,
+        timestamp: str,
+        signature: str,
+    ):
+        self.calls.append(
+            (
+                "trial_status",
+                {
+                    "installation_id": installation_id,
+                    "timestamp": timestamp,
+                    "signature": signature,
+                },
+            )
+        )
+        if self.trial_status_started is not None:
+            self.trial_status_started.set()
+        if self.trial_status_gate is not None:
+            await self.trial_status_gate.wait()
+        result = self.trial_status_result
         if isinstance(result, Exception):
             raise result
         return result
@@ -580,6 +610,354 @@ async def test_prepare_for_translation_persists_managed_entitlement_snapshot() -
 
     assert settings.managed_identity.active_managed_credential_ref == "hash_abc123"
     assert settings.managed_identity.active_managed_expires_at == "2026-10-17T12:34:56Z"
+
+
+@pytest.mark.asyncio
+async def test_prepare_for_translation_passes_friend_referral_id_without_persisting_it() -> None:
+    service, settings, _secrets, client, _harness = _make_discord_service()
+
+    result = await service.prepare_for_translation(referral_id=" 7kq9m2 ")
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    discord_start_payload = client.calls[0][1]
+    assert discord_start_payload["referral_id"] == " 7kq9m2 "
+    assert settings.managed_identity.referral_id is None
+
+
+@pytest.mark.asyncio
+async def test_discord_issue_success_persists_owned_referral_id_and_exposes_result_hints() -> None:
+    client = FakeManagedReleaseClient(
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(
+            openrouter_api_key="managed-key",
+            referral_bonus_applied=True,
+            referral_id=" 7kq9m2 ",
+        ),
+    )
+    service, settings, _secrets, _client, _harness = _make_discord_service(client=client)
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert result.referral_bonus_applied is True
+    assert result.referral_id == "7KQ9M2"
+    assert settings.managed_identity.referral_id == "7KQ9M2"
+
+
+@pytest.mark.asyncio
+async def test_discord_issue_success_defaults_referral_bonus_and_preserves_known_owned_id() -> None:
+    settings = AppSettings()
+    settings.managed_identity.referral_id = "8H3J4N"
+    client = FakeManagedReleaseClient(
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(openrouter_api_key="managed-key"),
+    )
+    service, settings, _secrets, _client, _harness = _make_discord_service(
+        client=client,
+        settings=settings,
+    )
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert result.referral_bonus_applied is False
+    assert result.referral_id == "8H3J4N"
+    assert settings.managed_identity.referral_id == "8H3J4N"
+
+
+@pytest.mark.asyncio
+async def test_discord_issue_success_ignores_malformed_referral_hints_without_clearing_known_id() -> (
+    None
+):
+    settings = AppSettings()
+    settings.managed_identity.referral_id = "8H3J4N"
+    client = FakeManagedReleaseClient(
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(
+            openrouter_api_key="managed-key",
+            referral_bonus_applied="true",  # type: ignore[arg-type]
+            referral_id="ABC120",
+        ),
+    )
+    service, settings, _secrets, _client, _harness = _make_discord_service(
+        client=client,
+        settings=settings,
+    )
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert result.referral_bonus_applied is False
+    assert result.referral_id == "8H3J4N"
+    assert settings.managed_identity.referral_id == "8H3J4N"
+
+
+@pytest.mark.asyncio
+async def test_status_refresh_signs_existing_identity_request_and_persists_owned_referral_id() -> (
+    None
+):
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    bundle = ensure_managed_identity_bundle(
+        settings,
+        secrets,
+        persist_settings=lambda _updated: None,
+    )
+    client = FakeManagedReleaseClient(
+        trial_status_result=ManagedOpenRouterTrialStatusSuccess(referral_id=" 7kq9m2 "),
+    )
+    persist_calls: list[tuple[str | None, str | None]] = []
+    service, settings, _secrets = _make_service(
+        client=client,
+        settings=settings,
+        secrets=secrets,
+        persist_calls=persist_calls,
+    )
+
+    result = await service.refresh_owned_referral_id_from_status()
+
+    expected_signature = bundle.sign_status_request(
+        timestamp="2026-04-08T06:00:45.000Z",
+    )["signature"]
+    assert client.calls == [
+        (
+            "trial_status",
+            {
+                "installation_id": bundle.installation_id,
+                "timestamp": "2026-04-08T06:00:45.000Z",
+                "signature": expected_signature,
+            },
+        )
+    ]
+    assert result == "7KQ9M2"
+    assert settings.managed_identity.referral_id == "7KQ9M2"
+    assert persist_calls == [(bundle.installation_id, None)]
+
+
+@pytest.mark.asyncio
+async def test_status_refresh_preserves_known_owned_referral_id_when_old_broker_omits_field() -> (
+    None
+):
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.managed_identity.referral_id = "8H3J4N"
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(
+        settings,
+        secrets,
+        persist_settings=lambda _updated: None,
+    )
+    client = FakeManagedReleaseClient(
+        trial_status_result=ManagedOpenRouterTrialStatusSuccess(referral_id=None),
+    )
+    persist_calls: list[tuple[str | None, str | None]] = []
+    service, settings, _secrets = _make_service(
+        client=client,
+        settings=settings,
+        secrets=secrets,
+        persist_calls=persist_calls,
+    )
+
+    result = await service.refresh_owned_referral_id_from_status()
+
+    assert [name for name, _payload in client.calls] == ["trial_status"]
+    assert result == "8H3J4N"
+    assert settings.managed_identity.referral_id == "8H3J4N"
+    assert persist_calls == []
+
+
+@pytest.mark.asyncio
+async def test_status_refresh_preserves_known_owned_referral_id_when_broker_status_fails() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.managed_identity.referral_id = "8H3J4N"
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(
+        settings,
+        secrets,
+        persist_settings=lambda _updated: None,
+    )
+    client = FakeManagedReleaseClient(
+        trial_status_result=ManagedOpenRouterReleaseError(
+            code="trial_unavailable",
+            error_class="retryable",
+            message="broker request timed out",
+            operation="trial_status",
+        ),
+    )
+    persist_calls: list[tuple[str | None, str | None]] = []
+    service, settings, _secrets = _make_service(
+        client=client,
+        settings=settings,
+        secrets=secrets,
+        persist_calls=persist_calls,
+    )
+
+    result = await service.refresh_owned_referral_id_from_status()
+
+    assert [name for name, _payload in client.calls] == ["trial_status"]
+    assert result == "8H3J4N"
+    assert settings.managed_identity.referral_id == "8H3J4N"
+    assert persist_calls == []
+
+
+@pytest.mark.asyncio
+async def test_status_refresh_preserves_newer_owned_referral_id_persisted_while_in_flight() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(
+        settings,
+        secrets,
+        persist_settings=lambda _updated: None,
+    )
+    status_gate = asyncio.Event()
+    status_started = asyncio.Event()
+    client = FakeManagedReleaseClient(
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(
+            openrouter_api_key="managed-key",
+            referral_id=" 8h3j4n ",
+        ),
+        trial_status_result=ManagedOpenRouterTrialStatusSuccess(referral_id=" 7kq9m2 "),
+        trial_status_gate=status_gate,
+        trial_status_started=status_started,
+    )
+    persist_calls: list[tuple[str | None, str | None]] = []
+    service, settings, _secrets, client, _harness = _make_discord_service(
+        client=client,
+        settings=settings,
+        secrets=secrets,
+        persist_calls=persist_calls,
+    )
+
+    refresh_task = asyncio.create_task(service.refresh_owned_referral_id_from_status())
+    try:
+        await asyncio.wait_for(status_started.wait(), timeout=1.0)
+
+        issue_result = await service.prepare_for_translation()
+        persist_count_after_issue = len(persist_calls)
+
+        assert issue_result.referral_id == "8H3J4N"
+        assert settings.managed_identity.referral_id == "8H3J4N"
+
+        status_gate.set()
+        refresh_result = await asyncio.wait_for(refresh_task, timeout=1.0)
+
+        assert refresh_result == "8H3J4N"
+        assert settings.managed_identity.referral_id == "8H3J4N"
+        assert len(persist_calls) == persist_count_after_issue
+    finally:
+        status_gate.set()
+        if not refresh_task.done():
+            refresh_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await refresh_task
+
+
+@pytest.mark.asyncio
+async def test_status_refresh_skips_without_identity_mutation_when_existing_bundle_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.managed_identity.installation_id = "not-a-valid-managed-installation-id"
+    settings.managed_identity.release_token = "release-token-kept"
+    settings.managed_identity.release_token_expires_at = "2026-04-08T06:15:00.000Z"
+    settings.managed_identity.referral_id = "8H3J4N"
+    secrets = InMemorySecretStore()
+    secrets.set("unrelated-secret", "kept")
+    before_secret_items = dict(secrets._items)
+    before_managed_identity = (
+        settings.managed_identity.installation_id,
+        settings.managed_identity.release_token,
+        settings.managed_identity.release_token_expires_at,
+        settings.managed_identity.verified_hardware_hash,
+        settings.managed_identity.verified_hardware_hash_salt_version,
+        settings.managed_identity.referral_id,
+    )
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("status refresh must not create or regenerate identity bundles")
+
+    monkeypatch.setattr(
+        "puripuly_heart.core.managed_openrouter_release.ensure_managed_identity_bundle",
+        fail_if_called,
+    )
+    monkeypatch.setattr(
+        "puripuly_heart.core.managed_openrouter_release.regenerate_managed_identity_bundle",
+        fail_if_called,
+    )
+    client = FakeManagedReleaseClient(
+        trial_status_result=ManagedOpenRouterTrialStatusSuccess(referral_id="7KQ9M2"),
+    )
+    persist_calls: list[tuple[str | None, str | None]] = []
+    service, settings, secrets = _make_service(
+        client=client,
+        settings=settings,
+        secrets=secrets,
+        persist_calls=persist_calls,
+    )
+
+    result = await service.refresh_owned_referral_id_from_status()
+
+    assert result == "8H3J4N"
+    assert client.calls == []
+    assert persist_calls == []
+    assert secrets._items == before_secret_items
+    assert (
+        settings.managed_identity.installation_id,
+        settings.managed_identity.release_token,
+        settings.managed_identity.release_token_expires_at,
+        settings.managed_identity.verified_hardware_hash,
+        settings.managed_identity.verified_hardware_hash_salt_version,
+        settings.managed_identity.referral_id,
+    ) == before_managed_identity
+
+
+@pytest.mark.asyncio
+async def test_status_refresh_close_cancels_in_flight_status_without_persisting_stale_settings() -> (
+    None
+):
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.managed_identity.referral_id = "8H3J4N"
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(
+        settings,
+        secrets,
+        persist_settings=lambda _updated: None,
+    )
+    status_gate = asyncio.Event()
+    status_started = asyncio.Event()
+    client = FakeManagedReleaseClient(
+        trial_status_result=ManagedOpenRouterTrialStatusSuccess(referral_id="7KQ9M2"),
+        trial_status_gate=status_gate,
+        trial_status_started=status_started,
+    )
+    persist_calls: list[tuple[str | None, str | None]] = []
+    service, settings, _secrets = _make_service(
+        client=client,
+        settings=settings,
+        secrets=secrets,
+        persist_calls=persist_calls,
+    )
+    refresh_task = asyncio.create_task(service.refresh_owned_referral_id_from_status())
+    try:
+        await asyncio.wait_for(status_started.wait(), timeout=1.0)
+
+        await service.close()
+
+        assert refresh_task.done()
+        assert settings.managed_identity.referral_id == "8H3J4N"
+        assert persist_calls == []
+    finally:
+        status_gate.set()
+        if not refresh_task.done():
+            refresh_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await refresh_task
 
 
 @pytest.mark.asyncio

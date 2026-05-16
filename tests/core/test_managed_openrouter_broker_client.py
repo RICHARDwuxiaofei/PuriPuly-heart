@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Callable
 
@@ -136,6 +137,100 @@ async def test_start_discord_oauth_posts_redirect_and_parses_success_payload() -
         ),
         fingerprint_salt_version=7,
     )
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_referral_id", "expected_referral_id"),
+    [
+        ("  7kq9m2  ", "7KQ9M2"),
+        ("  invalid friend id  ", "INVALID FRIEND ID"),
+    ],
+)
+async def test_start_discord_oauth_forwards_trimmed_uppercase_non_empty_referral_id(
+    raw_referral_id: str,
+    expected_referral_id: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body == {
+            "installation_id": "install-discord-123",
+            "device_public_key": "device-public-key-123",
+            "redirect_uri": "http://127.0.0.1:62187/discord/callback",
+            "app_version": "2.0.0",
+            "referral_id": expected_referral_id,
+        }
+        return httpx.Response(
+            200,
+            json={
+                "authorization_url": "https://discord.com/oauth2/authorize?state=state-123",
+                "redirect_uri": "http://127.0.0.1:62187/discord/callback",
+                "oauth_session_expires_at": "2026-04-30T06:05:00.000Z",
+                "issue_nonce": "issue-nonce-123",
+                "fingerprint_salt": {
+                    "version": 7,
+                    "salt": "fingerprint-salt-123",
+                },
+                "fingerprint_salt_version": 7,
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    signature = inspect.signature(client.start_discord_oauth)
+    assert "referral_id" in signature.parameters
+    await client.start_discord_oauth(
+        installation_id="install-discord-123",
+        device_public_key="device-public-key-123",
+        redirect_uri="http://127.0.0.1:62187/discord/callback",
+        app_version="2.0.0",
+        referral_id=raw_referral_id,
+    )
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty_referral_id", [None, "", "   "])
+async def test_start_discord_oauth_omits_empty_referral_id(
+    empty_referral_id: str | None,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body == {
+            "installation_id": "install-discord-123",
+            "device_public_key": "device-public-key-123",
+            "redirect_uri": "http://127.0.0.1:62187/discord/callback",
+            "app_version": "2.0.0",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "authorization_url": "https://discord.com/oauth2/authorize?state=state-123",
+                "redirect_uri": "http://127.0.0.1:62187/discord/callback",
+                "oauth_session_expires_at": "2026-04-30T06:05:00.000Z",
+                "issue_nonce": "issue-nonce-123",
+                "fingerprint_salt": {
+                    "version": 7,
+                    "salt": "fingerprint-salt-123",
+                },
+                "fingerprint_salt_version": 7,
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    signature = inspect.signature(client.start_discord_oauth)
+    assert "referral_id" in signature.parameters
+    await client.start_discord_oauth(
+        installation_id="install-discord-123",
+        device_public_key="device-public-key-123",
+        redirect_uri="http://127.0.0.1:62187/discord/callback",
+        app_version="2.0.0",
+        referral_id=empty_referral_id,
+    )
+
     await client.close()
 
 
@@ -293,6 +388,127 @@ async def test_issue_discord_managed_key_posts_signed_payload_and_parses_success
         expires_at="2026-07-30T06:00:00.000Z",
         openrouter_user_id="user-123",
     )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_issue_discord_managed_key_parses_referral_success_hints() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "openrouter_api_key": "managed-openrouter-api-key",
+                "managed_credential_ref": "managed-credential-ref-123",
+                "expires_at": "2026-07-30T06:00:00.000Z",
+                "openrouter_user_id": " user-123 ",
+                "referral_bonus_applied": True,
+                "referral_id": " 7kq9m2 ",
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.issue_discord_managed_key({"code": "discord-oauth-code-123"})
+
+    assert result == ManagedOpenRouterIssueSuccess(
+        openrouter_api_key="managed-openrouter-api-key",
+        managed_credential_ref="managed-credential-ref-123",
+        expires_at="2026-07-30T06:00:00.000Z",
+        openrouter_user_id="user-123",
+        referral_bonus_applied=True,
+        referral_id="7KQ9M2",
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_payload", "expected_referral_bonus_applied", "expected_referral_id"),
+    [
+        ({}, False, None),
+        ({"referral_bonus_applied": None, "referral_id": None}, False, None),
+        ({"referral_bonus_applied": False, "referral_id": " 7kq9m2 "}, False, "7KQ9M2"),
+        ({"referral_bonus_applied": "true", "referral_id": "ABC120"}, False, None),
+        ({"referral_bonus_applied": 1, "referral_id": 12345}, False, None),
+    ],
+)
+async def test_issue_discord_managed_key_tolerates_referral_hint_compatibility_fields(
+    extra_payload: dict[str, object],
+    expected_referral_bonus_applied: bool,
+    expected_referral_id: str | None,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "openrouter_api_key": "managed-openrouter-api-key",
+                "managed_credential_ref": "managed-credential-ref-123",
+                **extra_payload,
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.issue_discord_managed_key({"code": "discord-oauth-code-123"})
+
+    assert result == ManagedOpenRouterIssueSuccess(
+        openrouter_api_key="managed-openrouter-api-key",
+        managed_credential_ref="managed-credential-ref-123",
+        referral_bonus_applied=expected_referral_bonus_applied,
+        referral_id=expected_referral_id,
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_payload", "expected_referral_id"),
+    [
+        ({"referral_id": " 7kq9m2 "}, "7KQ9M2"),
+        ({}, None),
+        ({"referral_id": None}, None),
+        ({"referral_id": "ABC120"}, None),
+        ({"referral_id": 12345}, None),
+    ],
+)
+async def test_get_trial_status_tolerates_optional_referral_id_compatibility_fields(
+    extra_payload: dict[str, object],
+    expected_referral_id: str | None,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/v1/trial/status"
+        assert request.url.params.get("installation_id") == "install-discord-123"
+        assert request.headers["X-Puripuly-Timestamp"] == "2026-04-30T06:00:30.000Z"
+        assert request.headers["X-Puripuly-Signature"] == "signature-123"
+        return httpx.Response(
+            200,
+            json={
+                "managed_state": {
+                    "lifecycle": "active",
+                    "managed_availability": True,
+                },
+                "current_entitlement": None,
+                "onboarding_eligibility": {
+                    "eligible": False,
+                    "reason": "active",
+                    "requires_discord_oauth": False,
+                },
+                **extra_payload,
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    get_trial_status = getattr(client, "get_trial_status", None)
+    assert callable(get_trial_status)
+    result = await get_trial_status(
+        installation_id="install-discord-123",
+        timestamp="2026-04-30T06:00:30.000Z",
+        signature="signature-123",
+    )
+
+    assert getattr(result, "referral_id", None) == expected_referral_id
     await client.close()
 
 
