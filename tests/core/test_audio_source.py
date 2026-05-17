@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import puripuly_heart.core.audio.source as audio_source_module
 from puripuly_heart.core.audio.source import (
     SelfMicCaptureChannelDecision,
     SoundDeviceAudioSource,
@@ -27,6 +28,137 @@ from puripuly_heart.core.audio.source import (
 def test_sounddevice_audio_source_rejects_invalid_params(kwargs, error):
     with pytest.raises(ValueError, match=error):
         SoundDeviceAudioSource(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_sounddevice_callback_tracks_status_and_drops_without_logging(monkeypatch):
+    stream_ref: dict[str, object] = {}
+    warnings: list[str] = []
+    allow_status_stringification = False
+
+    class StatusWithoutCallbackStringification:
+        def __str__(self) -> str:
+            if not allow_status_stringification:
+                raise AssertionError("callback must not stringify status")
+            return "input-overflow"
+
+    class FakeInputStream:
+        def __init__(self, *, callback, **kwargs):
+            self.callback = callback
+            self.samplerate = 48000
+            stream_ref["stream"] = self
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def close(self):
+            return None
+
+    fake_sd = SimpleNamespace(InputStream=FakeInputStream)
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    def fake_warning(message, *args, **kwargs):
+        _ = kwargs
+        warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(
+        "puripuly_heart.core.audio.source.logger.warning",
+        fake_warning,
+    )
+
+    source = SoundDeviceAudioSource(sample_rate_hz=None, channels=1, max_queue_frames=1)
+    try:
+        stream = stream_ref["stream"]
+        status = StatusWithoutCallbackStringification()
+        stream.callback(np.ones((4,), dtype=np.float32), None, None, status)
+        stream.callback(np.ones((4,), dtype=np.float32), None, None, None)
+
+        assert source.callback_status_count == 1
+        assert source.queue_drop_count == 1
+        assert source.last_callback_status is status
+        assert warnings == []
+
+        allow_status_stringification = True
+        frame = await source.frames().__anext__()
+
+        np.testing.assert_allclose(frame.samples, np.ones((4,), dtype=np.float32))
+        assert any("callback status" in message and "count=1" in message for message in warnings)
+        assert any("queue drop" in message and "count=1" in message for message in warnings)
+    finally:
+        await source.close()
+
+
+@pytest.mark.asyncio
+async def test_sounddevice_callback_warning_reporting_is_rate_limited(monkeypatch) -> None:
+    stream_ref: dict[str, object] = {}
+    warnings: list[str] = []
+    clock = SimpleNamespace(value=0.0)
+
+    class FakeInputStream:
+        def __init__(self, *, callback, **kwargs):
+            _ = kwargs
+            self.callback = callback
+            self.samplerate = 48000
+            stream_ref["stream"] = self
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def close(self):
+            return None
+
+    def fake_warning(message, *args, **kwargs):
+        _ = kwargs
+        warnings.append(message % args if args else message)
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "sounddevice", SimpleNamespace(InputStream=FakeInputStream)
+    )
+    monkeypatch.setattr(
+        audio_source_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock.value),
+        raising=False,
+    )
+    monkeypatch.setattr(audio_source_module.logger, "warning", fake_warning)
+
+    source = SoundDeviceAudioSource(sample_rate_hz=None, channels=1, max_queue_frames=1)
+
+    def trigger_status_and_drop() -> None:
+        stream = stream_ref["stream"]
+        stream.callback(np.ones((4,), dtype=np.float32), None, None, "input-overflow")
+        stream.callback(np.ones((4,), dtype=np.float32), None, None, "input-overflow")
+
+    try:
+        trigger_status_and_drop()
+        await source.frames().__anext__()
+        assert len(warnings) == 1
+        assert "callback status count=2" in warnings[0]
+        assert "callback status new=2" in warnings[0]
+        assert "queue drop count=1" in warnings[0]
+        assert "queue drop new=1" in warnings[0]
+
+        trigger_status_and_drop()
+        await source.frames().__anext__()
+        assert len(warnings) == 1
+
+        clock.value = 1.1
+        trigger_status_and_drop()
+        await source.frames().__anext__()
+
+        assert len(warnings) == 2
+        assert "callback status count=6" in warnings[1]
+        assert "callback status new=4" in warnings[1]
+        assert "queue drop count=3" in warnings[1]
+        assert "queue drop new=2" in warnings[1]
+    finally:
+        await source.close()
 
 
 def test_resolve_sounddevice_input_device_prefers_hostapi_default(monkeypatch):

@@ -111,6 +111,17 @@ class ConstructionDummyController:
         _ = level
         self.detailed_messages.append(message)
 
+    def cycle_debug_capture_fault_profile(self) -> str:
+        self.capture_fault_cycled = True
+        return "capture_attenuate_40db"
+
+    def cycle_debug_stt_fault_profile(self) -> str:
+        self.stt_fault_cycled = True
+        return "stt_input_low_snr_vad_pass"
+
+    def clear_debug_audio_fault_profiles(self) -> None:
+        self.audio_faults_cleared = True
+
 
 class ConstructionDummyDashboardView(ft.Container):
     def __init__(self) -> None:
@@ -271,6 +282,9 @@ def test_translator_app_mounts_debug_preview_when_enabled(
         "on_discord_auth",
         "on_discord_callback_page",
         "on_peer_translation_eula",
+        "on_capture_fault_cycle",
+        "on_stt_fault_cycle",
+        "on_audio_fault_clear",
     }
     discord_callback = seen["callbacks"]["on_discord_auth"]
     assert getattr(discord_callback, "__self__", None) is app
@@ -289,6 +303,68 @@ def test_translator_app_mounts_debug_preview_when_enabled(
     root = page.added[0]
     assert isinstance(root.content, ft.Stack)
     assert root.content.controls[-1] is app.debug_preview_panel
+
+
+def test_debug_preview_panel_wires_audio_fault_actions(monkeypatch) -> None:
+    _patch_app_construction(monkeypatch)
+    captured_kwargs: dict[str, object] = {}
+    snackbars: list[tuple[str, object]] = []
+
+    class FakeDebugPreviewPanel(ft.Container):
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            super().__init__()
+
+    monkeypatch.setattr(app_module, "DebugPreviewPanel", FakeDebugPreviewPanel)
+    app = app_module.TranslatorApp(
+        DummyPage(), config_path=Path("settings.json"), debug_ui_preview=True
+    )
+    monkeypatch.setattr(
+        app, "_show_snackbar", lambda message, color=None: snackbars.append((message, color))
+    )
+
+    assert callable(captured_kwargs["on_capture_fault_cycle"])
+    assert callable(captured_kwargs["on_stt_fault_cycle"])
+    assert callable(captured_kwargs["on_audio_fault_clear"])
+    captured_kwargs["on_capture_fault_cycle"]()
+    captured_kwargs["on_stt_fault_cycle"]()
+    captured_kwargs["on_audio_fault_clear"]()
+    assert app.controller.capture_fault_cycled is True
+    assert app.controller.stt_fault_cycled is True
+    assert app.controller.audio_faults_cleared is True
+    assert snackbars[0][0] == app_module.t(
+        "debug_preview.capture_fault_snackbar", profile="capture_attenuate_40db"
+    )
+    assert snackbars[1][0] == app_module.t(
+        "debug_preview.stt_fault_snackbar", profile="stt_input_low_snr_vad_pass"
+    )
+    assert snackbars[2][0] == app_module.t("debug_preview.audio_fault_clear")
+
+
+def test_debug_audio_fault_actions_do_not_call_persistence_or_providers(monkeypatch) -> None:
+    _patch_app_construction(monkeypatch)
+    forbidden_calls: list[str] = []
+    monkeypatch.setattr(
+        app_module,
+        "save_settings",
+        lambda *args, **kwargs: forbidden_calls.append("save_settings"),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "webbrowser",
+        SimpleNamespace(open=lambda *args, **kwargs: forbidden_calls.append("webbrowser.open")),
+    )
+
+    app = app_module.TranslatorApp(
+        DummyPage(), config_path=Path("settings.json"), debug_ui_preview=True
+    )
+    monkeypatch.setattr(app, "_show_snackbar", lambda *_args, **_kwargs: None)
+
+    app._preview_capture_fault_cycle()
+    app._preview_stt_fault_cycle()
+    app._preview_audio_fault_clear()
+
+    assert forbidden_calls == []
 
 
 def test_debug_preview_discord_callback_page_opens_local_preview_without_oauth(

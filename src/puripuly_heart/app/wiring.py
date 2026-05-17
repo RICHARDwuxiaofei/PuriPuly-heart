@@ -542,7 +542,12 @@ def create_llm_provider(
     )
 
 
-def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBackend:
+def create_stt_backend(
+    settings: AppSettings,
+    *,
+    secrets: SecretStore,
+    diagnostics_enabled: Callable[[], bool] | None = None,
+) -> STTBackend:
     effective_terms = get_effective_custom_terms(settings, settings.languages.source_language)
 
     if settings.provider.stt == STTProviderName.LOCAL_QWEN:
@@ -555,6 +560,7 @@ def create_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBac
             sample_rate_hz=STT_INTERNAL_SAMPLE_RATE_HZ,
             stream_label="self",
             language_hint=get_local_qwen_language_hint(settings.languages.source_language),
+            diagnostics_enabled=diagnostics_enabled,
         )
 
     if settings.provider.stt == STTProviderName.DEEPGRAM:
@@ -676,7 +682,12 @@ def build_peer_stt_provider_signature(settings: AppSettings) -> tuple[object, ..
     )
 
 
-def create_peer_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> STTBackend:
+def create_peer_stt_backend(
+    settings: AppSettings,
+    *,
+    secrets: SecretStore,
+    diagnostics_enabled: Callable[[], bool] | None = None,
+) -> STTBackend:
     resolved = resolve_peer_stt_config(settings)
 
     if resolved.provider == STTProviderName.DEEPGRAM:
@@ -745,6 +756,7 @@ def create_peer_stt_backend(settings: AppSettings, *, secrets: SecretStore) -> S
             sample_rate_hz=resolved.sample_rate_hz,
             stream_label="peer",
             language_hint=get_local_qwen_language_hint(resolved.source_language),
+            diagnostics_enabled=diagnostics_enabled,
         )
 
     raise ValueError(f"Unsupported peer STT provider: {resolved.provider}")

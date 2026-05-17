@@ -139,14 +139,17 @@ def test_configure_main_logging_reuses_existing_root_stream_handler(tmp_path):
 
     sinks = configure_main_logging(root_logger=root_logger, log_dir=tmp_path)
 
-    stream_handlers = [
-        handler
-        for handler in root_logger.handlers
-        if isinstance(handler, logging.StreamHandler)
-        and not isinstance(handler, RotatingFileHandler)
-    ]
-    assert sinks.stream_handler is existing_stream
-    assert stream_handlers == [existing_stream]
+    try:
+        stream_handlers = [
+            handler
+            for handler in root_logger.handlers
+            if isinstance(handler, logging.StreamHandler)
+            and not isinstance(handler, RotatingFileHandler)
+        ]
+        assert sinks.stream_handler is existing_stream
+        assert stream_handlers == [existing_stream]
+    finally:
+        sinks.close()
 
 
 def test_default_session_runtime_logging_services_do_not_share_session_logger(tmp_path):

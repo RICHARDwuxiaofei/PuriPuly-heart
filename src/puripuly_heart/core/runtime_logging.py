@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import queue
 from dataclasses import dataclass
 from enum import Enum
-from logging.handlers import RotatingFileHandler
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
 from typing import Callable, Protocol
 from uuid import uuid4
@@ -14,7 +15,14 @@ from puripuly_heart.config.paths import user_config_dir
 MAIN_LOG_FILENAME = "puripuly_heart.log"
 _MAIN_STREAM_HANDLER_NAME = "puripuly_heart.main.stream"
 _MAIN_FILE_HANDLER_NAME = "puripuly_heart.main.file"
+_MAIN_FILE_QUEUE_HANDLER_NAME = "puripuly_heart.main.file.queue"
 _SESSION_LOGGER_NAME = "puripuly_heart.runtime.session"
+_QUEUE_HANDLER_LOG_FILE_ATTR = "_puripuly_heart_log_file"
+_QUEUE_HANDLER_FILE_HANDLER_ATTR = "_puripuly_heart_file_handler"
+_QUEUE_HANDLER_LISTENER_ATTR = "_puripuly_heart_queue_listener"
+_QUEUE_HANDLER_CLOSED_ATTR = "_puripuly_heart_queue_closed"
+_QUEUE_HANDLER_REFCOUNT_ATTR = "_puripuly_heart_queue_refcount"
+_QUEUE_HANDLER_QUEUE_ATTR = "_puripuly_heart_queue"
 
 
 LOG_FORMAT = "%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s: %(message)s"
@@ -158,11 +166,29 @@ class SessionLoggingMode(str, Enum):
     DETAILED = "detailed"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class RuntimeLoggingSinks:
     stream_handler: logging.Handler
     file_handler: logging.Handler
     log_file: Path
+    owner_logger: logging.Logger | None = None
+    file_queue_handler: logging.Handler | None = None
+    file_queue_listener: QueueListener | None = None
+    file_queue: queue.Queue[logging.LogRecord] | None = None
+    _closed: bool = False
+
+    def close(self, *, force: bool = False) -> None:
+        if self._closed and not force:
+            return
+        self._closed = True
+        if self.owner_logger is not None and self.file_queue_handler is not None:
+            _release_main_file_queue_handler(
+                self.owner_logger,
+                self.file_queue_handler,
+                force=force,
+            )
+            return
+        _close_file_handler(self.file_handler)
 
 
 def default_main_log_file(*, log_dir: Path | None = None) -> Path:
@@ -186,23 +212,53 @@ def configure_main_logging(
         target_logger.addHandler(stream_handler)
     stream_handler.setFormatter(_main_formatter())
 
-    file_handler = _find_main_file_handler(target_logger, log_file=log_file)
-    if file_handler is None:
-        file_handler = RotatingFileHandler(
-            log_file,
-            maxBytes=5 * 1024 * 1024,
-            backupCount=0,
-            encoding="utf-8",
-        )
+    _remove_stale_main_file_queue_handlers(target_logger, log_file=log_file)
+    existing_queue = _find_main_file_queue_handler(target_logger, log_file=log_file)
+    if existing_queue is None:
+        file_handler = _find_main_file_handler(target_logger, log_file=log_file)
+        if file_handler is not None:
+            with contextlib.suppress(Exception):
+                target_logger.removeHandler(file_handler)
+        else:
+            file_handler = RotatingFileHandler(
+                log_file,
+                maxBytes=5 * 1024 * 1024,
+                backupCount=0,
+                encoding="utf-8",
+            )
         file_handler.set_name(_MAIN_FILE_HANDLER_NAME)
-        target_logger.addHandler(file_handler)
-    file_handler.setFormatter(_main_formatter())
+        file_handler.setFormatter(_main_formatter())
+        file_queue: queue.Queue[logging.LogRecord] = queue.Queue()
+        file_queue_handler = QueueHandler(file_queue)
+        file_queue_handler.set_name(_MAIN_FILE_QUEUE_HANDLER_NAME)
+        file_queue_listener = QueueListener(file_queue, file_handler, respect_handler_level=True)
+        setattr(file_queue_handler, _QUEUE_HANDLER_LOG_FILE_ATTR, str(log_file.resolve()))
+        setattr(file_queue_handler, _QUEUE_HANDLER_FILE_HANDLER_ATTR, file_handler)
+        setattr(file_queue_handler, _QUEUE_HANDLER_LISTENER_ATTR, file_queue_listener)
+        setattr(file_queue_handler, _QUEUE_HANDLER_CLOSED_ATTR, False)
+        setattr(file_queue_handler, _QUEUE_HANDLER_REFCOUNT_ATTR, 1)
+        setattr(file_queue_handler, _QUEUE_HANDLER_QUEUE_ATTR, file_queue)
+        target_logger.addHandler(file_queue_handler)
+        file_queue_listener.start()
+    else:
+        file_queue_handler, file_handler, file_queue_listener = existing_queue
+        file_queue = _main_file_queue_for_handler(file_queue_handler)
+        setattr(
+            file_queue_handler,
+            _QUEUE_HANDLER_REFCOUNT_ATTR,
+            int(getattr(file_queue_handler, _QUEUE_HANDLER_REFCOUNT_ATTR, 1)) + 1,
+        )
+        file_handler.setFormatter(_main_formatter())
 
     target_logger.setLevel(logging.INFO)
     return RuntimeLoggingSinks(
         stream_handler=stream_handler,
         file_handler=file_handler,
         log_file=log_file,
+        owner_logger=target_logger,
+        file_queue_handler=file_queue_handler,
+        file_queue_listener=file_queue_listener,
+        file_queue=file_queue,
     )
 
 
@@ -216,6 +272,7 @@ class SessionRuntimeLoggingService:
         ui_handler_factory: Callable[[RealtimeLogSink], logging.Handler] | None = None,
     ) -> None:
         self._root_logger = root_logger or logging.getLogger()
+        self._owns_sinks = sinks is None
         self._sinks = sinks or configure_main_logging(root_logger=self._root_logger)
         self._session_logger = session_logger or logging.getLogger(_new_session_logger_name())
         self._root_logger.setLevel(logging.INFO)
@@ -227,12 +284,15 @@ class SessionRuntimeLoggingService:
         self._session_handlers: list[logging.Handler] = []
         self._mode = SessionLoggingMode.BASIC
 
+        file_output_handler = (
+            getattr(self._sinks, "file_queue_handler", None) or self._sinks.file_handler
+        )
         _ensure_handler(self._root_logger, self._sinks.stream_handler)
-        _ensure_handler(self._root_logger, self._sinks.file_handler)
+        _ensure_handler(self._root_logger, file_output_handler)
         if _ensure_handler(self._session_logger, self._sinks.stream_handler):
             self._session_handlers.append(self._sinks.stream_handler)
-        if _ensure_handler(self._session_logger, self._sinks.file_handler):
-            self._session_handlers.append(self._sinks.file_handler)
+        if _ensure_handler(self._session_logger, file_output_handler):
+            self._session_handlers.append(file_output_handler)
 
     @property
     def mode(self) -> SessionLoggingMode:
@@ -300,7 +360,10 @@ class SessionRuntimeLoggingService:
             args=(),
             exc_info=None,
         )
+        _join_pending_file_queue(self._sinks)
         self._sinks.file_handler.handle(record)
+        with contextlib.suppress(Exception):
+            self._sinks.file_handler.flush()
 
     def close(self) -> None:
         self.detach_realtime_sink()
@@ -308,6 +371,8 @@ class SessionRuntimeLoggingService:
             with contextlib.suppress(Exception):
                 self._session_logger.removeHandler(handler)
         self._session_handlers.clear()
+        if self._owns_sinks:
+            self._sinks.close()
 
 
 def _ensure_handler(logger: logging.Logger, handler: logging.Handler) -> bool:
@@ -345,4 +410,103 @@ def _find_main_file_handler(logger: logging.Logger, *, log_file: Path) -> loggin
         if str(Path(handler.baseFilename).resolve()) == expected_path:
             handler.set_name(_MAIN_FILE_HANDLER_NAME)
             return handler
+    return None
+
+
+def _close_file_handler(file_handler: logging.Handler) -> None:
+    with contextlib.suppress(Exception):
+        file_handler.flush()
+    with contextlib.suppress(Exception):
+        file_handler.close()
+
+
+def _main_file_queue_for_handler(
+    handler: logging.Handler,
+) -> queue.Queue[logging.LogRecord] | None:
+    file_queue = getattr(handler, _QUEUE_HANDLER_QUEUE_ATTR, None)
+    if isinstance(file_queue, queue.Queue):
+        return file_queue
+    if isinstance(handler, QueueHandler) and isinstance(handler.queue, queue.Queue):
+        setattr(handler, _QUEUE_HANDLER_QUEUE_ATTR, handler.queue)
+        return handler.queue
+    return None
+
+
+def _join_pending_file_queue(sinks: RuntimeLoggingSinks) -> None:
+    file_queue_handler = getattr(sinks, "file_queue_handler", None)
+    if file_queue_handler is None:
+        return
+    if getattr(file_queue_handler, _QUEUE_HANDLER_CLOSED_ATTR, False):
+        return
+    file_queue = getattr(sinks, "file_queue", None) or _main_file_queue_for_handler(
+        file_queue_handler
+    )
+    if file_queue is not None:
+        file_queue.join()
+
+
+def _close_main_file_queue_handler(logger: logging.Logger, handler: logging.Handler) -> None:
+    with contextlib.suppress(Exception):
+        logger.removeHandler(handler)
+    setattr(handler, _QUEUE_HANDLER_CLOSED_ATTR, True)
+    setattr(handler, _QUEUE_HANDLER_REFCOUNT_ATTR, 0)
+
+    listener = getattr(handler, _QUEUE_HANDLER_LISTENER_ATTR, None)
+    if isinstance(listener, QueueListener):
+        with contextlib.suppress(Exception):
+            listener.stop()
+
+    file_handler = getattr(handler, _QUEUE_HANDLER_FILE_HANDLER_ATTR, None)
+    if isinstance(file_handler, logging.Handler):
+        _close_file_handler(file_handler)
+
+
+def _release_main_file_queue_handler(
+    logger: logging.Logger,
+    handler: logging.Handler,
+    *,
+    force: bool = False,
+) -> None:
+    if getattr(handler, _QUEUE_HANDLER_CLOSED_ATTR, False):
+        return
+    if force:
+        _close_main_file_queue_handler(logger, handler)
+        return
+    refcount = int(getattr(handler, _QUEUE_HANDLER_REFCOUNT_ATTR, 1))
+    remaining_refcount = max(0, refcount - 1)
+    setattr(handler, _QUEUE_HANDLER_REFCOUNT_ATTR, remaining_refcount)
+    if remaining_refcount > 0:
+        return
+    _close_main_file_queue_handler(logger, handler)
+
+
+def _remove_stale_main_file_queue_handlers(logger: logging.Logger, *, log_file: Path) -> None:
+    expected_path = str(log_file.resolve())
+    for handler in list(logger.handlers):
+        if handler.get_name() != _MAIN_FILE_QUEUE_HANDLER_NAME:
+            continue
+        if getattr(handler, _QUEUE_HANDLER_LOG_FILE_ATTR, None) == expected_path and not getattr(
+            handler, _QUEUE_HANDLER_CLOSED_ATTR, False
+        ):
+            continue
+        _close_main_file_queue_handler(logger, handler)
+
+
+def _find_main_file_queue_handler(
+    logger: logging.Logger,
+    *,
+    log_file: Path,
+) -> tuple[logging.Handler, logging.Handler, QueueListener] | None:
+    expected_path = str(log_file.resolve())
+    for handler in logger.handlers:
+        if handler.get_name() != _MAIN_FILE_QUEUE_HANDLER_NAME:
+            continue
+        if getattr(handler, _QUEUE_HANDLER_CLOSED_ATTR, False):
+            continue
+        if getattr(handler, _QUEUE_HANDLER_LOG_FILE_ATTR, None) != expected_path:
+            continue
+        file_handler = getattr(handler, _QUEUE_HANDLER_FILE_HANDLER_ATTR, None)
+        listener = getattr(handler, _QUEUE_HANDLER_LISTENER_ATTR, None)
+        if isinstance(listener, QueueListener) and isinstance(file_handler, logging.Handler):
+            return handler, file_handler, listener
     return None

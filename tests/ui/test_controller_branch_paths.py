@@ -63,6 +63,7 @@ from puripuly_heart.core.overlay.sink import (
     SelfTranscriptFinal,
     TranslationFinal,
 )
+from puripuly_heart.core.runtime.peer_channel import PeerRuntimeConfig
 from puripuly_heart.core.runtime_logging import (
     RuntimeLoggingSinks,
     SessionLoggingMode,
@@ -195,7 +196,7 @@ class RuntimeLoggingSpy:
     def __init__(
         self, *, detailed_enabled: bool = True, basic_error: Exception | None = None
     ) -> None:
-        self.mode = SimpleNamespace(value="detailed" if detailed_enabled else "basic")
+        self.mode = SessionLoggingMode.DETAILED if detailed_enabled else SessionLoggingMode.BASIC
         self.basic_messages: list[tuple[int, str]] = []
         self.detailed_messages: list[tuple[int, str]] = []
         self.basic_error = basic_error
@@ -226,7 +227,8 @@ class RuntimeLoggingSpy:
         _ = sink
 
     def set_mode(self, mode) -> None:
-        self.mode = SimpleNamespace(value=str(mode))
+        normalized = SessionLoggingMode(mode)
+        self.mode = normalized
 
 
 class DummyHub:
@@ -334,7 +336,7 @@ class DummyPeerRuntime:
         self.closed = False
         self.warmup_calls = 0
 
-    async def apply_policy(self, *, config, desired_active: bool) -> None:
+    async def apply_policy(self, *, config: PeerRuntimeConfig, desired_active: bool) -> None:
         self.policy_calls.append({"config": config, "desired_active": desired_active})
 
     async def warmup(self) -> None:
@@ -516,6 +518,18 @@ def _make_controller(*, app: object) -> GuiController:
     return GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
 
 
+def test_debug_capture_fault_is_disabled_without_debug_preview() -> None:
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(debug_ui_preview=False),
+        config_path=Path("settings.json"),
+    )
+    controller._debug_capture_fault_profile = "capture_attenuate_40db"
+
+    assert controller.cycle_debug_capture_fault_profile() == "none"
+    assert controller.debug_capture_fault_profile == "capture_attenuate_40db"
+
+
 async def _wait_until(predicate, *, attempts: int = 20) -> None:
     for _ in range(attempts):
         if predicate():
@@ -573,6 +587,149 @@ def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[s
     monkeypatch.setattr(controller_module, "ClientHub", fake_hub)
 
     return created
+
+
+@pytest.mark.asyncio
+async def test_init_pipeline_wires_self_stt_fault_provider_with_debug_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stt_calls: list[dict[str, object]] = []
+    _patch_init_pipeline_dependencies(monkeypatch)
+
+    def fake_stt_provider(*_args, **kwargs):
+        stt_calls.append(dict(kwargs))
+        return SimpleNamespace()
+
+    app = SimpleNamespace(debug_ui_preview=True)
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = AppSettings()
+    monkeypatch.setattr(controller_module, "ManagedSTTProvider", fake_stt_provider)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, *, enabled: asyncio.sleep(0),
+    )
+
+    assert controller.cycle_debug_stt_fault_profile() == "stt_input_low_snr_vad_pass"
+    await controller._init_pipeline()
+
+    provider = stt_calls[0]["stt_input_fault_profile_provider"]
+    assert callable(provider)
+    assert provider() == "stt_input_low_snr_vad_pass"
+
+    app.debug_ui_preview = False
+    assert provider() == "none"
+    assert controller.debug_stt_fault_profile == "stt_input_low_snr_vad_pass"
+
+
+@pytest.mark.asyncio
+async def test_rebuild_stt_provider_wires_self_stt_fault_provider_with_debug_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stt_calls: list[dict[str, object]] = []
+
+    def fake_stt_provider(*_args, **kwargs):
+        stt = SimpleNamespace()
+        stt_calls.append(dict(kwargs))
+        return stt
+
+    app = SimpleNamespace(debug_ui_preview=False)
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.hub = DummyHub(stt=object())
+    controller._debug_stt_fault_profile = "stt_input_low_snr_vad_pass"
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "create_stt_backend", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "ManagedSTTProvider", fake_stt_provider)
+
+    await controller._rebuild_stt_provider()
+
+    provider = stt_calls[0]["stt_input_fault_profile_provider"]
+    assert callable(provider)
+    assert provider() == "none"
+    assert controller.debug_stt_fault_profile == "stt_input_low_snr_vad_pass"
+
+    app.debug_ui_preview = True
+    assert provider() == "stt_input_low_snr_vad_pass"
+
+
+def test_create_peer_stt_provider_wires_fault_provider_with_debug_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stt_calls: list[dict[str, object]] = []
+
+    def fake_stt_provider(*_args, **kwargs):
+        stt_calls.append(dict(kwargs))
+        return SimpleNamespace()
+
+    app = SimpleNamespace(debug_ui_preview=True)
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = AppSettings()
+    controller._debug_stt_fault_profile = "stt_input_low_snr_vad_pass"
+    config = controller._build_peer_runtime_config(controller.settings)
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "create_peer_stt_backend", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "ManagedSTTProvider", fake_stt_provider)
+
+    controller._create_peer_stt_provider_from_runtime_config(config, lambda _exc: None)
+
+    provider = stt_calls[0]["stt_input_fault_profile_provider"]
+    assert stt_calls[0]["channel"] == "peer"
+    assert callable(provider)
+    assert provider() == "stt_input_low_snr_vad_pass"
+
+    app.debug_ui_preview = False
+    assert provider() == "none"
+    assert controller.debug_stt_fault_profile == "stt_input_low_snr_vad_pass"
+
+
+def test_cycle_debug_stt_fault_profile_requires_debug_preview() -> None:
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(debug_ui_preview=False),
+        config_path=Path("settings.json"),
+    )
+    controller._debug_stt_fault_profile = "stt_input_low_snr_vad_pass"
+
+    assert controller.cycle_debug_stt_fault_profile() == "none"
+    assert controller.debug_stt_fault_profile == "stt_input_low_snr_vad_pass"
+
+    controller.app.debug_ui_preview = True
+    assert controller.cycle_debug_stt_fault_profile() == "none"
+    assert controller.cycle_debug_stt_fault_profile() == "stt_input_low_snr_vad_pass"
+
+
+@pytest.mark.parametrize("channel_label", ["self", "peer"])
+def test_wrap_diagnostic_audio_source_wires_capture_fault_provider_with_debug_gate(
+    channel_label: str,
+) -> None:
+    class FakeAudioSource:
+        async def frames(self):
+            if False:
+                yield None
+
+        async def close(self) -> None:
+            return None
+
+    app = SimpleNamespace(debug_ui_preview=True)
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller._debug_capture_fault_profile = "capture_attenuate_40db"
+
+    wrapped = controller._wrap_diagnostic_audio_source(
+        FakeAudioSource(),
+        channel_label=channel_label,
+    )
+
+    assert getattr(wrapped, "channel_label") == channel_label
+    provider = getattr(wrapped, "fault_profile_provider")
+    assert callable(provider)
+    assert provider() == "capture_attenuate_40db"
+
+    app.debug_ui_preview = False
+    assert provider() == "none"
+    assert controller.debug_capture_fault_profile == "capture_attenuate_40db"
 
 
 @pytest.mark.asyncio
@@ -3360,6 +3517,121 @@ async def test_create_peer_audio_source_from_runtime_config_uses_desktop_loopbac
     assert opened == [{"device_name": config.output_device}]
 
 
+def test_create_peer_audio_source_logs_loopback_resolution(monkeypatch) -> None:
+    class FakeLoopbackSource:
+        resolved_device_name = "Default Speakers [Loopback]"
+        resolved_device_index = 10
+        resolved_channels = 2
+        actual_sample_rate_hz = 48000
+        used_default_fallback = True
+        queue_drop_count = 0
+        callback_status_count = 0
+        last_callback_status = None
+
+        async def frames(self):
+            if False:
+                yield None
+
+        async def close(self) -> None:
+            return None
+
+    created: dict[str, object] = {}
+
+    def fake_loopback_source(*, device_name: str):
+        created["requested_device"] = device_name
+        source = FakeLoopbackSource()
+        created["raw_source"] = source
+        return source
+
+    def fake_peer_pipeline(**kwargs):
+        created["pipeline_kwargs"] = kwargs
+        return kwargs
+
+    monkeypatch.setattr(controller_module, "DesktopLoopbackAudioSource", fake_loopback_source)
+    monkeypatch.setattr(controller_module, "DesktopPeerPipeline", fake_peer_pipeline)
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(debug_ui_preview=False),
+        config_path=Path("settings.json"),
+    )
+    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
+    config = PeerRuntimeConfig(
+        backend=SimpleNamespace(sample_rate_hz=16000),
+        output_device="Missing Speakers",
+        vad_threshold=0.6,
+        vad_hangover_ms=1100,
+        vad_pre_roll_ms=500,
+        provider_signature=(),
+        runtime_signature=(),
+    )
+
+    controller._create_peer_audio_source_from_runtime_config(config)
+
+    messages = [message for _level, message in controller._runtime_logging.detailed_messages]
+    pipeline_source = created["pipeline_kwargs"]["source"]  # type: ignore[index]
+    assert created["requested_device"] == "Missing Speakers"
+    assert getattr(pipeline_source, "source", None) is created["raw_source"]
+    assert any("[AudioDiag][Loopback][peer]" in message for message in messages)
+    assert any("requested_device='Missing Speakers'" in message for message in messages)
+    assert any(
+        "resolved_device_name='Default Speakers [Loopback]'" in message for message in messages
+    )
+    assert any("used_default_fallback=True" in message for message in messages)
+
+
+def test_create_peer_audio_source_wires_capture_fault_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeLoopbackSource:
+        async def frames(self):
+            if False:
+                yield None
+
+        async def close(self) -> None:
+            return None
+
+    created: dict[str, object] = {}
+
+    def fake_loopback_source(*, device_name: str):
+        created["requested_device"] = device_name
+        return FakeLoopbackSource()
+
+    def fake_peer_pipeline(**kwargs):
+        created["pipeline_kwargs"] = kwargs
+        return kwargs
+
+    monkeypatch.setattr(controller_module, "DesktopLoopbackAudioSource", fake_loopback_source)
+    monkeypatch.setattr(controller_module, "DesktopPeerPipeline", fake_peer_pipeline)
+
+    app = SimpleNamespace(debug_ui_preview=True)
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
+    controller._debug_capture_fault_profile = "capture_attenuate_40db"
+    config = PeerRuntimeConfig(
+        backend=SimpleNamespace(sample_rate_hz=16000),
+        output_device="Peer Speakers",
+        vad_threshold=0.6,
+        vad_hangover_ms=1100,
+        vad_pre_roll_ms=500,
+        provider_signature=(),
+        runtime_signature=(),
+    )
+
+    controller._create_peer_audio_source_from_runtime_config(config)
+
+    wrapped_source = created["pipeline_kwargs"]["source"]  # type: ignore[index]
+    provider = getattr(wrapped_source, "fault_profile_provider")
+    assert created["requested_device"] == "Peer Speakers"
+    assert getattr(wrapped_source, "channel_label") == "peer"
+    assert callable(provider)
+    assert provider() == "capture_attenuate_40db"
+
+    app.debug_ui_preview = False
+    assert provider() == "none"
+    assert controller.debug_capture_fault_profile == "capture_attenuate_40db"
+
+
 @pytest.mark.asyncio
 async def test_refresh_overlay_runtime_dependencies_applies_peer_runtime_policy() -> None:
     controller = _make_controller(app=SimpleNamespace())
@@ -3425,7 +3697,15 @@ async def test_create_peer_vad_from_runtime_config_uses_shared_peer_vad_policy_h
     engine = object()
 
     def fake_create_peer_vad_gating(
-        *, engine, sample_rate_hz, ring_buffer_ms, speech_threshold, hangover_ms
+        *,
+        engine,
+        sample_rate_hz,
+        ring_buffer_ms,
+        speech_threshold,
+        hangover_ms,
+        diagnostic_event_callback=None,
+        diagnostics_enabled=None,
+        diagnostic_label="peer",
     ):
         helper_calls.append(
             {
@@ -3434,6 +3714,9 @@ async def test_create_peer_vad_from_runtime_config_uses_shared_peer_vad_policy_h
                 "ring_buffer_ms": ring_buffer_ms,
                 "speech_threshold": speech_threshold,
                 "hangover_ms": hangover_ms,
+                "diagnostic_event_callback": diagnostic_event_callback,
+                "diagnostics_enabled": diagnostics_enabled,
+                "diagnostic_label": diagnostic_label,
             }
         )
         return "peer-vad"
@@ -3451,8 +3734,12 @@ async def test_create_peer_vad_from_runtime_config_uses_shared_peer_vad_policy_h
             "ring_buffer_ms": 420,
             "speech_threshold": 0.72,
             "hangover_ms": 950,
+            "diagnostic_event_callback": helper_calls[0]["diagnostic_event_callback"],
+            "diagnostics_enabled": controller._detailed_audio_diag_enabled,
+            "diagnostic_label": "peer",
         }
     ]
+    assert callable(helper_calls[0]["diagnostic_event_callback"])
 
 
 @pytest.mark.asyncio
@@ -4557,6 +4844,70 @@ async def test_start_mic_loop_normalizes_wasapi_compatibility_mode(
 
 
 @pytest.mark.asyncio
+async def test_start_mic_loop_wires_self_vad_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    controller.settings.audio.input_device = "Compat Mic"
+    controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    vad_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        actual_sample_rate_hz = 48000
+        requested_channels = 1
+        opened_channels = 1
+        frame_channels = 1
+
+        async def close(self) -> None:
+            return None
+
+    def fake_vad_gating(*_args, **kwargs):
+        vad_calls.append(dict(kwargs))
+        return SimpleNamespace()
+
+    async def fake_run_mic_loop(self) -> None:
+        _ = self
+        return None
+
+    monkeypatch.setattr(controller_module, "ensure_silero_vad_onnx", lambda: Path("vad.onnx"))
+    monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "VadGating", fake_vad_gating)
+    monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", lambda **kwargs: 7)
+    monkeypatch.setattr(
+        controller_module,
+        "determine_self_mic_capture_channels",
+        lambda *, device_idx, internal_channels: _self_mic_decision(
+            device_idx=device_idx,
+            preferred_channels=1,
+        ),
+    )
+    monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", lambda *a, **k: FakeSource())
+    monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
+
+    await controller._start_mic_loop()
+    await asyncio.sleep(0)
+
+    assert vad_calls[0]["diagnostic_label"] == "self"
+    diagnostics_enabled = vad_calls[0]["diagnostics_enabled"]
+    assert callable(diagnostics_enabled)
+    assert diagnostics_enabled() is True
+    diagnostic_callback = vad_calls[0]["diagnostic_event_callback"]
+    assert callable(diagnostic_callback)
+
+    diagnostic_callback("[AudioDiag][VAD][self] probe")
+
+    assert (
+        logging.INFO,
+        "[AudioDiag][VAD][self] probe",
+    ) in controller._runtime_logging.detailed_messages
+    controller._runtime_logging.set_mode("basic")
+    assert diagnostics_enabled() is False
+
+
+@pytest.mark.asyncio
 async def test_start_mic_loop_requests_two_channel_capture_from_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5353,6 +5704,85 @@ async def test_start_does_not_auto_restore_transient_overlay_or_peer_toggles(
 
 
 @pytest.mark.asyncio
+async def test_set_runtime_logging_mode_emits_audio_snapshot_once_on_basic_to_detailed(
+    monkeypatch,
+) -> None:
+    class FakePage:
+        def __init__(self) -> None:
+            self.tasks: list[object] = []
+
+        def run_task(self, coro_fn) -> None:
+            self.tasks.append(coro_fn)
+
+    sounddevice_lines = ["[AudioDiag][Snapshot][SoundDevice] one"]
+    loopback_lines = ["[AudioDiag][Snapshot][Loopback] one"]
+    monkeypatch.setattr(
+        "puripuly_heart.core.audio.diagnostics.collect_sounddevice_snapshot_lines",
+        lambda: sounddevice_lines,
+    )
+    monkeypatch.setattr(
+        "puripuly_heart.core.audio.diagnostics.collect_pyaudiowpatch_snapshot_lines",
+        lambda: loopback_lines,
+    )
+
+    runtime = RuntimeLoggingSpy(detailed_enabled=False)
+    page = FakePage()
+    controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
+    controller._runtime_logging = runtime
+
+    controller.set_runtime_logging_mode("detailed")
+    controller.set_runtime_logging_mode("detailed")
+    assert len(page.tasks) == 1
+    await page.tasks[0]()
+
+    messages = [message for _level, message in runtime.detailed_messages]
+    assert messages.count("[AudioDiag][Snapshot][SoundDevice] one") == 1
+    assert messages.count("[AudioDiag][Snapshot][Loopback] one") == 1
+
+
+@pytest.mark.asyncio
+async def test_set_runtime_logging_mode_audio_snapshot_run_task_failure_falls_back_to_loop(
+    monkeypatch,
+) -> None:
+    class FailingPage:
+        def run_task(self, coro_fn) -> None:
+            _ = coro_fn
+            raise RuntimeError("run_task rejected")
+
+    sounddevice_lines = ["[AudioDiag][Snapshot][SoundDevice] fallback"]
+    loopback_lines = ["[AudioDiag][Snapshot][Loopback] fallback"]
+    monkeypatch.setattr(
+        "puripuly_heart.core.audio.diagnostics.collect_sounddevice_snapshot_lines",
+        lambda: sounddevice_lines,
+    )
+    monkeypatch.setattr(
+        "puripuly_heart.core.audio.diagnostics.collect_pyaudiowpatch_snapshot_lines",
+        lambda: loopback_lines,
+    )
+
+    runtime = RuntimeLoggingSpy(detailed_enabled=False)
+    controller = GuiController(
+        page=FailingPage(),
+        app=SimpleNamespace(),
+        config_path=Path("settings.json"),
+    )
+    controller._runtime_logging = runtime
+
+    controller.set_runtime_logging_mode("detailed")
+    await _wait_until(
+        lambda: any(
+            message == "[AudioDiag][Snapshot][Loopback] fallback"
+            for _level, message in runtime.detailed_messages
+        ),
+        attempts=50,
+    )
+
+    messages = [message for _level, message in runtime.detailed_messages]
+    assert "[AudioDiag][Snapshot][SoundDevice] fallback" in messages
+    assert "[AudioDiag][Snapshot][Loopback] fallback" in messages
+
+
+@pytest.mark.asyncio
 async def test_set_runtime_logging_mode_updates_overlay_runtime_contract() -> None:
     class FakePage:
         def __init__(self) -> None:
@@ -5370,7 +5800,7 @@ async def test_set_runtime_logging_mode_updates_overlay_runtime_contract() -> No
 
     page = FakePage()
     controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
-    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=False)
+    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
     controller._overlay_bridge = FakeOverlayBridge(session_token="token")
     manager = OverlayManagerSpy()
     controller._overlay_manager = manager  # type: ignore[assignment]
