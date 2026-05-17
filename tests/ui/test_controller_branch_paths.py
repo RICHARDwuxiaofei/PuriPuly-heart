@@ -530,11 +530,11 @@ def test_debug_capture_fault_is_disabled_without_debug_preview() -> None:
     assert controller.debug_capture_fault_profile == "capture_attenuate_40db"
 
 
-async def _wait_until(predicate, *, attempts: int = 20) -> None:
+async def _wait_until(predicate, *, attempts: int = 20, delay_s: float = 0.0) -> None:
     for _ in range(attempts):
         if predicate():
             return
-        await asyncio.sleep(0)
+        await asyncio.sleep(delay_s)
     raise AssertionError("condition was not met in time")
 
 
@@ -5775,6 +5775,7 @@ async def test_set_runtime_logging_mode_audio_snapshot_run_task_failure_falls_ba
             for _level, message in runtime.detailed_messages
         ),
         attempts=50,
+        delay_s=0.01,
     )
 
     messages = [message for _level, message in runtime.detailed_messages]
