@@ -9,7 +9,7 @@
     "README.ja.md",
     "README.zh-CN.md"
   ],
-  "imageSize": 80,
+  "imageSize": 88,
   "contributorsPerLine": 4,
   "contributorsSortAlphabetically": false,
   "badgeTemplate": "",
@@ -43,49 +43,49 @@
     {
       "login": "sui-32c",
       "name": "SUI_32C",
-      "avatar_url": "https://placehold.co/160x160/FFF1EC/7A3B3B.png?text=SUI",
+      "avatar_url": "https://ui-avatars.com/api/?name=SUI&size=160&background=FFF1EC&color=7A3B3B&rounded=true&bold=true",
       "contributions": ["thanks"]
     },
     {
       "login": "nagikokoro",
       "name": "Nagikokoro",
-      "avatar_url": "https://placehold.co/160x160/FFF5E8/7A4732.png?text=NAGI",
+      "avatar_url": "https://ui-avatars.com/api/?name=NAGI&size=160&background=FFF5E8&color=7A4732&rounded=true&bold=true",
       "contributions": ["thanks"]
     },
     {
       "login": "motoka96",
       "name": "motoka96",
-      "avatar_url": "https://placehold.co/160x160/FFF0F5/733047.png?text=MOTO",
+      "avatar_url": "https://ui-avatars.com/api/?name=MOTO&size=160&background=FFF0F5&color=733047&rounded=true&bold=true",
       "contributions": ["thanks"]
     },
     {
       "login": "ykol",
       "name": "_Ykol魚",
-      "avatar_url": "https://placehold.co/160x160/F5F0FF/4E397A.png?text=YKOL",
+      "avatar_url": "https://ui-avatars.com/api/?name=YKOL&size=160&background=F5F0FF&color=4E397A&rounded=true&bold=true",
       "contributions": ["thanks"]
     },
     {
       "login": "kascr",
       "name": "kascr_",
-      "avatar_url": "https://placehold.co/160x160/FFF6E5/6F451E.png?text=KAS",
+      "avatar_url": "https://ui-avatars.com/api/?name=KAS&size=160&background=FFF6E5&color=6F451E&rounded=true&bold=true",
       "contributions": ["thanks"]
     },
     {
       "login": "just-monika-v",
       "name": "Just Monika V",
-      "avatar_url": "https://placehold.co/160x160/ECFFF7/2E6656.png?text=JMV",
+      "avatar_url": "https://ui-avatars.com/api/?name=JMV&size=160&background=ECFFF7&color=2E6656&rounded=true&bold=true",
       "contributions": ["thanks"]
     },
     {
       "login": "fluvia",
       "name": "FLUVIA",
-      "avatar_url": "https://placehold.co/160x160/EEF7FF/315C7A.png?text=FLU",
+      "avatar_url": "https://ui-avatars.com/api/?name=FLU&size=160&background=EEF7FF&color=315C7A&rounded=true&bold=true",
       "contributions": ["thanks"]
     },
     {
       "login": "han-chole",
       "name": "Han โชเล่ย์",
-      "avatar_url": "https://placehold.co/160x160/FFFBEA/6C5525.png?text=HAN",
+      "avatar_url": "https://ui-avatars.com/api/?name=HAN&size=160&background=FFFBEA&color=6C5525&rounded=true&bold=true",
       "contributions": ["thanks"]
     }
   ]
