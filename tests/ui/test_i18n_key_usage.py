@@ -160,6 +160,54 @@ def test_local_llm_keys_are_localized() -> None:
     assert "서버 API 키" in bundles["ko"]["settings.local_llm.extra_body.sensitive_key"]
 
 
+def test_managed_key_card_keys_are_localized() -> None:
+    bundles = _load_bundles()
+    required_keys = {
+        "settings.managed_key.title",
+        "settings.managed_key.referral_id.label",
+        "settings.managed_key.referral_id.empty",
+        "settings.managed_key.referral_id.pending_helper",
+        "settings.managed_key.referral_id.helper",
+        "settings.managed_key.referral_id.copy_tooltip",
+        "settings.managed_key.referral_id.copy_success",
+        "settings.managed_key.invite_progress.label",
+    }
+
+    for locale, bundle in bundles.items():
+        missing = sorted(required_keys - set(bundle))
+        assert missing == [], locale
+        for key in required_keys:
+            assert bundle[key].strip()
+            assert bundle[key] != key
+
+    assert bundles["en"]["settings.managed_key.title"] == "Managed Key"
+    assert bundles["en"]["settings.managed_key.referral_id.label"] == "Talk Together Pass ID"
+    assert bundles["en"]["settings.managed_key.referral_id.empty"] == "—"
+    assert bundles["en"]["settings.managed_key.referral_id.copy_success"] == "Pass ID copied."
+    assert bundles["ko"]["settings.managed_key.title"] == "매니지드 키"
+    ko = bundles["ko"]
+    assert ko["settings.managed_key.referral_id.copy_tooltip"] == "Pass ID 복사"
+    assert ko["settings.managed_key.referral_id.copy_success"] == "Pass ID를 복사했어요."
+    assert ko["settings.managed_key.referral_id.helper"] == (
+        "친구에게 Pass ID를 공유해 함께 추가 사용량을 받을 수 있어요."
+    )
+    assert ko["settings.managed_key.invite_progress.label"] == "친구 초대"
+
+    for locale_name, bundle in bundles.items():
+        for key in (
+            "settings.managed_key.referral_id.label",
+            "settings.managed_key.referral_id.helper",
+            "settings.managed_key.referral_id.copy_tooltip",
+            "settings.managed_key.referral_id.copy_success",
+            "settings.managed_key.invite_progress.label",
+            "discord_auth.referral_id.label",
+            "discord_auth.referral_reward_applied",
+        ):
+            value = bundle[key]
+            assert "Referral ID" not in value, (locale_name, key, value)
+            assert "Referral reward" not in value, (locale_name, key, value)
+
+
 def test_i18n_bundles_do_not_keep_unused_runtime_keys() -> None:
     bundles = _load_bundles()
     all_keys = sorted(set().union(*(bundle.keys() for bundle in bundles.values())))

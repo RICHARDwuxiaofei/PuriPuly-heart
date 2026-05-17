@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import inspect
 import json
 import logging
 import os
@@ -39,6 +40,7 @@ from puripuly_heart.config.settings import (
     STTProviderName,
     load_settings,
     new_settings_for_first_run,
+    normalize_owned_referral_id,
     save_settings,
 )
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
@@ -73,6 +75,8 @@ from puripuly_heart.core.managed_openrouter_broker_client import (
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseBehavior,
     ManagedOpenRouterReleaseService,
+    ManagedOpenRouterStatusRefreshResult,
+    TalkTogetherPassStatus,
     UnavailableManagedOpenRouterReleaseClient,
     format_managed_openrouter_diagnostics,
 )
@@ -130,6 +134,7 @@ logger = logging.getLogger(__name__)
 STT_RESET_DEADLINE_S = 300.0
 OVERLAY_STARTUP_TIMEOUT_MS = 3000
 OVERLAY_SHUTDOWN_GRACE_S = 0.05
+_PASS_STATUS_UNSET = object()
 _OVERLAY_FAILURE_REASONS = frozenset(
     {
         "missing_executable",
@@ -165,6 +170,16 @@ DISCORD_AUTH_ERROR_KEY_BY_SUBCODE = {
 
 def _canonical_json_signature(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _callable_accepts_keyword(callable_obj: object, keyword: str) -> bool:
+    try:
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return True
+    return keyword in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
 
 
 class ClipboardWatcherRuntime(Protocol):
@@ -263,8 +278,20 @@ class GuiController:
         default=None,
         repr=False,
     )
+    last_discord_managed_auth_referral_bonus_applied: bool = field(
+        init=False,
+        default=False,
+    )
     _managed_trial_usage_metadata: OpenRouterKeyMetadata | None = field(init=False, default=None)
     _managed_trial_usage_metadata_entitlement_ref: str | None = field(
+        init=False,
+        default=None,
+    )
+    _talk_together_pass_status: TalkTogetherPassStatus | None = field(
+        init=False,
+        default=None,
+    )
+    _talk_together_pass_status_key: tuple[str | None, str | None, str | None] | None = field(
         init=False,
         default=None,
     )
@@ -662,8 +689,12 @@ class GuiController:
         return getattr(result, "message_key", "discord_auth.error.retry")
 
     async def start_discord_managed_auth_from_dialog(
-        self, *, on_callback_received: Callable[[], None] | None = None
+        self,
+        *,
+        on_callback_received: Callable[[], None] | None = None,
+        referral_id: str | None = None,
     ) -> bool:
+        self.last_discord_managed_auth_referral_bonus_applied = False
         service = self._managed_openrouter_release_service
         if service is None:
             self._discord_managed_auth_in_progress = False
@@ -677,7 +708,7 @@ class GuiController:
         self._set_managed_trial_pending_auth(True)
         try:
             try:
-                result = await service.prepare_for_translation()
+                result = await service.prepare_for_translation(referral_id=referral_id)
             except Exception as exc:
                 self.log_basic(
                     f"[ManagedAuth] Discord auth start failed: {exc}",
@@ -690,6 +721,9 @@ class GuiController:
                 result.behavior == ManagedOpenRouterReleaseBehavior.READY
                 and result.local_key_available
             ):
+                self.last_discord_managed_auth_referral_bonus_applied = (
+                    getattr(result, "referral_bonus_applied", False) is True
+                )
                 if self.hub is None:
                     self._show_short_message("discord_auth.error.retry")
                     return False
@@ -698,6 +732,16 @@ class GuiController:
                 if self.hub.llm is None:
                     self._show_short_message("discord_auth.error.retry")
                     return False
+                result_referral_id = normalize_owned_referral_id(
+                    getattr(result, "referral_id", None)
+                )
+                self._set_managed_usage_view_state(
+                    view_settings=getattr(self.app, "view_settings", None),
+                    visible=True,
+                    remaining_percent=None,
+                    referral_id=result_referral_id or self._current_owned_referral_id(),
+                    pass_status=getattr(result, "pass_status", None),
+                )
                 self._schedule_managed_trial_usage_refresh()
                 return True
 
@@ -732,6 +776,232 @@ class GuiController:
         return max(
             0, min(100, round((usage_metadata.remaining_usd / usage_metadata.limit_usd) * 100))
         )
+
+    def _current_owned_referral_id(self) -> str | None:
+        if self.settings is None:
+            return None
+        return normalize_owned_referral_id(self.settings.managed_identity.referral_id)
+
+    def _managed_identity_scope(
+        self,
+        referral_id: str | None,
+    ) -> tuple[str | None, str | None, str | None] | None:
+        if self.settings is None:
+            return None
+        installation_id = self.settings.managed_identity.installation_id.strip() or None
+        active_ref = self.settings.managed_identity.active_managed_credential_ref
+        normalized_active_ref = active_ref.strip() if isinstance(active_ref, str) else None
+        normalized_referral_id = normalize_owned_referral_id(referral_id)
+        return (installation_id, normalized_active_ref or None, normalized_referral_id)
+
+    def _talk_together_pass_cache_key(
+        self,
+        referral_id: str | None,
+    ) -> tuple[str | None, str | None, str | None] | None:
+        normalized_referral_id = normalize_owned_referral_id(referral_id)
+        if normalized_referral_id is None:
+            return None
+        return self._managed_identity_scope(normalized_referral_id)
+
+    def _clear_talk_together_pass_status_cache(self) -> None:
+        self._talk_together_pass_status = None
+        self._talk_together_pass_status_key = None
+
+    def _cached_talk_together_pass_status_for(
+        self,
+        referral_id: str | None,
+    ) -> TalkTogetherPassStatus | None:
+        cache_key = self._talk_together_pass_cache_key(referral_id)
+        if cache_key is None or cache_key != self._talk_together_pass_status_key:
+            self._clear_talk_together_pass_status_cache()
+            return None
+        return self._talk_together_pass_status
+
+    def _set_managed_usage_view_state(
+        self,
+        *,
+        view_settings: object | None,
+        visible: bool,
+        remaining_percent: int | None,
+        referral_id: str | None,
+        pass_status: TalkTogetherPassStatus | None | object = _PASS_STATUS_UNSET,
+    ) -> None:
+        normalized_referral_id = normalize_owned_referral_id(referral_id)
+        if not visible or normalized_referral_id is None:
+            self._clear_talk_together_pass_status_cache()
+        elif pass_status is _PASS_STATUS_UNSET:
+            pass
+        elif (
+            isinstance(pass_status, TalkTogetherPassStatus)
+            and pass_status.pass_id == normalized_referral_id
+        ):
+            self._talk_together_pass_status = pass_status
+            self._talk_together_pass_status_key = self._talk_together_pass_cache_key(
+                normalized_referral_id
+            )
+        else:
+            self._clear_talk_together_pass_status_cache()
+
+        effective_pass_status = self._cached_talk_together_pass_status_for(normalized_referral_id)
+        if view_settings is None:
+            return
+        managed_key_setter = getattr(view_settings, "set_managed_key_state", None)
+        if callable(managed_key_setter):
+            if _callable_accepts_keyword(managed_key_setter, "pass_status"):
+                managed_key_setter(
+                    visible=visible,
+                    remaining_percent=remaining_percent,
+                    referral_id=normalized_referral_id,
+                    pass_status=effective_pass_status,
+                )
+            else:
+                managed_key_setter(
+                    visible=visible,
+                    remaining_percent=remaining_percent,
+                    referral_id=normalized_referral_id,
+                )
+            return
+        usage_setter = getattr(view_settings, "set_managed_trial_usage_state", None)
+        if callable(usage_setter):
+            usage_setter(visible=visible, remaining_percent=remaining_percent)
+
+    def _managed_key_card_visible_from_settings(self) -> bool:
+        if self.settings is None:
+            return False
+        active_ref = self.settings.managed_identity.active_managed_credential_ref
+        return bool(
+            (
+                self.settings.provider.llm == LLMProviderName.OPENROUTER
+                and self.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+            )
+            or (isinstance(active_ref, str) and bool(active_ref.strip()))
+            or self._current_owned_referral_id()
+        )
+
+    async def _refresh_managed_status_best_effort(
+        self,
+        *,
+        service: object | None = None,
+    ) -> ManagedOpenRouterStatusRefreshResult:
+        current_referral_id = self._current_owned_referral_id()
+        if service is None:
+            service = self._managed_openrouter_release_service
+        if service is None:
+            return ManagedOpenRouterStatusRefreshResult(
+                referral_id=current_referral_id,
+                pass_status=self._cached_talk_together_pass_status_for(current_referral_id),
+                succeeded=False,
+            )
+        refresh_status = getattr(service, "refresh_managed_status", None)
+        if callable(refresh_status):
+            try:
+                return await refresh_status()
+            except Exception as exc:
+                self.log_basic(
+                    f"[ManagedAuth] Managed status refresh failed: {exc}",
+                    level=logging.WARNING,
+                )
+                return ManagedOpenRouterStatusRefreshResult(
+                    referral_id=current_referral_id,
+                    pass_status=self._cached_talk_together_pass_status_for(current_referral_id),
+                    succeeded=False,
+                )
+        refresh_status = getattr(service, "refresh_owned_referral_id_from_status", None)
+        if callable(refresh_status):
+            try:
+                return ManagedOpenRouterStatusRefreshResult(
+                    referral_id=normalize_owned_referral_id(await refresh_status())
+                    or current_referral_id,
+                    pass_status=None,
+                    succeeded=True,
+                )
+            except Exception as exc:
+                self.log_basic(
+                    f"[ManagedAuth] Referral ID status refresh failed: {exc}",
+                    level=logging.WARNING,
+                )
+        return ManagedOpenRouterStatusRefreshResult(
+            referral_id=current_referral_id,
+            pass_status=self._cached_talk_together_pass_status_for(current_referral_id),
+            succeeded=False,
+        )
+
+    async def _refresh_owned_referral_id_from_managed_status_best_effort(
+        self,
+        *,
+        service: object | None = None,
+    ) -> str | None:
+        return (await self._refresh_managed_status_best_effort(service=service)).referral_id
+
+    def _schedule_owned_referral_id_status_refresh(
+        self,
+        *,
+        view_settings: object | None,
+        remaining_percent: int | None,
+        current_referral_id: str | None,
+    ) -> None:
+        service = self._managed_openrouter_release_service
+        if service is None:
+            return
+        refresh_status = getattr(service, "refresh_managed_status", None)
+        legacy_refresh_status = getattr(service, "refresh_owned_referral_id_from_status", None)
+        if not callable(refresh_status) and not callable(legacy_refresh_status):
+            return
+        scheduled_identity_scope = self._managed_identity_scope(current_referral_id)
+        scheduled_identity_base = (
+            scheduled_identity_scope[:2] if scheduled_identity_scope is not None else None
+        )
+
+        async def _run_status_refresh() -> None:
+            try:
+                result = await self._refresh_managed_status_best_effort(
+                    service=service,
+                )
+                if service is not self._managed_openrouter_release_service:
+                    return
+                if (
+                    self.settings is None
+                    or self.settings.provider.llm != LLMProviderName.OPENROUTER
+                    or self.settings.openrouter.selected_source
+                    != OpenRouterCredentialSource.MANAGED
+                ):
+                    return
+                refreshed_referral_id = (
+                    normalize_owned_referral_id(result.referral_id) or current_referral_id
+                )
+                current_identity_scope = self._managed_identity_scope(
+                    self._current_owned_referral_id()
+                )
+                allowed_identity_scopes = {scheduled_identity_scope}
+                if scheduled_identity_base is not None:
+                    allowed_identity_scopes.add((*scheduled_identity_base, refreshed_referral_id))
+                if current_identity_scope not in allowed_identity_scopes:
+                    return
+                if result.succeeded:
+                    self._set_managed_usage_view_state(
+                        view_settings=view_settings,
+                        visible=True,
+                        remaining_percent=remaining_percent,
+                        referral_id=refreshed_referral_id,
+                        pass_status=result.pass_status,
+                    )
+                    return
+                self._set_managed_usage_view_state(
+                    view_settings=view_settings,
+                    visible=True,
+                    remaining_percent=remaining_percent,
+                    referral_id=refreshed_referral_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.log_basic(
+                    f"[ManagedAuth] Referral ID status refresh failed: {exc}",
+                    level=logging.WARNING,
+                )
+
+        with contextlib.suppress(RuntimeError):
+            asyncio.get_running_loop().create_task(_run_status_refresh())
 
     def _schedule_managed_trial_usage_refresh(self) -> None:
         async def _run_refresh() -> None:
@@ -776,11 +1046,6 @@ class GuiController:
         auto_show_founder_letter: bool,
     ) -> None:
         view_settings = getattr(self.app, "view_settings", None)
-        setter = (
-            getattr(view_settings, "set_managed_trial_usage_state", None)
-            if view_settings is not None
-            else None
-        )
         if (
             self.settings is None
             or self.settings.provider.llm != LLMProviderName.OPENROUTER
@@ -788,8 +1053,12 @@ class GuiController:
         ):
             self._clear_managed_trial_usage_metadata_cache()
             self._set_managed_trial_pending_auth(False)
-            if callable(setter):
-                setter(visible=False, remaining_percent=None)
+            self._set_managed_usage_view_state(
+                view_settings=view_settings,
+                visible=self._managed_key_card_visible_from_settings(),
+                remaining_percent=None,
+                referral_id=self._current_owned_referral_id(),
+            )
             return
 
         entitlement_ref = self._sync_managed_trial_usage_metadata_scope()
@@ -809,16 +1078,25 @@ class GuiController:
         self._managed_trial_usage_metadata = usage_metadata
         self._managed_trial_usage_metadata_entitlement_ref = entitlement_ref
 
-        if callable(setter):
-            setter(
-                visible=True,
-                remaining_percent=self._managed_trial_remaining_percent(usage_metadata),
-            )
+        remaining_percent = self._managed_trial_remaining_percent(usage_metadata)
+        current_referral_id = self._current_owned_referral_id()
+        self._set_managed_usage_view_state(
+            view_settings=view_settings,
+            visible=True,
+            remaining_percent=remaining_percent,
+            referral_id=current_referral_id,
+        )
 
         if auto_show_founder_letter and is_effectively_exhausted(usage_metadata):
             self._disable_translation_for_managed_exhaustion(
                 reopen_founder_letter=should_auto_show_founder_letter(self.settings, usage_metadata)
             )
+
+        self._schedule_owned_referral_id_status_refresh(
+            view_settings=view_settings,
+            remaining_percent=remaining_percent,
+            current_referral_id=current_referral_id,
+        )
 
     def _show_founder_letter_dialog(self) -> None:
         if self.settings is None:

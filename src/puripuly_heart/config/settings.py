@@ -32,11 +32,13 @@ from puripuly_heart.config.llm_profiles import (
 )
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 22
+SETTINGS_SCHEMA_VERSION = 23
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000
 DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS = 500
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
+REFERRAL_ID_LENGTH = 6
+REFERRAL_ID_ALPHABET = frozenset("23456789ABCDEFGHJKMNPQRSTUVWXYZ")
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
     "ko": ("아이리", "시나노"),
     "en": ("airi", "shinano"),
@@ -71,6 +73,19 @@ def _default_local_llm_extra_body() -> dict[str, object]:
 
 def _default_custom_terms() -> dict[str, list[str]]:
     return {language: list(terms) for language, terms in DEFAULT_CUSTOM_VOCAB_TERMS.items()}
+
+
+def normalize_owned_referral_id(value: object) -> str | None:
+    """Normalize an owned Referral ID for app persistence/display, or return None."""
+
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().upper()
+    if len(normalized) != REFERRAL_ID_LENGTH:
+        return None
+    if any(char not in REFERRAL_ID_ALPHABET for char in normalized):
+        return None
+    return normalized
 
 
 class STTProviderName(str, Enum):
@@ -768,6 +783,7 @@ class ManagedIdentitySettings:
     active_managed_credential_ref: str | None = None
     active_managed_expires_at: str | None = None
     founder_letter_seen_credential_ref: str | None = None
+    referral_id: str | None = None
 
     def validate(self) -> None:
         if not isinstance(self.installation_id, str):
@@ -799,6 +815,7 @@ class ManagedIdentitySettings:
             self.founder_letter_seen_credential_ref, str
         ):
             raise ValueError("managed founder_letter_seen_credential_ref must be a string or None")
+        self.referral_id = normalize_owned_referral_id(self.referral_id)
 
 
 @dataclass(slots=True)
@@ -1034,6 +1051,7 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "founder_letter_seen_credential_ref": (
                 settings.managed_identity.founder_letter_seen_credential_ref
             ),
+            "referral_id": normalize_owned_referral_id(settings.managed_identity.referral_id),
         },
         "system_prompt": settings.system_prompt,
     }
@@ -2251,6 +2269,21 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             changed = True
         version = 22
 
+    if version < 23:
+        managed_identity_data = data.get("managed_identity")
+        if not isinstance(managed_identity_data, dict):
+            managed_identity_data = {}
+            data["managed_identity"] = managed_identity_data
+            changed = True
+
+        raw_referral_id = managed_identity_data.get("referral_id")
+        normalized_referral_id = normalize_owned_referral_id(raw_referral_id)
+        if "referral_id" not in managed_identity_data or raw_referral_id != normalized_referral_id:
+            managed_identity_data["referral_id"] = normalized_referral_id
+            changed = True
+
+        version = 23
+
     if _normalize_local_llm_data(data):
         changed = True
 
@@ -2634,6 +2667,12 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         )
         changed = True
 
+    raw_referral_id = managed_identity_data.get("referral_id")
+    normalized_referral_id = normalize_owned_referral_id(raw_referral_id)
+    if "referral_id" not in managed_identity_data or raw_referral_id != normalized_referral_id:
+        managed_identity_data["referral_id"] = normalized_referral_id
+        changed = True
+
     if "system_prompts" in data:
         data.pop("system_prompts", None)
         changed = True
@@ -2950,6 +2989,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             founder_letter_seen_credential_ref=_parse_optional_str(
                 managed_identity_data.get("founder_letter_seen_credential_ref")
             ),
+            referral_id=normalize_owned_referral_id(managed_identity_data.get("referral_id")),
         ),
         system_prompt=legacy_system_prompt,
         system_prompts={},

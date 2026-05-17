@@ -33,6 +33,7 @@ from puripuly_heart.config.settings import (
     TranslationModel,
     TranslationSettings,
 )
+from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.components import subtab_shell as subtab_shell_module
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
@@ -135,6 +136,22 @@ def _make_llm_selection_view(
     view._managed_trial_usage_bar.set_percent = lambda percent: setattr(
         view._managed_trial_usage_bar, "percent", percent
     )
+    view._managed_key_card = SimpleNamespace(visible=False, update=lambda: None)
+    view._managed_key_title = SimpleNamespace(value="")
+    view._managed_key_free_usage_label = SimpleNamespace(value="")
+    view._managed_key_referral_id = None
+    view._managed_key_referral_id_label = SimpleNamespace(value="")
+    view._managed_key_referral_id_value = SimpleNamespace(value="")
+    view._managed_key_referral_copy_button = SimpleNamespace(
+        disabled=True,
+        tooltip="",
+        update=lambda: None,
+    )
+    view._managed_key_referral_helper_text = SimpleNamespace(value="")
+    view._managed_key_pass_status = None
+    view._managed_key_invite_progress_label = SimpleNamespace(value="", update=lambda: None)
+    view._managed_key_invite_progress_value = SimpleNamespace(value="", update=lambda: None)
+    view._managed_key_invite_progress_row = SimpleNamespace(visible=False, update=lambda: None)
     view._qwen_region_btn = SimpleNamespace(visible=False, update=lambda: None)
     view._api_keys_column = SimpleNamespace(update=lambda: None)
     view._deepgram_key = SimpleNamespace(visible=False)
@@ -633,7 +650,7 @@ def test_update_api_visibility_hides_openrouter_key_for_managed_trial(
     assert view._translation_connection_row.visible is True
 
 
-def test_load_from_settings_shows_managed_usage_bar_in_api_keys_column(
+def test_load_from_settings_shows_managed_usage_bar_in_managed_key_card(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -643,10 +660,161 @@ def test_load_from_settings_shows_managed_usage_bar_in_api_keys_column(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    assert view._managed_trial_usage_bar in view._api_keys_column.controls
+    assert view._managed_key_card not in view._api_keys_column.controls
+    assert view._managed_key_card in _subtab_controls(view, "api")
+    assert view._managed_trial_usage_bar not in view._api_keys_column.controls
+    assert _tree_contains_control(view._managed_key_card, view._managed_trial_usage_bar)
+    assert view._managed_key_card.visible is True
     assert view._managed_trial_usage_bar.visible is True
     assert view._openrouter_key.visible is False
     assert view._openrouter_pkce_button_row.visible is False
+
+
+def test_load_from_settings_places_managed_key_card_above_provider_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    api_controls = _subtab_controls(view, "api")
+    api_card = _api_tab_card(view, t("settings.section.api_keys"))
+    assert view._managed_key_card in api_controls
+    assert api_controls.index(view._managed_key_card) < api_controls.index(api_card)
+    assert view._managed_key_card not in view._api_keys_column.controls
+    assert view._managed_trial_usage_bar not in view._api_keys_column.controls
+    assert _card_title(view._managed_key_card) == t("settings.managed_key.title")
+
+    labels = _control_labels(view._managed_key_card)
+    assert t("settings.managed_key.referral_id.label") in labels
+    assert "무료 사용량" not in labels
+    assert "Free usage" not in labels
+    assert _tree_contains_control(view._managed_key_card, view._managed_trial_usage_bar)
+
+
+@pytest.mark.parametrize(
+    ("selected_source", "active_ref", "referral_id", "expected_visible"),
+    [
+        (OpenRouterCredentialSource.MANAGED, None, None, True),
+        (OpenRouterCredentialSource.BYOK, "managed-ref", None, True),
+        (OpenRouterCredentialSource.BYOK, None, "7KQ9M2", True),
+        (OpenRouterCredentialSource.BYOK, None, None, False),
+    ],
+)
+def test_managed_key_card_visibility_follows_managed_identity_state(
+    monkeypatch: pytest.MonkeyPatch,
+    selected_source: OpenRouterCredentialSource,
+    active_ref: str | None,
+    referral_id: str | None,
+    expected_visible: bool,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = selected_source
+    settings.managed_identity.active_managed_credential_ref = active_ref
+    settings.managed_identity.referral_id = referral_id
+    settings.validate()
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._managed_key_card.visible is expected_visible
+
+
+def test_managed_key_referral_row_shows_empty_state_with_disabled_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._managed_key_referral_id_value.value == t("settings.managed_key.referral_id.empty")
+    assert view._managed_key_referral_copy_button.disabled is True
+    assert view._managed_key_referral_helper_text.value == t(
+        "settings.managed_key.referral_id.pending_helper"
+    )
+
+
+def test_managed_key_referral_row_shows_owned_id_with_enabled_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    settings.managed_identity.referral_id = "7kq9m2"
+    settings.validate()
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._managed_key_card.visible is True
+    assert view._managed_key_referral_id_value.value == "7KQ9M2"
+    assert view._managed_key_referral_copy_button.disabled is False
+    assert view._managed_key_referral_helper_text.value == t(
+        "settings.managed_key.referral_id.helper"
+    )
+
+
+def test_managed_key_referral_copy_button_copies_owned_id_and_shows_snackbar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ClipboardPage:
+        def __init__(self) -> None:
+            self.copied: list[str] = []
+
+        def set_clipboard(self, value: str) -> None:
+            self.copied.append(value)
+
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    settings.managed_identity.referral_id = "7KQ9M2"
+    settings.validate()
+    snackbar_calls: list[tuple[str, object]] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    page = attach_dummy_page(monkeypatch, view, ClipboardPage())
+
+    view._managed_key_referral_copy_button.on_click(None)
+
+    assert page.copied == ["7KQ9M2"]
+    assert snackbar_calls == [
+        (t("settings.managed_key.referral_id.copy_success"), settings_view.COLOR_SUCCESS)
+    ]
+
+
+def test_managed_key_referral_copy_button_ignores_missing_owned_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ClipboardPage:
+        def __init__(self) -> None:
+            self.copied: list[str] = []
+
+        def set_clipboard(self, value: str) -> None:
+            self.copied.append(value)
+
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    snackbar_calls: list[tuple[str, object]] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    page = attach_dummy_page(monkeypatch, view, ClipboardPage())
+
+    view._managed_key_referral_copy_button.on_click(None)
+
+    assert page.copied == []
+    assert snackbar_calls == []
 
 
 def test_set_managed_trial_usage_state_tracks_visible_and_remaining_percent(
@@ -676,6 +844,167 @@ def test_set_managed_trial_usage_state_tracks_visible_and_remaining_percent(
     }
     assert view._managed_trial_usage_bar.visible is True
     assert view._managed_trial_usage_bar.percent is None
+
+
+def test_set_managed_key_state_updates_card_controls_and_api_section_repaint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    attach_dummy_page(monkeypatch, view)
+    updates: list[str] = []
+    mounted_page = object()
+    view._managed_key_card = SimpleNamespace(
+        visible=False,
+        page=mounted_page,
+        update=lambda: updates.append("managed_key_card"),
+    )
+    view._api_keys_column = SimpleNamespace(
+        page=mounted_page,
+        update=lambda: updates.append("api_keys_column"),
+    )
+
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=64,
+        referral_id="7kq9m2",
+    )
+
+    assert view._managed_key_card.visible is True
+    assert view._managed_trial_usage_bar.visible is True
+    assert view._managed_trial_usage_bar.percent == 64
+    assert view._managed_key_referral_id == "7KQ9M2"
+    assert view._managed_key_referral_id_value.value == "7KQ9M2"
+    assert view._managed_key_referral_copy_button.disabled is False
+    assert view._managed_key_referral_copy_button.tooltip == t(
+        "settings.managed_key.referral_id.copy_tooltip"
+    )
+    assert "api_keys_column" in updates
+
+
+def test_set_managed_key_state_empty_referral_disables_copy_and_repaints_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    attach_dummy_page(monkeypatch, view)
+    updates: list[str] = []
+    mounted_page = object()
+    view._managed_key_card = SimpleNamespace(
+        visible=True,
+        page=mounted_page,
+        update=lambda: updates.append("managed_key_card"),
+    )
+    view._api_keys_column = SimpleNamespace(
+        page=mounted_page,
+        update=lambda: updates.append("api_keys_column"),
+    )
+
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=None,
+        referral_id=None,
+    )
+
+    assert view._managed_key_card.visible is True
+    assert view._managed_trial_usage_bar.visible is True
+    assert view._managed_trial_usage_bar.percent is None
+    assert view._managed_key_referral_id is None
+    assert view._managed_key_referral_id_value.value == t("settings.managed_key.referral_id.empty")
+    assert view._managed_key_referral_copy_button.disabled is True
+    assert view._managed_key_referral_copy_button.tooltip == t(
+        "settings.managed_key.referral_id.pending_helper"
+    )
+    assert "api_keys_column" in updates
+
+
+def test_set_managed_key_state_shows_talk_together_pass_invite_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=64,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=1,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+    )
+
+    assert view._managed_key_invite_progress_row.visible is True
+    assert view._managed_key_invite_progress_label.value == t(
+        "settings.managed_key.invite_progress.label"
+    )
+    assert view._managed_key_invite_progress_value.value == "1 / 5"
+
+
+def test_set_managed_key_state_hides_invite_progress_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=None,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=1,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+    )
+    assert view._managed_key_invite_progress_row.visible is True
+    assert view._managed_key_invite_progress_value.value == "1 / 5"
+
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=None,
+        referral_id="7KQ9M2",
+        pass_status=None,
+    )
+
+    assert view._managed_key_invite_progress_row.visible is False
+    assert view._managed_key_pass_status is None
+    assert view._managed_key_invite_progress_value.value == ""
+
+
+def test_set_managed_key_state_clamps_over_limit_invite_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view.set_managed_key_state(
+        visible=True,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=7,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+    )
+
+    assert view._managed_key_invite_progress_value.value == "5 / 5"
 
 
 def test_update_api_visibility_keeps_openrouter_cards_visible_for_inactive_fallback_copy(
@@ -3539,13 +3868,13 @@ def test_integrated_context_general_tab_uses_dedicated_unit_card(
     assert not _tree_contains_control(general_card, view._integrated_context_hint)
 
 
-def test_api_tab_uses_three_row_layout_with_response_mode_and_api_keys(
+def test_api_tab_places_independent_managed_key_card_above_api_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
     api_controls = _subtab_controls(view, "api")
 
-    assert len(api_controls) == 4
+    assert len(api_controls) == 5
     assert _row_card_titles(api_controls[0]) == [
         t("settings.section.stt"),
         t("settings.section.peer_stt"),
@@ -3558,8 +3887,10 @@ def test_api_tab_uses_three_row_layout_with_response_mode_and_api_keys(
     ]
     assert _row_card_titles(api_controls[2]) == [t("settings.local_llm.connection")]
     assert api_controls[2] is view._local_llm_connection_card
-    assert api_controls[3] is not view._api_keys_column
-    assert _row_card_titles(api_controls[3]) == [t("settings.section.api_keys")]
+    assert api_controls[3] is view._managed_key_card
+    assert _row_card_titles(api_controls[3]) == [t("settings.managed_key.title")]
+    assert api_controls[4] is not view._api_keys_column
+    assert _row_card_titles(api_controls[4]) == [t("settings.section.api_keys")]
 
 
 def test_api_tab_primary_value_typography_is_consistent_across_rows(

@@ -15,7 +15,11 @@ from puripuly_heart.config.llm_profiles import (
     get_openrouter_llm_profile,
     openrouter_alias_for_fields,
 )
-from puripuly_heart.config.settings import AppSettings, OpenRouterCredentialSource
+from puripuly_heart.config.settings import (
+    AppSettings,
+    OpenRouterCredentialSource,
+    normalize_owned_referral_id,
+)
 from puripuly_heart.core.discord_managed_oauth import run_discord_oauth_callback_flow
 from puripuly_heart.core.discord_oauth_loopback import (
     DiscordOAuthCallbackError,
@@ -27,6 +31,7 @@ from puripuly_heart.core.hardware_fingerprint import compute_hardware_hash
 from puripuly_heart.core.llm.provider import LLMProvider
 from puripuly_heart.core.managed_identity import (
     ensure_managed_identity_bundle,
+    load_existing_managed_identity_bundle,
     regenerate_managed_identity_bundle,
 )
 from puripuly_heart.core.openrouter_credentials import (
@@ -99,6 +104,14 @@ def format_managed_openrouter_diagnostics(
 
 
 @dataclass(frozen=True, slots=True)
+class TalkTogetherPassStatus:
+    pass_id: str
+    invite_count: int
+    invite_limit: int
+    bonus_translations_per_friend: int = 200
+
+
+@dataclass(frozen=True, slots=True)
 class ManagedOpenRouterReleaseResult:
     behavior: ManagedOpenRouterReleaseBehavior
     message_key: str
@@ -109,6 +122,9 @@ class ManagedOpenRouterReleaseResult:
     local_key_available: bool = False
     pending_issue: bool = False
     single_flight_reused: bool = False
+    referral_bonus_applied: bool = False
+    referral_id: str | None = None
+    pass_status: TalkTogetherPassStatus | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +162,22 @@ class ManagedOpenRouterIssueSuccess:
     managed_credential_ref: str | None = None
     expires_at: str | None = None
     openrouter_user_id: str | None = None
+    referral_bonus_applied: bool = False
+    referral_id: str | None = None
+    pass_status: TalkTogetherPassStatus | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedOpenRouterTrialStatusSuccess:
+    referral_id: str | None = None
+    pass_status: TalkTogetherPassStatus | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedOpenRouterStatusRefreshResult:
+    referral_id: str | None
+    pass_status: TalkTogetherPassStatus | None = None
+    succeeded: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,12 +229,21 @@ class ManagedOpenRouterReleaseClient(Protocol):
         device_public_key: str,
         redirect_uri: str,
         app_version: str,
+        referral_id: str | None = None,
     ) -> ManagedOpenRouterDiscordStartSuccess: ...
 
     async def issue_discord_managed_key(
         self,
         request: dict[str, object],
     ) -> ManagedOpenRouterIssueSuccess: ...
+
+    async def get_trial_status(
+        self,
+        *,
+        installation_id: str,
+        timestamp: str,
+        signature: str,
+    ) -> ManagedOpenRouterTrialStatusSuccess: ...
 
 
 @dataclass(slots=True)
@@ -240,8 +281,9 @@ class UnavailableManagedOpenRouterReleaseClient:
         device_public_key: str,
         redirect_uri: str,
         app_version: str,
+        referral_id: str | None = None,
     ) -> ManagedOpenRouterDiscordStartSuccess:
-        _ = installation_id, device_public_key, redirect_uri, app_version
+        _ = installation_id, device_public_key, redirect_uri, app_version, referral_id
         raise ManagedOpenRouterReleaseError(
             code="trial_unavailable",
             error_class="retryable",
@@ -253,6 +295,20 @@ class UnavailableManagedOpenRouterReleaseClient:
         request: dict[str, object],
     ) -> ManagedOpenRouterIssueSuccess:
         _ = request
+        raise ManagedOpenRouterReleaseError(
+            code="trial_unavailable",
+            error_class="retryable",
+            message="managed OpenRouter release is unavailable",
+        )
+
+    async def get_trial_status(
+        self,
+        *,
+        installation_id: str,
+        timestamp: str,
+        signature: str,
+    ) -> ManagedOpenRouterTrialStatusSuccess:
+        _ = installation_id, timestamp, signature
         raise ManagedOpenRouterReleaseError(
             code="trial_unavailable",
             error_class="retryable",
@@ -284,6 +340,11 @@ class ManagedOpenRouterReleaseService:
         default=None,
         repr=False,
     )
+    _status_refresh_tasks: set[asyncio.Task[object]] = field(
+        init=False,
+        default_factory=set,
+        repr=False,
+    )
     _retry_after_deadline_ms: int | None = field(init=False, default=None, repr=False)
     _retry_after_diagnostics: ManagedOpenRouterReleaseDiagnostics | None = field(
         init=False,
@@ -295,6 +356,7 @@ class ManagedOpenRouterReleaseService:
         default=None,
         repr=False,
     )
+    _closed: bool = field(init=False, default=False, repr=False)
 
     def __post_init__(self, hardware_hash_provider: HardwareFingerprintProvider | None) -> None:
         self._legacy_hardware_hash_provider = hardware_hash_provider
@@ -325,13 +387,20 @@ class ManagedOpenRouterReleaseService:
             return replace(result, single_flight_reused=True)
         return result
 
-    async def prepare_for_translation(self) -> ManagedOpenRouterReleaseResult:
+    async def prepare_for_translation(
+        self,
+        *,
+        referral_id: str | None = None,
+    ) -> ManagedOpenRouterReleaseResult:
         if self._issue_task is not None and not self._issue_task.done():
             return await self._await_shared_task(self._issue_task, single_flight_reused=True)
         if self._prepare_task is not None and not self._prepare_task.done():
             return await self._await_shared_task(self._prepare_task, single_flight_reused=True)
 
-        task = self._start_shared_task("_prepare_task", self._run_prepare_flow())
+        task = self._start_shared_task(
+            "_prepare_task",
+            self._run_prepare_flow(referral_id=referral_id),
+        )
         return await self._await_shared_task(task, single_flight_reused=False)
 
     async def ensure_key_for_llm_start(self) -> ManagedOpenRouterReleaseResult:
@@ -375,7 +444,119 @@ class ManagedOpenRouterReleaseService:
 
         return await self._await_or_start_issue_flow()
 
-    async def _run_prepare_flow(self) -> ManagedOpenRouterReleaseResult:
+    async def refresh_managed_status(self) -> ManagedOpenRouterStatusRefreshResult:
+        """Best-effort signed-request status refresh for owned Pass ID and live pass status."""
+
+        observed_referral_id = normalize_owned_referral_id(
+            self.settings.managed_identity.referral_id
+        )
+        if self._closed:
+            return ManagedOpenRouterStatusRefreshResult(
+                referral_id=observed_referral_id,
+                succeeded=False,
+            )
+        if self.settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED:
+            return ManagedOpenRouterStatusRefreshResult(
+                referral_id=observed_referral_id,
+                succeeded=False,
+            )
+
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._status_refresh_tasks.add(current_task)
+        try:
+            try:
+                bundle = load_existing_managed_identity_bundle(self.settings, self.secrets)
+            except Exception:
+                return ManagedOpenRouterStatusRefreshResult(
+                    referral_id=observed_referral_id,
+                    succeeded=False,
+                )
+            if bundle is None:
+                return ManagedOpenRouterStatusRefreshResult(
+                    referral_id=observed_referral_id,
+                    succeeded=False,
+                )
+
+            try:
+                signed_request = bundle.sign_status_request(timestamp=self.signed_at_provider())
+                status_response = await self.client.get_trial_status(
+                    installation_id=signed_request["installation_id"],
+                    timestamp=signed_request["timestamp"],
+                    signature=signed_request["signature"],
+                )
+            except Exception:
+                return ManagedOpenRouterStatusRefreshResult(
+                    referral_id=normalize_owned_referral_id(
+                        self.settings.managed_identity.referral_id
+                    ),
+                    succeeded=False,
+                )
+
+            if self._closed:
+                return ManagedOpenRouterStatusRefreshResult(
+                    referral_id=normalize_owned_referral_id(
+                        self.settings.managed_identity.referral_id
+                    ),
+                    succeeded=False,
+                )
+            returned_referral_id = normalize_owned_referral_id(
+                getattr(status_response, "referral_id", None)
+            )
+            latest_referral_id = normalize_owned_referral_id(
+                self.settings.managed_identity.referral_id
+            )
+            pass_status = getattr(status_response, "pass_status", None)
+            if returned_referral_id is None:
+                return ManagedOpenRouterStatusRefreshResult(
+                    referral_id=latest_referral_id,
+                    pass_status=None,
+                    succeeded=True,
+                )
+            if latest_referral_id != observed_referral_id:
+                if pass_status is not None and pass_status.pass_id != latest_referral_id:
+                    pass_status = None
+                return ManagedOpenRouterStatusRefreshResult(
+                    referral_id=latest_referral_id,
+                    pass_status=pass_status,
+                    succeeded=True,
+                )
+            if returned_referral_id != latest_referral_id:
+                previous_referral_id = self.settings.managed_identity.referral_id
+                self.settings.managed_identity.referral_id = returned_referral_id
+                try:
+                    self.persist_settings(self.settings)
+                except Exception:
+                    self.settings.managed_identity.referral_id = previous_referral_id
+                    return ManagedOpenRouterStatusRefreshResult(
+                        referral_id=latest_referral_id,
+                        succeeded=False,
+                    )
+
+            final_referral_id = normalize_owned_referral_id(
+                self.settings.managed_identity.referral_id
+            )
+            if pass_status is not None and pass_status.pass_id != final_referral_id:
+                pass_status = None
+            return ManagedOpenRouterStatusRefreshResult(
+                referral_id=final_referral_id,
+                pass_status=pass_status,
+                succeeded=True,
+            )
+        finally:
+            if current_task is not None:
+                self._status_refresh_tasks.discard(current_task)
+
+    async def refresh_owned_referral_id_from_status(self) -> str | None:
+        """Best-effort signed status refresh for the persisted owned Referral ID."""
+
+        return (await self.refresh_managed_status()).referral_id
+
+    async def _run_prepare_flow(
+        self,
+        *,
+        referral_id: str | None = None,
+    ) -> ManagedOpenRouterReleaseResult:
         resolution = resolve_openrouter_credentials(
             self.settings,
             secrets=self.secrets,
@@ -430,6 +611,7 @@ class ManagedOpenRouterReleaseService:
                     device_public_key=bundle.device_public_key,
                     redirect_uri=listener.redirect_uri,
                     app_version=self.app_version,
+                    referral_id=referral_id,
                 )
             except ManagedOpenRouterReleaseError as exc:
                 return self._handle_release_error(exc, operation="discord_start")
@@ -614,6 +796,13 @@ class ManagedOpenRouterReleaseService:
             managed_credential_ref=issue_response.managed_credential_ref,
             expires_at=issue_response.expires_at,
         )
+        returned_referral_id = normalize_owned_referral_id(issue_response.referral_id)
+        if returned_referral_id is not None:
+            self.settings.managed_identity.referral_id = returned_referral_id
+        final_referral_id = normalize_owned_referral_id(self.settings.managed_identity.referral_id)
+        pass_status = issue_response.pass_status
+        if pass_status is not None and pass_status.pass_id != final_referral_id:
+            pass_status = None
         clear_temporary_managed_release_state(self.settings)
         self.persist_settings(self.settings)
         self._clear_retry_after()
@@ -622,6 +811,9 @@ class ManagedOpenRouterReleaseService:
             message_key="managed_release.ready",
             api_key=issue_response.openrouter_api_key,
             local_key_available=True,
+            referral_bonus_applied=issue_response.referral_bonus_applied is True,
+            referral_id=final_referral_id,
+            pass_status=pass_status,
         )
 
     def _handle_release_error(
@@ -786,13 +978,19 @@ class ManagedOpenRouterReleaseService:
         self._retry_after_diagnostics = None
 
     async def close(self) -> None:
+        self._closed = True
         prepare_task = self._prepare_task
         issue_task = self._issue_task
+        status_refresh_tasks = tuple(self._status_refresh_tasks)
         self._prepare_task = None
         self._issue_task = None
+        self._status_refresh_tasks.clear()
 
+        current_task = asyncio.current_task()
         active_tasks = [
-            task for task in (prepare_task, issue_task) if task is not None and not task.done()
+            task
+            for task in (prepare_task, issue_task, *status_refresh_tasks)
+            if task is not None and not task.done() and task is not current_task
         ]
         for task in active_tasks:
             task.cancel()

@@ -10,11 +10,20 @@ import flet as ft  # noqa: E402
 
 import puripuly_heart.ui.components.discord_managed_auth_dialog as discord_module  # noqa: E402
 from puripuly_heart.ui.components.discord_managed_auth_dialog import DiscordManagedAuthDialog
-from puripuly_heart.ui.i18n import set_locale, t
+from puripuly_heart.ui.i18n import get_locale, set_locale, t
 from puripuly_heart.ui.theme import (  # noqa: E402
     COLOR_NEUTRAL_DARK,
     COLOR_PRIMARY,
 )
+
+
+@pytest.fixture(autouse=True)
+def restore_locale_after_test():
+    previous_locale = get_locale()
+    try:
+        yield
+    finally:
+        set_locale(previous_locale)
 
 
 class DummyPage:
@@ -31,6 +40,20 @@ class DummyPage:
         self.closed.append(dialog)
         if self.dialog is dialog:
             self.dialog = None
+
+
+class SnapshotOpenPage(DummyPage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.body_control_classes_at_open: list[str] = []
+
+    def open(self, dialog) -> None:
+        modal_content = dialog.content
+        body_column = modal_content.content.controls[0]
+        self.body_control_classes_at_open = [
+            control.__class__.__name__ for control in body_column.controls
+        ]
+        super().open(dialog)
 
 
 def _dialog(
@@ -133,7 +156,7 @@ def test_discord_managed_auth_dialog_uses_warm_document_layout(
     body_text = body_column.controls[0]
     action_row = _action_row(page)
 
-    assert len(body_column.controls) == 1
+    assert len(body_column.controls) == 2
     assert body_text.value == "value:discord_auth.body"
     assert body_text.size == 24
     assert body_text.selectable is True
@@ -155,6 +178,51 @@ def test_discord_managed_auth_dialog_uses_warm_document_layout(
         COLOR_PRIMARY,
     ]
     assert [button.style.animation_duration for button in action_row.controls] == [0, 0]
+
+
+def test_discord_managed_auth_dialog_renders_optional_referral_id_field() -> None:
+    set_locale("en")
+    page = DummyPage()
+    dialog = _dialog(page)
+
+    dialog.open()
+
+    field = dialog._referral_id_field
+    assert field is not None
+    assert field.label == t("discord_auth.referral_id.label")
+    assert getattr(field, "helper_text", None) in (None, "")
+    assert getattr(field, "hint_text", None) in (None, "")
+    assert field.value == ""
+    assert dialog._continue_button is not None
+    assert not getattr(dialog._continue_button, "disabled", False)
+
+
+def test_discord_managed_auth_dialog_referral_field_is_present_before_page_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(discord_module, "create_glow_stack", lambda content: content)
+    page = SnapshotOpenPage()
+    dialog = _dialog(page)
+
+    dialog.open()
+
+    assert page.body_control_classes_at_open == ["Text", "TextField"]
+
+
+def test_discord_managed_auth_dialog_invalid_looking_referral_id_does_not_block_continue() -> None:
+    page = DummyPage()
+    events: list[str] = []
+    dialog = _dialog(page, events)
+    dialog.open()
+
+    assert dialog._referral_id_field is not None
+    dialog._referral_id_field.value = "not a referral id"
+    assert dialog.referral_id == "not a referral id"
+    assert dialog._continue_button is not None
+    dialog._continue_button.on_click(None)
+
+    assert events == ["continue"]
+    assert page.closed == []
 
 
 def test_discord_managed_auth_dialog_waiting_state_uses_waiting_labels() -> None:
@@ -191,11 +259,7 @@ def test_discord_managed_auth_dialog_callback_received_expands_body() -> None:
     dialog.set_callback_received()
 
     assert dialog._body_text is not None
-    assert dialog._body_text.value == (
-        "Discord 확인을 받았어요\n\n"
-        "이제 PuriPuly가 Managed 키를 준비하고 있어요.\n"
-        "완료되면 이 창이 닫히고 번역이 시작돼요."
-    )
+    assert dialog._body_text.value == t("discord_auth.callback_received_body")
     assert [control.text for control in dialog._actions.controls] == [
         t("discord_auth.cancel"),
         t("discord_auth.reopen_browser"),

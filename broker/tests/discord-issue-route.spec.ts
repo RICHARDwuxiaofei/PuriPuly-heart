@@ -21,6 +21,7 @@ import {
   updateAbuseControls,
   updateAbuseRuntimeState,
 } from './test-support/abuse-controls';
+import { expectNoReferralRewardEstimateFields } from './test-support/referral-response-privacy';
 
 const REGISTERED_REDIRECT_URI = 'http://127.0.0.1:62187/discord/callback';
 const APP_VERSION = '1.2.3';
@@ -34,6 +35,7 @@ const OPENROUTER_GUARDRAIL_URL =
   'https://openrouter.ai/api/v1/guardrails/test-managed-guardrail-id/assignments/keys';
 const DISCORD_EPOCH_MS = 1420070400000n;
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+const REFERRAL_ID_PATTERN = /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{6}$/u;
 
 interface StartedDiscordSession {
   env: TestBrokerEnv;
@@ -72,6 +74,13 @@ interface IssueSuccessEventRow {
   ip_hash: string | null;
   ip_prefix_hash: string | null;
   observed_at: string;
+}
+
+interface ReferralCodeRow {
+  referral_id: string;
+  owner_discord_user_ref: string;
+  owner_installation_id: string | null;
+  status: string;
 }
 
 describe('Discord issue gate', () => {
@@ -120,6 +129,18 @@ describe('Discord issue gate', () => {
         model: MODEL,
       }),
     );
+    expect(payload.referral_id).toMatch(REFERRAL_ID_PATTERN);
+    expect(payload.talk_together_pass).toEqual({
+      pass_id: payload.referral_id,
+      invite_count: 0,
+      invite_limit: 5,
+      bonus_translations_per_friend: 200,
+    });
+    const serializedTalkTogetherPass = JSON.stringify(payload.talk_together_pass);
+    expect(serializedTalkTogetherPass).not.toContain('discord_user_ref');
+    expect(serializedTalkTogetherPass).not.toContain('budget_usd');
+    expect(payload).not.toHaveProperty('referral_bonus_applied');
+    expectNoReferralRewardEstimateFields(payload);
     expectTokenExchange(discordApi.fetchMock, {
       code,
       redirectUri: started.redirectUri,
@@ -161,6 +182,14 @@ describe('Discord issue gate', () => {
         updated_at: NOW_ISO,
       }),
     );
+    expect(readReferralCodeForOwner(started.env, expectedDiscordUserRef)).toEqual(
+      expect.objectContaining({
+        referral_id: payload.referral_id,
+        owner_discord_user_ref: expectedDiscordUserRef,
+        owner_installation_id: started.installationId,
+        status: 'active',
+      }),
+    );
     const issueSuccessEvents = readIssueSuccessEvents(started.env);
     expect(issueSuccessEvents).toEqual([
       expect.objectContaining({
@@ -171,6 +200,41 @@ describe('Discord issue gate', () => {
     ]);
     expect(JSON.stringify(issueSuccessEvents)).not.toContain(rawDiscordUserId);
     expect(JSON.stringify(issueSuccessEvents)).not.toContain(rawDiscordEmail);
+  });
+
+  it('keeps Referral ID and omits Talk Together Pass status when issue invite count query fails', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const env = createTestBrokerEnv({
+      beforeFirst({ sql }) {
+        if (
+          sql.includes('FROM referral_rewards counted') &&
+          sql.includes('counted.referrer_discord_user_ref = ?')
+        ) {
+          throw new Error('forced Talk Together Pass count failure');
+        }
+      },
+    });
+    const started = await startDiscordSession(
+      'install-discord-issue-pass-count-failure',
+      env,
+    );
+    const code = 'discord-oauth-code-pass-count-failure';
+    mockDiscordApi({
+      user: {
+        id: discordSnowflakeForAgeDays(31),
+        verified: true,
+      },
+    });
+    const requestBody = await signedIssueRequest(started, { code });
+
+    const response = await postDiscordIssue(started.env, requestBody);
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as Record<string, unknown>;
+    expect(payload.referral_id).toMatch(REFERRAL_ID_PATTERN);
+    expect(payload).not.toHaveProperty('talk_together_pass');
   });
 
   it('returns a restart boundary when Discord token exchange fails after terminalizing the session', async () => {
@@ -1178,6 +1242,7 @@ describe('Discord issue gate', () => {
     expect(discordApi.openRouterCreateCalls).toHaveLength(1);
     expect(countDiscordIdentities(started.env)).toBe(0);
     expect(countDiscordEntitlements(started.env)).toBe(0);
+    expect(countReferralCodes(started.env)).toBe(0);
     await expect(readSessionByState(started.env, started.state)).resolves.toEqual(
       expect.objectContaining({
         status: 'failed',
@@ -2029,6 +2094,24 @@ function readIssueSuccessEvents(env: TestBrokerEnv): IssueSuccessEventRow[] {
     .all() as unknown as IssueSuccessEventRow[];
 }
 
+function readReferralCodeForOwner(
+  env: TestBrokerEnv,
+  discordUserRef: string,
+): ReferralCodeRow | null {
+  const row = env.__db
+    .prepare(
+      `SELECT referral_id,
+              owner_discord_user_ref,
+              owner_installation_id,
+              status
+         FROM referral_codes
+        WHERE owner_discord_user_ref = ?`,
+    )
+    .get(discordUserRef) as ReferralCodeRow | undefined;
+
+  return row ?? null;
+}
+
 async function readEntitlement(
   env: TestBrokerEnv,
   installationId: string,
@@ -2197,6 +2280,13 @@ function countDiscordIdentities(env: TestBrokerEnv): number {
 function countDiscordEntitlements(env: TestBrokerEnv, where = '1 = 1'): number {
   const row = env.__db
     .prepare(`SELECT COUNT(*) AS count FROM openrouter_entitlements WHERE ${where}`)
+    .get() as { count: number };
+  return Number(row.count);
+}
+
+function countReferralCodes(env: TestBrokerEnv): number {
+  const row = env.__db
+    .prepare('SELECT COUNT(*) AS count FROM referral_codes')
     .get() as { count: number };
   return Number(row.count);
 }

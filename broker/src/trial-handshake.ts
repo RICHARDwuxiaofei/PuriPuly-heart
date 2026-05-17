@@ -3,6 +3,7 @@ import type { Context } from 'hono';
 import type {
   InstallationRecord,
   OpenRouterEntitlementRecord,
+  ReferralCodeRecord,
 } from './persistence';
 import type { BrokerEnv } from './contract';
 import { getFingerprintSaltConfig } from './fingerprint-salt';
@@ -23,12 +24,17 @@ import {
   normalizeManagedState,
   normalizeTrialStatusResponse,
   type ManagedStateResponse,
+  type TalkTogetherPassStatusResponse,
   type TrialStatusResponse,
 } from './managed-state';
 import {
   MANAGED_TRIAL_BUDGET_POLICY,
   TRIAL_PROVIDER_POLICY,
 } from './trial-policy';
+import {
+  ensureOwnedReferralIdForActiveDiscordManagedUser,
+  resolveTalkTogetherPassStatusForOwnedReferralCode,
+} from './referral';
 
 export const TRIAL_CHALLENGE_TTL_SECONDS = 300;
 export const TRIAL_RELEASE_TOKEN_TTL_SECONDS = 900;
@@ -925,7 +931,58 @@ export async function handleTrialStatus(c: Context<BrokerEnv>): Promise<Response
     });
   }
 
-  return c.json(normalizeTrialStatusResponse(entitlement));
+  const ownedReferralStatus = await bestEffortResolveOwnedReferralStatusForStatus(
+    c.env.BROKER_DB,
+    {
+      installationId,
+      nowIso: now.toISOString(),
+    },
+  );
+
+  return c.json(
+    normalizeTrialStatusResponse(
+      entitlement,
+      ownedReferralStatus?.referralCode.referral_id ?? null,
+      ownedReferralStatus?.talkTogetherPass ?? null,
+    ),
+  );
+}
+
+type OwnedReferralStatusLookup = {
+  referralCode: ReferralCodeRecord;
+  talkTogetherPass: TalkTogetherPassStatusResponse | null;
+};
+
+async function bestEffortResolveOwnedReferralStatusForStatus(
+  db: D1Database,
+  input: {
+    installationId: string;
+    nowIso: string;
+  },
+): Promise<OwnedReferralStatusLookup | null> {
+  try {
+    const result = await ensureOwnedReferralIdForActiveDiscordManagedUser(db, input);
+    if (!result.ok) {
+      return null;
+    }
+
+    try {
+      return {
+        referralCode: result.referralCode,
+        talkTogetherPass: await resolveTalkTogetherPassStatusForOwnedReferralCode(
+          db,
+          result.referralCode,
+        ),
+      };
+    } catch {
+      return {
+        referralCode: result.referralCode,
+        talkTogetherPass: null,
+      };
+    }
+  } catch {
+    return null;
+  }
 }
 
 async function readJsonBody<T>(

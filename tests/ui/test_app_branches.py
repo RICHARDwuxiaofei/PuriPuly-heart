@@ -25,6 +25,8 @@ from puripuly_heart.config.settings import (
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.app import TranslatorApp, _check_and_notify_update
 
+MISSING = object()
+
 
 class DummyPage:
     def __init__(self) -> None:
@@ -1059,6 +1061,114 @@ async def test_start_discord_managed_auth_uses_run_task_and_success_enables_tran
     assert snackbar_calls == [(app_module.t("discord_auth.success"), app_module.COLOR_SUCCESS)]
     assert enable_calls == [True]
     assert dashboard_translation_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_passes_dialog_referral_id_to_controller() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(referral_id="not a referral id", set_waiting=lambda: None)
+    app._discord_managed_auth_dialog = dialog
+    start_kwargs: list[dict[str, object]] = []
+    enable_calls: list[bool] = []
+
+    async def fake_start_discord_managed_auth_from_dialog(**kwargs) -> bool:
+        start_kwargs.append(kwargs)
+        return False
+
+    async def fake_set_translation_enabled(enabled: bool) -> None:
+        enable_calls.append(enabled)
+
+    app.controller = SimpleNamespace(
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    await app.page.tasks[0]()
+
+    assert len(start_kwargs) == 1
+    assert start_kwargs[0]["referral_id"] == "not a referral id"
+    assert callable(start_kwargs[0]["on_callback_received"])
+    assert enable_calls == []
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_shows_referral_reward_snackbar_when_bonus_applied() -> (
+    None
+):
+    previous_locale = i18n_module.get_locale()
+    i18n_module.set_locale("ko")
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(referral_id="7KQ9M2", set_waiting=lambda: None, close=lambda: None)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+    app.view_dashboard = SimpleNamespace(set_translation_enabled=lambda _enabled: None)
+    hub = SimpleNamespace(llm=object(), translation_enabled=False)
+
+    controller = SimpleNamespace(hub=hub)
+
+    async def fake_start_discord_managed_auth_from_dialog(**_kwargs) -> bool:
+        controller.last_discord_managed_auth_referral_bonus_applied = True
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        hub.translation_enabled = enabled
+        return True
+
+    controller.start_discord_managed_auth_from_dialog = fake_start_discord_managed_auth_from_dialog
+    controller.set_translation_enabled = fake_set_translation_enabled
+    app.controller = controller
+
+    try:
+        app._start_discord_managed_auth()
+        await app.page.tasks[0]()
+
+        assert snackbar_calls == [
+            (app_module.t("discord_auth.success"), app_module.COLOR_SUCCESS),
+            (app_module.t("discord_auth.referral_reward_applied"), app_module.COLOR_SUCCESS),
+        ]
+    finally:
+        i18n_module.set_locale(previous_locale)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "referral_bonus_applied",
+    [MISSING, False, None, "true", 1],
+)
+async def test_start_discord_managed_auth_omits_referral_snackbar_without_boolean_true(
+    referral_bonus_applied: object,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(referral_id="7KQ9M2", set_waiting=lambda: None, close=lambda: None)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+    app.view_dashboard = SimpleNamespace(set_translation_enabled=lambda _enabled: None)
+    hub = SimpleNamespace(llm=object(), translation_enabled=False)
+    controller = SimpleNamespace(hub=hub)
+
+    async def fake_start_discord_managed_auth_from_dialog(**_kwargs) -> bool:
+        if referral_bonus_applied is not MISSING:
+            controller.last_discord_managed_auth_referral_bonus_applied = referral_bonus_applied
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        hub.translation_enabled = enabled
+        return True
+
+    controller.start_discord_managed_auth_from_dialog = fake_start_discord_managed_auth_from_dialog
+    controller.set_translation_enabled = fake_set_translation_enabled
+    app.controller = controller
+
+    app._start_discord_managed_auth()
+    await app.page.tasks[0]()
+
+    assert snackbar_calls == [(app_module.t("discord_auth.success"), app_module.COLOR_SUCCESS)]
 
 
 @pytest.mark.asyncio

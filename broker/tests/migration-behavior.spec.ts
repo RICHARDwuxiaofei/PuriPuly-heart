@@ -686,11 +686,19 @@ describe('broker migration behavior', () => {
         discordOpenrouterIssueIp: _discordOpenrouterIssueIp,
         discordOpenrouterIssueInstallation: _discordOpenrouterIssueInstallation,
         pendingDiscordOAuthSessions: _pendingDiscordOAuthSessions,
+        referralAttempts: _referralAttempts,
+        retention: defaultRetention,
         ...defaultsThrough0003
       } = TEST_DEFAULT_ABUSE_CONTROLS;
+      const {
+        referralSkippedDays: _referralSkippedDays,
+        referralFailedDays: _referralFailedDays,
+        ...retentionThrough0003
+      } = defaultRetention;
 
       expect(JSON.parse(migratedRow.value)).toEqual({
         ...defaultsThrough0003,
+        retention: retentionThrough0003,
         ...tunedLegacyControls,
       });
     } finally {

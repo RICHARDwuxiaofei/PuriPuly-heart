@@ -59,6 +59,80 @@ describe('OpenRouter management client', () => {
     );
   });
 
+  it('creates a child key with an explicit absolute limit and verifies the effective limit', async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        {
+          key: 'or-child-key-123',
+          data: {
+            hash: 'hash_123',
+            expires_at: '2026-10-10T06:00:00.000Z',
+            limit: 0.09,
+            limit_reset: null,
+          },
+        },
+        201,
+      ),
+    );
+
+    const result = await createManagedChildKey({
+      managementApiKey: 'mgmt-key',
+      installationId: 'install-123',
+      releaseSessionRef: 'session-123',
+      expiresAt: '2026-10-10T06:00:00.000Z',
+      limitUsd: 0.09,
+      requireEffectiveLimitVerification: true,
+      fetchImpl: fetchMock,
+    });
+
+    expect(result).toEqual({ rawKey: 'or-child-key-123', hash: 'hash_123' });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://openrouter.ai/api/v1/keys',
+      expect.objectContaining({
+        body: JSON.stringify({
+          name: 'puripuly-heart:install-123:session-123',
+          limit: 0.09,
+          limit_reset: null,
+          include_byok_in_limit: false,
+          expires_at: '2026-10-10T06:00:00.000Z',
+        }),
+      }),
+    );
+  });
+
+  it('rejects explicit-limit child keys when the effective limit is below the requested limit', async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        {
+          key: 'or-child-key-123',
+          data: {
+            hash: 'hash_123',
+            limit: 0.07,
+          },
+        },
+        201,
+      ),
+    );
+
+    await expect(
+      createManagedChildKey({
+        managementApiKey: 'mgmt-key',
+        installationId: 'install-123',
+        releaseSessionRef: 'session-123',
+        expiresAt: '2026-10-10T06:00:00.000Z',
+        limitUsd: 0.09,
+        requireEffectiveLimitVerification: true,
+        fetchImpl: fetchMock,
+      }),
+    ).rejects.toMatchObject({
+      name: 'OpenRouterManagementError',
+      operation: 'create_key',
+      code: 'malformed_upstream',
+      status: 201,
+      message: expect.stringContaining('effective limit'),
+    });
+  });
+
   it('assigns the managed guardrail to the created key hash', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ assigned_count: 1 }));
 

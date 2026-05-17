@@ -835,6 +835,7 @@ function validateBrokerAbuseControlsConfig(
   const asnFastPath = validateAsnFastPathConfig(value.asnFastPath);
   const asnClassifications = validateAsnClassificationsConfig(value.asnClassifications);
   const retention = validateRetentionConfig(value.retention);
+  const referralAttempts = validateReferralAttemptControlsConfig(value.referralAttempts);
   const dailyReport = validateDailyReportConfig(value.dailyReport);
 
   if (
@@ -852,6 +853,7 @@ function validateBrokerAbuseControlsConfig(
     !asnFastPath ||
     !asnClassifications ||
     !retention ||
+    !referralAttempts ||
     !dailyReport
   ) {
     return null;
@@ -872,6 +874,7 @@ function validateBrokerAbuseControlsConfig(
     asnFastPath,
     asnClassifications,
     retention,
+    referralAttempts,
     dailyReport,
   };
 }
@@ -1099,7 +1102,9 @@ function validateRetentionConfig(
   if (
     !isPositiveInteger(value.requestEventsDays) ||
     !isPositiveInteger(value.issueSuccessDays) ||
-    !isPositiveInteger(value.runtimeAuditDays)
+    !isPositiveInteger(value.runtimeAuditDays) ||
+    !isPositiveInteger(value.referralSkippedDays) ||
+    !isPositiveInteger(value.referralFailedDays)
   ) {
     return null;
   }
@@ -1108,6 +1113,97 @@ function validateRetentionConfig(
     requestEventsDays: value.requestEventsDays,
     issueSuccessDays: value.issueSuccessDays,
     runtimeAuditDays: value.runtimeAuditDays,
+    referralSkippedDays: value.referralSkippedDays,
+    referralFailedDays: value.referralFailedDays,
+  };
+}
+
+function validateReferralAttemptControlsConfig(
+  value: unknown,
+): BrokerAbuseControlsConfigValue['referralAttempts'] | null {
+  if (!isJsonObject(value)) {
+    return null;
+  }
+
+  const validShaped = validateReferralScopedAttemptLimit(value.validShaped);
+  const unknown = validateReferralScopedAttemptLimit(value.unknown);
+  const perReferralIdVelocity = validateReferralIdVelocityLimit(
+    value.perReferralIdVelocity,
+  );
+  const perReferrerRewardVelocity = validateReferrerRewardVelocityLimit(
+    value.perReferrerRewardVelocity,
+  );
+
+  if (
+    !validShaped ||
+    !unknown ||
+    !perReferralIdVelocity ||
+    !perReferrerRewardVelocity
+  ) {
+    return null;
+  }
+
+  return {
+    validShaped,
+    unknown,
+    perReferralIdVelocity,
+    perReferrerRewardVelocity,
+  };
+}
+
+function validateReferralScopedAttemptLimit(
+  value: unknown,
+): BrokerAbuseControlsConfigValue['referralAttempts']['validShaped'] | null {
+  if (!isJsonObject(value)) {
+    return null;
+  }
+
+  if (
+    !isPositiveInteger(value.maxPerInstallation) ||
+    !isPositiveInteger(value.maxPerIp) ||
+    !isPositiveInteger(value.windowMinutes)
+  ) {
+    return null;
+  }
+
+  return {
+    maxPerInstallation: value.maxPerInstallation,
+    maxPerIp: value.maxPerIp,
+    windowMinutes: value.windowMinutes,
+  };
+}
+
+function validateReferralIdVelocityLimit(
+  value: unknown,
+): BrokerAbuseControlsConfigValue['referralAttempts']['perReferralIdVelocity'] | null {
+  if (!isJsonObject(value)) {
+    return null;
+  }
+
+  if (!isPositiveInteger(value.maxAttempts) || !isPositiveInteger(value.windowMinutes)) {
+    return null;
+  }
+
+  return {
+    maxAttempts: value.maxAttempts,
+    windowMinutes: value.windowMinutes,
+  };
+}
+
+function validateReferrerRewardVelocityLimit(
+  value: unknown,
+): BrokerAbuseControlsConfigValue['referralAttempts']['perReferrerRewardVelocity'] | null {
+  if (!isJsonObject(value)) {
+    return null;
+  }
+
+  if (!isPositiveInteger(value.maxRewards) || !isPositiveInteger(value.windowMinutes)) {
+    return null;
+  }
+
+  return {
+    maxRewards: value.maxRewards,
+    windowMinutes: value.windowMinutes,
   };
 }
 

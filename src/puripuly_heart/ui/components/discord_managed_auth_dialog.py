@@ -13,6 +13,7 @@ from puripuly_heart.ui.components.warm_document_dialog import (
     split_body_paragraphs,
 )
 from puripuly_heart.ui.i18n import t
+from puripuly_heart.ui.theme import COLOR_DIVIDER, COLOR_ON_BACKGROUND, COLOR_PRIMARY
 
 
 class DiscordManagedAuthDialog:
@@ -53,6 +54,7 @@ class DiscordManagedAuthDialog:
         self._close_button: ft.TextButton | None = None
         self._reopen_browser_button: ft.TextButton | None = None
         self._cancel_button: ft.TextButton | None = None
+        self._referral_id_field: ft.TextField | None = None
 
     @property
     def is_open(self) -> bool:
@@ -62,14 +64,23 @@ class DiscordManagedAuthDialog:
     def is_waiting(self) -> bool:
         return self._is_waiting
 
+    @property
+    def referral_id(self) -> str:
+        if self._referral_id_field is None:
+            return ""
+        value = self._referral_id_field.value
+        return value if isinstance(value, str) else ""
+
     def open(self) -> None:
         if self._dialog is not None and self._is_open:
             return
 
         self._is_waiting = False
+        self._referral_id_field = self._build_referral_id_field()
         self._dialog_result = open_warm_document_dialog(
             self._page,
             body_paragraphs=split_body_paragraphs(t("discord_auth.body")),
+            extra_body_controls=[self._referral_id_field],
             actions=[
                 WarmDocumentDialogAction(
                     label=t("discord_auth.close"),
@@ -96,10 +107,27 @@ class DiscordManagedAuthDialog:
         self._cancel_button = None
         self._is_open = True
 
+    def _build_referral_id_field(self) -> ft.TextField:
+        return ft.TextField(
+            label=t("discord_auth.referral_id.label"),
+            value="",
+            helper_text="",
+            dense=True,
+            border_radius=14,
+            border_color=COLOR_DIVIDER,
+            focused_border_color=COLOR_PRIMARY,
+            text_size=18,
+            color=COLOR_ON_BACKGROUND,
+            on_submit=lambda _: self._on_continue(),
+        )
+
     def set_waiting(self) -> None:
         self._is_waiting = True
         if self._dialog_result is None or self._body_text is None:
             return
+
+        if self._referral_id_field is not None:
+            self._referral_id_field.disabled = True
 
         self._body_text.value = join_body_paragraphs(
             split_body_paragraphs(t("discord_auth.waiting_body"))

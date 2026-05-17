@@ -275,7 +275,7 @@ def test_migrate_v17_strips_directsound_host_api_before_migration_and_preserves_
 
 
 def test_migrate_v18_preserves_directsound_when_removing_legacy_osc_rate_limits() -> None:
-    assert SETTINGS_SCHEMA_VERSION == 22
+    assert SETTINGS_SCHEMA_VERSION == 23
 
     raw = to_dict(AppSettings())
     raw["settings_version"] = 17
@@ -319,7 +319,7 @@ def test_load_settings_persists_v17_directsound_migration(tmp_path) -> None:
 
 
 def test_load_settings_persists_v18_osc_rate_limit_key_removal(tmp_path) -> None:
-    assert SETTINGS_SCHEMA_VERSION == 22
+    assert SETTINGS_SCHEMA_VERSION == 23
 
     path = tmp_path / "settings.json"
     raw = to_dict(AppSettings())
@@ -657,9 +657,9 @@ def test_schema21_migration_adds_local_llm_defaults(tmp_path: Path) -> None:
     loaded = load_settings(path)
     persisted = json.loads(path.read_text(encoding="utf-8"))
 
-    assert loaded.settings_version == 22
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.local_llm.extra_body == {"reasoning_effort": "none"}
-    assert persisted["settings_version"] == 22
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["local_llm"]["base_url"] == "http://127.0.0.1:11434/v1"
 
 
