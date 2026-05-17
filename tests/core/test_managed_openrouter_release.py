@@ -29,8 +29,10 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseError,
     ManagedOpenRouterReleaseResult,
     ManagedOpenRouterReleaseService,
+    ManagedOpenRouterStatusRefreshResult,
     ManagedOpenRouterTrialStatusSuccess,
     ManagedOpenRouterUserFacingError,
+    TalkTogetherPassStatus,
     UnavailableManagedOpenRouterReleaseClient,
 )
 from puripuly_heart.core.openrouter_credentials import (
@@ -645,6 +647,33 @@ async def test_discord_issue_success_persists_owned_referral_id_and_exposes_resu
 
 
 @pytest.mark.asyncio
+async def test_discord_issue_success_exposes_talk_together_pass_status() -> None:
+    pass_status = TalkTogetherPassStatus(
+        pass_id="7KQ9M2",
+        invite_count=1,
+        invite_limit=5,
+        bonus_translations_per_friend=200,
+    )
+    client = FakeManagedReleaseClient(
+        discord_start_result=_make_discord_start_success(),
+        discord_issue_result=ManagedOpenRouterIssueSuccess(
+            openrouter_api_key="managed-key",
+            referral_id="7KQ9M2",
+            pass_status=pass_status,
+        ),
+    )
+    service, settings, _secrets, _client, _harness = _make_discord_service(client=client)
+
+    result = await service.prepare_for_translation()
+
+    assert result.behavior == ManagedOpenRouterReleaseBehavior.READY
+    assert result.referral_id == "7KQ9M2"
+    assert result.pass_status == pass_status
+    assert settings.managed_identity.referral_id == "7KQ9M2"
+    assert not hasattr(settings.managed_identity, "invite_count")
+
+
+@pytest.mark.asyncio
 async def test_discord_issue_success_defaults_referral_bonus_and_preserves_known_owned_id() -> None:
     settings = AppSettings()
     settings.managed_identity.referral_id = "8H3J4N"
@@ -733,6 +762,66 @@ async def test_status_refresh_signs_existing_identity_request_and_persists_owned
     assert result == "7KQ9M2"
     assert settings.managed_identity.referral_id == "7KQ9M2"
     assert persist_calls == [(bundle.installation_id, None)]
+
+
+@pytest.mark.asyncio
+async def test_managed_status_refresh_returns_pass_status_without_persisting_it() -> None:
+    from puripuly_heart.config.settings import to_dict
+
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    secrets = InMemorySecretStore()
+    bundle = ensure_managed_identity_bundle(
+        settings,
+        secrets,
+        persist_settings=lambda _updated: None,
+    )
+    pass_status = TalkTogetherPassStatus(
+        pass_id="7KQ9M2",
+        invite_count=2,
+        invite_limit=5,
+        bonus_translations_per_friend=200,
+    )
+    client = FakeManagedReleaseClient(
+        trial_status_result=ManagedOpenRouterTrialStatusSuccess(
+            referral_id="7KQ9M2",
+            pass_status=pass_status,
+        ),
+    )
+    service, settings, _secrets = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.refresh_managed_status()
+
+    assert isinstance(result, ManagedOpenRouterStatusRefreshResult)
+    assert result.succeeded is True
+    assert result.referral_id == "7KQ9M2"
+    assert result.pass_status == pass_status
+    assert settings.managed_identity.referral_id == "7KQ9M2"
+    assert "invite_count" not in to_dict(settings)["managed_identity"]
+    assert client.calls[0][1]["installation_id"] == bundle.installation_id
+
+
+@pytest.mark.asyncio
+async def test_managed_status_refresh_failure_is_distinguishable_from_absent_pass_status() -> None:
+    settings = AppSettings()
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    settings.managed_identity.referral_id = "8H3J4N"
+    secrets = InMemorySecretStore()
+    ensure_managed_identity_bundle(settings, secrets, persist_settings=lambda _updated: None)
+    client = FakeManagedReleaseClient(
+        trial_status_result=ManagedOpenRouterReleaseError(
+            code="trial_unavailable",
+            error_class="retryable",
+            message="status failed",
+        ),
+    )
+    service, _settings, _secrets = _make_service(client=client, settings=settings, secrets=secrets)
+
+    result = await service.refresh_managed_status()
+
+    assert result.succeeded is False
+    assert result.referral_id == "8H3J4N"
+    assert result.pass_status is None
 
 
 @pytest.mark.asyncio

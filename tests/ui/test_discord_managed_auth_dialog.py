@@ -10,11 +10,20 @@ import flet as ft  # noqa: E402
 
 import puripuly_heart.ui.components.discord_managed_auth_dialog as discord_module  # noqa: E402
 from puripuly_heart.ui.components.discord_managed_auth_dialog import DiscordManagedAuthDialog
-from puripuly_heart.ui.i18n import set_locale, t
+from puripuly_heart.ui.i18n import get_locale, set_locale, t
 from puripuly_heart.ui.theme import (  # noqa: E402
     COLOR_NEUTRAL_DARK,
     COLOR_PRIMARY,
 )
+
+
+@pytest.fixture(autouse=True)
+def restore_locale_after_test():
+    previous_locale = get_locale()
+    try:
+        yield
+    finally:
+        set_locale(previous_locale)
 
 
 class DummyPage:
@@ -181,7 +190,7 @@ def test_discord_managed_auth_dialog_renders_optional_referral_id_field() -> Non
     field = dialog._referral_id_field
     assert field is not None
     assert field.label == t("discord_auth.referral_id.label")
-    assert field.helper_text == t("discord_auth.referral_id.helper")
+    assert getattr(field, "helper_text", None) in (None, "")
     assert getattr(field, "hint_text", None) in (None, "")
     assert field.value == ""
     assert dialog._continue_button is not None
@@ -250,11 +259,7 @@ def test_discord_managed_auth_dialog_callback_received_expands_body() -> None:
     dialog.set_callback_received()
 
     assert dialog._body_text is not None
-    assert dialog._body_text.value == (
-        "Discord 확인을 받았어요\n\n"
-        "이제 PuriPuly가 Managed 키를 준비하고 있어요.\n"
-        "완료되면 이 창이 닫히고 번역이 시작돼요."
-    )
+    assert dialog._body_text.value == t("discord_auth.callback_received_body")
     assert [control.text for control in dialog._actions.controls] == [
         t("discord_auth.cancel"),
         t("discord_auth.reopen_browser"),

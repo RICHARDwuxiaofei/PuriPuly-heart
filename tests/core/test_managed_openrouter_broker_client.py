@@ -14,6 +14,7 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterIssueSuccess,
     ManagedOpenRouterReleaseError,
     ManagedOpenRouterVerifySuccess,
+    TalkTogetherPassStatus,
 )
 
 
@@ -422,6 +423,37 @@ async def test_issue_discord_managed_key_parses_referral_success_hints() -> None
 
 
 @pytest.mark.asyncio
+async def test_issue_discord_managed_key_parses_talk_together_pass_status() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "openrouter_api_key": "managed-openrouter-api-key",
+                "referral_id": " 7kq9m2 ",
+                "talk_together_pass": {
+                    "pass_id": "7KQ9M2",
+                    "invite_count": 1,
+                    "invite_limit": 5,
+                    "bonus_translations_per_friend": 200,
+                },
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.issue_discord_managed_key({"code": "discord-oauth-code-123"})
+
+    assert result.referral_id == "7KQ9M2"
+    assert result.pass_status == TalkTogetherPassStatus(
+        pass_id="7KQ9M2",
+        invite_count=1,
+        invite_limit=5,
+        bonus_translations_per_friend=200,
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("extra_payload", "expected_referral_bonus_applied", "expected_referral_id"),
     [
@@ -509,6 +541,144 @@ async def test_get_trial_status_tolerates_optional_referral_id_compatibility_fie
     )
 
     assert getattr(result, "referral_id", None) == expected_referral_id
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_trial_status_parses_talk_together_pass_status() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "managed_state": {"lifecycle": "active", "managed_availability": True},
+                "current_entitlement": None,
+                "onboarding_eligibility": {
+                    "eligible": False,
+                    "reason": "active",
+                    "requires_discord_oauth": False,
+                },
+                "referral_id": "7KQ9M2",
+                "talk_together_pass": {
+                    "pass_id": "7KQ9M2",
+                    "invite_count": 2,
+                    "invite_limit": 5,
+                    "bonus_translations_per_friend": 200,
+                },
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.get_trial_status(
+        installation_id="install-discord-123",
+        timestamp="2026-04-30T06:00:30.000Z",
+        signature="signature-123",
+    )
+
+    assert result.referral_id == "7KQ9M2"
+    assert result.pass_status == TalkTogetherPassStatus(
+        pass_id="7KQ9M2",
+        invite_count=2,
+        invite_limit=5,
+        bonus_translations_per_friend=200,
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "talk_together_pass",
+    [
+        None,
+        {},
+        {"pass_id": "ABC120", "invite_count": 1, "invite_limit": 5},
+        {"pass_id": "8H3J4N", "invite_count": 1, "invite_limit": 5},
+        {"pass_id": "7KQ9M2", "invite_count": True, "invite_limit": 5},
+        {"pass_id": "7KQ9M2", "invite_count": 1.5, "invite_limit": 5},
+        {"pass_id": "7KQ9M2", "invite_count": "1", "invite_limit": 5},
+        {"pass_id": "7KQ9M2", "invite_count": None, "invite_limit": 5},
+        {"pass_id": "7KQ9M2", "invite_count": -1, "invite_limit": 5},
+        {"pass_id": "7KQ9M2", "invite_count": 1, "invite_limit": 0},
+        {"pass_id": "7KQ9M2", "invite_count": 2**63, "invite_limit": 5},
+    ],
+)
+async def test_talk_together_pass_malformed_required_fields_are_absent(
+    talk_together_pass: object,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        payload: dict[str, object] = {
+            "openrouter_api_key": "managed-openrouter-api-key",
+            "referral_id": "7KQ9M2",
+        }
+        if talk_together_pass is not None:
+            payload["talk_together_pass"] = talk_together_pass
+        return httpx.Response(200, json=payload)
+
+    client, _transport = _build_client(handler)
+
+    result = await client.issue_discord_managed_key({"code": "discord-oauth-code-123"})
+
+    assert result.referral_id == "7KQ9M2"
+    assert result.pass_status is None
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_talk_together_pass_defaults_malformed_bonus_only() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "openrouter_api_key": "managed-openrouter-api-key",
+                "referral_id": "7KQ9M2",
+                "talk_together_pass": {
+                    "pass_id": "7KQ9M2",
+                    "invite_count": 1,
+                    "invite_limit": 5,
+                    "bonus_translations_per_friend": "200",
+                },
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.issue_discord_managed_key({"code": "discord-oauth-code-123"})
+
+    assert result.pass_status == TalkTogetherPassStatus(
+        pass_id="7KQ9M2",
+        invite_count=1,
+        invite_limit=5,
+        bonus_translations_per_friend=200,
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_talk_together_pass_defaults_missing_bonus_only() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "openrouter_api_key": "managed-openrouter-api-key",
+                "referral_id": "7KQ9M2",
+                "talk_together_pass": {
+                    "pass_id": "7KQ9M2",
+                    "invite_count": 1,
+                    "invite_limit": 5,
+                },
+            },
+        )
+
+    client, _transport = _build_client(handler)
+
+    result = await client.issue_discord_managed_key({"code": "discord-oauth-code-123"})
+
+    assert result.pass_status == TalkTogetherPassStatus(
+        pass_id="7KQ9M2",
+        invite_count=1,
+        invite_limit=5,
+        bonus_translations_per_friend=200,
+    )
     await client.close()
 
 

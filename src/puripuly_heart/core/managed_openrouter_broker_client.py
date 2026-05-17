@@ -17,6 +17,7 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseError,
     ManagedOpenRouterTrialStatusSuccess,
     ManagedOpenRouterVerifySuccess,
+    TalkTogetherPassStatus,
 )
 from puripuly_heart.core.openrouter_credentials import (
     normalize_managed_openrouter_user_identifier,
@@ -166,6 +167,7 @@ class HttpManagedOpenRouterBrokerClient:
                 ),
                 referral_bonus_applied=_parse_referral_bonus_applied(payload),
                 referral_id=_parse_owned_referral_id(payload),
+                pass_status=_parse_talk_together_pass_status(payload),
             )
         except ValueError as exc:
             raise _retryable_error(
@@ -190,6 +192,7 @@ class HttpManagedOpenRouterBrokerClient:
         )
         return ManagedOpenRouterTrialStatusSuccess(
             referral_id=_parse_owned_referral_id(payload),
+            pass_status=_parse_talk_together_pass_status(payload),
         )
 
     async def close(self) -> None:
@@ -272,6 +275,52 @@ def _parse_referral_bonus_applied(payload: Mapping[str, object]) -> bool:
 
 def _parse_owned_referral_id(payload: Mapping[str, object]) -> str | None:
     return normalize_owned_referral_id(payload.get("referral_id"))
+
+
+_MAX_SAFE_JSON_INTEGER = 2**53 - 1
+_DEFAULT_TALK_TOGETHER_PASS_BONUS_TRANSLATIONS = 200
+
+
+def _parse_talk_together_pass_status(
+    payload: Mapping[str, object],
+) -> TalkTogetherPassStatus | None:
+    owned_referral_id = _parse_owned_referral_id(payload)
+    if owned_referral_id is None:
+        return None
+
+    raw_status = payload.get("talk_together_pass")
+    if not isinstance(raw_status, Mapping):
+        return None
+
+    pass_id = normalize_owned_referral_id(raw_status.get("pass_id"))
+    if pass_id != owned_referral_id:
+        return None
+
+    invite_count = _parse_json_int(raw_status.get("invite_count"))
+    invite_limit = _parse_json_int(raw_status.get("invite_limit"))
+    if invite_count is None or invite_count < 0:
+        return None
+    if invite_limit is None or invite_limit <= 0:
+        return None
+
+    bonus = _parse_json_int(raw_status.get("bonus_translations_per_friend"))
+    if bonus is None or bonus <= 0:
+        bonus = _DEFAULT_TALK_TOGETHER_PASS_BONUS_TRANSLATIONS
+
+    return TalkTogetherPassStatus(
+        pass_id=owned_referral_id,
+        invite_count=invite_count,
+        invite_limit=invite_limit,
+        bonus_translations_per_friend=bonus,
+    )
+
+
+def _parse_json_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if abs(value) > _MAX_SAFE_JSON_INTEGER:
+        return None
+    return value
 
 
 def _parse_error_response(

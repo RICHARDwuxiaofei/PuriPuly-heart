@@ -33,6 +33,7 @@ from puripuly_heart.config.settings import (
     TranslationModel,
     TranslationSettings,
 )
+from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.components import subtab_shell as subtab_shell_module
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
@@ -147,6 +148,10 @@ def _make_llm_selection_view(
         update=lambda: None,
     )
     view._managed_key_referral_helper_text = SimpleNamespace(value="")
+    view._managed_key_pass_status = None
+    view._managed_key_invite_progress_label = SimpleNamespace(value="", update=lambda: None)
+    view._managed_key_invite_progress_value = SimpleNamespace(value="", update=lambda: None)
+    view._managed_key_invite_progress_row = SimpleNamespace(visible=False, update=lambda: None)
     view._qwen_region_btn = SimpleNamespace(visible=False, update=lambda: None)
     view._api_keys_column = SimpleNamespace(update=lambda: None)
     view._deepgram_key = SimpleNamespace(visible=False)
@@ -655,7 +660,8 @@ def test_load_from_settings_shows_managed_usage_bar_in_managed_key_card(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    assert view._managed_key_card in view._api_keys_column.controls
+    assert view._managed_key_card not in view._api_keys_column.controls
+    assert view._managed_key_card in _subtab_controls(view, "api")
     assert view._managed_trial_usage_bar not in view._api_keys_column.controls
     assert _tree_contains_control(view._managed_key_card, view._managed_trial_usage_bar)
     assert view._managed_key_card.visible is True
@@ -674,15 +680,18 @@ def test_load_from_settings_places_managed_key_card_above_provider_fields(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    controls = list(view._api_keys_column.controls)
-    assert view._managed_key_card in controls
-    assert view._managed_trial_usage_bar not in controls
-    assert controls.index(view._managed_key_card) < controls.index(view._openrouter_key)
+    api_controls = _subtab_controls(view, "api")
+    api_card = _api_tab_card(view, t("settings.section.api_keys"))
+    assert view._managed_key_card in api_controls
+    assert api_controls.index(view._managed_key_card) < api_controls.index(api_card)
+    assert view._managed_key_card not in view._api_keys_column.controls
+    assert view._managed_trial_usage_bar not in view._api_keys_column.controls
     assert _card_title(view._managed_key_card) == t("settings.managed_key.title")
 
     labels = _control_labels(view._managed_key_card)
-    assert t("settings.managed_key.free_usage") in labels
     assert t("settings.managed_key.referral_id.label") in labels
+    assert "무료 사용량" not in labels
+    assert "Free usage" not in labels
     assert _tree_contains_control(view._managed_key_card, view._managed_trial_usage_bar)
 
 
@@ -913,6 +922,89 @@ def test_set_managed_key_state_empty_referral_disables_copy_and_repaints_parent(
         "settings.managed_key.referral_id.pending_helper"
     )
     assert "api_keys_column" in updates
+
+
+def test_set_managed_key_state_shows_talk_together_pass_invite_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=64,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=1,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+    )
+
+    assert view._managed_key_invite_progress_row.visible is True
+    assert view._managed_key_invite_progress_label.value == t(
+        "settings.managed_key.invite_progress.label"
+    )
+    assert view._managed_key_invite_progress_value.value == "1 / 5"
+
+
+def test_set_managed_key_state_hides_invite_progress_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=None,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=1,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+    )
+    assert view._managed_key_invite_progress_row.visible is True
+    assert view._managed_key_invite_progress_value.value == "1 / 5"
+
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=None,
+        referral_id="7KQ9M2",
+        pass_status=None,
+    )
+
+    assert view._managed_key_invite_progress_row.visible is False
+    assert view._managed_key_pass_status is None
+    assert view._managed_key_invite_progress_value.value == ""
+
+
+def test_set_managed_key_state_clamps_over_limit_invite_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view.set_managed_key_state(
+        visible=True,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=7,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+    )
+
+    assert view._managed_key_invite_progress_value.value == "5 / 5"
 
 
 def test_update_api_visibility_keeps_openrouter_cards_visible_for_inactive_fallback_copy(
@@ -3776,13 +3868,13 @@ def test_integrated_context_general_tab_uses_dedicated_unit_card(
     assert not _tree_contains_control(general_card, view._integrated_context_hint)
 
 
-def test_api_tab_uses_three_row_layout_with_response_mode_and_api_keys(
+def test_api_tab_places_independent_managed_key_card_above_api_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
     api_controls = _subtab_controls(view, "api")
 
-    assert len(api_controls) == 4
+    assert len(api_controls) == 5
     assert _row_card_titles(api_controls[0]) == [
         t("settings.section.stt"),
         t("settings.section.peer_stt"),
@@ -3795,8 +3887,10 @@ def test_api_tab_uses_three_row_layout_with_response_mode_and_api_keys(
     ]
     assert _row_card_titles(api_controls[2]) == [t("settings.local_llm.connection")]
     assert api_controls[2] is view._local_llm_connection_card
-    assert api_controls[3] is not view._api_keys_column
-    assert _row_card_titles(api_controls[3]) == [t("settings.section.api_keys")]
+    assert api_controls[3] is view._managed_key_card
+    assert _row_card_titles(api_controls[3]) == [t("settings.managed_key.title")]
+    assert api_controls[4] is not view._api_keys_column
+    assert _row_card_titles(api_controls[4]) == [t("settings.section.api_keys")]
 
 
 def test_api_tab_primary_value_typography_is_consistent_across_rows(

@@ -1021,6 +1021,8 @@ async def test_start_discord_managed_auth_passes_dialog_referral_id_to_controlle
 async def test_start_discord_managed_auth_shows_referral_reward_snackbar_when_bonus_applied() -> (
     None
 ):
+    previous_locale = i18n_module.get_locale()
+    i18n_module.set_locale("ko")
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
     dialog = SimpleNamespace(referral_id="7KQ9M2", set_waiting=lambda: None, close=lambda: None)
@@ -1044,13 +1046,16 @@ async def test_start_discord_managed_auth_shows_referral_reward_snackbar_when_bo
     controller.set_translation_enabled = fake_set_translation_enabled
     app.controller = controller
 
-    app._start_discord_managed_auth()
-    await app.page.tasks[0]()
+    try:
+        app._start_discord_managed_auth()
+        await app.page.tasks[0]()
 
-    assert snackbar_calls == [
-        (app_module.t("discord_auth.success"), app_module.COLOR_SUCCESS),
-        (app_module.t("discord_auth.referral_reward_applied"), app_module.COLOR_SUCCESS),
-    ]
+        assert snackbar_calls == [
+            (app_module.t("discord_auth.success"), app_module.COLOR_SUCCESS),
+            (app_module.t("discord_auth.referral_reward_applied"), app_module.COLOR_SUCCESS),
+        ]
+    finally:
+        i18n_module.set_locale(previous_locale)
 
 
 @pytest.mark.asyncio

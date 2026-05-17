@@ -69,6 +69,56 @@ function readReferralCode(input: {
   return row ?? null;
 }
 
+function insertStatusReferralReward(input: {
+  env: ReturnType<typeof createTestBrokerEnv>;
+  referralId: string;
+  referrerDiscordUserRef: string;
+  referrerInstallationId: string;
+  index: number;
+  referredBonusStatus: 'reserved' | 'credited' | 'skipped' | 'failed';
+}): void {
+  const referrerBonusStatus =
+    input.referredBonusStatus === 'credited'
+      ? 'credited'
+      : input.referredBonusStatus === 'reserved'
+        ? 'pending'
+        : input.referredBonusStatus;
+  input.env.__db
+    .prepare(
+      `INSERT INTO referral_rewards (
+          referral_id,
+          referrer_discord_user_ref,
+          referrer_installation_id,
+          referred_discord_user_ref,
+          referred_installation_id,
+          referred_hardware_hash,
+          referred_hardware_hash_salt_version,
+          referred_bonus_status,
+          referrer_bonus_status,
+          skip_reason,
+          failure_reason,
+          referred_managed_credential_ref,
+          referrer_managed_credential_ref,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 7, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+    )
+    .run(
+      input.referralId,
+      input.referrerDiscordUserRef,
+      input.referrerInstallationId,
+      `ph-discord-user-v1_status-referred-${input.index}`,
+      `install-status-referred-${input.index}`,
+      `hardware-hash-status-referred-${input.index}`,
+      input.referredBonusStatus,
+      referrerBonusStatus,
+      input.referredBonusStatus === 'skipped' ? 'unknown_referral_id' : null,
+      input.referredBonusStatus === 'failed' ? 'issue_delivery_failed' : null,
+      '2026-04-08T06:00:00.000Z',
+      '2026-04-08T06:00:00.000Z',
+    );
+}
+
 describe('GET /v1/trial/status response contract', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -201,6 +251,290 @@ describe('GET /v1/trial/status response contract', () => {
       }),
     );
   });
+
+  it('includes Talk Together Pass status for active Discord-managed users', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const installationId = 'install-status-active-discord-pass';
+    const env = createTestBrokerEnv();
+    const keyPair = await createDeviceKeyPair();
+    await issueChallenge({
+      env,
+      installationId,
+      devicePublicKey: keyPair.devicePublicKey,
+      appVersion: '1.2.3',
+    });
+    insertDiscordIdentity({
+      env,
+      discordUserRef: ACTIVE_DISCORD_USER_REF,
+      installationId,
+      status: 'active',
+    });
+    insertEntitlement(env, {
+      installation_id: installationId,
+      status: 'active',
+      budget_usd: 0.04,
+      managed_credential_ref: 'internal-active-discord-pass-ref',
+      issued_at: '2026-04-01T00:00:00Z',
+      expires_at: '2026-10-01T00:00:00Z',
+      discord_user_ref: ACTIVE_DISCORD_USER_REF,
+      discord_issue_status: 'active',
+      discord_issue_reserved_at: '2026-04-01T00:00:00Z',
+      discord_issue_delivered_at: '2026-04-01T00:00:01Z',
+    });
+    const signedRequest = await signCanonicalStatusRequest(keyPair.privateKey, {
+      installation_id: installationId,
+      timestamp: '2026-04-08T06:00:30.000Z',
+    });
+
+    const response = await getTrialStatus({
+      env,
+      installationId,
+      headers: {
+        'X-Puripuly-Timestamp': signedRequest.timestamp,
+        'X-Puripuly-Signature': signedRequest.signature,
+      },
+    });
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as Record<string, unknown>;
+    expect(payload.referral_id).toMatch(REFERRAL_ID_PATTERN);
+    expect(payload.talk_together_pass).toEqual({
+      pass_id: payload.referral_id,
+      invite_count: 0,
+      invite_limit: 5,
+      bonus_translations_per_friend: 200,
+    });
+    const serialized = JSON.stringify(payload.talk_together_pass);
+    expect(serialized).not.toContain('discord_user_ref');
+    expect(serialized).not.toContain('hardware');
+    expect(serialized).not.toContain('ledger');
+    expect(serialized).not.toContain('budget_usd');
+  });
+
+  it('counts only reserved and credited Talk Together Pass referral rewards', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const installationId = 'install-status-pass-counted-rewards';
+    const env = createTestBrokerEnv();
+    const keyPair = await createDeviceKeyPair();
+    await issueChallenge({
+      env,
+      installationId,
+      devicePublicKey: keyPair.devicePublicKey,
+      appVersion: '1.2.3',
+    });
+    insertDiscordIdentity({
+      env,
+      discordUserRef: ACTIVE_DISCORD_USER_REF,
+      installationId,
+      status: 'active',
+    });
+    insertEntitlement(env, {
+      installation_id: installationId,
+      status: 'active',
+      budget_usd: 0.04,
+      managed_credential_ref: 'internal-status-pass-counted-ref',
+      issued_at: '2026-04-01T00:00:00Z',
+      expires_at: '2026-10-01T00:00:00Z',
+      discord_user_ref: ACTIVE_DISCORD_USER_REF,
+      discord_issue_status: 'active',
+      discord_issue_reserved_at: '2026-04-01T00:00:00Z',
+      discord_issue_delivered_at: '2026-04-01T00:00:01Z',
+    });
+    const signedRequest = await signCanonicalStatusRequest(keyPair.privateKey, {
+      installation_id: installationId,
+      timestamp: '2026-04-08T06:00:30.000Z',
+    });
+
+    const initialResponse = await getTrialStatus({
+      env,
+      installationId,
+      headers: {
+        'X-Puripuly-Timestamp': signedRequest.timestamp,
+        'X-Puripuly-Signature': signedRequest.signature,
+      },
+    });
+    expect(initialResponse.status).toBe(200);
+    const initialPayload = (await initialResponse.json()) as Record<string, unknown>;
+    expect(initialPayload.referral_id).toMatch(REFERRAL_ID_PATTERN);
+    const referralId = String(initialPayload.referral_id);
+
+    (['reserved', 'credited', 'failed', 'skipped'] as const).forEach(
+      (referredBonusStatus, index) => {
+        insertStatusReferralReward({
+          env,
+          referralId,
+          referrerDiscordUserRef: ACTIVE_DISCORD_USER_REF,
+          referrerInstallationId: installationId,
+          index,
+          referredBonusStatus,
+        });
+      },
+    );
+
+    const response = await getTrialStatus({
+      env,
+      installationId,
+      headers: {
+        'X-Puripuly-Timestamp': signedRequest.timestamp,
+        'X-Puripuly-Signature': signedRequest.signature,
+      },
+    });
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as Record<string, unknown>;
+    expect(payload.referral_id).toBe(referralId);
+    expect(payload.talk_together_pass).toMatchObject({
+      pass_id: payload.referral_id,
+      invite_count: 2,
+      invite_limit: 5,
+      bonus_translations_per_friend: 200,
+    });
+  });
+
+  it('keeps Referral ID and omits Talk Together Pass status when invite count query fails', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+    const installationId = 'install-status-pass-count-failure';
+    const env = createTestBrokerEnv({
+      beforeFirst({ sql }) {
+        if (
+          sql.includes('FROM referral_rewards counted') &&
+          sql.includes('counted.referrer_discord_user_ref = ?')
+        ) {
+          throw new Error('forced Talk Together Pass count failure');
+        }
+      },
+    });
+    const keyPair = await createDeviceKeyPair();
+    await issueChallenge({
+      env,
+      installationId,
+      devicePublicKey: keyPair.devicePublicKey,
+      appVersion: '1.2.3',
+    });
+    insertDiscordIdentity({
+      env,
+      discordUserRef: ACTIVE_DISCORD_USER_REF,
+      installationId,
+      status: 'active',
+    });
+    insertEntitlement(env, {
+      installation_id: installationId,
+      status: 'active',
+      budget_usd: 0.04,
+      managed_credential_ref: 'internal-status-pass-count-failure-ref',
+      issued_at: '2026-04-01T00:00:00Z',
+      expires_at: '2026-10-01T00:00:00Z',
+      discord_user_ref: ACTIVE_DISCORD_USER_REF,
+      discord_issue_status: 'active',
+      discord_issue_reserved_at: '2026-04-01T00:00:00Z',
+      discord_issue_delivered_at: '2026-04-01T00:00:01Z',
+    });
+    const signedRequest = await signCanonicalStatusRequest(keyPair.privateKey, {
+      installation_id: installationId,
+      timestamp: '2026-04-08T06:00:30.000Z',
+    });
+
+    const response = await getTrialStatus({
+      env,
+      installationId,
+      headers: {
+        'X-Puripuly-Timestamp': signedRequest.timestamp,
+        'X-Puripuly-Signature': signedRequest.signature,
+      },
+    });
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as Record<string, unknown>;
+    expect(payload.referral_id).toMatch(REFERRAL_ID_PATTERN);
+    expect(payload).not.toHaveProperty('talk_together_pass');
+  });
+
+  it.each([0, 1, 4, 5, 6])(
+    'returns capped Talk Together Pass invite count for %i counted rows',
+    async (countedRows) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+
+      const installationId = `install-status-pass-boundary-${countedRows}`;
+      const env = createTestBrokerEnv();
+      const keyPair = await createDeviceKeyPair();
+      await issueChallenge({
+        env,
+        installationId,
+        devicePublicKey: keyPair.devicePublicKey,
+        appVersion: '1.2.3',
+      });
+      insertDiscordIdentity({
+        env,
+        discordUserRef: ACTIVE_DISCORD_USER_REF,
+        installationId,
+        status: 'active',
+      });
+      insertEntitlement(env, {
+        installation_id: installationId,
+        status: 'active',
+        budget_usd: 0.04,
+        managed_credential_ref: `internal-status-pass-boundary-${countedRows}`,
+        issued_at: '2026-04-01T00:00:00Z',
+        expires_at: '2026-10-01T00:00:00Z',
+        discord_user_ref: ACTIVE_DISCORD_USER_REF,
+        discord_issue_status: 'active',
+        discord_issue_reserved_at: '2026-04-01T00:00:00Z',
+        discord_issue_delivered_at: '2026-04-01T00:00:01Z',
+      });
+      const signedRequest = await signCanonicalStatusRequest(keyPair.privateKey, {
+        installation_id: installationId,
+        timestamp: '2026-04-08T06:00:30.000Z',
+      });
+
+      const initialResponse = await getTrialStatus({
+        env,
+        installationId,
+        headers: {
+          'X-Puripuly-Timestamp': signedRequest.timestamp,
+          'X-Puripuly-Signature': signedRequest.signature,
+        },
+      });
+      expect(initialResponse.status).toBe(200);
+      const initialPayload = (await initialResponse.json()) as Record<string, unknown>;
+      expect(initialPayload.referral_id).toMatch(REFERRAL_ID_PATTERN);
+      const referralId = String(initialPayload.referral_id);
+
+      for (let index = 0; index < countedRows; index += 1) {
+        insertStatusReferralReward({
+          env,
+          referralId,
+          referrerDiscordUserRef: ACTIVE_DISCORD_USER_REF,
+          referrerInstallationId: installationId,
+          index,
+          referredBonusStatus: index % 2 === 0 ? 'reserved' : 'credited',
+        });
+      }
+
+      const response = await getTrialStatus({
+        env,
+        installationId,
+        headers: {
+          'X-Puripuly-Timestamp': signedRequest.timestamp,
+          'X-Puripuly-Signature': signedRequest.signature,
+        },
+      });
+      expect(response.status).toBe(200);
+      const payload = (await response.json()) as Record<string, unknown>;
+      expect(payload.talk_together_pass).toMatchObject({
+        pass_id: referralId,
+        invite_count: Math.min(countedRows, 5),
+        invite_limit: 5,
+        bonus_translations_per_friend: 200,
+      });
+    },
+  );
 
   it('omits Referral ID and does not create one for non-delivered Discord-managed status', async () => {
     vi.useFakeTimers();

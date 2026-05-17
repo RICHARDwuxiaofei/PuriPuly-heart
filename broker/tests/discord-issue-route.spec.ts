@@ -129,7 +129,16 @@ describe('Discord issue gate', () => {
         model: MODEL,
       }),
     );
-    expect(payload.referral_id).toEqual(expect.stringMatching(REFERRAL_ID_PATTERN));
+    expect(payload.referral_id).toMatch(REFERRAL_ID_PATTERN);
+    expect(payload.talk_together_pass).toEqual({
+      pass_id: payload.referral_id,
+      invite_count: 0,
+      invite_limit: 5,
+      bonus_translations_per_friend: 200,
+    });
+    const serializedTalkTogetherPass = JSON.stringify(payload.talk_together_pass);
+    expect(serializedTalkTogetherPass).not.toContain('discord_user_ref');
+    expect(serializedTalkTogetherPass).not.toContain('budget_usd');
     expect(payload).not.toHaveProperty('referral_bonus_applied');
     expectNoReferralRewardEstimateFields(payload);
     expectTokenExchange(discordApi.fetchMock, {
@@ -191,6 +200,41 @@ describe('Discord issue gate', () => {
     ]);
     expect(JSON.stringify(issueSuccessEvents)).not.toContain(rawDiscordUserId);
     expect(JSON.stringify(issueSuccessEvents)).not.toContain(rawDiscordEmail);
+  });
+
+  it('keeps Referral ID and omits Talk Together Pass status when issue invite count query fails', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW_ISO));
+
+    const env = createTestBrokerEnv({
+      beforeFirst({ sql }) {
+        if (
+          sql.includes('FROM referral_rewards counted') &&
+          sql.includes('counted.referrer_discord_user_ref = ?')
+        ) {
+          throw new Error('forced Talk Together Pass count failure');
+        }
+      },
+    });
+    const started = await startDiscordSession(
+      'install-discord-issue-pass-count-failure',
+      env,
+    );
+    const code = 'discord-oauth-code-pass-count-failure';
+    mockDiscordApi({
+      user: {
+        id: discordSnowflakeForAgeDays(31),
+        verified: true,
+      },
+    });
+    const requestBody = await signedIssueRequest(started, { code });
+
+    const response = await postDiscordIssue(started.env, requestBody);
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as Record<string, unknown>;
+    expect(payload.referral_id).toMatch(REFERRAL_ID_PATTERN);
+    expect(payload).not.toHaveProperty('talk_together_pass');
   });
 
   it('returns a restart boundary when Discord token exchange fails after terminalizing the session', async () => {

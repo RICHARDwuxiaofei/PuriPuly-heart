@@ -5,9 +5,7 @@ import flet as ft
 from puripuly_heart.ui.i18n import t
 from puripuly_heart.ui.theme import (
     COLOR_DIVIDER,
-    COLOR_NEUTRAL,
     COLOR_ON_BACKGROUND,
-    COLOR_PRIMARY,
     COLOR_PRIMARY_CONTAINER,
     COLOR_SURFACE,
     COLOR_SURFACE_TONAL,
@@ -17,7 +15,6 @@ _FIELD_HEIGHT = 72
 _TRACK_RADIUS = 12
 _TEXT_SIZE = 18
 _TEXT_HORIZONTAL_PADDING = 16
-_STATUS_ICON_SIZE = 36
 
 
 class ManagedTrialUsageBar(ft.Row):
@@ -76,10 +73,9 @@ class ManagedTrialUsageBar(ft.Row):
                 expand=True,
             ),
         )
-        self._status_icon = ft.Icon(size=_STATUS_ICON_SIZE)
         super().__init__(
-            controls=[self._track, self._status_icon],
-            spacing=10,
+            controls=[self._track],
+            spacing=0,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         self.set_percent(percent)
@@ -117,14 +113,8 @@ class ManagedTrialUsageBar(ft.Row):
         self._sync_fill_segments()
         if self._percent is None:
             self._remaining_text.value = t("settings.managed_trial_usage.remaining_placeholder")
-            self._status_icon.name = ft.Icons.HOURGLASS_TOP_ROUNDED
-            self._status_icon.color = COLOR_NEUTRAL
-            self._status_icon.tooltip = t("api_key.status.verifying")
         else:
             self._remaining_text.value = t(
                 "settings.managed_trial_usage.remaining",
                 percent=self._percent,
             )
-            self._status_icon.name = ft.Icons.CHECK_CIRCLE_ROUNDED
-            self._status_icon.color = COLOR_PRIMARY
-            self._status_icon.tooltip = t("api_key.status.success")

@@ -15,12 +15,10 @@ def test_managed_trial_usage_bar_renders_inline_placeholder_when_percent_unknown
 
     assert isinstance(bar, ft.Row)
     assert bar.percent is None
-    assert len(bar.controls) == 2
-    assert bar.spacing == 10
+    assert len(bar.controls) == 1
+    assert bar.spacing == 0
     assert bar.controls[0] is bar._track
-    assert bar.controls[1] is bar._status_icon
-    assert bar._status_icon.name == ft.Icons.HOURGLASS_TOP_ROUNDED
-    assert bar._status_icon.size == 36
+    assert not hasattr(bar, "_status_icon")
     assert bar._remaining_text.value == "Checking"
 
 
@@ -45,11 +43,11 @@ def test_managed_trial_usage_bar_formats_and_clamps_percent(
     )
 
 
-def test_managed_trial_usage_bar_uses_free_usage_copy() -> None:
+def test_managed_trial_usage_bar_uses_neutral_remaining_copy() -> None:
     set_locale("en")
     bar = ManagedTrialUsageBar(percent=71)
 
-    assert bar._remaining_text.value == "Free usage 71% remaining"
+    assert bar._remaining_text.value == "71% remaining"
 
 
 def test_managed_trial_usage_bar_distributes_fill_horizontally() -> None:
@@ -65,8 +63,6 @@ def test_managed_trial_usage_bar_handles_empty_and_full_states() -> None:
 
     assert empty_bar._fill_segments.controls == [empty_bar._empty_segment]
     assert full_bar._fill_segments.controls == [full_bar._fill_segment]
-    assert empty_bar._status_icon.name == ft.Icons.CHECK_CIRCLE_ROUNDED
-    assert full_bar._status_icon.name == ft.Icons.CHECK_CIRCLE_ROUNDED
 
 
 def test_managed_trial_usage_bar_apply_locale_refreshes_overlay_text() -> None:
@@ -77,7 +73,7 @@ def test_managed_trial_usage_bar_apply_locale_refreshes_overlay_text() -> None:
 
         set_locale("ko")
         bar.apply_locale()
-        assert bar._remaining_text.value == "무료 사용량 71% 남음"
+        assert bar._remaining_text.value == "71% 남음"
 
         bar.set_percent(None)
         bar.apply_locale()
@@ -86,9 +82,9 @@ def test_managed_trial_usage_bar_apply_locale_refreshes_overlay_text() -> None:
         set_locale(previous_locale)
 
 
-def test_managed_trial_usage_bar_uses_real_status_icon_for_known_and_unknown_states() -> None:
+def test_managed_trial_usage_bar_never_renders_status_icon() -> None:
     unknown_bar = ManagedTrialUsageBar()
     known_bar = ManagedTrialUsageBar(percent=71)
 
-    assert unknown_bar._status_icon.name == ft.Icons.HOURGLASS_TOP_ROUNDED
-    assert known_bar._status_icon.name == ft.Icons.CHECK_CIRCLE_ROUNDED
+    assert not hasattr(unknown_bar, "_status_icon")
+    assert not hasattr(known_bar, "_status_icon")

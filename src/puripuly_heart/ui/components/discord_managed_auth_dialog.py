@@ -111,7 +111,7 @@ class DiscordManagedAuthDialog:
         return ft.TextField(
             label=t("discord_auth.referral_id.label"),
             value="",
-            helper_text=t("discord_auth.referral_id.helper"),
+            helper_text="",
             dense=True,
             border_radius=14,
             border_color=COLOR_DIVIDER,

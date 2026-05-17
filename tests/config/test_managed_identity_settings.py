@@ -61,6 +61,36 @@ def test_managed_identity_referral_id_defaults_to_none_and_round_trips_uppercase
     assert to_dict(restored)["managed_identity"]["referral_id"] == "7KQ9M2"
 
 
+def test_managed_identity_settings_do_not_persist_talk_together_pass_status() -> None:
+    settings = AppSettings()
+    settings.managed_identity.referral_id = "7KQ9M2"
+
+    serialized = to_dict(settings)
+    managed_identity = serialized["managed_identity"]
+
+    assert managed_identity["referral_id"] == "7KQ9M2"
+    assert "talk_together_pass" not in managed_identity
+    assert "invite_count" not in managed_identity
+    assert "invite_limit" not in managed_identity
+
+    loaded = from_dict(
+        {
+            **serialized,
+            "managed_identity": {
+                **managed_identity,
+                "talk_together_pass": {"pass_id": "7KQ9M2", "invite_count": 1},
+                "invite_count": 1,
+                "invite_limit": 5,
+            },
+        }
+    )
+
+    assert loaded.managed_identity.referral_id == "7KQ9M2"
+    assert not hasattr(loaded.managed_identity, "talk_together_pass")
+    assert not hasattr(loaded.managed_identity, "invite_count")
+    assert not hasattr(loaded.managed_identity, "invite_limit")
+
+
 @pytest.mark.parametrize(
     ("persisted_value", "expected"),
     [

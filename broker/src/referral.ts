@@ -1,4 +1,5 @@
 import { getBrokerAbuseControlsConfig } from './abuse-controls';
+import type { TalkTogetherPassStatusResponse } from './managed-state';
 import { resolveEffectiveEntitlementLifecycle } from './managed-state';
 import {
   readManagedChildKeyEffectiveLimit,
@@ -14,6 +15,8 @@ import { MANAGED_TRIAL_BUDGET_POLICY } from './trial-policy';
 
 export const REFERRAL_ID_LENGTH = 6;
 export const REFERRAL_ID_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ';
+export const TALK_TOGETHER_PASS_INVITE_LIMIT = 5;
+export const TALK_TOGETHER_PASS_BONUS_TRANSLATIONS_PER_FRIEND = 200;
 
 const REFERRAL_ID_PATTERN = new RegExp(
   `^[${REFERRAL_ID_ALPHABET}]{${REFERRAL_ID_LENGTH}}$`,
@@ -1165,7 +1168,7 @@ async function insertReservedIssueReferralReward(
                FROM referral_rewards counted
               WHERE counted.referrer_discord_user_ref = code.owner_discord_user_ref
                 AND counted.referred_bonus_status IN ('reserved', 'credited')
-           ) < 5
+           ) < ?
            AND NOT EXISTS (
              SELECT 1
                FROM referral_rewards counted_referred
@@ -1201,6 +1204,7 @@ async function insertReservedIssueReferralReward(
       input.referredDiscordUserRef,
       input.referredHardwareHash,
       input.referredHardwareHashSaltVersion,
+      TALK_TOGETHER_PASS_INVITE_LIMIT,
       input.referredDiscordUserRef,
       input.referredInstallationId,
       referralVelocityWindowStartIso,
@@ -1437,10 +1441,26 @@ async function hasCountedIssueReferralForReferred(
   return Number(row?.counted_found ?? 0) === 1;
 }
 
-async function hasReachedIssueReferralCap(
+export async function resolveTalkTogetherPassStatusForOwnedReferralCode(
+  db: D1Database,
+  referralCode: Pick<ReferralCodeRecord, 'referral_id' | 'owner_discord_user_ref'>,
+): Promise<TalkTogetherPassStatusResponse> {
+  const inviteCount = await countCountedIssueReferralRewardsForReferrer(
+    db,
+    referralCode.owner_discord_user_ref,
+  );
+  return {
+    pass_id: referralCode.referral_id,
+    invite_count: Math.min(inviteCount, TALK_TOGETHER_PASS_INVITE_LIMIT),
+    invite_limit: TALK_TOGETHER_PASS_INVITE_LIMIT,
+    bonus_translations_per_friend: TALK_TOGETHER_PASS_BONUS_TRANSLATIONS_PER_FRIEND,
+  };
+}
+
+async function countCountedIssueReferralRewardsForReferrer(
   db: D1Database,
   referrerDiscordUserRef: string,
-): Promise<boolean> {
+): Promise<number> {
   const row = await db
     .prepare(
       `SELECT COUNT(*) AS count
@@ -1451,7 +1471,17 @@ async function hasReachedIssueReferralCap(
     .bind(referrerDiscordUserRef)
     .first<{ count: number }>();
 
-  return Number(row?.count ?? 0) >= 5;
+  return Math.max(0, Number(row?.count ?? 0));
+}
+
+async function hasReachedIssueReferralCap(
+  db: D1Database,
+  referrerDiscordUserRef: string,
+): Promise<boolean> {
+  return (
+    (await countCountedIssueReferralRewardsForReferrer(db, referrerDiscordUserRef)) >=
+    TALK_TOGETHER_PASS_INVITE_LIMIT
+  );
 }
 
 async function insertSkippedIssueReferralReward(

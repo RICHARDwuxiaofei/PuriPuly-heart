@@ -417,6 +417,14 @@ describe('Discord managed issue referral reservation', () => {
         referral_bonus_applied: true,
       }),
     );
+    expect(payload.referral_bonus_applied).toBe(true);
+    expect(payload.referral_id).not.toBe(REFERRAL_ID);
+    expect(payload.talk_together_pass).toMatchObject({
+      pass_id: payload.referral_id,
+      invite_count: 0,
+      invite_limit: 5,
+      bonus_translations_per_friend: 200,
+    });
     expectNoReferralRewardEstimateFields(payload);
     const createBody = JSON.parse(
       String(discordApi.openRouterCreateCalls[0]?.init?.body),

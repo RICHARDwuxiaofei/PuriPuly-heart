@@ -31,13 +31,17 @@ import {
   type DiscordUserResponse,
 } from './discord-oauth';
 import { getFingerprintSaltConfig } from './fingerprint-salt';
-import { normalizeManagedState } from './managed-state';
+import {
+  normalizeManagedState,
+  type TalkTogetherPassStatusResponse,
+} from './managed-state';
 import { nonEmptyString, stringValue, validatePublicInput } from './public-input';
 import type {
   BrokerPendingDiscordOAuthSessionsConfig,
   DiscordOAuthSessionRecord,
   InstallationRecord,
   OpenRouterEntitlementRecord,
+  ReferralCodeRecord,
 } from './persistence';
 import {
   assignManagedGuardrail,
@@ -59,6 +63,7 @@ import {
   normalizeReferralId,
   recordSkippedIssueReferralReward,
   reserveIssueReferralReward,
+  resolveTalkTogetherPassStatusForOwnedReferralCode,
   type IssueReferralReservationResult,
   type IssueReferralSkipReason,
 } from './referral';
@@ -638,7 +643,7 @@ export async function handleDiscordOpenRouterIssue(
     });
     issueSuccessRecorded = true;
 
-    const referralId = await bestEffortEnsureOwnedReferralIdForIssueResponse(
+    const ownedReferralStatus = await bestEffortResolveOwnedReferralStatusForIssueResponse(
       c.env.BROKER_DB,
       {
         installationId: input.value.installationId,
@@ -668,7 +673,8 @@ export async function handleDiscordOpenRouterIssue(
       rawKey: childKey.rawKey,
       model: input.value.model,
       installationId: input.value.installationId,
-      referralId,
+      referralId: ownedReferralStatus?.referralCode.referral_id ?? null,
+      talkTogetherPass: ownedReferralStatus?.talkTogetherPass ?? null,
       referralBonusApplied,
     });
   } catch (error) {
@@ -2046,6 +2052,7 @@ async function discordIssueSuccessResponse(
     model: string;
     installationId: string;
     referralId: string | null;
+    talkTogetherPass: TalkTogetherPassStatusResponse | null;
     referralBonusApplied: boolean;
   },
 ): Promise<Response> {
@@ -2078,20 +2085,42 @@ async function discordIssueSuccessResponse(
     budget_usd: input.entitlement.budget_usd,
     model: input.model,
     ...(input.referralId ? { referral_id: input.referralId } : {}),
+    ...(input.talkTogetherPass ? { talk_together_pass: input.talkTogetherPass } : {}),
     ...(input.referralBonusApplied ? { referral_bonus_applied: true } : {}),
   });
 }
 
-async function bestEffortEnsureOwnedReferralIdForIssueResponse(
+type OwnedReferralIssueLookup = {
+  referralCode: ReferralCodeRecord;
+  talkTogetherPass: TalkTogetherPassStatusResponse | null;
+};
+
+async function bestEffortResolveOwnedReferralStatusForIssueResponse(
   db: D1Database,
   input: {
     installationId: string;
     nowIso: string;
   },
-): Promise<string | null> {
+): Promise<OwnedReferralIssueLookup | null> {
   try {
     const result = await ensureOwnedReferralIdForActiveDiscordManagedUser(db, input);
-    return result.ok ? result.referralCode.referral_id : null;
+    if (!result.ok) {
+      return null;
+    }
+    try {
+      return {
+        referralCode: result.referralCode,
+        talkTogetherPass: await resolveTalkTogetherPassStatusForOwnedReferralCode(
+          db,
+          result.referralCode,
+        ),
+      };
+    } catch {
+      return {
+        referralCode: result.referralCode,
+        talkTogetherPass: null,
+      };
+    }
   } catch {
     return null;
   }
