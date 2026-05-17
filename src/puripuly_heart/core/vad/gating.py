@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import uuid
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 from uuid import UUID
 
 import numpy as np
 
+from puripuly_heart.core.audio.diagnostics import compute_audio_frame_metrics
+from puripuly_heart.core.audio.format import AudioFrameF32
 from puripuly_heart.core.audio.ring_buffer import RingBufferF32
 
 logger = logging.getLogger(__name__)
@@ -59,6 +62,9 @@ class VadGating:
     start_debounce_chunks: int
     start_commit_chunks: int
     candidate_log_label: str | None
+    diagnostic_event_callback: Callable[[str], object] | None
+    diagnostics_enabled: Callable[[], bool] | None
+    diagnostic_label: str
     _ring: RingBufferF32
     _in_speech: bool
     _utterance_id: UUID | None
@@ -68,6 +74,8 @@ class VadGating:
     _pending_start_prob: float | None
     _pending_start_chunks: list[np.ndarray]
     _pending_debounce_reached: bool
+    _speech_chunk_count: int
+    _speech_sample_count: int
 
     def __init__(
         self,
@@ -81,6 +89,9 @@ class VadGating:
         start_debounce_chunks: int = 1,
         start_commit_chunks: int = 1,
         candidate_log_label: str | None = None,
+        diagnostic_event_callback: Callable[[str], object] | None = None,
+        diagnostics_enabled: Callable[[], bool] | None = None,
+        diagnostic_label: str = "self",
     ) -> None:
         if sample_rate_hz <= 0:
             raise ValueError("sample_rate_hz must be > 0")
@@ -102,6 +113,9 @@ class VadGating:
         self.start_debounce_chunks = start_debounce_chunks
         self.start_commit_chunks = start_commit_chunks
         self.candidate_log_label = candidate_log_label
+        self.diagnostic_event_callback = diagnostic_event_callback
+        self.diagnostics_enabled = diagnostics_enabled
+        self.diagnostic_label = diagnostic_label
 
         chunk_ms = (self.chunk_samples / self.sample_rate_hz) * 1000.0
         self.hangover_chunks = int(math.ceil(hangover_ms / chunk_ms)) if hangover_ms > 0 else 0
@@ -117,6 +131,8 @@ class VadGating:
         self._pending_start_prob = None
         self._pending_start_chunks = []
         self._pending_debounce_reached = False
+        self._speech_chunk_count = 0
+        self._speech_sample_count = 0
 
     @property
     def in_speech(self) -> bool:
@@ -133,6 +149,8 @@ class VadGating:
         self._utterance_id = None
         self._silence_run = 0
         self._reset_pending_start()
+        self._speech_chunk_count = 0
+        self._speech_sample_count = 0
 
     def process_chunk(self, chunk: np.ndarray) -> list[VadEvent]:
         chunk = np.asarray(chunk, dtype=np.float32).reshape(-1)
@@ -153,6 +171,8 @@ class VadGating:
 
         # in speech
         events.append(SpeechChunk(self._utterance_id, chunk=chunk.copy()))  # type: ignore[arg-type]
+        self._speech_chunk_count += 1
+        self._speech_sample_count += int(chunk.size)
 
         if prob >= self.speech_threshold:
             self._silence_run = 0
@@ -168,12 +188,26 @@ class VadGating:
                 str(self._utterance_id)[:8],
                 trailing_silence_ms,
             )
+            with contextlib.suppress(Exception):
+                if self._diagnostics_enabled():
+                    speech_audio_ms = self._speech_sample_count * 1000.0 / self.sample_rate_hz
+                    assert self.diagnostic_event_callback is not None
+                    self.diagnostic_event_callback(
+                        f"[AudioDiag][VAD][{self.diagnostic_label}] event=SpeechEnd "
+                        f"utterance_id={str(self._utterance_id)[:8]} "
+                        f"trailing_silence_ms={trailing_silence_ms} "
+                        f"speech_audio_ms={speech_audio_ms:.1f} "
+                        f"chunk_count={self._speech_chunk_count}"
+                    )
+
             events.append(
                 SpeechEnd(self._utterance_id, trailing_silence_ms=trailing_silence_ms)
             )  # type: ignore[arg-type]
             self._in_speech = False
             self._utterance_id = None
             self._silence_run = 0
+            self._speech_chunk_count = 0
+            self._speech_sample_count = 0
             self.engine.reset()
 
         self._ring.append(chunk)
@@ -214,6 +248,27 @@ class VadGating:
         buffered_chunks = list(self._pending_start_chunks)
         self._log_candidate("committed", buffered_chunks=len(buffered_chunks))
         logger.info("[VAD] SpeechStart: id=%s, prob=%.2f", str(utterance_id)[:8], start_prob)
+        self._speech_chunk_count = len(buffered_chunks)
+        self._speech_sample_count = sum(int(buffered.size) for buffered in buffered_chunks)
+
+        with contextlib.suppress(Exception):
+            if self._diagnostics_enabled():
+                metrics = compute_audio_frame_metrics(
+                    AudioFrameF32(
+                        samples=buffered_chunks[0],
+                        sample_rate_hz=self.sample_rate_hz,
+                        channels=1,
+                    )
+                )
+                assert self.diagnostic_event_callback is not None
+                self.diagnostic_event_callback(
+                    f"[AudioDiag][VAD][{self.diagnostic_label}] event=SpeechStart "
+                    f"utterance_id={str(utterance_id)[:8]} "
+                    f"prob={start_prob:.3f} threshold={self.speech_threshold} "
+                    f"pre_roll_ms={len(pre_roll) * 1000.0 / self.sample_rate_hz:.1f} "
+                    f"rms_db={metrics.rms_db:.1f} peak_db={metrics.peak_db:.1f}"
+                )
+
         self._reset_pending_start()
 
         events: list[VadEvent] = [
@@ -273,6 +328,15 @@ class VadGating:
                 buffered_chunks,
             )
 
+    def _diagnostics_enabled(self) -> bool:
+        if self.diagnostic_event_callback is None:
+            return False
+        if self.diagnostics_enabled is None:
+            return True
+        with contextlib.suppress(Exception):
+            return bool(self.diagnostics_enabled())
+        return False
+
 
 PEER_VAD_SPEECH_THRESHOLD = 0.60
 PEER_VAD_START_DEBOUNCE_CHUNKS = 3
@@ -286,6 +350,9 @@ def create_peer_vad_gating(
     ring_buffer_ms: int,
     speech_threshold: float = PEER_VAD_SPEECH_THRESHOLD,
     hangover_ms: int,
+    diagnostic_event_callback: Callable[[str], object] | None = None,
+    diagnostics_enabled: Callable[[], bool] | None = None,
+    diagnostic_label: str = "peer",
 ) -> VadGating:
     return VadGating(
         engine=engine,
@@ -296,4 +363,7 @@ def create_peer_vad_gating(
         start_debounce_chunks=PEER_VAD_START_DEBOUNCE_CHUNKS,
         start_commit_chunks=PEER_VAD_START_COMMIT_CHUNKS,
         candidate_log_label="Peer",
+        diagnostic_event_callback=diagnostic_event_callback,
+        diagnostics_enabled=diagnostics_enabled,
+        diagnostic_label=diagnostic_label,
     )

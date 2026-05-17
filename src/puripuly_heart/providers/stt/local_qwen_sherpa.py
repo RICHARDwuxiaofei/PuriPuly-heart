@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 import numpy as np
 
-from puripuly_heart.core.audio.format import pcm16le_bytes_to_float32
+from puripuly_heart.core.audio.diagnostics import compute_audio_frame_metrics
+from puripuly_heart.core.audio.format import AudioFrameF32, pcm16le_bytes_to_float32
 from puripuly_heart.core.local_qwen_runtime import (
     LocalQwenRuntimeBootstrapError,
     ensure_local_qwen_windows_runtime,
@@ -46,6 +48,35 @@ def _log_prefix(stream_label: str | None) -> str:
     if stream_label:
         return f"{prefix}[{stream_label}]"
     return prefix
+
+
+def _audio_diag_prefix(stream_label: str | None) -> str:
+    prefix = "[AudioDiag][local_qwen]"
+    if stream_label:
+        return f"{prefix}[{stream_label}]"
+    return prefix
+
+
+def _looks_repetitive(text: str) -> bool:
+    stripped = text.strip()
+    if len(stripped) < 6:
+        return False
+    for unit_len in range(1, (len(stripped) // 2) + 1):
+        if len(stripped) % unit_len == 0 and stripped == stripped[:unit_len] * (
+            len(stripped) // unit_len
+        ):
+            return len(stripped) // unit_len >= 3
+    if len(stripped) < 12:
+        return False
+    return len(set(stripped)) <= max(4, len(stripped) // 8)
+
+
+def _looks_script_mismatched(text: str, language_hint: str | None) -> bool:
+    if not text or language_hint != "Korean":
+        return False
+    cjk = sum("\u4e00" <= ch <= "\u9fff" for ch in text)
+    latin = sum("a" <= ch.lower() <= "z" for ch in text)
+    return cjk >= 3 or latin >= max(5, len(text) // 2)
 
 
 def _pcm16le_duration_ms(pcm16le_size_bytes: int, sample_rate_hz: int) -> float:
@@ -118,6 +149,7 @@ class LocalQwenSherpaSTTBackend(STTBackend):
     stream_label: str | None = None
     language_hint: str | None = None
     hotwords: tuple[str, ...] = ()
+    diagnostics_enabled: Callable[[], bool] | None = None
     _recognizer: object | None = field(init=False, default=None, repr=False)
     _load_lock: asyncio.Lock = field(init=False, repr=False)
     _decode_lock: asyncio.Lock = field(init=False, repr=False)
@@ -237,6 +269,9 @@ class _LocalQwenSherpaSession(STTBackendSession):
         samples_f32 = np.concatenate(self._buffer_f32)
         self._buffer_f32.clear()
         audio_ms = _sample_count_duration_ms(samples_f32.size, self.backend.sample_rate_hz)
+        diag_enabled = self._diagnostics_enabled()
+        if diag_enabled:
+            self._log_decode_start_diagnostics(samples_f32)
 
         try:
             started_at = time.perf_counter()
@@ -251,6 +286,14 @@ class _LocalQwenSherpaSession(STTBackendSession):
         self._total_audio_ms += audio_ms
         self._total_inference_ms += inference_ms
         self._total_rtf += rtf
+
+        if diag_enabled:
+            self._log_decode_done_diagnostics(
+                audio_ms=audio_ms,
+                inference_ms=inference_ms,
+                rtf=rtf,
+                text=text,
+            )
 
         if text:
             logger.info(
@@ -284,6 +327,54 @@ class _LocalQwenSherpaSession(STTBackendSession):
             if isinstance(event, BaseException):
                 raise event
             yield event
+
+    def _diagnostics_enabled(self) -> bool:
+        diagnostics_enabled = self.backend.diagnostics_enabled
+        if diagnostics_enabled is None:
+            return False
+        with contextlib.suppress(Exception):
+            return bool(diagnostics_enabled())
+        return False
+
+    def _log_decode_start_diagnostics(self, samples_f32: np.ndarray) -> None:
+        with contextlib.suppress(Exception):
+            metrics = compute_audio_frame_metrics(
+                AudioFrameF32(
+                    samples=samples_f32,
+                    sample_rate_hz=self.backend.sample_rate_hz,
+                    channels=1,
+                )
+            )
+            logger.info(
+                "%s decode_start audio_ms=%.1f rms_db=%.1f peak_db=%.1f zero_ratio=%.3f language_hint=%r",
+                _audio_diag_prefix(self.backend.stream_label),
+                metrics.audio_ms,
+                metrics.rms_db,
+                metrics.peak_db,
+                metrics.zero_ratio,
+                self.backend.language_hint,
+            )
+
+    def _log_decode_done_diagnostics(
+        self,
+        *,
+        audio_ms: float,
+        inference_ms: float,
+        rtf: float,
+        text: str,
+    ) -> None:
+        with contextlib.suppress(Exception):
+            logger.info(
+                "%s decode_done audio_ms=%.1f inference_ms=%.1f rtf=%.3f text_len=%s empty_result=%s suspicious_repetition=%s suspicious_script=%s",
+                _audio_diag_prefix(self.backend.stream_label),
+                audio_ms,
+                inference_ms,
+                rtf,
+                len(text),
+                not bool(text),
+                _looks_repetitive(text),
+                _looks_script_mismatched(text, self.backend.language_hint),
+            )
 
     def _log_summary_once(self) -> None:
         if self._summary_logged or self._utterances == 0:

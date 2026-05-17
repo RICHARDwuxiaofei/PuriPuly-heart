@@ -11,10 +11,11 @@ import numpy as np
 logger = logging.getLogger(__name__)
 MANAGED_STT_SAMPLE_RATE_HZ = 16000
 
+from puripuly_heart.core.audio.diagnostics import AudioFaultProfile, normalize_audio_fault_profile
 from puripuly_heart.core.audio.format import float32_to_pcm16le_bytes
 from puripuly_heart.core.audio.ring_buffer import RingBufferF32
 from puripuly_heart.core.clock import Clock, SystemClock
-from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
+from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.backend import (
     STTBackend,
     STTBackendFloat32Session,
@@ -47,6 +48,7 @@ class ManagedSTTProvider:
     reconnect_window_s: float = 20.0
     on_terminal_failure: Callable[[Exception], Awaitable[None] | None] | None = None
     runtime_logging: SessionRuntimeLoggingService | None = None
+    stt_input_fault_profile_provider: Callable[[], AudioFaultProfile | str | None] | None = None
 
     _state: STTSessionState = STTSessionState.DISCONNECTED
     _active_session: STTBackendSession | None = None
@@ -60,6 +62,12 @@ class ManagedSTTProvider:
     _audio_ring: RingBufferF32 | None = None
     _reset_timer: asyncio.Task[None] | None = None
     _last_speech_end_time: float | None = None
+    _diagnostic_chunk_count: int = 0
+    _diagnostic_sample_count: int = 0
+    _diagnostic_sum_squares: float = 0.0
+    _diagnostic_peak: float = 0.0
+    _diagnostic_zero_count: int = 0
+    _stt_fault_logged_for_utterance: bool = False
 
     def __post_init__(self) -> None:
         if self.channel not in ("self", "peer"):
@@ -114,6 +122,21 @@ class ManagedSTTProvider:
         if self.runtime_logging is not None:
             self.runtime_logging.emit_detailed(formatted, level=level)
         _ = fallback_level
+
+    def _emit_audio_diag_detailed(
+        self,
+        message: str,
+        *args: object,
+        level: int = logging.INFO,
+        fallback_level: int | None = None,
+    ) -> None:
+        with contextlib.suppress(Exception):
+            self._emit_detailed(
+                message,
+                *args,
+                level=level,
+                fallback_level=fallback_level,
+            )
 
     def _log_session_connected(self, *, attempts: int) -> None:
         retries = max(0, attempts - 1)
@@ -179,6 +202,12 @@ class ManagedSTTProvider:
     async def _on_speech_start(self, event: SpeechStart) -> None:
         self._active_utterance_id = event.utterance_id
         self._pending_final_utterance_id = None
+        self._diagnostic_chunk_count = 0
+        self._diagnostic_sample_count = 0
+        self._diagnostic_sum_squares = 0.0
+        self._diagnostic_peak = 0.0
+        self._diagnostic_zero_count = 0
+        self._stt_fault_logged_for_utterance = False
 
         if not await self._ensure_session():
             return
@@ -206,16 +235,95 @@ class ManagedSTTProvider:
                 event.trailing_silence_ms,
                 fallback_level=logging.INFO,
             )
+            self._emit_stt_input_diagnostics(event.utterance_id, finalize=True)
             await self._active_session.on_speech_end(trailing_silence_ms=event.trailing_silence_ms)
 
     async def _send_audio(self, samples_f32: np.ndarray) -> None:
         samples_f32 = np.asarray(samples_f32, dtype=np.float32).reshape(-1)
         if samples_f32.size == 0:
             return
+        samples_f32 = self._apply_stt_input_fault(samples_f32)
+        self._record_stt_input_diagnostics(samples_f32)
         self._audio_ring.append(samples_f32)  # type: ignore[union-attr]
         if self._active_session is None:
             raise RuntimeError("STT session is not active")
         await self._send_audio_to_session(self._active_session, samples_f32)
+
+    def _current_stt_fault_profile(self) -> AudioFaultProfile:
+        if self.stt_input_fault_profile_provider is None:
+            return AudioFaultProfile.NONE
+        with contextlib.suppress(Exception):
+            return normalize_audio_fault_profile(self.stt_input_fault_profile_provider())
+        return AudioFaultProfile.NONE
+
+    def _apply_stt_input_fault(self, samples_f32: np.ndarray) -> np.ndarray:
+        profile = self._current_stt_fault_profile()
+        if profile is not AudioFaultProfile.STT_INPUT_LOW_SNR_VAD_PASS:
+            return samples_f32
+        with contextlib.suppress(Exception):
+            flat = np.arange(samples_f32.size, dtype=np.float32)
+            noise = np.sin(flat * np.float32(12.9898)) * np.float32(0.003)
+            transformed = (samples_f32 * np.float32(0.01)) + noise.astype(np.float32)
+            if not self._stt_fault_logged_for_utterance:
+                self._stt_fault_logged_for_utterance = True
+                self._emit_audio_diag_detailed(
+                    "[AudioDiag][STTFault][%s] profile=%s applies_after_vad=True",
+                    self.channel,
+                    profile.value,
+                )
+            return transformed.astype(np.float32)
+        return samples_f32
+
+    def _record_stt_input_diagnostics(self, samples_f32: np.ndarray) -> None:
+        if (
+            self.runtime_logging is None
+            or self.runtime_logging.mode is not SessionLoggingMode.DETAILED
+        ):
+            return
+        with contextlib.suppress(Exception):
+            samples = np.asarray(samples_f32, dtype=np.float32).reshape(-1)
+            if samples.size == 0:
+                return
+            sample_count = int(samples.size)
+            sum_squares = float(np.sum(np.square(samples)))
+            peak = float(np.max(np.abs(samples)))
+            zero_count = int(np.count_nonzero(np.abs(samples) < 1e-6))
+            self._diagnostic_chunk_count += 1
+            self._diagnostic_sample_count += sample_count
+            self._diagnostic_sum_squares += sum_squares
+            self._diagnostic_peak = max(self._diagnostic_peak, peak)
+            self._diagnostic_zero_count += zero_count
+
+    def _emit_stt_input_diagnostics(self, utterance_id: UUID, *, finalize: bool) -> None:
+        if (
+            self.runtime_logging is None
+            or self.runtime_logging.mode is not SessionLoggingMode.DETAILED
+        ):
+            return
+        with contextlib.suppress(Exception):
+            if self._diagnostic_sample_count <= 0:
+                return
+            audio_ms = self._diagnostic_sample_count * 1000.0 / float(self.sample_rate_hz)
+            rms = float(np.sqrt(self._diagnostic_sum_squares / self._diagnostic_sample_count))
+            rms_db = -120.0 if rms <= 0.0 else round(float(20.0 * np.log10(max(rms, 1e-6))), 1)
+            peak_db = (
+                -120.0
+                if self._diagnostic_peak <= 0.0
+                else round(float(20.0 * np.log10(max(self._diagnostic_peak, 1e-6))), 1)
+            )
+            zero_ratio = self._diagnostic_zero_count / float(self._diagnostic_sample_count)
+            self._emit_audio_diag_detailed(
+                "[AudioDiag][STTInput][%s] utterance_id=%s chunk_count=%s audio_ms=%.1f "
+                "rms_db=%.1f peak_db=%.1f zero_ratio=%.3f finalize=%s",
+                self.channel,
+                str(utterance_id)[:8],
+                self._diagnostic_chunk_count,
+                audio_ms,
+                rms_db,
+                peak_db,
+                zero_ratio,
+                finalize,
+            )
 
     async def _send_audio_to_session(
         self, session: STTBackendSession, samples_f32: np.ndarray

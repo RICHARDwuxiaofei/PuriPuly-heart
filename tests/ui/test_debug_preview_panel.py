@@ -26,6 +26,11 @@ DEBUG_PREVIEW_I18N_KEYS = {
     "debug_preview.discord_auth",
     "debug_preview.discord_callback_page",
     "debug_preview.peer_translation_eula",
+    "debug_preview.capture_fault_cycle",
+    "debug_preview.stt_fault_cycle",
+    "debug_preview.audio_fault_clear",
+    "debug_preview.capture_fault_snackbar",
+    "debug_preview.stt_fault_snackbar",
     "peer_translation_eula.body",
     "peer_translation_eula.accept",
     "peer_translation_eula.cancel",
@@ -40,6 +45,9 @@ ACTION_KEYS = [
     "discord_auth",
     "discord_callback_page",
     "peer_translation_eula",
+    "capture_fault_cycle",
+    "stt_fault_cycle",
+    "audio_fault_clear",
 ]
 
 
@@ -52,6 +60,9 @@ def _callbacks(seen: list[str]):
         "on_discord_auth": lambda: seen.append("discord_auth"),
         "on_discord_callback_page": lambda: seen.append("discord_callback_page"),
         "on_peer_translation_eula": lambda: seen.append("peer_translation_eula"),
+        "on_capture_fault_cycle": lambda: seen.append("capture_fault_cycle"),
+        "on_stt_fault_cycle": lambda: seen.append("stt_fault_cycle"),
+        "on_audio_fault_clear": lambda: seen.append("audio_fault_clear"),
     }
 
 
@@ -164,6 +175,9 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
         "Discord auth",
         "Discord callback page",
         "Peer translation EULA",
+        "Cycle capture fault",
+        "Cycle STT fault",
+        "Clear audio faults",
     ]
 
     monkeypatch.setattr(panel_module, "t", lambda key: f"label:{key}")

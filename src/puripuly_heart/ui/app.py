@@ -232,6 +232,9 @@ class TranslatorApp:
             on_discord_auth=self._preview_discord_auth,
             on_discord_callback_page=self._preview_discord_callback_page,
             on_peer_translation_eula=self._preview_peer_translation_eula,
+            on_capture_fault_cycle=self._preview_capture_fault_cycle,
+            on_stt_fault_cycle=self._preview_stt_fault_cycle,
+            on_audio_fault_clear=self._preview_audio_fault_clear,
         )
 
     def _preview_brake_notice(self) -> None:
@@ -259,6 +262,22 @@ class TranslatorApp:
 
     def _preview_peer_translation_eula(self) -> None:
         self._show_peer_translation_eula(self._debug_preview_noop)
+
+    def _preview_capture_fault_cycle(self) -> None:
+        profile = self.controller.cycle_debug_capture_fault_profile()
+        self._show_snackbar(
+            t("debug_preview.capture_fault_snackbar", profile=profile), ft.Colors.ORANGE_700
+        )
+
+    def _preview_stt_fault_cycle(self) -> None:
+        profile = self.controller.cycle_debug_stt_fault_profile()
+        self._show_snackbar(
+            t("debug_preview.stt_fault_snackbar", profile=profile), ft.Colors.ORANGE_700
+        )
+
+    def _preview_audio_fault_clear(self) -> None:
+        self.controller.clear_debug_audio_fault_profiles()
+        self._show_snackbar(t("debug_preview.audio_fault_clear"), ft.Colors.GREEN_700)
 
     def _show_peer_translation_eula(self, on_accept) -> None:
         dialog = PeerTranslationEulaDialog(

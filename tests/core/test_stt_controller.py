@@ -7,9 +7,11 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 import numpy as np
+import pytest
 
+import puripuly_heart.core.stt.controller as stt_controller_module
 from puripuly_heart.core.clock import FakeClock
-from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService
+from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.gating import SpeechEnd, SpeechStart
@@ -51,6 +53,34 @@ def _make_runtime_logging_capture() -> tuple[SessionRuntimeLoggingService, io.St
 
 def _runtime_log_messages(stream: io.StringIO) -> list[str]:
     return [line for line in stream.getvalue().splitlines() if line]
+
+
+def _raising_stt_fault_profile() -> str:
+    raise RuntimeError("fault profile unavailable")
+
+
+@dataclass(slots=True)
+class _RaisingAudioDiagRuntimeLogging:
+    fail_marker: str
+    mode: SessionLoggingMode = SessionLoggingMode.DETAILED
+    detailed_messages: list[str] | None = None
+    basic_messages: list[str] | None = None
+
+    def __post_init__(self) -> None:
+        self.detailed_messages = []
+        self.basic_messages = []
+
+    def emit_basic(self, message: str, *, level: int = logging.INFO) -> None:
+        _ = level
+        assert self.basic_messages is not None
+        self.basic_messages.append(message)
+
+    def emit_detailed(self, message: str, *, level: int = logging.INFO) -> None:
+        _ = level
+        assert self.detailed_messages is not None
+        self.detailed_messages.append(message)
+        if self.fail_marker in message:
+            raise RuntimeError("diagnostic log sink unavailable")
 
 
 @dataclass(slots=True)
@@ -320,6 +350,245 @@ async def test_stt_controller_prefers_float32_session_audio_path() -> None:
     np.testing.assert_array_equal(session.audio_f32[0], chunk)
 
     await stt.close()
+
+
+async def test_stt_controller_logs_input_diagnostics_on_speech_end() -> None:
+    backend = Float32Backend()
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        reset_deadline_s=90.0,
+        runtime_logging=runtime_logging,
+    )
+
+    try:
+        uid = uuid4()
+        await stt.handle_vad_event(
+            SpeechStart(
+                uid,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=np.ones(16000, dtype=np.float32),
+            )
+        )
+        await stt.handle_vad_event(SpeechEnd(uid, trailing_silence_ms=64))
+
+        messages = _runtime_log_messages(log_stream)
+        assert any("[AudioDiag][STTInput][self]" in message for message in messages)
+        assert any(
+            "chunk_count=1" in message and "audio_ms=1000.0" in message for message in messages
+        )
+    finally:
+        await stt.close()
+        runtime_logging.close()
+
+
+async def test_stt_input_fault_profile_modifies_audio_after_vad() -> None:
+    backend = Float32Backend()
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        reset_deadline_s=90.0,
+        runtime_logging=runtime_logging,
+        stt_input_fault_profile_provider=lambda: "stt_input_low_snr_vad_pass",
+    )
+
+    try:
+        uid = uuid4()
+        original = np.ones(16000, dtype=np.float32)
+        original_before = original.copy()
+        await stt.handle_vad_event(
+            SpeechStart(uid, pre_roll=np.zeros(0, dtype=np.float32), chunk=original)
+        )
+
+        session = backend.sessions[0]
+        assert len(session.audio_f32) == 1
+        assert float(np.max(np.abs(session.audio_f32[0]))) < 0.05
+        np.testing.assert_array_equal(original, original_before)
+        messages = _runtime_log_messages(log_stream)
+        assert any(
+            "[AudioDiag][STTFault][self] profile=stt_input_low_snr_vad_pass" in message
+            for message in messages
+        )
+    finally:
+        await stt.close()
+        runtime_logging.close()
+
+
+async def test_stt_input_fault_log_failure_does_not_block_backend_audio() -> None:
+    backend = Float32Backend()
+    runtime_logging = _RaisingAudioDiagRuntimeLogging("[AudioDiag][STTFault]")
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        reset_deadline_s=90.0,
+        runtime_logging=runtime_logging,  # type: ignore[arg-type]
+        stt_input_fault_profile_provider=lambda: "stt_input_low_snr_vad_pass",
+    )
+
+    try:
+        uid = uuid4()
+        original = np.ones(16000, dtype=np.float32)
+        original_before = original.copy()
+        await stt.handle_vad_event(
+            SpeechStart(uid, pre_roll=np.zeros(0, dtype=np.float32), chunk=original)
+        )
+
+        session = backend.sessions[0]
+        assert len(session.audio_f32) == 1
+        assert float(np.max(np.abs(session.audio_f32[0]))) < 0.05
+        np.testing.assert_array_equal(original, original_before)
+        assert runtime_logging.detailed_messages is not None
+        assert any(
+            "[AudioDiag][STTFault][self] profile=stt_input_low_snr_vad_pass" in message
+            for message in runtime_logging.detailed_messages
+        )
+    finally:
+        await stt.close()
+
+
+async def test_stt_input_diagnostic_log_failure_does_not_skip_speech_end() -> None:
+    backend = Float32Backend()
+    runtime_logging = _RaisingAudioDiagRuntimeLogging("[AudioDiag][STTInput]")
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        reset_deadline_s=90.0,
+        runtime_logging=runtime_logging,  # type: ignore[arg-type]
+    )
+
+    try:
+        uid = uuid4()
+        await stt.handle_vad_event(
+            SpeechStart(
+                uid,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=np.ones(16000, dtype=np.float32),
+            )
+        )
+        await stt.handle_vad_event(SpeechEnd(uid, trailing_silence_ms=64))
+
+        session = backend.sessions[0]
+        assert "on_speech_end" in session.calls
+        assert runtime_logging.detailed_messages is not None
+        assert any(
+            "[AudioDiag][STTInput][self]" in message
+            for message in runtime_logging.detailed_messages
+        )
+    finally:
+        await stt.close()
+
+
+async def test_stt_input_metric_record_failure_does_not_block_backend_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = Float32Backend()
+    runtime_logging, _log_stream = _make_runtime_logging_capture()
+    runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        reset_deadline_s=90.0,
+        runtime_logging=runtime_logging,
+    )
+
+    def fail_sum(*_args, **_kwargs):
+        raise RuntimeError("diagnostic sum failed")
+
+    original_sum = stt_controller_module.np.sum
+    monkeypatch.setattr(stt_controller_module.np, "sum", fail_sum)
+
+    try:
+        uid = uuid4()
+        original = np.linspace(-0.5, 0.5, 16000, dtype=np.float32)
+        original_before = original.copy()
+        await stt.handle_vad_event(
+            SpeechStart(uid, pre_roll=np.zeros(0, dtype=np.float32), chunk=original)
+        )
+        monkeypatch.setattr(stt_controller_module.np, "sum", original_sum)
+
+        session = backend.sessions[0]
+        assert len(session.audio_f32) == 1
+        np.testing.assert_array_equal(session.audio_f32[0], original)
+        np.testing.assert_array_equal(original, original_before)
+    finally:
+        await stt.close()
+        runtime_logging.close()
+
+
+async def test_stt_input_metric_emit_failure_does_not_skip_speech_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = Float32Backend()
+    runtime_logging, _log_stream = _make_runtime_logging_capture()
+    runtime_logging.set_mode(SessionLoggingMode.DETAILED)
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        reset_deadline_s=90.0,
+        runtime_logging=runtime_logging,
+    )
+
+    try:
+        uid = uuid4()
+        await stt.handle_vad_event(
+            SpeechStart(
+                uid,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=np.ones(16000, dtype=np.float32),
+            )
+        )
+
+        def fail_sqrt(*_args, **_kwargs):
+            raise RuntimeError("diagnostic sqrt failed")
+
+        original_sqrt = stt_controller_module.np.sqrt
+        monkeypatch.setattr(stt_controller_module.np, "sqrt", fail_sqrt)
+        await stt.handle_vad_event(SpeechEnd(uid, trailing_silence_ms=64))
+        monkeypatch.setattr(stt_controller_module.np, "sqrt", original_sqrt)
+
+        session = backend.sessions[0]
+        assert "on_speech_end" in session.calls
+    finally:
+        await stt.close()
+        runtime_logging.close()
+
+
+@pytest.mark.parametrize(
+    "profile_provider",
+    [
+        _raising_stt_fault_profile,
+        lambda: "not_a_fault_profile",
+    ],
+)
+async def test_stt_input_fault_profile_resolution_failure_uses_original_audio(
+    profile_provider,
+) -> None:
+    backend = Float32Backend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        reset_deadline_s=90.0,
+        stt_input_fault_profile_provider=profile_provider,
+    )
+
+    try:
+        uid = uuid4()
+        original = np.linspace(-1.0, 1.0, 16000, dtype=np.float32)
+        original_before = original.copy()
+        await stt.handle_vad_event(
+            SpeechStart(uid, pre_roll=np.zeros(0, dtype=np.float32), chunk=original)
+        )
+
+        session = backend.sessions[0]
+        assert len(session.audio_f32) == 1
+        np.testing.assert_array_equal(session.audio_f32[0], original)
+        np.testing.assert_array_equal(original, original_before)
+    finally:
+        await stt.close()
 
 
 async def test_stt_controller_resets_with_bridging_during_speech():

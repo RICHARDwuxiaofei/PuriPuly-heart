@@ -45,6 +45,7 @@ from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.audio.source import (
+    AudioSource,
     SelfMicCaptureChannelDecision,
     SoundDeviceAudioSource,
     determine_self_mic_capture_channels,
@@ -207,7 +208,9 @@ class GuiController:
 
     _bridge_task: asyncio.Task[None] | None = None
     _mic_task: asyncio.Task[None] | None = None
-    _audio_source: SoundDeviceAudioSource | None = None
+    _audio_source: AudioSource | None = None
+    _debug_capture_fault_profile: str = field(init=False, default="none")
+    _debug_stt_fault_profile: str = field(init=False, default="none")
     _vad: VadGating | None = None
     _stt_desired: bool = False
     _stt_switch_lock: asyncio.Lock | None = None
@@ -1902,7 +1905,11 @@ class GuiController:
     async def _probe_peer_local_stt_runtime_load(self) -> None:
         assert self.settings is not None
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-        peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
+        peer_backend = create_peer_stt_backend(
+            self.settings,
+            secrets=secrets,
+            diagnostics_enabled=self._detailed_audio_diag_enabled,
+        )
         session = None
         try:
             session = await peer_backend.open_session()
@@ -2482,7 +2489,11 @@ class GuiController:
         stt_error: Exception | None = None
         try:
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-            backend = create_stt_backend(self.settings, secrets=secrets)
+            backend = create_stt_backend(
+                self.settings,
+                secrets=secrets,
+                diagnostics_enabled=self._detailed_audio_diag_enabled,
+            )
             stt = ManagedSTTProvider(
                 backend=backend,
                 sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
@@ -2491,6 +2502,9 @@ class GuiController:
                 drain_timeout_s=self.settings.stt.drain_timeout_s,
                 bridging_ms=self.settings.audio.ring_buffer_ms,
                 runtime_logging=self.runtime_logging,
+                stt_input_fault_profile_provider=lambda: (
+                    self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
+                ),
             )
         except Exception as exc:
             stt_error = exc
@@ -2518,7 +2532,11 @@ class GuiController:
     ) -> ManagedSTTProvider:
         assert self.settings is not None
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-        peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
+        peer_backend = create_peer_stt_backend(
+            self.settings,
+            secrets=secrets,
+            diagnostics_enabled=self._detailed_audio_diag_enabled,
+        )
         return ManagedSTTProvider(
             backend=peer_backend,
             sample_rate_hz=config.backend.sample_rate_hz,
@@ -2529,12 +2547,128 @@ class GuiController:
             bridging_ms=max(1, config.vad_pre_roll_ms),
             on_terminal_failure=on_terminal_failure,
             runtime_logging=self.runtime_logging,
+            stt_input_fault_profile_provider=lambda: (
+                self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
+            ),
         )
 
     def _create_peer_audio_source_from_runtime_config(self, config: PeerRuntimeConfig):
+        raw_source = DesktopLoopbackAudioSource(device_name=config.output_device)
+        self.log_detailed(
+            "[AudioDiag][Loopback][peer] "
+            f"requested_device={config.output_device!r} "
+            f"resolved_device_name={getattr(raw_source, 'resolved_device_name', None)!r} "
+            f"resolved_device_index={getattr(raw_source, 'resolved_device_index', None)} "
+            f"resolved_channels={getattr(raw_source, 'resolved_channels', None)} "
+            f"actual_sample_rate_hz={getattr(raw_source, 'actual_sample_rate_hz', None)} "
+            f"used_default_fallback={getattr(raw_source, 'used_default_fallback', None)}"
+        )
+        wrapped_source = self._wrap_diagnostic_audio_source(raw_source, channel_label="peer")
         return DesktopPeerPipeline(
-            source=DesktopLoopbackAudioSource(device_name=config.output_device),
+            source=wrapped_source,
             target_sample_rate_hz=config.backend.sample_rate_hz,
+            is_detailed_enabled=self._detailed_audio_diag_enabled,
+            log_detailed=lambda message: self.log_detailed(message),
+        )
+
+    @property
+    def debug_capture_fault_profile(self) -> str:
+        return self._debug_capture_fault_profile
+
+    @property
+    def debug_stt_fault_profile(self) -> str:
+        return self._debug_stt_fault_profile
+
+    def _debug_audio_fault_allowed(self) -> bool:
+        return bool(getattr(self.app, "debug_ui_preview", False))
+
+    def _detailed_audio_diag_enabled(self) -> bool:
+        return self.runtime_logging.mode is SessionLoggingMode.DETAILED
+
+    def cycle_debug_capture_fault_profile(self) -> str:
+        if not self._debug_audio_fault_allowed():
+            return "none"
+
+        from puripuly_heart.core.audio.diagnostics import (
+            EXPECTED_FAULT_SIGNATURES,
+            AudioFaultProfile,
+        )
+
+        profiles = [
+            AudioFaultProfile.NONE,
+            AudioFaultProfile.CAPTURE_SILENT_FIRST_CHANNEL,
+            AudioFaultProfile.CAPTURE_ATTENUATE_40DB,
+            AudioFaultProfile.CAPTURE_NEAR_SILENCE_NOISE,
+            AudioFaultProfile.CAPTURE_BUFFER_DROPOUTS,
+        ]
+        current = AudioFaultProfile(self._debug_capture_fault_profile)
+        next_profile = profiles[(profiles.index(current) + 1) % len(profiles)]
+        self._debug_capture_fault_profile = next_profile.value
+        self.log_detailed(
+            "[AudioDiag][DebugFault] "
+            f"capture_profile={next_profile.value} "
+            "expected_signature="
+            f"{EXPECTED_FAULT_SIGNATURES.get(next_profile.value, 'none')}"
+        )
+        return self._debug_capture_fault_profile
+
+    def cycle_debug_stt_fault_profile(self) -> str:
+        if not self._debug_audio_fault_allowed():
+            return "none"
+
+        from puripuly_heart.core.audio.diagnostics import (
+            EXPECTED_FAULT_SIGNATURES,
+            AudioFaultProfile,
+        )
+
+        profiles = [AudioFaultProfile.NONE, AudioFaultProfile.STT_INPUT_LOW_SNR_VAD_PASS]
+        current = AudioFaultProfile(self._debug_stt_fault_profile)
+        next_profile = profiles[(profiles.index(current) + 1) % len(profiles)]
+        self._debug_stt_fault_profile = next_profile.value
+        self.log_detailed(
+            "[AudioDiag][DebugFault] "
+            f"stt_profile={next_profile.value} "
+            "expected_signature="
+            f"{EXPECTED_FAULT_SIGNATURES.get(next_profile.value, 'none')}"
+        )
+        return self._debug_stt_fault_profile
+
+    def clear_debug_audio_fault_profiles(self) -> None:
+        self._debug_capture_fault_profile = "none"
+        self._debug_stt_fault_profile = "none"
+        self.log_detailed("[AudioDiag][DebugFault] capture_profile=none stt_profile=none")
+
+    def _wrap_diagnostic_audio_source(
+        self,
+        source: AudioSource,
+        *,
+        channel_label: str,
+    ) -> AudioSource:
+        from puripuly_heart.core.audio.diagnostics import AudioFaultProfile, DiagnosticAudioSource
+
+        def extra_fields() -> dict[str, object]:
+            return {
+                "queue_drops": getattr(source, "queue_drop_count", 0),
+                "callback_statuses": getattr(source, "callback_status_count", 0),
+                "last_callback_status": getattr(source, "last_callback_status", None),
+                "resolved_device_name": getattr(source, "resolved_device_name", None),
+                "resolved_device_index": getattr(source, "resolved_device_index", None),
+                "resolved_channels": getattr(source, "resolved_channels", None),
+                "actual_sample_rate_hz": getattr(source, "actual_sample_rate_hz", None),
+                "used_default_fallback": getattr(source, "used_default_fallback", None),
+            }
+
+        return DiagnosticAudioSource(
+            source=source,
+            channel_label=channel_label,
+            is_detailed_enabled=self._detailed_audio_diag_enabled,
+            log_detailed=lambda message: self.log_detailed(message),
+            fault_profile_provider=lambda: (
+                self._debug_capture_fault_profile
+                if self._debug_audio_fault_allowed()
+                else AudioFaultProfile.NONE.value
+            ),
+            extra_fields_provider=extra_fields,
         )
 
     def _create_peer_vad_from_runtime_config(self, config: PeerRuntimeConfig, model_path: Path):
@@ -2544,6 +2678,19 @@ class GuiController:
             ring_buffer_ms=config.vad_pre_roll_ms,
             speech_threshold=config.vad_threshold,
             hangover_ms=config.vad_hangover_ms,
+            diagnostic_event_callback=lambda message: self.log_detailed(message),
+            diagnostics_enabled=self._detailed_audio_diag_enabled,
+            diagnostic_label="peer",
+        )
+
+    async def _run_peer_audio_vad_loop(self, **kwargs: object) -> None:
+        from puripuly_heart.app.headless_mic import run_audio_vad_loop
+
+        await run_audio_vad_loop(
+            **kwargs,
+            channel_label="peer",
+            is_detailed_enabled=self._detailed_audio_diag_enabled,
+            log_detailed=lambda message: self.log_detailed(message),
         )
 
     async def _refresh_peer_stt_runtime(self) -> None:
@@ -2646,7 +2793,11 @@ class GuiController:
 
         stt = None
         try:
-            backend = create_stt_backend(self.settings, secrets=secrets)
+            backend = create_stt_backend(
+                self.settings,
+                secrets=secrets,
+                diagnostics_enabled=self._detailed_audio_diag_enabled,
+            )
             stt = ManagedSTTProvider(
                 backend=backend,
                 sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
@@ -2655,6 +2806,9 @@ class GuiController:
                 drain_timeout_s=self.settings.stt.drain_timeout_s,
                 bridging_ms=self.settings.audio.ring_buffer_ms,
                 runtime_logging=self.runtime_logging,
+                stt_input_fault_profile_provider=lambda: (
+                    self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
+                ),
             )
         except Exception as exc:
             self._log_error(f"STT backend not available: {exc}")
@@ -2717,7 +2871,6 @@ class GuiController:
         self.sender = sender
         self.osc = osc
         self.hub = hub
-        from puripuly_heart.app.headless_mic import run_audio_vad_loop
 
         self._peer_runtime = PeerChannelRuntime(
             hub=hub,
@@ -2726,7 +2879,7 @@ class GuiController:
             source_factory=self._create_peer_audio_source_from_runtime_config,
             vad_factory=self._create_peer_vad_from_runtime_config,
             vad_model_resolver=ensure_silero_vad_onnx,
-            run_audio_loop=run_audio_vad_loop,
+            run_audio_loop=self._run_peer_audio_vad_loop,
         )
         self._last_peer_translation_enabled = self.settings.ui.peer_translation_enabled
         await self._configure_vrc_mic_receiver(enabled=self.settings.osc.vrc_mic_intercept)
@@ -2804,6 +2957,9 @@ class GuiController:
                     if self.settings.stt.low_latency_mode
                     else 1100
                 ),
+                diagnostic_event_callback=lambda message: self.log_detailed(message),
+                diagnostics_enabled=self._detailed_audio_diag_enabled,
+                diagnostic_label="self",
             )
 
             def _resolve_device(host_api: str, device: str) -> int | None:
@@ -3032,7 +3188,7 @@ class GuiController:
                 return
 
             self._vad = vad
-            self._audio_source = source
+            self._audio_source = self._wrap_diagnostic_audio_source(source, channel_label="self")
             self._mic_task = asyncio.create_task(self._run_mic_loop())
 
     async def _stop_mic_loop(self) -> None:
@@ -3063,6 +3219,9 @@ class GuiController:
                 sink=_HubVadSink(hub=self.hub),
                 target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,  # type: ignore[union-attr]
                 audio_gate=self.vrc_mic_audio_gate,
+                channel_label="self",
+                is_detailed_enabled=self._detailed_audio_diag_enabled,
+                log_detailed=lambda message: self.log_detailed(message),
             )
         except asyncio.CancelledError:
             raise
@@ -3260,14 +3419,70 @@ class GuiController:
         return self.runtime_logging.mode.value
 
     def set_runtime_logging_mode(self, mode: SessionLoggingMode | str) -> None:
+        previous_mode = self.runtime_logging.mode
         self.runtime_logging.set_mode(mode)
         normalized_mode = self.runtime_logging.mode.value
+        if (
+            previous_mode is not SessionLoggingMode.DETAILED
+            and self.runtime_logging.mode is SessionLoggingMode.DETAILED
+        ):
+            self._schedule_audio_environment_snapshot()
         manager = self._overlay_manager
         if manager is not None:
             set_logging_mode = getattr(manager, "set_logging_mode", None)
             if callable(set_logging_mode):
                 set_logging_mode(normalized_mode)
         self._schedule_overlay_runtime_logging_mode_update()
+
+    def _schedule_audio_environment_snapshot(self) -> None:
+        async def _task() -> None:
+            await self._log_audio_environment_snapshot_async()
+
+        run_task = getattr(self.page, "run_task", None)
+        if callable(run_task):
+            try:
+                run_task(_task)
+                return
+            except Exception as exc:
+                self.log_detailed(
+                    "[AudioDiag][Snapshot] failed to schedule via page.run_task",
+                    level=logging.WARNING,
+                    exception=exc,
+                )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.log_detailed(
+                "[AudioDiag][Snapshot] skipped reason=no_running_loop",
+                level=logging.WARNING,
+            )
+            return
+
+        task_coro = _task()
+        try:
+            loop.create_task(task_coro)
+        except Exception as exc:
+            task_coro.close()
+            self.log_detailed(
+                "[AudioDiag][Snapshot] skipped reason=create_task_failed",
+                level=logging.WARNING,
+                exception=exc,
+            )
+
+    async def _log_audio_environment_snapshot_async(self) -> None:
+        from puripuly_heart.core.audio.diagnostics import (
+            collect_pyaudiowpatch_snapshot_lines,
+            collect_sounddevice_snapshot_lines,
+        )
+
+        sounddevice_lines, loopback_lines = await asyncio.gather(
+            asyncio.to_thread(collect_sounddevice_snapshot_lines),
+            asyncio.to_thread(collect_pyaudiowpatch_snapshot_lines),
+        )
+        for line in sounddevice_lines:
+            self.log_detailed(line)
+        for line in loopback_lines:
+            self.log_detailed(line)
 
     async def _emit_overlay_runtime_logging_mode_update(self) -> None:
         bridge = self._overlay_bridge

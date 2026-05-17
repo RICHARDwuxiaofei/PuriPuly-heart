@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Protocol
 
@@ -11,6 +12,8 @@ import numpy as np
 from puripuly_heart.core.audio.format import AudioFrameF32
 
 logger = logging.getLogger(__name__)
+
+_CALLBACK_WARNING_MIN_INTERVAL_S = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +202,12 @@ class SoundDeviceAudioSource(AudioSource):
     _actual_sample_rate_hz: int = field(init=False, repr=False)
     _opened_channels: int = field(init=False, repr=False)
     _frame_channels: int = field(init=False, repr=False)
+    _callback_status_count: int = field(init=False, default=0, repr=False)
+    _queue_drop_count: int = field(init=False, default=0, repr=False)
+    _last_callback_status: object | None = field(init=False, default=None, repr=False)
+    _last_reported_callback_status_count: int = field(init=False, default=0, repr=False)
+    _last_reported_queue_drop_count: int = field(init=False, default=0, repr=False)
+    _last_callback_warning_monotonic_s: float = field(init=False, default=float("-inf"), repr=False)
 
     def __post_init__(self) -> None:
         if self.sample_rate_hz is not None and self.sample_rate_hz <= 0:
@@ -223,7 +232,8 @@ class SoundDeviceAudioSource(AudioSource):
             if self._closed:
                 return
             if status:
-                logger.warning("sounddevice input status: %s", status)
+                self._callback_status_count += 1
+                self._last_callback_status = status
 
             try:
                 samples = np.asarray(indata, dtype=np.float32).copy()
@@ -234,6 +244,7 @@ class SoundDeviceAudioSource(AudioSource):
                 self._queue.sync_q.put_nowait(samples)
             except queue.Full:
                 # Drop if the asyncio consumer is too slow; better than blocking audio thread.
+                self._queue_drop_count += 1
                 return
 
         stream_kwargs = {
@@ -281,11 +292,24 @@ class SoundDeviceAudioSource(AudioSource):
     def frame_channels(self) -> int:
         return self._frame_channels
 
+    @property
+    def callback_status_count(self) -> int:
+        return self._callback_status_count
+
+    @property
+    def queue_drop_count(self) -> int:
+        return self._queue_drop_count
+
+    @property
+    def last_callback_status(self) -> object | None:
+        return self._last_callback_status
+
     async def frames(self) -> AsyncIterator[AudioFrameF32]:
         while True:
             item = await self._queue.async_q.get()
             if item is None:
                 return
+            self._report_callback_warnings_from_consumer()
             frame_channels = self._opened_channels
             if item.ndim == 2 and item.shape[-1] > 0:
                 frame_channels = int(item.shape[-1])
@@ -294,6 +318,33 @@ class SoundDeviceAudioSource(AudioSource):
                 samples=item,
                 sample_rate_hz=self._actual_sample_rate_hz,
                 channels=frame_channels,
+            )
+
+    def _report_callback_warnings_from_consumer(self) -> None:
+        callback_status_count = self._callback_status_count
+        queue_drop_count = self._queue_drop_count
+        status_new_count = callback_status_count - self._last_reported_callback_status_count
+        drop_new_count = queue_drop_count - self._last_reported_queue_drop_count
+        if status_new_count <= 0 and drop_new_count <= 0:
+            return
+
+        now = time.monotonic()
+        if now - self._last_callback_warning_monotonic_s < _CALLBACK_WARNING_MIN_INTERVAL_S:
+            return
+
+        self._last_callback_warning_monotonic_s = now
+        self._last_reported_callback_status_count = callback_status_count
+        self._last_reported_queue_drop_count = queue_drop_count
+        with contextlib.suppress(Exception):
+            logger.warning(
+                "SoundDevice audio callback status/drop observed: "
+                "callback status count=%s callback status new=%s "
+                "last_status=%s queue drop count=%s queue drop new=%s",
+                callback_status_count,
+                max(0, status_new_count),
+                self._last_callback_status,
+                queue_drop_count,
+                max(0, drop_new_count),
             )
 
     async def close(self) -> None:
