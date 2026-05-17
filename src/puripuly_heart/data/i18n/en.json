@@ -252,7 +252,7 @@
   "provider.deepgram": "Deepgram",
   "provider.deepgram.description": "Strong in noisy environments",
   "provider.soniox": "Soniox",
-  "provider.soniox.description": "Recommended for Korean speakers",
+  "provider.soniox.description": "Best voice recognition performance",
   "provider.gemini": "Gemini",
   "provider.gemini.description": "'GOD'",
   "provider.gemini3_flash": "Gemini 3 Flash",

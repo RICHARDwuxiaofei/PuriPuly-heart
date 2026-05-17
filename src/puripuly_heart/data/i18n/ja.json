@@ -252,7 +252,7 @@
   "provider.deepgram": "Deepgram",
   "provider.deepgram.description": "ノイズの多い環境に強いです",
   "provider.soniox": "Soniox",
-  "provider.soniox.description": "韓国語ユーザーにおすすめです",
+  "provider.soniox.description": "音声認識性能が最も高いです",
   "provider.gemini": "Gemini",
   "provider.gemini.description": "'神'",
   "provider.gemini3_flash": "Gemini 3 Flash",

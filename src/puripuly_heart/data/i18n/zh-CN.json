@@ -252,7 +252,7 @@
     "provider.deepgram": "Deepgram",
     "provider.deepgram.description": "在噪声较多的环境中表现稳定",
     "provider.soniox": "Soniox",
-    "provider.soniox.description": "推荐韩语用户选择",
+    "provider.soniox.description": "语音识别性能最好",
     "provider.gemini": "Gemini",
     "provider.gemini.description": "'真神'",
     "provider.gemini3_flash": "Gemini 3 Flash",

@@ -252,7 +252,7 @@
   "provider.deepgram": "Deepgram",
   "provider.deepgram.description": "노이즈가 많은 환경에 강해요",
   "provider.soniox": "Soniox",
-  "provider.soniox.description": "한국어 사용자에게 권장해요",
+  "provider.soniox.description": "음성 인식 성능이 가장 좋아요.",
   "provider.gemini": "Gemini",
   "provider.gemini.description": "'신'",
   "provider.gemini3_flash": "Gemini 3 Flash",
