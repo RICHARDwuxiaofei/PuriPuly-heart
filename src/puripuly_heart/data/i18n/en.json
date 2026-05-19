@@ -212,6 +212,7 @@
   "debug_preview.peer_translation_eula": "Peer translation EULA",
   "debug_preview.discord_auth": "Discord auth",
   "debug_preview.discord_callback_page": "Discord callback page",
+  "debug_preview.talk_together_pass_invite_progress": "Invite 1/5",
   "debug_preview.capture_fault_cycle": "Cycle capture fault",
   "debug_preview.stt_fault_cycle": "Cycle STT fault",
   "debug_preview.audio_fault_clear": "Clear audio faults",

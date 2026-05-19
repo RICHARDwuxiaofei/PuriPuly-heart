@@ -27,6 +27,7 @@ from puripuly_heart.core.discord_oauth_loopback import (
     render_discord_oauth_callback_completion_page,
 )
 from puripuly_heart.core.language import get_stt_compatibility_warning
+from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.core.updater import check_for_update
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
 from puripuly_heart.ui.components.debug_preview_panel import DebugPreviewPanel
@@ -72,6 +73,7 @@ FOUNDER_README_API_KEYS_ANCHOR_BY_LOCALE = {
     "ja": "自分のapiキーを使う",
 }
 FOUNDER_README_DEFAULT_API_KEYS_ANCHOR = "using-your-own-api-keys"
+DEBUG_PREVIEW_TALK_TOGETHER_PASS_ID = "7KQ9M2"
 
 
 def founder_readme_url_for_locale(locale: str | None) -> str:
@@ -232,6 +234,9 @@ class TranslatorApp:
             on_discord_auth=self._preview_discord_auth,
             on_discord_callback_page=self._preview_discord_callback_page,
             on_peer_translation_eula=self._preview_peer_translation_eula,
+            on_talk_together_pass_invite_progress=(
+                self._preview_talk_together_pass_invite_progress
+            ),
             on_capture_fault_cycle=self._preview_capture_fault_cycle,
             on_stt_fault_cycle=self._preview_stt_fault_cycle,
             on_audio_fault_clear=self._preview_audio_fault_clear,
@@ -262,6 +267,22 @@ class TranslatorApp:
 
     def _preview_peer_translation_eula(self) -> None:
         self._show_peer_translation_eula(self._debug_preview_noop)
+
+    def _preview_talk_together_pass_invite_progress(self) -> None:
+        set_managed_key_state = getattr(self.view_settings, "set_managed_key_state", None)
+        if not callable(set_managed_key_state):
+            return
+        set_managed_key_state(
+            visible=True,
+            remaining_percent=100,
+            referral_id=DEBUG_PREVIEW_TALK_TOGETHER_PASS_ID,
+            pass_status=TalkTogetherPassStatus(
+                pass_id=DEBUG_PREVIEW_TALK_TOGETHER_PASS_ID,
+                invite_count=1,
+                invite_limit=5,
+                bonus_translations_per_friend=200,
+            ),
+        )
 
     def _preview_capture_fault_cycle(self) -> None:
         profile = self.controller.cycle_debug_capture_fault_profile()

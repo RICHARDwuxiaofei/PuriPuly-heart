@@ -22,6 +22,7 @@ from puripuly_heart.config.settings import (
     TranslationModel,
     TranslationSettings,
 )
+from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.app import TranslatorApp, _check_and_notify_update
 
@@ -284,6 +285,7 @@ def test_translator_app_mounts_debug_preview_when_enabled(
         "on_discord_auth",
         "on_discord_callback_page",
         "on_peer_translation_eula",
+        "on_talk_together_pass_invite_progress",
         "on_capture_fault_cycle",
         "on_stt_fault_cycle",
         "on_audio_fault_clear",
@@ -294,6 +296,12 @@ def test_translator_app_mounts_debug_preview_when_enabled(
     callback_page = seen["callbacks"]["on_discord_callback_page"]
     assert getattr(callback_page, "__self__", None) is app
     assert getattr(callback_page, "__func__", None) is TranslatorApp._preview_discord_callback_page
+    pass_progress = seen["callbacks"]["on_talk_together_pass_invite_progress"]
+    assert getattr(pass_progress, "__self__", None) is app
+    assert (
+        getattr(pass_progress, "__func__", None)
+        is TranslatorApp._preview_talk_together_pass_invite_progress
+    )
     preview_calls: list[bool] = []
     monkeypatch.setattr(
         app,
@@ -367,6 +375,44 @@ def test_debug_audio_fault_actions_do_not_call_persistence_or_providers(monkeypa
     app._preview_audio_fault_clear()
 
     assert forbidden_calls == []
+
+
+def test_debug_preview_talk_together_pass_invite_progress_sets_settings_state_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    managed_key_calls: list[dict[str, object]] = []
+    app.view_settings = SimpleNamespace(
+        set_managed_key_state=lambda **kwargs: managed_key_calls.append(kwargs)
+    )
+    forbidden_calls: list[str] = []
+    monkeypatch.setattr(
+        app_module,
+        "save_settings",
+        lambda *args, **kwargs: forbidden_calls.append("save_settings"),
+    )
+    monkeypatch.setattr(
+        app_module.webbrowser,
+        "open",
+        lambda *args, **kwargs: forbidden_calls.append("webbrowser.open"),
+    )
+
+    app._preview_talk_together_pass_invite_progress()
+
+    assert forbidden_calls == []
+    assert managed_key_calls == [
+        {
+            "visible": True,
+            "remaining_percent": 100,
+            "referral_id": "7KQ9M2",
+            "pass_status": TalkTogetherPassStatus(
+                pass_id="7KQ9M2",
+                invite_count=1,
+                invite_limit=5,
+                bonus_translations_per_friend=200,
+            ),
+        }
+    ]
 
 
 def test_debug_preview_discord_callback_page_opens_local_preview_without_oauth(

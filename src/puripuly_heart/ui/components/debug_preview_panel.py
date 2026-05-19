@@ -52,6 +52,7 @@ class DebugPreviewPanel(ft.Container):
         on_discord_auth: Callable[[], None],
         on_discord_callback_page: Callable[[], None],
         on_peer_translation_eula: Callable[[], None],
+        on_talk_together_pass_invite_progress: Callable[[], None],
         on_capture_fault_cycle: Callable[[], None],
         on_stt_fault_cycle: Callable[[], None],
         on_audio_fault_clear: Callable[[], None],
@@ -71,6 +72,11 @@ class DebugPreviewPanel(ft.Container):
                 "peer_translation_eula",
                 "debug_preview.peer_translation_eula",
                 on_peer_translation_eula,
+            ),
+            _PreviewAction(
+                "talk_together_pass_invite_progress",
+                "debug_preview.talk_together_pass_invite_progress",
+                on_talk_together_pass_invite_progress,
             ),
             _PreviewAction(
                 "capture_fault_cycle",
