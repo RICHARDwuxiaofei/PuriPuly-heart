@@ -897,6 +897,7 @@ class SettingsView(ft.Column):
                     ft.Container(height=8),
                     ft.Column(
                         [
+                            self._managed_key_invite_progress_row,
                             ft.Row(
                                 [
                                     self._managed_key_referral_id_label,
@@ -908,7 +909,6 @@ class SettingsView(ft.Column):
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             ),
                             self._managed_key_referral_helper_text,
-                            self._managed_key_invite_progress_row,
                         ],
                         spacing=4,
                     ),

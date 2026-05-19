@@ -189,7 +189,7 @@ def test_managed_key_card_keys_are_localized() -> None:
     assert ko["settings.managed_key.referral_id.copy_tooltip"] == "Pass ID 복사"
     assert ko["settings.managed_key.referral_id.copy_success"] == "Pass ID를 복사했어요."
     assert ko["settings.managed_key.referral_id.helper"] == (
-        "친구에게 Pass ID를 공유해 함께 추가 사용량을 받을 수 있어요."
+        "친구에게 Pass ID를 공유하면 함께 추가 사용량을 받을 수 있어요."
     )
     assert ko["settings.managed_key.invite_progress.label"] == "친구 초대"
 

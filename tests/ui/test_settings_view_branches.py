@@ -951,6 +951,19 @@ def test_set_managed_key_state_shows_talk_together_pass_invite_progress(
     assert view._managed_key_invite_progress_value.value == "1 / 5"
 
 
+def test_managed_key_invite_progress_row_appears_above_talk_together_pass_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    managed_key_content = _wrapped_card_column(view._managed_key_card)
+    details_column = managed_key_content.controls[4]
+    referral_id_row = details_column.controls[1]
+
+    assert details_column.controls[0] is view._managed_key_invite_progress_row
+    assert view._managed_key_referral_id_label in referral_id_row.controls
+
+
 def test_set_managed_key_state_hides_invite_progress_when_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
