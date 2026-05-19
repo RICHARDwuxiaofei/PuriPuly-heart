@@ -443,31 +443,7 @@ pnpm --filter @puripuly-heart/broker run dev
 
 ## Special Thanks
 
-<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
-<!-- prettier-ignore-start -->
-<!-- markdownlint-disable -->
-<table>
-  <tbody>
-<tr>
-      <td align="center" valign="top" width="25%"><img src="https://ui-avatars.com/api/?name=SUI&size=160&background=FFF1EC&color=7A3B3B&rounded=true&bold=true" width="88px" height="88px" alt="SUI_32C avatar"/><br /><sub><b>SUI_32C</b></sub></td>
-      <td align="center" valign="top" width="25%"><img src="https://ui-avatars.com/api/?name=NAGI&size=160&background=FFF5E8&color=7A4732&rounded=true&bold=true" width="88px" height="88px" alt="Nagikokoro avatar"/><br /><sub><b>Nagikokoro</b></sub></td>
-      <td align="center" valign="top" width="25%"><img src="https://ui-avatars.com/api/?name=MOTO&size=160&background=FFF0F5&color=733047&rounded=true&bold=true" width="88px" height="88px" alt="motoka96 avatar"/><br /><sub><b>motoka96</b></sub></td>
-      <td align="center" valign="top" width="25%"><img src="https://ui-avatars.com/api/?name=YKOL&size=160&background=F5F0FF&color=4E397A&rounded=true&bold=true" width="88px" height="88px" alt="_Ykol魚 avatar"/><br /><sub><b>_Ykol魚</b></sub></td>
-    </tr><br />
-    <tr>
-      <td align="center" valign="top" width="25%"><img src="https://ui-avatars.com/api/?name=KAS&size=160&background=FFF6E5&color=6F451E&rounded=true&bold=true" width="88px" height="88px" alt="kascr_ avatar"/><br /><sub><b>kascr_</b></sub></td>
-      <td align="center" valign="top" width="25%"><img src="https://ui-avatars.com/api/?name=JMV&size=160&background=ECFFF7&color=2E6656&rounded=true&bold=true" width="88px" height="88px" alt="Just Monika V avatar"/><br /><sub><b>Just Monika V</b></sub></td>
-      <td align="center" valign="top" width="25%"><img src="https://ui-avatars.com/api/?name=FLU&size=160&background=EEF7FF&color=315C7A&rounded=true&bold=true" width="88px" height="88px" alt="FLUVIA avatar"/><br /><sub><b>FLUVIA</b></sub></td>
-      <td align="center" valign="top" width="25%"><img src="https://ui-avatars.com/api/?name=HAN&size=160&background=FFFBEA&color=6C5525&rounded=true&bold=true" width="88px" height="88px" alt="Han โชเล่ย์ avatar"/><br /><sub><b>Han โชเล่ย์</b></sub></td>
-    </tr>
-  </tbody>
-</table>
-
-
-<!-- markdownlint-restore -->
-<!-- prettier-ignore-end -->
-
-<!-- ALL-CONTRIBUTORS-LIST:END -->
+SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์
 
 ---
 
