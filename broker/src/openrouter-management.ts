@@ -7,6 +7,8 @@ type FetchImpl = typeof fetch;
 
 export type OpenRouterManagementOperation =
   | 'create_key'
+  | 'read_key'
+  | 'update_key_limit'
   | 'assign_guardrail'
   | 'disable_key'
   | 'delete_key';
@@ -22,6 +24,11 @@ export interface OpenRouterManagementFailureDetails {
   status: number | null;
   upstreamCode: number | null;
   message: string;
+}
+
+export interface ManagedChildKeyMaterial {
+  rawKey: string;
+  hash: string;
 }
 
 export type ManagedChildKeyCleanupStepResult =
@@ -46,8 +53,14 @@ export class OpenRouterManagementError extends Error {
   readonly code: OpenRouterManagementErrorCode;
   readonly status: number | null;
   readonly upstreamCode: number | null;
+  readonly createdChildKey: ManagedChildKeyMaterial | null;
 
-  constructor(input: OpenRouterManagementFailureDetails & { cause?: unknown }) {
+  constructor(
+    input: OpenRouterManagementFailureDetails & {
+      cause?: unknown;
+      createdChildKey?: ManagedChildKeyMaterial | null;
+    },
+  ) {
     super(
       input.message,
       input.cause === undefined ? undefined : { cause: input.cause },
@@ -57,6 +70,7 @@ export class OpenRouterManagementError extends Error {
     this.code = input.code;
     this.status = input.status;
     this.upstreamCode = input.upstreamCode;
+    this.createdChildKey = input.createdChildKey ?? null;
   }
 }
 
@@ -65,8 +79,11 @@ export async function createManagedChildKey(input: {
   installationId: string;
   releaseSessionRef: string;
   expiresAt: string;
+  limitUsd?: number;
+  requireEffectiveLimitVerification?: boolean;
   fetchImpl?: FetchImpl;
 }): Promise<{ rawKey: string; hash: string }> {
+  const requestedLimitUsd = input.limitUsd ?? MANAGED_TRIAL_BUDGET_POLICY.hardLimit;
   const response = await requestOpenRouter({
     operation: 'create_key',
     path: '/keys',
@@ -75,7 +92,7 @@ export async function createManagedChildKey(input: {
     method: 'POST',
     body: {
       name: `${MANAGED_CHILD_KEY_NAME_PREFIX}:${input.installationId}:${input.releaseSessionRef}`,
-      limit: MANAGED_TRIAL_BUDGET_POLICY.hardLimit,
+      limit: requestedLimitUsd,
       limit_reset: MANAGED_TRIAL_BUDGET_POLICY.limitReset,
       include_byok_in_limit: false,
       expires_at: input.expiresAt,
@@ -107,11 +124,52 @@ export async function createManagedChildKey(input: {
       'OpenRouter create-key response must include data.hash',
     );
   }
-
-  return {
+  const childKey = {
     rawKey,
     hash: data.hash,
   };
+  if (input.requireEffectiveLimitVerification) {
+    assertEffectiveLimitAtLeastRequested(
+      response.status,
+      data,
+      requestedLimitUsd,
+      childKey,
+    );
+  }
+
+  return childKey;
+}
+
+function assertEffectiveLimitAtLeastRequested(
+  status: number,
+  data: Record<string, unknown>,
+  requestedLimitUsd: number,
+  childKey: ManagedChildKeyMaterial,
+): void {
+  const effectiveLimitUsd = typeof data.limit === 'number' ? data.limit : null;
+  const effectiveLimitCents =
+    effectiveLimitUsd === null ? null : currencyCentsFromUsd(effectiveLimitUsd);
+  const requestedLimitCents = currencyCentsFromUsd(requestedLimitUsd);
+  if (
+    effectiveLimitCents === null ||
+    requestedLimitCents === null ||
+    effectiveLimitCents < requestedLimitCents
+  ) {
+    throw malformedUpstreamError(
+      'create_key',
+      status,
+      'OpenRouter create-key response effective limit is below the requested limit',
+      { createdChildKey: childKey },
+    );
+  }
+}
+
+function currencyCentsFromUsd(value: number): number | null {
+  if (!Number.isFinite(value) || value < 0) {
+    return null;
+  }
+
+  return Math.floor(value * 100 + 1e-9);
 }
 
 export async function assignManagedGuardrail(input: {
@@ -146,6 +204,61 @@ export async function assignManagedGuardrail(input: {
       'OpenRouter guardrail assignment did not report any assigned keys',
     );
   }
+}
+
+export async function readManagedChildKeyEffectiveLimit(input: {
+  managementApiKey: string;
+  keyHash: string;
+  fetchImpl?: FetchImpl;
+}): Promise<number> {
+  const response = await requestOpenRouter({
+    operation: 'read_key',
+    path: `/keys/${input.keyHash}`,
+    managementApiKey: input.managementApiKey,
+    fetchImpl: input.fetchImpl,
+    method: 'GET',
+  });
+  const payload = await readSuccessJson(response, 'read_key');
+  return readEffectiveLimitFromKeyPayload(payload, response.status, 'read_key');
+}
+
+export async function updateManagedChildKeyLimit(input: {
+  managementApiKey: string;
+  keyHash: string;
+  limitUsd: number;
+  fetchImpl?: FetchImpl;
+}): Promise<number> {
+  const response = await requestOpenRouter({
+    operation: 'update_key_limit',
+    path: `/keys/${input.keyHash}`,
+    managementApiKey: input.managementApiKey,
+    fetchImpl: input.fetchImpl,
+    method: 'PATCH',
+    body: {
+      limit: input.limitUsd,
+    },
+  });
+  const payload = await readSuccessJson(response, 'update_key_limit');
+  const effectiveLimitUsd = readEffectiveLimitFromKeyPayload(
+    payload,
+    response.status,
+    'update_key_limit',
+  );
+  const effectiveLimitCents = currencyCentsFromUsd(effectiveLimitUsd);
+  const requestedLimitCents = currencyCentsFromUsd(input.limitUsd);
+  if (
+    effectiveLimitCents === null ||
+    requestedLimitCents === null ||
+    effectiveLimitCents < requestedLimitCents
+  ) {
+    throw malformedUpstreamError(
+      'update_key_limit',
+      response.status,
+      'OpenRouter update-key response effective limit is below the requested limit',
+    );
+  }
+
+  return effectiveLimitUsd;
 }
 
 export async function cleanupManagedChildKey(input: {
@@ -219,7 +332,7 @@ async function requestOpenRouter(input: {
   path: string;
   managementApiKey: string;
   fetchImpl?: FetchImpl;
-  method: 'POST' | 'PATCH' | 'DELETE';
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   body?: unknown;
 }): Promise<Response> {
   const fetchImpl = input.fetchImpl ?? fetch;
@@ -247,6 +360,39 @@ async function requestOpenRouter(input: {
   }
 
   return response;
+}
+
+function readEffectiveLimitFromKeyPayload(
+  payload: unknown,
+  status: number,
+  operation: OpenRouterManagementOperation,
+): number {
+  if (!isRecord(payload) || !isRecord(payload.data)) {
+    throw malformedUpstreamError(
+      operation,
+      status,
+      `OpenRouter ${operation} response must include data`,
+    );
+  }
+
+  if (typeof payload.data.limit !== 'number') {
+    throw malformedUpstreamError(
+      operation,
+      status,
+      `OpenRouter ${operation} response must include numeric data.limit`,
+    );
+  }
+
+  const effectiveLimitCents = currencyCentsFromUsd(payload.data.limit);
+  if (effectiveLimitCents === null) {
+    throw malformedUpstreamError(
+      operation,
+      status,
+      `OpenRouter ${operation} response data.limit must be a non-negative USD value`,
+    );
+  }
+
+  return payload.data.limit;
 }
 
 async function validateCleanupStepSuccess(input: {
@@ -367,6 +513,7 @@ function malformedUpstreamError(
   operation: OpenRouterManagementOperation,
   status: number,
   message: string,
+  options: { createdChildKey?: ManagedChildKeyMaterial | null } = {},
 ): OpenRouterManagementError {
   return new OpenRouterManagementError({
     operation,
@@ -374,6 +521,7 @@ function malformedUpstreamError(
     status,
     upstreamCode: null,
     message,
+    createdChildKey: options.createdChildKey ?? null,
   });
 }
 

@@ -284,6 +284,15 @@ def ensure_managed_identity_bundle(
     )
 
 
+def load_existing_managed_identity_bundle(
+    settings: AppSettings,
+    secret_store: SecretStore,
+) -> ManagedIdentityBundle | None:
+    """Load a valid persisted managed identity bundle without creating or repairing it."""
+
+    return _load_existing_bundle(settings, secret_store)
+
+
 def regenerate_managed_identity_bundle(
     settings: AppSettings,
     secret_store: SecretStore,

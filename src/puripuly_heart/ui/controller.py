@@ -3,15 +3,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import inspect
 import json
 import logging
 import os
 import secrets
+import sys
 import threading
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 import flet as ft
 
@@ -37,15 +40,20 @@ from puripuly_heart.config.settings import (
     STTProviderName,
     load_settings,
     new_settings_for_first_run,
+    normalize_owned_referral_id,
     save_settings,
 )
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.audio.source import (
+    AudioSource,
+    SelfMicCaptureChannelDecision,
     SoundDeviceAudioSource,
+    determine_self_mic_capture_channels,
     resolve_sounddevice_input_device,
 )
+from puripuly_heart.core.clipboard.watcher import create_clipboard_watcher
 from puripuly_heart.core.clock import SystemClock
 from puripuly_heart.core.hardware_fingerprint import get_raw_hardware_fingerprint
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
@@ -67,6 +75,8 @@ from puripuly_heart.core.managed_openrouter_broker_client import (
 from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseBehavior,
     ManagedOpenRouterReleaseService,
+    ManagedOpenRouterStatusRefreshResult,
+    TalkTogetherPassStatus,
     UnavailableManagedOpenRouterReleaseClient,
     format_managed_openrouter_diagnostics,
 )
@@ -124,6 +134,7 @@ logger = logging.getLogger(__name__)
 STT_RESET_DEADLINE_S = 300.0
 OVERLAY_STARTUP_TIMEOUT_MS = 3000
 OVERLAY_SHUTDOWN_GRACE_S = 0.05
+_PASS_STATUS_UNSET = object()
 _OVERLAY_FAILURE_REASONS = frozenset(
     {
         "missing_executable",
@@ -161,6 +172,24 @@ def _canonical_json_signature(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _callable_accepts_keyword(callable_obj: object, keyword: str) -> bool:
+    try:
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return True
+    return keyword in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+
+
+class ClipboardWatcherRuntime(Protocol):
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+
 @dataclass(slots=True)
 class _HubVadSink:
     hub: ClientHub
@@ -194,7 +223,9 @@ class GuiController:
 
     _bridge_task: asyncio.Task[None] | None = None
     _mic_task: asyncio.Task[None] | None = None
-    _audio_source: SoundDeviceAudioSource | None = None
+    _audio_source: AudioSource | None = None
+    _debug_capture_fault_profile: str = field(init=False, default="none")
+    _debug_stt_fault_profile: str = field(init=False, default="none")
     _vad: VadGating | None = None
     _stt_desired: bool = False
     _stt_switch_lock: asyncio.Lock | None = None
@@ -211,6 +242,9 @@ class GuiController:
     _last_vrc_mic_sync_enabled: bool | None = None
     _vrc_receiver_lock: asyncio.Lock | None = None
     _ui_event_bridge: UIEventBridge | None = None
+    _clipboard_watcher: ClipboardWatcherRuntime | None = field(init=False, default=None)
+    _clipboard_loop: asyncio.AbstractEventLoop | None = field(init=False, default=None)
+    _clipboard_watcher_lock: asyncio.Lock | None = field(init=False, default=None)
     _local_stt_install_state: LocalSTTInstallState = field(
         init=False,
         default_factory=lambda: LocalSTTInstallState(status="ready"),
@@ -244,8 +278,20 @@ class GuiController:
         default=None,
         repr=False,
     )
+    last_discord_managed_auth_referral_bonus_applied: bool = field(
+        init=False,
+        default=False,
+    )
     _managed_trial_usage_metadata: OpenRouterKeyMetadata | None = field(init=False, default=None)
     _managed_trial_usage_metadata_entitlement_ref: str | None = field(
+        init=False,
+        default=None,
+    )
+    _talk_together_pass_status: TalkTogetherPassStatus | None = field(
+        init=False,
+        default=None,
+    )
+    _talk_together_pass_status_key: tuple[str | None, str | None, str | None] | None = field(
         init=False,
         default=None,
     )
@@ -419,6 +465,7 @@ class GuiController:
         )
         self._ui_event_bridge = bridge
         self._bridge_task = asyncio.create_task(bridge.run())
+        await self._sync_clipboard_watcher()
 
     def _get_alibaba_verified_key(self) -> str:
         """Get the api_key_verified field name based on Qwen region."""
@@ -642,8 +689,12 @@ class GuiController:
         return getattr(result, "message_key", "discord_auth.error.retry")
 
     async def start_discord_managed_auth_from_dialog(
-        self, *, on_callback_received: Callable[[], None] | None = None
+        self,
+        *,
+        on_callback_received: Callable[[], None] | None = None,
+        referral_id: str | None = None,
     ) -> bool:
+        self.last_discord_managed_auth_referral_bonus_applied = False
         service = self._managed_openrouter_release_service
         if service is None:
             self._discord_managed_auth_in_progress = False
@@ -657,7 +708,7 @@ class GuiController:
         self._set_managed_trial_pending_auth(True)
         try:
             try:
-                result = await service.prepare_for_translation()
+                result = await service.prepare_for_translation(referral_id=referral_id)
             except Exception as exc:
                 self.log_basic(
                     f"[ManagedAuth] Discord auth start failed: {exc}",
@@ -670,6 +721,9 @@ class GuiController:
                 result.behavior == ManagedOpenRouterReleaseBehavior.READY
                 and result.local_key_available
             ):
+                self.last_discord_managed_auth_referral_bonus_applied = (
+                    getattr(result, "referral_bonus_applied", False) is True
+                )
                 if self.hub is None:
                     self._show_short_message("discord_auth.error.retry")
                     return False
@@ -678,6 +732,16 @@ class GuiController:
                 if self.hub.llm is None:
                     self._show_short_message("discord_auth.error.retry")
                     return False
+                result_referral_id = normalize_owned_referral_id(
+                    getattr(result, "referral_id", None)
+                )
+                self._set_managed_usage_view_state(
+                    view_settings=getattr(self.app, "view_settings", None),
+                    visible=True,
+                    remaining_percent=None,
+                    referral_id=result_referral_id or self._current_owned_referral_id(),
+                    pass_status=getattr(result, "pass_status", None),
+                )
                 self._schedule_managed_trial_usage_refresh()
                 return True
 
@@ -712,6 +776,232 @@ class GuiController:
         return max(
             0, min(100, round((usage_metadata.remaining_usd / usage_metadata.limit_usd) * 100))
         )
+
+    def _current_owned_referral_id(self) -> str | None:
+        if self.settings is None:
+            return None
+        return normalize_owned_referral_id(self.settings.managed_identity.referral_id)
+
+    def _managed_identity_scope(
+        self,
+        referral_id: str | None,
+    ) -> tuple[str | None, str | None, str | None] | None:
+        if self.settings is None:
+            return None
+        installation_id = self.settings.managed_identity.installation_id.strip() or None
+        active_ref = self.settings.managed_identity.active_managed_credential_ref
+        normalized_active_ref = active_ref.strip() if isinstance(active_ref, str) else None
+        normalized_referral_id = normalize_owned_referral_id(referral_id)
+        return (installation_id, normalized_active_ref or None, normalized_referral_id)
+
+    def _talk_together_pass_cache_key(
+        self,
+        referral_id: str | None,
+    ) -> tuple[str | None, str | None, str | None] | None:
+        normalized_referral_id = normalize_owned_referral_id(referral_id)
+        if normalized_referral_id is None:
+            return None
+        return self._managed_identity_scope(normalized_referral_id)
+
+    def _clear_talk_together_pass_status_cache(self) -> None:
+        self._talk_together_pass_status = None
+        self._talk_together_pass_status_key = None
+
+    def _cached_talk_together_pass_status_for(
+        self,
+        referral_id: str | None,
+    ) -> TalkTogetherPassStatus | None:
+        cache_key = self._talk_together_pass_cache_key(referral_id)
+        if cache_key is None or cache_key != self._talk_together_pass_status_key:
+            self._clear_talk_together_pass_status_cache()
+            return None
+        return self._talk_together_pass_status
+
+    def _set_managed_usage_view_state(
+        self,
+        *,
+        view_settings: object | None,
+        visible: bool,
+        remaining_percent: int | None,
+        referral_id: str | None,
+        pass_status: TalkTogetherPassStatus | None | object = _PASS_STATUS_UNSET,
+    ) -> None:
+        normalized_referral_id = normalize_owned_referral_id(referral_id)
+        if not visible or normalized_referral_id is None:
+            self._clear_talk_together_pass_status_cache()
+        elif pass_status is _PASS_STATUS_UNSET:
+            pass
+        elif (
+            isinstance(pass_status, TalkTogetherPassStatus)
+            and pass_status.pass_id == normalized_referral_id
+        ):
+            self._talk_together_pass_status = pass_status
+            self._talk_together_pass_status_key = self._talk_together_pass_cache_key(
+                normalized_referral_id
+            )
+        else:
+            self._clear_talk_together_pass_status_cache()
+
+        effective_pass_status = self._cached_talk_together_pass_status_for(normalized_referral_id)
+        if view_settings is None:
+            return
+        managed_key_setter = getattr(view_settings, "set_managed_key_state", None)
+        if callable(managed_key_setter):
+            if _callable_accepts_keyword(managed_key_setter, "pass_status"):
+                managed_key_setter(
+                    visible=visible,
+                    remaining_percent=remaining_percent,
+                    referral_id=normalized_referral_id,
+                    pass_status=effective_pass_status,
+                )
+            else:
+                managed_key_setter(
+                    visible=visible,
+                    remaining_percent=remaining_percent,
+                    referral_id=normalized_referral_id,
+                )
+            return
+        usage_setter = getattr(view_settings, "set_managed_trial_usage_state", None)
+        if callable(usage_setter):
+            usage_setter(visible=visible, remaining_percent=remaining_percent)
+
+    def _managed_key_card_visible_from_settings(self) -> bool:
+        if self.settings is None:
+            return False
+        active_ref = self.settings.managed_identity.active_managed_credential_ref
+        return bool(
+            (
+                self.settings.provider.llm == LLMProviderName.OPENROUTER
+                and self.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+            )
+            or (isinstance(active_ref, str) and bool(active_ref.strip()))
+            or self._current_owned_referral_id()
+        )
+
+    async def _refresh_managed_status_best_effort(
+        self,
+        *,
+        service: object | None = None,
+    ) -> ManagedOpenRouterStatusRefreshResult:
+        current_referral_id = self._current_owned_referral_id()
+        if service is None:
+            service = self._managed_openrouter_release_service
+        if service is None:
+            return ManagedOpenRouterStatusRefreshResult(
+                referral_id=current_referral_id,
+                pass_status=self._cached_talk_together_pass_status_for(current_referral_id),
+                succeeded=False,
+            )
+        refresh_status = getattr(service, "refresh_managed_status", None)
+        if callable(refresh_status):
+            try:
+                return await refresh_status()
+            except Exception as exc:
+                self.log_basic(
+                    f"[ManagedAuth] Managed status refresh failed: {exc}",
+                    level=logging.WARNING,
+                )
+                return ManagedOpenRouterStatusRefreshResult(
+                    referral_id=current_referral_id,
+                    pass_status=self._cached_talk_together_pass_status_for(current_referral_id),
+                    succeeded=False,
+                )
+        refresh_status = getattr(service, "refresh_owned_referral_id_from_status", None)
+        if callable(refresh_status):
+            try:
+                return ManagedOpenRouterStatusRefreshResult(
+                    referral_id=normalize_owned_referral_id(await refresh_status())
+                    or current_referral_id,
+                    pass_status=None,
+                    succeeded=True,
+                )
+            except Exception as exc:
+                self.log_basic(
+                    f"[ManagedAuth] Referral ID status refresh failed: {exc}",
+                    level=logging.WARNING,
+                )
+        return ManagedOpenRouterStatusRefreshResult(
+            referral_id=current_referral_id,
+            pass_status=self._cached_talk_together_pass_status_for(current_referral_id),
+            succeeded=False,
+        )
+
+    async def _refresh_owned_referral_id_from_managed_status_best_effort(
+        self,
+        *,
+        service: object | None = None,
+    ) -> str | None:
+        return (await self._refresh_managed_status_best_effort(service=service)).referral_id
+
+    def _schedule_owned_referral_id_status_refresh(
+        self,
+        *,
+        view_settings: object | None,
+        remaining_percent: int | None,
+        current_referral_id: str | None,
+    ) -> None:
+        service = self._managed_openrouter_release_service
+        if service is None:
+            return
+        refresh_status = getattr(service, "refresh_managed_status", None)
+        legacy_refresh_status = getattr(service, "refresh_owned_referral_id_from_status", None)
+        if not callable(refresh_status) and not callable(legacy_refresh_status):
+            return
+        scheduled_identity_scope = self._managed_identity_scope(current_referral_id)
+        scheduled_identity_base = (
+            scheduled_identity_scope[:2] if scheduled_identity_scope is not None else None
+        )
+
+        async def _run_status_refresh() -> None:
+            try:
+                result = await self._refresh_managed_status_best_effort(
+                    service=service,
+                )
+                if service is not self._managed_openrouter_release_service:
+                    return
+                if (
+                    self.settings is None
+                    or self.settings.provider.llm != LLMProviderName.OPENROUTER
+                    or self.settings.openrouter.selected_source
+                    != OpenRouterCredentialSource.MANAGED
+                ):
+                    return
+                refreshed_referral_id = (
+                    normalize_owned_referral_id(result.referral_id) or current_referral_id
+                )
+                current_identity_scope = self._managed_identity_scope(
+                    self._current_owned_referral_id()
+                )
+                allowed_identity_scopes = {scheduled_identity_scope}
+                if scheduled_identity_base is not None:
+                    allowed_identity_scopes.add((*scheduled_identity_base, refreshed_referral_id))
+                if current_identity_scope not in allowed_identity_scopes:
+                    return
+                if result.succeeded:
+                    self._set_managed_usage_view_state(
+                        view_settings=view_settings,
+                        visible=True,
+                        remaining_percent=remaining_percent,
+                        referral_id=refreshed_referral_id,
+                        pass_status=result.pass_status,
+                    )
+                    return
+                self._set_managed_usage_view_state(
+                    view_settings=view_settings,
+                    visible=True,
+                    remaining_percent=remaining_percent,
+                    referral_id=refreshed_referral_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.log_basic(
+                    f"[ManagedAuth] Referral ID status refresh failed: {exc}",
+                    level=logging.WARNING,
+                )
+
+        with contextlib.suppress(RuntimeError):
+            asyncio.get_running_loop().create_task(_run_status_refresh())
 
     def _schedule_managed_trial_usage_refresh(self) -> None:
         async def _run_refresh() -> None:
@@ -756,11 +1046,6 @@ class GuiController:
         auto_show_founder_letter: bool,
     ) -> None:
         view_settings = getattr(self.app, "view_settings", None)
-        setter = (
-            getattr(view_settings, "set_managed_trial_usage_state", None)
-            if view_settings is not None
-            else None
-        )
         if (
             self.settings is None
             or self.settings.provider.llm != LLMProviderName.OPENROUTER
@@ -768,8 +1053,12 @@ class GuiController:
         ):
             self._clear_managed_trial_usage_metadata_cache()
             self._set_managed_trial_pending_auth(False)
-            if callable(setter):
-                setter(visible=False, remaining_percent=None)
+            self._set_managed_usage_view_state(
+                view_settings=view_settings,
+                visible=self._managed_key_card_visible_from_settings(),
+                remaining_percent=None,
+                referral_id=self._current_owned_referral_id(),
+            )
             return
 
         entitlement_ref = self._sync_managed_trial_usage_metadata_scope()
@@ -789,16 +1078,25 @@ class GuiController:
         self._managed_trial_usage_metadata = usage_metadata
         self._managed_trial_usage_metadata_entitlement_ref = entitlement_ref
 
-        if callable(setter):
-            setter(
-                visible=True,
-                remaining_percent=self._managed_trial_remaining_percent(usage_metadata),
-            )
+        remaining_percent = self._managed_trial_remaining_percent(usage_metadata)
+        current_referral_id = self._current_owned_referral_id()
+        self._set_managed_usage_view_state(
+            view_settings=view_settings,
+            visible=True,
+            remaining_percent=remaining_percent,
+            referral_id=current_referral_id,
+        )
 
         if auto_show_founder_letter and is_effectively_exhausted(usage_metadata):
             self._disable_translation_for_managed_exhaustion(
                 reopen_founder_letter=should_auto_show_founder_letter(self.settings, usage_metadata)
             )
+
+        self._schedule_owned_referral_id_status_refresh(
+            view_settings=view_settings,
+            remaining_percent=remaining_percent,
+            current_referral_id=current_referral_id,
+        )
 
     def _show_founder_letter_dialog(self) -> None:
         if self.settings is None:
@@ -977,6 +1275,7 @@ class GuiController:
         )
 
     async def stop(self) -> None:
+        await self._stop_clipboard_watcher()
         await self._cancel_local_stt_download()
         await self.set_stt_enabled(False)
         await self._configure_vrc_mic_receiver(enabled=False)
@@ -1884,7 +2183,11 @@ class GuiController:
     async def _probe_peer_local_stt_runtime_load(self) -> None:
         assert self.settings is not None
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-        peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
+        peer_backend = create_peer_stt_backend(
+            self.settings,
+            secrets=secrets,
+            diagnostics_enabled=self._detailed_audio_diag_enabled,
+        )
         session = None
         try:
             session = await peer_backend.open_session()
@@ -1969,6 +2272,69 @@ class GuiController:
 
                 if desired == self._stt_desired and not self._stt_restart_requested:
                     break
+
+    def _get_clipboard_watcher_lock(self) -> asyncio.Lock:
+        if self._clipboard_watcher_lock is None:
+            self._clipboard_watcher_lock = asyncio.Lock()
+        return self._clipboard_watcher_lock
+
+    async def _sync_clipboard_watcher(self) -> None:
+        enabled = bool(
+            self.settings is not None and self.settings.ui.clipboard_auto_translate_enabled
+        )
+        if not enabled or sys.platform != "win32":
+            await self._stop_clipboard_watcher()
+            return
+        async with self._get_clipboard_watcher_lock():
+            if self._clipboard_watcher is not None:
+                return
+
+            self._clipboard_loop = asyncio.get_running_loop()
+            watcher = create_clipboard_watcher(self._on_clipboard_text_from_thread)
+            try:
+                await asyncio.to_thread(watcher.start)
+            except Exception as exc:
+                self._clipboard_loop = None
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(watcher.stop)
+                self._log_error(f"Clipboard watcher failed to start: {exc}")
+                return
+            self._clipboard_watcher = watcher
+
+    async def _stop_clipboard_watcher(self) -> None:
+        async with self._get_clipboard_watcher_lock():
+            watcher = self._clipboard_watcher
+            self._clipboard_watcher = None
+            self._clipboard_loop = None
+            if watcher is None:
+                return
+            try:
+                await asyncio.to_thread(watcher.stop)
+            except Exception as exc:
+                self._log_error(f"Clipboard watcher failed to stop: {exc}")
+
+    def _on_clipboard_text_from_thread(self, text: str) -> None:
+        trimmed = text.strip()
+        if not trimmed or len(trimmed) > 300:
+            return
+        loop = self._clipboard_loop
+        if loop is None or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(self._schedule_clipboard_submit, trimmed)
+
+    def _schedule_clipboard_submit(self, text: str) -> None:
+        try:
+            asyncio.create_task(self._submit_clipboard_text(text))
+        except RuntimeError as exc:
+            self._log_error(f"Clipboard submit scheduling failed: {exc}")
+
+    async def _submit_clipboard_text(self, text: str) -> None:
+        if self.hub is None:
+            return
+        try:
+            await self.hub.submit_text(text, source="Clipboard")
+        except Exception as exc:
+            self._log_error(f"Clipboard submit failed: {exc}")
 
     async def submit_text(self, text: str) -> None:
         if self.hub is None:
@@ -2082,6 +2448,7 @@ class GuiController:
         self.settings = settings
         self._sync_overlay_calibration_cache(settings)
         self._save_settings()
+        await self._sync_clipboard_watcher()
         self._refresh_local_stt_runtime_state()
         self._clear_local_stt_pending_enable_if_provider_switched_away()
 
@@ -2203,7 +2570,10 @@ class GuiController:
         try:
             success = False
             if provider == "google":
-                success = await GeminiLLMProvider.verify_api_key(key)
+                success = await GeminiLLMProvider.verify_api_key(
+                    key,
+                    model=self.settings.gemini.llm_model.value,
+                )
             elif provider == "openrouter":
                 success = await OpenRouterLLMProvider.verify_api_key(key)
             elif provider == "deepseek":
@@ -2397,7 +2767,11 @@ class GuiController:
         stt_error: Exception | None = None
         try:
             secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-            backend = create_stt_backend(self.settings, secrets=secrets)
+            backend = create_stt_backend(
+                self.settings,
+                secrets=secrets,
+                diagnostics_enabled=self._detailed_audio_diag_enabled,
+            )
             stt = ManagedSTTProvider(
                 backend=backend,
                 sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
@@ -2406,6 +2780,9 @@ class GuiController:
                 drain_timeout_s=self.settings.stt.drain_timeout_s,
                 bridging_ms=self.settings.audio.ring_buffer_ms,
                 runtime_logging=self.runtime_logging,
+                stt_input_fault_profile_provider=lambda: (
+                    self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
+                ),
             )
         except Exception as exc:
             stt_error = exc
@@ -2433,7 +2810,11 @@ class GuiController:
     ) -> ManagedSTTProvider:
         assert self.settings is not None
         secrets = create_secret_store(self.settings.secrets, config_path=self.config_path)
-        peer_backend = create_peer_stt_backend(self.settings, secrets=secrets)
+        peer_backend = create_peer_stt_backend(
+            self.settings,
+            secrets=secrets,
+            diagnostics_enabled=self._detailed_audio_diag_enabled,
+        )
         return ManagedSTTProvider(
             backend=peer_backend,
             sample_rate_hz=config.backend.sample_rate_hz,
@@ -2444,12 +2825,128 @@ class GuiController:
             bridging_ms=max(1, config.vad_pre_roll_ms),
             on_terminal_failure=on_terminal_failure,
             runtime_logging=self.runtime_logging,
+            stt_input_fault_profile_provider=lambda: (
+                self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
+            ),
         )
 
     def _create_peer_audio_source_from_runtime_config(self, config: PeerRuntimeConfig):
+        raw_source = DesktopLoopbackAudioSource(device_name=config.output_device)
+        self.log_detailed(
+            "[AudioDiag][Loopback][peer] "
+            f"requested_device={config.output_device!r} "
+            f"resolved_device_name={getattr(raw_source, 'resolved_device_name', None)!r} "
+            f"resolved_device_index={getattr(raw_source, 'resolved_device_index', None)} "
+            f"resolved_channels={getattr(raw_source, 'resolved_channels', None)} "
+            f"actual_sample_rate_hz={getattr(raw_source, 'actual_sample_rate_hz', None)} "
+            f"used_default_fallback={getattr(raw_source, 'used_default_fallback', None)}"
+        )
+        wrapped_source = self._wrap_diagnostic_audio_source(raw_source, channel_label="peer")
         return DesktopPeerPipeline(
-            source=DesktopLoopbackAudioSource(device_name=config.output_device),
+            source=wrapped_source,
             target_sample_rate_hz=config.backend.sample_rate_hz,
+            is_detailed_enabled=self._detailed_audio_diag_enabled,
+            log_detailed=lambda message: self.log_detailed(message),
+        )
+
+    @property
+    def debug_capture_fault_profile(self) -> str:
+        return self._debug_capture_fault_profile
+
+    @property
+    def debug_stt_fault_profile(self) -> str:
+        return self._debug_stt_fault_profile
+
+    def _debug_audio_fault_allowed(self) -> bool:
+        return bool(getattr(self.app, "debug_ui_preview", False))
+
+    def _detailed_audio_diag_enabled(self) -> bool:
+        return self.runtime_logging.mode is SessionLoggingMode.DETAILED
+
+    def cycle_debug_capture_fault_profile(self) -> str:
+        if not self._debug_audio_fault_allowed():
+            return "none"
+
+        from puripuly_heart.core.audio.diagnostics import (
+            EXPECTED_FAULT_SIGNATURES,
+            AudioFaultProfile,
+        )
+
+        profiles = [
+            AudioFaultProfile.NONE,
+            AudioFaultProfile.CAPTURE_SILENT_FIRST_CHANNEL,
+            AudioFaultProfile.CAPTURE_ATTENUATE_40DB,
+            AudioFaultProfile.CAPTURE_NEAR_SILENCE_NOISE,
+            AudioFaultProfile.CAPTURE_BUFFER_DROPOUTS,
+        ]
+        current = AudioFaultProfile(self._debug_capture_fault_profile)
+        next_profile = profiles[(profiles.index(current) + 1) % len(profiles)]
+        self._debug_capture_fault_profile = next_profile.value
+        self.log_detailed(
+            "[AudioDiag][DebugFault] "
+            f"capture_profile={next_profile.value} "
+            "expected_signature="
+            f"{EXPECTED_FAULT_SIGNATURES.get(next_profile.value, 'none')}"
+        )
+        return self._debug_capture_fault_profile
+
+    def cycle_debug_stt_fault_profile(self) -> str:
+        if not self._debug_audio_fault_allowed():
+            return "none"
+
+        from puripuly_heart.core.audio.diagnostics import (
+            EXPECTED_FAULT_SIGNATURES,
+            AudioFaultProfile,
+        )
+
+        profiles = [AudioFaultProfile.NONE, AudioFaultProfile.STT_INPUT_LOW_SNR_VAD_PASS]
+        current = AudioFaultProfile(self._debug_stt_fault_profile)
+        next_profile = profiles[(profiles.index(current) + 1) % len(profiles)]
+        self._debug_stt_fault_profile = next_profile.value
+        self.log_detailed(
+            "[AudioDiag][DebugFault] "
+            f"stt_profile={next_profile.value} "
+            "expected_signature="
+            f"{EXPECTED_FAULT_SIGNATURES.get(next_profile.value, 'none')}"
+        )
+        return self._debug_stt_fault_profile
+
+    def clear_debug_audio_fault_profiles(self) -> None:
+        self._debug_capture_fault_profile = "none"
+        self._debug_stt_fault_profile = "none"
+        self.log_detailed("[AudioDiag][DebugFault] capture_profile=none stt_profile=none")
+
+    def _wrap_diagnostic_audio_source(
+        self,
+        source: AudioSource,
+        *,
+        channel_label: str,
+    ) -> AudioSource:
+        from puripuly_heart.core.audio.diagnostics import AudioFaultProfile, DiagnosticAudioSource
+
+        def extra_fields() -> dict[str, object]:
+            return {
+                "queue_drops": getattr(source, "queue_drop_count", 0),
+                "callback_statuses": getattr(source, "callback_status_count", 0),
+                "last_callback_status": getattr(source, "last_callback_status", None),
+                "resolved_device_name": getattr(source, "resolved_device_name", None),
+                "resolved_device_index": getattr(source, "resolved_device_index", None),
+                "resolved_channels": getattr(source, "resolved_channels", None),
+                "actual_sample_rate_hz": getattr(source, "actual_sample_rate_hz", None),
+                "used_default_fallback": getattr(source, "used_default_fallback", None),
+            }
+
+        return DiagnosticAudioSource(
+            source=source,
+            channel_label=channel_label,
+            is_detailed_enabled=self._detailed_audio_diag_enabled,
+            log_detailed=lambda message: self.log_detailed(message),
+            fault_profile_provider=lambda: (
+                self._debug_capture_fault_profile
+                if self._debug_audio_fault_allowed()
+                else AudioFaultProfile.NONE.value
+            ),
+            extra_fields_provider=extra_fields,
         )
 
     def _create_peer_vad_from_runtime_config(self, config: PeerRuntimeConfig, model_path: Path):
@@ -2459,6 +2956,19 @@ class GuiController:
             ring_buffer_ms=config.vad_pre_roll_ms,
             speech_threshold=config.vad_threshold,
             hangover_ms=config.vad_hangover_ms,
+            diagnostic_event_callback=lambda message: self.log_detailed(message),
+            diagnostics_enabled=self._detailed_audio_diag_enabled,
+            diagnostic_label="peer",
+        )
+
+    async def _run_peer_audio_vad_loop(self, **kwargs: object) -> None:
+        from puripuly_heart.app.headless_mic import run_audio_vad_loop
+
+        await run_audio_vad_loop(
+            **kwargs,
+            channel_label="peer",
+            is_detailed_enabled=self._detailed_audio_diag_enabled,
+            log_detailed=lambda message: self.log_detailed(message),
         )
 
     async def _refresh_peer_stt_runtime(self) -> None:
@@ -2561,7 +3071,11 @@ class GuiController:
 
         stt = None
         try:
-            backend = create_stt_backend(self.settings, secrets=secrets)
+            backend = create_stt_backend(
+                self.settings,
+                secrets=secrets,
+                diagnostics_enabled=self._detailed_audio_diag_enabled,
+            )
             stt = ManagedSTTProvider(
                 backend=backend,
                 sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
@@ -2570,6 +3084,9 @@ class GuiController:
                 drain_timeout_s=self.settings.stt.drain_timeout_s,
                 bridging_ms=self.settings.audio.ring_buffer_ms,
                 runtime_logging=self.runtime_logging,
+                stt_input_fault_profile_provider=lambda: (
+                    self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
+                ),
             )
         except Exception as exc:
             self._log_error(f"STT backend not available: {exc}")
@@ -2632,7 +3149,6 @@ class GuiController:
         self.sender = sender
         self.osc = osc
         self.hub = hub
-        from puripuly_heart.app.headless_mic import run_audio_vad_loop
 
         self._peer_runtime = PeerChannelRuntime(
             hub=hub,
@@ -2641,7 +3157,7 @@ class GuiController:
             source_factory=self._create_peer_audio_source_from_runtime_config,
             vad_factory=self._create_peer_vad_from_runtime_config,
             vad_model_resolver=ensure_silero_vad_onnx,
-            run_audio_loop=run_audio_vad_loop,
+            run_audio_loop=self._run_peer_audio_vad_loop,
         )
         self._last_peer_translation_enabled = self.settings.ui.peer_translation_enabled
         await self._configure_vrc_mic_receiver(enabled=self.settings.osc.vrc_mic_intercept)
@@ -2719,6 +3235,9 @@ class GuiController:
                     if self.settings.stt.low_latency_mode
                     else 1100
                 ),
+                diagnostic_event_callback=lambda message: self.log_detailed(message),
+                diagnostics_enabled=self._detailed_audio_diag_enabled,
+                diagnostic_label="self",
             )
 
             def _resolve_device(host_api: str, device: str) -> int | None:
@@ -2732,19 +3251,138 @@ class GuiController:
                     )
                     return None
 
-            def _open_source(
+            def _source_int(source: SoundDeviceAudioSource, attr: str, fallback: int) -> int:
+                try:
+                    value = getattr(source, attr, fallback)
+                    return int(value)
+                except Exception:
+                    return fallback
+
+            def _log_mic_capture_format(
+                *,
+                attempt: str,
+                dev_idx: int | None,
+                requested_channels: int,
+                decision: SelfMicCaptureChannelDecision,
+                source: SoundDeviceAudioSource,
+                host_api_for_log: str,
+                device_for_log: str,
+                wasapi_auto_convert: bool,
+                wasapi_exclusive: bool,
+            ) -> None:
+                metadata = decision.metadata
+                opened_channels = _source_int(source, "opened_channels", requested_channels)
+                frame_channels = _source_int(source, "frame_channels", opened_channels)
+                frame_channels_source = "opened_fallback"
+                actual_sample_rate_hz = _source_int(source, "actual_sample_rate_hz", 0)
+                self.log_detailed(
+                    "[STT] Microphone capture format: "
+                    f"attempt={attempt!r} "
+                    f"internal_channels={decision.internal_channels} "
+                    f"preferred_capture_channels={decision.preferred_capture_channels} "
+                    f"requested_channels={requested_channels} "
+                    f"opened_channels={opened_channels} "
+                    f"frame_channels={frame_channels} "
+                    f"frame_channels_source={frame_channels_source!r} "
+                    f"saved_host_api={saved_host_api!r} "
+                    f"actual_host_api={host_api_for_log!r} "
+                    f"device={device_for_log!r} "
+                    f"device_idx={dev_idx} "
+                    f"wasapi_auto_convert={wasapi_auto_convert} "
+                    f"wasapi_exclusive={wasapi_exclusive} "
+                    f"actual_sample_rate_hz={actual_sample_rate_hz or None} "
+                    f"metadata_device_idx={metadata.device_idx} "
+                    f"metadata_device_name={metadata.name!r} "
+                    f"device_max_input_channels={metadata.max_input_channels} "
+                    f"device_default_samplerate={metadata.default_samplerate} "
+                    f"metadata_status={metadata.metadata_status!r} "
+                    f"metadata_error={metadata.metadata_error!r}"
+                )
+
+            def _open_source_once(
                 dev_idx: int | None,
                 *,
+                attempt: str,
+                requested_channels: int,
+                decision: SelfMicCaptureChannelDecision,
+                host_api_for_log: str,
+                device_for_log: str,
                 wasapi_auto_convert: bool = False,
                 wasapi_exclusive: bool = False,
             ) -> SoundDeviceAudioSource:
-                return SoundDeviceAudioSource(
+                source = SoundDeviceAudioSource(
                     sample_rate_hz=None,
-                    channels=self.settings.audio.internal_channels,
+                    channels=requested_channels,
                     device=dev_idx,
                     wasapi_auto_convert=wasapi_auto_convert,
                     wasapi_exclusive=wasapi_exclusive,
                 )
+                _log_mic_capture_format(
+                    attempt=attempt,
+                    dev_idx=dev_idx,
+                    requested_channels=requested_channels,
+                    decision=decision,
+                    source=source,
+                    host_api_for_log=host_api_for_log,
+                    device_for_log=device_for_log,
+                    wasapi_auto_convert=wasapi_auto_convert,
+                    wasapi_exclusive=wasapi_exclusive,
+                )
+                return source
+
+            def _open_source_with_mono_retry(
+                dev_idx: int | None,
+                *,
+                attempt: str,
+                host_api_for_log: str,
+                device_for_log: str,
+                wasapi_auto_convert: bool = False,
+                wasapi_exclusive: bool = False,
+            ) -> SoundDeviceAudioSource:
+                decision = determine_self_mic_capture_channels(
+                    device_idx=dev_idx,
+                    internal_channels=self.settings.audio.internal_channels,
+                )
+                try:
+                    return _open_source_once(
+                        dev_idx,
+                        attempt=attempt,
+                        requested_channels=decision.preferred_capture_channels,
+                        decision=decision,
+                        host_api_for_log=host_api_for_log,
+                        device_for_log=device_for_log,
+                        wasapi_auto_convert=wasapi_auto_convert,
+                        wasapi_exclusive=wasapi_exclusive,
+                    )
+                except Exception as exc:
+                    if decision.preferred_capture_channels <= self.settings.audio.internal_channels:
+                        raise
+                    self.log_detailed(
+                        "[STT] Microphone open detail: "
+                        f"attempt={attempt!r} "
+                        f"host_api={host_api_for_log!r} "
+                        f"device={device_for_log!r} "
+                        f"device_idx={dev_idx} "
+                        f"preferred_capture_channels={decision.preferred_capture_channels} "
+                        f"requested_channels={decision.preferred_capture_channels} "
+                        f"wasapi_auto_convert={wasapi_auto_convert} "
+                        f"wasapi_exclusive={wasapi_exclusive} "
+                        f"metadata_status={decision.metadata.metadata_status!r} "
+                        f"will_retry_mono=True "
+                        f"error={exc}",
+                        level=logging.WARNING,
+                    )
+                    retry_attempt = f"{attempt}_mono_retry"
+                    return _open_source_once(
+                        dev_idx,
+                        attempt=retry_attempt,
+                        requested_channels=self.settings.audio.internal_channels,
+                        decision=decision,
+                        host_api_for_log=host_api_for_log,
+                        device_for_log=device_for_log,
+                        wasapi_auto_convert=wasapi_auto_convert,
+                        wasapi_exclusive=wasapi_exclusive,
+                    )
 
             saved_host_api = self.settings.audio.input_host_api
             host_api_profile = normalize_input_host_api(saved_host_api)
@@ -2759,8 +3397,11 @@ class GuiController:
             source: SoundDeviceAudioSource | None = None
 
             try:
-                source = _open_source(
+                source = _open_source_with_mono_retry(
                     device_idx,
+                    attempt="primary",
+                    host_api_for_log=host_api,
+                    device_for_log=device_name,
                     wasapi_auto_convert=host_api_profile.wasapi_auto_convert,
                     wasapi_exclusive=host_api_profile.wasapi_exclusive,
                 )
@@ -2785,8 +3426,11 @@ class GuiController:
                 fallback_idx = _resolve_device("", device_name)
                 if fallback_idx != device_idx or first_open_used_wasapi_flags:
                     try:
-                        source = _open_source(
+                        source = _open_source_with_mono_retry(
                             fallback_idx,
+                            attempt="name_fallback",
+                            host_api_for_log="",
+                            device_for_log=device_name,
                             wasapi_auto_convert=False,
                             wasapi_exclusive=False,
                         )
@@ -2802,8 +3446,11 @@ class GuiController:
             # 3차 시도: 시스템 기본 장치
             if source is None:
                 try:
-                    source = _open_source(
+                    source = _open_source_with_mono_retry(
                         None,
+                        attempt="system_default",
+                        host_api_for_log="",
+                        device_for_log="",
                         wasapi_auto_convert=False,
                         wasapi_exclusive=False,
                     )
@@ -2819,7 +3466,7 @@ class GuiController:
                 return
 
             self._vad = vad
-            self._audio_source = source
+            self._audio_source = self._wrap_diagnostic_audio_source(source, channel_label="self")
             self._mic_task = asyncio.create_task(self._run_mic_loop())
 
     async def _stop_mic_loop(self) -> None:
@@ -2850,6 +3497,9 @@ class GuiController:
                 sink=_HubVadSink(hub=self.hub),
                 target_sample_rate_hz=self.settings.audio.internal_sample_rate_hz,  # type: ignore[union-attr]
                 audio_gate=self.vrc_mic_audio_gate,
+                channel_label="self",
+                is_detailed_enabled=self._detailed_audio_diag_enabled,
+                log_detailed=lambda message: self.log_detailed(message),
             )
         except asyncio.CancelledError:
             raise
@@ -3047,14 +3697,70 @@ class GuiController:
         return self.runtime_logging.mode.value
 
     def set_runtime_logging_mode(self, mode: SessionLoggingMode | str) -> None:
+        previous_mode = self.runtime_logging.mode
         self.runtime_logging.set_mode(mode)
         normalized_mode = self.runtime_logging.mode.value
+        if (
+            previous_mode is not SessionLoggingMode.DETAILED
+            and self.runtime_logging.mode is SessionLoggingMode.DETAILED
+        ):
+            self._schedule_audio_environment_snapshot()
         manager = self._overlay_manager
         if manager is not None:
             set_logging_mode = getattr(manager, "set_logging_mode", None)
             if callable(set_logging_mode):
                 set_logging_mode(normalized_mode)
         self._schedule_overlay_runtime_logging_mode_update()
+
+    def _schedule_audio_environment_snapshot(self) -> None:
+        async def _task() -> None:
+            await self._log_audio_environment_snapshot_async()
+
+        run_task = getattr(self.page, "run_task", None)
+        if callable(run_task):
+            try:
+                run_task(_task)
+                return
+            except Exception as exc:
+                self.log_detailed(
+                    "[AudioDiag][Snapshot] failed to schedule via page.run_task",
+                    level=logging.WARNING,
+                    exception=exc,
+                )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.log_detailed(
+                "[AudioDiag][Snapshot] skipped reason=no_running_loop",
+                level=logging.WARNING,
+            )
+            return
+
+        task_coro = _task()
+        try:
+            loop.create_task(task_coro)
+        except Exception as exc:
+            task_coro.close()
+            self.log_detailed(
+                "[AudioDiag][Snapshot] skipped reason=create_task_failed",
+                level=logging.WARNING,
+                exception=exc,
+            )
+
+    async def _log_audio_environment_snapshot_async(self) -> None:
+        from puripuly_heart.core.audio.diagnostics import (
+            collect_pyaudiowpatch_snapshot_lines,
+            collect_sounddevice_snapshot_lines,
+        )
+
+        sounddevice_lines, loopback_lines = await asyncio.gather(
+            asyncio.to_thread(collect_sounddevice_snapshot_lines),
+            asyncio.to_thread(collect_pyaudiowpatch_snapshot_lines),
+        )
+        for line in sounddevice_lines:
+            self.log_detailed(line)
+        for line in loopback_lines:
+            self.log_detailed(line)
 
     async def _emit_overlay_runtime_logging_mode_update(self) -> None:
         bridge = self._overlay_bridge
@@ -3278,7 +3984,10 @@ class GuiController:
                 key = ""
                 if provider_name == "gemini":
                     key = secrets.get("google_api_key") or "" if secrets is not None else ""
-                    llm_valid = await GeminiLLMProvider.verify_api_key(key)
+                    llm_valid = await GeminiLLMProvider.verify_api_key(
+                        key,
+                        model=self.settings.gemini.llm_model.value,
+                    )
                 elif provider_name == LLMProviderName.OPENROUTER:
                     resolution = (
                         resolve_openrouter_credentials(self.settings, secrets=secrets)
@@ -3309,10 +4018,8 @@ class GuiController:
                     llm_valid = await _verify_alibaba_selected()
                 elif provider_name == LLMProviderName.LOCAL_LLM:
                     key = (
-                        (secrets.get("local_llm_api_key") if secrets is not None else None)
-                        or os.getenv("LOCAL_LLM_API_KEY")
-                        or ""
-                    )
+                        (secrets.get("local_llm_api_key") if secrets is not None else None) or ""
+                    ).strip()
                     llm_valid = await LocalOpenAICompatibleLLMProvider.verify_connection(
                         base_url=self.settings.local_llm.base_url,
                         model=self.settings.local_llm.model,

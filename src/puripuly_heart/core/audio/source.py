@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import time
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Protocol
 
@@ -11,6 +12,167 @@ import numpy as np
 from puripuly_heart.core.audio.format import AudioFrameF32
 
 logger = logging.getLogger(__name__)
+
+_CALLBACK_WARNING_MIN_INTERVAL_S = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class SoundDeviceInputMetadata:
+    device_idx: int | None
+    name: str | None
+    max_input_channels: int | None
+    default_samplerate: float | None
+    metadata_status: str
+    metadata_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SelfMicCaptureChannelDecision:
+    device_idx: int | None
+    internal_channels: int
+    preferred_capture_channels: int
+    metadata: SoundDeviceInputMetadata
+
+
+def _input_metadata_from_info(
+    *,
+    device_idx: int | None,
+    info: object,
+    ok_status: str,
+    invalid_status: str,
+) -> SoundDeviceInputMetadata:
+    if not hasattr(info, "get"):
+        return SoundDeviceInputMetadata(
+            device_idx=device_idx,
+            name=None,
+            max_input_channels=None,
+            default_samplerate=None,
+            metadata_status=invalid_status,
+            metadata_error="device info is not mapping-like",
+        )
+
+    get_value = info.get  # type: ignore[attr-defined]
+    name_value = get_value("name", None)
+    name = str(name_value) if name_value is not None else None
+
+    try:
+        max_input_channels = int(get_value("max_input_channels", 0) or 0)
+    except Exception as exc:
+        return SoundDeviceInputMetadata(
+            device_idx=device_idx,
+            name=name,
+            max_input_channels=None,
+            default_samplerate=None,
+            metadata_status=invalid_status,
+            metadata_error=str(exc),
+        )
+
+    samplerate_value = get_value("default_samplerate", None)
+    if samplerate_value is None:
+        default_samplerate = None
+    else:
+        try:
+            default_samplerate = float(samplerate_value)
+        except Exception:
+            default_samplerate = None
+
+    if max_input_channels <= 0:
+        return SoundDeviceInputMetadata(
+            device_idx=device_idx,
+            name=name,
+            max_input_channels=max_input_channels,
+            default_samplerate=default_samplerate,
+            metadata_status=invalid_status,
+            metadata_error="max_input_channels is not positive",
+        )
+
+    return SoundDeviceInputMetadata(
+        device_idx=device_idx,
+        name=name,
+        max_input_channels=max_input_channels,
+        default_samplerate=default_samplerate,
+        metadata_status=ok_status,
+    )
+
+
+def query_sounddevice_input_metadata(device_idx: int | None) -> SoundDeviceInputMetadata:
+    import sounddevice as sd  # type: ignore
+
+    if device_idx is None:
+        try:
+            info = sd.query_devices(kind="input")
+        except Exception as exc:
+            return SoundDeviceInputMetadata(
+                device_idx=None,
+                name=None,
+                max_input_channels=None,
+                default_samplerate=None,
+                metadata_status="query_failed",
+                metadata_error=str(exc),
+            )
+        return _input_metadata_from_info(
+            device_idx=None,
+            info=info,
+            ok_status="default_resolved",
+            invalid_status="unavailable",
+        )
+
+    try:
+        devices = sd.query_devices()
+    except Exception as exc:
+        return SoundDeviceInputMetadata(
+            device_idx=device_idx,
+            name=None,
+            max_input_channels=None,
+            default_samplerate=None,
+            metadata_status="query_failed",
+            metadata_error=str(exc),
+        )
+
+    if device_idx < 0 or device_idx >= len(devices):
+        return SoundDeviceInputMetadata(
+            device_idx=device_idx,
+            name=None,
+            max_input_channels=None,
+            default_samplerate=None,
+            metadata_status="invalid",
+            metadata_error=f"device index {device_idx} is out of range",
+        )
+
+    return _input_metadata_from_info(
+        device_idx=device_idx,
+        info=devices[device_idx],
+        ok_status="ok",
+        invalid_status="invalid",
+    )
+
+
+def determine_self_mic_capture_channels(
+    *,
+    device_idx: int | None,
+    internal_channels: int,
+    metadata: SoundDeviceInputMetadata | None = None,
+) -> SelfMicCaptureChannelDecision:
+    if internal_channels <= 0:
+        raise ValueError("internal_channels must be > 0")
+
+    resolved_metadata = metadata or query_sounddevice_input_metadata(device_idx)
+    max_input_channels = resolved_metadata.max_input_channels
+    if (
+        resolved_metadata.metadata_status in {"ok", "default_resolved"}
+        and max_input_channels is not None
+        and max_input_channels > 0
+    ):
+        preferred_capture_channels = min(max_input_channels, 2)
+    else:
+        preferred_capture_channels = internal_channels
+
+    return SelfMicCaptureChannelDecision(
+        device_idx=device_idx,
+        internal_channels=internal_channels,
+        preferred_capture_channels=preferred_capture_channels,
+        metadata=resolved_metadata,
+    )
 
 
 class AudioSource(Protocol):
@@ -38,6 +200,14 @@ class SoundDeviceAudioSource(AudioSource):
     _stream: object = field(init=False, repr=False)
     _closed: bool = field(init=False, default=False)
     _actual_sample_rate_hz: int = field(init=False, repr=False)
+    _opened_channels: int = field(init=False, repr=False)
+    _frame_channels: int = field(init=False, repr=False)
+    _callback_status_count: int = field(init=False, default=0, repr=False)
+    _queue_drop_count: int = field(init=False, default=0, repr=False)
+    _last_callback_status: object | None = field(init=False, default=None, repr=False)
+    _last_reported_callback_status_count: int = field(init=False, default=0, repr=False)
+    _last_reported_queue_drop_count: int = field(init=False, default=0, repr=False)
+    _last_callback_warning_monotonic_s: float = field(init=False, default=float("-inf"), repr=False)
 
     def __post_init__(self) -> None:
         if self.sample_rate_hz is not None and self.sample_rate_hz <= 0:
@@ -55,17 +225,26 @@ class SoundDeviceAudioSource(AudioSource):
             raise RuntimeError("WASAPI settings support is unavailable in sounddevice")
 
         self._queue = janus.Queue(maxsize=self.max_queue_frames)
+        self._opened_channels = self.channels
+        self._frame_channels = self.channels
 
         def _callback(indata, _frames, _time, status):  # called from PortAudio thread
             if self._closed:
                 return
             if status:
-                logger.warning("sounddevice input status: %s", status)
+                self._callback_status_count += 1
+                self._last_callback_status = status
 
             try:
-                self._queue.sync_q.put_nowait(np.asarray(indata, dtype=np.float32).copy())
+                samples = np.asarray(indata, dtype=np.float32).copy()
+                if samples.ndim == 2 and samples.shape[-1] > 0:
+                    self._frame_channels = int(samples.shape[-1])
+                else:
+                    self._frame_channels = self._opened_channels
+                self._queue.sync_q.put_nowait(samples)
             except queue.Full:
                 # Drop if the asyncio consumer is too slow; better than blocking audio thread.
+                self._queue_drop_count += 1
                 return
 
         stream_kwargs = {
@@ -83,19 +262,89 @@ class SoundDeviceAudioSource(AudioSource):
             )
 
         stream = sd.InputStream(**stream_kwargs)
-        stream.start()
+        try:
+            stream.start()
+            actual_sample_rate_hz = int(stream.samplerate)
+        except Exception:
+            with contextlib.suppress(Exception):
+                stream.stop()
+            with contextlib.suppress(Exception):
+                stream.close()
+            raise
+
         self._stream = stream
-        self._actual_sample_rate_hz = int(stream.samplerate)
+        self._opened_channels = self.channels
+        self._actual_sample_rate_hz = actual_sample_rate_hz
+
+    @property
+    def actual_sample_rate_hz(self) -> int:
+        return self._actual_sample_rate_hz
+
+    @property
+    def requested_channels(self) -> int:
+        return self.channels
+
+    @property
+    def opened_channels(self) -> int:
+        return self._opened_channels
+
+    @property
+    def frame_channels(self) -> int:
+        return self._frame_channels
+
+    @property
+    def callback_status_count(self) -> int:
+        return self._callback_status_count
+
+    @property
+    def queue_drop_count(self) -> int:
+        return self._queue_drop_count
+
+    @property
+    def last_callback_status(self) -> object | None:
+        return self._last_callback_status
 
     async def frames(self) -> AsyncIterator[AudioFrameF32]:
         while True:
             item = await self._queue.async_q.get()
             if item is None:
                 return
+            self._report_callback_warnings_from_consumer()
+            frame_channels = self._opened_channels
+            if item.ndim == 2 and item.shape[-1] > 0:
+                frame_channels = int(item.shape[-1])
+            self._frame_channels = frame_channels
             yield AudioFrameF32(
                 samples=item,
                 sample_rate_hz=self._actual_sample_rate_hz,
-                channels=self.channels,
+                channels=frame_channels,
+            )
+
+    def _report_callback_warnings_from_consumer(self) -> None:
+        callback_status_count = self._callback_status_count
+        queue_drop_count = self._queue_drop_count
+        status_new_count = callback_status_count - self._last_reported_callback_status_count
+        drop_new_count = queue_drop_count - self._last_reported_queue_drop_count
+        if status_new_count <= 0 and drop_new_count <= 0:
+            return
+
+        now = time.monotonic()
+        if now - self._last_callback_warning_monotonic_s < _CALLBACK_WARNING_MIN_INTERVAL_S:
+            return
+
+        self._last_callback_warning_monotonic_s = now
+        self._last_reported_callback_status_count = callback_status_count
+        self._last_reported_queue_drop_count = queue_drop_count
+        with contextlib.suppress(Exception):
+            logger.warning(
+                "SoundDevice audio callback status/drop observed: "
+                "callback status count=%s callback status new=%s "
+                "last_status=%s queue drop count=%s queue drop new=%s",
+                callback_status_count,
+                max(0, status_new_count),
+                self._last_callback_status,
+                queue_drop_count,
+                max(0, drop_new_count),
             )
 
     async def close(self) -> None:

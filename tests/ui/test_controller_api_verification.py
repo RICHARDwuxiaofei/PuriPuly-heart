@@ -557,6 +557,40 @@ async def test_local_llm_verification_uses_secret_store_key_before_env(
 
 
 @pytest.mark.asyncio
+async def test_local_llm_verification_ignores_env_key_when_secret_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.LOCAL_LLM
+    app = SimpleNamespace(view_dashboard=DummyDashboard())
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = settings
+    controller.hub = DummyHub()
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_a, **_k: DummySecrets({}),
+    )
+    monkeypatch.setenv("LOCAL_LLM_API_KEY", "env-secret")
+    seen: dict[str, object] = {}
+
+    async def fake_verify_connection(**kwargs):
+        seen.update(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        LocalOpenAICompatibleLLMProvider,
+        "verify_connection",
+        staticmethod(fake_verify_connection),
+    )
+
+    await controller._verify_and_update_status()
+
+    assert seen["api_key"] == ""
+    assert app.view_dashboard.translation_needs_key is False
+
+
+@pytest.mark.asyncio
 async def test_verify_and_update_status_uses_selected_managed_openrouter_key(monkeypatch) -> None:
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.OPENROUTER

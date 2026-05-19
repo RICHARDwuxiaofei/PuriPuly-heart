@@ -35,9 +35,11 @@ from puripuly_heart.config.settings import (
     _normalize_local_llm_base_url,
     default_translation_connection,
     materialize_translation_settings,
+    normalize_owned_referral_id,
     supported_translation_connections,
 )
 from puripuly_heart.core.language import get_stt_compatibility_warning
+from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.ui.components.managed_trial_usage_bar import ManagedTrialUsageBar
 from puripuly_heart.ui.components.settings import (
     ApiKeyField,
@@ -69,6 +71,7 @@ from puripuly_heart.ui.theme import (
     COLOR_NEUTRAL_DARK,
     COLOR_ON_BACKGROUND,
     COLOR_PRIMARY,
+    COLOR_SUCCESS,
 )
 
 logger = logging.getLogger(__name__)
@@ -208,6 +211,7 @@ class SettingsView(ft.Column):
         self.on_settings_changed: Callable[[AppSettings], None] | None = None
         self.on_prompt_apply_settings: Callable[[AppSettings], None] | None = None
         self.on_providers_changed: Callable[[], None] | None = None
+        self.on_local_llm_secret_changed: Callable[[], None] | None = None
         self.on_request_openrouter_pkce: Callable[[AppSettings], None] | None = None
         self.on_verify_api_key: Callable[[str, str], object] | None = None
         self.on_secret_cleared: Callable[[str], None] | None = None  # key name
@@ -234,6 +238,8 @@ class SettingsView(ft.Column):
         self._overlay_calibration_session_active = False
         self._managed_trial_usage_visible = False
         self._managed_trial_usage_remaining_percent: int | None = None
+        self._managed_key_referral_id: str | None = None
+        self._managed_key_pass_status: TalkTogetherPassStatus | None = None
         self._overlay_peer_contract: OverlayPeerConsumerContract | None = None
 
         # Build UI components
@@ -345,6 +351,7 @@ class SettingsView(ft.Column):
             self._llm_text,
             self._ui_text,
             self._chatbox_source_text,
+            self._clipboard_auto_translate_text,
             self._vrc_mic_text,
             self._mic_audio_text,
             self._audio_host_api_text,
@@ -828,6 +835,90 @@ class SettingsView(ft.Column):
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
         self._managed_trial_usage_bar = ManagedTrialUsageBar()
+        self._managed_key_title = ft.Text(
+            t("settings.managed_key.title"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._managed_key_referral_id_label = ft.Text(
+            t("settings.managed_key.referral_id.label"),
+            size=16,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._managed_key_referral_id_value = ft.Text(
+            t("settings.managed_key.referral_id.empty"),
+            size=22,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_ON_BACKGROUND,
+            selectable=True,
+        )
+        self._managed_key_referral_copy_button = ft.IconButton(
+            icon=ft.Icons.CONTENT_COPY_ROUNDED,
+            icon_color=COLOR_PRIMARY,
+            disabled=True,
+            tooltip=t("settings.managed_key.referral_id.pending_helper"),
+            on_click=self._on_managed_key_referral_copy,
+        )
+        self._managed_key_referral_helper_text = ft.Text(
+            t("settings.managed_key.referral_id.pending_helper"),
+            size=14,
+            color=COLOR_NEUTRAL,
+        )
+        self._managed_key_invite_progress_label = ft.Text(
+            t("settings.managed_key.invite_progress.label"),
+            size=16,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._managed_key_invite_progress_value = ft.Text(
+            "",
+            size=20,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_ON_BACKGROUND,
+        )
+        self._managed_key_invite_progress_row = ft.Row(
+            [
+                self._managed_key_invite_progress_label,
+                ft.Container(expand=True),
+                self._managed_key_invite_progress_value,
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            visible=False,
+        )
+        self._managed_key_card = self._wrap_card(
+            ft.Column(
+                [
+                    self._managed_key_title,
+                    ft.Container(height=4),
+                    self._managed_trial_usage_bar,
+                    ft.Container(height=8),
+                    ft.Column(
+                        [
+                            self._managed_key_invite_progress_row,
+                            ft.Row(
+                                [
+                                    self._managed_key_referral_id_label,
+                                    ft.Container(expand=True),
+                                    self._managed_key_referral_id_value,
+                                    self._managed_key_referral_copy_button,
+                                ],
+                                spacing=8,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            self._managed_key_referral_helper_text,
+                        ],
+                        spacing=4,
+                    ),
+                ],
+                spacing=0,
+            ),
+            height=None,
+            expand=False,
+        )
+        self._managed_key_card.visible = False
         self._alibaba_key_beijing = ApiKeyField(
             "settings.alibaba_api_key_beijing",
             "alibaba_api_key_beijing",
@@ -855,7 +946,6 @@ class SettingsView(ft.Column):
                 self._deepgram_key,
                 self._soniox_key,
                 self._google_key,
-                self._managed_trial_usage_bar,
                 self._openrouter_key,
                 self._openrouter_pkce_button_row,
                 self._deepseek_key,
@@ -926,6 +1016,21 @@ class SettingsView(ft.Column):
             value=self._chatbox_source_text,
         )
 
+        self._clipboard_auto_translate_text = self._build_clickable_text(
+            t("settings.clipboard_auto_translate.off"),
+            self._on_clipboard_auto_translate_click,
+        )
+        self._clipboard_auto_translate_title = ft.Text(
+            t("settings.clipboard_auto_translate"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        clipboard_auto_translate_card = self._wrap_unit_card(
+            title=self._clipboard_auto_translate_title,
+            value=self._clipboard_auto_translate_text,
+        )
+
         self._vrc_mic_text = self._build_clickable_text(
             t("settings.vrc_mic.on"),
             self._on_vrc_mic_click,
@@ -945,7 +1050,11 @@ class SettingsView(ft.Column):
 
         general_primary_row = ft.Container(
             content=ft.Row(
-                [ui_card, chatbox_source_card, integrated_context_card],
+                [
+                    ui_card,
+                    chatbox_source_card,
+                    integrated_context_card,
+                ],
                 spacing=16,
                 expand=True,
             ),
@@ -1083,6 +1192,17 @@ class SettingsView(ft.Column):
         general_vad_row = ft.Container(
             content=ft.Row(
                 [vrc_mic_card, self._self_vad_card, self._peer_vad_card],
+                spacing=16,
+                expand=True,
+            ),
+        )
+        general_clipboard_row = ft.Container(
+            content=ft.Row(
+                [
+                    clipboard_auto_translate_card,
+                    self._wrap_empty_unit_card(),
+                    self._wrap_empty_unit_card(),
+                ],
                 spacing=16,
                 expand=True,
             ),
@@ -1405,6 +1525,24 @@ class SettingsView(ft.Column):
             on_blur=self._on_local_llm_model_change_end,
             on_submit=self._on_local_llm_model_change_end,
         )
+        self._local_llm_api_key = ApiKeyField(
+            "settings.local_llm.api_key",
+            "local_llm_api_key",
+            "local_llm",
+            on_verify=None,
+            on_save=self._on_local_llm_secret_change,
+            show_snackbar=lambda msg, bg: (
+                self.show_snackbar(msg, bg) if self.show_snackbar else None
+            ),
+            show_status=False,
+        )
+        local_llm_api_key_description = t("settings.local_llm.api_key.description")
+        self._local_llm_api_key_helper = ft.Text(
+            local_llm_api_key_description,
+            size=15,
+            color=COLOR_NEUTRAL,
+            visible=bool(local_llm_api_key_description.strip()),
+        )
         self._local_llm_extra_body = ft.TextField(
             label=t("settings.local_llm.extra_body"),
             value=json.dumps({"reasoning_effort": "none"}, ensure_ascii=False, indent=2),
@@ -1443,6 +1581,8 @@ class SettingsView(ft.Column):
                     self._local_llm_extra_body_helper,
                     self._local_llm_base_url,
                     self._local_llm_model,
+                    self._local_llm_api_key,
+                    self._local_llm_api_key_helper,
                     self._local_llm_extra_body,
                     self._local_llm_extra_body_error,
                 ],
@@ -1572,9 +1712,15 @@ class SettingsView(ft.Column):
                     row1,
                     self._translation_connection_row,
                     self._local_llm_connection_card,
+                    self._managed_key_card,
                     api_keys_row,
                 ],
-                "general": [general_primary_row, general_audio_row, general_vad_row],
+                "general": [
+                    general_primary_row,
+                    general_audio_row,
+                    general_vad_row,
+                    general_clipboard_row,
+                ],
                 "prompt": [row7, persona_card],
                 "overlay": [overlay_row1, overlay_row2, overlay_row3],
             }
@@ -1809,6 +1955,136 @@ class SettingsView(ft.Column):
             "remaining_percent": self._managed_trial_usage_remaining_percent,
         }
 
+    def _is_managed_openrouter_selected(self, settings: AppSettings | None) -> bool:
+        return bool(
+            settings is not None
+            and settings.provider.llm == LLMProviderName.OPENROUTER
+            and settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+        )
+
+    def _managed_key_card_visible_for(self, settings: AppSettings | None) -> bool:
+        if settings is None:
+            return False
+        active_ref = getattr(settings.managed_identity, "active_managed_credential_ref", None)
+        owned_referral_id = normalize_owned_referral_id(
+            getattr(settings.managed_identity, "referral_id", None)
+        )
+        return bool(
+            self._is_managed_openrouter_selected(settings)
+            or (isinstance(active_ref, str) and bool(active_ref.strip()))
+            or owned_referral_id
+        )
+
+    def _sync_managed_key_referral_row_value(self, referral_id: str | None) -> None:
+        referral_id = normalize_owned_referral_id(referral_id)
+        self._managed_key_referral_id = referral_id
+
+        has_referral_id = referral_id is not None
+        self._managed_key_referral_id_value.value = referral_id or t(
+            "settings.managed_key.referral_id.empty"
+        )
+        self._managed_key_referral_copy_button.disabled = not has_referral_id
+        self._managed_key_referral_copy_button.icon_color = (
+            COLOR_PRIMARY if has_referral_id else COLOR_NEUTRAL
+        )
+        self._managed_key_referral_copy_button.tooltip = t(
+            "settings.managed_key.referral_id.copy_tooltip"
+            if has_referral_id
+            else "settings.managed_key.referral_id.pending_helper"
+        )
+        self._managed_key_referral_helper_text.value = t(
+            "settings.managed_key.referral_id.helper"
+            if has_referral_id
+            else "settings.managed_key.referral_id.pending_helper"
+        )
+
+    def _sync_managed_key_invite_progress_row(
+        self,
+        referral_id: str | None,
+        pass_status: TalkTogetherPassStatus | None,
+    ) -> None:
+        normalized_referral_id = normalize_owned_referral_id(referral_id)
+        if (
+            normalized_referral_id is None
+            or pass_status is None
+            or pass_status.pass_id != normalized_referral_id
+            or pass_status.invite_limit <= 0
+            or pass_status.invite_count < 0
+        ):
+            self._managed_key_pass_status = None
+            self._managed_key_invite_progress_row.visible = False
+            self._managed_key_invite_progress_value.value = ""
+            return
+
+        self._managed_key_pass_status = pass_status
+        displayed_count = min(pass_status.invite_count, pass_status.invite_limit)
+        self._managed_key_invite_progress_label.value = t(
+            "settings.managed_key.invite_progress.label"
+        )
+        self._managed_key_invite_progress_value.value = (
+            f"{displayed_count} / {pass_status.invite_limit}"
+        )
+        self._managed_key_invite_progress_row.visible = True
+
+    def _sync_managed_key_referral_row(self, settings: AppSettings | None) -> None:
+        referral_id = None
+        if settings is not None:
+            referral_id = normalize_owned_referral_id(
+                getattr(settings.managed_identity, "referral_id", None)
+            )
+        self._sync_managed_key_referral_row_value(referral_id)
+
+    def _sync_managed_key_card(self, settings: AppSettings | None = None) -> None:
+        if settings is None:
+            settings = self._build_settings_with_provider_draft()
+        visible = self._managed_key_card_visible_for(settings)
+        self._managed_key_card.visible = visible
+        self._sync_managed_key_referral_row(settings)
+        self._sync_managed_key_invite_progress_row(
+            self._managed_key_referral_id,
+            self._managed_key_pass_status if visible else None,
+        )
+        self._sync_managed_trial_usage_bar(settings)
+
+    def _repaint_managed_key_card(self) -> None:
+        _update_control_if_mounted(self._managed_key_card)
+        _update_control_if_mounted(self._api_keys_column)
+        if hasattr(self, "_settings_subtab_shell"):
+            api_body = self._settings_subtab_shell.body_by_key.get("api")
+            if api_body is not None:
+                _update_control_if_mounted(api_body)
+
+    def _show_managed_key_copy_snackbar(self, message: str) -> None:
+        if self.show_snackbar:
+            self.show_snackbar(message, COLOR_SUCCESS)
+            return
+        page = getattr(self, "page", None)
+        if page is None or not hasattr(page, "open"):
+            return
+        page.open(
+            ft.SnackBar(
+                ft.Text(message, size=18, color=ft.Colors.WHITE),
+                bgcolor=COLOR_SUCCESS,
+                duration=4000,
+                behavior=ft.SnackBarBehavior.FLOATING,
+                margin=ft.margin.only(bottom=90),
+                padding=20,
+            )
+        )
+
+    def _on_managed_key_referral_copy(self, _e) -> None:
+        referral_id = normalize_owned_referral_id(self._managed_key_referral_id)
+        if referral_id is None:
+            return
+        page = getattr(self, "page", None)
+        if page is None or not hasattr(page, "set_clipboard"):
+            return
+        try:
+            page.set_clipboard(referral_id)
+        except Exception:
+            return
+        self._show_managed_key_copy_snackbar(t("settings.managed_key.referral_id.copy_success"))
+
     def set_managed_trial_usage_state(
         self, *, visible: bool, remaining_percent: int | None = None
     ) -> None:
@@ -1817,10 +2093,37 @@ class SettingsView(ft.Column):
             self._managed_trial_usage_remaining_percent = max(0, min(100, int(remaining_percent)))
         else:
             self._managed_trial_usage_remaining_percent = None
-        self._sync_managed_trial_usage_bar()
+        self._sync_managed_key_card()
         if self.page:
             with contextlib.suppress(Exception):
-                self._managed_trial_usage_bar.update()
+                self._repaint_managed_key_card()
+
+    def set_managed_key_state(
+        self,
+        *,
+        visible: bool,
+        remaining_percent: int | None = None,
+        referral_id: str | None = None,
+        pass_status: TalkTogetherPassStatus | None = None,
+    ) -> None:
+        card_visible = bool(visible)
+        self._managed_trial_usage_visible = card_visible
+        if card_visible and remaining_percent is not None:
+            self._managed_trial_usage_remaining_percent = max(0, min(100, int(remaining_percent)))
+        else:
+            self._managed_trial_usage_remaining_percent = None
+
+        self._managed_key_card.visible = card_visible
+        self._managed_trial_usage_bar.visible = card_visible
+        self._managed_trial_usage_bar.set_percent(
+            self._managed_trial_usage_remaining_percent if card_visible else None
+        )
+        self._sync_managed_key_referral_row_value(referral_id)
+        self._sync_managed_key_invite_progress_row(
+            referral_id,
+            pass_status if card_visible else None,
+        )
+        self._repaint_managed_key_card()
 
     def _copy_provider_draft_fields(self, source: AppSettings, target: AppSettings) -> None:
         target.provider.stt = source.provider.stt
@@ -2155,6 +2458,11 @@ class SettingsView(ft.Column):
             if settings.osc.chatbox_include_source
             else "settings.chatbox_source.off"
         )
+        self._clipboard_auto_translate_text.content.value = t(
+            "settings.clipboard_auto_translate.on"
+            if settings.ui.clipboard_auto_translate_enabled
+            else "settings.clipboard_auto_translate.off"
+        )
         # Prompt
         provider_name = self._active_prompt_key()
         self._prompt_editor.set_provider(provider_name)
@@ -2240,6 +2548,7 @@ class SettingsView(ft.Column):
         self._deepseek_key.value = store.get("deepseek_api_key") or ""
         self._deepgram_key.value = store.get("deepgram_api_key") or ""
         self._soniox_key.value = store.get("soniox_api_key") or ""
+        self._local_llm_api_key.value = store.get("local_llm_api_key") or ""
 
         # Alibaba keys with legacy fallback
         beijing_key = _load_secret_value(
@@ -2313,17 +2622,14 @@ class SettingsView(ft.Column):
             self._openrouter_pkce_button.update()
 
     # --- Visibility Updates ---
-    def _sync_managed_trial_usage_bar(self) -> None:
-        settings = self._build_settings_with_provider_draft()
-        managed_selected = bool(
-            settings is not None
-            and settings.provider.llm == LLMProviderName.OPENROUTER
-            and settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
-        )
-        self._managed_trial_usage_bar.visible = managed_selected
+    def _sync_managed_trial_usage_bar(self, settings: AppSettings | None = None) -> None:
+        if settings is None:
+            settings = self._build_settings_with_provider_draft()
+        managed_key_visible = self._managed_key_card_visible_for(settings)
+        self._managed_trial_usage_bar.visible = managed_key_visible
         self._managed_trial_usage_bar.set_percent(
             self._managed_trial_usage_remaining_percent
-            if managed_selected and self._managed_trial_usage_visible
+            if managed_key_visible and self._managed_trial_usage_visible
             else None
         )
 
@@ -2342,7 +2648,7 @@ class SettingsView(ft.Column):
         self._soniox_key.visible = STTProviderName.SONIOX in active_stt_providers
 
         self._google_key.visible = llm == LLMProviderName.GEMINI
-        self._sync_managed_trial_usage_bar()
+        self._sync_managed_key_card(settings)
         openrouter_byok_selected = bool(
             llm == LLMProviderName.OPENROUTER
             and settings.openrouter.selected_source == OpenRouterCredentialSource.BYOK
@@ -2834,21 +3140,47 @@ class SettingsView(ft.Column):
         target.system_prompt = self._ensure_provider_prompt_value(target, "openrouter")
         self.on_request_openrouter_pkce(target)
 
-    def _on_secret_change(self, key: str, value: str) -> None:
+    def _write_secret_value(self, key: str, value: str) -> bool:
         if not self._settings or not self._config_path:
-            return
+            return False
 
-        with contextlib.suppress(Exception):
+        try:
             store = create_secret_store(self._settings.secrets, config_path=self._config_path)
             if value:
                 store.set(key, value)
             else:
                 store.delete(key)
-                # Notify app to reset verification status
-                if self.on_secret_cleared:
-                    self.on_secret_cleared(key)
-            if key == "openrouter_api_key":
-                self._sync_openrouter_pkce_button_state()
+            return True
+        except Exception as exc:
+            self._emit_runtime_basic(
+                f"Failed to update secret {key}: {type(exc).__name__}",
+                level=logging.WARNING,
+            )
+            return False
+
+    def _on_local_llm_secret_change(self, key: str, value: str) -> None:
+        if key != "local_llm_api_key":
+            return
+        stripped = value.strip()
+        if not self._write_secret_value(key, stripped):
+            if self.show_snackbar:
+                self.show_snackbar(t("settings.local_llm.api_key.save_failed"), ft.Colors.RED_400)
+            return
+        self._local_llm_api_key.value = stripped
+        if self.on_local_llm_secret_changed:
+            self.on_local_llm_secret_changed()
+
+    def _on_secret_change(self, key: str, value: str) -> None:
+        if not self._settings or not self._config_path:
+            return
+
+        if not self._write_secret_value(key, value):
+            return
+        if not value and self.on_secret_cleared:
+            with contextlib.suppress(Exception):
+                self.on_secret_cleared(key)
+        if key == "openrouter_api_key":
+            self._sync_openrouter_pkce_button_state()
 
     def _on_audio_change(self) -> None:
         if not self._settings:
@@ -3399,6 +3731,29 @@ class SettingsView(ft.Column):
             self._chatbox_source_text.update()
         self._emit_settings_changed()
 
+    def _on_clipboard_auto_translate_click(self, e) -> None:
+        """Toggle clipboard auto-translate immediately from the unit card."""
+        if not self._settings:
+            return
+        next_value = "off" if self._settings.ui.clipboard_auto_translate_enabled else "on"
+        self._on_clipboard_auto_translate_selected(next_value)
+
+    def _on_clipboard_auto_translate_selected(self, value: str) -> None:
+        """Handle clipboard auto-translate selection result."""
+        if not self._settings:
+            return
+        new_value = value == "on"
+        self._emit_runtime_basic(f"[Settings] Clipboard auto translate toggled: {new_value}")
+        self._settings.ui.clipboard_auto_translate_enabled = new_value
+        self._clipboard_auto_translate_text.content.value = t(
+            "settings.clipboard_auto_translate.on"
+            if new_value
+            else "settings.clipboard_auto_translate.off"
+        )
+        if self.page:
+            self._clipboard_auto_translate_text.update()
+        self._emit_settings_changed()
+
     def _on_low_latency_click(self, e) -> None:
         """Open low latency mode selection modal."""
         if not self.page:
@@ -3554,6 +3909,11 @@ class SettingsView(ft.Column):
         self._stt_title.value = t("settings.section.stt")
         self._trans_title.value = t("settings.section.translation")
         self._api_title.value = t("settings.section.api_keys")
+        self._managed_key_title.value = t("settings.managed_key.title")
+        self._managed_key_referral_id_label.value = t("settings.managed_key.referral_id.label")
+        self._managed_key_invite_progress_label.value = t(
+            "settings.managed_key.invite_progress.label"
+        )
         self._stt_provider_label.value = t("settings.self_stt_provider")
         self._translation_provider_label.value = t("settings.shared_translation_provider")
         self._api_credentials_helper_text.value = t("settings.api_credentials_helper")
@@ -3572,6 +3932,10 @@ class SettingsView(ft.Column):
         self._local_llm_connection_title.value = t("settings.local_llm.connection")
         self._local_llm_base_url.label = t("settings.local_llm.base_url")
         self._local_llm_model.label = t("settings.local_llm.model")
+        self._local_llm_api_key.apply_locale()
+        local_llm_api_key_description = t("settings.local_llm.api_key.description")
+        self._local_llm_api_key_helper.value = local_llm_api_key_description
+        self._local_llm_api_key_helper.visible = bool(local_llm_api_key_description.strip())
         self._local_llm_extra_body.label = t("settings.local_llm.extra_body")
         self._local_llm_extra_body_helper.value = t("settings.local_llm.extra_body.description")
         if self._local_llm_base_url.error_text:
@@ -3590,6 +3954,7 @@ class SettingsView(ft.Column):
         self._custom_vocab_info_icon.tooltip = t("settings.custom_vocabulary_tooltip")
         self._vrc_mic_title.value = t("settings.vrc_mic_intercept")
         self._chatbox_source_title.value = t("settings.chatbox_include_source")
+        self._clipboard_auto_translate_title.value = t("settings.clipboard_auto_translate")
         self._peer_provider_title.value = t("settings.section.peer_stt")
         self._dashboard_language_redirect_text.value = t("settings.dashboard_language_redirect")
         self._peer_stt_label.value = t("settings.peer_stt_provider")
@@ -3653,6 +4018,11 @@ class SettingsView(ft.Column):
                 self._get_translation_connection_display_label(display_settings),
             )
             self._sync_openrouter_fallback_card(display_settings)
+            self._sync_managed_key_card(display_settings)
+            self._sync_managed_key_invite_progress_row(
+                self._managed_key_referral_id,
+                self._managed_key_pass_status,
+            )
             self._ui_text.content.value = locale_label(display_settings.ui.locale)
             self._low_latency_text.content.value = t(
                 "toggle.on" if display_settings.stt.low_latency_mode else "toggle.off"
@@ -3666,6 +4036,11 @@ class SettingsView(ft.Column):
                 "settings.chatbox_source.on"
                 if display_settings.osc.chatbox_include_source
                 else "settings.chatbox_source.off"
+            )
+            self._clipboard_auto_translate_text.content.value = t(
+                "settings.clipboard_auto_translate.on"
+                if display_settings.ui.clipboard_auto_translate_enabled
+                else "settings.clipboard_auto_translate.off"
             )
             self._sync_overlay_controls()
             self._sync_overlay_calibration_controls()

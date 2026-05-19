@@ -4,7 +4,9 @@ import asyncio
 import importlib
 import inspect
 import json
+import logging
 import sys
+from logging.handlers import QueueHandler
 from pathlib import Path
 from types import ModuleType
 
@@ -19,6 +21,7 @@ from puripuly_heart.config.settings import (
     OpenRouterSettings,
     ProviderSettings,
 )
+from puripuly_heart.core.runtime_logging import SessionRuntimeLoggingService, configure_main_logging
 from puripuly_heart.core.storage.secrets import InMemorySecretStore
 
 
@@ -399,6 +402,56 @@ def test_main_run_gui_passes_debug_ui_preview_flag(monkeypatch, tmp_path) -> Non
     asyncio.run(calls["target"](object()))
     assert calls["config_path"] == config_path
     assert calls["debug_ui_preview"] is True
+
+
+def test_main_run_gui_force_closes_logging_when_gui_runtime_logging_leaks(
+    monkeypatch, tmp_path
+) -> None:
+    root_logger = logging.getLogger(f"test.main.gui.logging.force_close.{tmp_path.name}")
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+    leaked_services: list[SessionRuntimeLoggingService] = []
+    monkeypatch.setattr("puripuly_heart.core.runtime_logging.user_config_dir", lambda: tmp_path)
+
+    monkeypatch.setattr(
+        main_module,
+        "configure_main_logging",
+        lambda: configure_main_logging(root_logger=root_logger),
+    )
+
+    fake_flet = ModuleType("flet")
+
+    def fake_app(*, target, assets_dir):
+        _ = assets_dir
+        asyncio.run(target(object()))
+
+    fake_flet.app = fake_app
+    monkeypatch.setitem(sys.modules, "flet", fake_flet)
+
+    fake_ui_app = ModuleType("puripuly_heart.ui.app")
+
+    async def main_gui(page, *, config_path, debug_ui_preview=False):
+        _ = page, config_path, debug_ui_preview
+        leaked_services.append(SessionRuntimeLoggingService(root_logger=root_logger))
+
+    fake_ui_app.main_gui = main_gui
+    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.app", fake_ui_app)
+
+    fake_fonts = ModuleType("puripuly_heart.ui.fonts")
+    fake_fonts.assets_dir = lambda: tmp_path
+    monkeypatch.setitem(sys.modules, "puripuly_heart.ui.fonts", fake_fonts)
+
+    try:
+        result = main_module.main(["--config", str(tmp_path / "settings.json"), "run-gui"])
+
+        assert result == 0
+        assert leaked_services
+        assert [
+            handler for handler in root_logger.handlers if isinstance(handler, QueueHandler)
+        ] == []
+    finally:
+        for service in leaked_services:
+            service.close()
 
 
 def test_main_default_gui_passes_debug_ui_preview_flag(monkeypatch, tmp_path) -> None:

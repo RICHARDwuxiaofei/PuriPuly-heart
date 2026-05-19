@@ -30,6 +30,7 @@ class ApiKeyField(ft.Row):
         on_verify: Callable[[str, str], object] | None = None,
         on_save: Callable[[str, str], None] | None = None,
         show_snackbar: Callable[[str, str], None] | None = None,
+        show_status: bool = True,
     ):
         self._label_key = label_key
         self._secret_key = secret_key
@@ -37,6 +38,8 @@ class ApiKeyField(ft.Row):
         self._on_verify = on_verify
         self._on_save = on_save
         self._show_snackbar_cb = show_snackbar
+        self._show_status = show_status
+        self._dirty = False
         self._last_verified_hash = ""
         self._is_verifying = False
 
@@ -53,6 +56,7 @@ class ApiKeyField(ft.Row):
             password=True,
             can_reveal_password=False,
             on_blur=self._handle_blur,
+            on_change=self._handle_change,
             border_radius=12,
             border_color=COLOR_DIVIDER,
             focused_border_color=COLOR_PRIMARY,
@@ -71,8 +75,12 @@ class ApiKeyField(ft.Row):
             tooltip=t("api_key.status.idle"),
         )
 
+        controls: list[ft.Control] = [self._text_field]
+        if self._show_status:
+            controls.append(self._status_icon)
+
         super().__init__(
-            controls=[self._text_field, self._status_icon],
+            controls=controls,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
@@ -85,6 +93,7 @@ class ApiKeyField(ft.Row):
     def value(self, val: str) -> None:
         """Set field value."""
         self._text_field.value = val
+        self._dirty = False
         if self._text_field.page:
             self._text_field.update()
 
@@ -104,8 +113,16 @@ class ApiKeyField(ft.Row):
             self._text_field.update()
             self._reveal_button.update()
 
+    def _handle_change(self, e) -> None:
+        """Mark the field dirty after user edits."""
+        _ = e
+        self._dirty = True
+
     def _set_status(self, status: str) -> None:
         """Update status icon based on verification state."""
+        if not self._show_status:
+            return
+
         icon_map = {
             "idle": (icons.HELP_OUTLINE_ROUNDED, COLOR_NEUTRAL, "api_key.status.idle"),
             "verifying": (icons.HOURGLASS_TOP_ROUNDED, COLOR_NEUTRAL, "api_key.status.verifying"),
@@ -124,12 +141,16 @@ class ApiKeyField(ft.Row):
         """Handle blur event - save and verify."""
         key = self.value
 
-        # Always save on blur
-        if self._on_save:
-            self._on_save(self._secret_key, key)
+        if self._dirty:
+            self._dirty = False
+            # Save user-edited values on blur.
+            if self._on_save:
+                self._on_save(self._secret_key, key)
+        elif not self._show_status:
+            return
 
-        # Skip verification if no callback, already verifying, or empty key
-        if not self._on_verify or self._is_verifying:
+        # Skip verification if this field hides status or has no callback.
+        if not self._show_status or not self._on_verify:
             return
 
         if not key:
@@ -143,12 +164,23 @@ class ApiKeyField(ft.Row):
 
         self._pending_key = key
         self._pending_hash = key_hash
+        if self._is_verifying:
+            return
+
         if self.page:
             self.page.run_task(self._run_verification)
 
     async def _run_verification(self) -> None:
         """Wrapper for run_task compatibility."""
-        await self._verify_async(self._pending_key, self._pending_hash)
+        while True:
+            key = getattr(self, "_pending_key", "")
+            key_hash = getattr(self, "_pending_hash", "")
+            if not key_hash:
+                return
+
+            self._pending_key = ""
+            self._pending_hash = ""
+            await self._verify_async(key, key_hash)
 
     async def _verify_async(self, key: str, key_hash: str) -> None:
         """Run verification asynchronously."""
@@ -157,6 +189,9 @@ class ApiKeyField(ft.Row):
 
         try:
             success, msg = await self._on_verify(self._provider, key)
+            if self._get_key_hash(self.value) != key_hash:
+                return
+
             if success:
                 self._set_status("success")
                 self._last_verified_hash = key_hash
@@ -172,6 +207,9 @@ class ApiKeyField(ft.Row):
                     colors.RED_400,
                 )
         except Exception as exc:
+            if self._get_key_hash(self.value) != key_hash:
+                return
+
             self._set_status("error")
             self._last_verified_hash = ""
             self._show_snackbar(
@@ -216,15 +254,17 @@ class ApiKeyField(ft.Row):
     def apply_locale(self) -> None:
         """Update labels and tooltips when locale changes."""
         self._text_field.label = t(self._label_key)
-        # Update tooltip based on current status
-        tooltip_keys = {
-            "idle": "api_key.status.idle",
-            "verifying": "api_key.status.verifying",
-            "success": "api_key.status.success",
-            "error": "api_key.status.error",
-        }
-        tooltip_key = tooltip_keys.get(self._current_status, "api_key.status.idle")
-        self._status_icon.tooltip = t(tooltip_key)
+        if self._show_status:
+            # Update tooltip based on current status
+            tooltip_keys = {
+                "idle": "api_key.status.idle",
+                "verifying": "api_key.status.verifying",
+                "success": "api_key.status.success",
+                "error": "api_key.status.error",
+            }
+            tooltip_key = tooltip_keys.get(self._current_status, "api_key.status.idle")
+            self._status_icon.tooltip = t(tooltip_key)
         if self.page:
             self._text_field.update()
-            self._status_icon.update()
+            if self._show_status:
+                self._status_icon.update()

@@ -33,6 +33,7 @@ from puripuly_heart.config.settings import (
     TranslationModel,
     TranslationSettings,
 )
+from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.components import subtab_shell as subtab_shell_module
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
@@ -109,6 +110,13 @@ def _make_llm_selection_view(
         error_text=None,
         update=lambda: None,
     )
+    view._local_llm_api_key = SimpleNamespace(
+        value="",
+        visible=True,
+        apply_locale=lambda: None,
+        update=lambda: None,
+    )
+    view._local_llm_api_key_helper = SimpleNamespace(value="", update=lambda: None)
     view._local_llm_extra_body = SimpleNamespace(
         value=json.dumps(settings.local_llm.extra_body, ensure_ascii=False),
         label="",
@@ -128,6 +136,22 @@ def _make_llm_selection_view(
     view._managed_trial_usage_bar.set_percent = lambda percent: setattr(
         view._managed_trial_usage_bar, "percent", percent
     )
+    view._managed_key_card = SimpleNamespace(visible=False, update=lambda: None)
+    view._managed_key_title = SimpleNamespace(value="")
+    view._managed_key_free_usage_label = SimpleNamespace(value="")
+    view._managed_key_referral_id = None
+    view._managed_key_referral_id_label = SimpleNamespace(value="")
+    view._managed_key_referral_id_value = SimpleNamespace(value="")
+    view._managed_key_referral_copy_button = SimpleNamespace(
+        disabled=True,
+        tooltip="",
+        update=lambda: None,
+    )
+    view._managed_key_referral_helper_text = SimpleNamespace(value="")
+    view._managed_key_pass_status = None
+    view._managed_key_invite_progress_label = SimpleNamespace(value="", update=lambda: None)
+    view._managed_key_invite_progress_value = SimpleNamespace(value="", update=lambda: None)
+    view._managed_key_invite_progress_row = SimpleNamespace(visible=False, update=lambda: None)
     view._qwen_region_btn = SimpleNamespace(visible=False, update=lambda: None)
     view._api_keys_column = SimpleNamespace(update=lambda: None)
     view._deepgram_key = SimpleNamespace(visible=False)
@@ -423,6 +447,64 @@ def test_load_from_settings_peer_stt_card_has_no_peer_subsetting_controls(
     assert not hasattr(view, "_peer_soniox_model_text")
 
 
+def test_load_from_settings_shows_clipboard_auto_translate_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _store = _make_settings_view(monkeypatch)
+    settings = AppSettings()
+    settings.ui.clipboard_auto_translate_enabled = True
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._clipboard_auto_translate_text.content.value == t(
+        "settings.clipboard_auto_translate.on"
+    )
+
+
+def test_clipboard_auto_translate_selection_updates_settings_and_emits_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _store = _make_settings_view(monkeypatch)
+    settings = AppSettings()
+    emitted: list[AppSettings] = []
+    view.on_settings_changed = emitted.append
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view._on_clipboard_auto_translate_selected("on")
+
+    assert settings.ui.clipboard_auto_translate_enabled is True
+    assert view._clipboard_auto_translate_text.content.value == t(
+        "settings.clipboard_auto_translate.on"
+    )
+    assert emitted[-1].ui.clipboard_auto_translate_enabled is True
+
+
+def test_clipboard_auto_translate_click_toggles_immediately_without_modal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _store = _make_settings_view(monkeypatch)
+    settings = AppSettings()
+    emitted: list[AppSettings] = []
+    view.on_settings_changed = emitted.append
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view._on_clipboard_auto_translate_click(None)
+
+    assert settings.ui.clipboard_auto_translate_enabled is True
+    assert view._clipboard_auto_translate_text.content.value == t(
+        "settings.clipboard_auto_translate.on"
+    )
+    assert emitted[-1].ui.clipboard_auto_translate_enabled is True
+
+    view._on_clipboard_auto_translate_click(None)
+
+    assert settings.ui.clipboard_auto_translate_enabled is False
+    assert view._clipboard_auto_translate_text.content.value == t(
+        "settings.clipboard_auto_translate.off"
+    )
+    assert emitted[-1].ui.clipboard_auto_translate_enabled is False
+
+
 def test_load_from_settings_uses_system_prompt_when_provider_prompt_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -568,7 +650,7 @@ def test_update_api_visibility_hides_openrouter_key_for_managed_trial(
     assert view._translation_connection_row.visible is True
 
 
-def test_load_from_settings_shows_managed_usage_bar_in_api_keys_column(
+def test_load_from_settings_shows_managed_usage_bar_in_managed_key_card(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -578,10 +660,161 @@ def test_load_from_settings_shows_managed_usage_bar_in_api_keys_column(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    assert view._managed_trial_usage_bar in view._api_keys_column.controls
+    assert view._managed_key_card not in view._api_keys_column.controls
+    assert view._managed_key_card in _subtab_controls(view, "api")
+    assert view._managed_trial_usage_bar not in view._api_keys_column.controls
+    assert _tree_contains_control(view._managed_key_card, view._managed_trial_usage_bar)
+    assert view._managed_key_card.visible is True
     assert view._managed_trial_usage_bar.visible is True
     assert view._openrouter_key.visible is False
     assert view._openrouter_pkce_button_row.visible is False
+
+
+def test_load_from_settings_places_managed_key_card_above_provider_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    api_controls = _subtab_controls(view, "api")
+    api_card = _api_tab_card(view, t("settings.section.api_keys"))
+    assert view._managed_key_card in api_controls
+    assert api_controls.index(view._managed_key_card) < api_controls.index(api_card)
+    assert view._managed_key_card not in view._api_keys_column.controls
+    assert view._managed_trial_usage_bar not in view._api_keys_column.controls
+    assert _card_title(view._managed_key_card) == t("settings.managed_key.title")
+
+    labels = _control_labels(view._managed_key_card)
+    assert t("settings.managed_key.referral_id.label") in labels
+    assert "무료 사용량" not in labels
+    assert "Free usage" not in labels
+    assert _tree_contains_control(view._managed_key_card, view._managed_trial_usage_bar)
+
+
+@pytest.mark.parametrize(
+    ("selected_source", "active_ref", "referral_id", "expected_visible"),
+    [
+        (OpenRouterCredentialSource.MANAGED, None, None, True),
+        (OpenRouterCredentialSource.BYOK, "managed-ref", None, True),
+        (OpenRouterCredentialSource.BYOK, None, "7KQ9M2", True),
+        (OpenRouterCredentialSource.BYOK, None, None, False),
+    ],
+)
+def test_managed_key_card_visibility_follows_managed_identity_state(
+    monkeypatch: pytest.MonkeyPatch,
+    selected_source: OpenRouterCredentialSource,
+    active_ref: str | None,
+    referral_id: str | None,
+    expected_visible: bool,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = selected_source
+    settings.managed_identity.active_managed_credential_ref = active_ref
+    settings.managed_identity.referral_id = referral_id
+    settings.validate()
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._managed_key_card.visible is expected_visible
+
+
+def test_managed_key_referral_row_shows_empty_state_with_disabled_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._managed_key_referral_id_value.value == t("settings.managed_key.referral_id.empty")
+    assert view._managed_key_referral_copy_button.disabled is True
+    assert view._managed_key_referral_helper_text.value == t(
+        "settings.managed_key.referral_id.pending_helper"
+    )
+
+
+def test_managed_key_referral_row_shows_owned_id_with_enabled_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    settings.managed_identity.referral_id = "7kq9m2"
+    settings.validate()
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._managed_key_card.visible is True
+    assert view._managed_key_referral_id_value.value == "7KQ9M2"
+    assert view._managed_key_referral_copy_button.disabled is False
+    assert view._managed_key_referral_helper_text.value == t(
+        "settings.managed_key.referral_id.helper"
+    )
+
+
+def test_managed_key_referral_copy_button_copies_owned_id_and_shows_snackbar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ClipboardPage:
+        def __init__(self) -> None:
+            self.copied: list[str] = []
+
+        def set_clipboard(self, value: str) -> None:
+            self.copied.append(value)
+
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    settings.managed_identity.referral_id = "7KQ9M2"
+    settings.validate()
+    snackbar_calls: list[tuple[str, object]] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    page = attach_dummy_page(monkeypatch, view, ClipboardPage())
+
+    view._managed_key_referral_copy_button.on_click(None)
+
+    assert page.copied == ["7KQ9M2"]
+    assert snackbar_calls == [
+        (t("settings.managed_key.referral_id.copy_success"), settings_view.COLOR_SUCCESS)
+    ]
+
+
+def test_managed_key_referral_copy_button_ignores_missing_owned_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ClipboardPage:
+        def __init__(self) -> None:
+            self.copied: list[str] = []
+
+        def set_clipboard(self, value: str) -> None:
+            self.copied.append(value)
+
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    snackbar_calls: list[tuple[str, object]] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    page = attach_dummy_page(monkeypatch, view, ClipboardPage())
+
+    view._managed_key_referral_copy_button.on_click(None)
+
+    assert page.copied == []
+    assert snackbar_calls == []
 
 
 def test_set_managed_trial_usage_state_tracks_visible_and_remaining_percent(
@@ -611,6 +844,180 @@ def test_set_managed_trial_usage_state_tracks_visible_and_remaining_percent(
     }
     assert view._managed_trial_usage_bar.visible is True
     assert view._managed_trial_usage_bar.percent is None
+
+
+def test_set_managed_key_state_updates_card_controls_and_api_section_repaint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    attach_dummy_page(monkeypatch, view)
+    updates: list[str] = []
+    mounted_page = object()
+    view._managed_key_card = SimpleNamespace(
+        visible=False,
+        page=mounted_page,
+        update=lambda: updates.append("managed_key_card"),
+    )
+    view._api_keys_column = SimpleNamespace(
+        page=mounted_page,
+        update=lambda: updates.append("api_keys_column"),
+    )
+
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=64,
+        referral_id="7kq9m2",
+    )
+
+    assert view._managed_key_card.visible is True
+    assert view._managed_trial_usage_bar.visible is True
+    assert view._managed_trial_usage_bar.percent == 64
+    assert view._managed_key_referral_id == "7KQ9M2"
+    assert view._managed_key_referral_id_value.value == "7KQ9M2"
+    assert view._managed_key_referral_copy_button.disabled is False
+    assert view._managed_key_referral_copy_button.tooltip == t(
+        "settings.managed_key.referral_id.copy_tooltip"
+    )
+    assert "api_keys_column" in updates
+
+
+def test_set_managed_key_state_empty_referral_disables_copy_and_repaints_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    attach_dummy_page(monkeypatch, view)
+    updates: list[str] = []
+    mounted_page = object()
+    view._managed_key_card = SimpleNamespace(
+        visible=True,
+        page=mounted_page,
+        update=lambda: updates.append("managed_key_card"),
+    )
+    view._api_keys_column = SimpleNamespace(
+        page=mounted_page,
+        update=lambda: updates.append("api_keys_column"),
+    )
+
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=None,
+        referral_id=None,
+    )
+
+    assert view._managed_key_card.visible is True
+    assert view._managed_trial_usage_bar.visible is True
+    assert view._managed_trial_usage_bar.percent is None
+    assert view._managed_key_referral_id is None
+    assert view._managed_key_referral_id_value.value == t("settings.managed_key.referral_id.empty")
+    assert view._managed_key_referral_copy_button.disabled is True
+    assert view._managed_key_referral_copy_button.tooltip == t(
+        "settings.managed_key.referral_id.pending_helper"
+    )
+    assert "api_keys_column" in updates
+
+
+def test_set_managed_key_state_shows_talk_together_pass_invite_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=64,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=1,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+    )
+
+    assert view._managed_key_invite_progress_row.visible is True
+    assert view._managed_key_invite_progress_label.value == t(
+        "settings.managed_key.invite_progress.label"
+    )
+    assert view._managed_key_invite_progress_value.value == "1 / 5"
+
+
+def test_managed_key_invite_progress_row_appears_above_talk_together_pass_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+
+    managed_key_content = _wrapped_card_column(view._managed_key_card)
+    details_column = managed_key_content.controls[4]
+    referral_id_row = details_column.controls[1]
+
+    assert details_column.controls[0] is view._managed_key_invite_progress_row
+    assert view._managed_key_referral_id_label in referral_id_row.controls
+
+
+def test_set_managed_key_state_hides_invite_progress_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=None,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=1,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+    )
+    assert view._managed_key_invite_progress_row.visible is True
+    assert view._managed_key_invite_progress_value.value == "1 / 5"
+
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=None,
+        referral_id="7KQ9M2",
+        pass_status=None,
+    )
+
+    assert view._managed_key_invite_progress_row.visible is False
+    assert view._managed_key_pass_status is None
+    assert view._managed_key_invite_progress_value.value == ""
+
+
+def test_set_managed_key_state_clamps_over_limit_invite_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view.set_managed_key_state(
+        visible=True,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=7,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+    )
+
+    assert view._managed_key_invite_progress_value.value == "5 / 5"
 
 
 def test_update_api_visibility_keeps_openrouter_cards_visible_for_inactive_fallback_copy(
@@ -709,7 +1116,7 @@ def test_on_llm_selected_updates_to_local_llms_with_ollama_connection(
     assert view.has_provider_changes is True
 
 
-def test_local_llm_visibility_shows_connection_card_without_api_key_field(
+def test_local_llm_visibility_shows_connection_card_with_server_api_key_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
@@ -718,6 +1125,7 @@ def test_local_llm_visibility_shows_connection_card_without_api_key_field(
     view._update_api_visibility()
 
     assert view._local_llm_connection_card.visible is True
+    assert view._local_llm_api_key.visible is True
     assert view._google_key.visible is False
     assert view._openrouter_key.visible is False
     assert view._deepseek_key.visible is False
@@ -736,10 +1144,11 @@ def test_local_llm_connection_card_matches_api_field_scale_and_copy(
         controls = list(column.controls)
         api_field = view._google_key._text_field
 
-        assert view._local_llm_base_url.label == "연결 주소"
+        assert view._local_llm_base_url.label == "Base URL"
+        assert view._local_llm_model.label == "모델 ID"
         assert view._local_llm_extra_body.label == "JSON extra body"
         assert view._local_llm_extra_body_helper.value == (
-            "빠른 지연시간을 위해 추론을 끄고 사용하는 것을 권장해요. "
+            "낮은 지연시간을 위해 추론을 끄고 사용하는 것을 권장해요. "
             "JSON extra body에 알맞은 파라미터를 입력해서 추론 레벨을 제어하세요."
         )
         assert view._local_llm_extra_body_helper.size == 15
@@ -748,6 +1157,10 @@ def test_local_llm_connection_card_matches_api_field_scale_and_copy(
         )
         assert controls[2] is view._local_llm_extra_body_helper
         assert controls[3] is view._local_llm_base_url
+        assert controls[4] is view._local_llm_model
+        assert controls[5] is view._local_llm_api_key
+        assert controls[6] is view._local_llm_api_key_helper
+        assert controls[7] is view._local_llm_extra_body
 
         for field in (
             view._local_llm_base_url,
@@ -762,6 +1175,163 @@ def test_local_llm_connection_card_matches_api_field_scale_and_copy(
             assert field.label_style.color == api_field.label_style.color
             assert field.expand is True
             assert field.dense is not True
+    finally:
+        i18n_module.set_locale(old_locale)
+
+
+def test_load_from_settings_loads_local_llm_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    store = DummySecretStore({"local_llm_api_key": "server-secret"})
+    view, _ = _make_settings_view(monkeypatch, store)
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._local_llm_api_key.value == "server-secret"
+
+
+def test_load_from_settings_without_local_llm_api_key_shows_empty_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    store = DummySecretStore()
+    view, _ = _make_settings_view(monkeypatch, store)
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert view._local_llm_api_key.value == ""
+
+
+def test_load_from_settings_does_not_touch_existing_local_llm_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.GEMINI))
+    store = DummySecretStore({"local_llm_api_key": "server-secret"})
+    view, _ = _make_settings_view(monkeypatch, store)
+
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert store.set_calls == []
+    assert store.delete_calls == []
+
+
+def test_local_llm_secret_change_trims_saves_and_requests_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    store = DummySecretStore()
+    view, _ = _make_settings_view(monkeypatch, store)
+    view._settings = settings
+    view._config_path = Path("settings.json")
+    callbacks: list[str] = []
+    view.on_local_llm_secret_changed = lambda: callbacks.append("changed")
+
+    view._on_local_llm_secret_change("local_llm_api_key", "  server-secret  ")
+
+    assert store.set_calls == [("local_llm_api_key", "server-secret")]
+    assert store.delete_calls == []
+    assert callbacks == ["changed"]
+
+
+def test_local_llm_secret_change_whitespace_deletes_and_requests_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    store = DummySecretStore({"local_llm_api_key": "server-secret"})
+    view, _ = _make_settings_view(monkeypatch, store)
+    view._settings = settings
+    view._config_path = Path("settings.json")
+    callbacks: list[str] = []
+    view.on_local_llm_secret_changed = lambda: callbacks.append("changed")
+
+    view._on_local_llm_secret_change("local_llm_api_key", "   ")
+
+    assert store.set_calls == []
+    assert store.delete_calls == ["local_llm_api_key"]
+    assert callbacks == ["changed"]
+
+
+def test_local_llm_secret_change_failure_does_not_request_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingSecretStore(DummySecretStore):
+        def set(self, key: str, value: str) -> None:
+            raise RuntimeError("keyring unavailable")
+
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    store = FailingSecretStore()
+    view, _ = _make_settings_view(monkeypatch, store)
+    view._settings = settings
+    view._config_path = Path("settings.json")
+    snackbars: list[str] = []
+    callbacks: list[str] = []
+    view.show_snackbar = lambda message, _bg: snackbars.append(message)
+    view.on_local_llm_secret_changed = lambda: callbacks.append("changed")
+
+    view._on_local_llm_secret_change("local_llm_api_key", "server-secret")
+
+    assert callbacks == []
+    assert snackbars == [t("settings.local_llm.api_key.save_failed")]
+
+
+def test_local_llm_secret_delete_failure_does_not_request_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingDeleteSecretStore(DummySecretStore):
+        def delete(self, key: str) -> None:
+            raise RuntimeError("delete failed for server-secret")
+
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    store = FailingDeleteSecretStore({"local_llm_api_key": "server-secret"})
+    view, _ = _make_settings_view(monkeypatch, store)
+    view._settings = settings
+    view._config_path = Path("settings.json")
+    snackbars: list[str] = []
+    callbacks: list[str] = []
+    view.show_snackbar = lambda message, _bg: snackbars.append(message)
+    view.on_local_llm_secret_changed = lambda: callbacks.append("changed")
+
+    view._on_local_llm_secret_change("local_llm_api_key", "   ")
+
+    assert callbacks == []
+    assert snackbars == [t("settings.local_llm.api_key.save_failed")]
+
+
+def test_local_llm_secret_failure_logs_do_not_include_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class LeakyFailureSecretStore(DummySecretStore):
+        def set(self, key: str, value: str) -> None:
+            raise RuntimeError(f"backend echoed {value}")
+
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    store = LeakyFailureSecretStore()
+    view, _ = _make_settings_view(monkeypatch, store)
+    view._settings = settings
+    view._config_path = Path("settings.json")
+
+    with caplog.at_level(logging.WARNING):
+        view._on_local_llm_secret_change("local_llm_api_key", "server-secret")
+
+    assert "server-secret" not in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+def test_apply_locale_refreshes_local_llm_api_key_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_locale = i18n_module.get_locale()
+    i18n_module.set_locale("ko")
+    try:
+        view, _ = _make_settings_view(monkeypatch)
+
+        view.apply_locale()
+
+        assert view._local_llm_api_key._text_field.label == t("settings.local_llm.api_key")
+        assert view._local_llm_api_key_helper.value == ""
+        assert view._local_llm_api_key_helper.visible is False
     finally:
         i18n_module.set_locale(old_locale)
 
@@ -2966,21 +3536,21 @@ def test_translation_connection_and_model_copy_is_backed_by_i18n(locale: str) ->
             "settings.translation_model.gemma4.description": "Good for most situations We recommend using this model",
             "settings.translation_model.deepseek_v4_flash.description": "An option for people using PuriPuly in mainland China",
             "settings.translation_model.gemini3_flash.description": "Translation speed may be unstable",
-            "settings.translation_model.gemini31_flash_lite.description": "Translation speed may be unstable",
+            "settings.translation_model.gemini31_flash_lite.description": "Fast, lightweight Gemini translation",
             "settings.translation_model.qwen35_plus.description": "A strong alternative to DeepSeek",
         },
         "ko": {
             "settings.translation_model.gemma4.description": "대부분의 상황에서 좋아요 이 모델을 사용하는 걸 권장해요",
             "settings.translation_model.deepseek_v4_flash.description": "중국 대륙에서 사용하고 있는 사람들을 위한 선택이에요",
             "settings.translation_model.gemini3_flash.description": "번역 속도가 불안정할 수 있어요",
-            "settings.translation_model.gemini31_flash_lite.description": "번역 속도가 불안정할 수 있어요",
+            "settings.translation_model.gemini31_flash_lite.description": "빠르고 가벼운 Gemini 번역이에요",
             "settings.translation_model.qwen35_plus.description": "딥시크의 좋은 대안이에요",
         },
         "zh-CN": {
             "settings.translation_model.gemma4.description": "适合大多数情况 建议使用此模型",
             "settings.translation_model.deepseek_v4_flash.description": "适合在中国大陆使用 PuriPuly 的用户",
             "settings.translation_model.gemini3_flash.description": "翻译速度可能不稳定",
-            "settings.translation_model.gemini31_flash_lite.description": "翻译速度可能不稳定",
+            "settings.translation_model.gemini31_flash_lite.description": "快速、轻量的 Gemini 翻译",
             "settings.translation_model.qwen35_plus.description": "DeepSeek 的不错替代选择",
         },
     }[locale]
@@ -3243,16 +3813,17 @@ def test_audio_change_updates_desktop_loopback_controls(monkeypatch: pytest.Monk
     assert changed == [settings, settings, settings, settings]
 
 
-def test_general_tab_uses_three_row_layout_with_split_audio_and_vad_cards(
+def test_general_tab_uses_four_row_layout_with_clipboard_card_in_final_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
     general_controls = _subtab_controls(view, "general")
 
-    assert len(general_controls) == 3
+    assert len(general_controls) == 4
     assert len(general_controls[0].content.controls) == 3
     assert len(general_controls[1].content.controls) == 3
     assert len(general_controls[2].content.controls) == 3
+    assert len(general_controls[3].content.controls) == 3
     assert _row_card_titles(general_controls[0]) == [
         t("settings.section.ui"),
         t("settings.chatbox_include_source"),
@@ -3267,6 +3838,9 @@ def test_general_tab_uses_three_row_layout_with_split_audio_and_vad_cards(
         t("settings.vrc_mic_intercept"),
         t("settings.section.self_vad_sensitivity"),
         t("settings.section.peer_vad_sensitivity"),
+    ]
+    assert _row_card_titles(general_controls[3]) == [
+        t("settings.clipboard_auto_translate"),
     ]
 
 
@@ -3307,13 +3881,13 @@ def test_integrated_context_general_tab_uses_dedicated_unit_card(
     assert not _tree_contains_control(general_card, view._integrated_context_hint)
 
 
-def test_api_tab_uses_three_row_layout_with_response_mode_and_api_keys(
+def test_api_tab_places_independent_managed_key_card_above_api_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
     api_controls = _subtab_controls(view, "api")
 
-    assert len(api_controls) == 4
+    assert len(api_controls) == 5
     assert _row_card_titles(api_controls[0]) == [
         t("settings.section.stt"),
         t("settings.section.peer_stt"),
@@ -3326,8 +3900,10 @@ def test_api_tab_uses_three_row_layout_with_response_mode_and_api_keys(
     ]
     assert _row_card_titles(api_controls[2]) == [t("settings.local_llm.connection")]
     assert api_controls[2] is view._local_llm_connection_card
-    assert api_controls[3] is not view._api_keys_column
-    assert _row_card_titles(api_controls[3]) == [t("settings.section.api_keys")]
+    assert api_controls[3] is view._managed_key_card
+    assert _row_card_titles(api_controls[3]) == [t("settings.managed_key.title")]
+    assert api_controls[4] is not view._api_keys_column
+    assert _row_card_titles(api_controls[4]) == [t("settings.section.api_keys")]
 
 
 def test_api_tab_primary_value_typography_is_consistent_across_rows(
@@ -3499,6 +4075,7 @@ def test_general_tab_labels_and_section_headings_render_from_i18n(
         assert view._peer_pre_roll_field.label == t("settings.vad.peer_pre_roll_ms")
         assert view._vrc_mic_title.value == t("settings.vrc_mic_intercept")
         assert view._chatbox_source_title.value == t("settings.chatbox_include_source")
+        assert view._clipboard_auto_translate_title.value == t("settings.clipboard_auto_translate")
     finally:
         i18n_module.set_locale(old_locale)
 
@@ -4804,6 +5381,7 @@ def test_general_cards_use_settings_unit_card_defaults(
     general_cards = [
         _general_tab_card(view, t("settings.section.ui")),
         _general_tab_card(view, t("settings.chatbox_include_source")),
+        _general_tab_card(view, t("settings.clipboard_auto_translate")),
         _general_tab_card(view, t("settings.integrated_context")),
         _general_tab_card(view, t("settings.vrc_mic_intercept")),
         _general_tab_card(view, t("settings.audio_host_api")),

@@ -159,6 +159,7 @@ _SOURCE_KEY_MAP = {
     "You": "source.you",
     "Mic": "source.mic",
     "VRChat": "source.vrchat",
+    "Clipboard": "source.clipboard",
 }
 
 

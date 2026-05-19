@@ -11,6 +11,23 @@ from puripuly_heart.providers.llm.messages import build_translation_user_message
 
 logger = logging.getLogger(__name__)
 
+GEMINI_31_FLASH_LITE_GA_MODEL = "gemini-3.1-flash-lite"
+
+
+def _normalized_model_id(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip().rsplit("/", 1)[-1]
+
+
+def _model_entry_matches(entry: object, requested_model: str) -> bool:
+    for attr in ("name", "id", "model", "model_id", "base_model_id", "baseModelId"):
+        if _normalized_model_id(getattr(entry, attr, None)) == requested_model:
+            return True
+    if _normalized_model_id(entry) == requested_model:
+        return True
+    return False
+
 
 def _log_basic_request(
     *,
@@ -71,7 +88,7 @@ class GeminiClient(Protocol):
 @dataclass(slots=True)
 class GeminiLLMProvider:
     api_key: str
-    model: str = "gemini-3-flash-preview"
+    model: str = GEMINI_31_FLASH_LITE_GA_MODEL
     runtime_logging: SessionRuntimeLoggingService | None = None
     client: GeminiClient | None = None
     _internal_client: GeminiClient | None = field(init=False, default=None, repr=False)
@@ -123,17 +140,22 @@ class GeminiLLMProvider:
             self._internal_client = None
 
     @staticmethod
-    async def verify_api_key(api_key: str) -> bool:
+    async def verify_api_key(
+        api_key: str,
+        *,
+        model: str = GEMINI_31_FLASH_LITE_GA_MODEL,
+    ) -> bool:
         if not api_key:
             return False
         try:
             from google import genai  # type: ignore
 
             client = genai.Client(api_key=api_key)
-            # Try listing models as a lightweight auth check
-            async for _ in await client.aio.models.list(config={"page_size": 1}):
-                break
-            return True
+            requested_model = _normalized_model_id(model)
+            async for entry in await client.aio.models.list(config={"page_size": 1000}):
+                if not requested_model or _model_entry_matches(entry, requested_model):
+                    return True
+            return False
         except Exception:
             return False
 

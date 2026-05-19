@@ -84,6 +84,7 @@ def test_ensure_managed_identity_bundle_generates_uuid7_and_keeps_secret_boundar
         "active_managed_expires_at": None,
         "founder_letter_seen_credential_ref": None,
         "installation_id": bundle.installation_id,
+        "referral_id": None,
         "release_token": None,
         "release_token_expires_at": None,
         "verified_hardware_hash": None,
@@ -375,9 +376,11 @@ def test_issue_payload_matches_landed_broker_field_order() -> None:
 
 
 def test_discord_issue_payload_matches_landed_broker_field_order_and_hashes_code() -> None:
-    code_hash = base64.urlsafe_b64encode(
-        hashlib.sha256("discord-oauth-code".encode("utf-8")).digest()
-    ).decode("ascii").rstrip("=")
+    code_hash = (
+        base64.urlsafe_b64encode(hashlib.sha256("discord-oauth-code".encode("utf-8")).digest())
+        .decode("ascii")
+        .rstrip("=")
+    )
 
     payload = canonical_discord_issue_payload(
         installation_id="01961ad7-a7c1-7000-8000-0123456789ab",

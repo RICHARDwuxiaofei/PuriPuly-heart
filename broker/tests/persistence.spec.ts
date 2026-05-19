@@ -215,6 +215,7 @@ describe('broker persistent state model', () => {
             'expires_at',
             'processing_started_at',
             'consumed_at',
+            'referral_id',
           ],
           storedStatuses: [
             'pending',
@@ -226,7 +227,89 @@ describe('broker persistent state model', () => {
           ],
           retention:
             'expires_at cleanup only; durable entitlement and identity evidence is separate',
-          indexed: ['installation_id + status + created_at', 'expires_at'],
+          indexed: ['installation_id + status + created_at', 'expires_at', 'referral_id'],
+        },
+        referralCodes: {
+          name: 'referral_codes',
+          purpose: 'stable owned Referral ID per Discord identity',
+          primaryKey: 'referral_id',
+          columns: [
+            'referral_id',
+            'owner_discord_user_ref',
+            'owner_installation_id',
+            'status',
+            'created_at',
+            'updated_at',
+            'disabled_reason',
+            'disabled_by',
+            'disabled_at',
+          ],
+          referralIdFormat:
+            'six uppercase approved-alphabet characters excluding 0/O/1/I/L',
+          storedStatuses: ['active', 'disabled'],
+          unique: ['owner_discord_user_ref'],
+          indexed: [
+            'owner_discord_user_ref',
+            'owner_installation_id',
+            'status + referral_id',
+          ],
+          deletionBehavior:
+            'installation aging must not cascade-delete referral code history',
+        },
+        referralRewards: {
+          name: 'referral_rewards',
+          purpose: 'append-only referral attempt and reward ledger',
+          primaryKey: 'id',
+          columns: [
+            'id',
+            'referral_id',
+            'referrer_discord_user_ref',
+            'referrer_installation_id',
+            'referred_discord_user_ref',
+            'referred_installation_id',
+            'referred_hardware_hash',
+            'referred_hardware_hash_salt_version',
+            'referred_bonus_status',
+            'referrer_bonus_status',
+            'skip_reason',
+            'failure_reason',
+            'referred_managed_credential_ref',
+            'referrer_managed_credential_ref',
+            'created_at',
+            'updated_at',
+            'credited_at',
+            'attempt_ip_hash',
+          ],
+          referralIdFormat:
+            'six uppercase approved-alphabet characters excluding 0/O/1/I/L',
+          referredBonusStatuses: ['reserved', 'credited', 'skipped', 'failed'],
+          referrerBonusStatuses: ['pending', 'applying', 'credited', 'skipped', 'failed'],
+          reasonBounds: {
+            skip_reason: '1-64 chars when present',
+            failure_reason: '1-64 chars when present',
+          },
+          indexed: [
+            'referral_id',
+            'referrer_discord_user_ref + referred_bonus_status',
+            'referred_installation_id + created_at',
+            'attempt_ip_hash + created_at',
+            'referral_id + created_at',
+            'referrer_discord_user_ref + created_at',
+          ],
+          partialUniqueIndexes: [
+            {
+              name: 'idx_referral_rewards_counted_referred_discord_user',
+              columns: ['referred_discord_user_ref'],
+              predicate: "referred_bonus_status IN ('reserved', 'credited')",
+            },
+            {
+              name: 'idx_referral_rewards_counted_referred_installation',
+              columns: ['referred_installation_id'],
+              predicate: "referred_bonus_status IN ('reserved', 'credited')",
+            },
+          ],
+          deletionBehavior:
+            'installation aging must not cascade-delete referral reward ledger history',
         },
         discordIdentities: {
           name: 'discord_identities',
@@ -354,6 +437,8 @@ describe('broker persistent state model', () => {
       '0002_add_entitlement_verified_hardware_snapshot.sql',
       '0003_add_abuse_runtime_state_and_issue_success_events.sql',
       '0004_add_discord_oauth_managed_issue.sql',
+      '0005_add_referral_persistence_foundation.sql',
+      '0006_harden_referral_reward_operations.sql',
     ]);
     expect(existsSync(FIRST_BROKER_MIGRATION)).toBe(true);
     expect(existsSync(LATEST_BROKER_MIGRATION)).toBe(true);
@@ -374,7 +459,13 @@ describe('broker persistent state model', () => {
     const abuseRuntimeMigration = readBrokerMigrationSql(
       '0003_add_abuse_runtime_state_and_issue_success_events.sql',
     );
-    const discordManagedIssueMigration = readFileSync(LATEST_BROKER_MIGRATION, 'utf8');
+    const discordManagedIssueMigration = readBrokerMigrationSql(
+      '0004_add_discord_oauth_managed_issue.sql',
+    );
+    const referralPersistenceMigration = readBrokerMigrationSql(
+      '0005_add_referral_persistence_foundation.sql',
+    );
+    const referralOperationsMigration = readFileSync(LATEST_BROKER_MIGRATION, 'utf8');
 
     expect(migration).toContain('CREATE TABLE broker_config');
     expect(migration).toContain('CREATE TABLE installations');
@@ -447,5 +538,34 @@ describe('broker persistent state model', () => {
     );
     expect(discordManagedIssueMigration).not.toContain('legacy_installation_id_mapping');
     expect(discordManagedIssueMigration).not.toContain('legacy-invalid-app-version');
+    expect(referralPersistenceMigration).toContain('CREATE TABLE referral_codes');
+    expect(referralPersistenceMigration).toContain('CREATE TABLE referral_rewards');
+    expect(referralPersistenceMigration).toContain('ADD COLUMN referral_id TEXT');
+    expect(referralPersistenceMigration).toContain(
+      'CREATE UNIQUE INDEX idx_referral_rewards_counted_referred_discord_user',
+    );
+    expect(referralPersistenceMigration).toContain(
+      'CREATE UNIQUE INDEX idx_referral_rewards_counted_referred_installation',
+    );
+    expect(referralPersistenceMigration).not.toContain('ON DELETE CASCADE');
+    expect(referralOperationsMigration).toContain('ADD COLUMN disabled_reason TEXT');
+    expect(referralOperationsMigration).toContain('ADD COLUMN disabled_by TEXT');
+    expect(referralOperationsMigration).toContain('ADD COLUMN disabled_at TEXT');
+    expect(referralOperationsMigration).toContain('ADD COLUMN attempt_ip_hash TEXT');
+    expect(referralOperationsMigration).toContain(
+      'CREATE INDEX idx_referral_rewards_attempt_installation_time',
+    );
+    expect(referralOperationsMigration).toContain(
+      'CREATE INDEX idx_referral_rewards_attempt_ip_hash_time',
+    );
+    expect(referralOperationsMigration).toContain(
+      'CREATE INDEX idx_referral_rewards_referral_velocity',
+    );
+    expect(referralOperationsMigration).toContain(
+      'CREATE INDEX idx_referral_rewards_referrer_velocity',
+    );
+    expect(referralOperationsMigration).toContain('$.retention.referralSkippedDays');
+    expect(referralOperationsMigration).toContain('$.retention.referralFailedDays');
+    expect(referralOperationsMigration).toContain('$.referralAttempts');
   });
 });

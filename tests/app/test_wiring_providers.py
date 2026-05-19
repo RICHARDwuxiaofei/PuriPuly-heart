@@ -72,7 +72,7 @@ def test_create_llm_provider_gemini_uses_secret_and_concurrency_limit() -> None:
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, GeminiLLMProvider)
     assert provider.inner.api_key == "k"
-    assert provider.inner.model == "gemini-3.1-flash-lite-preview"
+    assert provider.inner.model == "gemini-3.1-flash-lite"
     assert provider.semaphore._value == 3  # type: ignore[attr-defined]
 
 
@@ -87,7 +87,7 @@ def test_create_llm_provider_gemini_uses_selected_model() -> None:
     provider = create_llm_provider(settings, secrets=secrets)
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, GeminiLLMProvider)
-    assert provider.inner.model == "gemini-3.1-flash-lite-preview"
+    assert provider.inner.model == "gemini-3.1-flash-lite"
 
 
 def test_create_llm_provider_gemini_passes_runtime_logging() -> None:
@@ -264,7 +264,7 @@ def test_create_llm_provider_local_llm_uses_settings_without_secret(
     assert provider.semaphore._value == 2  # type: ignore[attr-defined]
 
 
-def test_create_llm_provider_local_llm_uses_optional_env_key(
+def test_create_llm_provider_local_llm_ignores_optional_env_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
@@ -275,10 +275,10 @@ def test_create_llm_provider_local_llm_uses_optional_env_key(
 
     assert isinstance(provider, SemaphoreLLMProvider)
     assert isinstance(provider.inner, LocalOpenAICompatibleLLMProvider)
-    assert provider.inner.api_key == "local-secret"
+    assert provider.inner.api_key == ""
 
 
-def test_create_llm_provider_local_llm_secret_store_key_takes_precedence_over_env(
+def test_create_llm_provider_local_llm_uses_secret_store_key_even_when_env_is_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
@@ -1000,6 +1000,23 @@ def test_create_stt_backend_local_qwen_uses_shared_model_path_without_secret() -
     assert backend.stream_label == "self"
 
 
+def test_create_stt_backend_local_qwen_passes_diagnostics_enabled_predicate() -> None:
+    settings = AppSettings(provider=ProviderSettings(stt=STTProviderName.LOCAL_QWEN))
+    secrets = InMemorySecretStore()
+
+    def diagnostics_enabled() -> bool:
+        return True
+
+    backend = create_stt_backend(
+        settings,
+        secrets=secrets,
+        diagnostics_enabled=diagnostics_enabled,
+    )
+
+    assert isinstance(backend, LocalQwenSherpaSTTBackend)
+    assert backend.diagnostics_enabled is diagnostics_enabled
+
+
 def test_create_stt_backend_local_qwen_passes_language_hint_without_hotwords() -> None:
     settings = AppSettings(provider=ProviderSettings(stt=STTProviderName.LOCAL_QWEN))
     settings.languages.source_language = "ko-KR"
@@ -1170,6 +1187,24 @@ def test_create_peer_stt_backend_uses_peer_local_qwen_provider_and_fixed_sample_
     assert backend.model_dir == default_local_stt_model_dir()
     assert backend.sample_rate_hz == 16000
     assert backend.stream_label == "peer"
+
+
+def test_create_peer_stt_backend_local_qwen_passes_diagnostics_enabled_predicate() -> None:
+    settings = AppSettings()
+    settings.provider.peer_stt = STTProviderName.LOCAL_QWEN
+    secrets = InMemorySecretStore()
+
+    def diagnostics_enabled() -> bool:
+        return True
+
+    backend = create_peer_stt_backend(
+        settings,
+        secrets=secrets,
+        diagnostics_enabled=diagnostics_enabled,
+    )
+
+    assert isinstance(backend, LocalQwenSherpaSTTBackend)
+    assert backend.diagnostics_enabled is diagnostics_enabled
 
 
 def test_managed_stt_provider_rejects_legacy_8khz_runtime_sample_rate() -> None:

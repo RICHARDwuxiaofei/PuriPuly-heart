@@ -6,8 +6,13 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import puripuly_heart.core.audio.source as audio_source_module
 from puripuly_heart.core.audio.source import (
+    SelfMicCaptureChannelDecision,
     SoundDeviceAudioSource,
+    SoundDeviceInputMetadata,
+    determine_self_mic_capture_channels,
+    query_sounddevice_input_metadata,
     resolve_sounddevice_input_device,
 )
 
@@ -23,6 +28,137 @@ from puripuly_heart.core.audio.source import (
 def test_sounddevice_audio_source_rejects_invalid_params(kwargs, error):
     with pytest.raises(ValueError, match=error):
         SoundDeviceAudioSource(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_sounddevice_callback_tracks_status_and_drops_without_logging(monkeypatch):
+    stream_ref: dict[str, object] = {}
+    warnings: list[str] = []
+    allow_status_stringification = False
+
+    class StatusWithoutCallbackStringification:
+        def __str__(self) -> str:
+            if not allow_status_stringification:
+                raise AssertionError("callback must not stringify status")
+            return "input-overflow"
+
+    class FakeInputStream:
+        def __init__(self, *, callback, **kwargs):
+            self.callback = callback
+            self.samplerate = 48000
+            stream_ref["stream"] = self
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def close(self):
+            return None
+
+    fake_sd = SimpleNamespace(InputStream=FakeInputStream)
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    def fake_warning(message, *args, **kwargs):
+        _ = kwargs
+        warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(
+        "puripuly_heart.core.audio.source.logger.warning",
+        fake_warning,
+    )
+
+    source = SoundDeviceAudioSource(sample_rate_hz=None, channels=1, max_queue_frames=1)
+    try:
+        stream = stream_ref["stream"]
+        status = StatusWithoutCallbackStringification()
+        stream.callback(np.ones((4,), dtype=np.float32), None, None, status)
+        stream.callback(np.ones((4,), dtype=np.float32), None, None, None)
+
+        assert source.callback_status_count == 1
+        assert source.queue_drop_count == 1
+        assert source.last_callback_status is status
+        assert warnings == []
+
+        allow_status_stringification = True
+        frame = await source.frames().__anext__()
+
+        np.testing.assert_allclose(frame.samples, np.ones((4,), dtype=np.float32))
+        assert any("callback status" in message and "count=1" in message for message in warnings)
+        assert any("queue drop" in message and "count=1" in message for message in warnings)
+    finally:
+        await source.close()
+
+
+@pytest.mark.asyncio
+async def test_sounddevice_callback_warning_reporting_is_rate_limited(monkeypatch) -> None:
+    stream_ref: dict[str, object] = {}
+    warnings: list[str] = []
+    clock = SimpleNamespace(value=0.0)
+
+    class FakeInputStream:
+        def __init__(self, *, callback, **kwargs):
+            _ = kwargs
+            self.callback = callback
+            self.samplerate = 48000
+            stream_ref["stream"] = self
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def close(self):
+            return None
+
+    def fake_warning(message, *args, **kwargs):
+        _ = kwargs
+        warnings.append(message % args if args else message)
+
+    monkeypatch.setitem(
+        __import__("sys").modules, "sounddevice", SimpleNamespace(InputStream=FakeInputStream)
+    )
+    monkeypatch.setattr(
+        audio_source_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock.value),
+        raising=False,
+    )
+    monkeypatch.setattr(audio_source_module.logger, "warning", fake_warning)
+
+    source = SoundDeviceAudioSource(sample_rate_hz=None, channels=1, max_queue_frames=1)
+
+    def trigger_status_and_drop() -> None:
+        stream = stream_ref["stream"]
+        stream.callback(np.ones((4,), dtype=np.float32), None, None, "input-overflow")
+        stream.callback(np.ones((4,), dtype=np.float32), None, None, "input-overflow")
+
+    try:
+        trigger_status_and_drop()
+        await source.frames().__anext__()
+        assert len(warnings) == 1
+        assert "callback status count=2" in warnings[0]
+        assert "callback status new=2" in warnings[0]
+        assert "queue drop count=1" in warnings[0]
+        assert "queue drop new=1" in warnings[0]
+
+        trigger_status_and_drop()
+        await source.frames().__anext__()
+        assert len(warnings) == 1
+
+        clock.value = 1.1
+        trigger_status_and_drop()
+        await source.frames().__anext__()
+
+        assert len(warnings) == 2
+        assert "callback status count=6" in warnings[1]
+        assert "callback status new=4" in warnings[1]
+        assert "queue drop count=3" in warnings[1]
+        assert "queue drop new=2" in warnings[1]
+    finally:
+        await source.close()
 
 
 def test_resolve_sounddevice_input_device_prefers_hostapi_default(monkeypatch):
@@ -53,6 +189,164 @@ def test_resolve_sounddevice_input_device_by_name(monkeypatch):
 
 def test_resolve_sounddevice_input_device_returns_none_when_blank() -> None:
     assert resolve_sounddevice_input_device() is None
+
+
+@pytest.mark.parametrize(
+    ("max_input_channels", "expected_channels"),
+    [
+        (1, 1),
+        (2, 2),
+        (8, 2),
+    ],
+)
+def test_determine_self_mic_capture_channels_uses_positive_metadata(
+    max_input_channels: int,
+    expected_channels: int,
+) -> None:
+    metadata = SoundDeviceInputMetadata(
+        device_idx=5,
+        name="Mic",
+        max_input_channels=max_input_channels,
+        default_samplerate=48000.0,
+        metadata_status="ok",
+    )
+
+    decision = determine_self_mic_capture_channels(
+        device_idx=5,
+        internal_channels=1,
+        metadata=metadata,
+    )
+
+    assert decision == SelfMicCaptureChannelDecision(
+        device_idx=5,
+        internal_channels=1,
+        preferred_capture_channels=expected_channels,
+        metadata=metadata,
+    )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        SoundDeviceInputMetadata(
+            device_idx=3,
+            name="No Channels",
+            max_input_channels=0,
+            default_samplerate=48000.0,
+            metadata_status="invalid",
+        ),
+        SoundDeviceInputMetadata(
+            device_idx=3,
+            name="Missing Channels",
+            max_input_channels=None,
+            default_samplerate=None,
+            metadata_status="unavailable",
+        ),
+        SoundDeviceInputMetadata(
+            device_idx=3,
+            name=None,
+            max_input_channels=None,
+            default_samplerate=None,
+            metadata_status="query_failed",
+            metadata_error="boom",
+        ),
+    ],
+)
+def test_determine_self_mic_capture_channels_falls_back_to_internal_channels(
+    metadata: SoundDeviceInputMetadata,
+) -> None:
+    decision = determine_self_mic_capture_channels(
+        device_idx=metadata.device_idx,
+        internal_channels=1,
+        metadata=metadata,
+    )
+
+    assert decision.preferred_capture_channels == 1
+    assert decision.internal_channels == 1
+    assert decision.metadata is metadata
+
+
+def test_determine_self_mic_capture_channels_rejects_invalid_internal_channels() -> None:
+    metadata = SoundDeviceInputMetadata(
+        device_idx=1,
+        name="Mic",
+        max_input_channels=2,
+        default_samplerate=48000.0,
+        metadata_status="ok",
+    )
+
+    with pytest.raises(ValueError, match="internal_channels"):
+        determine_self_mic_capture_channels(
+            device_idx=1,
+            internal_channels=0,
+            metadata=metadata,
+        )
+
+
+def test_query_sounddevice_input_metadata_for_explicit_device(monkeypatch):
+    fake_sd = SimpleNamespace(
+        query_devices=lambda *args, **kwargs: [
+            {"name": "Out", "max_input_channels": 0, "default_samplerate": 48000.0},
+            {"name": "마이크", "max_input_channels": 2, "default_samplerate": 44100.0},
+        ]
+    )
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    metadata = query_sounddevice_input_metadata(1)
+
+    assert metadata.device_idx == 1
+    assert metadata.name == "마이크"
+    assert metadata.max_input_channels == 2
+    assert metadata.default_samplerate == 44100.0
+    assert metadata.metadata_status == "ok"
+    assert metadata.metadata_error is None
+
+
+def test_query_sounddevice_input_metadata_for_default_input(monkeypatch):
+    query_calls: list[dict[str, object]] = []
+
+    def fake_query_devices(*args, **kwargs):
+        query_calls.append({"args": args, "kwargs": kwargs})
+        return {"name": "Default Mic", "max_input_channels": 2, "default_samplerate": 48000.0}
+
+    fake_sd = SimpleNamespace(query_devices=fake_query_devices)
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    metadata = query_sounddevice_input_metadata(None)
+
+    assert query_calls == [{"args": (), "kwargs": {"kind": "input"}}]
+    assert metadata.device_idx is None
+    assert metadata.name == "Default Mic"
+    assert metadata.max_input_channels == 2
+    assert metadata.default_samplerate == 48000.0
+    assert metadata.metadata_status == "default_resolved"
+
+
+def test_query_sounddevice_input_metadata_reports_invalid_explicit_device(monkeypatch):
+    fake_sd = SimpleNamespace(query_devices=lambda *args, **kwargs: [])
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    metadata = query_sounddevice_input_metadata(99)
+
+    assert metadata.device_idx == 99
+    assert metadata.max_input_channels is None
+    assert metadata.metadata_status == "invalid"
+    assert "99" in (metadata.metadata_error or "")
+
+
+def test_query_sounddevice_input_metadata_reports_query_failure(monkeypatch):
+    def fake_query_devices(*args, **kwargs):
+        raise RuntimeError("no devices")
+
+    fake_sd = SimpleNamespace(query_devices=fake_query_devices)
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    metadata = query_sounddevice_input_metadata(None)
+
+    assert metadata.device_idx is None
+    assert metadata.max_input_channels is None
+    assert metadata.metadata_status == "query_failed"
+    assert metadata.metadata_error == "no devices"
 
 
 def test_resolve_sounddevice_input_device_by_index_with_hostapi(monkeypatch):
@@ -161,6 +455,80 @@ async def test_sounddevice_audio_source_frames_and_close(monkeypatch):
         stream.callback(np.ones((2,), dtype=np.float32), None, None, None)
     finally:
         await source.close()
+
+
+@pytest.mark.asyncio
+async def test_sounddevice_audio_source_exposes_format_metadata(monkeypatch):
+    stream_ref: dict[str, object] = {}
+
+    class FakeInputStream:
+        def __init__(self, *, samplerate, channels, dtype, callback, device, blocksize):
+            assert channels == 2
+            assert dtype == "float32"
+            assert device == 3
+            assert blocksize == 0
+            self.callback = callback
+            self.samplerate = samplerate or 48000
+            stream_ref["stream"] = self
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    fake_sd = SimpleNamespace(InputStream=FakeInputStream)
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    source = SoundDeviceAudioSource(sample_rate_hz=None, channels=2, device=3)
+    try:
+        assert source.actual_sample_rate_hz == 48000
+        assert source.requested_channels == 2
+        assert source.opened_channels == 2
+        assert source.frame_channels == 2
+
+        stream = stream_ref["stream"]
+        stream.callback(np.ones((4, 2), dtype=np.float32), None, None, None)
+
+        frame = await source.frames().__anext__()
+        assert frame.sample_rate_hz == 48000
+        assert frame.channels == 2
+        assert source.frame_channels == 2
+        np.testing.assert_allclose(frame.samples, np.ones((4, 2), dtype=np.float32))
+    finally:
+        await source.close()
+
+
+def test_sounddevice_audio_source_closes_stream_when_start_fails(monkeypatch):
+    closed: list[str] = []
+    stopped: list[str] = []
+
+    class FakeInputStream:
+        samplerate = 48000
+
+        def __init__(self, **kwargs):
+            _ = kwargs
+
+        def start(self):
+            raise RuntimeError("start failed")
+
+        def stop(self):
+            stopped.append("stopped")
+
+        def close(self):
+            closed.append("closed")
+
+    fake_sd = SimpleNamespace(InputStream=FakeInputStream)
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    with pytest.raises(RuntimeError, match="start failed"):
+        SoundDeviceAudioSource(sample_rate_hz=None, channels=2, device=3)
+
+    assert stopped == ["stopped"]
+    assert closed == ["closed"]
 
 
 def test_sounddevice_audio_source_does_not_pass_wasapi_settings_by_default(monkeypatch):

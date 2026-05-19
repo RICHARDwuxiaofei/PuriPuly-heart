@@ -51,6 +51,29 @@ export interface BrokerAbuseRetentionConfig {
   requestEventsDays: number;
   issueSuccessDays: number;
   runtimeAuditDays: number;
+  referralSkippedDays: number;
+  referralFailedDays: number;
+}
+
+export interface BrokerReferralAttemptControlsConfig {
+  validShaped: {
+    maxPerInstallation: number;
+    maxPerIp: number;
+    windowMinutes: number;
+  };
+  unknown: {
+    maxPerInstallation: number;
+    maxPerIp: number;
+    windowMinutes: number;
+  };
+  perReferralIdVelocity: {
+    maxAttempts: number;
+    windowMinutes: number;
+  };
+  perReferrerRewardVelocity: {
+    maxRewards: number;
+    windowMinutes: number;
+  };
 }
 
 export interface BrokerDailyReportConfig {
@@ -75,6 +98,7 @@ export interface BrokerAbuseControlsConfigValue {
   asnFastPath: BrokerAsnFastPathConfig;
   asnClassifications: BrokerAsnClassificationEntry[];
   retention: BrokerAbuseRetentionConfig;
+  referralAttempts: BrokerReferralAttemptControlsConfig;
   dailyReport: BrokerDailyReportConfig;
 }
 
@@ -154,6 +178,28 @@ export const DEFAULT_BROKER_ABUSE_CONTROLS: BrokerAbuseControlsConfigValue = {
     requestEventsDays: 30,
     issueSuccessDays: 30,
     runtimeAuditDays: 90,
+    referralSkippedDays: 7,
+    referralFailedDays: 30,
+  },
+  referralAttempts: {
+    validShaped: {
+      maxPerInstallation: 8,
+      maxPerIp: 30,
+      windowMinutes: 15,
+    },
+    unknown: {
+      maxPerInstallation: 3,
+      maxPerIp: 10,
+      windowMinutes: 15,
+    },
+    perReferralIdVelocity: {
+      maxAttempts: 25,
+      windowMinutes: 60,
+    },
+    perReferrerRewardVelocity: {
+      maxRewards: 5,
+      windowMinutes: 1440,
+    },
   },
   dailyReport: {
     enabled: true,
@@ -291,11 +337,39 @@ export const DISCORD_OAUTH_SESSION_STATUS_VALUES = [
   'expired',
 ] as const;
 
+export const REFERRAL_ID_FORMAT_DESCRIPTION =
+  'six uppercase approved-alphabet characters excluding 0/O/1/I/L';
+
+export const REFERRAL_CODE_STATUS_VALUES = ['active', 'disabled'] as const;
+
+export const REFERRAL_REFERRED_BONUS_STATUS_VALUES = [
+  'reserved',
+  'credited',
+  'skipped',
+  'failed',
+] as const;
+
+export const REFERRAL_REFERRER_BONUS_STATUS_VALUES = [
+  'pending',
+  'applying',
+  'credited',
+  'skipped',
+  'failed',
+] as const;
+
 export type OpenRouterEntitlementStatus =
   (typeof OPENROUTER_ENTITLEMENT_STATUS_VALUES)[number];
 
 export type DiscordOAuthSessionStatus =
   (typeof DISCORD_OAUTH_SESSION_STATUS_VALUES)[number];
+
+export type ReferralCodeStatus = (typeof REFERRAL_CODE_STATUS_VALUES)[number];
+
+export type ReferralReferredBonusStatus =
+  (typeof REFERRAL_REFERRED_BONUS_STATUS_VALUES)[number];
+
+export type ReferralReferrerBonusStatus =
+  (typeof REFERRAL_REFERRER_BONUS_STATUS_VALUES)[number];
 
 export interface DiscordOAuthSessionRecord {
   state_hash: string;
@@ -314,6 +388,40 @@ export interface DiscordOAuthSessionRecord {
   expires_at: string;
   processing_started_at: string | null;
   consumed_at: string | null;
+  referral_id: string | null;
+}
+
+export interface ReferralCodeRecord {
+  referral_id: string;
+  owner_discord_user_ref: string;
+  owner_installation_id: string | null;
+  status: ReferralCodeStatus;
+  disabled_reason?: string | null;
+  disabled_by?: string | null;
+  disabled_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReferralRewardRecord {
+  id: number;
+  referral_id: string;
+  referrer_discord_user_ref: string | null;
+  referrer_installation_id: string | null;
+  referred_discord_user_ref: string;
+  referred_installation_id: string;
+  referred_hardware_hash: string;
+  referred_hardware_hash_salt_version: number;
+  referred_bonus_status: ReferralReferredBonusStatus;
+  referrer_bonus_status: ReferralReferrerBonusStatus;
+  skip_reason: string | null;
+  failure_reason: string | null;
+  referred_managed_credential_ref: string | null;
+  referrer_managed_credential_ref: string | null;
+  attempt_ip_hash?: string | null;
+  created_at: string;
+  updated_at: string;
+  credited_at: string | null;
 }
 
 export interface OpenRouterEntitlementRecord {
@@ -537,10 +645,91 @@ export const BROKER_PERSISTENCE_MODEL = {
         'expires_at',
         'processing_started_at',
         'consumed_at',
+        'referral_id',
       ],
       storedStatuses: DISCORD_OAUTH_SESSION_STATUS_VALUES,
       retention: 'expires_at cleanup only; durable entitlement and identity evidence is separate',
-      indexed: ['installation_id + status + created_at', 'expires_at'],
+      indexed: ['installation_id + status + created_at', 'expires_at', 'referral_id'],
+    },
+    referralCodes: {
+      name: 'referral_codes',
+      purpose: 'stable owned Referral ID per Discord identity',
+      primaryKey: 'referral_id',
+      columns: [
+        'referral_id',
+        'owner_discord_user_ref',
+        'owner_installation_id',
+        'status',
+        'created_at',
+        'updated_at',
+        'disabled_reason',
+        'disabled_by',
+        'disabled_at',
+      ],
+      referralIdFormat: REFERRAL_ID_FORMAT_DESCRIPTION,
+      storedStatuses: REFERRAL_CODE_STATUS_VALUES,
+      unique: ['owner_discord_user_ref'],
+      indexed: [
+        'owner_discord_user_ref',
+        'owner_installation_id',
+        'status + referral_id',
+      ],
+      deletionBehavior:
+        'installation aging must not cascade-delete referral code history',
+    },
+    referralRewards: {
+      name: 'referral_rewards',
+      purpose: 'append-only referral attempt and reward ledger',
+      primaryKey: 'id',
+      columns: [
+        'id',
+        'referral_id',
+        'referrer_discord_user_ref',
+        'referrer_installation_id',
+        'referred_discord_user_ref',
+        'referred_installation_id',
+        'referred_hardware_hash',
+        'referred_hardware_hash_salt_version',
+        'referred_bonus_status',
+        'referrer_bonus_status',
+        'skip_reason',
+        'failure_reason',
+        'referred_managed_credential_ref',
+        'referrer_managed_credential_ref',
+        'created_at',
+        'updated_at',
+        'credited_at',
+        'attempt_ip_hash',
+      ],
+      referralIdFormat: REFERRAL_ID_FORMAT_DESCRIPTION,
+      referredBonusStatuses: REFERRAL_REFERRED_BONUS_STATUS_VALUES,
+      referrerBonusStatuses: REFERRAL_REFERRER_BONUS_STATUS_VALUES,
+      reasonBounds: {
+        skip_reason: '1-64 chars when present',
+        failure_reason: '1-64 chars when present',
+      },
+      indexed: [
+        'referral_id',
+        'referrer_discord_user_ref + referred_bonus_status',
+        'referred_installation_id + created_at',
+        'attempt_ip_hash + created_at',
+        'referral_id + created_at',
+        'referrer_discord_user_ref + created_at',
+      ],
+      partialUniqueIndexes: [
+        {
+          name: 'idx_referral_rewards_counted_referred_discord_user',
+          columns: ['referred_discord_user_ref'],
+          predicate: "referred_bonus_status IN ('reserved', 'credited')",
+        },
+        {
+          name: 'idx_referral_rewards_counted_referred_installation',
+          columns: ['referred_installation_id'],
+          predicate: "referred_bonus_status IN ('reserved', 'credited')",
+        },
+      ],
+      deletionBehavior:
+        'installation aging must not cascade-delete referral reward ledger history',
     },
     discordIdentities: {
       name: 'discord_identities',

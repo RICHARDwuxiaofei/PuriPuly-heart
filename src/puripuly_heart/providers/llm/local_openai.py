@@ -392,6 +392,7 @@ class HttpxLocalOpenAIClient:
         self.base_url = _normalize_base_url(self.base_url)
         if not self.model.strip():
             raise ValueError("invalid local LLM model")
+        self.api_key = self.api_key.strip()
         _assert_extra_body_is_safe(self.extra_body)
 
     def _build_http_client(self) -> httpx.AsyncClient:

@@ -52,6 +52,10 @@ class DebugPreviewPanel(ft.Container):
         on_discord_auth: Callable[[], None],
         on_discord_callback_page: Callable[[], None],
         on_peer_translation_eula: Callable[[], None],
+        on_talk_together_pass_invite_progress: Callable[[], None],
+        on_capture_fault_cycle: Callable[[], None],
+        on_stt_fault_cycle: Callable[[], None],
+        on_audio_fault_clear: Callable[[], None],
     ) -> None:
         self._actions = (
             _PreviewAction("brake_notice", "debug_preview.brake_notice", on_brake_notice),
@@ -68,6 +72,26 @@ class DebugPreviewPanel(ft.Container):
                 "peer_translation_eula",
                 "debug_preview.peer_translation_eula",
                 on_peer_translation_eula,
+            ),
+            _PreviewAction(
+                "talk_together_pass_invite_progress",
+                "debug_preview.talk_together_pass_invite_progress",
+                on_talk_together_pass_invite_progress,
+            ),
+            _PreviewAction(
+                "capture_fault_cycle",
+                "debug_preview.capture_fault_cycle",
+                on_capture_fault_cycle,
+            ),
+            _PreviewAction(
+                "stt_fault_cycle",
+                "debug_preview.stt_fault_cycle",
+                on_stt_fault_cycle,
+            ),
+            _PreviewAction(
+                "audio_fault_clear",
+                "debug_preview.audio_fault_clear",
+                on_audio_fault_clear,
             ),
         )
         self._toggle_button = _make_text_button(

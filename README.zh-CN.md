@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
 </p>
 
-<p align="center">LLM-based real-time translator for VRChat</p>
+<p align="center">LLM-based two-way translator for VRChat</p>
 
 <h2 align="center">
   <a href="README.md">🇺🇸 English</a> ·
@@ -436,6 +436,12 @@ pnpm --filter @puripuly-heart/broker run dev
 ## 贡献者
 
 [RICHARDwuxiaofei](https://github.com/RICHARDwuxiaofei)
+
+---
+
+## Special Thanks
+
+SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์
 
 ---
 

@@ -118,84 +118,87 @@ def _run_gui(config_path: Path, *, debug_ui_preview: bool) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    configure_main_logging()
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    if args.version:
-        from puripuly_heart import __version__
-
-        print(__version__)
-        return 0
-
+    logging_sinks = configure_main_logging()
     try:
-        if _requires_soxr_runtime_startup_check(args):
-            ensure_soxr_runtime_available_for_startup()
-    except SoxrRuntimeAvailabilityError as exc:
-        return _print_runtime_error("packaged soxr runtime", exc)
+        parser = build_parser()
+        args = parser.parse_args(argv)
 
-    if args.command == "run-gui":
-        return _run_gui(
-            args.config,
-            debug_ui_preview=bool(getattr(args, "debug_ui_preview", False)),
-        )
+        if args.version:
+            from puripuly_heart import __version__
 
-    if args.command == "local-qwen-runtime-check":
-        return run_local_qwen_runtime_check()
+            print(__version__)
+            return 0
 
-    if args.command == "soxr-runtime-check":
-        return run_soxr_runtime_check()
-
-    settings = _load_settings_or_default(args.config)
-
-    if args.command == "osc-send":
-        sender = VrchatOscUdpSender(
-            host=settings.osc.host,
-            port=settings.osc.port,
-            chatbox_address=settings.osc.chatbox_address,
-            chatbox_send=settings.osc.chatbox_send,
-            chatbox_clear=settings.osc.chatbox_clear,
-        )
         try:
-            sender.send_chatbox(args.text)
-        finally:
-            sender.close()
-        return 0
+            if _requires_soxr_runtime_startup_check(args):
+                ensure_soxr_runtime_available_for_startup()
+        except SoxrRuntimeAvailabilityError as exc:
+            return _print_runtime_error("packaged soxr runtime", exc)
 
-    if args.command == "run-stdin":
-        llm = None
-        if args.use_llm:
+        if args.command == "run-gui":
+            return _run_gui(
+                args.config,
+                debug_ui_preview=bool(getattr(args, "debug_ui_preview", False)),
+            )
+
+        if args.command == "local-qwen-runtime-check":
+            return run_local_qwen_runtime_check()
+
+        if args.command == "soxr-runtime-check":
+            return run_soxr_runtime_check()
+
+        settings = _load_settings_or_default(args.config)
+
+        if args.command == "osc-send":
+            sender = VrchatOscUdpSender(
+                host=settings.osc.host,
+                port=settings.osc.port,
+                chatbox_address=settings.osc.chatbox_address,
+                chatbox_send=settings.osc.chatbox_send,
+                chatbox_clear=settings.osc.chatbox_clear,
+            )
             try:
-                secrets = create_secret_store(settings.secrets, config_path=args.config)
-                llm = create_llm_provider(settings, secrets=secrets)
-            except Exception as exc:
-                return _print_initialization_error("LLM provider", exc)
+                sender.send_chatbox(args.text)
+            finally:
+                sender.close()
+            return 0
 
-        runner = HeadlessStdinRunner(settings=settings, llm=llm)
-        return asyncio.run(runner.run())
+        if args.command == "run-stdin":
+            llm = None
+            if args.use_llm:
+                try:
+                    secrets = create_secret_store(settings.secrets, config_path=args.config)
+                    llm = create_llm_provider(settings, secrets=secrets)
+                except Exception as exc:
+                    return _print_initialization_error("LLM provider", exc)
 
-    if args.command == "run-mic":
-        HeadlessMicRunner, HeadlessMicInitializationError = _load_headless_mic_types()
-        runner = HeadlessMicRunner(
-            settings=settings,
-            config_path=args.config,
-            vad_model_path=args.vad_model,
-            use_llm=args.use_llm,
-        )
-        try:
+            runner = HeadlessStdinRunner(settings=settings, llm=llm)
             return asyncio.run(runner.run())
-        except HeadlessMicInitializationError as exc:
-            return _print_initialization_error("headless mic runner", exc)
 
-    # Default: run GUI when no command specified (e.g., double-clicking EXE)
-    if args.command is None:
-        return _run_gui(
-            args.config,
-            debug_ui_preview=bool(getattr(args, "debug_ui_preview", False)),
-        )
+        if args.command == "run-mic":
+            HeadlessMicRunner, HeadlessMicInitializationError = _load_headless_mic_types()
+            runner = HeadlessMicRunner(
+                settings=settings,
+                config_path=args.config,
+                vad_model_path=args.vad_model,
+                use_llm=args.use_llm,
+            )
+            try:
+                return asyncio.run(runner.run())
+            except HeadlessMicInitializationError as exc:
+                return _print_initialization_error("headless mic runner", exc)
 
-    parser.print_help()
-    return 2
+        # Default: run GUI when no command specified (e.g., double-clicking EXE)
+        if args.command is None:
+            return _run_gui(
+                args.config,
+                debug_ui_preview=bool(getattr(args, "debug_ui_preview", False)),
+            )
+
+        parser.print_help()
+        return 2
+    finally:
+        logging_sinks.close(force=True)
 
 
 def _load_settings_or_default(path: Path) -> AppSettings:

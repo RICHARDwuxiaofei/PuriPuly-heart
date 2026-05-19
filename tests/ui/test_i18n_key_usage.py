@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from puripuly_heart.ui.i18n import available_locales
+from puripuly_heart.ui import i18n as i18n_module
+from puripuly_heart.ui.i18n import available_locales, source_label
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 I18N_DIR = REPO_ROOT / "src" / "puripuly_heart" / "data" / "i18n"
@@ -59,6 +60,30 @@ def test_available_locales_use_product_display_order() -> None:
     assert available_locales() == ("en", "ko", "zh-CN", "ja")
 
 
+def test_clipboard_source_and_setting_keys_are_localized() -> None:
+    bundles = _load_bundles()
+    required_keys = {
+        "source.clipboard",
+        "settings.clipboard_auto_translate",
+        "settings.clipboard_auto_translate.on",
+        "settings.clipboard_auto_translate.off",
+    }
+
+    for locale, bundle in bundles.items():
+        missing = sorted(required_keys - set(bundle))
+        assert missing == [], locale
+        for key in required_keys:
+            assert bundle[key].strip()
+            assert bundle[key] != key
+
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale("ko")
+        assert source_label("Clipboard") == "클립보드"
+    finally:
+        i18n_module.set_locale(previous_locale)
+
+
 def test_logs_conversation_keys_are_localized() -> None:
     bundles = _load_bundles()
     required_keys = {
@@ -90,6 +115,9 @@ def test_local_llm_keys_are_localized() -> None:
         "settings.local_llm.base_url.invalid",
         "settings.local_llm.model",
         "settings.local_llm.model.required",
+        "settings.local_llm.api_key",
+        "settings.local_llm.api_key.description",
+        "settings.local_llm.api_key.save_failed",
         "settings.local_llm.extra_body",
         "settings.local_llm.extra_body.description",
         "settings.local_llm.extra_body.invalid_json",
@@ -104,16 +132,80 @@ def test_local_llm_keys_are_localized() -> None:
         missing = sorted(required_keys - set(bundle))
         assert missing == [], locale
         for key in required_keys:
-            if key == "settings.translation_model.local_llm.description":
+            if key in {
+                "settings.translation_model.local_llm.description",
+                "settings.local_llm.api_key.description",
+            }:
                 assert bundle[key] == ""
                 continue
             assert bundle[key].strip()
             assert bundle[key] != key
 
-    assert bundles["ko"]["settings.local_llm.connection"] == "로컬 LLM 연결"
-    assert bundles["ko"]["settings.local_llm.base_url"] == "연결 주소"
-    assert bundles["ko"]["settings.local_llm.model"] == "모델명"
-    assert bundles["ko"]["settings.local_llm.extra_body"] == "JSON extra body"
+    assert bundles["en"]["settings.translation_connection.ollama"] == "OpenAI-compatible API"
+    assert bundles["ko"]["settings.translation_connection.ollama"] == "OpenAI 호환 API"
+    assert bundles["ko"]["settings.local_llm.connection"] == "OpenAI 호환 LLM 서버"
+    assert bundles["ko"]["settings.local_llm.base_url"] == "Base URL"
+    expected_model_copy = {
+        "en": ("Model ID", "Enter a model ID."),
+        "ko": ("모델 ID", "모델 ID를 입력해 주세요."),
+        "ja": ("モデルID", "モデルIDを入力してください。"),
+        "zh-CN": ("模型 ID", "请输入模型 ID。"),
+    }
+    for locale, (model_label, required_label) in expected_model_copy.items():
+        assert bundles[locale]["settings.local_llm.model"] == model_label
+        assert bundles[locale]["settings.local_llm.model.required"] == required_label
+    assert bundles["ko"]["settings.local_llm.api_key"] == "서버 API 키 (선택)"
+    assert bundles["ko"]["settings.local_llm.api_key.description"] == ""
+    assert bundles["ko"]["settings.local_llm.extra_body.description"].startswith("낮은 지연시간")
+    assert "서버 API 키" in bundles["ko"]["settings.local_llm.extra_body.sensitive_key"]
+
+
+def test_managed_key_card_keys_are_localized() -> None:
+    bundles = _load_bundles()
+    required_keys = {
+        "settings.managed_key.title",
+        "settings.managed_key.referral_id.label",
+        "settings.managed_key.referral_id.empty",
+        "settings.managed_key.referral_id.pending_helper",
+        "settings.managed_key.referral_id.helper",
+        "settings.managed_key.referral_id.copy_tooltip",
+        "settings.managed_key.referral_id.copy_success",
+        "settings.managed_key.invite_progress.label",
+    }
+
+    for locale, bundle in bundles.items():
+        missing = sorted(required_keys - set(bundle))
+        assert missing == [], locale
+        for key in required_keys:
+            assert bundle[key].strip()
+            assert bundle[key] != key
+
+    assert bundles["en"]["settings.managed_key.title"] == "Managed Key"
+    assert bundles["en"]["settings.managed_key.referral_id.label"] == "Talk Together Pass ID"
+    assert bundles["en"]["settings.managed_key.referral_id.empty"] == "—"
+    assert bundles["en"]["settings.managed_key.referral_id.copy_success"] == "Pass ID copied."
+    assert bundles["ko"]["settings.managed_key.title"] == "매니지드 키"
+    ko = bundles["ko"]
+    assert ko["settings.managed_key.referral_id.copy_tooltip"] == "Pass ID 복사"
+    assert ko["settings.managed_key.referral_id.copy_success"] == "Pass ID를 복사했어요."
+    assert ko["settings.managed_key.referral_id.helper"] == (
+        "친구에게 Pass ID를 공유하면 함께 추가 사용량을 받을 수 있어요."
+    )
+    assert ko["settings.managed_key.invite_progress.label"] == "친구 초대"
+
+    for locale_name, bundle in bundles.items():
+        for key in (
+            "settings.managed_key.referral_id.label",
+            "settings.managed_key.referral_id.helper",
+            "settings.managed_key.referral_id.copy_tooltip",
+            "settings.managed_key.referral_id.copy_success",
+            "settings.managed_key.invite_progress.label",
+            "discord_auth.referral_id.label",
+            "discord_auth.referral_reward_applied",
+        ):
+            value = bundle[key]
+            assert "Referral ID" not in value, (locale_name, key, value)
+            assert "Referral reward" not in value, (locale_name, key, value)
 
 
 def test_i18n_bundles_do_not_keep_unused_runtime_keys() -> None:

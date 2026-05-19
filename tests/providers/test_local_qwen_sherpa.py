@@ -708,3 +708,274 @@ async def test_local_qwen_session_logs_inference_metrics_and_summary(
         "[STT][local_qwen][peer] Session summary: utterances=2 "
         "total_audio_ms=1500.0 total_inference_ms=450.0 weighted_total_rtf=0.300 mean_rtf=0.325"
     ) in messages
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_logs_decode_diagnostics_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FakeStream:
+        def __init__(self) -> None:
+            self.result = SimpleNamespace(text="的答案的答案的答案")
+
+        def accept_waveform(self, sample_rate: int, samples) -> None:
+            _ = sample_rate, samples
+
+    class FakeRecognizer:
+        def create_stream(self) -> FakeStream:
+            return FakeStream()
+
+        def decode_stream(self, stream: FakeStream) -> None:
+            _ = stream
+
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    _install_fake_sherpa(monkeypatch, recognizer_factory=lambda _config: FakeRecognizer())
+
+    backend = LocalQwenSherpaSTTBackend(
+        model_dir=Path("/models/qwen"),
+        stream_label="self",
+        language_hint="Korean",
+        diagnostics_enabled=lambda: True,
+    )
+    session = await backend.open_session()
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.stt.local_qwen_sherpa"):
+        await session.send_audio_f32(np.ones(16000, dtype=np.float32))
+        await session.on_speech_end()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("[AudioDiag][local_qwen][self] decode_start" in message for message in messages)
+    assert any("decode_done" in message and "empty_result=False" in message for message in messages)
+    assert any("suspicious_script=True" in message for message in messages)
+    assert any("suspicious_repetition=True" in message for message in messages)
+    audio_diag_messages = [message for message in messages if "[AudioDiag][local_qwen]" in message]
+    assert all("的答案的答案的答案" not in message for message in audio_diag_messages)
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_logs_empty_decode_diagnostics_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FakeStream:
+        def __init__(self) -> None:
+            self.result = SimpleNamespace(text="")
+
+        def accept_waveform(self, sample_rate: int, samples) -> None:
+            _ = sample_rate, samples
+
+    class FakeRecognizer:
+        def create_stream(self) -> FakeStream:
+            return FakeStream()
+
+        def decode_stream(self, stream: FakeStream) -> None:
+            _ = stream
+
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    _install_fake_sherpa(monkeypatch, recognizer_factory=lambda _config: FakeRecognizer())
+
+    backend = LocalQwenSherpaSTTBackend(
+        model_dir=Path("/models/qwen"),
+        stream_label="peer",
+        diagnostics_enabled=lambda: True,
+    )
+    session = await backend.open_session()
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.stt.local_qwen_sherpa"):
+        await session.send_audio_f32(np.zeros(16000, dtype=np.float32))
+        await session.on_speech_end()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("[AudioDiag][local_qwen][peer] decode_done" in message for message in messages)
+    assert any("empty_result=True" in message and "text_len=0" in message for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_decode_diagnostics_stay_silent_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FakeStream:
+        def __init__(self) -> None:
+            self.result = SimpleNamespace(text="")
+
+        def accept_waveform(self, sample_rate: int, samples) -> None:
+            _ = sample_rate, samples
+
+    class FakeRecognizer:
+        def create_stream(self) -> FakeStream:
+            return FakeStream()
+
+        def decode_stream(self, stream: FakeStream) -> None:
+            _ = stream
+
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    _install_fake_sherpa(monkeypatch, recognizer_factory=lambda _config: FakeRecognizer())
+    monkeypatch.setattr(
+        local_qwen_module,
+        "compute_audio_frame_metrics",
+        lambda _frame: (_ for _ in ()).throw(
+            AssertionError("disabled local_qwen diagnostics must not compute metrics")
+        ),
+        raising=False,
+    )
+
+    backend = LocalQwenSherpaSTTBackend(
+        model_dir=Path("/models/qwen"),
+        diagnostics_enabled=lambda: False,
+    )
+    session = await backend.open_session()
+
+    with caplog.at_level(logging.INFO, logger="puripuly_heart.providers.stt.local_qwen_sherpa"):
+        await session.send_audio_f32(np.ones(16000, dtype=np.float32))
+        await session.on_speech_end()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert not any("[AudioDiag][local_qwen]" in message for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_decode_continues_when_diagnostics_predicate_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeStream:
+        def __init__(self) -> None:
+            self.result = SimpleNamespace(text="hello local qwen")
+
+        def accept_waveform(self, sample_rate: int, samples) -> None:
+            _ = sample_rate, samples
+
+    class FakeRecognizer:
+        def create_stream(self) -> FakeStream:
+            return FakeStream()
+
+        def decode_stream(self, stream: FakeStream) -> None:
+            _ = stream
+
+    def failing_diagnostics_enabled() -> bool:
+        raise RuntimeError("diagnostics predicate failed")
+
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    _install_fake_sherpa(monkeypatch, recognizer_factory=lambda _config: FakeRecognizer())
+
+    backend = LocalQwenSherpaSTTBackend(
+        model_dir=Path("/models/qwen"),
+        diagnostics_enabled=failing_diagnostics_enabled,
+    )
+    session = await backend.open_session()
+
+    await session.send_audio_f32(np.ones(16000, dtype=np.float32))
+    await session.on_speech_end()
+
+    gen = session.events()
+    event = await gen.__anext__()
+    assert event.text == "hello local qwen"
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_decode_continues_when_diagnostic_metrics_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeStream:
+        def __init__(self) -> None:
+            self.result = SimpleNamespace(text="hello local qwen")
+
+        def accept_waveform(self, sample_rate: int, samples) -> None:
+            _ = sample_rate, samples
+
+    class FakeRecognizer:
+        def create_stream(self) -> FakeStream:
+            return FakeStream()
+
+        def decode_stream(self, stream: FakeStream) -> None:
+            _ = stream
+
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    _install_fake_sherpa(monkeypatch, recognizer_factory=lambda _config: FakeRecognizer())
+    monkeypatch.setattr(
+        local_qwen_module,
+        "compute_audio_frame_metrics",
+        lambda _frame: (_ for _ in ()).throw(RuntimeError("metrics failed")),
+        raising=False,
+    )
+
+    backend = LocalQwenSherpaSTTBackend(
+        model_dir=Path("/models/qwen"),
+        diagnostics_enabled=lambda: True,
+    )
+    session = await backend.open_session()
+
+    await session.send_audio_f32(np.ones(16000, dtype=np.float32))
+    await session.on_speech_end()
+
+    gen = session.events()
+    event = await gen.__anext__()
+    assert event.text == "hello local qwen"
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_decode_continues_when_diagnostic_logging_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeStream:
+        def __init__(self) -> None:
+            self.result = SimpleNamespace(text="hello local qwen")
+
+        def accept_waveform(self, sample_rate: int, samples) -> None:
+            _ = sample_rate, samples
+
+    class FakeRecognizer:
+        def create_stream(self) -> FakeStream:
+            return FakeStream()
+
+        def decode_stream(self, stream: FakeStream) -> None:
+            _ = stream
+
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    _install_fake_sherpa(monkeypatch, recognizer_factory=lambda _config: FakeRecognizer())
+    original_info = local_qwen_module.logger.info
+
+    def flaky_info(message, *args, **kwargs) -> None:
+        if args and isinstance(args[0], str) and args[0].startswith("[AudioDiag][local_qwen]"):
+            raise RuntimeError("diagnostic logging failed")
+        original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(local_qwen_module.logger, "info", flaky_info)
+
+    backend = LocalQwenSherpaSTTBackend(
+        model_dir=Path("/models/qwen"),
+        diagnostics_enabled=lambda: True,
+    )
+    session = await backend.open_session()
+
+    await session.send_audio_f32(np.ones(16000, dtype=np.float32))
+    await session.on_speech_end()
+
+    gen = session.events()
+    event = await gen.__anext__()
+    assert event.text == "hello local qwen"

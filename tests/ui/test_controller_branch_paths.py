@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import logging
 from pathlib import Path
@@ -29,6 +30,7 @@ from puripuly_heart.config.settings import (
     OpenRouterProviderRouting,
     OpenRouterRoutingMode,
     OpenRouterSelectionAlias,
+    ProviderSettings,
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
@@ -37,6 +39,10 @@ from puripuly_heart.config.settings import (
     TranslationSettings,
 )
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
+from puripuly_heart.core.audio.source import (
+    SelfMicCaptureChannelDecision,
+    SoundDeviceInputMetadata,
+)
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.llm.provider import SemaphoreLLMProvider
 from puripuly_heart.core.managed_openrouter_broker_client import (
@@ -47,6 +53,8 @@ from puripuly_heart.core.managed_openrouter_release import (
     ManagedOpenRouterReleaseDiagnostics,
     ManagedOpenRouterReleaseResult,
     ManagedOpenRouterReleaseService,
+    ManagedOpenRouterStatusRefreshResult,
+    TalkTogetherPassStatus,
     UnavailableManagedOpenRouterReleaseClient,
 )
 from puripuly_heart.core.openrouter_pkce import OpenRouterPKCEExchangeResult
@@ -57,6 +65,12 @@ from puripuly_heart.core.overlay.sink import (
     PeerTranscriptFinal,
     SelfTranscriptFinal,
     TranslationFinal,
+)
+from puripuly_heart.core.runtime.peer_channel import PeerRuntimeConfig
+from puripuly_heart.core.runtime_logging import (
+    RuntimeLoggingSinks,
+    SessionLoggingMode,
+    SessionRuntimeLoggingService,
 )
 from puripuly_heart.domain.models import Transcript
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
@@ -185,7 +199,7 @@ class RuntimeLoggingSpy:
     def __init__(
         self, *, detailed_enabled: bool = True, basic_error: Exception | None = None
     ) -> None:
-        self.mode = SimpleNamespace(value="detailed" if detailed_enabled else "basic")
+        self.mode = SessionLoggingMode.DETAILED if detailed_enabled else SessionLoggingMode.BASIC
         self.basic_messages: list[tuple[int, str]] = []
         self.detailed_messages: list[tuple[int, str]] = []
         self.basic_error = basic_error
@@ -201,11 +215,23 @@ class RuntimeLoggingSpy:
         self.detailed_messages.append((level, message))
         return True
 
+    def emit_detailed_lazy(
+        self,
+        build_message: Callable[[], str],
+        *,
+        level: int = logging.INFO,
+    ) -> bool:
+        if self.mode.value != "detailed":
+            return False
+        self.detailed_messages.append((level, build_message()))
+        return True
+
     def attach_realtime_sink(self, sink) -> None:
         _ = sink
 
     def set_mode(self, mode) -> None:
-        self.mode = SimpleNamespace(value=str(mode))
+        normalized = SessionLoggingMode(mode)
+        self.mode = normalized
 
 
 class DummyHub:
@@ -237,6 +263,7 @@ class DummyHub:
         self.start_calls: list[bool] = []
         self.stop_calls = 0
         self.submit_calls: list[tuple[str, str]] = []
+        self.submit_event = asyncio.Event()
         self.reset_overlay_preview_calls = 0
         self.clear_language_runtime_state_calls: list[str] = []
         self.clear_language_runtime_state_errors: dict[str, Exception] = {}
@@ -256,6 +283,7 @@ class DummyHub:
 
     async def submit_text(self, text: str, *, source: str) -> None:
         self.submit_calls.append((text, source))
+        self.submit_event.set()
 
     async def reset_overlay_preview(self) -> None:
         self.reset_overlay_preview_calls += 1
@@ -280,6 +308,22 @@ class DummyHub:
         self.peer_stt = stt
 
 
+class FakeClipboardWatcher:
+    def __init__(self, on_text: Callable[[str], None]) -> None:
+        self.on_text = on_text
+        self.started = False
+        self.stopped = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def emit(self, text: str) -> None:
+        self.on_text(text)
+
+
 class DisclosureDummyHub(DummyHub):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -295,7 +339,7 @@ class DummyPeerRuntime:
         self.closed = False
         self.warmup_calls = 0
 
-    async def apply_policy(self, *, config, desired_active: bool) -> None:
+    async def apply_policy(self, *, config: PeerRuntimeConfig, desired_active: bool) -> None:
         self.policy_calls.append({"config": config, "desired_active": desired_active})
 
     async def warmup(self) -> None:
@@ -326,10 +370,16 @@ class DummyManagedReleaseService:
     def __init__(self, result: ManagedOpenRouterReleaseResult) -> None:
         self.result = result
         self.prepare_calls = 0
+        self.prepare_referral_ids: list[str | None] = []
         self.close_calls = 0
 
-    async def prepare_for_translation(self) -> ManagedOpenRouterReleaseResult:
+    async def prepare_for_translation(
+        self,
+        *,
+        referral_id: str | None = None,
+    ) -> ManagedOpenRouterReleaseResult:
         self.prepare_calls += 1
+        self.prepare_referral_ids.append(referral_id)
         return self.result
 
     async def close(self) -> None:
@@ -346,8 +396,13 @@ class InspectingManagedReleaseService(DummyManagedReleaseService):
         super().__init__(result)
         self.on_prepare = on_prepare
 
-    async def prepare_for_translation(self) -> ManagedOpenRouterReleaseResult:
+    async def prepare_for_translation(
+        self,
+        *,
+        referral_id: str | None = None,
+    ) -> ManagedOpenRouterReleaseResult:
         self.prepare_calls += 1
+        self.prepare_referral_ids.append(referral_id)
         if self.on_prepare is not None:
             prepare_result = self.on_prepare()
             if asyncio.iscoroutine(prepare_result):
@@ -365,8 +420,13 @@ class FailingManagedReleaseService(DummyManagedReleaseService):
         )
         self.exc = exc
 
-    async def prepare_for_translation(self) -> ManagedOpenRouterReleaseResult:
+    async def prepare_for_translation(
+        self,
+        *,
+        referral_id: str | None = None,
+    ) -> ManagedOpenRouterReleaseResult:
         self.prepare_calls += 1
+        self.prepare_referral_ids.append(referral_id)
         raise self.exc
 
 
@@ -477,11 +537,23 @@ def _make_controller(*, app: object) -> GuiController:
     return GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
 
 
-async def _wait_until(predicate, *, attempts: int = 20) -> None:
+def test_debug_capture_fault_is_disabled_without_debug_preview() -> None:
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(debug_ui_preview=False),
+        config_path=Path("settings.json"),
+    )
+    controller._debug_capture_fault_profile = "capture_attenuate_40db"
+
+    assert controller.cycle_debug_capture_fault_profile() == "none"
+    assert controller.debug_capture_fault_profile == "capture_attenuate_40db"
+
+
+async def _wait_until(predicate, *, attempts: int = 20, delay_s: float = 0.0) -> None:
     for _ in range(attempts):
         if predicate():
             return
-        await asyncio.sleep(0)
+        await asyncio.sleep(delay_s)
     raise AssertionError("condition was not met in time")
 
 
@@ -534,6 +606,310 @@ def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[s
     monkeypatch.setattr(controller_module, "ClientHub", fake_hub)
 
     return created
+
+
+@pytest.mark.asyncio
+async def test_init_pipeline_wires_self_stt_fault_provider_with_debug_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stt_calls: list[dict[str, object]] = []
+    _patch_init_pipeline_dependencies(monkeypatch)
+
+    def fake_stt_provider(*_args, **kwargs):
+        stt_calls.append(dict(kwargs))
+        return SimpleNamespace()
+
+    app = SimpleNamespace(debug_ui_preview=True)
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = AppSettings()
+    monkeypatch.setattr(controller_module, "ManagedSTTProvider", fake_stt_provider)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, *, enabled: asyncio.sleep(0),
+    )
+
+    assert controller.cycle_debug_stt_fault_profile() == "stt_input_low_snr_vad_pass"
+    await controller._init_pipeline()
+
+    provider = stt_calls[0]["stt_input_fault_profile_provider"]
+    assert callable(provider)
+    assert provider() == "stt_input_low_snr_vad_pass"
+
+    app.debug_ui_preview = False
+    assert provider() == "none"
+    assert controller.debug_stt_fault_profile == "stt_input_low_snr_vad_pass"
+
+
+@pytest.mark.asyncio
+async def test_rebuild_stt_provider_wires_self_stt_fault_provider_with_debug_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stt_calls: list[dict[str, object]] = []
+
+    def fake_stt_provider(*_args, **kwargs):
+        stt = SimpleNamespace()
+        stt_calls.append(dict(kwargs))
+        return stt
+
+    app = SimpleNamespace(debug_ui_preview=False)
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+    controller.hub = DummyHub(stt=object())
+    controller._debug_stt_fault_profile = "stt_input_low_snr_vad_pass"
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "create_stt_backend", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "ManagedSTTProvider", fake_stt_provider)
+
+    await controller._rebuild_stt_provider()
+
+    provider = stt_calls[0]["stt_input_fault_profile_provider"]
+    assert callable(provider)
+    assert provider() == "none"
+    assert controller.debug_stt_fault_profile == "stt_input_low_snr_vad_pass"
+
+    app.debug_ui_preview = True
+    assert provider() == "stt_input_low_snr_vad_pass"
+
+
+def test_create_peer_stt_provider_wires_fault_provider_with_debug_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stt_calls: list[dict[str, object]] = []
+
+    def fake_stt_provider(*_args, **kwargs):
+        stt_calls.append(dict(kwargs))
+        return SimpleNamespace()
+
+    app = SimpleNamespace(debug_ui_preview=True)
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller.settings = AppSettings()
+    controller._debug_stt_fault_profile = "stt_input_low_snr_vad_pass"
+    config = controller._build_peer_runtime_config(controller.settings)
+    monkeypatch.setattr(controller_module, "create_secret_store", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "create_peer_stt_backend", lambda *_a, **_k: object())
+    monkeypatch.setattr(controller_module, "ManagedSTTProvider", fake_stt_provider)
+
+    controller._create_peer_stt_provider_from_runtime_config(config, lambda _exc: None)
+
+    provider = stt_calls[0]["stt_input_fault_profile_provider"]
+    assert stt_calls[0]["channel"] == "peer"
+    assert callable(provider)
+    assert provider() == "stt_input_low_snr_vad_pass"
+
+    app.debug_ui_preview = False
+    assert provider() == "none"
+    assert controller.debug_stt_fault_profile == "stt_input_low_snr_vad_pass"
+
+
+def test_cycle_debug_stt_fault_profile_requires_debug_preview() -> None:
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(debug_ui_preview=False),
+        config_path=Path("settings.json"),
+    )
+    controller._debug_stt_fault_profile = "stt_input_low_snr_vad_pass"
+
+    assert controller.cycle_debug_stt_fault_profile() == "none"
+    assert controller.debug_stt_fault_profile == "stt_input_low_snr_vad_pass"
+
+    controller.app.debug_ui_preview = True
+    assert controller.cycle_debug_stt_fault_profile() == "none"
+    assert controller.cycle_debug_stt_fault_profile() == "stt_input_low_snr_vad_pass"
+
+
+@pytest.mark.parametrize("channel_label", ["self", "peer"])
+def test_wrap_diagnostic_audio_source_wires_capture_fault_provider_with_debug_gate(
+    channel_label: str,
+) -> None:
+    class FakeAudioSource:
+        async def frames(self):
+            if False:
+                yield None
+
+        async def close(self) -> None:
+            return None
+
+    app = SimpleNamespace(debug_ui_preview=True)
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller._debug_capture_fault_profile = "capture_attenuate_40db"
+
+    wrapped = controller._wrap_diagnostic_audio_source(
+        FakeAudioSource(),
+        channel_label=channel_label,
+    )
+
+    assert getattr(wrapped, "channel_label") == channel_label
+    provider = getattr(wrapped, "fault_profile_provider")
+    assert callable(provider)
+    assert provider() == "capture_attenuate_40db"
+
+    app.debug_ui_preview = False
+    assert provider() == "none"
+    assert controller.debug_capture_fault_profile == "capture_attenuate_40db"
+
+
+@pytest.mark.asyncio
+async def test_clipboard_watcher_starts_and_stops_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    watchers: list[FakeClipboardWatcher] = []
+
+    def watcher_factory(on_text: Callable[[str], None]) -> FakeClipboardWatcher:
+        watcher = FakeClipboardWatcher(on_text)
+        watchers.append(watcher)
+        return watcher
+
+    monkeypatch.setattr(controller_module, "create_clipboard_watcher", watcher_factory)
+    monkeypatch.setattr(controller_module.sys, "platform", "win32")
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=tmp_path / "settings.json",
+    )
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+
+    controller.settings.ui.clipboard_auto_translate_enabled = True
+    await controller._sync_clipboard_watcher()
+
+    assert len(watchers) == 1
+    assert watchers[0].started is True
+
+    controller.settings.ui.clipboard_auto_translate_enabled = False
+    await controller._sync_clipboard_watcher()
+
+    assert watchers[0].stopped is True
+
+
+@pytest.mark.asyncio
+async def test_clipboard_watcher_submits_valid_text_through_existing_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    watchers: list[FakeClipboardWatcher] = []
+
+    def watcher_factory(on_text: Callable[[str], None]) -> FakeClipboardWatcher:
+        watcher = FakeClipboardWatcher(on_text)
+        watchers.append(watcher)
+        return watcher
+
+    monkeypatch.setattr(controller_module, "create_clipboard_watcher", watcher_factory)
+    monkeypatch.setattr(controller_module.sys, "platform", "win32")
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=tmp_path / "settings.json",
+    )
+    controller.settings = AppSettings()
+    controller.settings.ui.clipboard_auto_translate_enabled = True
+    controller.hub = DummyHub()
+
+    await controller._sync_clipboard_watcher()
+    watchers[0].emit("  hello clipboard  ")
+    await asyncio.wait_for(controller.hub.submit_event.wait(), timeout=1.0)
+
+    assert controller.hub.submit_calls == [("hello clipboard", "Clipboard")]
+
+
+@pytest.mark.asyncio
+async def test_clipboard_watcher_does_not_block_manual_fallback_when_translation_off(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    watchers: list[FakeClipboardWatcher] = []
+
+    def watcher_factory(on_text: Callable[[str], None]) -> FakeClipboardWatcher:
+        watcher = FakeClipboardWatcher(on_text)
+        watchers.append(watcher)
+        return watcher
+
+    monkeypatch.setattr(controller_module, "create_clipboard_watcher", watcher_factory)
+    monkeypatch.setattr(controller_module.sys, "platform", "win32")
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=tmp_path / "settings.json",
+    )
+    controller.settings = AppSettings()
+    controller.settings.ui.clipboard_auto_translate_enabled = True
+    controller.hub = DummyHub(llm=None)
+    controller.hub.translation_enabled = False
+
+    await controller._sync_clipboard_watcher()
+    watchers[0].emit("source fallback")
+    await asyncio.wait_for(controller.hub.submit_event.wait(), timeout=1.0)
+
+    assert controller.hub.submit_calls == [("source fallback", "Clipboard")]
+
+
+@pytest.mark.asyncio
+async def test_clipboard_watcher_ignores_empty_and_long_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    watchers: list[FakeClipboardWatcher] = []
+
+    def watcher_factory(on_text: Callable[[str], None]) -> FakeClipboardWatcher:
+        watcher = FakeClipboardWatcher(on_text)
+        watchers.append(watcher)
+        return watcher
+
+    monkeypatch.setattr(controller_module, "create_clipboard_watcher", watcher_factory)
+    monkeypatch.setattr(controller_module.sys, "platform", "win32")
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=tmp_path / "settings.json",
+    )
+    controller.settings = AppSettings()
+    controller.settings.ui.clipboard_auto_translate_enabled = True
+    controller.hub = DummyHub()
+
+    await controller._sync_clipboard_watcher()
+    watchers[0].emit("   ")
+    watchers[0].emit("x" * 301)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert controller.hub.submit_calls == []
+
+
+@pytest.mark.asyncio
+async def test_clipboard_watcher_not_started_on_non_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    called = False
+
+    def watcher_factory(on_text: Callable[[str], None]) -> FakeClipboardWatcher:
+        nonlocal called
+        called = True
+        return FakeClipboardWatcher(on_text)
+
+    monkeypatch.setattr(controller_module, "create_clipboard_watcher", watcher_factory)
+    monkeypatch.setattr(controller_module.sys, "platform", "linux")
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=tmp_path / "settings.json",
+    )
+    controller.settings = AppSettings()
+    controller.settings.ui.clipboard_auto_translate_enabled = True
+    controller.hub = DummyHub()
+
+    await controller._sync_clipboard_watcher()
+
+    assert called is False
+    assert controller._clipboard_watcher is None
 
 
 @pytest.mark.asyncio
@@ -741,6 +1117,26 @@ async def test_verify_api_key_handles_empty_unknown_and_exception(
     assert errored == (False, "bad key")
     assert getattr(controller, "runtime_logging_mode", None) == "basic"
     assert any("[ERROR]" in line and "bad key" in line for line in logs.logs)
+
+
+@pytest.mark.asyncio
+async def test_verify_api_key_google_checks_selected_gemini_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    calls: list[tuple[str, str]] = []
+
+    async def fake_verify(key: str, *, model: str) -> bool:
+        calls.append((key, model))
+        return True
+
+    monkeypatch.setattr(GeminiLLMProvider, "verify_api_key", staticmethod(fake_verify))
+
+    outcome = await controller.verify_api_key("google", "secret")
+
+    assert outcome == (True, "Verification successful")
+    assert calls == [("secret", "gemini-3.1-flash-lite")]
 
 
 def test_log_error_falls_back_to_standard_logger_without_direct_logs_view_append(
@@ -1522,6 +1918,60 @@ async def test_apply_providers_clears_dashboard_pending_notice_when_switching_aw
 
 
 @pytest.mark.asyncio
+async def test_apply_providers_force_rebuild_local_llm_reads_updated_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ClosableLLM:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    async def noop_replace_managed_service(self, service) -> None:
+        _ = (self, service)
+
+    async def noop_refresh_managed_usage(self) -> None:
+        _ = self
+
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=DummySettingsView())
+    )
+    controller.settings = settings
+    previous_llm = ClosableLLM()
+    controller.hub = DummyHub(llm=previous_llm)
+
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_create_managed_openrouter_release_service",
+        lambda self, *, secrets: object(),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_replace_managed_openrouter_release_service",
+        noop_replace_managed_service,
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_refresh_managed_trial_usage_state_best_effort",
+        noop_refresh_managed_usage,
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_a, **_k: DummySecrets({"local_llm_api_key": "new-secret"}),
+    )
+
+    await controller.apply_providers(force_rebuild_llm=True)
+
+    assert previous_llm.closed is True
+    assert isinstance(controller.hub.llm, SemaphoreLLMProvider)
+    assert controller.hub.llm.inner.api_key == "new-secret"
+
+
+@pytest.mark.asyncio
 async def test_set_translation_enabled_clears_dashboard_pending_notice_when_prepare_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1752,6 +2202,266 @@ async def test_start_discord_managed_auth_from_dialog_success_rebuilds_missing_p
     assert controller.hub.llm is not None
     assert controller.managed_auth_pending is False
     assert dash.managed_auth_pending_calls == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_from_dialog_passes_referral_id_without_persisting_friend_id() -> (
+    None
+):
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+        )
+    )
+    controller._managed_openrouter_release_service = service
+
+    ok = await controller.start_discord_managed_auth_from_dialog(referral_id=" 7kq9m2 ")
+
+    assert ok is True
+    assert service.prepare_referral_ids == [" 7kq9m2 "]
+    assert controller.settings.managed_identity.referral_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("referral_bonus_applied", "expected"),
+    [(True, True), (False, False), (None, False), ("true", False), (1, False)],
+)
+async def test_start_discord_managed_auth_from_dialog_exposes_only_boolean_true_referral_bonus(
+    referral_bonus_applied: object,
+    expected: bool,
+) -> None:
+    dash = DummyDashboard()
+    controller = _make_controller(app=SimpleNamespace(view_dashboard=dash))
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+            referral_bonus_applied=referral_bonus_applied,  # type: ignore[arg-type]
+        )
+    )
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is True
+    assert controller.last_discord_managed_auth_referral_bonus_applied is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result_referral_id", "persisted_referral_id", "expected_referral_id"),
+    [
+        ("7kq9m2", None, "7KQ9M2"),
+        (None, "7KQ9M2", "7KQ9M2"),
+    ],
+)
+async def test_start_discord_managed_auth_from_dialog_updates_managed_key_referral_row_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+    result_referral_id: str | None,
+    persisted_referral_id: str | None,
+    expected_referral_id: str,
+) -> None:
+    dash = DummyDashboard()
+
+    class ManagedKeySettingsView(DummySettingsView):
+        def __init__(self) -> None:
+            super().__init__()
+            self.managed_key_state_calls: list[dict[str, object]] = []
+
+        def set_managed_key_state(
+            self,
+            *,
+            visible: bool,
+            remaining_percent: int | None = None,
+            referral_id: str | None = None,
+            pass_status: object | None = None,
+        ) -> None:
+            self.managed_key_state_calls.append(
+                {
+                    "visible": visible,
+                    "remaining_percent": remaining_percent,
+                    "referral_id": referral_id,
+                    "pass_status": pass_status,
+                }
+            )
+
+    settings_view = ManagedKeySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.managed_identity.referral_id = persisted_referral_id
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+            referral_id=result_referral_id,
+        )
+    )
+    scheduled_refreshes: list[str] = []
+    monkeypatch.setattr(
+        GuiController,
+        "_schedule_managed_trial_usage_refresh",
+        lambda self: scheduled_refreshes.append("usage"),
+    )
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is True
+    assert settings_view.managed_key_state_calls == [
+        {
+            "visible": True,
+            "remaining_percent": None,
+            "referral_id": expected_referral_id,
+            "pass_status": None,
+        }
+    ]
+    assert scheduled_refreshes == ["usage"]
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_from_dialog_repaints_pass_status_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pass_status = TalkTogetherPassStatus(
+        pass_id="7KQ9M2",
+        invite_count=1,
+        invite_limit=5,
+        bonus_translations_per_friend=200,
+    )
+    dash = DummyDashboard()
+    settings_view = CapturingManagedKeySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+            referral_id="7KQ9M2",
+            pass_status=pass_status,
+        )
+    )
+    scheduled_refreshes: list[str] = []
+    monkeypatch.setattr(
+        GuiController,
+        "_schedule_managed_trial_usage_refresh",
+        lambda self: scheduled_refreshes.append("usage"),
+    )
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is True
+    assert settings_view.managed_key_state_calls == [
+        {
+            "visible": True,
+            "remaining_percent": None,
+            "referral_id": "7KQ9M2",
+            "pass_status": pass_status,
+        }
+    ]
+    assert scheduled_refreshes == ["usage"]
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_from_dialog_issue_success_does_not_repaint_stale_usage_percent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+
+    class ManagedKeySettingsView(DummySettingsView):
+        def __init__(self) -> None:
+            super().__init__()
+            self.managed_key_state_calls: list[dict[str, object]] = []
+
+        def set_managed_key_state(
+            self,
+            *,
+            visible: bool,
+            remaining_percent: int | None = None,
+            referral_id: str | None = None,
+            pass_status: object | None = None,
+        ) -> None:
+            self.managed_key_state_calls.append(
+                {
+                    "visible": visible,
+                    "remaining_percent": remaining_percent,
+                    "referral_id": referral_id,
+                    "pass_status": pass_status,
+                }
+            )
+
+    settings_view = ManagedKeySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.managed_identity.active_managed_credential_ref = "new-ref"
+    controller.hub = DummyHub(llm=object())
+    controller._managed_trial_usage_metadata = (
+        controller_module.OpenRouterKeyMetadata(  # noqa: SLF001
+            limit_usd=0.10,
+            remaining_usd=0.02,
+            usage_usd=0.08,
+        )
+    )
+    controller._managed_trial_usage_metadata_entitlement_ref = "old-ref"  # noqa: SLF001
+    controller._managed_openrouter_release_service = DummyManagedReleaseService(  # noqa: SLF001
+        ManagedOpenRouterReleaseResult(
+            behavior=ManagedOpenRouterReleaseBehavior.READY,
+            message_key="managed_release.ready",
+            api_key="managed-key",
+            local_key_available=True,
+            referral_id="7KQ9M2",
+        )
+    )
+    scheduled_refreshes: list[str] = []
+    monkeypatch.setattr(
+        GuiController,
+        "_schedule_managed_trial_usage_refresh",
+        lambda self: scheduled_refreshes.append("usage"),
+    )
+
+    ok = await controller.start_discord_managed_auth_from_dialog()
+
+    assert ok is True
+    assert settings_view.managed_key_state_calls == [
+        {
+            "visible": True,
+            "remaining_percent": None,
+            "referral_id": "7KQ9M2",
+            "pass_status": None,
+        }
+    ]
+    assert scheduled_refreshes == ["usage"]
 
 
 def test_discord_managed_auth_callback_received_runs_active_hook_only() -> None:
@@ -3086,6 +3796,121 @@ async def test_create_peer_audio_source_from_runtime_config_uses_desktop_loopbac
     assert opened == [{"device_name": config.output_device}]
 
 
+def test_create_peer_audio_source_logs_loopback_resolution(monkeypatch) -> None:
+    class FakeLoopbackSource:
+        resolved_device_name = "Default Speakers [Loopback]"
+        resolved_device_index = 10
+        resolved_channels = 2
+        actual_sample_rate_hz = 48000
+        used_default_fallback = True
+        queue_drop_count = 0
+        callback_status_count = 0
+        last_callback_status = None
+
+        async def frames(self):
+            if False:
+                yield None
+
+        async def close(self) -> None:
+            return None
+
+    created: dict[str, object] = {}
+
+    def fake_loopback_source(*, device_name: str):
+        created["requested_device"] = device_name
+        source = FakeLoopbackSource()
+        created["raw_source"] = source
+        return source
+
+    def fake_peer_pipeline(**kwargs):
+        created["pipeline_kwargs"] = kwargs
+        return kwargs
+
+    monkeypatch.setattr(controller_module, "DesktopLoopbackAudioSource", fake_loopback_source)
+    monkeypatch.setattr(controller_module, "DesktopPeerPipeline", fake_peer_pipeline)
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(debug_ui_preview=False),
+        config_path=Path("settings.json"),
+    )
+    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
+    config = PeerRuntimeConfig(
+        backend=SimpleNamespace(sample_rate_hz=16000),
+        output_device="Missing Speakers",
+        vad_threshold=0.6,
+        vad_hangover_ms=1100,
+        vad_pre_roll_ms=500,
+        provider_signature=(),
+        runtime_signature=(),
+    )
+
+    controller._create_peer_audio_source_from_runtime_config(config)
+
+    messages = [message for _level, message in controller._runtime_logging.detailed_messages]
+    pipeline_source = created["pipeline_kwargs"]["source"]  # type: ignore[index]
+    assert created["requested_device"] == "Missing Speakers"
+    assert getattr(pipeline_source, "source", None) is created["raw_source"]
+    assert any("[AudioDiag][Loopback][peer]" in message for message in messages)
+    assert any("requested_device='Missing Speakers'" in message for message in messages)
+    assert any(
+        "resolved_device_name='Default Speakers [Loopback]'" in message for message in messages
+    )
+    assert any("used_default_fallback=True" in message for message in messages)
+
+
+def test_create_peer_audio_source_wires_capture_fault_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeLoopbackSource:
+        async def frames(self):
+            if False:
+                yield None
+
+        async def close(self) -> None:
+            return None
+
+    created: dict[str, object] = {}
+
+    def fake_loopback_source(*, device_name: str):
+        created["requested_device"] = device_name
+        return FakeLoopbackSource()
+
+    def fake_peer_pipeline(**kwargs):
+        created["pipeline_kwargs"] = kwargs
+        return kwargs
+
+    monkeypatch.setattr(controller_module, "DesktopLoopbackAudioSource", fake_loopback_source)
+    monkeypatch.setattr(controller_module, "DesktopPeerPipeline", fake_peer_pipeline)
+
+    app = SimpleNamespace(debug_ui_preview=True)
+    controller = GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
+    controller._debug_capture_fault_profile = "capture_attenuate_40db"
+    config = PeerRuntimeConfig(
+        backend=SimpleNamespace(sample_rate_hz=16000),
+        output_device="Peer Speakers",
+        vad_threshold=0.6,
+        vad_hangover_ms=1100,
+        vad_pre_roll_ms=500,
+        provider_signature=(),
+        runtime_signature=(),
+    )
+
+    controller._create_peer_audio_source_from_runtime_config(config)
+
+    wrapped_source = created["pipeline_kwargs"]["source"]  # type: ignore[index]
+    provider = getattr(wrapped_source, "fault_profile_provider")
+    assert created["requested_device"] == "Peer Speakers"
+    assert getattr(wrapped_source, "channel_label") == "peer"
+    assert callable(provider)
+    assert provider() == "capture_attenuate_40db"
+
+    app.debug_ui_preview = False
+    assert provider() == "none"
+    assert controller.debug_capture_fault_profile == "capture_attenuate_40db"
+
+
 @pytest.mark.asyncio
 async def test_refresh_overlay_runtime_dependencies_applies_peer_runtime_policy() -> None:
     controller = _make_controller(app=SimpleNamespace())
@@ -3151,7 +3976,15 @@ async def test_create_peer_vad_from_runtime_config_uses_shared_peer_vad_policy_h
     engine = object()
 
     def fake_create_peer_vad_gating(
-        *, engine, sample_rate_hz, ring_buffer_ms, speech_threshold, hangover_ms
+        *,
+        engine,
+        sample_rate_hz,
+        ring_buffer_ms,
+        speech_threshold,
+        hangover_ms,
+        diagnostic_event_callback=None,
+        diagnostics_enabled=None,
+        diagnostic_label="peer",
     ):
         helper_calls.append(
             {
@@ -3160,6 +3993,9 @@ async def test_create_peer_vad_from_runtime_config_uses_shared_peer_vad_policy_h
                 "ring_buffer_ms": ring_buffer_ms,
                 "speech_threshold": speech_threshold,
                 "hangover_ms": hangover_ms,
+                "diagnostic_event_callback": diagnostic_event_callback,
+                "diagnostics_enabled": diagnostics_enabled,
+                "diagnostic_label": diagnostic_label,
             }
         )
         return "peer-vad"
@@ -3177,8 +4013,12 @@ async def test_create_peer_vad_from_runtime_config_uses_shared_peer_vad_policy_h
             "ring_buffer_ms": 420,
             "speech_threshold": 0.72,
             "hangover_ms": 950,
+            "diagnostic_event_callback": helper_calls[0]["diagnostic_event_callback"],
+            "diagnostics_enabled": controller._detailed_audio_diag_enabled,
+            "diagnostic_label": "peer",
         }
     ]
+    assert callable(helper_calls[0]["diagnostic_event_callback"])
 
 
 @pytest.mark.asyncio
@@ -4207,6 +5047,27 @@ async def test_init_pipeline_passes_runtime_logging_to_smart_osc_queue(
     assert created["osc_kwargs"]["runtime_logging"] is controller.runtime_logging
 
 
+def _self_mic_decision(
+    *,
+    device_idx: int | None,
+    preferred_channels: int,
+    status: str = "ok",
+    name: str | None = "Compat Mic",
+) -> SelfMicCaptureChannelDecision:
+    return SelfMicCaptureChannelDecision(
+        device_idx=device_idx,
+        internal_channels=1,
+        preferred_capture_channels=preferred_channels,
+        metadata=SoundDeviceInputMetadata(
+            device_idx=device_idx,
+            name=name,
+            max_input_channels=preferred_channels,
+            default_samplerate=48000.0,
+            metadata_status=status,
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_start_mic_loop_normalizes_wasapi_compatibility_mode(
     monkeypatch: pytest.MonkeyPatch,
@@ -4216,6 +5077,7 @@ async def test_start_mic_loop_normalizes_wasapi_compatibility_mode(
     controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
     controller.settings.audio.input_device = "Compat Mic"
     controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
     resolve_calls: list[dict[str, object]] = []
     source_calls: list[dict[str, object]] = []
 
@@ -4239,6 +5101,14 @@ async def test_start_mic_loop_normalizes_wasapi_compatibility_mode(
     monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
     monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
     monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", fake_resolve)
+    monkeypatch.setattr(
+        controller_module,
+        "determine_self_mic_capture_channels",
+        lambda *, device_idx, internal_channels: _self_mic_decision(
+            device_idx=device_idx,
+            preferred_channels=1,
+        ),
+    )
     monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
     monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
 
@@ -4249,6 +5119,420 @@ async def test_start_mic_loop_normalizes_wasapi_compatibility_mode(
     assert source_calls[0]["device"] == 7
     assert source_calls[0].get("wasapi_auto_convert") is True
     assert source_calls[0].get("wasapi_exclusive") is False
+    assert source_calls[0]["channels"] == 1
+
+
+@pytest.mark.asyncio
+async def test_start_mic_loop_wires_self_vad_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    controller.settings.audio.input_device = "Compat Mic"
+    controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    vad_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        actual_sample_rate_hz = 48000
+        requested_channels = 1
+        opened_channels = 1
+        frame_channels = 1
+
+        async def close(self) -> None:
+            return None
+
+    def fake_vad_gating(*_args, **kwargs):
+        vad_calls.append(dict(kwargs))
+        return SimpleNamespace()
+
+    async def fake_run_mic_loop(self) -> None:
+        _ = self
+        return None
+
+    monkeypatch.setattr(controller_module, "ensure_silero_vad_onnx", lambda: Path("vad.onnx"))
+    monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "VadGating", fake_vad_gating)
+    monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", lambda **kwargs: 7)
+    monkeypatch.setattr(
+        controller_module,
+        "determine_self_mic_capture_channels",
+        lambda *, device_idx, internal_channels: _self_mic_decision(
+            device_idx=device_idx,
+            preferred_channels=1,
+        ),
+    )
+    monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", lambda *a, **k: FakeSource())
+    monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
+
+    await controller._start_mic_loop()
+    await asyncio.sleep(0)
+
+    assert vad_calls[0]["diagnostic_label"] == "self"
+    diagnostics_enabled = vad_calls[0]["diagnostics_enabled"]
+    assert callable(diagnostics_enabled)
+    assert diagnostics_enabled() is True
+    diagnostic_callback = vad_calls[0]["diagnostic_event_callback"]
+    assert callable(diagnostic_callback)
+
+    diagnostic_callback("[AudioDiag][VAD][self] probe")
+
+    assert (
+        logging.INFO,
+        "[AudioDiag][VAD][self] probe",
+    ) in controller._runtime_logging.detailed_messages
+    controller._runtime_logging.set_mode("basic")
+    assert diagnostics_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_start_mic_loop_requests_two_channel_capture_from_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    controller.settings.audio.input_device = "마이크"
+    controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    source_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        actual_sample_rate_hz = 48000
+        requested_channels = 2
+        opened_channels = 2
+        frame_channels = 2
+
+        async def close(self) -> None:
+            return None
+
+    def fake_source(*_args, **kwargs) -> FakeSource:
+        source_calls.append(dict(kwargs))
+        return FakeSource()
+
+    async def fake_run_mic_loop(self) -> None:
+        _ = self
+        return None
+
+    monkeypatch.setattr(controller_module, "ensure_silero_vad_onnx", lambda: Path("vad.onnx"))
+    monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", lambda **kwargs: 7)
+    monkeypatch.setattr(
+        controller_module,
+        "determine_self_mic_capture_channels",
+        lambda *, device_idx, internal_channels: _self_mic_decision(
+            device_idx=device_idx,
+            preferred_channels=2,
+            name="마이크",
+        ),
+    )
+    monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
+    monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
+
+    await controller._start_mic_loop()
+    await asyncio.sleep(0)
+
+    detailed_logs = [message for _level, message in controller._runtime_logging.detailed_messages]
+    basic_logs = [message for _level, message in controller._runtime_logging.basic_messages]
+
+    assert source_calls[0]["device"] == 7
+    assert source_calls[0]["channels"] == 2
+    assert source_calls[0].get("wasapi_auto_convert") is True
+    assert source_calls[0].get("wasapi_exclusive") is False
+    assert basic_logs == []
+    assert any("Microphone capture format" in item for item in detailed_logs)
+    assert any("requested_channels=2" in item for item in detailed_logs)
+    assert any("opened_channels=2" in item for item in detailed_logs)
+    assert any("frame_channels=2" in item for item in detailed_logs)
+    assert any("frame_channels_source='opened_fallback'" in item for item in detailed_logs)
+    assert any("metadata_device_name='마이크'" in item for item in detailed_logs)
+
+
+@pytest.mark.asyncio
+async def test_start_mic_loop_retries_same_device_with_mono_after_two_channel_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    controller.settings.audio.input_device = "Compat Mic"
+    controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    resolve_calls: list[dict[str, object]] = []
+    source_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        actual_sample_rate_hz = 48000
+        requested_channels = 1
+        opened_channels = 1
+        frame_channels = 1
+
+        async def close(self) -> None:
+            return None
+
+    def fake_resolve(*, host_api: str, device: str) -> int:
+        resolve_calls.append({"host_api": host_api, "device": device})
+        return 7
+
+    def fake_source(*_args, **kwargs) -> FakeSource:
+        source_calls.append(dict(kwargs))
+        if kwargs["channels"] == 2:
+            raise RuntimeError("2ch rejected")
+        return FakeSource()
+
+    async def fake_run_mic_loop(self) -> None:
+        _ = self
+        return None
+
+    monkeypatch.setattr(controller_module, "ensure_silero_vad_onnx", lambda: Path("vad.onnx"))
+    monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", fake_resolve)
+    monkeypatch.setattr(
+        controller_module,
+        "determine_self_mic_capture_channels",
+        lambda *, device_idx, internal_channels: _self_mic_decision(
+            device_idx=device_idx,
+            preferred_channels=2,
+        ),
+    )
+    monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
+    monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
+
+    await controller._start_mic_loop()
+    await asyncio.sleep(0)
+
+    detailed_logs = [message for _level, message in controller._runtime_logging.detailed_messages]
+    basic_logs = [message for _level, message in controller._runtime_logging.basic_messages]
+
+    assert resolve_calls == [{"host_api": WINDOWS_WASAPI_HOST_API, "device": "Compat Mic"}]
+    assert [(call["device"], call["channels"]) for call in source_calls] == [(7, 2), (7, 1)]
+    assert source_calls[0].get("wasapi_auto_convert") is True
+    assert source_calls[1].get("wasapi_auto_convert") is True
+    assert basic_logs == []
+    assert any("will_retry_mono=True" in item for item in detailed_logs)
+    assert any("primary_mono_retry" in item for item in detailed_logs)
+    assert any("requested_channels=1" in item for item in detailed_logs)
+    assert any("opened_channels=1" in item for item in detailed_logs)
+
+
+@pytest.mark.asyncio
+async def test_start_mic_loop_recomputes_capture_channels_for_name_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    controller.settings.audio.input_device = "Compat Mic"
+    controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    source_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        actual_sample_rate_hz = 48000
+        requested_channels = 2
+        opened_channels = 2
+        frame_channels = 2
+
+        async def close(self) -> None:
+            return None
+
+    def fake_resolve(*, host_api: str, device: str) -> int:
+        if host_api == WINDOWS_WASAPI_HOST_API:
+            return 7
+        return 8
+
+    def fake_decision(
+        *, device_idx: int | None, internal_channels: int
+    ) -> SelfMicCaptureChannelDecision:
+        if device_idx == 7:
+            return _self_mic_decision(device_idx=7, preferred_channels=1)
+        return _self_mic_decision(device_idx=device_idx, preferred_channels=2)
+
+    def fake_source(*_args, **kwargs) -> FakeSource:
+        source_calls.append(dict(kwargs))
+        if kwargs["device"] == 7:
+            raise RuntimeError("primary failed")
+        return FakeSource()
+
+    async def fake_run_mic_loop(self) -> None:
+        _ = self
+        return None
+
+    monkeypatch.setattr(controller_module, "ensure_silero_vad_onnx", lambda: Path("vad.onnx"))
+    monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", fake_resolve)
+    monkeypatch.setattr(
+        controller_module,
+        "determine_self_mic_capture_channels",
+        fake_decision,
+    )
+    monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
+    monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
+
+    await controller._start_mic_loop()
+    await asyncio.sleep(0)
+
+    assert [(call["device"], call["channels"]) for call in source_calls] == [(7, 1), (8, 2)]
+    assert source_calls[1].get("wasapi_auto_convert") is False
+    assert source_calls[1].get("wasapi_exclusive") is False
+
+
+@pytest.mark.asyncio
+async def test_start_mic_loop_uses_default_metadata_for_system_default_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    controller.settings.audio.input_device = ""
+    controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    source_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        actual_sample_rate_hz = 48000
+        requested_channels = 2
+        opened_channels = 2
+        frame_channels = 2
+
+        async def close(self) -> None:
+            return None
+
+    def fake_source(*_args, **kwargs) -> FakeSource:
+        source_calls.append(dict(kwargs))
+        if kwargs["device"] == 7:
+            raise RuntimeError("primary failed")
+        return FakeSource()
+
+    def fake_decision(
+        *, device_idx: int | None, internal_channels: int
+    ) -> SelfMicCaptureChannelDecision:
+        if device_idx is None:
+            return _self_mic_decision(
+                device_idx=None,
+                preferred_channels=2,
+                status="default_resolved",
+                name="Default Mic",
+            )
+        return _self_mic_decision(device_idx=device_idx, preferred_channels=1)
+
+    async def fake_run_mic_loop(self) -> None:
+        _ = self
+        return None
+
+    monkeypatch.setattr(controller_module, "ensure_silero_vad_onnx", lambda: Path("vad.onnx"))
+    monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", lambda **kwargs: 7)
+    monkeypatch.setattr(
+        controller_module,
+        "determine_self_mic_capture_channels",
+        fake_decision,
+    )
+    monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
+    monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
+
+    await controller._start_mic_loop()
+    await asyncio.sleep(0)
+
+    assert [(call["device"], call["channels"]) for call in source_calls] == [(7, 1), (None, 2)]
+    assert source_calls[1].get("wasapi_auto_convert") is False
+    assert source_calls[1].get("wasapi_exclusive") is False
+
+
+@pytest.mark.asyncio
+async def test_start_mic_loop_suppresses_capture_format_diagnostics_in_basic_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    controller.settings.audio.input_device = "마이크"
+    controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=False)
+    source_calls: list[dict[str, object]] = []
+
+    class FakeSource:
+        actual_sample_rate_hz = 48000
+        requested_channels = 2
+        opened_channels = 2
+        frame_channels = 2
+
+        async def close(self) -> None:
+            return None
+
+    def fake_source(*_args, **kwargs) -> FakeSource:
+        source_calls.append(dict(kwargs))
+        return FakeSource()
+
+    async def fake_run_mic_loop(self) -> None:
+        _ = self
+        return None
+
+    monkeypatch.setattr(controller_module, "ensure_silero_vad_onnx", lambda: Path("vad.onnx"))
+    monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", lambda **kwargs: 7)
+    monkeypatch.setattr(
+        controller_module,
+        "determine_self_mic_capture_channels",
+        lambda *, device_idx, internal_channels: _self_mic_decision(
+            device_idx=device_idx,
+            preferred_channels=2,
+            name="마이크",
+        ),
+    )
+    monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
+    monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
+
+    await controller._start_mic_loop()
+    await asyncio.sleep(0)
+
+    all_messages = [
+        message
+        for _level, message in (
+            controller._runtime_logging.basic_messages
+            + controller._runtime_logging.detailed_messages
+        )
+    ]
+    assert source_calls[0]["channels"] == 2
+    assert not any("Microphone capture format" in message for message in all_messages)
+
+
+def test_runtime_logging_writes_non_ascii_detailed_messages_to_utf8_file(tmp_path):
+    log_file = tmp_path / "runtime.log"
+    stream_handler = logging.NullHandler()
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    root_logger = logging.getLogger(f"test-root-{uuid4()}")
+    session_logger = logging.getLogger(f"test-session-{uuid4()}")
+    service = SessionRuntimeLoggingService(
+        root_logger=root_logger,
+        session_logger=session_logger,
+        sinks=RuntimeLoggingSinks(
+            stream_handler=stream_handler,
+            file_handler=file_handler,
+            log_file=log_file,
+        ),
+    )
+
+    try:
+        service.set_mode(SessionLoggingMode.DETAILED)
+        assert (
+            service.emit_detailed("[STT] Microphone capture format: metadata_device_name='마이크'")
+            is True
+        )
+        file_handler.flush()
+        assert "마이크" in log_file.read_text(encoding="utf-8")
+    finally:
+        for logger_obj in (root_logger, session_logger):
+            for handler in list(logger_obj.handlers):
+                logger_obj.removeHandler(handler)
+        file_handler.close()
+        stream_handler.close()
 
 
 @pytest.mark.asyncio
@@ -4260,6 +5544,7 @@ async def test_start_mic_loop_does_not_apply_wasapi_flags_to_name_fallback(
     controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
     controller.settings.audio.input_device = "Compat Mic"
     controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
     resolve_calls: list[dict[str, object]] = []
     source_calls: list[dict[str, object]] = []
 
@@ -4289,6 +5574,14 @@ async def test_start_mic_loop_does_not_apply_wasapi_flags_to_name_fallback(
     monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
     monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
     monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", fake_resolve)
+    monkeypatch.setattr(
+        controller_module,
+        "determine_self_mic_capture_channels",
+        lambda *, device_idx, internal_channels: _self_mic_decision(
+            device_idx=device_idx,
+            preferred_channels=1,
+        ),
+    )
     monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
     monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
 
@@ -4303,6 +5596,7 @@ async def test_start_mic_loop_does_not_apply_wasapi_flags_to_name_fallback(
     assert source_calls[1]["device"] == 8
     assert source_calls[1].get("wasapi_auto_convert") is False
     assert source_calls[1].get("wasapi_exclusive") is False
+    assert [call["channels"] for call in source_calls] == [1, 1]
 
 
 @pytest.mark.asyncio
@@ -4314,6 +5608,7 @@ async def test_start_mic_loop_retries_same_device_name_fallback_without_wasapi_f
     controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
     controller.settings.audio.input_device = "Compat Mic"
     controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
     resolve_calls: list[dict[str, object]] = []
     source_calls: list[dict[str, object]] = []
 
@@ -4339,6 +5634,14 @@ async def test_start_mic_loop_retries_same_device_name_fallback_without_wasapi_f
     monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
     monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
     monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", fake_resolve)
+    monkeypatch.setattr(
+        controller_module,
+        "determine_self_mic_capture_channels",
+        lambda *, device_idx, internal_channels: _self_mic_decision(
+            device_idx=device_idx,
+            preferred_channels=1,
+        ),
+    )
     monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
     monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
 
@@ -4356,6 +5659,7 @@ async def test_start_mic_loop_retries_same_device_name_fallback_without_wasapi_f
     assert source_calls[1]["device"] == 7
     assert source_calls[1].get("wasapi_auto_convert") is False
     assert source_calls[1].get("wasapi_exclusive") is False
+    assert [call["channels"] for call in source_calls] == [1, 1]
 
 
 @pytest.mark.asyncio
@@ -4367,6 +5671,7 @@ async def test_start_mic_loop_does_not_apply_wasapi_flags_to_system_default_fall
     controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
     controller.settings.audio.input_device = ""
     controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
     resolve_calls: list[dict[str, object]] = []
     source_calls: list[dict[str, object]] = []
 
@@ -4394,6 +5699,14 @@ async def test_start_mic_loop_does_not_apply_wasapi_flags_to_system_default_fall
     monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
     monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
     monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", fake_resolve)
+    monkeypatch.setattr(
+        controller_module,
+        "determine_self_mic_capture_channels",
+        lambda *, device_idx, internal_channels: _self_mic_decision(
+            device_idx=device_idx,
+            preferred_channels=1,
+        ),
+    )
     monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
     monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
 
@@ -4405,6 +5718,7 @@ async def test_start_mic_loop_does_not_apply_wasapi_flags_to_system_default_fall
     assert source_calls[1]["device"] is None
     assert source_calls[1].get("wasapi_auto_convert") is False
     assert source_calls[1].get("wasapi_exclusive") is False
+    assert [call["channels"] for call in source_calls] == [1, 1]
 
 
 @pytest.mark.asyncio
@@ -4669,6 +5983,86 @@ async def test_start_does_not_auto_restore_transient_overlay_or_peer_toggles(
 
 
 @pytest.mark.asyncio
+async def test_set_runtime_logging_mode_emits_audio_snapshot_once_on_basic_to_detailed(
+    monkeypatch,
+) -> None:
+    class FakePage:
+        def __init__(self) -> None:
+            self.tasks: list[object] = []
+
+        def run_task(self, coro_fn) -> None:
+            self.tasks.append(coro_fn)
+
+    sounddevice_lines = ["[AudioDiag][Snapshot][SoundDevice] one"]
+    loopback_lines = ["[AudioDiag][Snapshot][Loopback] one"]
+    monkeypatch.setattr(
+        "puripuly_heart.core.audio.diagnostics.collect_sounddevice_snapshot_lines",
+        lambda: sounddevice_lines,
+    )
+    monkeypatch.setattr(
+        "puripuly_heart.core.audio.diagnostics.collect_pyaudiowpatch_snapshot_lines",
+        lambda: loopback_lines,
+    )
+
+    runtime = RuntimeLoggingSpy(detailed_enabled=False)
+    page = FakePage()
+    controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
+    controller._runtime_logging = runtime
+
+    controller.set_runtime_logging_mode("detailed")
+    controller.set_runtime_logging_mode("detailed")
+    assert len(page.tasks) == 1
+    await page.tasks[0]()
+
+    messages = [message for _level, message in runtime.detailed_messages]
+    assert messages.count("[AudioDiag][Snapshot][SoundDevice] one") == 1
+    assert messages.count("[AudioDiag][Snapshot][Loopback] one") == 1
+
+
+@pytest.mark.asyncio
+async def test_set_runtime_logging_mode_audio_snapshot_run_task_failure_falls_back_to_loop(
+    monkeypatch,
+) -> None:
+    class FailingPage:
+        def run_task(self, coro_fn) -> None:
+            _ = coro_fn
+            raise RuntimeError("run_task rejected")
+
+    sounddevice_lines = ["[AudioDiag][Snapshot][SoundDevice] fallback"]
+    loopback_lines = ["[AudioDiag][Snapshot][Loopback] fallback"]
+    monkeypatch.setattr(
+        "puripuly_heart.core.audio.diagnostics.collect_sounddevice_snapshot_lines",
+        lambda: sounddevice_lines,
+    )
+    monkeypatch.setattr(
+        "puripuly_heart.core.audio.diagnostics.collect_pyaudiowpatch_snapshot_lines",
+        lambda: loopback_lines,
+    )
+
+    runtime = RuntimeLoggingSpy(detailed_enabled=False)
+    controller = GuiController(
+        page=FailingPage(),
+        app=SimpleNamespace(),
+        config_path=Path("settings.json"),
+    )
+    controller._runtime_logging = runtime
+
+    controller.set_runtime_logging_mode("detailed")
+    await _wait_until(
+        lambda: any(
+            message == "[AudioDiag][Snapshot][Loopback] fallback"
+            for _level, message in runtime.detailed_messages
+        ),
+        attempts=50,
+        delay_s=0.01,
+    )
+
+    messages = [message for _level, message in runtime.detailed_messages]
+    assert "[AudioDiag][Snapshot][SoundDevice] fallback" in messages
+    assert "[AudioDiag][Snapshot][Loopback] fallback" in messages
+
+
+@pytest.mark.asyncio
 async def test_set_runtime_logging_mode_updates_overlay_runtime_contract() -> None:
     class FakePage:
         def __init__(self) -> None:
@@ -4686,7 +6080,7 @@ async def test_set_runtime_logging_mode_updates_overlay_runtime_contract() -> No
 
     page = FakePage()
     controller = GuiController(page=page, app=SimpleNamespace(), config_path=Path("settings.json"))
-    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=False)
+    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
     controller._overlay_bridge = FakeOverlayBridge(session_token="token")
     manager = OverlayManagerSpy()
     controller._overlay_manager = manager  # type: ignore[assignment]
@@ -4831,6 +6225,327 @@ async def test_exhausted_managed_start_and_background_verify_do_not_auto_show_fo
     assert shown == []
 
 
+class CapturingManagedKeySettingsView(DummySettingsView):
+    def __init__(self) -> None:
+        super().__init__()
+        self.managed_key_state_calls: list[dict[str, object]] = []
+
+    def set_managed_key_state(
+        self,
+        *,
+        visible: bool,
+        remaining_percent: int | None = None,
+        referral_id: str | None = None,
+        pass_status: object | None = None,
+    ) -> None:
+        self.managed_key_state_calls.append(
+            {
+                "visible": visible,
+                "remaining_percent": remaining_percent,
+                "referral_id": referral_id,
+                "pass_status": pass_status,
+            }
+        )
+
+
+class ManagedStatusRefreshService:
+    def __init__(self, result: ManagedOpenRouterStatusRefreshResult) -> None:
+        self.result = result
+        self.calls = 0
+
+    async def refresh_managed_status(self) -> ManagedOpenRouterStatusRefreshResult:
+        self.calls += 1
+        return self.result
+
+
+def _install_managed_usage_metadata_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummySecretsForTrial:
+        def get(self, key: str) -> str | None:
+            if key == "openrouter_managed_api_key":
+                return "managed-key"
+            return None
+
+    async def fake_fetch_key_metadata(_api_key: str):
+        return controller_module.OpenRouterKeyMetadata(
+            limit_usd=0.07,
+            remaining_usd=0.05,
+            usage_usd=0.02,
+        )
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecretsForTrial(),
+    )
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fake_fetch_key_metadata),
+    )
+
+
+def _make_managed_usage_controller(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    settings_view: CapturingManagedKeySettingsView,
+    status_service: ManagedStatusRefreshService,
+) -> GuiController:
+    _install_managed_usage_metadata_stubs(monkeypatch)
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.managed_identity.referral_id = "7KQ9M2"
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = status_service  # noqa: SLF001
+    return controller
+
+
+@pytest.mark.asyncio
+async def test_status_refresh_updates_pass_status_when_referral_id_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pass_status = TalkTogetherPassStatus(
+        pass_id="7KQ9M2",
+        invite_count=2,
+        invite_limit=5,
+        bonus_translations_per_friend=200,
+    )
+
+    settings_view = CapturingManagedKeySettingsView()
+    status_service = ManagedStatusRefreshService(
+        ManagedOpenRouterStatusRefreshResult(
+            referral_id="7KQ9M2",
+            pass_status=pass_status,
+            succeeded=True,
+        )
+    )
+    controller = _make_managed_usage_controller(
+        monkeypatch,
+        settings_view=settings_view,
+        status_service=status_service,
+    )
+
+    await controller._refresh_managed_trial_usage_state()
+
+    await _wait_until(lambda: status_service.calls == 1)
+    assert settings_view.managed_key_state_calls[-1] == {
+        "visible": True,
+        "remaining_percent": 71,
+        "referral_id": "7KQ9M2",
+        "pass_status": pass_status,
+    }
+
+
+@pytest.mark.asyncio
+async def test_status_refresh_clears_pass_status_on_successful_absent_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_view = CapturingManagedKeySettingsView()
+    status_service = ManagedStatusRefreshService(
+        ManagedOpenRouterStatusRefreshResult(
+            referral_id="7KQ9M2",
+            pass_status=None,
+            succeeded=True,
+        )
+    )
+    controller = _make_managed_usage_controller(
+        monkeypatch,
+        settings_view=settings_view,
+        status_service=status_service,
+    )
+    controller._talk_together_pass_status = TalkTogetherPassStatus(  # noqa: SLF001
+        pass_id="7KQ9M2",
+        invite_count=2,
+        invite_limit=5,
+        bonus_translations_per_friend=200,
+    )
+    controller._talk_together_pass_status_key = (None, None, "7KQ9M2")  # noqa: SLF001
+
+    await controller._refresh_managed_trial_usage_state()
+
+    await _wait_until(lambda: status_service.calls == 1)
+    assert settings_view.managed_key_state_calls[-1] == {
+        "visible": True,
+        "remaining_percent": 71,
+        "referral_id": "7KQ9M2",
+        "pass_status": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_status_refresh_preserves_pass_status_on_network_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cached_pass_status = TalkTogetherPassStatus(
+        pass_id="7KQ9M2",
+        invite_count=2,
+        invite_limit=5,
+        bonus_translations_per_friend=200,
+    )
+    settings_view = CapturingManagedKeySettingsView()
+    status_service = ManagedStatusRefreshService(
+        ManagedOpenRouterStatusRefreshResult(
+            referral_id="7KQ9M2",
+            pass_status=None,
+            succeeded=False,
+        )
+    )
+    controller = _make_managed_usage_controller(
+        monkeypatch,
+        settings_view=settings_view,
+        status_service=status_service,
+    )
+    controller._talk_together_pass_status = cached_pass_status  # noqa: SLF001
+    controller._talk_together_pass_status_key = (None, None, "7KQ9M2")  # noqa: SLF001
+
+    await controller._refresh_managed_trial_usage_state()
+
+    await _wait_until(lambda: status_service.calls == 1)
+    assert settings_view.managed_key_state_calls[-1] == {
+        "visible": True,
+        "remaining_percent": 71,
+        "referral_id": "7KQ9M2",
+        "pass_status": cached_pass_status,
+    }
+
+
+def test_managed_usage_view_state_clears_pass_status_when_identity_key_changes() -> None:
+    settings_view = CapturingManagedKeySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.managed_identity.referral_id = "7KQ9M2"
+    controller.settings.managed_identity.active_managed_credential_ref = "new-ref"
+    controller._talk_together_pass_status = TalkTogetherPassStatus(  # noqa: SLF001
+        pass_id="7KQ9M2",
+        invite_count=2,
+        invite_limit=5,
+        bonus_translations_per_friend=200,
+    )
+    controller._talk_together_pass_status_key = (None, "old-ref", "7KQ9M2")  # noqa: SLF001
+
+    controller._set_managed_usage_view_state(  # noqa: SLF001
+        view_settings=settings_view,
+        visible=True,
+        remaining_percent=71,
+        referral_id="7KQ9M2",
+    )
+
+    assert settings_view.managed_key_state_calls[-1] == {
+        "visible": True,
+        "remaining_percent": 71,
+        "referral_id": "7KQ9M2",
+        "pass_status": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_status_refresh_drops_stale_pass_status_when_identity_scope_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pass_status = TalkTogetherPassStatus(
+        pass_id="7KQ9M2",
+        invite_count=2,
+        invite_limit=5,
+        bonus_translations_per_friend=200,
+    )
+
+    class SlowManagedStatusRefreshService:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.finished = asyncio.Event()
+            self.calls = 0
+
+        async def refresh_managed_status(self) -> ManagedOpenRouterStatusRefreshResult:
+            self.calls += 1
+            self.started.set()
+            await self.release.wait()
+            self.finished.set()
+            return ManagedOpenRouterStatusRefreshResult(
+                referral_id="7KQ9M2",
+                pass_status=pass_status,
+                succeeded=True,
+            )
+
+    scheduled_tasks: list[asyncio.Task[object]] = []
+    loop = asyncio.get_running_loop()
+
+    class CapturingLoop:
+        def create_task(self, coro):  # noqa: ANN001
+            task = loop.create_task(coro)
+            scheduled_tasks.append(task)
+            return task
+
+    settings_view = CapturingManagedKeySettingsView()
+    status_service = SlowManagedStatusRefreshService()
+    controller = _make_managed_usage_controller(
+        monkeypatch,
+        settings_view=settings_view,
+        status_service=status_service,  # type: ignore[arg-type]
+    )
+    controller.settings.managed_identity.active_managed_credential_ref = "old-ref"
+
+    monkeypatch.setattr(controller_module.asyncio, "get_running_loop", lambda: CapturingLoop())
+
+    await controller._refresh_managed_trial_usage_state()
+    await asyncio.wait_for(status_service.started.wait(), timeout=1.0)
+
+    controller.settings.managed_identity.active_managed_credential_ref = "new-ref"
+    status_service.release.set()
+    await asyncio.wait_for(status_service.finished.wait(), timeout=1.0)
+    await asyncio.wait_for(scheduled_tasks[-1], timeout=1.0)
+
+    assert status_service.calls == 1
+    assert settings_view.managed_key_state_calls
+    assert settings_view.managed_key_state_calls[-1]["pass_status"] is None
+    assert controller._talk_together_pass_status is None  # noqa: SLF001
+
+
+def test_status_refresh_managed_key_setter_type_error_is_not_masked() -> None:
+    class RaisingManagedKeySettingsView(DummySettingsView):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def set_managed_key_state(
+            self,
+            *,
+            visible: bool,
+            remaining_percent: int | None = None,
+            referral_id: str | None = None,
+            pass_status: object | None = None,
+        ) -> None:
+            _ = visible, remaining_percent, referral_id, pass_status
+            self.calls += 1
+            raise TypeError("pass_status setter internals failed")
+
+    settings_view = RaisingManagedKeySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=DummyDashboard(), view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.managed_identity.referral_id = "7KQ9M2"
+
+    with pytest.raises(TypeError, match="pass_status setter internals failed"):
+        controller._set_managed_usage_view_state(  # noqa: SLF001
+            view_settings=settings_view,
+            visible=True,
+            remaining_percent=71,
+            referral_id="7KQ9M2",
+        )
+
+    assert settings_view.calls == 1
+
+
 @pytest.mark.asyncio
 async def test_refresh_managed_trial_usage_state_uses_settings_view_live_openrouter_usage(
     monkeypatch: pytest.MonkeyPatch,
@@ -4876,6 +6591,451 @@ async def test_refresh_managed_trial_usage_state_uses_settings_view_live_openrou
         "remaining_percent": 71,
     }
     assert dash.managed_trial_calls == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_managed_trial_usage_state_exposes_refreshed_referral_id_to_managed_key_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+
+    class ManagedKeySettingsView(DummySettingsView):
+        def __init__(self) -> None:
+            super().__init__()
+            self.managed_key_state_calls: list[dict[str, object]] = []
+
+        def set_managed_key_state(
+            self,
+            *,
+            visible: bool,
+            remaining_percent: int | None = None,
+            referral_id: str | None = None,
+            pass_status: object | None = None,
+        ) -> None:
+            self.managed_key_state_calls.append(
+                {
+                    "visible": visible,
+                    "remaining_percent": remaining_percent,
+                    "referral_id": referral_id,
+                    "pass_status": pass_status,
+                }
+            )
+
+    class FakeStatusRefreshService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def refresh_owned_referral_id_from_status(self) -> str | None:
+            self.calls += 1
+            return "7KQ9M2"
+
+    settings_view = ManagedKeySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    status_service = FakeStatusRefreshService()
+    controller._managed_openrouter_release_service = status_service  # noqa: SLF001
+
+    class DummySecretsForTrial:
+        def get(self, key: str) -> str | None:
+            if key == "openrouter_managed_api_key":
+                return "managed-key"
+            return None
+
+    async def fake_fetch_key_metadata(_api_key: str):
+        return controller_module.OpenRouterKeyMetadata(
+            limit_usd=0.07,
+            remaining_usd=0.05,
+            usage_usd=0.02,
+        )
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecretsForTrial(),
+    )
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fake_fetch_key_metadata),
+    )
+
+    await controller._refresh_managed_trial_usage_state()
+
+    await _wait_until(lambda: status_service.calls == 1)
+    assert status_service.calls == 1
+    await _wait_until(
+        lambda: bool(settings_view.managed_key_state_calls)
+        and settings_view.managed_key_state_calls[-1]["referral_id"] == "7KQ9M2"
+    )
+    assert settings_view.managed_key_state_calls[-1] == {
+        "visible": True,
+        "remaining_percent": 71,
+        "referral_id": "7KQ9M2",
+        "pass_status": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_refresh_managed_trial_usage_state_preserves_known_referral_id_when_status_omits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+
+    class ManagedKeySettingsView(DummySettingsView):
+        def __init__(self) -> None:
+            super().__init__()
+            self.managed_key_state_calls: list[dict[str, object]] = []
+
+        def set_managed_key_state(
+            self,
+            *,
+            visible: bool,
+            remaining_percent: int | None = None,
+            referral_id: str | None = None,
+            pass_status: object | None = None,
+        ) -> None:
+            self.managed_key_state_calls.append(
+                {
+                    "visible": visible,
+                    "remaining_percent": remaining_percent,
+                    "referral_id": referral_id,
+                    "pass_status": pass_status,
+                }
+            )
+
+    class OldBrokerStatusRefreshService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def refresh_owned_referral_id_from_status(self) -> str | None:
+            self.calls += 1
+            return None
+
+    settings_view = ManagedKeySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.managed_identity.referral_id = "7KQ9M2"
+    controller.hub = DummyHub(llm=object())
+    status_service = OldBrokerStatusRefreshService()
+    controller._managed_openrouter_release_service = status_service  # noqa: SLF001
+
+    class DummySecretsForTrial:
+        def get(self, key: str) -> str | None:
+            if key == "openrouter_managed_api_key":
+                return "managed-key"
+            return None
+
+    async def fake_fetch_key_metadata(_api_key: str):
+        return controller_module.OpenRouterKeyMetadata(
+            limit_usd=0.07,
+            remaining_usd=0.05,
+            usage_usd=0.02,
+        )
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecretsForTrial(),
+    )
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fake_fetch_key_metadata),
+    )
+
+    await controller._refresh_managed_trial_usage_state()
+
+    await _wait_until(lambda: status_service.calls == 1)
+    assert status_service.calls == 1
+    assert settings_view.managed_key_state_calls
+    assert all(call["referral_id"] == "7KQ9M2" for call in settings_view.managed_key_state_calls)
+    assert settings_view.managed_key_state_calls[-1] == {
+        "visible": True,
+        "remaining_percent": 71,
+        "referral_id": "7KQ9M2",
+        "pass_status": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_refresh_managed_trial_usage_state_preserves_referral_card_when_openrouter_byok_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+
+    class ManagedKeySettingsView(DummySettingsView):
+        def __init__(self) -> None:
+            super().__init__()
+            self.managed_key_state_calls: list[dict[str, object]] = []
+
+        def set_managed_key_state(
+            self,
+            *,
+            visible: bool,
+            remaining_percent: int | None = None,
+            referral_id: str | None = None,
+            pass_status: object | None = None,
+        ) -> None:
+            self.managed_key_state_calls.append(
+                {
+                    "visible": visible,
+                    "remaining_percent": remaining_percent,
+                    "referral_id": referral_id,
+                    "pass_status": pass_status,
+                }
+            )
+
+    settings_view = ManagedKeySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    controller.settings.managed_identity.referral_id = "7KQ9M2"
+    controller.hub = DummyHub(llm=object())
+
+    await controller._refresh_managed_trial_usage_state()
+
+    assert settings_view.managed_key_state_calls == [
+        {
+            "visible": True,
+            "remaining_percent": None,
+            "referral_id": "7KQ9M2",
+            "pass_status": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_status_refresh_background_view_update_error_is_logged_not_left_on_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+    log_messages: list[tuple[str, int]] = []
+    scheduled_tasks: list[asyncio.Task[object]] = []
+    loop = asyncio.get_running_loop()
+
+    class FailingManagedKeySettingsView(DummySettingsView):
+        def set_managed_key_state(
+            self,
+            *,
+            visible: bool,
+            remaining_percent: int | None = None,
+            referral_id: str | None = None,
+            pass_status: object | None = None,
+        ) -> None:
+            _ = pass_status
+            if referral_id == "7KQ9M2":
+                raise RuntimeError("managed key repaint failed")
+            super().set_managed_trial_usage_state(
+                visible=visible,
+                remaining_percent=remaining_percent,
+            )
+
+    class FakeStatusRefreshService:
+        async def refresh_owned_referral_id_from_status(self) -> str | None:
+            return "7KQ9M2"
+
+    class CapturingLoop:
+        def create_task(self, coro):  # noqa: ANN001
+            task = loop.create_task(coro)
+            scheduled_tasks.append(task)
+            return task
+
+    def fake_log_basic(
+        _self: GuiController,
+        message: str,
+        *,
+        level: int = logging.INFO,
+    ) -> None:
+        log_messages.append((message, level))
+
+    settings_view = FailingManagedKeySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.hub = DummyHub(llm=object())
+    controller._managed_openrouter_release_service = FakeStatusRefreshService()  # noqa: SLF001
+
+    monkeypatch.setattr(controller_module.asyncio, "get_running_loop", lambda: CapturingLoop())
+    monkeypatch.setattr(GuiController, "log_basic", fake_log_basic)
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({"openrouter_managed_api_key": "managed-key"}),
+    )
+
+    async def fake_fetch_key_metadata(_api_key: str):
+        return controller_module.OpenRouterKeyMetadata(
+            limit_usd=0.07,
+            remaining_usd=0.05,
+            usage_usd=0.02,
+        )
+
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fake_fetch_key_metadata),
+    )
+
+    await controller._refresh_managed_trial_usage_state()
+    await _wait_until(lambda: bool(scheduled_tasks) and scheduled_tasks[-1].done())
+
+    assert scheduled_tasks[-1].exception() is None
+    assert any(
+        "Referral ID status refresh failed" in message
+        and "managed key repaint failed" in message
+        and level == logging.WARNING
+        for message, level in log_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_refresh_managed_trial_usage_state_runs_exhaustion_side_effects_before_slow_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shown: list[str] = []
+    dash = DummyDashboard()
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=dash,
+            view_settings=settings_view,
+            show_founder_letter_dialog=lambda: shown.append("shown"),
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.managed_identity.active_managed_credential_ref = "hash_123"
+    controller.hub = DummyHub(llm=object())
+
+    class SlowStatusRefreshService:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.finished = asyncio.Event()
+
+        async def refresh_owned_referral_id_from_status(self) -> str | None:
+            self.started.set()
+            await self.release.wait()
+            self.finished.set()
+            return None
+
+    status_service = SlowStatusRefreshService()
+    controller._managed_openrouter_release_service = status_service  # noqa: SLF001
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_a, **_k: DummySecrets({"openrouter_managed_api_key": "managed-key"}),
+    )
+
+    async def fake_fetch_key_metadata(_api_key: str):
+        return controller_module.OpenRouterKeyMetadata(
+            limit_usd=0.07,
+            remaining_usd=0.0007,
+            usage_usd=0.0693,
+        )
+
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fake_fetch_key_metadata),
+    )
+
+    refresh_task = asyncio.create_task(controller._refresh_managed_trial_usage_state())
+    try:
+        await asyncio.wait_for(status_service.started.wait(), timeout=1.0)
+
+        assert shown == ["shown"]
+    finally:
+        status_service.release.set()
+        await asyncio.wait_for(status_service.finished.wait(), timeout=1.0)
+        await refresh_task
+
+
+@pytest.mark.asyncio
+async def test_should_route_managed_trans_to_founder_letter_does_not_wait_for_slow_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shown: list[str] = []
+    dash = DummyDashboard()
+    settings_view = DummySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(
+            view_dashboard=dash,
+            view_settings=settings_view,
+            show_founder_letter_dialog=lambda: shown.append("shown"),
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.managed_identity.active_managed_credential_ref = "hash_123"
+    controller.hub = DummyHub(llm=object())
+
+    class SlowStatusRefreshService:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.finished = asyncio.Event()
+
+        async def refresh_owned_referral_id_from_status(self) -> str | None:
+            self.started.set()
+            await self.release.wait()
+            self.finished.set()
+            return None
+
+    status_service = SlowStatusRefreshService()
+    controller._managed_openrouter_release_service = status_service  # noqa: SLF001
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_a, **_k: DummySecrets({"openrouter_managed_api_key": "managed-key"}),
+    )
+
+    async def fake_fetch_key_metadata(_api_key: str):
+        return controller_module.OpenRouterKeyMetadata(
+            limit_usd=0.07,
+            remaining_usd=0.0007,
+            usage_usd=0.0693,
+        )
+
+    monkeypatch.setattr(
+        OpenRouterLLMProvider,
+        "fetch_key_metadata",
+        staticmethod(fake_fetch_key_metadata),
+    )
+
+    route_task = asyncio.create_task(controller._should_route_managed_trans_to_founder_letter())
+    try:
+        await asyncio.wait_for(status_service.started.wait(), timeout=1.0)
+
+        assert route_task.done()
+        assert route_task.result() is True
+        assert shown == ["shown"]
+    finally:
+        status_service.release.set()
+        await asyncio.wait_for(status_service.finished.wait(), timeout=1.0)
+        if not route_task.done():
+            route_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await route_task
 
 
 @pytest.mark.asyncio

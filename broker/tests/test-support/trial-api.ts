@@ -135,6 +135,7 @@ export async function postDiscordStart(
 export async function postDiscordIssue(
   env: TestBrokerEnv,
   body: object | string,
+  options: { headers?: Record<string, string> } = {},
 ): Promise<Response> {
   return app.request(
     'http://broker.test/v1/providers/openrouter/discord/issue',
@@ -142,6 +143,7 @@ export async function postDiscordIssue(
       method: 'POST',
       headers: {
         'content-type': 'application/json',
+        ...options.headers,
       },
       body: typeof body === 'string' ? body : JSON.stringify(body),
     },

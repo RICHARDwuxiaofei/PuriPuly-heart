@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+import puripuly_heart.core.vad.gating as gating_module
 from puripuly_heart.core.vad.gating import (
     PEER_VAD_SPEECH_THRESHOLD,
     PEER_VAD_START_COMMIT_CHUNKS,
@@ -140,3 +141,132 @@ def test_create_peer_vad_gating_uses_helper_defaults():
     assert gating.start_debounce_chunks == PEER_VAD_START_DEBOUNCE_CHUNKS
     assert gating.start_commit_chunks == PEER_VAD_START_COMMIT_CHUNKS
     assert gating.candidate_log_label == "Peer"
+
+
+def test_vad_gating_emits_diagnostic_event_summaries() -> None:
+    lines: list[str] = []
+    probs = [0.9, 0.0, 0.0]
+    gating = VadGating(
+        SequenceVadEngine(probs=probs),
+        sample_rate_hz=16000,
+        ring_buffer_ms=64,
+        hangover_ms=64,
+        diagnostic_event_callback=lines.append,
+        diagnostic_label="self",
+    )
+
+    for i in range(len(probs)):
+        gating.process_chunk(chunk_samples(float(i + 1), n=gating.chunk_samples))
+
+    assert any("[AudioDiag][VAD][self] event=SpeechStart" in line for line in lines)
+    assert any("prob=0.900" in line and "threshold=0.5" in line for line in lines)
+    assert any("[AudioDiag][VAD][self] event=SpeechEnd" in line for line in lines)
+
+
+def test_vad_gating_diagnostic_callback_failure_does_not_drop_speech_start() -> None:
+    def raise_on_diagnostic(_message: str) -> None:
+        raise RuntimeError("diagnostic sink unavailable")
+
+    gating = VadGating(
+        SequenceVadEngine(probs=[0.9]),
+        sample_rate_hz=16000,
+        ring_buffer_ms=64,
+        hangover_ms=64,
+        diagnostic_event_callback=raise_on_diagnostic,
+        diagnostic_label="self",
+    )
+
+    events = gating.process_chunk(chunk_samples(1.0, n=gating.chunk_samples))
+
+    assert len(events) == 1
+    assert isinstance(events[0], SpeechStart)
+    assert gating.in_speech is True
+    assert gating.utterance_id == events[0].utterance_id
+
+
+def test_vad_gating_diagnostic_callback_failure_does_not_drop_speech_end_or_reset() -> None:
+    def raise_on_end(message: str) -> None:
+        if "event=SpeechEnd" in message:
+            raise RuntimeError("diagnostic sink unavailable")
+
+    probs = [0.9, 0.0, 0.0]
+    gating = VadGating(
+        SequenceVadEngine(probs=probs),
+        sample_rate_hz=16000,
+        ring_buffer_ms=64,
+        hangover_ms=64,
+        diagnostic_event_callback=raise_on_end,
+        diagnostic_label="self",
+    )
+
+    events = []
+    for i in range(len(probs)):
+        events.extend(gating.process_chunk(chunk_samples(float(i + 1), n=gating.chunk_samples)))
+
+    assert any(isinstance(event, SpeechStart) for event in events)
+    assert any(isinstance(event, SpeechChunk) for event in events)
+    end = next(event for event in events if isinstance(event, SpeechEnd))
+    assert end.trailing_silence_ms == 64
+    assert gating.in_speech is False
+    assert gating.utterance_id is None
+
+
+def test_vad_gating_diagnostic_metric_failure_does_not_drop_events_or_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gating_module,
+        "compute_audio_frame_metrics",
+        lambda _frame: (_ for _ in ()).throw(RuntimeError("diagnostic metrics failed")),
+        raising=False,
+    )
+    lines: list[str] = []
+    probs = [0.9, 0.0, 0.0]
+    gating = VadGating(
+        SequenceVadEngine(probs=probs),
+        sample_rate_hz=16000,
+        ring_buffer_ms=64,
+        hangover_ms=64,
+        diagnostic_event_callback=lines.append,
+        diagnostic_label="self",
+    )
+
+    events = []
+    for i in range(len(probs)):
+        events.extend(gating.process_chunk(chunk_samples(float(i + 1), n=gating.chunk_samples)))
+
+    start = next(event for event in events if isinstance(event, SpeechStart))
+    end = next(event for event in events if isinstance(event, SpeechEnd))
+    assert start.utterance_id == end.utterance_id
+    assert any(isinstance(event, SpeechChunk) for event in events)
+    assert end.trailing_silence_ms == 64
+    assert gating.in_speech is False
+    assert gating.utterance_id is None
+    assert any("[AudioDiag][VAD][self] event=SpeechEnd" in line for line in lines)
+
+
+def test_vad_gating_skips_diagnostic_metrics_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gating_module,
+        "compute_audio_frame_metrics",
+        lambda _frame: (_ for _ in ()).throw(
+            AssertionError("disabled VAD diagnostics must not compute metrics")
+        ),
+        raising=False,
+    )
+    lines: list[str] = []
+    gating = VadGating(
+        SequenceVadEngine(probs=[0.9]),
+        sample_rate_hz=16000,
+        ring_buffer_ms=64,
+        hangover_ms=64,
+        diagnostic_event_callback=lines.append,
+        diagnostic_label="self",
+        diagnostics_enabled=lambda: False,
+    )
+
+    gating.process_chunk(chunk_samples(1.0, n=gating.chunk_samples))
+
+    assert lines == []

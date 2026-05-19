@@ -53,7 +53,11 @@ from puripuly_heart.config.settings import (
     supported_translation_connections,
     to_dict,
 )
-from puripuly_heart.core.storage.secrets import EncryptedFileSecretStore, mask_secret
+from puripuly_heart.core.storage.secrets import (
+    EncryptedFileSecretStore,
+    KeyringSecretStore,
+    mask_secret,
+)
 
 
 def test_settings_roundtrip(tmp_path):
@@ -137,6 +141,31 @@ def test_from_dict_preserves_explicit_integrated_context_disabled() -> None:
     settings = from_dict({"ui": {"integrated_context_enabled": False}})
 
     assert settings.ui.integrated_context_enabled is False
+
+
+def test_clipboard_auto_translate_defaults_off_for_new_and_partial_settings() -> None:
+    assert AppSettings().ui.clipboard_auto_translate_enabled is False
+    assert from_dict({}).ui.clipboard_auto_translate_enabled is False
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_clipboard_auto_translate_roundtrips_through_ui_settings(enabled: bool) -> None:
+    settings = AppSettings()
+    settings.ui.clipboard_auto_translate_enabled = enabled
+
+    data = to_dict(settings)
+
+    assert data["ui"]["clipboard_auto_translate_enabled"] is enabled
+    assert from_dict(data).ui.clipboard_auto_translate_enabled is enabled
+
+
+def test_from_dict_defaults_missing_clipboard_auto_translate_to_false() -> None:
+    raw = to_dict(AppSettings())
+    raw["ui"].pop("clipboard_auto_translate_enabled", None)
+
+    loaded = from_dict(raw)
+
+    assert loaded.ui.clipboard_auto_translate_enabled is False
 
 
 def test_save_settings_writes_via_temp_replace(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,7 +275,7 @@ def test_migrate_v17_strips_directsound_host_api_before_migration_and_preserves_
 
 
 def test_migrate_v18_preserves_directsound_when_removing_legacy_osc_rate_limits() -> None:
-    assert SETTINGS_SCHEMA_VERSION == 22
+    assert SETTINGS_SCHEMA_VERSION == 23
 
     raw = to_dict(AppSettings())
     raw["settings_version"] = 17
@@ -290,7 +319,7 @@ def test_load_settings_persists_v17_directsound_migration(tmp_path) -> None:
 
 
 def test_load_settings_persists_v18_osc_rate_limit_key_removal(tmp_path) -> None:
-    assert SETTINGS_SCHEMA_VERSION == 22
+    assert SETTINGS_SCHEMA_VERSION == 23
 
     path = tmp_path / "settings.json"
     raw = to_dict(AppSettings())
@@ -396,6 +425,27 @@ def test_local_llm_settings_default_and_roundtrip() -> None:
     assert loaded.local_llm.base_url == "http://192.168.0.25:11434/v1"
     assert loaded.local_llm.model == "qwen2.5:7b"
     assert loaded.local_llm.extra_body == {"enable_thinking": False}
+
+
+def test_local_llm_api_key_is_not_serialized_in_settings() -> None:
+    settings = AppSettings()
+    persisted = to_dict(settings)
+
+    assert "local_llm_api_key" not in persisted
+    assert "api_key" not in persisted["local_llm"]
+    assert "local_llm" not in persisted["api_key_verified"]
+
+
+def test_local_llm_stray_api_key_settings_are_ignored_on_roundtrip() -> None:
+    raw = to_dict(AppSettings())
+    raw["local_llm"]["api_key"] = "do-not-persist"
+    raw["api_key_verified"]["local_llm"] = True
+
+    loaded = from_dict(raw)
+    persisted = to_dict(loaded)
+
+    assert "api_key" not in persisted["local_llm"]
+    assert "local_llm" not in persisted["api_key_verified"]
 
 
 def test_translation_settings_defaults_to_gemma_managed_with_only_gemma_history() -> None:
@@ -607,9 +657,9 @@ def test_schema21_migration_adds_local_llm_defaults(tmp_path: Path) -> None:
     loaded = load_settings(path)
     persisted = json.loads(path.read_text(encoding="utf-8"))
 
-    assert loaded.settings_version == 22
+    assert loaded.settings_version == SETTINGS_SCHEMA_VERSION
     assert loaded.local_llm.extra_body == {"reasoning_effort": "none"}
-    assert persisted["settings_version"] == 22
+    assert persisted["settings_version"] == SETTINGS_SCHEMA_VERSION
     assert persisted["local_llm"]["base_url"] == "http://127.0.0.1:11434/v1"
 
 
@@ -1318,7 +1368,7 @@ def test_gemini_llm_model_roundtrip(tmp_path):
     assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
 
     persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite-preview"
+    assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite"
 
 
 def test_load_settings_migrates_legacy_qwen_mt_flash_model(tmp_path):
@@ -1344,7 +1394,20 @@ def test_load_settings_migrates_legacy_invalid_gemini_model(tmp_path):
     assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
 
     persisted = json.loads(path.read_text(encoding="utf-8"))
-    assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite-preview"
+    assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite"
+
+
+def test_load_settings_migrates_preview_gemini_flash_lite_to_ga(tmp_path):
+    path = tmp_path / "settings.json"
+    legacy = to_dict(AppSettings())
+    legacy["gemini"]["llm_model"] = "gemini-3.1-flash-lite-preview"
+    path.write_text(json.dumps(legacy, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    loaded = load_settings(path)
+    assert loaded.gemini.llm_model == GeminiLLMModel.GEMINI_31_FLASH_LITE
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["gemini"]["llm_model"] == "gemini-3.1-flash-lite"
 
 
 def test_from_dict_defaults_missing_gemini_model_to_flash_lite():
@@ -2736,6 +2799,100 @@ def test_encrypted_file_secret_store_roundtrip(tmp_path):
     assert store.get("google_api_key") == "sk-SECRET"
     store.delete("google_api_key")
     assert store.get("google_api_key") is None
+
+
+def test_keyring_secret_store_delete_propagates_unexpected_backend_exceptions() -> None:
+    class PasswordDeleteError(Exception):
+        pass
+
+    class BrokenKeyring:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+            self.errors = type("errors", (), {"PasswordDeleteError": PasswordDeleteError})
+
+        def delete_password(self, service_name: str, key: str) -> None:
+            self.calls.append((service_name, key))
+            raise RuntimeError("keyring delete failed")
+
+    fake_keyring = BrokenKeyring()
+
+    class FakeKeyringSecretStore(KeyringSecretStore):
+        def _keyring(self):
+            return fake_keyring
+
+    store = FakeKeyringSecretStore(service_name="test-service")
+
+    with pytest.raises(RuntimeError, match="keyring delete failed"):
+        store.delete("local_llm_api_key")
+
+    assert fake_keyring.calls == [("test-service", "local_llm_api_key")]
+
+
+def test_keyring_secret_store_delete_ignores_password_delete_error() -> None:
+    class PasswordDeleteError(Exception):
+        pass
+
+    class MissingPasswordKeyring:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str]] = []
+            self.errors = type("errors", (), {"PasswordDeleteError": PasswordDeleteError})
+
+        def delete_password(self, service_name: str, key: str) -> None:
+            self.calls.append(("delete", service_name, key))
+            raise PasswordDeleteError("password not found")
+
+        def get_password(self, service_name: str, key: str) -> str | None:
+            self.calls.append(("get", service_name, key))
+            return None
+
+    fake_keyring = MissingPasswordKeyring()
+
+    class FakeKeyringSecretStore(KeyringSecretStore):
+        def _keyring(self):
+            return fake_keyring
+
+    store = FakeKeyringSecretStore(service_name="test-service")
+
+    store.delete("local_llm_api_key")
+
+    assert fake_keyring.calls == [
+        ("delete", "test-service", "local_llm_api_key"),
+        ("get", "test-service", "local_llm_api_key"),
+    ]
+
+
+def test_keyring_secret_store_delete_reraises_password_delete_error_when_secret_remains() -> None:
+    class PasswordDeleteError(Exception):
+        pass
+
+    class StillPresentKeyring:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str]] = []
+            self.errors = type("errors", (), {"PasswordDeleteError": PasswordDeleteError})
+
+        def delete_password(self, service_name: str, key: str) -> None:
+            self.calls.append(("delete", service_name, key))
+            raise PasswordDeleteError("delete failed")
+
+        def get_password(self, service_name: str, key: str) -> str | None:
+            self.calls.append(("get", service_name, key))
+            return "still-present"
+
+    fake_keyring = StillPresentKeyring()
+
+    class FakeKeyringSecretStore(KeyringSecretStore):
+        def _keyring(self):
+            return fake_keyring
+
+    store = FakeKeyringSecretStore(service_name="test-service")
+
+    with pytest.raises(PasswordDeleteError, match="delete failed"):
+        store.delete("local_llm_api_key")
+
+    assert fake_keyring.calls == [
+        ("delete", "test-service", "local_llm_api_key"),
+        ("get", "test-service", "local_llm_api_key"),
+    ]
 
 
 def test_encrypted_file_secret_store_does_not_store_plaintext(tmp_path):

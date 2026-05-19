@@ -17,12 +17,16 @@ from puripuly_heart.config.settings import (
     OpenRouterLLMModel,
     OpenRouterProviderRouting,
     OpenRouterSelectionAlias,
+    ProviderSettings,
     TranslationConnection,
     TranslationModel,
     TranslationSettings,
 )
+from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.app import TranslatorApp, _check_and_notify_update
+
+MISSING = object()
 
 
 class DummyPage:
@@ -110,6 +114,17 @@ class ConstructionDummyController:
         _ = level
         self.detailed_messages.append(message)
 
+    def cycle_debug_capture_fault_profile(self) -> str:
+        self.capture_fault_cycled = True
+        return "capture_attenuate_40db"
+
+    def cycle_debug_stt_fault_profile(self) -> str:
+        self.stt_fault_cycled = True
+        return "stt_input_low_snr_vad_pass"
+
+    def clear_debug_audio_fault_profiles(self) -> None:
+        self.audio_faults_cleared = True
+
 
 class ConstructionDummyDashboardView(ft.Container):
     def __init__(self) -> None:
@@ -139,6 +154,7 @@ class ConstructionDummySettingsView(ft.Container):
         self.on_request_openrouter_pkce = None
         self.on_verify_api_key = None
         self.on_secret_cleared = None
+        self.on_local_llm_secret_changed = None
         self.show_snackbar = None
         self.overlay_peer_contract = None
         self.has_provider_changes = False
@@ -269,6 +285,10 @@ def test_translator_app_mounts_debug_preview_when_enabled(
         "on_discord_auth",
         "on_discord_callback_page",
         "on_peer_translation_eula",
+        "on_talk_together_pass_invite_progress",
+        "on_capture_fault_cycle",
+        "on_stt_fault_cycle",
+        "on_audio_fault_clear",
     }
     discord_callback = seen["callbacks"]["on_discord_auth"]
     assert getattr(discord_callback, "__self__", None) is app
@@ -276,6 +296,12 @@ def test_translator_app_mounts_debug_preview_when_enabled(
     callback_page = seen["callbacks"]["on_discord_callback_page"]
     assert getattr(callback_page, "__self__", None) is app
     assert getattr(callback_page, "__func__", None) is TranslatorApp._preview_discord_callback_page
+    pass_progress = seen["callbacks"]["on_talk_together_pass_invite_progress"]
+    assert getattr(pass_progress, "__self__", None) is app
+    assert (
+        getattr(pass_progress, "__func__", None)
+        is TranslatorApp._preview_talk_together_pass_invite_progress
+    )
     preview_calls: list[bool] = []
     monkeypatch.setattr(
         app,
@@ -287,6 +313,106 @@ def test_translator_app_mounts_debug_preview_when_enabled(
     root = page.added[0]
     assert isinstance(root.content, ft.Stack)
     assert root.content.controls[-1] is app.debug_preview_panel
+
+
+def test_debug_preview_panel_wires_audio_fault_actions(monkeypatch) -> None:
+    _patch_app_construction(monkeypatch)
+    captured_kwargs: dict[str, object] = {}
+    snackbars: list[tuple[str, object]] = []
+
+    class FakeDebugPreviewPanel(ft.Container):
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            super().__init__()
+
+    monkeypatch.setattr(app_module, "DebugPreviewPanel", FakeDebugPreviewPanel)
+    app = app_module.TranslatorApp(
+        DummyPage(), config_path=Path("settings.json"), debug_ui_preview=True
+    )
+    monkeypatch.setattr(
+        app, "_show_snackbar", lambda message, color=None: snackbars.append((message, color))
+    )
+
+    assert callable(captured_kwargs["on_capture_fault_cycle"])
+    assert callable(captured_kwargs["on_stt_fault_cycle"])
+    assert callable(captured_kwargs["on_audio_fault_clear"])
+    captured_kwargs["on_capture_fault_cycle"]()
+    captured_kwargs["on_stt_fault_cycle"]()
+    captured_kwargs["on_audio_fault_clear"]()
+    assert app.controller.capture_fault_cycled is True
+    assert app.controller.stt_fault_cycled is True
+    assert app.controller.audio_faults_cleared is True
+    assert snackbars[0][0] == app_module.t(
+        "debug_preview.capture_fault_snackbar", profile="capture_attenuate_40db"
+    )
+    assert snackbars[1][0] == app_module.t(
+        "debug_preview.stt_fault_snackbar", profile="stt_input_low_snr_vad_pass"
+    )
+    assert snackbars[2][0] == app_module.t("debug_preview.audio_fault_clear")
+
+
+def test_debug_audio_fault_actions_do_not_call_persistence_or_providers(monkeypatch) -> None:
+    _patch_app_construction(monkeypatch)
+    forbidden_calls: list[str] = []
+    monkeypatch.setattr(
+        app_module,
+        "save_settings",
+        lambda *args, **kwargs: forbidden_calls.append("save_settings"),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "webbrowser",
+        SimpleNamespace(open=lambda *args, **kwargs: forbidden_calls.append("webbrowser.open")),
+    )
+
+    app = app_module.TranslatorApp(
+        DummyPage(), config_path=Path("settings.json"), debug_ui_preview=True
+    )
+    monkeypatch.setattr(app, "_show_snackbar", lambda *_args, **_kwargs: None)
+
+    app._preview_capture_fault_cycle()
+    app._preview_stt_fault_cycle()
+    app._preview_audio_fault_clear()
+
+    assert forbidden_calls == []
+
+
+def test_debug_preview_talk_together_pass_invite_progress_sets_settings_state_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    managed_key_calls: list[dict[str, object]] = []
+    app.view_settings = SimpleNamespace(
+        set_managed_key_state=lambda **kwargs: managed_key_calls.append(kwargs)
+    )
+    forbidden_calls: list[str] = []
+    monkeypatch.setattr(
+        app_module,
+        "save_settings",
+        lambda *args, **kwargs: forbidden_calls.append("save_settings"),
+    )
+    monkeypatch.setattr(
+        app_module.webbrowser,
+        "open",
+        lambda *args, **kwargs: forbidden_calls.append("webbrowser.open"),
+    )
+
+    app._preview_talk_together_pass_invite_progress()
+
+    assert forbidden_calls == []
+    assert managed_key_calls == [
+        {
+            "visible": True,
+            "remaining_percent": 100,
+            "referral_id": "7KQ9M2",
+            "pass_status": TalkTogetherPassStatus(
+                pass_id="7KQ9M2",
+                invite_count=1,
+                invite_limit=5,
+                bonus_translations_per_friend=200,
+            ),
+        }
+    ]
 
 
 def test_debug_preview_discord_callback_page_opens_local_preview_without_oauth(
@@ -981,6 +1107,114 @@ async def test_start_discord_managed_auth_uses_run_task_and_success_enables_tran
     assert snackbar_calls == [(app_module.t("discord_auth.success"), app_module.COLOR_SUCCESS)]
     assert enable_calls == [True]
     assert dashboard_translation_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_passes_dialog_referral_id_to_controller() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(referral_id="not a referral id", set_waiting=lambda: None)
+    app._discord_managed_auth_dialog = dialog
+    start_kwargs: list[dict[str, object]] = []
+    enable_calls: list[bool] = []
+
+    async def fake_start_discord_managed_auth_from_dialog(**kwargs) -> bool:
+        start_kwargs.append(kwargs)
+        return False
+
+    async def fake_set_translation_enabled(enabled: bool) -> None:
+        enable_calls.append(enabled)
+
+    app.controller = SimpleNamespace(
+        start_discord_managed_auth_from_dialog=fake_start_discord_managed_auth_from_dialog,
+        set_translation_enabled=fake_set_translation_enabled,
+    )
+
+    app._start_discord_managed_auth()
+    await app.page.tasks[0]()
+
+    assert len(start_kwargs) == 1
+    assert start_kwargs[0]["referral_id"] == "not a referral id"
+    assert callable(start_kwargs[0]["on_callback_received"])
+    assert enable_calls == []
+
+
+@pytest.mark.asyncio
+async def test_start_discord_managed_auth_shows_referral_reward_snackbar_when_bonus_applied() -> (
+    None
+):
+    previous_locale = i18n_module.get_locale()
+    i18n_module.set_locale("ko")
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(referral_id="7KQ9M2", set_waiting=lambda: None, close=lambda: None)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+    app.view_dashboard = SimpleNamespace(set_translation_enabled=lambda _enabled: None)
+    hub = SimpleNamespace(llm=object(), translation_enabled=False)
+
+    controller = SimpleNamespace(hub=hub)
+
+    async def fake_start_discord_managed_auth_from_dialog(**_kwargs) -> bool:
+        controller.last_discord_managed_auth_referral_bonus_applied = True
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        hub.translation_enabled = enabled
+        return True
+
+    controller.start_discord_managed_auth_from_dialog = fake_start_discord_managed_auth_from_dialog
+    controller.set_translation_enabled = fake_set_translation_enabled
+    app.controller = controller
+
+    try:
+        app._start_discord_managed_auth()
+        await app.page.tasks[0]()
+
+        assert snackbar_calls == [
+            (app_module.t("discord_auth.success"), app_module.COLOR_SUCCESS),
+            (app_module.t("discord_auth.referral_reward_applied"), app_module.COLOR_SUCCESS),
+        ]
+    finally:
+        i18n_module.set_locale(previous_locale)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "referral_bonus_applied",
+    [MISSING, False, None, "true", 1],
+)
+async def test_start_discord_managed_auth_omits_referral_snackbar_without_boolean_true(
+    referral_bonus_applied: object,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    dialog = SimpleNamespace(referral_id="7KQ9M2", set_waiting=lambda: None, close=lambda: None)
+    app._discord_managed_auth_dialog = dialog
+    snackbar_calls: list[tuple[str, object]] = []
+    app._show_snackbar = lambda message, color: snackbar_calls.append((message, color))
+    app.view_dashboard = SimpleNamespace(set_translation_enabled=lambda _enabled: None)
+    hub = SimpleNamespace(llm=object(), translation_enabled=False)
+    controller = SimpleNamespace(hub=hub)
+
+    async def fake_start_discord_managed_auth_from_dialog(**_kwargs) -> bool:
+        if referral_bonus_applied is not MISSING:
+            controller.last_discord_managed_auth_referral_bonus_applied = referral_bonus_applied
+        return True
+
+    async def fake_set_translation_enabled(enabled: bool) -> bool:
+        hub.translation_enabled = enabled
+        return True
+
+    controller.start_discord_managed_auth_from_dialog = fake_start_discord_managed_auth_from_dialog
+    controller.set_translation_enabled = fake_set_translation_enabled
+    app.controller = controller
+
+    app._start_discord_managed_auth()
+    await app.page.tasks[0]()
+
+    assert snackbar_calls == [(app_module.t("discord_auth.success"), app_module.COLOR_SUCCESS)]
 
 
 @pytest.mark.asyncio
@@ -1887,6 +2121,52 @@ async def test_submit_toggle_and_settings_wrappers_schedule_controller_tasks() -
     ]
 
 
+@pytest.mark.asyncio
+async def test_local_llm_secret_changed_forces_local_llm_rebuild() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    calls: list[bool] = []
+
+    async def fake_apply_providers(
+        _settings=None,
+        *,
+        force_rebuild_llm: bool = False,
+    ) -> None:
+        calls.append(force_rebuild_llm)
+
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.LOCAL_LLM))
+    app.controller = SimpleNamespace(settings=settings, apply_providers=fake_apply_providers)
+
+    app._on_local_llm_secret_changed()
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_local_llm_secret_changed_ignores_non_local_llm_provider() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    calls: list[bool] = []
+
+    async def fake_apply_providers(
+        _settings=None,
+        *,
+        force_rebuild_llm: bool = False,
+    ) -> None:
+        calls.append(force_rebuild_llm)
+
+    settings = AppSettings(provider=ProviderSettings(llm=LLMProviderName.GEMINI))
+    app.controller = SimpleNamespace(settings=settings, apply_providers=fake_apply_providers)
+
+    app._on_local_llm_secret_changed()
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert calls == []
+
+
 def test_toggle_handlers_route_basic_and_detailed_runtime_logs() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
@@ -2037,6 +2317,50 @@ async def test_on_verify_api_key_persists_and_updates_dashboard_flags(
     assert app.view_dashboard.stt_calls[-1] == (False, False)
     assert app.view_dashboard.trans_calls[-1] == (False, False)
     assert len(saves) == 4
+
+
+@pytest.mark.asyncio
+async def test_on_verify_api_key_skips_persistence_for_stale_field_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.view_settings = SimpleNamespace(_google_key=SimpleNamespace(value="new-key"))
+    app.view_dashboard = SimpleNamespace(
+        stt_calls=[],
+        trans_calls=[],
+        set_stt_needs_key=lambda value, update_ui=False: app.view_dashboard.stt_calls.append(
+            (value, update_ui)
+        ),
+        set_translation_needs_key=lambda value, update_ui=False: app.view_dashboard.trans_calls.append(
+            (value, update_ui)
+        ),
+    )
+
+    async def fake_verify(provider: str, key: str):
+        assert (provider, key) == ("google", "old-key")
+        return True, "ok"
+
+    settings = SimpleNamespace(
+        api_key_verified=SimpleNamespace(
+            google=False,
+        )
+    )
+    app.controller = SimpleNamespace(
+        verify_api_key=fake_verify,
+        settings=settings,
+        config_path="settings.json",
+    )
+
+    saves: list[tuple[object, object]] = []
+    monkeypatch.setattr(app_module, "save_settings", lambda path, cfg: saves.append((path, cfg)))
+
+    result = await app._on_verify_api_key("google", "old-key")
+
+    assert result == (True, "ok")
+    assert settings.api_key_verified.google is False
+    assert saves == []
+    assert app.view_dashboard.stt_calls == []
+    assert app.view_dashboard.trans_calls == []
 
 
 def test_show_snackbar_opens_page_snackbar() -> None:

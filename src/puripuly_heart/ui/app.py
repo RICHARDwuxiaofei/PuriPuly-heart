@@ -27,6 +27,7 @@ from puripuly_heart.core.discord_oauth_loopback import (
     render_discord_oauth_callback_completion_page,
 )
 from puripuly_heart.core.language import get_stt_compatibility_warning
+from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.core.updater import check_for_update
 from puripuly_heart.ui.components.bottom_nav import BottomNavBar
 from puripuly_heart.ui.components.debug_preview_panel import DebugPreviewPanel
@@ -72,6 +73,7 @@ FOUNDER_README_API_KEYS_ANCHOR_BY_LOCALE = {
     "ja": "自分のapiキーを使う",
 }
 FOUNDER_README_DEFAULT_API_KEYS_ANCHOR = "using-your-own-api-keys"
+DEBUG_PREVIEW_TALK_TOGETHER_PASS_ID = "7KQ9M2"
 
 
 def founder_readme_url_for_locale(locale: str | None) -> str:
@@ -129,6 +131,7 @@ class TranslatorApp:
         self.view_settings.on_request_openrouter_pkce = self._on_request_openrouter_pkce
         self.view_settings.on_verify_api_key = self._on_verify_api_key
         self.view_settings.on_secret_cleared = self._on_secret_cleared
+        self.view_settings.on_local_llm_secret_changed = self._on_local_llm_secret_changed
         self.view_settings.show_snackbar = self._show_snackbar
         self.view_logs.on_mode_change = self._on_runtime_logging_mode_change
         self.view_logs.set_runtime_logging_mode(self.controller.runtime_logging_mode)
@@ -231,6 +234,12 @@ class TranslatorApp:
             on_discord_auth=self._preview_discord_auth,
             on_discord_callback_page=self._preview_discord_callback_page,
             on_peer_translation_eula=self._preview_peer_translation_eula,
+            on_talk_together_pass_invite_progress=(
+                self._preview_talk_together_pass_invite_progress
+            ),
+            on_capture_fault_cycle=self._preview_capture_fault_cycle,
+            on_stt_fault_cycle=self._preview_stt_fault_cycle,
+            on_audio_fault_clear=self._preview_audio_fault_clear,
         )
 
     def _preview_brake_notice(self) -> None:
@@ -258,6 +267,38 @@ class TranslatorApp:
 
     def _preview_peer_translation_eula(self) -> None:
         self._show_peer_translation_eula(self._debug_preview_noop)
+
+    def _preview_talk_together_pass_invite_progress(self) -> None:
+        set_managed_key_state = getattr(self.view_settings, "set_managed_key_state", None)
+        if not callable(set_managed_key_state):
+            return
+        set_managed_key_state(
+            visible=True,
+            remaining_percent=100,
+            referral_id=DEBUG_PREVIEW_TALK_TOGETHER_PASS_ID,
+            pass_status=TalkTogetherPassStatus(
+                pass_id=DEBUG_PREVIEW_TALK_TOGETHER_PASS_ID,
+                invite_count=1,
+                invite_limit=5,
+                bonus_translations_per_friend=200,
+            ),
+        )
+
+    def _preview_capture_fault_cycle(self) -> None:
+        profile = self.controller.cycle_debug_capture_fault_profile()
+        self._show_snackbar(
+            t("debug_preview.capture_fault_snackbar", profile=profile), ft.Colors.ORANGE_700
+        )
+
+    def _preview_stt_fault_cycle(self) -> None:
+        profile = self.controller.cycle_debug_stt_fault_profile()
+        self._show_snackbar(
+            t("debug_preview.stt_fault_snackbar", profile=profile), ft.Colors.ORANGE_700
+        )
+
+    def _preview_audio_fault_clear(self) -> None:
+        self.controller.clear_debug_audio_fault_profiles()
+        self._show_snackbar(t("debug_preview.audio_fault_clear"), ft.Colors.GREEN_700)
 
     def _show_peer_translation_eula(self, on_accept) -> None:
         dialog = PeerTranslationEulaDialog(
@@ -612,6 +653,15 @@ class TranslatorApp:
 
         self._queue_settings_mutation_task(_task)
 
+    def _on_local_llm_secret_changed(self) -> None:
+        async def _task():
+            settings = getattr(self.controller, "settings", None)
+            if settings is None or settings.provider.llm != LLMProviderName.LOCAL_LLM:
+                return
+            await self.controller.apply_providers(force_rebuild_llm=True)
+
+        self._queue_settings_mutation_task(_task)
+
     def _on_request_openrouter_pkce(
         self,
         target_settings: AppSettings,
@@ -735,6 +785,10 @@ class TranslatorApp:
 
     def _start_discord_managed_auth(self) -> None:
         dialog = getattr(self, "_discord_managed_auth_dialog", None)
+        raw_referral_id = getattr(dialog, "referral_id", "")
+        referral_id = (
+            raw_referral_id if isinstance(raw_referral_id, str) and raw_referral_id else None
+        )
         set_waiting = getattr(dialog, "set_waiting", None)
         if callable(set_waiting):
             set_waiting()
@@ -750,7 +804,10 @@ class TranslatorApp:
                 self.mark_discord_managed_auth_callback_received(generation)
 
             try:
-                ok = await start_auth(on_callback_received=_mark_callback_received)
+                ok = await start_auth(
+                    on_callback_received=_mark_callback_received,
+                    referral_id=referral_id,
+                )
                 if not ok or not self._is_current_discord_managed_auth_generation(generation):
                     return
                 enable_translation = getattr(controller, "set_translation_enabled", None)
@@ -768,6 +825,11 @@ class TranslatorApp:
                 return
             self._close_discord_managed_auth_dialog()
             self._show_snackbar(t("discord_auth.success"), COLOR_SUCCESS)
+            if (
+                getattr(controller, "last_discord_managed_auth_referral_bonus_applied", False)
+                is True
+            ):
+                self._show_snackbar(t("discord_auth.referral_reward_applied"), COLOR_SUCCESS)
             self._set_dashboard_translation_visual_state(True)
             if self._is_current_discord_managed_auth_generation(generation):
                 self._discord_managed_auth_task_handle = None
@@ -869,8 +931,35 @@ class TranslatorApp:
         self._founder_letter_dialog = dialog
         dialog.open()
 
+    def _api_key_verification_matches_current_field(self, provider: str, key: str) -> bool:
+        field_by_provider = {
+            "deepgram": "_deepgram_key",
+            "soniox": "_soniox_key",
+            "google": "_google_key",
+            "openrouter": "_openrouter_key",
+            "deepseek": "_deepseek_key",
+            "alibaba_beijing": "_alibaba_key_beijing",
+            "alibaba_singapore": "_alibaba_key_singapore",
+        }
+        field_name = field_by_provider.get(provider)
+        if field_name is None:
+            return True
+
+        field = getattr(getattr(self, "view_settings", None), field_name, None)
+        if field is None:
+            return True
+
+        current_key = getattr(field, "value", None)
+        if current_key is None:
+            return True
+
+        return current_key == key
+
     async def _on_verify_api_key(self, provider: str, key: str) -> tuple[bool, str]:
         success, msg = await self.controller.verify_api_key(provider, key)
+
+        if not self._api_key_verification_matches_current_field(provider, key):
+            return success, msg
 
         # Save verification result to settings
         setattr(self.controller.settings.api_key_verified, provider, success)
