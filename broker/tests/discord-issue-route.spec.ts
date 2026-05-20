@@ -205,6 +205,7 @@ describe('Discord issue gate', () => {
   it('keeps Referral ID and omits Talk Together Pass status when issue invite count query fails', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW_ISO));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
     const env = createTestBrokerEnv({
       beforeFirst({ sql }) {
@@ -221,9 +222,10 @@ describe('Discord issue gate', () => {
       env,
     );
     const code = 'discord-oauth-code-pass-count-failure';
+    const rawDiscordUserId = discordSnowflakeForAgeDays(31);
     mockDiscordApi({
       user: {
-        id: discordSnowflakeForAgeDays(31),
+        id: rawDiscordUserId,
         verified: true,
       },
     });
@@ -235,6 +237,17 @@ describe('Discord issue gate', () => {
     const payload = (await response.json()) as Record<string, unknown>;
     expect(payload.referral_id).toMatch(REFERRAL_ID_PATTERN);
     expect(payload).not.toHaveProperty('talk_together_pass');
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith('owned_referral_status_failed', {
+      endpoint: 'discord_issue',
+      installation_id: expect.any(String),
+      reason: 'talk_together_pass_status_failed',
+    });
+    const warnCalls = JSON.stringify(warnSpy.mock.calls);
+    expect(warnCalls).not.toContain('forced Talk Together Pass count failure');
+    expect(warnCalls).not.toContain('or-discord-managed-child-key');
+    expect(warnCalls).not.toContain('hash_discord_managed_child');
+    expect(warnCalls).not.toContain(rawDiscordUserId);
   });
 
   it('returns a restart boundary when Discord token exchange fails after terminalizing the session', async () => {
