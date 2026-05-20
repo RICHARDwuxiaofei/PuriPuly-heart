@@ -696,16 +696,53 @@ def test_load_from_settings_places_managed_key_card_above_provider_fields(
 
 
 @pytest.mark.parametrize(
-    ("selected_source", "active_ref", "referral_id", "expected_visible"),
+    (
+        "model",
+        "connection",
+        "selected_source",
+        "active_ref",
+        "referral_id",
+        "expected_visible",
+    ),
     [
-        (OpenRouterCredentialSource.MANAGED, None, None, True),
-        (OpenRouterCredentialSource.BYOK, "managed-ref", None, True),
-        (OpenRouterCredentialSource.BYOK, None, "7KQ9M2", True),
-        (OpenRouterCredentialSource.BYOK, None, None, False),
+        (
+            TranslationModel.GEMMA4,
+            TranslationConnection.MANAGED,
+            OpenRouterCredentialSource.MANAGED,
+            None,
+            None,
+            True,
+        ),
+        (
+            TranslationModel.DEEPSEEK_V4_FLASH,
+            TranslationConnection.MANAGED_CHINA,
+            OpenRouterCredentialSource.MANAGED,
+            None,
+            None,
+            True,
+        ),
+        (
+            TranslationModel.GEMMA4,
+            TranslationConnection.OPENROUTER,
+            OpenRouterCredentialSource.BYOK,
+            "managed-ref",
+            None,
+            False,
+        ),
+        (
+            TranslationModel.GEMMA4,
+            TranslationConnection.OPENROUTER,
+            OpenRouterCredentialSource.BYOK,
+            None,
+            "7KQ9M2",
+            False,
+        ),
     ],
 )
-def test_managed_key_card_visibility_follows_managed_identity_state(
+def test_managed_key_card_visibility_follows_translation_connection(
     monkeypatch: pytest.MonkeyPatch,
+    model: TranslationModel,
+    connection: TranslationConnection,
     selected_source: OpenRouterCredentialSource,
     active_ref: str | None,
     referral_id: str | None,
@@ -713,6 +750,9 @@ def test_managed_key_card_visibility_follows_managed_identity_state(
 ) -> None:
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.translation.model = model
+    settings.translation.connection = connection
+    settings.translation.connection_history[model.value] = connection
     settings.openrouter.selected_source = selected_source
     settings.managed_identity.active_managed_credential_ref = active_ref
     settings.managed_identity.referral_id = referral_id
@@ -746,7 +786,7 @@ def test_managed_key_referral_row_shows_owned_id_with_enabled_copy(
 ) -> None:
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.OPENROUTER
-    settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     settings.managed_identity.referral_id = "7kq9m2"
     settings.validate()
 
@@ -773,7 +813,7 @@ def test_managed_key_referral_copy_button_copies_owned_id_and_shows_snackbar(
 
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.OPENROUTER
-    settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
     settings.managed_identity.referral_id = "7KQ9M2"
     settings.validate()
     snackbar_calls: list[tuple[str, object]] = []
@@ -883,6 +923,128 @@ def test_set_managed_key_state_updates_card_controls_and_api_section_repaint(
         "settings.managed_key.referral_id.copy_tooltip"
     )
     assert "api_keys_column" in updates
+
+
+def test_set_managed_key_state_hides_card_for_openrouter_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.translation.connection = TranslationConnection.OPENROUTER
+    settings.translation.connection_history[TranslationModel.GEMMA4.value] = (
+        TranslationConnection.OPENROUTER
+    )
+    settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    attach_dummy_page(monkeypatch, view)
+
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=64,
+        referral_id="7kq9m2",
+    )
+
+    assert view._managed_key_card.visible is False
+    assert view._managed_trial_usage_bar.visible is False
+    assert view._managed_trial_usage_bar.percent is None
+    assert view._managed_key_referral_id == "7KQ9M2"
+
+
+def test_set_managed_key_state_keeps_card_visible_for_managed_connection_when_usage_hidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.translation.connection = TranslationConnection.MANAGED
+    settings.translation.connection_history[TranslationModel.GEMMA4.value] = (
+        TranslationConnection.MANAGED
+    )
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view.set_managed_key_state(
+        visible=False,
+        remaining_percent=64,
+        referral_id="7kq9m2",
+    )
+
+    assert view._managed_key_card.visible is True
+    assert view._managed_trial_usage_bar.visible is True
+    assert view._managed_trial_usage_bar.percent is None
+    assert view._managed_key_referral_id == "7KQ9M2"
+
+
+@pytest.mark.parametrize(
+    (
+        "initial_connection",
+        "initial_source",
+        "initial_alias",
+        "selected_connection",
+        "expected_visible",
+    ),
+    [
+        (
+            TranslationConnection.OPENROUTER,
+            OpenRouterCredentialSource.BYOK,
+            OpenRouterSelectionAlias.GEMMA4_BYOK,
+            TranslationConnection.MANAGED,
+            True,
+        ),
+        (
+            TranslationConnection.MANAGED,
+            OpenRouterCredentialSource.MANAGED,
+            OpenRouterSelectionAlias.GEMMA4_MANAGED,
+            TranslationConnection.OPENROUTER,
+            False,
+        ),
+    ],
+)
+def test_translation_connection_selected_repaints_managed_key_card_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+    initial_connection: TranslationConnection,
+    initial_source: OpenRouterCredentialSource,
+    initial_alias: OpenRouterSelectionAlias,
+    selected_connection: TranslationConnection,
+    expected_visible: bool,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMMA4,
+        connection=initial_connection,
+        connection_history={TranslationModel.GEMMA4.value: initial_connection},
+    )
+    settings.openrouter.selected_source = initial_source
+    settings.openrouter.selection_alias = initial_alias
+    view = _make_llm_selection_view(monkeypatch, settings)
+    updates: list[str] = []
+    mounted_page = object()
+    view._managed_key_card = SimpleNamespace(
+        visible=initial_connection == TranslationConnection.MANAGED,
+        page=mounted_page,
+        update=lambda: updates.append("managed_key_card"),
+    )
+    view._api_keys_column = SimpleNamespace(
+        page=mounted_page,
+        update=lambda: updates.append("api_keys_column"),
+    )
+    view._settings_subtab_shell = SimpleNamespace(
+        body_by_key={
+            "api": SimpleNamespace(
+                page=mounted_page,
+                update=lambda: updates.append("api_body"),
+            )
+        }
+    )
+    attach_dummy_page(monkeypatch, view)
+
+    view._on_translation_connection_selected(selected_connection.value)
+
+    assert view._managed_key_card.visible is expected_visible
+    assert "managed_key_card" in updates
+    assert "api_body" in updates
 
 
 def test_set_managed_key_state_empty_referral_disables_copy_and_repaints_parent(
