@@ -439,6 +439,7 @@ describe('broker persistent state model', () => {
       '0004_add_discord_oauth_managed_issue.sql',
       '0005_add_referral_persistence_foundation.sql',
       '0006_harden_referral_reward_operations.sql',
+      '0007_simplify_referral_id_checks.sql',
     ]);
     expect(existsSync(FIRST_BROKER_MIGRATION)).toBe(true);
     expect(existsSync(LATEST_BROKER_MIGRATION)).toBe(true);
@@ -465,7 +466,12 @@ describe('broker persistent state model', () => {
     const referralPersistenceMigration = readBrokerMigrationSql(
       '0005_add_referral_persistence_foundation.sql',
     );
-    const referralOperationsMigration = readFileSync(LATEST_BROKER_MIGRATION, 'utf8');
+    const referralOperationsMigration = readBrokerMigrationSql(
+      '0006_harden_referral_reward_operations.sql',
+    );
+    const referralCheckRepairMigration = readBrokerMigrationSql(
+      '0007_simplify_referral_id_checks.sql',
+    );
 
     expect(migration).toContain('CREATE TABLE broker_config');
     expect(migration).toContain('CREATE TABLE installations');
@@ -567,5 +573,21 @@ describe('broker persistent state model', () => {
     expect(referralOperationsMigration).toContain('$.retention.referralSkippedDays');
     expect(referralOperationsMigration).toContain('$.retention.referralFailedDays');
     expect(referralOperationsMigration).toContain('$.referralAttempts');
+    expect(referralCheckRepairMigration).toContain('PRAGMA defer_foreign_keys = on');
+    expect(referralCheckRepairMigration).toContain(
+      'CREATE TABLE discord_oauth_sessions_referral_id_checks_v2',
+    );
+    expect(referralCheckRepairMigration).toContain(
+      'CREATE TABLE referral_codes_referral_id_checks_v2',
+    );
+    expect(referralCheckRepairMigration).toContain(
+      'CREATE TABLE referral_rewards_referral_id_checks_v2',
+    );
+    expect(referralCheckRepairMigration).toContain(
+      "AND referral_id NOT GLOB '*[^23456789ABCDEFGHJKMNPQRSTUVWXYZ]*'",
+    );
+    expect(referralCheckRepairMigration).toContain('PRAGMA foreign_key_check');
+    expect(referralCheckRepairMigration).not.toContain('PRAGMA foreign_keys = OFF');
+    expect(referralCheckRepairMigration).not.toContain('PRAGMA foreign_keys = ON');
   });
 });

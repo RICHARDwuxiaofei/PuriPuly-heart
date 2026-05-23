@@ -963,6 +963,10 @@ async function bestEffortResolveOwnedReferralStatusForStatus(
   try {
     const result = await ensureOwnedReferralIdForActiveDiscordManagedUser(db, input);
     if (!result.ok) {
+      logTrialStatusOwnedReferralFailure({
+        installationId: input.installationId,
+        reason: result.reason,
+      });
       return null;
     }
 
@@ -975,14 +979,43 @@ async function bestEffortResolveOwnedReferralStatusForStatus(
         ),
       };
     } catch {
+      logTrialStatusOwnedReferralFailure({
+        installationId: input.installationId,
+        reason: 'talk_together_pass_status_failed',
+      });
       return {
         referralCode: result.referralCode,
         talkTogetherPass: null,
       };
     }
   } catch {
+    logTrialStatusOwnedReferralFailure({
+      installationId: input.installationId,
+      reason: 'owned_referral_ensure_exception',
+    });
     return null;
   }
+}
+
+function logTrialStatusOwnedReferralFailure(input: {
+  installationId: string;
+  reason: string;
+}): void {
+  if (input.reason === 'not_eligible') {
+    return;
+  }
+
+  console.warn('owned_referral_status_failed', {
+    endpoint: 'trial_status',
+    installation_id: input.installationId,
+    reason: normalizeTrialStatusOwnedReferralFailureReason(input.reason),
+  });
+}
+
+function normalizeTrialStatusOwnedReferralFailureReason(reason: string): string {
+  return /^[a-z0-9_:-]{1,64}$/u.test(reason)
+    ? reason
+    : 'owned_referral_ensure_exception';
 }
 
 async function readJsonBody<T>(

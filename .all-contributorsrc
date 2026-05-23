@@ -87,6 +87,12 @@
       "name": "Han โชเล่ย์",
       "avatar_url": "https://ui-avatars.com/api/?name=HAN&size=160&background=FFFBEA&color=6C5525&rounded=true&bold=true",
       "contributions": ["thanks"]
+    },
+    {
+      "login": "ea-pe",
+      "name": "EA_PE",
+      "avatar_url": "https://ui-avatars.com/api/?name=EA&size=160&background=F0FFF4&color=2F6B45&rounded=true&bold=true",
+      "contributions": ["thanks"]
     }
   ]
 }

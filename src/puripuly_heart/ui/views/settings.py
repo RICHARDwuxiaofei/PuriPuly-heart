@@ -1955,25 +1955,15 @@ class SettingsView(ft.Column):
             "remaining_percent": self._managed_trial_usage_remaining_percent,
         }
 
-    def _is_managed_openrouter_selected(self, settings: AppSettings | None) -> bool:
+    def _is_managed_translation_connection_selected(self, settings: AppSettings | None) -> bool:
         return bool(
             settings is not None
-            and settings.provider.llm == LLMProviderName.OPENROUTER
-            and settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+            and settings.translation.connection
+            in (TranslationConnection.MANAGED, TranslationConnection.MANAGED_CHINA)
         )
 
     def _managed_key_card_visible_for(self, settings: AppSettings | None) -> bool:
-        if settings is None:
-            return False
-        active_ref = getattr(settings.managed_identity, "active_managed_credential_ref", None)
-        owned_referral_id = normalize_owned_referral_id(
-            getattr(settings.managed_identity, "referral_id", None)
-        )
-        return bool(
-            self._is_managed_openrouter_selected(settings)
-            or (isinstance(active_ref, str) and bool(active_ref.strip()))
-            or owned_referral_id
-        )
+        return self._is_managed_translation_connection_selected(settings)
 
     def _sync_managed_key_referral_row_value(self, referral_id: str | None) -> None:
         referral_id = normalize_owned_referral_id(referral_id)
@@ -2106,9 +2096,12 @@ class SettingsView(ft.Column):
         referral_id: str | None = None,
         pass_status: TalkTogetherPassStatus | None = None,
     ) -> None:
-        card_visible = bool(visible)
-        self._managed_trial_usage_visible = card_visible
-        if card_visible and remaining_percent is not None:
+        usage_visible = bool(visible)
+        card_visible = self._managed_key_card_visible_for(
+            self._build_settings_with_provider_draft()
+        )
+        self._managed_trial_usage_visible = usage_visible
+        if usage_visible and remaining_percent is not None:
             self._managed_trial_usage_remaining_percent = max(0, min(100, int(remaining_percent)))
         else:
             self._managed_trial_usage_remaining_percent = None
@@ -2905,7 +2898,7 @@ class SettingsView(ft.Column):
 
         if self.page:
             self._qwen_region_btn.update()
-            self._api_keys_column.update()
+            self._repaint_managed_key_card()
             self._llm_text.update()
             self._translation_connection_row.update()
             self._local_llm_connection_card.update()
