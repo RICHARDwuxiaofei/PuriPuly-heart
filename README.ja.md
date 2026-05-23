@@ -69,7 +69,7 @@
 → 騒音の少ない1対1の環境で最もよく動作します。3人までなら問題ない場合もありますが、保証はできません。VRChatで使う場合は、Earmuff機能を使って環境をコントロールしてください。
 
 - **音声認識がうまくいきません / 遅いです**
-→ ローカルのQwen ASRを使っている場合は、クラウドSTTに切り替えるのをおすすめします。
+→ ローカルのQwen ASRを使っている場合は、クラウドSTTに切り替えるのをおすすめします。Intelユーザーの方は、PuriPulyをPコアのみに固定割り当てされるよう設定してください。
 
 - **音声や会話の内容はどう扱われますか？**
 → 自分の文字起こしと翻訳結果のみがローカルに保存されます。相手の音声・文字起こし・翻訳結果は記録しません。ただし、STTサービスと翻訳プロバイダーがデータを処理することがあります。
@@ -164,14 +164,76 @@ Soniox / Gemini / Deepgramへのアクセスがブロックされている地域
 
 利用するサービスに合わせて、適切なガイドを見ながら進めてください。
 
-OpenRouter経由でGemma 4モデルを使うことをおすすめします。
+翻訳用LLMは、OpenRouter経由でGemma 4モデルを使うことをおすすめします。
 
-もしよければ、設定するついでに、STT側も一緒に設定しませんか？
+もしよければ、設定するついでに、ASR側も一緒に設定しませんか？
 PuriPulyはクラウドSTTと組み合わせると最良の体験になります。
 たとえば同じQwen ASRでも、ローカルとクラウドでは音声認識性能にかなり差があります。
 
 まずはDeepgramから始めるのをおすすめします。
 登録するだけで200ドル分の無料クレジットがもらえます。
+
+<details>
+<summary><h3>OpenRouter</h3></summary>
+
+1. 赤い丸の中のオプションをスクリーンショットのとおりに設定してください。
+   ![step0](docs/images/openrouter/0.png)
+
+2. アプリ内で赤い丸の中のボタンを押します。
+   ![step1](docs/images/openrouter/1.png)
+
+3. OpenRouterでログインします。
+   ![step2](docs/images/openrouter/2.png)
+
+4. 赤い丸の中のボタンを押して決済画面を抜けます。
+   ![step3](docs/images/openrouter/3.png)
+
+5. **Authorize** ボタンを押します。
+   ![step4](docs/images/openrouter/4.png)
+
+6. 使う分だけ前払いでチャージします。
+   ![step5](docs/images/openrouter/5.png)
+
+<details>
+<summary><h3>Authorizeボタンを押しても認証されない場合</h3></summary>
+
+Authorizeボタンを押しても認証されない場合は、再試行するか、以下の手順で直接APIキーを発行して貼り付けてください。
+
+6. 右上のアカウントをクリックし、左のAPI Keysタブを開いて、中央のCreateボタンを押します。
+   ![step6](docs/images/openrouter/6.png)
+
+7. Createボタンを押します。
+   ![step7](docs/images/openrouter/7.png)
+
+8. ボタンを押してAPIキーをコピーし、翻訳機のAPIタブに貼り付けます。
+   ![step8](docs/images/openrouter/8.png)
+
+</details>
+
+</details>
+
+<details>
+<summary><h3>DeepSeek</h3></summary>
+
+1. 赤い丸の中のオプションをスクリーンショットのとおりに設定してください。
+   ![step0](docs/images/deepseek/0.png)
+
+2. [DeepSeek公式サイト](https://www.deepseek.com/en/)にアクセスし、**Access API** ボタンをクリックします。
+   ![step1](docs/images/deepseek/1.png)
+
+3. サイトでログインします。
+   ![step2](docs/images/deepseek/2.png)
+
+4. API Keysタブに移動して **Create new API Keys** を押します。
+   ![step3](docs/images/deepseek/3.png)
+
+5. ボタンを押してAPIキーをコピーし、翻訳機のAPIタブに貼り付けます。
+   ![step4](docs/images/deepseek/4.png)
+
+6. Top Upタブに移動し、使う分だけ前払いでチャージします。
+   ![step5](docs/images/deepseek/5.png)
+
+</details>
 
 <details>
 <summary><h3>Deepgram</h3></summary>
@@ -229,62 +291,6 @@ PuriPulyはクラウドSTTと組み合わせると最良の体験になります
 
 9. ステップ7で設定した有料プランのプロジェクトを選択してください。
    ![step9](docs/images/gemini/9.png)
-
-</details>
-
-</details>
-
-<details>
-<summary><h3>DeepSeek</h3></summary>
-
-1. [DeepSeek公式サイト](https://www.deepseek.com/en/)にアクセスし、**Access API** ボタンをクリックします。
-   ![step1](docs/images/deepseek/1.png)
-
-2. サイトでログインします。
-   ![step2](docs/images/deepseek/2.png)
-
-3. API Keysタブに移動して **Create new API Keys** を押します。
-   ![step3](docs/images/deepseek/3.png)
-
-4. ボタンを押してAPIキーをコピーし、翻訳機のAPIタブに貼り付けます。
-   ![step4](docs/images/deepseek/4.png)
-
-5. Top Upタブに移動し、使う分だけ前払いでチャージします。
-   ![step5](docs/images/deepseek/5.png)
-
-</details>
-
-<details>
-<summary><h3>OpenRouter</h3></summary>
-
-1. アプリ内で赤い丸の中のボタンを押します。
-   ![step1](docs/images/openrouter/1.png)
-
-2. OpenRouterでログインします。
-   ![step2](docs/images/openrouter/2.png)
-
-3. 赤い丸の中のボタンを押して決済画面を抜けます。
-   ![step3](docs/images/openrouter/3.png)
-
-4. **Authorize** ボタンを押します。
-   ![step4](docs/images/openrouter/4.png)
-
-5. 使う分だけ前払いでチャージします。
-   ![step5](docs/images/openrouter/5.png)
-
-<details>
-<summary><h3>Authorizeボタンを押しても認証されない場合</h3></summary>
-
-Authorizeボタンを押しても認証されない場合は、再試行するか、以下の手順で直接APIキーを発行して貼り付けてください。
-
-6. 右上のアカウントをクリックし、左のAPI Keysタブを開いて、中央のCreateボタンを押します。
-   ![step6](docs/images/openrouter/6.png)
-
-7. Createボタンを押します。
-   ![step7](docs/images/openrouter/7.png)
-
-8. ボタンを押してAPIキーをコピーし、翻訳機のAPIタブに貼り付けます。
-   ![step8](docs/images/openrouter/8.png)
 
 </details>
 
@@ -443,7 +449,7 @@ pnpm --filter @puripuly-heart/broker run dev
 
 ## Special Thanks
 
-SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์
+SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์, EA\_PE
 
 ---
 

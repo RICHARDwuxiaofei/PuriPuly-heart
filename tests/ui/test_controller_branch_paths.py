@@ -6767,7 +6767,7 @@ async def test_refresh_managed_trial_usage_state_preserves_known_referral_id_whe
 
 
 @pytest.mark.asyncio
-async def test_refresh_managed_trial_usage_state_preserves_referral_card_when_openrouter_byok_selected(
+async def test_refresh_managed_trial_usage_state_hides_referral_card_when_openrouter_byok_selected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dash = DummyDashboard()
@@ -6800,6 +6800,10 @@ async def test_refresh_managed_trial_usage_state_preserves_referral_card_when_op
     )
     controller.settings = AppSettings()
     controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.translation.connection = TranslationConnection.OPENROUTER
+    controller.settings.translation.connection_history[TranslationModel.GEMMA4.value] = (
+        TranslationConnection.OPENROUTER
+    )
     controller.settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
     controller.settings.managed_identity.referral_id = "7KQ9M2"
     controller.hub = DummyHub(llm=object())
@@ -6808,7 +6812,70 @@ async def test_refresh_managed_trial_usage_state_preserves_referral_card_when_op
 
     assert settings_view.managed_key_state_calls == [
         {
-            "visible": True,
+            "visible": False,
+            "remaining_percent": None,
+            "referral_id": "7KQ9M2",
+            "pass_status": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_refresh_managed_trial_usage_state_hides_card_when_connection_is_openrouter_even_if_source_is_managed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dash = DummyDashboard()
+
+    class ManagedKeySettingsView(DummySettingsView):
+        def __init__(self) -> None:
+            super().__init__()
+            self.managed_key_state_calls: list[dict[str, object]] = []
+
+        def set_managed_key_state(
+            self,
+            *,
+            visible: bool,
+            remaining_percent: int | None = None,
+            referral_id: str | None = None,
+            pass_status: object | None = None,
+        ) -> None:
+            self.managed_key_state_calls.append(
+                {
+                    "visible": visible,
+                    "remaining_percent": remaining_percent,
+                    "referral_id": referral_id,
+                    "pass_status": pass_status,
+                }
+            )
+
+    class EmptySecrets:
+        def get(self, _key: str) -> str | None:
+            return None
+
+    settings_view = ManagedKeySettingsView()
+    controller = _make_controller(
+        app=SimpleNamespace(view_dashboard=dash, view_settings=settings_view)
+    )
+    controller.settings = AppSettings()
+    controller.settings.provider.llm = LLMProviderName.OPENROUTER
+    controller.settings.translation.connection = TranslationConnection.OPENROUTER
+    controller.settings.translation.connection_history[TranslationModel.GEMMA4.value] = (
+        TranslationConnection.OPENROUTER
+    )
+    controller.settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    controller.settings.managed_identity.referral_id = "7KQ9M2"
+    controller.hub = DummyHub(llm=object())
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: EmptySecrets(),
+    )
+
+    await controller._refresh_managed_trial_usage_state()
+
+    assert settings_view.managed_key_state_calls == [
+        {
+            "visible": False,
             "remaining_percent": None,
             "referral_id": "7KQ9M2",
             "pass_status": None,

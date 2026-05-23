@@ -121,6 +121,7 @@ function insertStatusReferralReward(input: {
 
 describe('GET /v1/trial/status response contract', () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -398,6 +399,7 @@ describe('GET /v1/trial/status response contract', () => {
   it('keeps Referral ID and omits Talk Together Pass status when invite count query fails', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
     const installationId = 'install-status-pass-count-failure';
     const env = createTestBrokerEnv({
@@ -453,6 +455,16 @@ describe('GET /v1/trial/status response contract', () => {
     const payload = (await response.json()) as Record<string, unknown>;
     expect(payload.referral_id).toMatch(REFERRAL_ID_PATTERN);
     expect(payload).not.toHaveProperty('talk_together_pass');
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith('owned_referral_status_failed', {
+      endpoint: 'trial_status',
+      installation_id: expect.any(String),
+      reason: 'talk_together_pass_status_failed',
+    });
+    const warnCalls = JSON.stringify(warnSpy.mock.calls);
+    expect(warnCalls).not.toContain('forced Talk Together Pass count failure');
+    expect(warnCalls).not.toContain('internal-status-pass-count-failure-ref');
+    expect(warnCalls).not.toContain(ACTIVE_DISCORD_USER_REF);
   });
 
   it.each([0, 1, 4, 5, 6])(
@@ -539,6 +551,7 @@ describe('GET /v1/trial/status response contract', () => {
   it('omits Referral ID and does not create one for non-delivered Discord-managed status', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-04-08T06:00:00Z'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
     const env = createTestBrokerEnv();
     const keyPair = await createDeviceKeyPair();
@@ -583,6 +596,7 @@ describe('GET /v1/trial/status response contract', () => {
     const payload = (await response.json()) as Record<string, unknown>;
     expect(payload).not.toHaveProperty('referral_id');
     expect(readReferralCode({ env, discordUserRef: ACTIVE_DISCORD_USER_REF })).toBeNull();
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it('returns Discord-required eligibility without silent browser launch fields when no entitlement exists', async () => {

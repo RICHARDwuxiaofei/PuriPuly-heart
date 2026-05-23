@@ -160,6 +160,26 @@ def test_local_llm_keys_are_localized() -> None:
     assert "서버 API 키" in bundles["ko"]["settings.local_llm.extra_body.sensitive_key"]
 
 
+def test_zh_cn_qwen_labels_use_qwen_brand_name() -> None:
+    zh_cn = _load_bundles()["zh-CN"]
+
+    expected_qwen_labels = {
+        "settings.alibaba_api_key_beijing": "Qwen API密钥（北京）",
+        "settings.alibaba_api_key_singapore": "Qwen API密钥（新加坡）",
+        "settings.qwen_region": "Qwen 服务区域：",
+        "provider.qwen": "Qwen 3.5",
+        "provider.qwen35_flash": "Qwen 3.5 Flash",
+        "provider.qwen35_plus": "Qwen 3.5 Plus",
+        "provider.qwen_asr": "Qwen ASR",
+    }
+
+    for key, expected in expected_qwen_labels.items():
+        assert zh_cn[key] == expected
+
+    for value in zh_cn.values():
+        assert "通义千问" not in value
+
+
 def test_managed_key_card_keys_are_localized() -> None:
     bundles = _load_bundles()
     required_keys = {

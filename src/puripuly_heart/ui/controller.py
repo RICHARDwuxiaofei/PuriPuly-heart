@@ -38,6 +38,7 @@ from puripuly_heart.config.settings import (
     QwenLLMModel,
     QwenRegion,
     STTProviderName,
+    TranslationConnection,
     load_settings,
     new_settings_for_first_run,
     normalize_owned_referral_id,
@@ -868,14 +869,9 @@ class GuiController:
     def _managed_key_card_visible_from_settings(self) -> bool:
         if self.settings is None:
             return False
-        active_ref = self.settings.managed_identity.active_managed_credential_ref
-        return bool(
-            (
-                self.settings.provider.llm == LLMProviderName.OPENROUTER
-                and self.settings.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
-            )
-            or (isinstance(active_ref, str) and bool(active_ref.strip()))
-            or self._current_owned_referral_id()
+        return self.settings.translation.connection in (
+            TranslationConnection.MANAGED,
+            TranslationConnection.MANAGED_CHINA,
         )
 
     async def _refresh_managed_status_best_effort(
@@ -964,6 +960,7 @@ class GuiController:
                     or self.settings.provider.llm != LLMProviderName.OPENROUTER
                     or self.settings.openrouter.selected_source
                     != OpenRouterCredentialSource.MANAGED
+                    or not self._managed_key_card_visible_from_settings()
                 ):
                     return
                 refreshed_referral_id = (
@@ -1046,16 +1043,36 @@ class GuiController:
         auto_show_founder_letter: bool,
     ) -> None:
         view_settings = getattr(self.app, "view_settings", None)
+        if self.settings is None:
+            self._clear_managed_trial_usage_metadata_cache()
+            self._set_managed_trial_pending_auth(False)
+            self._set_managed_usage_view_state(
+                view_settings=view_settings,
+                visible=False,
+                remaining_percent=None,
+                referral_id=self._current_owned_referral_id(),
+            )
+            return
+        managed_key_visible = self._managed_key_card_visible_from_settings()
+        if not managed_key_visible:
+            self._clear_managed_trial_usage_metadata_cache()
+            self._set_managed_trial_pending_auth(False)
+            self._set_managed_usage_view_state(
+                view_settings=view_settings,
+                visible=False,
+                remaining_percent=None,
+                referral_id=self._current_owned_referral_id(),
+            )
+            return
         if (
-            self.settings is None
-            or self.settings.provider.llm != LLMProviderName.OPENROUTER
+            self.settings.provider.llm != LLMProviderName.OPENROUTER
             or self.settings.openrouter.selected_source != OpenRouterCredentialSource.MANAGED
         ):
             self._clear_managed_trial_usage_metadata_cache()
             self._set_managed_trial_pending_auth(False)
             self._set_managed_usage_view_state(
                 view_settings=view_settings,
-                visible=self._managed_key_card_visible_from_settings(),
+                visible=True,
                 remaining_percent=None,
                 referral_id=self._current_owned_referral_id(),
             )

@@ -2105,6 +2105,10 @@ async function bestEffortResolveOwnedReferralStatusForIssueResponse(
   try {
     const result = await ensureOwnedReferralIdForActiveDiscordManagedUser(db, input);
     if (!result.ok) {
+      logOwnedReferralIssueFailure({
+        installationId: input.installationId,
+        reason: result.reason,
+      });
       return null;
     }
     try {
@@ -2116,14 +2120,39 @@ async function bestEffortResolveOwnedReferralStatusForIssueResponse(
         ),
       };
     } catch {
+      logOwnedReferralIssueFailure({
+        installationId: input.installationId,
+        reason: 'talk_together_pass_status_failed',
+      });
       return {
         referralCode: result.referralCode,
         talkTogetherPass: null,
       };
     }
   } catch {
+    logOwnedReferralIssueFailure({
+      installationId: input.installationId,
+      reason: 'owned_referral_ensure_exception',
+    });
     return null;
   }
+}
+
+function logOwnedReferralIssueFailure(input: {
+  installationId: string;
+  reason: string;
+}): void {
+  console.warn('owned_referral_status_failed', {
+    endpoint: 'discord_issue',
+    installation_id: input.installationId,
+    reason: normalizeOwnedReferralFailureReason(input.reason),
+  });
+}
+
+function normalizeOwnedReferralFailureReason(reason: string): string {
+  return /^[a-z0-9_:-]{1,64}$/u.test(reason)
+    ? reason
+    : 'owned_referral_ensure_exception';
 }
 
 async function bestEffortReserveIssueReferralReward(
