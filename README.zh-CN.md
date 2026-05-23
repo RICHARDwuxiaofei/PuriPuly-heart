@@ -172,6 +172,68 @@ PuriPuly 与云端 STT 结合时能提供最佳体验。
 例如即使同样是 Qwen ASR，本地与云端的语音识别性能也有相当差距。
 
 <details>
+<summary><h3>OpenRouter</h3></summary>
+
+1. 请按下方截图所示设置红色圆圈内的选项。
+   ![step0](docs/images/openrouter/0.png)
+
+2. 在应用中点击红色圆圈内的按钮。
+   ![step1](docs/images/openrouter/1.png)
+
+3. 在 OpenRouter 中登录。
+   ![step2](docs/images/openrouter/2.png)
+
+4. 点击红色圆圈内的按钮以退出付款窗口。
+   ![step3](docs/images/openrouter/3.png)
+
+5. 点击 **Authorize** 按钮。
+   ![step4](docs/images/openrouter/4.png)
+
+6. 按需充值预付金。
+   ![step5](docs/images/openrouter/5.png)
+
+<details>
+<summary><h3>点击 Authorize 后仍未完成认证</h3></summary>
+
+如果点击 Authorize 后仍未通过认证，请重试，或按下方步骤手动申请 API 密钥并粘贴。
+
+6. 点击右上角账户后，进入左侧的 API Keys 标签，再点击中央的 Create 按钮。
+   ![step6](docs/images/openrouter/6.png)
+
+7. 点击 Create 按钮。
+   ![step7](docs/images/openrouter/7.png)
+
+8. 点击按钮复制 API 密钥，然后粘贴到翻译器的 API 标签中。
+   ![step8](docs/images/openrouter/8.png)
+
+</details>
+
+</details>
+
+<details>
+<summary><h3>DeepSeek</h3></summary>
+
+1. 请按下方截图所示设置红色圆圈内的选项。
+   ![step0](docs/images/deepseek/0.png)
+
+2. 访问 [DeepSeek 官网](https://www.deepseek.com/en/) 并点击 **Access API** 按钮。
+   ![step1](docs/images/deepseek/1.png)
+
+3. 在主页登录。
+   ![step2](docs/images/deepseek/2.png)
+
+4. 切换到 API Keys 标签后，点击 **Create new API Keys**。
+   ![step3](docs/images/deepseek/3.png)
+
+5. 点击按钮复制 API 密钥后，粘贴到翻译器的 API 标签中。
+   ![step4](docs/images/deepseek/4.png)
+
+6. 切换到 Top Up 标签，按需充值预付金。
+   ![step5](docs/images/deepseek/5.png)
+
+</details>
+
+<details>
 <summary><h3>Deepgram</h3></summary>
 
 1. 访问并登录 [Deepgram Console](https://console.deepgram.com/)。
@@ -227,62 +289,6 @@ PuriPuly 与云端 STT 结合时能提供最佳体验。
 
 9. 选择您在第 7 步中设置的付费方案项目。
    ![step9](docs/images/gemini/9.png)
-
-</details>
-
-</details>
-
-<details>
-<summary><h3>DeepSeek</h3></summary>
-
-1. 访问 [DeepSeek 官网](https://www.deepseek.com/en/) 并点击 **Access API** 按钮。
-   ![step1](docs/images/deepseek/1.png)
-
-2. 在主页登录。
-   ![step2](docs/images/deepseek/2.png)
-
-3. 切换到 API Keys 标签后，点击 **Create new API Keys**。
-   ![step3](docs/images/deepseek/3.png)
-
-4. 点击按钮复制 API 密钥后，粘贴到翻译器的 API 标签中。
-   ![step4](docs/images/deepseek/4.png)
-
-5. 切换到 Top Up 标签，按需充值预付金。
-   ![step5](docs/images/deepseek/5.png)
-
-</details>
-
-<details>
-<summary><h3>OpenRouter</h3></summary>
-
-1. 在应用中点击红色圆圈内的按钮。
-   ![step1](docs/images/openrouter/1.png)
-
-2. 在 OpenRouter 中登录。
-   ![step2](docs/images/openrouter/2.png)
-
-3. 点击红色圆圈内的按钮以退出付款窗口。
-   ![step3](docs/images/openrouter/3.png)
-
-4. 点击 **Authorize** 按钮。
-   ![step4](docs/images/openrouter/4.png)
-
-5. 按需充值预付金。
-   ![step5](docs/images/openrouter/5.png)
-
-<details>
-<summary><h3>点击 Authorize 后仍未完成认证</h3></summary>
-
-如果点击 Authorize 后仍未通过认证，请重试，或按下方步骤手动申请 API 密钥并粘贴。
-
-6. 点击右上角账户后，进入左侧的 API Keys 标签，再点击中央的 Create 按钮。
-   ![step6](docs/images/openrouter/6.png)
-
-7. 点击 Create 按钮。
-   ![step7](docs/images/openrouter/7.png)
-
-8. 点击按钮复制 API 密钥，然后粘贴到翻译器的 API 标签中。
-   ![step8](docs/images/openrouter/8.png)
 
 </details>
 

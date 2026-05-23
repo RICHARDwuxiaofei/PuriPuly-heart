@@ -174,6 +174,68 @@ We recommend starting with Deepgram.
 Just signing up gets you $200 in free credits.
 
 <details>
+<summary><h3>OpenRouter</h3></summary>
+
+1. Set the options inside the red circle as shown in the screenshot.
+   ![step0](docs/images/openrouter/0.png)
+
+2. In the app, click the button inside the red circle.
+   ![step1](docs/images/openrouter/1.png)
+
+3. Login at OpenRouter.
+   ![step2](docs/images/openrouter/2.png)
+
+4. Click the button inside the red circle to exit the payment screen.
+   ![step3](docs/images/openrouter/3.png)
+
+5. Click the **Authorize** button.
+   ![step4](docs/images/openrouter/4.png)
+
+6. Prepay as much as you plan to use.
+   ![step5](docs/images/openrouter/5.png)
+
+<details>
+<summary><h3>If clicking Authorize didn't authenticate you</h3></summary>
+
+If you clicked Authorize but you're still not authenticated, retry, or directly issue an API key as below and paste it in.
+
+6. Click your account in the top right, go to the API Keys tab on the left, then click the Create button in the center.
+   ![step6](docs/images/openrouter/6.png)
+
+7. Click the Create button.
+   ![step7](docs/images/openrouter/7.png)
+
+8. Click the button to copy the API key, then paste it into the API tab of the translator.
+   ![step8](docs/images/openrouter/8.png)
+
+</details>
+
+</details>
+
+<details>
+<summary><h3>DeepSeek</h3></summary>
+
+1. Set the options inside the red circle as shown in the screenshot.
+   ![step0](docs/images/deepseek/0.png)
+
+2. Go to the [DeepSeek official homepage](https://www.deepseek.com/en/) and click the **Access API** button.
+   ![step1](docs/images/deepseek/1.png)
+
+3. Login on the homepage.
+   ![step2](docs/images/deepseek/2.png)
+
+4. Go to the API Keys tab and click **Create new API Keys**.
+   ![step3](docs/images/deepseek/3.png)
+
+5. Click the button to copy the API key, then paste it into the API tab of the translator.
+   ![step4](docs/images/deepseek/4.png)
+
+6. Go to the Top Up tab and prepay as much as you plan to use.
+   ![step5](docs/images/deepseek/5.png)
+
+</details>
+
+<details>
 <summary><h3>Deepgram</h3></summary>
 
 1. Login to the [Deepgram Console](https://console.deepgram.com/).
@@ -229,62 +291,6 @@ The tier transition may take a moment.
 
 9. Select the paid tier project you set up in step 7.
    ![step9](docs/images/gemini/9.png)
-
-</details>
-
-</details>
-
-<details>
-<summary><h3>DeepSeek</h3></summary>
-
-1. Go to the [DeepSeek official homepage](https://www.deepseek.com/en/) and click the **Access API** button.
-   ![step1](docs/images/deepseek/1.png)
-
-2. Login on the homepage.
-   ![step2](docs/images/deepseek/2.png)
-
-3. Go to the API Keys tab and click **Create new API Keys**.
-   ![step3](docs/images/deepseek/3.png)
-
-4. Click the button to copy the API key, then paste it into the API tab of the translator.
-   ![step4](docs/images/deepseek/4.png)
-
-5. Go to the Top Up tab and prepay as much as you plan to use.
-   ![step5](docs/images/deepseek/5.png)
-
-</details>
-
-<details>
-<summary><h3>OpenRouter</h3></summary>
-
-1. In the app, click the button inside the red circle.
-   ![step1](docs/images/openrouter/1.png)
-
-2. Login at OpenRouter.
-   ![step2](docs/images/openrouter/2.png)
-
-3. Click the button inside the red circle to exit the payment screen.
-   ![step3](docs/images/openrouter/3.png)
-
-4. Click the **Authorize** button.
-   ![step4](docs/images/openrouter/4.png)
-
-5. Prepay as much as you plan to use.
-   ![step5](docs/images/openrouter/5.png)
-
-<details>
-<summary><h3>If clicking Authorize didn't authenticate you</h3></summary>
-
-If you clicked Authorize but you're still not authenticated, retry, or directly issue an API key as below and paste it in.
-
-6. Click your account in the top right, go to the API Keys tab on the left, then click the Create button in the center.
-   ![step6](docs/images/openrouter/6.png)
-
-7. Click the Create button.
-   ![step7](docs/images/openrouter/7.png)
-
-8. Click the button to copy the API key, then paste it into the API tab of the translator.
-   ![step8](docs/images/openrouter/8.png)
 
 </details>
 

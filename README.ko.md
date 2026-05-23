@@ -174,6 +174,68 @@ PuriPuly는 클라우드 STT와 결합했을 때 최상의 경험을 제공해�
 가입만 하면 무료 크레딧 200달러 어치를 받을 수 있어요.
 
 <details>
+<summary><h3>OpenRouter</h3></summary>
+
+1. 빨간색 원 안의 옵션을 화면과 같이 설정해주세요.
+   ![step0](docs/images/openrouter/0.png)
+
+2. 앱에서 빨간색 원 안의 버튼을 눌러주세요
+   ![step1](docs/images/openrouter/1.png)
+
+3. Openrouter에서 로그인하세요
+   ![step2](docs/images/openrouter/2.png)
+
+4. 빨간색 원 안의 버튼을 눌러 결제창을 빠져나가세요
+   ![step3](docs/images/openrouter/3.png)
+
+5. **Authorize** 버튼을 누르세요
+   ![step4](docs/images/openrouter/4.png)
+
+6. 사용할 만큼 선불금을 충전하세요
+   ![step5](docs/images/openrouter/5.png)
+
+<details>
+<summary><h3>Authorize 버튼을 눌렀는데도 인증이 되지 않았다면</h3></summary>
+
+Authorize 버튼을 눌렀는데도 인증이 안되어 있다면 재시도 하거나 아래와 같이 직접 API 키를 발급해서 붙여넣기 해주세요.
+
+6. 오른쪽 상단의 계정을 클릭 한 후 왼쪽의 API Keys 탭에 들어간 후 중앙의 Create 버튼을 누르세요
+   ![step6](docs/images/openrouter/6.png)
+
+7. Create 버튼을 누르세요
+   ![step7](docs/images/openrouter/7.png)
+
+8. 버튼을 눌러 API 키를 복사 한후 번역기의 API 탭에 붙여넣으세요
+   ![step8](docs/images/openrouter/8.png)
+
+</details>
+
+</details>
+
+<details>
+<summary><h3>DeepSeek</h3></summary>
+
+1. 빨간색 원 안의 옵션을 화면과 같이 설정해주세요.
+   ![step0](docs/images/deepseek/0.png)
+
+2. [deepseek 공식 홈페이지](https://www.deepseek.com/en/)에 접속해서 **Access API** 버튼을 클릭하세요.
+   ![step1](docs/images/deepseek/1.png)
+
+3. 홈페이지에서 로그인하세요
+   ![step2](docs/images/deepseek/2.png)
+
+4. API Keys 탭으로 이동한 후 **Create new API Keys**를 누르세요.
+   ![step3](docs/images/deepseek/3.png)
+
+5. 버튼을 눌러 API 키를 복사 한후 번역기의 API 탭에 붙여넣으세요
+   ![step4](docs/images/deepseek/4.png)
+
+6. Top Up 탭으로 이동한 후 사용할 만큼 선불금을 충전하세요
+   ![step5](docs/images/deepseek/5.png)
+
+</details>
+
+<details>
 <summary><h3>Deepgram</h3></summary>
 
 1. [Deepgram Console](https://console.deepgram.com/)에 접속하여 로그인하세요.
@@ -229,62 +291,6 @@ PuriPuly는 클라우드 STT와 결합했을 때 최상의 경험을 제공해�
 
 9. 7 단계에서 설정한 유료 티어 프로젝트를 선택하세요
    ![step9](docs/images/gemini/9.png)
-
-</details>
-
-</details>
-
-<details>
-<summary><h3>DeepSeek</h3></summary>
-
-1. [deepseek 공식 홈페이지](https://www.deepseek.com/en/)에 접속해서 **Access API** 버튼을 클릭하세요.
-   ![step1](docs/images/deepseek/1.png)
-
-2. 홈페이지에서 로그인하세요
-   ![step2](docs/images/deepseek/2.png)
-
-3. API Keys 탭으로 이동한 후 **Create new API Keys**를 누르세요.
-   ![step3](docs/images/deepseek/3.png)
-
-4. 버튼을 눌러 API 키를 복사 한후 번역기의 API 탭에 붙여넣으세요
-   ![step4](docs/images/deepseek/4.png)
-
-5. Top Up 탭으로 이동한 후 사용할 만큼 선불금을 충전하세요
-   ![step5](docs/images/deepseek/5.png)
-
-</details>
-
-<details>
-<summary><h3>OpenRouter</h3></summary>
-
-1. 앱에서 빨간색 원 안의 버튼을 눌러주세요
-   ![step1](docs/images/openrouter/1.png)
-
-2. Openrouter에서 로그인하세요
-   ![step2](docs/images/openrouter/2.png)
-
-3. 빨간색 원 안의 버튼을 눌러 결제창을 빠져나가세요
-   ![step3](docs/images/openrouter/3.png)
-
-4. **Authorize** 버튼을 누르세요
-   ![step4](docs/images/openrouter/4.png)
-
-5. 사용할 만큼 선불금을 충전하세요
-   ![step5](docs/images/openrouter/5.png)
-
-<details>
-<summary><h3>Authorize 버튼을 눌렀는데도 인증이 되지 않았다면</h3></summary>
-
-Authorize 버튼을 눌렀는데도 인증이 안되어 있다면 재시도 하거나 아래와 같이 직접 API 키를 발급해서 붙여넣기 해주세요.
-
-6. 오른쪽 상단의 계정을 클릭 한 후 왼쪽의 API Keys 탭에 들어간 후 중앙의 Create 버튼을 누르세요
-   ![step6](docs/images/openrouter/6.png)
-
-7. Create 버튼을 누르세요
-   ![step7](docs/images/openrouter/7.png)
-
-8. 버튼을 눌러 API 키를 복사 한후 번역기의 API 탭에 붙여넣으세요
-   ![step8](docs/images/openrouter/8.png)
 
 </details>
 
