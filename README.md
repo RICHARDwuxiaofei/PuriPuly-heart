@@ -70,7 +70,7 @@ So I built one that can.
 → It works best for one-on-one conversations in low-noise environments. Up to three people may be okay, but usability is not guaranteed. When using it in VRChat, use Earmuff to control the environment.
 
 - **Voice recognition is poor / slow.**
-→ If you're using local Qwen ASR, we recommend switching to a cloud STT service.
+→ If you're using local Qwen ASR, we recommend switching to a cloud STT service. If you're on Intel, configure PuriPuly so it's pinned to P-cores only.
 
 - **How are voice and conversation contents handled?**
 → Only your own transcripts and translation results are stored locally. Other people's voices, transcripts, and translation results are never recorded. That said, the STT service and translation provider may process the data.
@@ -164,9 +164,9 @@ If Soniox/Gemini/Deepgram are blocked in your region, please use the following c
 
 Follow the guide that matches the service you want to use.
 
-We recommend using the Gemma 4 model through OpenRouter.
+For the translation LLM, we recommend using the Gemma 4 model through OpenRouter.
 
-By the way, while you're setting things up, why not configure STT too?
+By the way, while you're setting things up, why not configure ASR too?
 PuriPuly delivers the best experience when paired with a cloud STT.
 For instance, even with the same Qwen ASR, local and cloud voice-recognition performance differ noticeably.
 
