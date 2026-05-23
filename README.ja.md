@@ -174,6 +174,68 @@ PuriPulyはクラウドSTTと組み合わせると最良の体験になります
 登録するだけで200ドル分の無料クレジットがもらえます。
 
 <details>
+<summary><h3>OpenRouter</h3></summary>
+
+1. 赤い丸の中のオプションをスクリーンショットのとおりに設定してください。
+   ![step0](docs/images/openrouter/0.png)
+
+2. アプリ内で赤い丸の中のボタンを押します。
+   ![step1](docs/images/openrouter/1.png)
+
+3. OpenRouterでログインします。
+   ![step2](docs/images/openrouter/2.png)
+
+4. 赤い丸の中のボタンを押して決済画面を抜けます。
+   ![step3](docs/images/openrouter/3.png)
+
+5. **Authorize** ボタンを押します。
+   ![step4](docs/images/openrouter/4.png)
+
+6. 使う分だけ前払いでチャージします。
+   ![step5](docs/images/openrouter/5.png)
+
+<details>
+<summary><h3>Authorizeボタンを押しても認証されない場合</h3></summary>
+
+Authorizeボタンを押しても認証されない場合は、再試行するか、以下の手順で直接APIキーを発行して貼り付けてください。
+
+6. 右上のアカウントをクリックし、左のAPI Keysタブを開いて、中央のCreateボタンを押します。
+   ![step6](docs/images/openrouter/6.png)
+
+7. Createボタンを押します。
+   ![step7](docs/images/openrouter/7.png)
+
+8. ボタンを押してAPIキーをコピーし、翻訳機のAPIタブに貼り付けます。
+   ![step8](docs/images/openrouter/8.png)
+
+</details>
+
+</details>
+
+<details>
+<summary><h3>DeepSeek</h3></summary>
+
+1. 赤い丸の中のオプションをスクリーンショットのとおりに設定してください。
+   ![step0](docs/images/deepseek/0.png)
+
+2. [DeepSeek公式サイト](https://www.deepseek.com/en/)にアクセスし、**Access API** ボタンをクリックします。
+   ![step1](docs/images/deepseek/1.png)
+
+3. サイトでログインします。
+   ![step2](docs/images/deepseek/2.png)
+
+4. API Keysタブに移動して **Create new API Keys** を押します。
+   ![step3](docs/images/deepseek/3.png)
+
+5. ボタンを押してAPIキーをコピーし、翻訳機のAPIタブに貼り付けます。
+   ![step4](docs/images/deepseek/4.png)
+
+6. Top Upタブに移動し、使う分だけ前払いでチャージします。
+   ![step5](docs/images/deepseek/5.png)
+
+</details>
+
+<details>
 <summary><h3>Deepgram</h3></summary>
 
 1. [Deepgram Console](https://console.deepgram.com/)にアクセスしてログインします。
@@ -229,62 +291,6 @@ PuriPulyはクラウドSTTと組み合わせると最良の体験になります
 
 9. ステップ7で設定した有料プランのプロジェクトを選択してください。
    ![step9](docs/images/gemini/9.png)
-
-</details>
-
-</details>
-
-<details>
-<summary><h3>DeepSeek</h3></summary>
-
-1. [DeepSeek公式サイト](https://www.deepseek.com/en/)にアクセスし、**Access API** ボタンをクリックします。
-   ![step1](docs/images/deepseek/1.png)
-
-2. サイトでログインします。
-   ![step2](docs/images/deepseek/2.png)
-
-3. API Keysタブに移動して **Create new API Keys** を押します。
-   ![step3](docs/images/deepseek/3.png)
-
-4. ボタンを押してAPIキーをコピーし、翻訳機のAPIタブに貼り付けます。
-   ![step4](docs/images/deepseek/4.png)
-
-5. Top Upタブに移動し、使う分だけ前払いでチャージします。
-   ![step5](docs/images/deepseek/5.png)
-
-</details>
-
-<details>
-<summary><h3>OpenRouter</h3></summary>
-
-1. アプリ内で赤い丸の中のボタンを押します。
-   ![step1](docs/images/openrouter/1.png)
-
-2. OpenRouterでログインします。
-   ![step2](docs/images/openrouter/2.png)
-
-3. 赤い丸の中のボタンを押して決済画面を抜けます。
-   ![step3](docs/images/openrouter/3.png)
-
-4. **Authorize** ボタンを押します。
-   ![step4](docs/images/openrouter/4.png)
-
-5. 使う分だけ前払いでチャージします。
-   ![step5](docs/images/openrouter/5.png)
-
-<details>
-<summary><h3>Authorizeボタンを押しても認証されない場合</h3></summary>
-
-Authorizeボタンを押しても認証されない場合は、再試行するか、以下の手順で直接APIキーを発行して貼り付けてください。
-
-6. 右上のアカウントをクリックし、左のAPI Keysタブを開いて、中央のCreateボタンを押します。
-   ![step6](docs/images/openrouter/6.png)
-
-7. Createボタンを押します。
-   ![step7](docs/images/openrouter/7.png)
-
-8. ボタンを押してAPIキーをコピーし、翻訳機のAPIタブに貼り付けます。
-   ![step8](docs/images/openrouter/8.png)
 
 </details>
 
