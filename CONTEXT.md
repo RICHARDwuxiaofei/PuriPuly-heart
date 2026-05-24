@@ -32,6 +32,10 @@ _Avoid_: provider mode, API mode
 A PuriPuly-managed translation connection that lets eligible users start through Discord authentication instead of bringing their own API key.
 _Avoid_: free mode, trial key, hosted translation
 
+**User-Owned Cloud Connection**:
+A cloud Translation Connection where the user supplies their own provider credential instead of using PuriPuly-managed access. This does not include local compatible endpoints.
+_Avoid_: BYOK mode, personal mode
+
 **Broker**:
 The PuriPuly-controlled authority for managed eligibility and credential issuance. The broker is not the translation provider and does not translate speech.
 _Avoid_: translation proxy, OpenRouter proxy
@@ -44,9 +48,14 @@ _Avoid_: referral code, invite code, pass code
 The in-VR display surface used to show transcripts and translations without relying only on the VRChat chatbox.
 _Avoid_: overlay app, subtitle window
 
+**Desktop Subtitle Overlay**:
+The desktop screen display surface used to show transcripts and translations outside the VR headset.
+_Avoid_: desktop renderer, Flet overlay, subtitle window
+
 ## Flagged ambiguities
 
 - Use **Managed Connection** for the user-facing connection mode, **Managed Key** for the issued credential surface, and **Talk Together Pass ID** for the shareable invite identifier.
+- Use **User-Owned Cloud Connection** when the user supplies a cloud provider credential. Do not use it for local compatible endpoints.
 - Use **Broker** only for managed eligibility and credential issuance. Do not call it a translation proxy.
 
 ## Example dialogue
