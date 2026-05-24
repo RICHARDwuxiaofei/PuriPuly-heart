@@ -74,6 +74,9 @@ FOUNDER_README_API_KEYS_ANCHOR_BY_LOCALE = {
 }
 FOUNDER_README_DEFAULT_API_KEYS_ANCHOR = "using-your-own-api-keys"
 DEBUG_PREVIEW_TALK_TOGETHER_PASS_ID = "7KQ9M2"
+GITHUB_STAR_REPOSITORY_URL = "https://github.com/kapitalismho/PuriPuly-heart"
+GITHUB_STAR_PROMPT_DELAY_S = 2.5
+GITHUB_STAR_PROMPT_DURATION_MS = 10000
 
 
 def founder_readme_url_for_locale(locale: str | None) -> str:
@@ -114,6 +117,11 @@ class TranslatorApp:
         self._discord_managed_auth_generation = 0
         self._discord_managed_auth_cancelled = False
         self._discord_managed_auth_task_handle = None
+        self._github_star_prompt_launch_pending = True
+        self._launch_high_priority_feedback_shown = False
+        self._launch_high_priority_feedback_reason: str | None = None
+        self._launch_high_priority_snackbar = None
+        self._github_star_prompt_shown_this_launch = False
         self._setup_page()
         self._build_layout()
 
@@ -240,7 +248,125 @@ class TranslatorApp:
             on_capture_fault_cycle=self._preview_capture_fault_cycle,
             on_stt_fault_cycle=self._preview_stt_fault_cycle,
             on_audio_fault_clear=self._preview_audio_fault_clear,
+            on_github_star_snackbar=self._preview_github_star_snackbar,
         )
+
+    def _mark_launch_high_priority_feedback_shown(
+        self,
+        reason: str,
+        snackbar: object | None = None,
+    ) -> None:
+        if not getattr(self, "_github_star_prompt_launch_pending", True):
+            return
+        self._launch_high_priority_feedback_shown = True
+        self._launch_high_priority_feedback_reason = reason
+        if snackbar is not None:
+            self._launch_high_priority_snackbar = snackbar
+
+    def _launch_feedback_conflicts_with_github_star_prompt(self) -> bool:
+        if getattr(self, "_launch_high_priority_feedback_shown", False):
+            return True
+        snackbar = getattr(self, "_launch_high_priority_snackbar", None)
+        return bool(getattr(snackbar, "open", False))
+
+    async def maybe_show_github_star_prompt_after_launch(
+        self,
+        *,
+        delay_s: float = GITHUB_STAR_PROMPT_DELAY_S,
+    ) -> bool:
+        try:
+            if self._launch_feedback_conflicts_with_github_star_prompt():
+                return False
+            controller = getattr(self, "controller", None)
+            should_show = getattr(controller, "should_show_github_star_prompt", None)
+            if not callable(should_show) or not should_show():
+                return False
+
+            await asyncio.sleep(delay_s)
+
+            if self._launch_feedback_conflicts_with_github_star_prompt():
+                return False
+            if not should_show():
+                return False
+            return await self._open_github_star_prompt_snackbar()
+        finally:
+            self._github_star_prompt_launch_pending = False
+
+    async def _open_github_star_prompt_snackbar(self) -> bool:
+        if getattr(self, "_github_star_prompt_shown_this_launch", False):
+            return False
+        controller = getattr(self, "controller", None)
+        persist_opened = getattr(controller, "persist_github_star_prompt_opened", None)
+        if not callable(persist_opened) or not await persist_opened():
+            return False
+
+        snackbar = None
+
+        def _open_repository(_event) -> None:  # noqa: ANN001
+            async def _persist_click() -> None:
+                persist_clicked = getattr(controller, "persist_github_star_prompt_clicked", None)
+                if callable(persist_clicked):
+                    await persist_clicked()
+
+            self._queue_settings_mutation_task(_persist_click)
+            webbrowser.open(GITHUB_STAR_REPOSITORY_URL)
+            if snackbar is not None:
+                snackbar.open = False
+            with contextlib.suppress(Exception):
+                self.page.update()
+
+        snackbar = self._build_github_star_prompt_snackbar(_open_repository)
+        self._github_star_prompt_shown_this_launch = True
+        self.page.open(snackbar)
+        return True
+
+    def _build_github_star_prompt_snackbar(self, on_click) -> ft.SnackBar:  # noqa: ANN001
+        return ft.SnackBar(
+            content=ft.Row(
+                controls=[
+                    ft.Text(
+                        t("github_star.snackbar.message"),
+                        size=18,
+                        color=ft.Colors.WHITE,
+                        font_family=font_for_language(get_locale()),
+                        expand=True,
+                    ),
+                    ft.TextButton(
+                        text=t("github_star.snackbar.action"),
+                        on_click=on_click,
+                        style=ft.ButtonStyle(
+                            color=ft.Colors.WHITE,
+                            text_style=ft.TextStyle(
+                                size=18,
+                                font_family=font_for_language(get_locale()),
+                            ),
+                            overlay_color=COLOR_PRIMARY,
+                        ),
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.START,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=12,
+            ),
+            bgcolor=COLOR_SUCCESS,
+            duration=GITHUB_STAR_PROMPT_DURATION_MS,
+            behavior=ft.SnackBarBehavior.FLOATING,
+            margin=ft.margin.only(bottom=90),
+            padding=20,
+        )
+
+    def _preview_github_star_snackbar(self) -> None:
+        snackbar = None
+
+        def _open_repository(_event) -> None:  # noqa: ANN001
+            webbrowser.open(GITHUB_STAR_REPOSITORY_URL)
+            if snackbar is not None:
+                snackbar.open = False
+            with contextlib.suppress(Exception):
+                self.page.update()
+
+        snackbar = self._build_github_star_prompt_snackbar(_open_repository)
+        self.page.open(snackbar)
 
     def _preview_brake_notice(self) -> None:
         self._show_snackbar(t("managed_release.brake"), ft.Colors.ORANGE_700)
@@ -608,16 +734,16 @@ class TranslatorApp:
             stt_provider = settings.provider.stt.value
             warning = get_stt_compatibility_warning(source_code, stt_provider)
         if warning:
-            self.page.open(
-                ft.SnackBar(
-                    ft.Text(t(warning.key, language=language_name(warning.language_code))),
-                    bgcolor=ft.Colors.ORANGE_700,
-                    duration=4000,
-                    behavior=ft.SnackBarBehavior.FLOATING,
-                    margin=ft.margin.only(bottom=90),
-                    padding=20,
-                )
+            snackbar = ft.SnackBar(
+                ft.Text(t(warning.key, language=language_name(warning.language_code))),
+                bgcolor=ft.Colors.ORANGE_700,
+                duration=4000,
+                behavior=ft.SnackBarBehavior.FLOATING,
+                margin=ft.margin.only(bottom=90),
+                padding=20,
             )
+            self._mark_launch_high_priority_feedback_shown("stt_compatibility", snackbar)
+            self.page.open(snackbar)
 
         async def _task():
             await self.controller.on_dashboard_language_change(
@@ -716,6 +842,8 @@ class TranslatorApp:
             close()
 
     def show_discord_managed_auth_dialog(self, preview: bool = False) -> None:
+        if not preview:
+            self._mark_launch_high_priority_feedback_shown("auth_required")
         if preview:
             on_continue = self._close_discord_managed_auth_dialog
             on_byok = self._close_discord_managed_auth_dialog
@@ -928,6 +1056,7 @@ class TranslatorApp:
         webbrowser.open(founder_readme_url_for_locale(get_locale()))
 
     def show_founder_letter_dialog(self) -> None:
+        self._mark_launch_high_priority_feedback_shown("usage_exhaustion")
         dialog = FounderLetterDialog(self.page, on_readme=self._on_founder_letter_readme)
         self._founder_letter_dialog = dialog
         dialog.open()
@@ -1012,16 +1141,16 @@ class TranslatorApp:
 
     def _show_snackbar(self, message: str, bgcolor, duration: int = 4000) -> None:
         """Show a snackbar above the bottom nav."""
-        self.page.open(
-            ft.SnackBar(
-                ft.Text(message, size=18, color=ft.Colors.WHITE),
-                bgcolor=bgcolor,
-                duration=duration,
-                behavior=ft.SnackBarBehavior.FLOATING,
-                margin=ft.margin.only(bottom=90),
-                padding=20,
-            )
+        snackbar = ft.SnackBar(
+            ft.Text(message, size=18, color=ft.Colors.WHITE),
+            bgcolor=bgcolor,
+            duration=duration,
+            behavior=ft.SnackBarBehavior.FLOATING,
+            margin=ft.margin.only(bottom=90),
+            padding=20,
         )
+        self._mark_launch_high_priority_feedback_shown("snackbar", snackbar)
+        self.page.open(snackbar)
 
     def on_overlay_state_changed(
         self,
@@ -1049,10 +1178,29 @@ async def main_gui(page: ft.Page, *, config_path, debug_ui_preview: bool = False
     await app.controller.start()
 
     # Check for updates in background
-    await _check_and_notify_update(page, log_detailed=app._log_detailed)
+    update_kwargs = {"log_detailed": app._log_detailed}
+    try:
+        update_parameters = inspect.signature(_check_and_notify_update).parameters
+    except (TypeError, ValueError):
+        update_parameters = {}
+    if "on_launch_snackbar_shown" in update_parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in update_parameters.values()
+    ):
+        update_kwargs["on_launch_snackbar_shown"] = (
+            lambda snackbar: app._mark_launch_high_priority_feedback_shown("update", snackbar)
+        )
+    await _check_and_notify_update(page, **update_kwargs)
+
+    show_github_star_prompt = getattr(app, "maybe_show_github_star_prompt_after_launch", None)
+    if callable(show_github_star_prompt):
+        await show_github_star_prompt()
 
 
-async def _check_and_notify_update(page: ft.Page, log_detailed=None) -> None:
+async def _check_and_notify_update(
+    page: ft.Page,
+    log_detailed=None,
+    on_launch_snackbar_shown=None,
+) -> None:
     """Check for updates and show notification as a toast."""
     try:
         update_info = await check_for_update()
@@ -1105,6 +1253,8 @@ async def _check_and_notify_update(page: ft.Page, log_detailed=None) -> None:
             close_icon_color=ft.Colors.WHITE,
         )
         page.open(snackbar)
+        if callable(on_launch_snackbar_shown):
+            on_launch_snackbar_shown(snackbar)
 
     except Exception as exc:
         message = f"[Update] Check notification failed: {exc}"

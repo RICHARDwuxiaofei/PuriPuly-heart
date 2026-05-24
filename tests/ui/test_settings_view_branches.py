@@ -1960,6 +1960,39 @@ def test_on_stt_selected_updates_provider_and_pipeline_flags(
     assert changed == []
 
 
+def test_on_stt_selected_routes_compatibility_warning_through_snackbar_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    snackbars: list[tuple[str, object]] = []
+    view, _ = _make_settings_view(monkeypatch)
+    page = SimpleNamespace(opened=[])
+    page.open = lambda control: page.opened.append(control)
+    attach_dummy_page(monkeypatch, view, page)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    monkeypatch.setattr(view._qwen_region_btn, "update", lambda: None)
+    monkeypatch.setattr(view._api_keys_column, "update", lambda: None)
+    monkeypatch.setattr(view._stt_text, "update", lambda: None)
+    view.show_snackbar = lambda message, color: snackbars.append((message, color))
+    warning = SimpleNamespace(key="warning.deepgram_not_supported", language_code="xx")
+    monkeypatch.setattr(
+        settings_view,
+        "get_stt_compatibility_warning",
+        lambda *_args, **_kwargs: warning,
+    )
+
+    view._on_stt_selected(STTProviderName.SONIOX.value)
+
+    assert snackbars == [
+        (
+            t(warning.key, language=language_name(warning.language_code)),
+            settings_view.ft.Colors.ORANGE_700,
+        )
+    ]
+    assert page.opened == []
+
+
 def test_on_peer_stt_selected_updates_provider_and_pipeline_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
