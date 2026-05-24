@@ -125,6 +125,7 @@ class QwenLLMModel(str, Enum):
 
 class DeepSeekLLMModel(str, Enum):
     DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
+    DEEPSEEK_V4_PRO = "deepseek-v4-pro"
 
 
 class LocalLLMBackend(str, Enum):
@@ -173,6 +174,7 @@ class OpenRouterFallbackSelectionAlias(str, Enum):
 class TranslationModel(str, Enum):
     GEMMA4 = "gemma4"
     DEEPSEEK_V4_FLASH = "deepseek_v4_flash"
+    DEEPSEEK_V4_PRO = "deepseek_v4_pro"
     GEMINI_3_FLASH = "gemini3_flash"
     GEMINI_31_FLASH_LITE = "gemini31_flash_lite"
     QWEN_35_PLUS = "qwen35_plus"
@@ -225,6 +227,7 @@ TRANSLATION_CONNECTIONS_BY_MODEL: dict[TranslationModel, tuple[TranslationConnec
         TranslationConnection.OPENROUTER,
         TranslationConnection.OFFICIAL_BYOK,
     ),
+    TranslationModel.DEEPSEEK_V4_PRO: (TranslationConnection.OFFICIAL_BYOK,),
     TranslationModel.GEMINI_3_FLASH: (TranslationConnection.OFFICIAL_BYOK,),
     TranslationModel.GEMINI_31_FLASH_LITE: (TranslationConnection.OFFICIAL_BYOK,),
     TranslationModel.QWEN_35_PLUS: (TranslationConnection.OFFICIAL_BYOK,),
@@ -1452,6 +1455,7 @@ def _derive_translation_settings_from_runtime_values(
     openrouter_provider_routing: OpenRouterProviderRouting,
     gemini_model: GeminiLLMModel,
     qwen_model: QwenLLMModel,
+    deepseek_model: DeepSeekLLMModel,
     history: object = None,
 ) -> TranslationSettings:
     normalized_history = _parse_translation_connection_history(history)
@@ -1495,6 +1499,12 @@ def _derive_translation_settings_from_runtime_values(
         )
 
     if provider_llm == LLMProviderName.DEEPSEEK:
+        if deepseek_model == DeepSeekLLMModel.DEEPSEEK_V4_PRO:
+            return _normalize_translation_settings(
+                model=TranslationModel.DEEPSEEK_V4_PRO,
+                connection=TranslationConnection.OFFICIAL_BYOK,
+                history=normalized_history,
+            )
         return _normalize_translation_settings(
             model=TranslationModel.DEEPSEEK_V4_FLASH,
             connection=TranslationConnection.OFFICIAL_BYOK,
@@ -1541,6 +1551,7 @@ def _derive_translation_settings_from_runtime(
         openrouter_provider_routing=settings.openrouter.provider_routing,
         gemini_model=settings.gemini.llm_model,
         qwen_model=settings.qwen.llm_model,
+        deepseek_model=settings.deepseek.llm_model,
         history=history,
     )
 
@@ -1591,6 +1602,12 @@ def materialize_translation_settings(settings: AppSettings) -> AppSettings:
             settings.openrouter.llm_model,
             settings.openrouter.selected_source,
         )
+        return settings
+
+    if model == TranslationModel.DEEPSEEK_V4_PRO:
+        settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
+        settings.provider.llm = LLMProviderName.DEEPSEEK
+        settings.deepseek.llm_model = DeepSeekLLMModel.DEEPSEEK_V4_PRO
         return settings
 
     if model == TranslationModel.GEMINI_3_FLASH:
@@ -1719,6 +1736,20 @@ def _apply_materialized_translation_to_data(
         )
         changed |= _set_mapping_value(openrouter_data, "selected_source", selected_source.value)
         changed |= _set_mapping_value(openrouter_data, "selection_alias", selection_alias.value)
+        return changed
+
+    if translation.model == TranslationModel.DEEPSEEK_V4_PRO:
+        changed |= _set_mapping_value(
+            openrouter_data,
+            "provider_routing",
+            OpenRouterProviderRouting.DEFAULT.value,
+        )
+        changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.DEEPSEEK.value)
+        changed |= _set_mapping_value(
+            deepseek_data,
+            "llm_model",
+            DeepSeekLLMModel.DEEPSEEK_V4_PRO.value,
+        )
         return changed
 
     if translation.model == TranslationModel.GEMINI_3_FLASH:
@@ -2501,6 +2532,7 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             ),
             gemini_model=_parse_gemini_llm_model(gemini_data.get("llm_model")),
             qwen_model=_parse_qwen_llm_model(qwen_data.get("llm_model")),
+            deepseek_model=_parse_deepseek_llm_model(deepseek_data.get("llm_model")),
             history=translation_history,
         )
     normalized_translation_data = _translation_settings_to_dict(normalized_translation_settings)

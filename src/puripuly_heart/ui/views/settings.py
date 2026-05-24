@@ -92,6 +92,7 @@ _OVERLAY_TEXT_SCALE_PRESETS = (
 _TRANSLATION_MODEL_LABEL_KEYS = {
     TranslationModel.GEMMA4: "provider.gemma4_26b_a4b_it",
     TranslationModel.DEEPSEEK_V4_FLASH: "provider.deepseek_v4_flash",
+    TranslationModel.DEEPSEEK_V4_PRO: "provider.deepseek_v4_pro",
     TranslationModel.GEMINI_3_FLASH: "provider.gemini3_flash",
     TranslationModel.GEMINI_31_FLASH_LITE: "provider.gemini31_flash_lite",
     TranslationModel.QWEN_35_PLUS: "provider.qwen35_plus",
@@ -2829,6 +2830,7 @@ class SettingsView(ft.Column):
             for model in (
                 TranslationModel.GEMMA4,
                 TranslationModel.DEEPSEEK_V4_FLASH,
+                TranslationModel.DEEPSEEK_V4_PRO,
                 TranslationModel.GEMINI_3_FLASH,
                 TranslationModel.GEMINI_31_FLASH_LITE,
                 TranslationModel.QWEN_35_PLUS,

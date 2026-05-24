@@ -2206,6 +2206,77 @@ def test_on_llm_selected_restores_saved_connection_history(
     assert view._prompt_editor.value == "O"
 
 
+def test_on_llm_selected_updates_deepseek_v4_pro_with_default_official_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deepseek_v4_pro = getattr(TranslationModel, "DEEPSEEK_V4_PRO", None)
+    deepseek_model = getattr(DeepSeekLLMModel, "DEEPSEEK_V4_PRO", None)
+
+    assert deepseek_v4_pro is not None
+    assert deepseek_model is not None
+
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.system_prompts = {"gemini": "G", "openrouter": "O", "deepseek": "D"}
+    settings.system_prompt = "G"
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view._on_llm_selected(deepseek_v4_pro.value)
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.translation.model == deepseek_v4_pro
+    assert pending.translation.connection == TranslationConnection.OFFICIAL_BYOK
+    assert pending.provider.llm == LLMProviderName.DEEPSEEK
+    assert pending.deepseek.llm_model == deepseek_model
+    assert view._llm_text.content.value == t("provider.deepseek_v4_pro")
+    assert view._translation_connection_text.content.value == t(
+        "settings.translation_connection.official_byok"
+    )
+    assert view._managed_trial_usage_bar.visible is False
+    assert view._prompt_editor.value == "G"
+
+
+def test_on_translation_connection_selected_ignores_openrouter_for_deepseek_v4_pro(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deepseek_v4_pro = getattr(TranslationModel, "DEEPSEEK_V4_PRO", None)
+    deepseek_model = getattr(DeepSeekLLMModel, "DEEPSEEK_V4_PRO", None)
+
+    assert deepseek_v4_pro is not None
+    assert deepseek_model is not None
+
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=deepseek_v4_pro,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+        connection_history={deepseek_v4_pro.value: TranslationConnection.OFFICIAL_BYOK},
+    )
+    settings.provider.llm = LLMProviderName.DEEPSEEK
+    settings.deepseek.llm_model = deepseek_model
+    settings.system_prompts = {"deepseek": "D"}
+    settings.system_prompt = "D"
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view._on_translation_connection_selected(TranslationConnection.OPENROUTER.value)
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is settings
+    assert pending.translation.model == deepseek_v4_pro
+    assert pending.translation.connection == TranslationConnection.OFFICIAL_BYOK
+    assert pending.provider.llm == LLMProviderName.DEEPSEEK
+    assert pending.deepseek.llm_model == deepseek_model
+    assert view.has_provider_changes is False
+
+
 def test_on_llm_selected_invalid_value_is_noop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3029,6 +3100,7 @@ def test_llm_modal_lists_logical_translation_models_once(
     assert [option.value for option in options] == [
         TranslationModel.GEMMA4.value,
         TranslationModel.DEEPSEEK_V4_FLASH.value,
+        TranslationModel.DEEPSEEK_V4_PRO.value,
         TranslationModel.GEMINI_3_FLASH.value,
         TranslationModel.GEMINI_31_FLASH_LITE.value,
         TranslationModel.QWEN_35_PLUS.value,
@@ -3046,6 +3118,9 @@ def test_llm_modal_lists_logical_translation_models_once(
     assert option_by_value[TranslationModel.GEMMA4.value].label == t("provider.gemma4_26b_a4b_it")
     assert option_by_value[TranslationModel.DEEPSEEK_V4_FLASH.value].label == t(
         "provider.deepseek_v4_flash"
+    )
+    assert option_by_value[TranslationModel.DEEPSEEK_V4_PRO.value].label == t(
+        "provider.deepseek_v4_pro"
     )
     assert option_by_value[TranslationModel.LOCAL_LLM.value].label == t("provider.local_llms")
 

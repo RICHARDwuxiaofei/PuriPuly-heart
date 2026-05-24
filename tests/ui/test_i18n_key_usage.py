@@ -180,6 +180,29 @@ def test_zh_cn_qwen_labels_use_qwen_brand_name() -> None:
         assert "通义千问" not in value
 
 
+def test_deepseek_v4_pro_keys_are_localized_with_blank_descriptions() -> None:
+    bundles = _load_bundles()
+    required_keys = {
+        "provider.deepseek_v4_pro",
+        "provider.deepseek_v4_pro.description",
+        "settings.translation_model.deepseek_v4_pro.description",
+    }
+    forbidden_keys = {
+        "provider.deepseek_v4_pro_openrouter",
+        "provider.deepseek_v4_pro_openrouter.description",
+    }
+
+    for locale, bundle in bundles.items():
+        missing = sorted(required_keys - set(bundle))
+        assert missing == [], locale
+        present_forbidden = sorted(forbidden_keys.intersection(bundle))
+        assert present_forbidden == [], locale
+        assert bundle["provider.deepseek_v4_pro"].strip()
+        assert bundle["provider.deepseek_v4_pro"] != "provider.deepseek_v4_pro"
+        assert bundle["provider.deepseek_v4_pro.description"] == ""
+        assert bundle["settings.translation_model.deepseek_v4_pro.description"] == ""
+
+
 def test_managed_key_card_keys_are_localized() -> None:
     bundles = _load_bundles()
     required_keys = {
