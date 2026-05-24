@@ -167,6 +167,44 @@ def test_configure_main_logging_routes_file_writes_through_queue(tmp_path) -> No
         sinks.close()
 
 
+def test_configure_main_logging_uses_bounded_rotation_policy(tmp_path) -> None:
+    root_logger = logging.getLogger(f"test.runtime_logging.rotation_policy.{uuid4()}")
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+
+    sinks = configure_main_logging(root_logger=root_logger, log_dir=tmp_path)
+
+    try:
+        assert isinstance(sinks.file_handler, RotatingFileHandler)
+        assert sinks.file_handler.maxBytes == 10 * 1024 * 1024
+        assert sinks.file_handler.backupCount == 1
+    finally:
+        sinks.close()
+
+
+def test_configure_main_logging_names_single_backup_with_log_extension(tmp_path) -> None:
+    root_logger = logging.getLogger(f"test.runtime_logging.rotation_name.{uuid4()}")
+    root_logger.handlers.clear()
+    root_logger.propagate = False
+
+    sinks = configure_main_logging(root_logger=root_logger, log_dir=tmp_path)
+
+    try:
+        default_backup_name = str(sinks.log_file) + ".1"
+        assert sinks.file_handler.rotation_filename(default_backup_name) == str(
+            tmp_path / "puripuly_heart.backup.log"
+        )
+
+        sinks.file_handler.stream.write("old log line\n")
+        sinks.file_handler.flush()
+        sinks.file_handler.doRollover()
+
+        assert (tmp_path / "puripuly_heart.backup.log").exists()
+        assert not (tmp_path / "puripuly_heart.log.1").exists()
+    finally:
+        sinks.close()
+
+
 def test_configure_main_logging_reuses_existing_queue_handler(tmp_path) -> None:
     root_logger = logging.getLogger(f"test.runtime_logging.queue.reuse.{uuid4()}")
     root_logger.handlers.clear()
