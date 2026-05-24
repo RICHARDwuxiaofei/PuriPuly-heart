@@ -649,8 +649,26 @@ class TranslatorApp:
         self.view_logs.set_runtime_logging_mode(self.controller.runtime_logging_mode)
 
     def _on_providers_changed(self) -> None:
+        pending_settings = None
+        view_settings = getattr(self, "view_settings", None)
+        consume_provider_apply_settings = getattr(
+            view_settings,
+            "consume_provider_apply_settings",
+            None,
+        )
+        if callable(consume_provider_apply_settings) and getattr(
+            view_settings,
+            "has_provider_changes",
+            False,
+        ):
+            pending_settings = consume_provider_apply_settings()
+            view_settings.has_provider_changes = False
+
         async def _task():
-            await self.controller.apply_providers()
+            if pending_settings is None:
+                await self.controller.apply_providers()
+            else:
+                await self.controller.apply_providers(pending_settings)
 
         self._queue_settings_mutation_task(_task)
 

@@ -146,11 +146,6 @@ def _make_llm_selection_view(
     view._managed_key_referral_id = None
     view._managed_key_referral_id_label = SimpleNamespace(value="")
     view._managed_key_referral_id_value = SimpleNamespace(value="")
-    view._managed_key_referral_copy_button = SimpleNamespace(
-        disabled=True,
-        tooltip="",
-        update=lambda: None,
-    )
     view._managed_key_referral_helper_text = SimpleNamespace(value="")
     view._managed_key_pass_status = None
     view._managed_key_invite_progress_label = SimpleNamespace(value="", update=lambda: None)
@@ -768,7 +763,7 @@ def test_managed_key_card_visibility_follows_translation_connection(
     assert view._managed_key_card.visible is expected_visible
 
 
-def test_managed_key_referral_row_shows_empty_state_with_disabled_copy(
+def test_managed_key_referral_row_shows_empty_state_without_copy_button(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -779,13 +774,15 @@ def test_managed_key_referral_row_shows_empty_state_with_disabled_copy(
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     assert view._managed_key_referral_id_value.value == t("settings.managed_key.referral_id.empty")
-    assert view._managed_key_referral_copy_button.disabled is True
+    referral_row = _wrapped_card_column(view._managed_key_card).controls[4].controls[0]
+    assert view._managed_key_referral_id_value in referral_row.controls
+    assert not any(isinstance(control, ft.IconButton) for control in referral_row.controls)
     assert view._managed_key_referral_helper_text.value == t(
         "settings.managed_key.referral_id.pending_helper"
     )
 
 
-def test_managed_key_referral_row_shows_owned_id_with_enabled_copy(
+def test_managed_key_referral_row_shows_owned_id_without_copy_button(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -799,66 +796,12 @@ def test_managed_key_referral_row_shows_owned_id_with_enabled_copy(
 
     assert view._managed_key_card.visible is True
     assert view._managed_key_referral_id_value.value == "7KQ9M2"
-    assert view._managed_key_referral_copy_button.disabled is False
+    referral_row = _wrapped_card_column(view._managed_key_card).controls[4].controls[0]
+    assert view._managed_key_referral_id_value in referral_row.controls
+    assert not any(isinstance(control, ft.IconButton) for control in referral_row.controls)
     assert view._managed_key_referral_helper_text.value == t(
         "settings.managed_key.referral_id.helper"
     )
-
-
-def test_managed_key_referral_copy_button_copies_owned_id_and_shows_snackbar(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class ClipboardPage:
-        def __init__(self) -> None:
-            self.copied: list[str] = []
-
-        def set_clipboard(self, value: str) -> None:
-            self.copied.append(value)
-
-    settings = AppSettings()
-    settings.provider.llm = LLMProviderName.OPENROUTER
-    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
-    settings.managed_identity.referral_id = "7KQ9M2"
-    settings.validate()
-    snackbar_calls: list[tuple[str, object]] = []
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.show_snackbar = lambda message, color: snackbar_calls.append((message, color))
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    page = attach_dummy_page(monkeypatch, view, ClipboardPage())
-
-    view._managed_key_referral_copy_button.on_click(None)
-
-    assert page.copied == ["7KQ9M2"]
-    assert snackbar_calls == [
-        (t("settings.managed_key.referral_id.copy_success"), settings_view.COLOR_SUCCESS)
-    ]
-
-
-def test_managed_key_referral_copy_button_ignores_missing_owned_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class ClipboardPage:
-        def __init__(self) -> None:
-            self.copied: list[str] = []
-
-        def set_clipboard(self, value: str) -> None:
-            self.copied.append(value)
-
-    settings = AppSettings()
-    settings.provider.llm = LLMProviderName.OPENROUTER
-    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
-    snackbar_calls: list[tuple[str, object]] = []
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.show_snackbar = lambda message, color: snackbar_calls.append((message, color))
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    page = attach_dummy_page(monkeypatch, view, ClipboardPage())
-
-    view._managed_key_referral_copy_button.on_click(None)
-
-    assert page.copied == []
-    assert snackbar_calls == []
 
 
 def test_set_managed_trial_usage_state_tracks_visible_and_remaining_percent(
@@ -922,10 +865,6 @@ def test_set_managed_key_state_updates_card_controls_and_api_section_repaint(
     assert view._managed_trial_usage_bar.percent == 64
     assert view._managed_key_referral_id == "7KQ9M2"
     assert view._managed_key_referral_id_value.value == "7KQ9M2"
-    assert view._managed_key_referral_copy_button.disabled is False
-    assert view._managed_key_referral_copy_button.tooltip == t(
-        "settings.managed_key.referral_id.copy_tooltip"
-    )
     assert "api_keys_column" in updates
 
 
@@ -1083,10 +1022,6 @@ def test_set_managed_key_state_empty_referral_disables_copy_and_repaints_parent(
     assert view._managed_trial_usage_bar.percent is None
     assert view._managed_key_referral_id is None
     assert view._managed_key_referral_id_value.value == t("settings.managed_key.referral_id.empty")
-    assert view._managed_key_referral_copy_button.disabled is True
-    assert view._managed_key_referral_copy_button.tooltip == t(
-        "settings.managed_key.referral_id.pending_helper"
-    )
     assert "api_keys_column" in updates
 
 
@@ -1139,8 +1074,6 @@ def test_set_managed_key_state_repaints_mounted_pass_id_usage_and_invite_control
     )
     view._managed_key_referral_id_value.page = mounted_page
     view._managed_key_referral_id_value.update = lambda: updates.append("referral_value")
-    view._managed_key_referral_copy_button.page = mounted_page
-    view._managed_key_referral_copy_button.update = lambda: updates.append("referral_copy")
     view._managed_key_referral_helper_text.page = mounted_page
     view._managed_key_referral_helper_text.update = lambda: updates.append("referral_helper")
     view._managed_key_invite_progress_label.page = mounted_page
@@ -1171,7 +1104,6 @@ def test_set_managed_key_state_repaints_mounted_pass_id_usage_and_invite_control
         "usage_remaining_text",
         "usage_fill_segments",
         "referral_value",
-        "referral_copy",
         "referral_helper",
         "invite_label",
         "invite_value",
@@ -1264,7 +1196,7 @@ def test_managed_key_invite_progress_row_appears_between_talk_together_pass_id_a
     assert details_column.controls[2] is view._managed_key_referral_helper_text
 
 
-def test_set_managed_key_state_hides_invite_progress_when_absent(
+def test_set_managed_key_state_shows_invite_progress_placeholder_when_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -1293,9 +1225,9 @@ def test_set_managed_key_state_hides_invite_progress_when_absent(
         pass_status=None,
     )
 
-    assert view._managed_key_invite_progress_row.visible is False
+    assert view._managed_key_invite_progress_row.visible is True
     assert view._managed_key_pass_status is None
-    assert view._managed_key_invite_progress_value.value == ""
+    assert view._managed_key_invite_progress_value.value == "- / -"
 
 
 def test_set_managed_key_state_clamps_over_limit_invite_progress(
@@ -2638,6 +2570,32 @@ def test_on_translation_connection_selected_updates_settings_and_flags(
     )
     assert view.has_provider_changes is True
     assert changed == []
+
+
+def test_on_translation_connection_selected_auto_applies_managed_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMMA4,
+        connection=TranslationConnection.OPENROUTER,
+        connection_history={TranslationModel.GEMMA4.value: TranslationConnection.OPENROUTER},
+    )
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    provider_changes: list[str] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_providers_changed = lambda: provider_changes.append("apply")
+
+    view._on_translation_connection_selected(TranslationConnection.MANAGED.value)
+
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.translation.connection == TranslationConnection.MANAGED
+    assert pending.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert provider_changes == ["apply"]
 
 
 def test_on_translation_connection_selected_stages_deepseek_managed_china_routing(

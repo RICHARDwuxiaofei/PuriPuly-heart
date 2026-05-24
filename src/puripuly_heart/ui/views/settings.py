@@ -71,7 +71,6 @@ from puripuly_heart.ui.theme import (
     COLOR_NEUTRAL_DARK,
     COLOR_ON_BACKGROUND,
     COLOR_PRIMARY,
-    COLOR_SUCCESS,
 )
 
 logger = logging.getLogger(__name__)
@@ -855,13 +854,6 @@ class SettingsView(ft.Column):
             color=COLOR_ON_BACKGROUND,
             selectable=True,
         )
-        self._managed_key_referral_copy_button = ft.IconButton(
-            icon=ft.Icons.CONTENT_COPY_ROUNDED,
-            icon_color=COLOR_PRIMARY,
-            disabled=True,
-            tooltip=t("settings.managed_key.referral_id.pending_helper"),
-            on_click=self._on_managed_key_referral_copy,
-        )
         self._managed_key_referral_helper_text = ft.Text(
             t("settings.managed_key.referral_id.pending_helper"),
             size=14,
@@ -903,7 +895,6 @@ class SettingsView(ft.Column):
                                     self._managed_key_referral_id_label,
                                     ft.Container(expand=True),
                                     self._managed_key_referral_id_value,
-                                    self._managed_key_referral_copy_button,
                                 ],
                                 spacing=8,
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1970,22 +1961,12 @@ class SettingsView(ft.Column):
         referral_id = normalize_owned_referral_id(referral_id)
         self._managed_key_referral_id = referral_id
 
-        has_referral_id = referral_id is not None
         self._managed_key_referral_id_value.value = referral_id or t(
             "settings.managed_key.referral_id.empty"
         )
-        self._managed_key_referral_copy_button.disabled = not has_referral_id
-        self._managed_key_referral_copy_button.icon_color = (
-            COLOR_PRIMARY if has_referral_id else COLOR_NEUTRAL
-        )
-        self._managed_key_referral_copy_button.tooltip = t(
-            "settings.managed_key.referral_id.copy_tooltip"
-            if has_referral_id
-            else "settings.managed_key.referral_id.pending_helper"
-        )
         self._managed_key_referral_helper_text.value = t(
             "settings.managed_key.referral_id.helper"
-            if has_referral_id
+            if referral_id is not None
             else "settings.managed_key.referral_id.pending_helper"
         )
 
@@ -2014,8 +1995,11 @@ class SettingsView(ft.Column):
             or pass_status.invite_count < 0
         ):
             self._managed_key_pass_status = None
-            self._managed_key_invite_progress_row.visible = False
-            self._managed_key_invite_progress_value.value = ""
+            self._managed_key_invite_progress_label.value = t(
+                "settings.managed_key.invite_progress.label"
+            )
+            self._managed_key_invite_progress_row.visible = normalized_referral_id is not None
+            self._managed_key_invite_progress_value.value = "- / -"
             return
 
         self._managed_key_pass_status = pass_status
@@ -2069,44 +2053,12 @@ class SettingsView(ft.Column):
         for control in (
             self._managed_trial_usage_bar,
             self._managed_key_referral_id_value,
-            self._managed_key_referral_copy_button,
             self._managed_key_referral_helper_text,
             self._managed_key_invite_progress_label,
             self._managed_key_invite_progress_value,
             self._managed_key_invite_progress_row,
         ):
             _update_control_if_mounted(control)
-
-    def _show_managed_key_copy_snackbar(self, message: str) -> None:
-        if self.show_snackbar:
-            self.show_snackbar(message, COLOR_SUCCESS)
-            return
-        page = getattr(self, "page", None)
-        if page is None or not hasattr(page, "open"):
-            return
-        page.open(
-            ft.SnackBar(
-                ft.Text(message, size=18, color=ft.Colors.WHITE),
-                bgcolor=COLOR_SUCCESS,
-                duration=4000,
-                behavior=ft.SnackBarBehavior.FLOATING,
-                margin=ft.margin.only(bottom=90),
-                padding=20,
-            )
-        )
-
-    def _on_managed_key_referral_copy(self, _e) -> None:
-        referral_id = normalize_owned_referral_id(self._managed_key_referral_id)
-        if referral_id is None:
-            return
-        page = getattr(self, "page", None)
-        if page is None or not hasattr(page, "set_clipboard"):
-            return
-        try:
-            page.set_clipboard(referral_id)
-        except Exception:
-            return
-        self._show_managed_key_copy_snackbar(t("settings.managed_key.referral_id.copy_success"))
 
     def set_managed_trial_usage_state(
         self, *, visible: bool, remaining_percent: int | None = None
@@ -2923,6 +2875,12 @@ class SettingsView(ft.Column):
 
         self.has_provider_changes = True
         self._update_api_visibility()
+
+        if (
+            connection in (TranslationConnection.MANAGED, TranslationConnection.MANAGED_CHINA)
+            and getattr(self, "on_providers_changed", None) is not None
+        ):
+            self.on_providers_changed()
 
         display_settings = self._build_settings_with_provider_draft()
         assert display_settings is not None

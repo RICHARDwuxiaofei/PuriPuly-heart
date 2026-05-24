@@ -90,6 +90,8 @@ def open_warm_document_dialog(
     *,
     body_paragraphs: Sequence[str],
     extra_body_controls: Sequence[ft.Control] | None = None,
+    body_spacing: int = PARAGRAPH_SPACING,
+    action_top_margin: int = ACTION_TOP_MARGIN,
     primary_label: str | None = None,
     primary_action: Callable[[], None] | None = None,
     secondary_label: str | None = None,
@@ -151,7 +153,7 @@ def open_warm_document_dialog(
     )
     body = ft.Column(
         controls=[body_text, *(extra_body_controls or ())],
-        spacing=PARAGRAPH_SPACING,
+        spacing=body_spacing,
         tight=True,
     )
 
@@ -187,7 +189,7 @@ def open_warm_document_dialog(
         content=ft.Column(
             controls=[
                 body,
-                ft.Container(height=ACTION_TOP_MARGIN),
+                ft.Container(height=action_top_margin),
                 action_row,
             ],
             spacing=0,
