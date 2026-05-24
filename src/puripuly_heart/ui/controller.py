@@ -13,6 +13,7 @@ import threading
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -157,6 +158,20 @@ _OVERLAY_FAILURE_REASONS = frozenset(
         "unknown",
     }
 )
+GITHUB_STAR_PROMPT_MANAGED_REMAINING_PERCENT_THRESHOLD = 60
+GITHUB_STAR_PROMPT_RECENCY_WINDOW = timedelta(days=14)
+_GITHUB_STAR_PROMPT_MANAGED_CONNECTIONS = frozenset(
+    {
+        TranslationConnection.MANAGED,
+        TranslationConnection.MANAGED_CHINA,
+    }
+)
+_GITHUB_STAR_PROMPT_USER_OWNED_CLOUD_CONNECTIONS = frozenset(
+    {
+        TranslationConnection.OPENROUTER,
+        TranslationConnection.OFFICIAL_BYOK,
+    }
+)
 DISCORD_AUTH_ERROR_KEY_BY_SUBCODE = {
     "discord_email_unverified": "discord_auth.error.email_unverified",
     "discord_account_too_new": "discord_auth.error.account_too_new",
@@ -180,6 +195,55 @@ def _callable_accepts_keyword(callable_obj: object, keyword: str) -> bool:
     return keyword in parameters or any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
+
+
+def _github_star_prompt_utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _github_star_prompt_utc_timestamp(value: datetime | None = None) -> str:
+    resolved = value or _github_star_prompt_utc_now()
+    if resolved.tzinfo is None:
+        resolved = resolved.replace(tzinfo=timezone.utc)
+    return (
+        resolved.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
+
+
+def _parse_github_star_prompt_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    parse_value = f"{normalized[:-1]}+00:00" if normalized.endswith("Z") else normalized
+    try:
+        parsed = datetime.fromisoformat(parse_value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _github_star_prompt_non_negative_count(value: object) -> int:
+    if type(value) is int and value >= 0:
+        return value
+    return 0
+
+
+def _github_star_prompt_latest_timestamp(*values: str | None) -> str | None:
+    latest: tuple[datetime, str] | None = None
+    for value in values:
+        parsed = _parse_github_star_prompt_timestamp(value)
+        if parsed is None:
+            continue
+        normalized_value = _github_star_prompt_utc_timestamp(parsed)
+        if latest is None or parsed > latest[0]:
+            latest = (parsed, normalized_value)
+    return latest[1] if latest is not None else None
 
 
 class ClipboardWatcherRuntime(Protocol):
@@ -297,6 +361,16 @@ class GuiController:
     )
     _translation_toggle_intent_enabled: bool = field(init=False, default=False)
     _translation_toggle_generation: int = field(init=False, default=0)
+    _github_star_prompt_translation_success_task: asyncio.Task[bool] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _github_star_prompt_persistence_lock: asyncio.Lock | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     _runtime_logging: SessionRuntimeLoggingService | None = field(init=False, default=None)
 
     overlay_state: str = "off"
@@ -776,6 +850,285 @@ class GuiController:
         return max(
             0, min(100, round((usage_metadata.remaining_usd / usage_metadata.limit_usd) * 100))
         )
+
+    def _github_star_prompt_translation_connection_for(
+        self,
+        settings: AppSettings | None,
+    ) -> TranslationConnection | None:
+        if settings is None:
+            return None
+        connection = settings.translation.connection
+        if isinstance(connection, TranslationConnection):
+            return connection
+        with contextlib.suppress(ValueError, TypeError):
+            return TranslationConnection(connection)
+        return None
+
+    def _github_star_prompt_current_translation_connection(self) -> TranslationConnection | None:
+        return self._github_star_prompt_translation_connection_for(self.settings)
+
+    def _github_star_prompt_settings_has_user_owned_cloud_connection(
+        self,
+        settings: AppSettings | None,
+    ) -> bool:
+        return (
+            self._github_star_prompt_translation_connection_for(settings)
+            in _GITHUB_STAR_PROMPT_USER_OWNED_CLOUD_CONNECTIONS
+        )
+
+    def _github_star_prompt_has_managed_connection(self) -> bool:
+        return (
+            self._github_star_prompt_current_translation_connection()
+            in _GITHUB_STAR_PROMPT_MANAGED_CONNECTIONS
+        )
+
+    def _github_star_prompt_has_user_owned_cloud_connection(self) -> bool:
+        return (
+            self._github_star_prompt_current_translation_connection()
+            in _GITHUB_STAR_PROMPT_USER_OWNED_CLOUD_CONNECTIONS
+        )
+
+    def is_github_star_prompt_eligible(self) -> bool:
+        if self.settings is None:
+            return False
+        if self._github_star_prompt_has_managed_connection():
+            remaining_percent = self._managed_trial_remaining_percent(
+                self._managed_trial_usage_metadata
+            )
+            return (
+                remaining_percent is not None
+                and remaining_percent <= GITHUB_STAR_PROMPT_MANAGED_REMAINING_PERCENT_THRESHOLD
+            )
+        if self._github_star_prompt_has_user_owned_cloud_connection():
+            return bool(self.settings.ui.github_star_prompt_translation_success_observed)
+        return False
+
+    def should_show_github_star_prompt(self, *, now: datetime | None = None) -> bool:
+        settings = self.settings
+        if settings is None:
+            return False
+        if settings.ui.github_star_prompt_clicked:
+            return False
+        if not self.is_github_star_prompt_eligible():
+            return False
+
+        last_shown_at = _parse_github_star_prompt_timestamp(
+            settings.ui.github_star_prompt_last_shown_at
+        )
+        if last_shown_at is None:
+            return True
+
+        resolved_now = now or _github_star_prompt_utc_now()
+        if resolved_now.tzinfo is None:
+            resolved_now = resolved_now.replace(tzinfo=timezone.utc)
+        elapsed = resolved_now.astimezone(timezone.utc) - last_shown_at
+        return elapsed >= GITHUB_STAR_PROMPT_RECENCY_WINDOW
+
+    def _get_github_star_prompt_persistence_lock(self) -> asyncio.Lock:
+        if self._github_star_prompt_persistence_lock is None:
+            self._github_star_prompt_persistence_lock = asyncio.Lock()
+        return self._github_star_prompt_persistence_lock
+
+    def _github_star_prompt_state_snapshot(self, settings: AppSettings) -> tuple[object, ...]:
+        return (
+            settings.ui.github_star_prompt_clicked,
+            settings.ui.github_star_prompt_last_shown_at,
+            settings.ui.github_star_prompt_show_count,
+            settings.ui.github_star_prompt_translation_success_observed,
+        )
+
+    def _restore_github_star_prompt_state_snapshot(
+        self,
+        settings: AppSettings,
+        snapshot: tuple[object, ...],
+    ) -> None:
+        (
+            clicked,
+            last_shown_at,
+            show_count,
+            translation_success_observed,
+        ) = snapshot
+        settings.ui.github_star_prompt_clicked = bool(clicked)
+        settings.ui.github_star_prompt_last_shown_at = (
+            last_shown_at if isinstance(last_shown_at, str) else None
+        )
+        settings.ui.github_star_prompt_show_count = _github_star_prompt_non_negative_count(
+            show_count
+        )
+        settings.ui.github_star_prompt_translation_success_observed = bool(
+            translation_success_observed
+        )
+
+    def _log_github_star_prompt_save_failure(
+        self,
+        failure_context: str,
+        exc: Exception,
+    ) -> None:
+        self.log_basic(
+            f"[GitHubStar] Failed to persist prompt {failure_context}: {exc}",
+            level=logging.WARNING,
+        )
+
+    async def _persist_github_star_prompt_mutation(
+        self,
+        *,
+        failure_context: str,
+        mutate,
+    ) -> bool:
+        attempted_mutation = False
+        while True:
+            async with self._get_github_star_prompt_persistence_lock():
+                settings = self.settings
+                if settings is None:
+                    return False
+                snapshot = self._github_star_prompt_state_snapshot(settings)
+                if not mutate(settings):
+                    return attempted_mutation
+                attempted_mutation = True
+                try:
+                    await asyncio.to_thread(save_settings, self.config_path, settings)
+                except asyncio.CancelledError:
+                    if self.settings is settings:
+                        self._restore_github_star_prompt_state_snapshot(settings, snapshot)
+                    raise
+                except Exception as exc:
+                    if self.settings is settings:
+                        self._restore_github_star_prompt_state_snapshot(settings, snapshot)
+                    self._log_github_star_prompt_save_failure(failure_context, exc)
+                    return False
+                if self.settings is settings:
+                    return True
+            await asyncio.sleep(0)
+
+    async def persist_github_star_prompt_opened(
+        self,
+        *,
+        opened_at: datetime | None = None,
+    ) -> bool:
+        opened_timestamp = _github_star_prompt_utc_timestamp(opened_at)
+
+        def _mutate(settings: AppSettings) -> bool:
+            settings.ui.github_star_prompt_last_shown_at = opened_timestamp
+            settings.ui.github_star_prompt_show_count = (
+                _github_star_prompt_non_negative_count(settings.ui.github_star_prompt_show_count)
+                + 1
+            )
+            return True
+
+        return await self._persist_github_star_prompt_mutation(
+            failure_context="open state",
+            mutate=_mutate,
+        )
+
+    def _run_github_star_prompt_persistence_sync(self, coro) -> bool:  # noqa: ANN001
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return bool(asyncio.run(coro))
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
+        return False
+
+    def record_github_star_prompt_opened(self, *, opened_at: datetime | None = None) -> bool:
+        return self._run_github_star_prompt_persistence_sync(
+            self.persist_github_star_prompt_opened(opened_at=opened_at)
+        )
+
+    async def persist_github_star_prompt_clicked(self) -> bool:
+        def _mutate(settings: AppSettings) -> bool:
+            settings.ui.github_star_prompt_clicked = True
+            return True
+
+        return await self._persist_github_star_prompt_mutation(
+            failure_context="click state",
+            mutate=_mutate,
+        )
+
+    def record_github_star_prompt_clicked(self) -> bool:
+        return self._run_github_star_prompt_persistence_sync(
+            self.persist_github_star_prompt_clicked()
+        )
+
+    async def persist_github_star_prompt_translation_success_observed(self) -> bool:
+        def _mutate(settings: AppSettings) -> bool:
+            if not self._github_star_prompt_settings_has_user_owned_cloud_connection(settings):
+                return False
+            if settings.ui.github_star_prompt_translation_success_observed:
+                return False
+            settings.ui.github_star_prompt_translation_success_observed = True
+            return True
+
+        return await self._persist_github_star_prompt_mutation(
+            failure_context="translation success observation",
+            mutate=_mutate,
+        )
+
+    def record_github_star_prompt_translation_success_observed(self) -> bool:
+        return self._run_github_star_prompt_persistence_sync(
+            self.persist_github_star_prompt_translation_success_observed()
+        )
+
+    def schedule_github_star_prompt_translation_success_observed(self) -> bool:
+        if self.settings is None:
+            return False
+        if not self._github_star_prompt_has_user_owned_cloud_connection():
+            return False
+        if self.settings.ui.github_star_prompt_translation_success_observed:
+            return False
+        existing_task = self._github_star_prompt_translation_success_task
+        if existing_task is not None and not existing_task.done():
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return self.record_github_star_prompt_translation_success_observed()
+
+        task = loop.create_task(self.persist_github_star_prompt_translation_success_observed())
+        self._github_star_prompt_translation_success_task = task
+
+        def _clear_completed_task(completed_task: asyncio.Task[bool]) -> None:
+            if self._github_star_prompt_translation_success_task is completed_task:
+                self._github_star_prompt_translation_success_task = None
+
+        task.add_done_callback(_clear_completed_task)
+        return True
+
+    async def _drain_github_star_prompt_translation_success_task(self) -> None:
+        task = self._github_star_prompt_translation_success_task
+        if task is None:
+            return
+        await asyncio.gather(task, return_exceptions=True)
+        if self._github_star_prompt_translation_success_task is task:
+            self._github_star_prompt_translation_success_task = None
+
+    async def _preserve_github_star_prompt_observation_before_settings_replace(
+        self,
+        replacement_settings: AppSettings,
+    ) -> None:
+        await self._drain_github_star_prompt_translation_success_task()
+        async with self._get_github_star_prompt_persistence_lock():
+            if self.settings is None:
+                return
+            current_ui = self.settings.ui
+            replacement_ui = replacement_settings.ui
+            replacement_ui.github_star_prompt_clicked = bool(
+                replacement_ui.github_star_prompt_clicked or current_ui.github_star_prompt_clicked
+            )
+            replacement_ui.github_star_prompt_translation_success_observed = bool(
+                replacement_ui.github_star_prompt_translation_success_observed
+                or current_ui.github_star_prompt_translation_success_observed
+            )
+            replacement_ui.github_star_prompt_show_count = max(
+                _github_star_prompt_non_negative_count(
+                    replacement_ui.github_star_prompt_show_count
+                ),
+                _github_star_prompt_non_negative_count(current_ui.github_star_prompt_show_count),
+            )
+            replacement_ui.github_star_prompt_last_shown_at = _github_star_prompt_latest_timestamp(
+                replacement_ui.github_star_prompt_last_shown_at,
+                current_ui.github_star_prompt_last_shown_at,
+            )
 
     def _current_owned_referral_id(self) -> str | None:
         if self.settings is None:
@@ -1291,6 +1644,7 @@ class GuiController:
         )
 
     async def stop(self) -> None:
+        await self._drain_github_star_prompt_translation_success_task()
         await self._stop_clipboard_watcher()
         await self._cancel_local_stt_download()
         await self.set_stt_enabled(False)
@@ -2382,6 +2736,8 @@ class GuiController:
         def _effective_peer_language(language: str, peer_language: str) -> str:
             return peer_language or language
 
+        await self._preserve_github_star_prompt_observation_before_settings_replace(settings)
+
         prev_locale = get_locale()
         prev_overlay_enabled = (
             self.settings.ui.overlay_enabled if self.settings is not None else False
@@ -2633,6 +2989,8 @@ class GuiController:
         )
         if next_settings is None:
             return
+
+        await self._preserve_github_star_prompt_observation_before_settings_replace(next_settings)
 
         prev_settings = self.settings
         prev_self_provider_signature = self._last_self_stt_provider_signature
