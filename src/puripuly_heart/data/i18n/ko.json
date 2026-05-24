@@ -385,7 +385,7 @@
   "settings.vrc_mic.on": "켜기",
   "settings.vrc_mic.off": "끄기",
   "settings.chatbox_include_source": "Chatbox 출력 형식",
-  "settings.clipboard_auto_translate": "클립보드 자동 번역",
+  "settings.clipboard_auto_translate": "클립보드 자동 감지",
   "settings.clipboard_auto_translate.on": "켜기",
   "settings.clipboard_auto_translate.off": "끄기",
   "settings.chatbox_source.on": "원문 + 번역",
