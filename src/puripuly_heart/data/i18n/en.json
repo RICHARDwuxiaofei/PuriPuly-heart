@@ -218,7 +218,7 @@
   "debug_preview.audio_fault_clear": "Clear audio faults",
   "debug_preview.capture_fault_snackbar": "Capture fault: {profile}",
   "debug_preview.stt_fault_snackbar": "STT fault: {profile}",
-  "discord_auth.body": "PuriPuly gives new users a free usage allowance.\nThat's about 600–700 translated utterances.\nYou'll receive it right after Discord verification.\n\nIf you received a Pass ID from a friend, enter it here.\nYou and your friend can each get 200 extra translations.",
+  "discord_auth.body": "PuriPuly gives new users a free usage allowance.\nThat's about 600–700 translated utterances.\nYou'll receive it right after Discord verification.\n\nWe don't keep personal information.\nWe only check the minimum information needed for verification.\n\nIf you received a Pass ID from a friend, enter it here.\nYou and your friend can each get 200 extra translations.",
   "discord_auth.continue": "Discord OAuth verification",
   "discord_auth.close": "Cancel",
   "discord_auth.reopen_browser": "Reopen browser",

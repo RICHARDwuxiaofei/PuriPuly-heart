@@ -218,7 +218,7 @@
     "debug_preview.audio_fault_clear": "清除音频故障",
     "debug_preview.capture_fault_snackbar": "采集故障：{profile}",
     "debug_preview.stt_fault_snackbar": "STT 故障：{profile}",
-    "discord_auth.body": "PuriPuly 会为新用户提供免费使用额度。\n按发言计算，可翻译约 600–700 次。\n完成 Discord 认证后会立即发放。\n\n如果你有朋友给你的 Pass ID，请在这里输入。\n你和朋友可以一起获得额外 200 次使用额度。",
+    "discord_auth.body": "PuriPuly 会为新用户提供免费使用额度。\n按发言计算，可翻译约 600–700 次。\n完成 Discord 认证后会立即发放。\n\n我们不会保存个人信息。\n只会确认认证所需的最低限度信息。\n\n如果你有朋友给你的 Pass ID，请在这里输入。\n你和朋友可以一起获得额外 200 次使用额度。",
     "discord_auth.continue": "Discord OAuth 认证",
     "discord_auth.close": "取消",
     "discord_auth.reopen_browser": "重新打开浏览器",

@@ -197,6 +197,41 @@ def test_discord_managed_auth_dialog_renders_optional_referral_id_field() -> Non
     assert not getattr(dialog._continue_button, "disabled", False)
 
 
+def test_discord_managed_auth_dialog_scales_referral_id_field_content() -> None:
+    page = DummyPage()
+    dialog = _dialog(page)
+
+    dialog.open()
+
+    field = dialog._referral_id_field
+    assert field is not None
+    assert field.height is None
+    assert field.dense is False
+    assert field.text_size == 22
+    assert field.content_padding is not None
+    assert field.content_padding.left == 16
+    assert field.content_padding.right == 16
+    assert field.content_padding.top == 20
+    assert field.content_padding.bottom == 20
+    assert field.bgcolor is None
+    assert field.border_radius == 14
+    assert field.focused_border_color == COLOR_PRIMARY
+
+
+def test_discord_managed_auth_dialog_groups_referral_field_with_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(discord_module, "create_glow_stack", lambda content: content)
+    page = DummyPage()
+    dialog = _dialog(page)
+
+    dialog.open()
+
+    assert _body_column(page).spacing == 44
+    action_spacer = _content_column(page).controls[1]
+    assert action_spacer.height == 24
+
+
 def test_discord_managed_auth_dialog_referral_field_is_present_before_page_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
