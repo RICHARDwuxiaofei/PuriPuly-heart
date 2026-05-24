@@ -130,6 +130,21 @@ def test_deepseek_provider_passes_max_tokens_to_internal_httpx_client() -> None:
     assert client.max_tokens == 17
 
 
+def test_deepseek_provider_passes_v4_pro_model_to_internal_httpx_client() -> None:
+    from puripuly_heart.config.settings import DeepSeekLLMModel
+
+    deepseek_model = getattr(DeepSeekLLMModel, "DEEPSEEK_V4_PRO", None)
+
+    assert deepseek_model is not None
+
+    provider = DeepSeekLLMProvider(api_key="k", model=deepseek_model.value)
+
+    client = provider._get_client()
+
+    assert isinstance(client, HttpxDeepSeekClient)
+    assert client.model == "deepseek-v4-pro"
+
+
 @pytest.mark.asyncio
 async def test_httpx_deepseek_client_builds_non_thinking_request(monkeypatch) -> None:
     fake_client = FakeAsyncClient()
