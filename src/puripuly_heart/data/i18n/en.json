@@ -100,8 +100,6 @@
   "settings.managed_key.referral_id.empty": "—",
   "settings.managed_key.referral_id.pending_helper": "Your Talk Together Pass ID appears after Discord verification.",
   "settings.managed_key.referral_id.helper": "Share your Pass ID with a friend to get extra usage together.",
-  "settings.managed_key.referral_id.copy_tooltip": "Copy Pass ID",
-  "settings.managed_key.referral_id.copy_success": "Pass ID copied.",
   "settings.managed_key.invite_progress.label": "Friend invites",
   "settings.prompt_for": "Prompt for: {provider}",
   "settings.system_prompt": "System Prompt",
