@@ -25,6 +25,18 @@ DYNAMIC_I18N_PREFIXES = (
     "settings.translation_model.",
 )
 
+GITHUB_STAR_SNACKBAR_KEYS = (
+    "github_star.snackbar.message",
+    "github_star.snackbar.action",
+)
+
+INTENTIONAL_PENDING_RUNTIME_KEYS: set[str] = set()
+
+EXPECTED_GITHUB_STAR_SNACKBAR_KO_COPY = {
+    "github_star.snackbar.message": "PuriPuly가 도움이 됐다면 GitHub에서 Star를 눌러주세요! 큰 힘이 되어요!",
+    "github_star.snackbar.action": "이동",
+}
+
 
 def _load_bundles() -> dict[str, dict[str, str]]:
     return {
@@ -100,6 +112,27 @@ def test_logs_conversation_keys_are_localized() -> None:
             assert bundle[key] != key
 
     assert bundles["ko"]["logs.conversation.show"] == "대화록 보기"
+
+
+def test_github_star_snackbar_keys_are_localized_for_all_supported_locales() -> None:
+    bundles = _load_bundles()
+    supported_locales = set(available_locales())
+
+    assert set(bundles) == supported_locales
+    for locale, bundle in bundles.items():
+        missing = sorted(set(GITHUB_STAR_SNACKBAR_KEYS) - set(bundle))
+        assert missing == [], locale
+        for key in GITHUB_STAR_SNACKBAR_KEYS:
+            assert bundle[key].strip()
+            assert bundle[key] != key
+
+
+def test_github_star_snackbar_korean_copy_matches_source_spec() -> None:
+    ko = _load_bundles()["ko"]
+
+    assert {
+        key: ko[key] for key in GITHUB_STAR_SNACKBAR_KEYS
+    } == EXPECTED_GITHUB_STAR_SNACKBAR_KO_COPY
 
 
 def test_local_llm_keys_are_localized() -> None:
@@ -259,7 +292,9 @@ def test_i18n_bundles_do_not_keep_unused_runtime_keys() -> None:
     unused_keys = [
         key
         for key in all_keys
-        if key not in runtime_source and not key.startswith(DYNAMIC_I18N_PREFIXES)
+        if key not in runtime_source
+        and key not in INTENTIONAL_PENDING_RUNTIME_KEYS
+        and not key.startswith(DYNAMIC_I18N_PREFIXES)
     ]
 
     assert unused_keys == []

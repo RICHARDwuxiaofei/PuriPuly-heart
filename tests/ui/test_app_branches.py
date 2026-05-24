@@ -280,6 +280,7 @@ def test_translator_app_mounts_debug_preview_when_enabled(
     assert set(seen["callbacks"]) == {
         "on_brake_notice",
         "on_revoked_notice",
+        "on_github_star_snackbar",
         "on_founder_letter",
         "on_pkce_failure",
         "on_discord_auth",
@@ -296,6 +297,9 @@ def test_translator_app_mounts_debug_preview_when_enabled(
     callback_page = seen["callbacks"]["on_discord_callback_page"]
     assert getattr(callback_page, "__self__", None) is app
     assert getattr(callback_page, "__func__", None) is TranslatorApp._preview_discord_callback_page
+    github_star = seen["callbacks"]["on_github_star_snackbar"]
+    assert getattr(github_star, "__self__", None) is app
+    assert getattr(github_star, "__func__", None) is TranslatorApp._preview_github_star_snackbar
     pass_progress = seen["callbacks"]["on_talk_together_pass_invite_progress"]
     assert getattr(pass_progress, "__self__", None) is app
     assert (

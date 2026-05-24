@@ -4,6 +4,7 @@ import copy
 import json
 import locale
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -738,12 +739,26 @@ class UiSettings:
     integrated_context_enabled: bool = True
     integrated_context_bootstrapped: bool = False
     clipboard_auto_translate_enabled: bool = False
+    github_star_prompt_clicked: bool = False
+    github_star_prompt_last_shown_at: str | None = None
+    github_star_prompt_show_count: int = 0
+    github_star_prompt_translation_success_observed: bool = False
 
     def validate(self) -> None:
         if not self.locale:
             raise ValueError("locale must be non-empty")
         if not isinstance(self.clipboard_auto_translate_enabled, bool):
             raise ValueError("clipboard_auto_translate_enabled must be a bool")
+        if not isinstance(self.github_star_prompt_clicked, bool):
+            raise ValueError("github_star_prompt_clicked must be a bool")
+        self.github_star_prompt_last_shown_at = _parse_utc_iso8601_timestamp(
+            self.github_star_prompt_last_shown_at
+        )
+        self.github_star_prompt_show_count = _parse_non_negative_int(
+            self.github_star_prompt_show_count
+        )
+        if not isinstance(self.github_star_prompt_translation_success_observed, bool):
+            raise ValueError("github_star_prompt_translation_success_observed must be a bool")
 
 
 @dataclass(slots=True)
@@ -1029,6 +1044,16 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "integrated_context_enabled": settings.ui.integrated_context_enabled,
             "integrated_context_bootstrapped": settings.ui.integrated_context_bootstrapped,
             "clipboard_auto_translate_enabled": settings.ui.clipboard_auto_translate_enabled,
+            "github_star_prompt_clicked": settings.ui.github_star_prompt_clicked,
+            "github_star_prompt_last_shown_at": _parse_utc_iso8601_timestamp(
+                settings.ui.github_star_prompt_last_shown_at
+            ),
+            "github_star_prompt_show_count": _parse_non_negative_int(
+                settings.ui.github_star_prompt_show_count
+            ),
+            "github_star_prompt_translation_success_observed": (
+                settings.ui.github_star_prompt_translation_success_observed
+            ),
         },
         "api_key_verified": {
             "deepgram": settings.api_key_verified.deepgram,
@@ -1925,6 +1950,38 @@ def _parse_optional_str(value: object) -> str | None:
     return normalized or None
 
 
+def _parse_bool(value: object, fallback: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    return fallback
+
+
+def _parse_non_negative_int(value: object, fallback: int = 0) -> int:
+    if type(value) is not int:
+        return fallback
+    if value < 0:
+        return fallback
+    return value
+
+
+def _parse_utc_iso8601_timestamp(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    parse_value = f"{normalized[:-1]}+00:00" if normalized.endswith("Z") else normalized
+    try:
+        parsed = datetime.fromisoformat(parse_value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        return None
+    return normalized
+
+
 def _parse_optional_float(value: object) -> float | None:
     if value is None or isinstance(value, bool):
         return None
@@ -2608,6 +2665,55 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         del ui_data["peer_translation_enabled"]
         changed = True
 
+    raw_github_star_prompt_clicked = ui_data.get("github_star_prompt_clicked")
+    normalized_github_star_prompt_clicked = _parse_bool(raw_github_star_prompt_clicked)
+    if (
+        "github_star_prompt_clicked" not in ui_data
+        or raw_github_star_prompt_clicked != normalized_github_star_prompt_clicked
+    ):
+        ui_data["github_star_prompt_clicked"] = normalized_github_star_prompt_clicked
+        changed = True
+
+    raw_github_star_prompt_last_shown_at = ui_data.get("github_star_prompt_last_shown_at")
+    normalized_github_star_prompt_last_shown_at = _parse_utc_iso8601_timestamp(
+        raw_github_star_prompt_last_shown_at
+    )
+    if (
+        "github_star_prompt_last_shown_at" not in ui_data
+        or raw_github_star_prompt_last_shown_at != normalized_github_star_prompt_last_shown_at
+    ):
+        ui_data["github_star_prompt_last_shown_at"] = normalized_github_star_prompt_last_shown_at
+        changed = True
+
+    raw_github_star_prompt_show_count = ui_data.get("github_star_prompt_show_count")
+    normalized_github_star_prompt_show_count = _parse_non_negative_int(
+        raw_github_star_prompt_show_count
+    )
+    if (
+        "github_star_prompt_show_count" not in ui_data
+        or raw_github_star_prompt_show_count != normalized_github_star_prompt_show_count
+        or type(raw_github_star_prompt_show_count)
+        is not type(normalized_github_star_prompt_show_count)
+    ):
+        ui_data["github_star_prompt_show_count"] = normalized_github_star_prompt_show_count
+        changed = True
+
+    raw_github_star_prompt_translation_success_observed = ui_data.get(
+        "github_star_prompt_translation_success_observed"
+    )
+    normalized_github_star_prompt_translation_success_observed = _parse_bool(
+        raw_github_star_prompt_translation_success_observed
+    )
+    if (
+        "github_star_prompt_translation_success_observed" not in ui_data
+        or raw_github_star_prompt_translation_success_observed
+        != normalized_github_star_prompt_translation_success_observed
+    ):
+        ui_data["github_star_prompt_translation_success_observed"] = (
+            normalized_github_star_prompt_translation_success_observed
+        )
+        changed = True
+
     if "overlay_calibration" in data:
         del data["overlay_calibration"]
         changed = True
@@ -2987,6 +3093,16 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             ),
             clipboard_auto_translate_enabled=bool(
                 ui_data.get("clipboard_auto_translate_enabled", False)
+            ),
+            github_star_prompt_clicked=_parse_bool(ui_data.get("github_star_prompt_clicked")),
+            github_star_prompt_last_shown_at=_parse_utc_iso8601_timestamp(
+                ui_data.get("github_star_prompt_last_shown_at")
+            ),
+            github_star_prompt_show_count=_parse_non_negative_int(
+                ui_data.get("github_star_prompt_show_count")
+            ),
+            github_star_prompt_translation_success_observed=_parse_bool(
+                ui_data.get("github_star_prompt_translation_success_observed")
             ),
         ),
         api_key_verified=ApiKeyVerificationSettings(

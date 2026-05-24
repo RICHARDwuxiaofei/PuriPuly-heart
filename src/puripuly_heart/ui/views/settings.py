@@ -2713,20 +2713,24 @@ class SettingsView(ft.Column):
         # Check compatibility warning
         source_lang = self._settings.languages.source_language
         warning = get_stt_compatibility_warning(source_lang, provider.value)
-        if warning and self.page:
-            self.page.open(
-                ft.SnackBar(
-                    ft.Text(
-                        t(warning.key, language=language_name(warning.language_code)),
-                        color=ft.Colors.WHITE,
-                    ),
-                    bgcolor=ft.Colors.ORANGE_700,
-                    duration=4000,
-                    behavior=ft.SnackBarBehavior.FLOATING,
-                    margin=ft.margin.only(bottom=90),
-                    padding=20,
+        if warning:
+            message = t(warning.key, language=language_name(warning.language_code))
+            if self.show_snackbar:
+                self.show_snackbar(message, ft.Colors.ORANGE_700)
+            elif self.page:
+                self.page.open(
+                    ft.SnackBar(
+                        ft.Text(
+                            message,
+                            color=ft.Colors.WHITE,
+                        ),
+                        bgcolor=ft.Colors.ORANGE_700,
+                        duration=4000,
+                        behavior=ft.SnackBarBehavior.FLOATING,
+                        margin=ft.margin.only(bottom=90),
+                        padding=20,
+                    )
                 )
-            )
 
         if self.page:
             self._qwen_region_btn.update()
