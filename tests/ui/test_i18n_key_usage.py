@@ -244,8 +244,6 @@ def test_managed_key_card_keys_are_localized() -> None:
         "settings.managed_key.referral_id.empty",
         "settings.managed_key.referral_id.pending_helper",
         "settings.managed_key.referral_id.helper",
-        "settings.managed_key.referral_id.copy_tooltip",
-        "settings.managed_key.referral_id.copy_success",
         "settings.managed_key.invite_progress.label",
     }
 
@@ -259,11 +257,8 @@ def test_managed_key_card_keys_are_localized() -> None:
     assert bundles["en"]["settings.managed_key.title"] == "Managed Key"
     assert bundles["en"]["settings.managed_key.referral_id.label"] == "Talk Together Pass ID"
     assert bundles["en"]["settings.managed_key.referral_id.empty"] == "—"
-    assert bundles["en"]["settings.managed_key.referral_id.copy_success"] == "Pass ID copied."
     assert bundles["ko"]["settings.managed_key.title"] == "매니지드 키"
     ko = bundles["ko"]
-    assert ko["settings.managed_key.referral_id.copy_tooltip"] == "Pass ID 복사"
-    assert ko["settings.managed_key.referral_id.copy_success"] == "Pass ID를 복사했어요."
     assert ko["settings.managed_key.referral_id.helper"] == (
         "친구에게 Pass ID를 공유하면 함께 추가 사용량을 받을 수 있어요."
     )
@@ -273,8 +268,6 @@ def test_managed_key_card_keys_are_localized() -> None:
         for key in (
             "settings.managed_key.referral_id.label",
             "settings.managed_key.referral_id.helper",
-            "settings.managed_key.referral_id.copy_tooltip",
-            "settings.managed_key.referral_id.copy_success",
             "settings.managed_key.invite_progress.label",
             "discord_auth.referral_id.label",
             "discord_auth.referral_reward_applied",
