@@ -74,6 +74,7 @@ from puripuly_heart.core.runtime_logging import (
 )
 from puripuly_heart.domain.models import Transcript
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
+from puripuly_heart.providers.llm.local_openai import LocalOpenAICompatibleLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -956,6 +957,49 @@ async def test_start_local_llm_without_runtime_does_not_show_api_key_warning(
 
     assert dash.translation_needs_key is False
     assert dash.translation_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_verify_and_update_status_trusts_local_llm_runtime_without_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.LOCAL_LLM
+    settings.translation = TranslationSettings(
+        model=TranslationModel.LOCAL_LLM,
+        connection=TranslationConnection.OLLAMA,
+    )
+
+    dash = DummyDashboard()
+    app = SimpleNamespace(view_dashboard=dash)
+    controller = _make_controller(app=app)
+    controller.settings = settings
+    controller.hub = DummyHub(llm=object(), stt=object())
+
+    probe_calls = 0
+
+    async def fake_verify_connection(*_args, **_kwargs) -> bool:
+        nonlocal probe_calls
+        probe_calls += 1
+        return False
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.setattr(
+        LocalOpenAICompatibleLLMProvider,
+        "verify_connection",
+        staticmethod(fake_verify_connection),
+    )
+
+    await controller._verify_and_update_status()
+
+    assert probe_calls == 0
+    assert dash.translation_needs_key is False
+    assert dash.translation_enabled is True
+    assert controller.hub.translation_enabled is True
 
 
 @pytest.mark.asyncio
