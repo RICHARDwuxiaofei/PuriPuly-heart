@@ -276,6 +276,7 @@ class TranslatorApp:
             visible=True,
             remaining_percent=100,
             referral_id=DEBUG_PREVIEW_TALK_TOGETHER_PASS_ID,
+            remember_referral_id=False,
             pass_status=TalkTogetherPassStatus(
                 pass_id=DEBUG_PREVIEW_TALK_TOGETHER_PASS_ID,
                 invite_count=1,

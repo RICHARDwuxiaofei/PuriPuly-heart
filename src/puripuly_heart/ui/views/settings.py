@@ -897,7 +897,6 @@ class SettingsView(ft.Column):
                     ft.Container(height=8),
                     ft.Column(
                         [
-                            self._managed_key_invite_progress_row,
                             ft.Row(
                                 [
                                     self._managed_key_referral_id_label,
@@ -908,6 +907,7 @@ class SettingsView(ft.Column):
                                 spacing=8,
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             ),
+                            self._managed_key_invite_progress_row,
                             self._managed_key_referral_helper_text,
                         ],
                         spacing=4,
@@ -1988,6 +1988,17 @@ class SettingsView(ft.Column):
             else "settings.managed_key.referral_id.pending_helper"
         )
 
+    def _remember_managed_key_referral_id(self, referral_id: str | None) -> str | None:
+        referral_id = normalize_owned_referral_id(referral_id)
+        if referral_id is None:
+            return None
+
+        if self._settings is not None:
+            self._settings.managed_identity.referral_id = referral_id
+        if self._provider_settings_draft is not None:
+            self._provider_settings_draft.managed_identity.referral_id = referral_id
+        return referral_id
+
     def _sync_managed_key_invite_progress_row(
         self,
         referral_id: str | None,
@@ -2037,12 +2048,33 @@ class SettingsView(ft.Column):
         self._sync_managed_trial_usage_bar(settings)
 
     def _repaint_managed_key_card(self) -> None:
+        self._repaint_managed_key_dynamic_controls()
         _update_control_if_mounted(self._managed_key_card)
         _update_control_if_mounted(self._api_keys_column)
         if hasattr(self, "_settings_subtab_shell"):
             api_body = self._settings_subtab_shell.body_by_key.get("api")
             if api_body is not None:
                 _update_control_if_mounted(api_body)
+
+    def _repaint_managed_key_dynamic_controls(self) -> None:
+        usage_repaint = getattr(self._managed_trial_usage_bar, "repaint_dynamic_controls", None)
+        if callable(usage_repaint):
+            usage_repaint()
+        else:
+            for control_name in ("_fill_segments", "_remaining_text"):
+                control = getattr(self._managed_trial_usage_bar, control_name, None)
+                if control is not None:
+                    _update_control_if_mounted(control)
+        for control in (
+            self._managed_trial_usage_bar,
+            self._managed_key_referral_id_value,
+            self._managed_key_referral_copy_button,
+            self._managed_key_referral_helper_text,
+            self._managed_key_invite_progress_label,
+            self._managed_key_invite_progress_value,
+            self._managed_key_invite_progress_row,
+        ):
+            _update_control_if_mounted(control)
 
     def _show_managed_key_copy_snackbar(self, message: str) -> None:
         if self.show_snackbar:
@@ -2095,7 +2127,13 @@ class SettingsView(ft.Column):
         remaining_percent: int | None = None,
         referral_id: str | None = None,
         pass_status: TalkTogetherPassStatus | None = None,
+        remember_referral_id: bool = True,
     ) -> None:
+        referral_id = (
+            self._remember_managed_key_referral_id(referral_id)
+            if remember_referral_id
+            else normalize_owned_referral_id(referral_id)
+        )
         usage_visible = bool(visible)
         card_visible = self._managed_key_card_visible_for(
             self._build_settings_with_provider_draft()
