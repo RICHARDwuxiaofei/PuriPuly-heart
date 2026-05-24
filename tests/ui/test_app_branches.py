@@ -405,6 +405,7 @@ def test_debug_preview_talk_together_pass_invite_progress_sets_settings_state_on
             "visible": True,
             "remaining_percent": 100,
             "referral_id": "7KQ9M2",
+            "remember_referral_id": False,
             "pass_status": TalkTogetherPassStatus(
                 pass_id="7KQ9M2",
                 invite_count=1,

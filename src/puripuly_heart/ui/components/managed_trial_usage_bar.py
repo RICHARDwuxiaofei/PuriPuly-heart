@@ -17,6 +17,16 @@ _TEXT_SIZE = 18
 _TEXT_HORIZONTAL_PADDING = 16
 
 
+def _update_control_if_mounted(control: ft.Control) -> None:
+    if getattr(control, "page", None) is None:
+        return
+    try:
+        control.update()
+    except AssertionError as exc:
+        if "Control must be added" not in str(exc):
+            raise
+
+
 class ManagedTrialUsageBar(ft.Row):
     def __init__(self, percent: int | None = None) -> None:
         self._percent: int | None = None
@@ -108,6 +118,15 @@ class ManagedTrialUsageBar(ft.Row):
 
     def apply_locale(self) -> None:
         self._sync()
+
+    def repaint_dynamic_controls(self) -> None:
+        for control in (
+            self._fill_segments,
+            self._fill_segment,
+            self._empty_segment,
+            self._remaining_text,
+        ):
+            _update_control_if_mounted(control)
 
     def _sync(self) -> None:
         self._sync_fill_segments()

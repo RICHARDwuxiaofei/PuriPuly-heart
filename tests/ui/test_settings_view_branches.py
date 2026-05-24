@@ -131,7 +131,11 @@ def _make_llm_selection_view(
     )
     view._local_llm_connection_card = SimpleNamespace(visible=False, update=lambda: None)
     view._managed_trial_usage_bar = SimpleNamespace(
-        visible=False, percent=None, update=lambda: None
+        visible=False,
+        percent=None,
+        update=lambda: None,
+        _remaining_text=SimpleNamespace(update=lambda: None),
+        _fill_segments=SimpleNamespace(update=lambda: None),
     )
     view._managed_trial_usage_bar.set_percent = lambda percent: setattr(
         view._managed_trial_usage_bar, "percent", percent
@@ -1113,17 +1117,151 @@ def test_set_managed_key_state_shows_talk_together_pass_invite_progress(
     assert view._managed_key_invite_progress_value.value == "1 / 5"
 
 
-def test_managed_key_invite_progress_row_appears_above_talk_together_pass_id(
+def test_set_managed_key_state_repaints_mounted_pass_id_usage_and_invite_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    view = _make_llm_selection_view(monkeypatch, settings)
+    updates: list[str] = []
+    mounted_page = object()
+
+    view._managed_trial_usage_bar.page = mounted_page
+    view._managed_trial_usage_bar.update = lambda: updates.append("usage_bar")
+    view._managed_trial_usage_bar._remaining_text.page = mounted_page  # noqa: SLF001
+    view._managed_trial_usage_bar._remaining_text.update = lambda: updates.append(  # noqa: SLF001
+        "usage_remaining_text"
+    )
+    view._managed_trial_usage_bar._fill_segments.page = mounted_page  # noqa: SLF001
+    view._managed_trial_usage_bar._fill_segments.update = lambda: updates.append(  # noqa: SLF001
+        "usage_fill_segments"
+    )
+    view._managed_key_referral_id_value.page = mounted_page
+    view._managed_key_referral_id_value.update = lambda: updates.append("referral_value")
+    view._managed_key_referral_copy_button.page = mounted_page
+    view._managed_key_referral_copy_button.update = lambda: updates.append("referral_copy")
+    view._managed_key_referral_helper_text.page = mounted_page
+    view._managed_key_referral_helper_text.update = lambda: updates.append("referral_helper")
+    view._managed_key_invite_progress_label.page = mounted_page
+    view._managed_key_invite_progress_label.update = lambda: updates.append("invite_label")
+    view._managed_key_invite_progress_value.page = mounted_page
+    view._managed_key_invite_progress_value.update = lambda: updates.append("invite_value")
+    view._managed_key_invite_progress_row.page = mounted_page
+    view._managed_key_invite_progress_row.update = lambda: updates.append("invite_row")
+
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=64,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=1,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+    )
+
+    assert view._managed_trial_usage_bar.percent == 64
+    assert view._managed_key_referral_id_value.value == "7KQ9M2"
+    assert view._managed_key_invite_progress_row.visible is True
+    assert view._managed_key_invite_progress_value.value == "1 / 5"
+    assert {
+        "usage_bar",
+        "usage_remaining_text",
+        "usage_fill_segments",
+        "referral_value",
+        "referral_copy",
+        "referral_helper",
+        "invite_label",
+        "invite_value",
+        "invite_row",
+    }.issubset(updates)
+
+
+def test_managed_key_invite_progress_survives_managed_china_round_trip_before_settings_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED,
+        connection_history={
+            TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.MANAGED,
+            TranslationModel.GEMMA4.value: TranslationConnection.MANAGED,
+        },
+    )
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=64,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=1,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+    )
+
+    view._on_translation_connection_selected(TranslationConnection.MANAGED_CHINA.value)
+    assert view._managed_key_referral_id == "7KQ9M2"
+    assert view._managed_key_invite_progress_row.visible is True
+    assert view._managed_key_invite_progress_value.value == "1 / 5"
+
+    view._on_translation_connection_selected(TranslationConnection.MANAGED.value)
+    assert view._managed_key_referral_id == "7KQ9M2"
+    assert view._managed_key_invite_progress_row.visible is True
+    assert view._managed_key_invite_progress_value.value == "1 / 5"
+
+    view._on_llm_selected(TranslationModel.GEMMA4.value)
+    assert view._managed_key_referral_id == "7KQ9M2"
+    assert view._managed_key_invite_progress_row.visible is True
+    assert view._managed_key_invite_progress_value.value == "1 / 5"
+
+
+def test_set_managed_key_state_can_display_preview_referral_without_remembering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=100,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=1,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+        remember_referral_id=False,
+    )
+
+    assert settings.managed_identity.referral_id is None
+    assert view._managed_key_referral_id == "7KQ9M2"
+    assert view._managed_key_referral_id_value.value == "7KQ9M2"
+    assert view._managed_key_invite_progress_row.visible is True
+
+
+def test_managed_key_invite_progress_row_appears_between_talk_together_pass_id_and_helper_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
 
     managed_key_content = _wrapped_card_column(view._managed_key_card)
     details_column = managed_key_content.controls[4]
-    referral_id_row = details_column.controls[1]
+    referral_id_row = details_column.controls[0]
 
-    assert details_column.controls[0] is view._managed_key_invite_progress_row
     assert view._managed_key_referral_id_label in referral_id_row.controls
+    assert details_column.controls[1] is view._managed_key_invite_progress_row
+    assert details_column.controls[2] is view._managed_key_referral_helper_text
 
 
 def test_set_managed_key_state_hides_invite_progress_when_absent(
