@@ -1547,6 +1547,31 @@ async def test_on_nav_change_applies_provider_changes_when_leaving_settings() ->
 
 
 @pytest.mark.asyncio
+async def test_on_providers_changed_applies_consumed_provider_draft() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app._settings_mutation_queue = []
+    app._settings_mutation_worker_active = False
+    app.view_settings = SimpleNamespace(
+        has_provider_changes=True,
+        consume_provider_apply_settings=lambda: "managed-settings",
+    )
+    seen: list[object] = []
+
+    async def fake_apply_providers(settings=None) -> None:
+        seen.append(settings)
+
+    app.controller = SimpleNamespace(apply_providers=fake_apply_providers)
+
+    app._on_providers_changed()
+
+    assert app.view_settings.has_provider_changes is False
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert seen == ["managed-settings"]
+
+
+@pytest.mark.asyncio
 async def test_on_nav_change_refreshes_prompt_and_schedules_log_scroll() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()

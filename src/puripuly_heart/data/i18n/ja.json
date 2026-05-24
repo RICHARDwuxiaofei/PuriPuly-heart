@@ -218,7 +218,7 @@
   "debug_preview.audio_fault_clear": "音声障害を解除",
   "debug_preview.capture_fault_snackbar": "キャプチャ障害: {profile}",
   "debug_preview.stt_fault_snackbar": "STT障害: {profile}",
-  "discord_auth.body": "PuriPulyでは新規ユーザー向けに無料利用枠をご用意しています。\n発話ベースで約600〜700回翻訳できます。\nDiscord認証後、すぐに付与されます。\n\n友だちから受け取った Pass ID があれば入力してください。\n友だちと一緒に追加で200回分の利用枠を受け取れます。",
+  "discord_auth.body": "PuriPulyでは新規ユーザー向けに無料利用枠をご用意しています。\n発話ベースで約600〜700回翻訳できます。\nDiscord認証後、すぐに付与されます。\n\n個人情報は保存しません。\n認証に必要な最小限の情報だけを確認します。\n\n友だちから受け取った Pass ID があれば入力してください。\n友だちと一緒に追加で200回分の利用枠を受け取れます。",
   "discord_auth.continue": "Discord OAuth認証",
   "discord_auth.close": "キャンセル",
   "discord_auth.reopen_browser": "ブラウザを再度開く",

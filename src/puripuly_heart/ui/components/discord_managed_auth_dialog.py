@@ -81,6 +81,8 @@ class DiscordManagedAuthDialog:
             self._page,
             body_paragraphs=split_body_paragraphs(t("discord_auth.body")),
             extra_body_controls=[self._referral_id_field],
+            body_spacing=44,
+            action_top_margin=24,
             actions=[
                 WarmDocumentDialogAction(
                     label=t("discord_auth.close"),
@@ -112,11 +114,12 @@ class DiscordManagedAuthDialog:
             label=t("discord_auth.referral_id.label"),
             value="",
             helper_text="",
-            dense=True,
+            dense=False,
             border_radius=14,
             border_color=COLOR_DIVIDER,
             focused_border_color=COLOR_PRIMARY,
-            text_size=18,
+            content_padding=ft.padding.symmetric(horizontal=16, vertical=20),
+            text_size=22,
             color=COLOR_ON_BACKGROUND,
             on_submit=lambda _: self._on_continue(),
         )
