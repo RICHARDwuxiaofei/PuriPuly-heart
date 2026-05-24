@@ -113,7 +113,6 @@ from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
 from puripuly_heart.providers.llm.deepseek import DeepSeekLLMProvider
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
-from puripuly_heart.providers.llm.local_openai import LocalOpenAICompatibleLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterKeyMetadata, OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -4034,15 +4033,7 @@ class GuiController:
                 elif provider_name == "qwen":
                     llm_valid = await _verify_alibaba_selected()
                 elif provider_name == LLMProviderName.LOCAL_LLM:
-                    key = (
-                        (secrets.get("local_llm_api_key") if secrets is not None else None) or ""
-                    ).strip()
-                    llm_valid = await LocalOpenAICompatibleLLMProvider.verify_connection(
-                        base_url=self.settings.local_llm.base_url,
-                        model=self.settings.local_llm.model,
-                        api_key=key,
-                        extra_body=self.settings.local_llm.extra_body,
-                    )
+                    llm_valid = True
                 else:
                     # Assume valid for others or if no key usage known
                     llm_valid = True
