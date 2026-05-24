@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -155,13 +156,21 @@ class ConstructionDummySettingsView(ft.Container):
         self.on_verify_api_key = None
         self.on_secret_cleared = None
         self.on_local_llm_secret_changed = None
+        self.on_desktop_overlay_lock_change = None
+        self.on_desktop_overlay_size_change = None
+        self.on_desktop_overlay_recovery_action = None
+        self.on_desktop_overlay_position_reset = None
         self.show_snackbar = None
         self.overlay_peer_contract = None
         self.has_provider_changes = False
         self.has_pending_prompt_changes = False
+        self.synced_desktop_settings: list[AppSettings] = []
 
     def set_overlay_runtime_state(self, *_args, **_kwargs) -> None:
         return None
+
+    def sync_desktop_overlay_settings(self, settings: AppSettings) -> None:
+        self.synced_desktop_settings.append(settings)
 
     def set_overlay_peer_contract(self, contract) -> None:
         self.overlay_peer_contract = contract
@@ -233,12 +242,115 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert app.view_dashboard.on_toggle_peer_translation == app._on_peer_translation_toggle
     assert app.view_settings.on_verify_api_key == app._on_verify_api_key
     assert app.view_settings.on_prompt_apply_settings == app._on_prompt_apply_settings
+    assert app.view_settings.on_desktop_overlay_lock_change == (app._on_desktop_overlay_lock_change)
+    assert app.view_settings.on_desktop_overlay_size_change == (app._on_desktop_overlay_size_change)
+    assert app.view_settings.on_desktop_overlay_recovery_action == (
+        app._on_desktop_overlay_recovery_action
+    )
+    assert app.view_settings.on_desktop_overlay_position_reset == (
+        app._on_desktop_overlay_position_reset
+    )
+    assert app.view_settings.on_view_logs == app._open_logs_tab
     assert not hasattr(app.view_settings, "on_overlay_toggle")
     assert not hasattr(app.view_settings, "on_peer_translation_toggle")
     assert app.view_settings.runtime_log_basic == app.controller.log_basic
     assert app.view_settings.runtime_log_detailed == app.controller.log_detailed
     assert app.view_logs.on_mode_change == app._on_runtime_logging_mode_change
     assert app.view_logs.runtime_logging_mode == "detailed"
+
+
+@pytest.mark.asyncio
+async def test_desktop_gui_state_actions_are_dispatched_through_translator_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_app_construction(monkeypatch)
+
+    page = DummyPage()
+    app = TranslatorApp(page, config_path=Path("settings.json"))
+    locked_requests: list[bool] = []
+    size_requests: list[str] = []
+    retry_requests: list[bool] = []
+    desktop_reset_requests: list[bool] = []
+
+    async def fake_set_locked(locked: bool) -> None:
+        locked_requests.append(locked)
+
+    async def fake_set_overlay_enabled(enabled: bool) -> None:
+        retry_requests.append(enabled)
+
+    async def fake_set_desktop_overlay_size_preset(size_preset: str) -> None:
+        size_requests.append(size_preset)
+
+    async def fake_reset_desktop_overlay_position() -> None:
+        desktop_reset_requests.append(True)
+
+    app.controller.set_desktop_overlay_captions_locked = fake_set_locked
+    app.controller.set_desktop_overlay_size_preset = fake_set_desktop_overlay_size_preset
+    app.controller.set_overlay_enabled = fake_set_overlay_enabled
+    app.controller.reset_desktop_overlay_position = fake_reset_desktop_overlay_position
+
+    app._on_desktop_overlay_lock_change(False)
+    app._on_desktop_overlay_size_change("xlarge")
+    app._on_desktop_overlay_recovery_action("retry")
+    app._on_desktop_overlay_position_reset()
+
+    assert len(page.tasks) == 4
+    await page.tasks[0]()
+    await page.tasks[1]()
+    await page.tasks[2]()
+    await page.tasks[3]()
+
+    assert locked_requests == [False]
+    assert size_requests == ["xlarge"]
+    assert retry_requests == [True]
+    assert desktop_reset_requests == [True]
+
+
+@pytest.mark.asyncio
+async def test_desktop_gui_state_actions_refresh_settings_view_after_runtime_updates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_app_construction(monkeypatch)
+
+    page = DummyPage()
+    app = TranslatorApp(page, config_path=Path("settings.json"))
+    app.controller.settings = AppSettings()
+    app.controller.settings.overlay.desktop_flet.position.x = 80
+    app.controller.settings.overlay.desktop_flet.position.y = 90
+
+    async def fake_set_locked(locked: bool) -> None:
+        app.controller.settings.overlay.desktop_flet.locked = locked
+
+    async def fake_set_desktop_overlay_size_preset(size_preset: str) -> None:
+        updated = copy.deepcopy(app.controller.settings)
+        updated.overlay.desktop_flet.size_preset = size_preset
+        app.controller.settings = updated
+
+    async def fake_reset_desktop_overlay_position() -> None:
+        app.controller.settings.overlay.desktop_flet.position.x = None
+        app.controller.settings.overlay.desktop_flet.position.y = None
+        app.controller.settings.overlay.desktop_flet.locked = False
+
+    app.controller.set_desktop_overlay_captions_locked = fake_set_locked
+    app.controller.set_desktop_overlay_size_preset = fake_set_desktop_overlay_size_preset
+    app.controller.reset_desktop_overlay_position = fake_reset_desktop_overlay_position
+
+    app._on_desktop_overlay_lock_change(True)
+    app._on_desktop_overlay_size_change("xlarge")
+    app._on_desktop_overlay_position_reset()
+
+    assert len(page.tasks) == 3
+    await page.tasks[0]()
+    await page.tasks[1]()
+    await page.tasks[2]()
+
+    synced_settings = app.view_settings.synced_desktop_settings
+    assert len(synced_settings) == 3
+    assert synced_settings[0].overlay.desktop_flet.locked is True
+    assert synced_settings[1].overlay.desktop_flet.size_preset == "xlarge"
+    assert synced_settings[2].overlay.desktop_flet.position.x is None
+    assert synced_settings[2].overlay.desktop_flet.position.y is None
+    assert synced_settings[2].overlay.desktop_flet.locked is False
 
 
 def test_translator_app_does_not_mount_debug_preview_by_default(
@@ -2040,15 +2152,20 @@ def test_refresh_overlay_peer_contract_ignores_missing_controller() -> None:
 def test_on_overlay_state_changed_updates_settings_view_runtime_state() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     contract = object()
-    seen: list[tuple[str, str | None]] = []
+    seen: list[tuple[str, str | None, str | None, bool | None]] = []
     refreshed: list[object] = []
     app.controller = SimpleNamespace(build_overlay_peer_consumer_contract=lambda: contract)
     app.view_dashboard = SimpleNamespace(
         set_overlay_peer_contract=lambda incoming: refreshed.append(("dashboard", incoming))
     )
     app.view_settings = SimpleNamespace(
-        set_overlay_runtime_state=lambda state, failure_reason=None: seen.append(
-            (state, failure_reason)
+        set_overlay_runtime_state=lambda state, failure_reason=None, **kwargs: seen.append(
+            (
+                state,
+                failure_reason,
+                kwargs.get("overlay_target"),
+                kwargs.get("desktop_captions_locked"),
+            )
         ),
         set_overlay_peer_contract=lambda incoming: refreshed.append(("settings", incoming)),
     )
@@ -2057,7 +2174,7 @@ def test_on_overlay_state_changed_updates_settings_view_runtime_state() -> None:
 
     assert app.overlay_state == "failed"
     assert app.overlay_failure_reason == "runtime_crashed"
-    assert seen == [("failed", "runtime_crashed")]
+    assert seen == [("failed", "runtime_crashed", None, False)]
     assert refreshed == [("settings", contract), ("dashboard", contract)]
 
 
@@ -2210,11 +2327,16 @@ def test_on_overlay_state_changed_routes_runtime_logs() -> None:
     controller = RuntimeLoggingController()
     app = TranslatorApp.__new__(TranslatorApp)
     app.controller = controller
-    seen: list[tuple[str, str | None]] = []
+    seen: list[tuple[str, str | None, str | None, bool | None]] = []
     app.overlay_state = "off"
     app.view_settings = SimpleNamespace(
-        set_overlay_runtime_state=lambda state, failure_reason=None: seen.append(
-            (state, failure_reason)
+        set_overlay_runtime_state=lambda state, failure_reason=None, **kwargs: seen.append(
+            (
+                state,
+                failure_reason,
+                kwargs.get("overlay_target"),
+                kwargs.get("desktop_captions_locked"),
+            )
         )
     )
 
@@ -2224,7 +2346,7 @@ def test_on_overlay_state_changed_routes_runtime_logs() -> None:
     assert controller.detailed_messages == [
         "[Overlay] State detail: overlay_state=failed failure_reason=runtime_crashed"
     ]
-    assert seen == [("failed", "runtime_crashed")]
+    assert seen == [("failed", "runtime_crashed", None, False)]
 
 
 @pytest.mark.asyncio

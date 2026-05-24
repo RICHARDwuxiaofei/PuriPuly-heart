@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 import secrets
 import shutil
@@ -34,6 +35,19 @@ _EXIT_CODE_TO_FAILURE_REASON = {
     20: "openvr_init_failed",
     21: "renderer_init_failed",
 }
+_WINDOW_BOUNDS_EVENT_PERSIST_RULES = {
+    "user": True,
+    "reset": True,
+    "programmatic": False,
+    "launch_repair": False,
+}
+_WINDOW_BOUNDS_EVENT_KEYS = {"event", "source", "persist", "x", "y", "width", "height"}
+_WINDOW_BOUNDS_EVENT_OPTIONAL_KEYS = {"bounds_epoch"}
+_MIN_DESKTOP_WINDOW_WIDTH = 480
+_MIN_DESKTOP_WINDOW_HEIGHT = 160
+_INTERACTION_MODE_EVENT_MODES = {"edit", "pass_through"}
+_INTERACTION_MODE_EVENT_KEYS = {"event", "mode"}
+_RESET_TO_BOTTOM_CENTER_EVENT_KEYS = {"event"}
 
 
 class OverlayPreparationError(Exception):
@@ -353,6 +367,51 @@ class DefaultOverlayProcessRunner:
 
 
 @dataclass(slots=True)
+class DesktopFletOverlayRunner:
+    frozen: bool | None = None
+    python_executable: Path | None = None
+    app_executable: Path | None = None
+    module_name: str = "puripuly_heart.ui.desktop_overlay"
+
+    def prepare(self, manifest: OverlayLaunchManifest) -> Path:
+        _ = manifest
+        return self._launcher_executable()
+
+    def build_command(
+        self,
+        manifest_path: Path,
+        *,
+        executable_path: Path | None = None,
+    ) -> tuple[str, ...]:
+        launcher = executable_path or self._launcher_executable()
+        if self._is_frozen():
+            return (str(launcher), "run-desktop-overlay", "--config", str(manifest_path))
+        return (str(launcher), "-m", self.module_name, "--config", str(manifest_path))
+
+    async def spawn(
+        self,
+        executable_path: Path,
+        manifest_path: Path,
+    ) -> OverlayManagedProcess:
+        process = await asyncio.create_subprocess_exec(
+            *self.build_command(manifest_path, executable_path=executable_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        return _AsyncioOverlayProcess(process=process)
+
+    def _is_frozen(self) -> bool:
+        if self.frozen is not None:
+            return self.frozen
+        return bool(getattr(sys, "frozen", False))
+
+    def _launcher_executable(self) -> Path:
+        if self._is_frozen():
+            return self.app_executable or Path(sys.executable)
+        return self.python_executable or Path(sys.executable)
+
+
+@dataclass(slots=True)
 class OverlayProcessManager:
     process_runner: OverlayProcessRunner = field(default_factory=DefaultOverlayProcessRunner)
     startup_timeout_ms: int = 3000
@@ -363,6 +422,7 @@ class OverlayProcessManager:
     log_dir: str = "logs"
     log_level: str = "INFO"
     logging_mode: str = "basic"
+    renderer_events: asyncio.Queue[dict[str, object]] | None = None
     overlay_instance_id: str = field(default_factory=lambda: f"overlay-{uuid4()}")
     diagnostics_dir: Path = field(default_factory=default_overlay_diagnostics_dir)
     diagnostics: OverlayDiagnosticsRecorder | None = None
@@ -627,10 +687,18 @@ class OverlayProcessManager:
 
     async def _handle_lifecycle_event(
         self,
-        event: dict[str, object],
+        event: object,
         *,
         allow_ready: bool,
     ) -> str:
+        if not isinstance(event, dict):
+            self._record_process("renderer_message_ignored", reason="malformed_message")
+            logger.warning(
+                "[OverlayProcess] Ignoring malformed renderer message with type: %s",
+                type(event).__name__,
+            )
+            return "ignored"
+
         event_type = str(event.get("type", ""))
         self._record_process(
             "lifecycle_event",
@@ -651,7 +719,118 @@ class OverlayProcessManager:
         if event_type in {"startup_error", "runtime_error"}:
             await self._fail(self._extract_failure_reason(event))
             return "failed"
+        if event_type == "overlay_event":
+            self._handle_renderer_event(event)
         return "ignored"
+
+    def _handle_renderer_event(self, event: dict[str, object]) -> None:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            self._record_process(
+                "renderer_message_ignored",
+                event_type="overlay_event",
+                reason="invalid_payload",
+            )
+            logger.warning("[OverlayProcess] Ignoring overlay_event without object payload")
+            return
+
+        renderer_event_type = payload.get("event")
+        if not self._is_valid_renderer_event_payload(payload):
+            self._record_process(
+                "renderer_message_ignored",
+                event_type="overlay_event",
+                renderer_event=renderer_event_type,
+                reason="invalid_payload",
+            )
+            logger.warning(
+                "[OverlayProcess] Ignoring invalid renderer event: %r",
+                renderer_event_type,
+            )
+            return
+
+        if self.renderer_events is None:
+            self._record_process(
+                "renderer_event_diagnostic_only",
+                renderer_event=renderer_event_type,
+            )
+            logger.info(
+                "[OverlayProcess] Renderer event ignored without controller queue: %s",
+                renderer_event_type,
+            )
+            return
+
+        try:
+            self.renderer_events.put_nowait(event)
+        except asyncio.QueueFull:
+            self._record_process("renderer_event_dropped", renderer_event=renderer_event_type)
+            logger.warning(
+                "[OverlayProcess] Dropping renderer event because controller queue is full: %s",
+                renderer_event_type,
+            )
+
+    def _is_valid_renderer_event_payload(self, payload: dict[object, object]) -> bool:
+        renderer_event_type = payload.get("event")
+        if renderer_event_type == "window_bounds_changed":
+            return self._is_valid_window_bounds_changed_payload(payload)
+        if renderer_event_type == "interaction_mode_changed":
+            return self._is_valid_interaction_mode_changed_payload(payload)
+        if renderer_event_type == "reset_to_bottom_center_requested":
+            return self._is_valid_reset_to_bottom_center_requested_payload(payload)
+        return False
+
+    def _is_valid_window_bounds_changed_payload(self, payload: dict[object, object]) -> bool:
+        keys = set(payload)
+        if not _WINDOW_BOUNDS_EVENT_KEYS.issubset(keys):
+            return False
+        if keys - _WINDOW_BOUNDS_EVENT_KEYS - _WINDOW_BOUNDS_EVENT_OPTIONAL_KEYS:
+            return False
+        source = payload.get("source")
+        persist = payload.get("persist")
+        if not isinstance(source, str) or source not in _WINDOW_BOUNDS_EVENT_PERSIST_RULES:
+            return False
+        if not isinstance(persist, bool):
+            return False
+        if persist is not _WINDOW_BOUNDS_EVENT_PERSIST_RULES[source]:
+            return False
+        if "bounds_epoch" in payload and not self._is_non_negative_int(payload.get("bounds_epoch")):
+            return False
+        return (
+            self._is_finite_non_bool_number(payload.get("x"))
+            and self._is_finite_non_bool_number(payload.get("y"))
+            and self._is_number_at_least(payload.get("width"), _MIN_DESKTOP_WINDOW_WIDTH)
+            and self._is_number_at_least(payload.get("height"), _MIN_DESKTOP_WINDOW_HEIGHT)
+        )
+
+    def _is_valid_interaction_mode_changed_payload(self, payload: dict[object, object]) -> bool:
+        mode = payload.get("mode")
+        return (
+            set(payload) == _INTERACTION_MODE_EVENT_KEYS
+            and isinstance(mode, str)
+            and mode in _INTERACTION_MODE_EVENT_MODES
+        )
+
+    def _is_valid_reset_to_bottom_center_requested_payload(
+        self,
+        payload: dict[object, object],
+    ) -> bool:
+        return (
+            set(payload) == _RESET_TO_BOTTOM_CENTER_EVENT_KEYS
+            and payload.get("event") == "reset_to_bottom_center_requested"
+        )
+
+    @staticmethod
+    def _is_finite_non_bool_number(value: object) -> bool:
+        return (
+            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        )
+
+    @staticmethod
+    def _is_non_negative_int(value: object) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+    @classmethod
+    def _is_number_at_least(cls, value: object, minimum: int) -> bool:
+        return cls._is_finite_non_bool_number(value) and value >= minimum
 
     def _extract_failure_reason(self, event: dict[str, object]) -> str:
         failure_reason = event.get("failure_reason")

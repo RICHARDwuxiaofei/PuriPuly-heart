@@ -19,9 +19,12 @@ from puripuly_heart.config.llm_profiles import (
 )
 from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
+    DESKTOP_FLET_SIZE_PRESET_ORDER,
     LOCAL_LLM_RESERVED_EXTRA_BODY_KEYS,
     LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS,
     MAX_CUSTOM_VOCAB_TERMS,
+    OVERLAY_TARGET_DESKTOP,
+    OVERLAY_TARGET_STEAMVR,
     AppSettings,
     LLMProviderName,
     OpenRouterCredentialSource,
@@ -89,6 +92,7 @@ _OVERLAY_TEXT_SCALE_PRESETS = (
     ("normal", 1.0),
     ("small", 0.8),
 )
+_DESKTOP_OVERLAY_REOPEN_FAILURE_REASONS = frozenset({"window_configuration_failed"})
 _TRANSLATION_MODEL_LABEL_KEYS = {
     TranslationModel.GEMMA4: "provider.gemma4_26b_a4b_it",
     TranslationModel.DEEPSEEK_V4_FLASH: "provider.deepseek_v4_flash",
@@ -221,6 +225,11 @@ class SettingsView(ft.Column):
         )
         self.on_overlay_calibration_apply: Callable[[], OverlayCalibration] | None = None
         self.on_overlay_calibration_cancel: Callable[[], OverlayCalibration] | None = None
+        self.on_desktop_overlay_lock_change: Callable[[bool], None] | None = None
+        self.on_desktop_overlay_size_change: Callable[[str], None] | None = None
+        self.on_desktop_overlay_recovery_action: Callable[[str], None] | None = None
+        self.on_desktop_overlay_position_reset: Callable[[], None] | None = None
+        self.on_view_logs: Callable[[], None] | None = None
         self.show_snackbar: Callable[[str, str], None] | None = None
         self.runtime_log_basic: Callable[..., None] | None = None
         self.runtime_log_detailed: Callable[..., None] | None = None
@@ -233,6 +242,13 @@ class SettingsView(ft.Column):
         self.has_pending_prompt_changes: bool = False
         self._custom_vocab_draft_terms: dict[str, str] = {}
         self._overlay_state: str = "off"
+        self._overlay_failure_reason: str | None = None
+        self._overlay_runtime_target: str = OVERLAY_TARGET_STEAMVR
+        self._desktop_overlay_captions_locked = False
+        self._desktop_overlay_pending_locked: bool | None = None
+        self._desktop_overlay_primary_action_kind: str | None = None
+        self._desktop_overlay_pending_size_preset: str | None = None
+        self._desktop_overlay_pending_position_reset = False
         self._overlay_calibration = OverlayCalibration()
         self._overlay_calibration_draft = self._overlay_calibration.copy()
         self._overlay_calibration_session_active = False
@@ -359,9 +375,16 @@ class SettingsView(ft.Column):
             self._low_latency_text,
             self._overlay_translation_button,
             self._overlay_peer_original_button,
+            self._overlay_target_button,
             self._overlay_anchor_button,
             self._overlay_text_scale_text,
+            self._desktop_overlay_size_button,
+            self._desktop_overlay_lock_button,
+            self._overlay_vr_reset_button,
+            self._overlay_desktop_reset_button,
             self._overlay_reset_button,
+            self._desktop_overlay_primary_action,
+            self._desktop_overlay_view_logs_action,
             self._translation_connection_text,
             self._openrouter_fallback_text,
         )
@@ -1267,6 +1290,24 @@ class SettingsView(ft.Column):
             value=self._overlay_peer_original_button,
         )
 
+        self._overlay_target_title = ft.Text(
+            t("settings.overlay.caption_location"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._overlay_target_button = self._build_clickable_text(
+            self._overlay_target_label_for(OVERLAY_TARGET_STEAMVR),
+            self._on_overlay_target_click,
+            size=28,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        self._overlay_target_card = self._wrap_unit_card(
+            title=self._overlay_target_title,
+            value=self._overlay_target_button,
+        )
+
         self._overlay_anchor_title = ft.Text(
             t("settings.overlay.calibration.anchor"),
             size=24,
@@ -1394,27 +1435,139 @@ class SettingsView(ft.Column):
         )
 
         self._overlay_reset_title = ft.Text(
-            t("settings.overlay.position_reset"),
+            t("settings.overlay.position_reset.title"),
             size=24,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
-        self._overlay_reset_button = self._build_clickable_text(
-            t("settings.overlay.calibration.reset"),
+        self._overlay_vr_reset_button = self._build_clickable_text(
+            t("settings.overlay.position_reset.action.vr"),
             self._on_overlay_position_reset,
+            size=20,
+            height=72,
+            expand=False,
+        )
+        self._overlay_desktop_reset_button = self._build_clickable_text(
+            t("settings.overlay.position_reset.action.desktop"),
+            self._on_desktop_overlay_position_reset,
+            size=20,
+            height=72,
+            expand=False,
+        )
+        self._overlay_reset_button = self._overlay_vr_reset_button
+        self._overlay_position_reset_actions = ft.Column(
+            [
+                self._overlay_vr_reset_button,
+                self._overlay_desktop_reset_button,
+            ],
+            spacing=18,
+            expand=True,
+            alignment=ft.MainAxisAlignment.CENTER,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
         self._overlay_reset_card = self._wrap_unit_card(
             title=self._overlay_reset_title,
-            value=self._overlay_reset_button,
+            value=self._overlay_position_reset_actions,
+        )
+
+        self._desktop_overlay_size_title = ft.Text(
+            t("settings.overlay.desktop.size.title"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._desktop_overlay_size_button = self._build_clickable_text(
+            self._desktop_overlay_size_label_for("medium"),
+            self._on_desktop_overlay_size_click,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        self._desktop_overlay_size_card = self._wrap_unit_card(
+            title=self._desktop_overlay_size_title,
+            value=self._desktop_overlay_size_button,
+        )
+
+        self._desktop_overlay_lock_title = ft.Text(
+            t("settings.overlay.desktop.lock.title"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._desktop_overlay_lock_button = self._build_clickable_text(
+            self._desktop_overlay_lock_label_for(False),
+            self._on_desktop_overlay_lock_click,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        self._desktop_overlay_lock_card = self._wrap_unit_card(
+            title=self._desktop_overlay_lock_title,
+            value=self._desktop_overlay_lock_button,
+        )
+
+        self._desktop_overlay_status_title = ft.Text(
+            t("settings.overlay.status.off"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._desktop_overlay_reason_text = ft.Text(
+            "",
+            size=15,
+            color=COLOR_NEUTRAL,
+            text_align=ft.TextAlign.CENTER,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            visible=False,
+        )
+        self._desktop_overlay_helper_text = ft.Text(
+            "",
+            size=14,
+            color=COLOR_NEUTRAL,
+            text_align=ft.TextAlign.CENTER,
+            max_lines=2,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            visible=False,
+        )
+        self._desktop_overlay_primary_action = self._build_clickable_text(
+            "",
+            self._on_desktop_overlay_primary_action,
+            size=20,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        self._desktop_overlay_primary_action.visible = False
+        self._desktop_overlay_view_logs_action = self._build_clickable_text(
+            t("settings.overlay.desktop.recovery.action.view_details"),
+            self._on_desktop_overlay_view_logs,
+            size=16,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+        )
+        self._desktop_overlay_view_logs_action.visible = False
+        self._desktop_overlay_status_body = ft.Column(
+            [
+                self._desktop_overlay_reason_text,
+                self._desktop_overlay_primary_action,
+                self._desktop_overlay_view_logs_action,
+                self._desktop_overlay_helper_text,
+            ],
+            spacing=6,
+            expand=True,
+            alignment=ft.MainAxisAlignment.CENTER,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+        self._desktop_overlay_status_card = self._wrap_unit_card(
+            title=self._desktop_overlay_status_title,
+            value=self._desktop_overlay_status_body,
         )
         self._overlay_empty_card = self._wrap_empty_unit_card()
 
         overlay_row1 = ft.Container(
             content=ft.Row(
                 [
+                    self._overlay_target_card,
                     self._overlay_translation_card,
                     self._overlay_peer_original_card,
-                    self._overlay_anchor_card,
                 ],
                 spacing=16,
                 expand=True,
@@ -1423,9 +1576,9 @@ class SettingsView(ft.Column):
         overlay_row2 = ft.Container(
             content=ft.Row(
                 [
+                    self._overlay_anchor_card,
                     self._overlay_distance_card,
                     self._overlay_offset_x_card,
-                    self._overlay_offset_y_card,
                 ],
                 spacing=16,
                 expand=True,
@@ -1434,14 +1587,39 @@ class SettingsView(ft.Column):
         overlay_row3 = ft.Container(
             content=ft.Row(
                 [
+                    self._overlay_offset_y_card,
                     self._overlay_text_scale_card,
-                    self._overlay_reset_card,
-                    self._overlay_empty_card,
+                    self._wrap_empty_unit_card(),
                 ],
                 spacing=16,
                 expand=True,
             ),
         )
+        overlay_row4 = ft.Container(
+            content=ft.Row(
+                [
+                    self._desktop_overlay_size_card,
+                    self._desktop_overlay_lock_card,
+                    self._overlay_reset_card,
+                ],
+                spacing=16,
+                expand=True,
+            ),
+        )
+        overlay_row5 = ft.Container(
+            content=ft.Row(
+                [
+                    self._desktop_overlay_status_card,
+                    self._wrap_empty_unit_card(),
+                    self._overlay_empty_card,
+                ],
+                spacing=16,
+                expand=True,
+            ),
+            visible=False,
+        )
+        self._desktop_overlay_controls_row = overlay_row4
+        self._desktop_overlay_recovery_row = overlay_row5
 
         # === Row 7: Response Mode / Translation Connection / Fallback ===
         self._translation_connection_title = ft.Text(
@@ -1722,7 +1900,7 @@ class SettingsView(ft.Column):
                     general_clipboard_row,
                 ],
                 "prompt": [row7, persona_card],
-                "overlay": [overlay_row1, overlay_row2, overlay_row3],
+                "overlay": [overlay_row1, overlay_row2, overlay_row3, overlay_row4, overlay_row5],
             }
         )
         self.controls = [self._settings_subtab_shell]
@@ -2329,6 +2507,36 @@ class SettingsView(ft.Column):
         self._on_local_llm_model_change_end(None)
         self._on_local_llm_extra_body_change_end(None)
 
+    def _settings_with_desktop_overlay_runtime_state(
+        self,
+        settings: AppSettings | None,
+    ) -> AppSettings | None:
+        if settings is None:
+            return None
+        pending_position_reset = getattr(self, "_desktop_overlay_pending_position_reset", False)
+        desktop_settings = settings.overlay.desktop_flet
+        size_preset = self._current_desktop_overlay_size_preset()
+        locked = self._current_desktop_overlay_locked()
+        needs_copy = (
+            desktop_settings.size_preset != size_preset
+            or desktop_settings.locked != locked
+            or pending_position_reset
+        )
+        if not needs_copy:
+            return settings
+
+        updated = copy.deepcopy(settings)
+        updated_desktop = updated.overlay.desktop_flet
+        updated_desktop.size_preset = size_preset
+        if pending_position_reset:
+            updated_desktop.position.x = None
+            updated_desktop.position.y = None
+            updated_desktop.locked = False
+        else:
+            updated_desktop.locked = locked
+        updated_desktop.validate()
+        return updated
+
     def _sanitize_provider_apply_settings(self, settings: AppSettings | None) -> AppSettings | None:
         if settings is not None:
             settings.system_prompts = {}
@@ -2352,7 +2560,11 @@ class SettingsView(ft.Column):
 
     def build_provider_apply_settings(self) -> AppSettings | None:
         self._commit_local_llm_fields_from_controls()
-        return self._sanitize_provider_apply_settings(self._build_settings_with_provider_draft())
+        return self._sanitize_provider_apply_settings(
+            self._settings_with_desktop_overlay_runtime_state(
+                self._build_settings_with_provider_draft()
+            )
+        )
 
     def consume_provider_apply_settings(self) -> AppSettings | None:
         settings = self.build_provider_apply_settings()
@@ -2368,7 +2580,9 @@ class SettingsView(ft.Column):
         if not self.has_pending_prompt_changes:
             return None
         settings = self._sanitize_provider_apply_settings(
-            self._build_settings_with_provider_draft()
+            self._settings_with_desktop_overlay_runtime_state(
+                self._build_settings_with_provider_draft()
+            )
         )
         if settings is None:
             return None
@@ -2392,6 +2606,12 @@ class SettingsView(ft.Column):
         self._config_path = config_path
         self.has_provider_changes = False
         self.has_pending_prompt_changes = False
+        self._desktop_overlay_pending_size_preset = None
+        self._desktop_overlay_pending_position_reset = False
+        self._desktop_overlay_pending_locked = None
+        self._desktop_overlay_captions_locked = bool(settings.overlay.desktop_flet.locked)
+        if self._overlay_state == "off":
+            self._overlay_runtime_target = self._current_overlay_target()
         self._sync_clickable_text_control_fonts(font_for_language(settings.ui.locale))
 
         # UI Language
@@ -2502,6 +2722,10 @@ class SettingsView(ft.Column):
         self._config_path = config_path
         self.has_provider_changes = False
         self.has_pending_prompt_changes = False
+        self._desktop_overlay_pending_size_preset = None
+        self._desktop_overlay_pending_position_reset = False
+        self._desktop_overlay_pending_locked = None
+        self._desktop_overlay_captions_locked = bool(settings.overlay.desktop_flet.locked)
 
         self._set_unit_card_value_text(
             self._llm_text,
@@ -3269,6 +3493,277 @@ class SettingsView(ft.Column):
             self._loopback_audio_text.update()
         self._on_audio_change()
 
+    def _normalized_overlay_target(self, value: object) -> str:
+        return OVERLAY_TARGET_DESKTOP if value == OVERLAY_TARGET_DESKTOP else OVERLAY_TARGET_STEAMVR
+
+    def _current_overlay_target(self) -> str:
+        if self._settings is None:
+            return OVERLAY_TARGET_STEAMVR
+        return self._normalized_overlay_target(self._settings.overlay.target)
+
+    def _overlay_target_label_for(self, target: object) -> str:
+        normalized_target = self._normalized_overlay_target(target)
+        return t(f"settings.overlay.target.{normalized_target}")
+
+    def _sync_overlay_target_control(self) -> None:
+        self._set_unit_card_value_text(
+            self._overlay_target_button,
+            self._overlay_target_label_for(self._current_overlay_target()),
+            size=28,
+        )
+        self._overlay_target_button.disabled = self._settings is None
+
+    @staticmethod
+    def _normalize_desktop_overlay_size_preset(value: object) -> str:
+        if isinstance(value, str) and value in DESKTOP_FLET_SIZE_PRESET_ORDER:
+            return value
+        return "medium"
+
+    def _desktop_overlay_size_label_for(self, size_preset: object) -> str:
+        normalized = self._normalize_desktop_overlay_size_preset(size_preset)
+        return t(f"settings.overlay.desktop.size.option.{normalized}")
+
+    def _current_desktop_overlay_size_preset(self) -> str:
+        pending_size_preset = getattr(self, "_desktop_overlay_pending_size_preset", None)
+        if pending_size_preset is not None:
+            return pending_size_preset
+        if self._settings is None:
+            return "medium"
+        return self._normalize_desktop_overlay_size_preset(
+            self._settings.overlay.desktop_flet.size_preset
+        )
+
+    def _desktop_overlay_lock_label_for(self, locked: bool) -> str:
+        return t(
+            "settings.overlay.desktop.lock.value.locked"
+            if locked
+            else "settings.overlay.desktop.lock.value.move"
+        )
+
+    def _current_desktop_overlay_locked(self) -> bool:
+        if self._settings is None:
+            return False
+        if getattr(self, "_desktop_overlay_pending_position_reset", False):
+            return False
+        pending_locked = getattr(self, "_desktop_overlay_pending_locked", None)
+        if pending_locked is not None:
+            return bool(pending_locked)
+        if self._desktop_overlay_runtime_lock_applies():
+            return bool(
+                getattr(
+                    self,
+                    "_desktop_overlay_captions_locked",
+                    self._settings.overlay.desktop_flet.locked,
+                )
+            )
+        return bool(self._settings.overlay.desktop_flet.locked)
+
+    def _desktop_overlay_runtime_lock_applies(self) -> bool:
+        if getattr(self, "_overlay_state", "off") == "off":
+            return False
+        return (
+            self._normalized_overlay_target(
+                getattr(self, "_overlay_runtime_target", OVERLAY_TARGET_STEAMVR)
+            )
+            == OVERLAY_TARGET_DESKTOP
+        )
+
+    def _sync_desktop_overlay_main_controls(self) -> None:
+        self._set_unit_card_value_text(
+            self._desktop_overlay_size_button,
+            self._desktop_overlay_size_label_for(self._current_desktop_overlay_size_preset()),
+        )
+        self._set_unit_card_value_text(
+            self._desktop_overlay_lock_button,
+            self._desktop_overlay_lock_label_for(self._current_desktop_overlay_locked()),
+        )
+        disabled = self._settings is None
+        self._desktop_overlay_size_button.disabled = disabled
+        self._desktop_overlay_lock_button.disabled = disabled
+        self._overlay_vr_reset_button.disabled = disabled
+        self._overlay_desktop_reset_button.disabled = disabled
+
+    def _desktop_overlay_status_is_visible(self) -> bool:
+        return bool(
+            self._current_overlay_target() == OVERLAY_TARGET_DESKTOP
+            or self._normalized_overlay_target(self._overlay_runtime_target)
+            == OVERLAY_TARGET_DESKTOP
+        )
+
+    def _desktop_overlay_failure_action_kind(self) -> str:
+        if self._overlay_failure_reason in _DESKTOP_OVERLAY_REOPEN_FAILURE_REASONS:
+            return "reopen"
+        return "retry"
+
+    def _set_desktop_overlay_primary_action(
+        self,
+        *,
+        label_key: str | None,
+        action_kind: str | None,
+        visible: bool,
+    ) -> None:
+        self._set_unit_card_value_text(
+            self._desktop_overlay_primary_action,
+            t(label_key) if label_key else "",
+            size=20,
+        )
+        self._desktop_overlay_primary_action_kind = action_kind
+        self._desktop_overlay_primary_action.visible = visible
+
+    def _sync_desktop_overlay_status_control(self) -> None:
+        state = self._overlay_state
+        desktop_status_visible = self._desktop_overlay_status_is_visible() and state == "failed"
+        self._desktop_overlay_status_card.visible = desktop_status_visible
+        self._desktop_overlay_recovery_row.visible = desktop_status_visible
+        self._desktop_overlay_reason_text.visible = False
+        self._desktop_overlay_reason_text.value = ""
+        self._desktop_overlay_helper_text.visible = False
+        self._desktop_overlay_helper_text.value = ""
+        self._desktop_overlay_view_logs_action.visible = False
+        self._desktop_overlay_view_logs_action.disabled = False
+
+        if state == "failed":
+            self._desktop_overlay_status_title.value = t("settings.overlay.desktop.status.failed")
+            action_kind = self._desktop_overlay_failure_action_kind()
+            self._desktop_overlay_reason_text.value = t(
+                f"settings.overlay.desktop.recovery.message.{action_kind}",
+                default=t("settings.overlay.desktop.recovery.message.retry"),
+            )
+            self._desktop_overlay_reason_text.visible = True
+            action_key = (
+                "settings.overlay.desktop.recovery.action.reopen"
+                if action_kind == "reopen"
+                else "settings.overlay.desktop.recovery.action.retry"
+            )
+            self._set_desktop_overlay_primary_action(
+                label_key=action_key,
+                action_kind=action_kind,
+                visible=True,
+            )
+            self._desktop_overlay_view_logs_action.visible = True
+        else:
+            self._desktop_overlay_status_title.value = t(
+                "settings.overlay.status.stopping"
+                if state == "stopping"
+                else "settings.overlay.status.off"
+            )
+            self._set_desktop_overlay_primary_action(
+                label_key=None,
+                action_kind=None,
+                visible=False,
+            )
+
+    def _on_overlay_target_click(self, e) -> None:
+        _ = e
+        if not self.page or not self._settings:
+            return
+        options = [
+            OptionItem(
+                value=OVERLAY_TARGET_STEAMVR,
+                label=self._overlay_target_label_for(OVERLAY_TARGET_STEAMVR),
+            ),
+            OptionItem(
+                value=OVERLAY_TARGET_DESKTOP,
+                label=self._overlay_target_label_for(OVERLAY_TARGET_DESKTOP),
+            ),
+        ]
+        modal = SettingsModal(
+            self.page,
+            t("settings.overlay.caption_location"),
+            options,
+            self._on_overlay_target_selected,
+            show_description=True,
+        )
+        modal.open(self._current_overlay_target())
+
+    def _on_overlay_target_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+        target = self._normalized_overlay_target(value)
+        if self._current_overlay_target() == target:
+            return
+        self._settings.overlay.target = target
+        if self._overlay_state == "off":
+            self._overlay_runtime_target = target
+        self._sync_overlay_controls()
+        self._emit_settings_changed()
+
+    def _on_desktop_overlay_size_click(self, e) -> None:
+        _ = e
+        if not self.page or not self._settings or self._desktop_overlay_size_button.disabled:
+            return
+        options = [
+            OptionItem(
+                value=preset,
+                label=self._desktop_overlay_size_label_for(preset),
+            )
+            for preset in DESKTOP_FLET_SIZE_PRESET_ORDER
+        ]
+        modal = SettingsModal(
+            self.page,
+            t("settings.overlay.desktop.size.title"),
+            options,
+            self._on_desktop_overlay_size_selected,
+            show_description=False,
+        )
+        modal.open(self._current_desktop_overlay_size_preset())
+
+    def _on_desktop_overlay_size_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+        size_preset = self._normalize_desktop_overlay_size_preset(value)
+        if self._current_desktop_overlay_size_preset() == size_preset:
+            return
+        if self.on_desktop_overlay_size_change:
+            self._desktop_overlay_pending_size_preset = size_preset
+            self._sync_desktop_overlay_main_controls()
+            self.on_desktop_overlay_size_change(size_preset)
+            return
+        self._settings.overlay.desktop_flet.size_preset = size_preset
+        self._desktop_overlay_pending_size_preset = None
+        self._sync_desktop_overlay_main_controls()
+        self._emit_settings_changed()
+
+    def _on_desktop_overlay_lock_click(self, e) -> None:
+        _ = e
+        if not self._settings or self._desktop_overlay_lock_button.disabled:
+            return
+        next_value = "move" if self._current_desktop_overlay_locked() else "locked"
+        self._on_desktop_overlay_lock_selected(next_value)
+
+    def _on_desktop_overlay_lock_selected(self, value: str) -> None:
+        if not self._settings:
+            return
+        locked = value == "locked"
+        if self._current_desktop_overlay_locked() == locked:
+            return
+        if self.on_desktop_overlay_lock_change:
+            self._desktop_overlay_pending_locked = locked
+            self._desktop_overlay_captions_locked = locked
+            self._sync_desktop_overlay_main_controls()
+            self.on_desktop_overlay_lock_change(locked)
+            return
+        self._settings.overlay.desktop_flet.locked = locked
+        self._desktop_overlay_pending_locked = None
+        self._desktop_overlay_captions_locked = locked
+        self._sync_desktop_overlay_main_controls()
+        self._emit_settings_changed()
+
+    def _on_desktop_overlay_primary_action(self, e) -> None:
+        _ = e
+        action_kind = self._desktop_overlay_primary_action_kind
+        if action_kind == "lock" and self.on_desktop_overlay_lock_change:
+            self.on_desktop_overlay_lock_change(True)
+        elif action_kind == "edit" and self.on_desktop_overlay_lock_change:
+            self.on_desktop_overlay_lock_change(False)
+        elif action_kind in {"retry", "reopen"} and self.on_desktop_overlay_recovery_action:
+            self.on_desktop_overlay_recovery_action(action_kind)
+
+    def _on_desktop_overlay_view_logs(self, e) -> None:
+        _ = e
+        if self.on_view_logs:
+            self.on_view_logs()
+
     def set_overlay_calibration(
         self,
         calibration: OverlayCalibration,
@@ -3444,6 +3939,36 @@ class SettingsView(ft.Column):
             self._update_overlay_calibration_draft(field_name, getattr(defaults, field_name))
         self._commit_overlay_calibration_draft()
 
+    def _on_desktop_overlay_position_reset(self, e) -> None:
+        _ = e
+        if not self._settings or self._overlay_desktop_reset_button.disabled:
+            return
+        if self.on_desktop_overlay_position_reset:
+            self._desktop_overlay_pending_position_reset = True
+            self._desktop_overlay_captions_locked = False
+            self._sync_desktop_overlay_main_controls()
+            self.on_desktop_overlay_position_reset()
+            return
+        desktop_settings = self._settings.overlay.desktop_flet
+        desktop_settings.position.x = None
+        desktop_settings.position.y = None
+        desktop_settings.locked = False
+        desktop_settings.validate()
+        self._desktop_overlay_captions_locked = False
+        self._desktop_overlay_pending_position_reset = False
+        self._sync_desktop_overlay_main_controls()
+        self._emit_settings_changed()
+
+    def sync_desktop_overlay_settings(self, settings: AppSettings) -> None:
+        self._settings = settings
+        self._desktop_overlay_pending_size_preset = None
+        self._desktop_overlay_pending_position_reset = False
+        self._desktop_overlay_pending_locked = None
+        self._desktop_overlay_captions_locked = bool(settings.overlay.desktop_flet.locked)
+        if self._overlay_state == "off":
+            self._overlay_runtime_target = self._current_overlay_target()
+        self._sync_overlay_controls()
+
     def set_overlay_peer_contract(self, contract: OverlayPeerConsumerContract) -> None:
         self._overlay_peer_contract = contract
         if self._settings is not None:
@@ -3481,9 +4006,13 @@ class SettingsView(ft.Column):
                 else "settings.context.local"
             ),
         )
+        self._sync_overlay_target_control()
+        self._sync_desktop_overlay_main_controls()
+        self._sync_desktop_overlay_status_control()
 
         self._overlay_translation_button.disabled = self._settings is None
         self._overlay_peer_original_button.disabled = self._settings is None
+        self._overlay_target_button.disabled = self._settings is None
         self._overlay_anchor_button.disabled = self._settings is None
         self._overlay_distance_decrease_button.disabled = self._settings is None
         self._overlay_distance_increase_button.disabled = self._settings is None
@@ -3491,7 +4020,8 @@ class SettingsView(ft.Column):
         self._overlay_offset_x_increase_button.disabled = self._settings is None
         self._overlay_offset_y_decrease_button.disabled = self._settings is None
         self._overlay_offset_y_increase_button.disabled = self._settings is None
-        self._overlay_reset_button.disabled = self._settings is None
+        self._overlay_vr_reset_button.disabled = self._settings is None
+        self._overlay_desktop_reset_button.disabled = self._settings is None
         self._integrated_context_button.disabled = self._settings is None
         self._integrated_context_hint.value = ""
 
@@ -3503,9 +4033,18 @@ class SettingsView(ft.Column):
         state: str,
         *,
         failure_reason: str | None = None,
+        overlay_target: str | None = None,
+        desktop_captions_locked: bool | None = None,
     ) -> None:
-        _ = failure_reason
         self._overlay_state = state
+        self._overlay_failure_reason = failure_reason
+        if overlay_target is not None:
+            self._overlay_runtime_target = self._normalized_overlay_target(overlay_target)
+        elif state == "off":
+            self._overlay_runtime_target = self._current_overlay_target()
+        if desktop_captions_locked is not None and self._desktop_overlay_runtime_lock_applies():
+            self._desktop_overlay_pending_locked = None
+            self._desktop_overlay_captions_locked = bool(desktop_captions_locked)
         self._sync_overlay_controls()
 
     def _on_overlay_calibration_reset(self, e) -> None:
@@ -3886,7 +4425,11 @@ class SettingsView(ft.Column):
 
     def _emit_settings_changed(self) -> None:
         if self._settings and self.on_settings_changed:
-            self.on_settings_changed(self._sanitize_provider_apply_settings(self._settings))
+            self.on_settings_changed(
+                self._sanitize_provider_apply_settings(
+                    self._settings_with_desktop_overlay_runtime_state(self._settings)
+                )
+            )
 
     def _emit_prompt_apply_settings(self, settings: AppSettings) -> None:
         sanitized = self._sanitize_provider_apply_settings(settings)
@@ -3958,6 +4501,7 @@ class SettingsView(ft.Column):
         self._peer_provider_title.value = t("settings.section.peer_stt")
         self._dashboard_language_redirect_text.value = t("settings.dashboard_language_redirect")
         self._peer_stt_label.value = t("settings.peer_stt_provider")
+        self._overlay_target_title.value = t("settings.overlay.caption_location")
         self._overlay_translation_title.value = t("settings.overlay.show_translation")
         self._overlay_peer_original_title.value = t("settings.overlay.show_peer_original")
         self._integrated_context_label.value = t("settings.integrated_context")
@@ -3968,9 +4512,16 @@ class SettingsView(ft.Column):
         self._overlay_offset_x_title.value = t("settings.overlay.calibration.offset_x")
         self._overlay_offset_y_title.value = t("settings.overlay.calibration.offset_y")
         self._overlay_text_scale_title.value = t("settings.overlay.calibration.text_scale")
-        self._overlay_reset_title.value = t("settings.overlay.position_reset")
+        self._overlay_reset_title.value = t("settings.overlay.position_reset.title")
+        self._desktop_overlay_size_title.value = t("settings.overlay.desktop.size.title")
+        self._desktop_overlay_lock_title.value = t("settings.overlay.desktop.lock.title")
         self._set_unit_card_value_text(
-            self._overlay_reset_button, t("settings.overlay.calibration.reset")
+            self._overlay_vr_reset_button, t("settings.overlay.position_reset.action.vr"), size=20
+        )
+        self._set_unit_card_value_text(
+            self._overlay_desktop_reset_button,
+            t("settings.overlay.position_reset.action.desktop"),
+            size=20,
         )
         _set_text_button_label(self._reset_prompt_btn, t("settings.reset_prompt"))
         self._sync_prompt_tab_copy()

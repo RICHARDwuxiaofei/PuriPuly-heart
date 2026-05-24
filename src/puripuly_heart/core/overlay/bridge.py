@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +30,7 @@ class OverlayBridge:
     overlay_instance_id: str | None = None
     diagnostics: OverlayDiagnosticsRecorder | None = None
     runtime_logging_mode: str | None = None
+    desktop_runtime_controls_enabled: bool = False
 
     url: str = field(init=False, default="")
     messages: asyncio.Queue[dict[str, Any]] = field(
@@ -45,6 +47,10 @@ class OverlayBridge:
     _snapshot_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock)
     _token_consumed: bool = field(init=False, default=False)
     _last_snapshot_revision: int = field(init=False, default=0)
+    _initial_desktop_runtime_controls: list[dict[str, Any]] = field(
+        init=False,
+        default_factory=list,
+    )
 
     def __post_init__(self) -> None:
         if self.initial_snapshot is None:
@@ -108,6 +114,17 @@ class OverlayBridge:
         self.runtime_logging_mode = normalize_overlay_logging_mode(logging_mode)
         await self._broadcast_json(self._runtime_control_payload())
 
+    async def broadcast_desktop_runtime_control(self, payload: Mapping[str, Any]) -> None:
+        self._ensure_desktop_runtime_controls_enabled()
+        await self._broadcast_json(self._desktop_runtime_control_message(payload))
+
+    def set_initial_desktop_runtime_controls(
+        self,
+        sequence: Iterable[Mapping[str, Any]],
+    ) -> None:
+        self._ensure_desktop_runtime_controls_enabled()
+        self._initial_desktop_runtime_controls = [dict(payload) for payload in sequence]
+
     def snapshot(self) -> OverlayPresentationSnapshot:
         return self._snapshot
 
@@ -137,6 +154,10 @@ class OverlayBridge:
                 )
                 if self.runtime_logging_mode is not None:
                     await connection.send(json.dumps(self._runtime_control_payload()))
+                for payload in self._initial_desktop_runtime_controls:
+                    await connection.send(
+                        json.dumps(self._desktop_runtime_control_message(payload))
+                    )
                 self._authenticated_connections.add(connection)
                 authenticated = True
                 logger.info(
@@ -351,3 +372,13 @@ class OverlayBridge:
                 "logging_mode": normalize_overlay_logging_mode(self.runtime_logging_mode or "basic")
             },
         }
+
+    def _desktop_runtime_control_message(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "type": "runtime_control",
+            "payload": dict(payload),
+        }
+
+    def _ensure_desktop_runtime_controls_enabled(self) -> None:
+        if not self.desktop_runtime_controls_enabled:
+            raise RuntimeError("desktop runtime controls are only enabled for desktop overlays")

@@ -1,0 +1,2907 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import inspect
+import json
+import logging
+import math
+import os
+import re
+import subprocess
+import sys
+import time
+from collections.abc import Awaitable, Callable
+from concurrent.futures import Future as ConcurrentFuture
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Protocol
+from urllib.parse import urlsplit
+
+import websockets
+from websockets.exceptions import ConnectionClosed
+
+from puripuly_heart.config.settings import (
+    DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
+    DESKTOP_FLET_DEFAULT_HEIGHT,
+    DESKTOP_FLET_DEFAULT_SIZE_PRESET,
+    DESKTOP_FLET_DEFAULT_TEXT_SCALE,
+    DESKTOP_FLET_DEFAULT_WIDTH,
+    DESKTOP_FLET_MAX_BACKGROUND_ALPHA,
+    DESKTOP_FLET_MAX_OUTLINE_WIDTH,
+    DESKTOP_FLET_MAX_TEXT_SCALE,
+    DESKTOP_FLET_MIN_BACKGROUND_ALPHA,
+    DESKTOP_FLET_MIN_HEIGHT,
+    DESKTOP_FLET_MIN_OUTLINE_WIDTH,
+    DESKTOP_FLET_MIN_TEXT_SCALE,
+    DESKTOP_FLET_MIN_WIDTH,
+    DESKTOP_FLET_SIZE_PRESET_ORDER,
+    DESKTOP_FLET_SIZE_PRESETS,
+    DesktopFletOverlayVisualSettings,
+)
+from puripuly_heart.core.overlay.manifest import OVERLAY_CONTRACT_VERSION, OverlayLaunchManifest
+from puripuly_heart.core.overlay.protocol import (
+    OverlayPresentationBlock,
+    OverlayPresentationSnapshot,
+)
+from puripuly_heart.ui.fonts import font_for_language
+from puripuly_heart.ui.i18n import t_for_locale
+
+logger = logging.getLogger(__name__)
+
+_LOOPBACK_BRIDGE_HOSTS = {"127.0.0.1", "::1"}
+_SENSITIVE_EVENT_KEYS = {
+    "accesstoken",
+    "apikey",
+    "authorization",
+    "authorizationheader",
+    "bearer",
+    "secret",
+    "sessiontoken",
+    "token",
+}
+_STARTUP_FAILURE_EXIT_CODE = 1
+_RUNTIME_FAILURE_EXIT_CODE = 1
+_SUCCESS_EXIT_CODE = 0
+_REQUIRED_MANIFEST_STRING_FIELDS = {
+    "app_version",
+    "bridge_url",
+    "locale",
+    "log_dir",
+    "log_level",
+    "logging_mode",
+    "overlay_instance_id",
+    "session_token",
+}
+_REQUIRED_MANIFEST_INT_FIELDS = {"contract_version", "parent_pid", "startup_deadline_ms"}
+_DESKTOP_CAPTION_WHITE = "#FFFFFF"
+_DESKTOP_CAPTION_GOLD = "#FFD700"
+_DESKTOP_CAPTION_BACKGROUND_RGB = "000000"
+_DESKTOP_CAPTION_TRANSPARENT = "transparent"
+_DESKTOP_CAPTION_MAX_VISIBLE_LINES = 4
+_DESKTOP_CAPTION_PRIMARY_MAX_LINES = 2
+_DESKTOP_CAPTION_SECONDARY_MAX_LINES = 2
+_DESKTOP_CAPTION_LINE_HEIGHT = 1.14
+_DESKTOP_CAPTION_OVERFLOW_STRATEGY = (
+    "four-line-budget:newest-active,peer-translated-primary," "drop-secondary-then-older-finalized"
+)
+_DESKTOP_INTERACTION_MODE_EDIT = "edit"
+_DESKTOP_INTERACTION_MODE_PASS_THROUGH = "pass_through"
+_DESKTOP_INTERACTION_MODES = {
+    _DESKTOP_INTERACTION_MODE_EDIT,
+    _DESKTOP_INTERACTION_MODE_PASS_THROUGH,
+}
+_DESKTOP_WINDOW_BOUNDS_EVENT_NAMES = {"MOVE", "MOVED", "RESIZE", "RESIZED"}
+_INITIAL_RUNTIME_CONTROL_DRAIN_TIMEOUT_S = 0.05
+_PROGRAMMATIC_BOUNDS_ECHO_SUPPRESSION_S = 0.25
+_PROGRAMMATIC_BOUNDS_ECHO_TOLERANCE_PX = 2.0
+_DESKTOP_PREVIEW_BACKGROUND_ALPHA_PRESETS = (0.35, 0.5, 0.65, 0.8)
+_DESKTOP_PREVIEW_DEFAULT_BACKGROUND_ALPHA = DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA
+_DESKTOP_PREVIEW_DEFAULT_BACKGROUND_SURFACE_ID = "bright"
+_DESKTOP_PREVIEW_STAGE_WIDTH = 1180
+_DESKTOP_PREVIEW_STAGE_HEIGHT = 420
+_DESKTOP_PREVIEW_BACKGROUND_SURFACE_DATA = (
+    ("bright", "settings.overlay.desktop.preview.background_surface.bright", "#FFFFFF"),
+    ("dark", "settings.overlay.desktop.preview.background_surface.dark", "#111827"),
+    ("busy", "settings.overlay.desktop.preview.background_surface.busy", "#1F2937"),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopCaptionMappingRule:
+    snapshot_field: str
+    block_type: str
+    role: str
+    slot: str
+    promoted: bool
+    color: str
+    priority: str
+    truncation: str
+
+
+# Reviewable snapshot mapping table required before renderer coding.
+# Current contract inspected in core.overlay.protocol/state:
+# OverlayPresentationSnapshot(revision, calibration, blocks[]), where blocks[]
+# contains OverlayPresentationBlock(channel self|peer, block_variant
+# active_self|active_peer|finalized, primary_text, secondary_text,
+# secondary_enabled, appearance_seq). Desktop visual sizing is owned by repaired
+# desktop visual settings/runtime controls, so snapshot.calibration is not mapped
+# to desktop caption visual state.
+DESKTOP_CAPTION_MAPPING_TABLE: tuple[DesktopCaptionMappingRule, ...] = (
+    DesktopCaptionMappingRule(
+        snapshot_field="blocks[]",
+        block_type="active_self/self",
+        role="active_self_source",
+        slot="primary",
+        promoted=False,
+        color=_DESKTOP_CAPTION_WHITE,
+        priority="100 newest active/interim source",
+        truncation="max 2 lines; retained before secondary and finalized lines",
+    ),
+    DesktopCaptionMappingRule(
+        snapshot_field="blocks[]",
+        block_type="active_self/self",
+        role="active_self_translation",
+        slot="secondary",
+        promoted=False,
+        color=_DESKTOP_CAPTION_GOLD,
+        priority="85 active/interim secondary",
+        truncation="max 2 lines; drops before active primary",
+    ),
+    DesktopCaptionMappingRule(
+        snapshot_field="blocks[]",
+        block_type="active_peer/peer",
+        role="active_peer_source",
+        slot="primary",
+        promoted=True,
+        color=_DESKTOP_CAPTION_WHITE,
+        priority="95 newest active/interim peer source",
+        truncation="max 2 lines; retained before finalized secondary lines",
+    ),
+    DesktopCaptionMappingRule(
+        snapshot_field="blocks[]",
+        block_type="finalized/peer translated",
+        role="peer_translation",
+        slot="primary",
+        promoted=False,
+        color=_DESKTOP_CAPTION_GOLD,
+        priority="90 peer translated primary; newer appearance wins ties",
+        truncation="max 2 lines; outranks older finalized source/self lines",
+    ),
+    DesktopCaptionMappingRule(
+        snapshot_field="blocks[]",
+        block_type="finalized/peer translated",
+        role="peer_source_original",
+        slot="secondary",
+        promoted=False,
+        color=_DESKTOP_CAPTION_WHITE,
+        priority="70 peer original/source secondary",
+        truncation="max 2 lines; drops before peer translated primary",
+    ),
+    DesktopCaptionMappingRule(
+        snapshot_field="blocks[]",
+        block_type="finalized/peer source-only",
+        role="peer_source_original",
+        slot="primary",
+        promoted=True,
+        color=_DESKTOP_CAPTION_WHITE,
+        priority="60 peer source-only finalized",
+        truncation="max 2 lines; drops before active and translated primary lines",
+    ),
+    DesktopCaptionMappingRule(
+        snapshot_field="blocks[]",
+        block_type="finalized/self",
+        role="self_source",
+        slot="primary",
+        promoted=False,
+        color=_DESKTOP_CAPTION_WHITE,
+        priority="65 self/source finalized; newer appearance wins ties",
+        truncation="max 2 lines; older finalized drops first",
+    ),
+    DesktopCaptionMappingRule(
+        snapshot_field="blocks[]",
+        block_type="finalized/self",
+        role="self_translation",
+        slot="secondary",
+        promoted=False,
+        color=_DESKTOP_CAPTION_GOLD,
+        priority="50 self translation secondary",
+        truncation="max 2 lines; drops before finalized primary lines",
+    ),
+    DesktopCaptionMappingRule(
+        snapshot_field="blocks[]",
+        block_type="finalized/self secondary-only",
+        role="self_translation",
+        slot="primary",
+        promoted=True,
+        color=_DESKTOP_CAPTION_GOLD,
+        priority="55 self translation secondary-only promoted primary",
+        truncation="max 2 lines; drops before active and peer translated primary lines",
+    ),
+    DesktopCaptionMappingRule(
+        snapshot_field="calibration",
+        block_type="all",
+        role="desktop_visual_ignored",
+        slot="none",
+        promoted=False,
+        color="none",
+        priority="not rendered",
+        truncation="desktop caption visual state comes from repaired desktop visual config",
+    ),
+    DesktopCaptionMappingRule(
+        snapshot_field="blocks[]",
+        block_type="none/edit",
+        role="edit_no_caption_empty_card",
+        slot="none",
+        promoted=False,
+        color="none",
+        priority="0 edit-mode empty caption surface",
+        truncation="renders empty caption card with no text",
+    ),
+    DesktopCaptionMappingRule(
+        snapshot_field="blocks[]",
+        block_type="none/pass_through",
+        role="pass_through_no_caption",
+        slot="none",
+        promoted=False,
+        color="none",
+        priority="not rendered",
+        truncation="renders no text and no background",
+    ),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopCaptionSizePreset:
+    id: str
+    window_width: int
+    window_height: int
+    primary_font_size: int
+    secondary_font_size: int
+    padding_horizontal: int
+    padding_vertical: int
+    border_radius: int
+
+
+_DESKTOP_CAPTION_SIZE_PRESETS: dict[str, DesktopCaptionSizePreset] = {
+    "small": DesktopCaptionSizePreset("small", 1152, 297, 37, 23, 18, 10, 14),
+    "medium": DesktopCaptionSizePreset("medium", 1344, 347, 43, 27, 22, 12, 16),
+    "large": DesktopCaptionSizePreset("large", 1600, 413, 52, 32, 26, 14, 18),
+    "xlarge": DesktopCaptionSizePreset("xlarge", 1792, 462, 58, 36, 30, 16, 20),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopCaptionVisualState:
+    text_scale: float = DESKTOP_FLET_DEFAULT_TEXT_SCALE
+    background_alpha: float = DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA
+    outline_width: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopCaptionLine:
+    text: str
+    role: str
+    slot: str
+    color: str
+    priority: int
+    block_id: str
+    channel: str
+    block_variant: str
+    appearance_seq: int
+    max_lines: int
+    font_size: int
+    font_family: str | None
+    line_height: float = _DESKTOP_CAPTION_LINE_HEIGHT
+    weight: str = "bold"
+    promoted: bool = False
+    active: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopCaptionPlan:
+    lines: tuple[DesktopCaptionLine, ...]
+    size_preset: str
+    window_width: int
+    window_height: int
+    text_width: int
+    primary_font_size: int
+    secondary_font_size: int
+    outline_width: float
+    padding_horizontal: int
+    padding_vertical: int
+    border_radius: int
+    background_alpha: float
+    background_color: str
+    surface_visible: bool
+    no_scrollbars: bool = True
+    max_visible_lines: int = _DESKTOP_CAPTION_MAX_VISIBLE_LINES
+    overflow_strategy: str = _DESKTOP_CAPTION_OVERFLOW_STRATEGY
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopOverlayPreviewFixture:
+    id: str
+    label: str
+    i18n_key: str
+    snapshot: OverlayPresentationSnapshot
+    coverage_tags: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopOverlayPreviewSizePreset:
+    id: str
+    label: str
+    i18n_key: str
+    window_width: int
+    window_height: int
+    primary_font_size: int
+    secondary_font_size: int
+    padding_horizontal: int
+    padding_vertical: int
+    border_radius: int
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopOverlayPreviewBackgroundSurface:
+    id: str
+    label: str
+    i18n_key: str
+    bgcolor: str
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopOverlayPreviewLabels:
+    fixture: str
+    size_preset: str
+    background_alpha: str
+    background_surface: str
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopOverlayPreviewCatalog:
+    fixtures: tuple[DesktopOverlayPreviewFixture, ...]
+    background_surfaces: tuple[DesktopOverlayPreviewBackgroundSurface, ...]
+    size_presets: tuple[DesktopOverlayPreviewSizePreset, ...]
+    background_alpha_presets: tuple[float, ...]
+    labels: DesktopOverlayPreviewLabels
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopOverlayPreviewFixtureDataSource:
+    source_kind: str
+    module: str
+    package_data_globs: tuple[str, ...] = ()
+    hiddenimports: tuple[str, ...] = ()
+
+
+_DESKTOP_PREVIEW_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "bearer_token",
+        re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}\b", re.IGNORECASE),
+    ),
+    (
+        "api_key",
+        re.compile(r"\b(?:sk|rk|pk)-(?:live|prod|test)?-?[A-Za-z0-9_-]{12,}\b", re.IGNORECASE),
+    ),
+)
+
+
+def build_desktop_caption_plan(
+    snapshot: OverlayPresentationSnapshot,
+    *,
+    window_width: int | float = DESKTOP_FLET_DEFAULT_WIDTH,
+    window_height: int | float = DESKTOP_FLET_DEFAULT_HEIGHT,
+    visual_state: DesktopCaptionVisualState | None = None,
+    interaction_mode: str = "pass_through",
+    locale: str | None = None,
+) -> DesktopCaptionPlan:
+    """Map the current overlay snapshot contract into a deterministic caption plan."""
+
+    width = _positive_int_or_default(window_width, DESKTOP_FLET_DEFAULT_WIDTH)
+    height = _positive_int_or_default(window_height, DESKTOP_FLET_DEFAULT_HEIGHT)
+    visual = _validated_visual_state(visual_state)
+    preset = _desktop_caption_size_preset_for_dimensions(width, height)
+    primary_font_size = preset.primary_font_size
+    secondary_font_size = preset.secondary_font_size
+    outline_width = 0.0
+    font_family = font_for_language(locale)
+
+    candidates = _caption_lines_for_snapshot(
+        snapshot,
+        primary_font_size=primary_font_size,
+        secondary_font_size=secondary_font_size,
+        font_family=font_family,
+    )
+    lines = _select_visible_caption_lines(candidates)
+
+    surface_visible = bool(lines) or interaction_mode == _DESKTOP_INTERACTION_MODE_EDIT
+    background_alpha = 0.0
+    if surface_visible:
+        background_alpha = visual.background_alpha
+    return DesktopCaptionPlan(
+        lines=lines,
+        size_preset=preset.id,
+        window_width=width,
+        window_height=height,
+        text_width=max(1, width - (preset.padding_horizontal * 2)),
+        primary_font_size=primary_font_size,
+        secondary_font_size=secondary_font_size,
+        outline_width=outline_width,
+        padding_horizontal=preset.padding_horizontal,
+        padding_vertical=preset.padding_vertical,
+        border_radius=preset.border_radius,
+        background_alpha=background_alpha,
+        background_color=_caption_background_color(background_alpha),
+        surface_visible=surface_visible,
+    )
+
+
+def build_desktop_caption_surface(plan: DesktopCaptionPlan) -> Any:
+    """Build no-outline Flet caption controls from a caption plan."""
+
+    import flet as ft
+
+    line_controls = [_build_flet_caption_line(ft, plan, line) for line in plan.lines]
+    column = ft.Column(
+        controls=line_controls,
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        spacing=2,
+        tight=True,
+        scroll=None,
+    )
+    return ft.Container(
+        content=column,
+        width=plan.window_width,
+        bgcolor=plan.background_color,
+        padding=ft.padding.symmetric(
+            horizontal=plan.padding_horizontal,
+            vertical=plan.padding_vertical,
+        ),
+        border_radius=plan.border_radius,
+        alignment=ft.alignment.center,
+        visible=plan.surface_visible,
+    )
+
+
+def build_desktop_overlay_preview_catalog(
+    *,
+    locale: str | None = None,
+) -> DesktopOverlayPreviewCatalog:
+    """Return local-only desktop overlay preview fixtures and visual presets."""
+
+    def text(key: str) -> str:
+        return t_for_locale(locale, key)
+
+    fixtures = tuple(
+        DesktopOverlayPreviewFixture(
+            id=fixture_id,
+            i18n_key=i18n_key,
+            label=text(i18n_key),
+            snapshot=snapshot,
+            coverage_tags=frozenset(coverage_tags),
+        )
+        for fixture_id, i18n_key, snapshot, coverage_tags in _desktop_preview_fixture_data()
+    )
+    size_presets = tuple(
+        _preview_size_preset(preset_id, locale=locale)
+        for preset_id in DESKTOP_FLET_SIZE_PRESET_ORDER
+    )
+    background_surfaces = tuple(
+        DesktopOverlayPreviewBackgroundSurface(
+            id=surface_id,
+            i18n_key=i18n_key,
+            label=text(i18n_key),
+            bgcolor=bgcolor,
+        )
+        for surface_id, i18n_key, bgcolor in _DESKTOP_PREVIEW_BACKGROUND_SURFACE_DATA
+    )
+    labels = DesktopOverlayPreviewLabels(
+        fixture=text("settings.overlay.desktop.preview.fixture"),
+        size_preset=text("settings.overlay.desktop.size.title"),
+        background_alpha=text("settings.overlay.desktop.preview.background_alpha"),
+        background_surface=text("settings.overlay.desktop.preview.background_surface"),
+    )
+    return DesktopOverlayPreviewCatalog(
+        fixtures=fixtures,
+        background_surfaces=background_surfaces,
+        size_presets=size_presets,
+        background_alpha_presets=_DESKTOP_PREVIEW_BACKGROUND_ALPHA_PRESETS,
+        labels=labels,
+    )
+
+
+def _preview_size_preset(
+    preset_id: str,
+    *,
+    locale: str | None,
+) -> DesktopOverlayPreviewSizePreset:
+    preset = _DESKTOP_CAPTION_SIZE_PRESETS[preset_id]
+    i18n_key = f"settings.overlay.desktop.size.option.{preset_id}"
+    return DesktopOverlayPreviewSizePreset(
+        id=preset.id,
+        label=t_for_locale(locale, i18n_key),
+        i18n_key=i18n_key,
+        window_width=preset.window_width,
+        window_height=preset.window_height,
+        primary_font_size=preset.primary_font_size,
+        secondary_font_size=preset.secondary_font_size,
+        padding_horizontal=preset.padding_horizontal,
+        padding_vertical=preset.padding_vertical,
+        border_radius=preset.border_radius,
+    )
+
+
+def preview_fixture_secret_findings(
+    catalog: DesktopOverlayPreviewCatalog | None = None,
+) -> tuple[str, ...]:
+    """Return redacted diagnostics for credential-like preview fixture content."""
+
+    catalog = catalog or build_desktop_overlay_preview_catalog(locale="en")
+    findings: list[str] = []
+    for fixture in catalog.fixtures:
+        fixture_identifier = _safe_preview_fixture_identifier(fixture.id)
+        for field_path, value in _iter_preview_guard_strings(
+            _preview_fixture_guard_payload(fixture)
+        ):
+            for pattern_name, pattern in _DESKTOP_PREVIEW_SECRET_PATTERNS:
+                if pattern.search(value):
+                    findings.append(
+                        f"fixture {fixture_identifier} field {field_path} matched {pattern_name}"
+                    )
+    for field_path, value in _iter_preview_guard_strings(
+        _preview_catalog_control_guard_payload(catalog)
+    ):
+        for pattern_name, pattern in _DESKTOP_PREVIEW_SECRET_PATTERNS:
+            if pattern.search(value):
+                findings.append(f"preview catalog field {field_path} matched {pattern_name}")
+    return tuple(findings)
+
+
+def desktop_overlay_preview_fixture_data_sources() -> tuple[
+    DesktopOverlayPreviewFixtureDataSource,
+    ...,
+]:
+    """Describe preview fixture data sources for packaging readiness checks."""
+
+    return (
+        DesktopOverlayPreviewFixtureDataSource(
+            source_kind="embedded_python_module",
+            module=__name__,
+        ),
+    )
+
+
+def _preview_fixture_guard_payload(fixture: DesktopOverlayPreviewFixture) -> dict[str, object]:
+    return {
+        "id": fixture.id,
+        "label": fixture.label,
+        "i18n_key": fixture.i18n_key,
+        "coverage_tags": tuple(sorted(fixture.coverage_tags)),
+        "snapshot": fixture.snapshot.to_dict(),
+    }
+
+
+def _preview_catalog_control_guard_payload(
+    catalog: DesktopOverlayPreviewCatalog,
+) -> dict[str, object]:
+    return {
+        "background_surfaces": tuple(
+            {
+                "id": surface.id,
+                "label": surface.label,
+                "i18n_key": surface.i18n_key,
+                "bgcolor": surface.bgcolor,
+            }
+            for surface in catalog.background_surfaces
+        ),
+        "size_presets": tuple(
+            {
+                "id": preset.id,
+                "label": preset.label,
+                "i18n_key": preset.i18n_key,
+                "window_width": preset.window_width,
+                "window_height": preset.window_height,
+                "primary_font_size": preset.primary_font_size,
+                "secondary_font_size": preset.secondary_font_size,
+                "padding_horizontal": preset.padding_horizontal,
+                "padding_vertical": preset.padding_vertical,
+                "border_radius": preset.border_radius,
+            }
+            for preset in catalog.size_presets
+        ),
+        "background_alpha_presets": tuple(catalog.background_alpha_presets),
+        "labels": {
+            "fixture": catalog.labels.fixture,
+            "size_preset": catalog.labels.size_preset,
+            "background_alpha": catalog.labels.background_alpha,
+            "background_surface": catalog.labels.background_surface,
+        },
+    }
+
+
+def _iter_preview_guard_strings(value: object, path: str = "") -> tuple[tuple[str, str], ...]:
+    strings: list[tuple[str, str]] = []
+    if isinstance(value, str):
+        strings.append((path, value))
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            key_path = str(key) if not path else f"{path}.{key}"
+            strings.extend(_iter_preview_guard_strings(item, key_path))
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            strings.extend(_iter_preview_guard_strings(item, f"{path}[{index}]"))
+    return tuple(strings)
+
+
+def _safe_preview_fixture_identifier(fixture_id: str) -> str:
+    for _, pattern in _DESKTOP_PREVIEW_SECRET_PATTERNS:
+        if pattern.search(fixture_id):
+            return "<redacted-fixture-id>"
+    return fixture_id
+
+
+def _desktop_preview_fixture_data() -> tuple[
+    tuple[str, str, OverlayPresentationSnapshot, frozenset[str]],
+    ...,
+]:
+    return (
+        (
+            "korean_long_wrap",
+            "settings.overlay.desktop.preview.fixture.korean_long_wrap",
+            OverlayPresentationSnapshot(
+                revision=1,
+                blocks=[
+                    _preview_block(
+                        "preview-ko-long-active-self",
+                        channel="self",
+                        block_variant="active_self",
+                        appearance_seq=10,
+                        primary_text=(
+                            "긴 문장 미리보기입니다. 한국어 자막이 화면 너비에 맞춰 "
+                            "자연스럽게 줄바꿈되는지 확인하기 위해 일부러 길게 작성했습니다. "
+                            "밝은 배경에서도 반투명 자막 카드가 읽기 쉬운지 살펴보세요."
+                        ),
+                        secondary_text=(
+                            "This long Korean sample checks wrapping, source color, "
+                            "and the secondary translation line."
+                        ),
+                        secondary_enabled=True,
+                    )
+                ],
+            ),
+            frozenset({"ko", "en", "self", "primary", "secondary", "active", "long_wrap"}),
+        ),
+        (
+            "japanese_peer_finalized",
+            "settings.overlay.desktop.preview.fixture.japanese_peer_finalized",
+            OverlayPresentationSnapshot(
+                revision=2,
+                blocks=[
+                    _preview_block(
+                        "preview-ja-peer-finalized",
+                        channel="peer",
+                        block_variant="finalized",
+                        appearance_seq=20,
+                        primary_text="今日はゆっくり話してくれてありがとう。字幕カードも見やすいです。",
+                        secondary_text="Thanks for speaking slowly today. The caption card is easy to read.",
+                        secondary_enabled=True,
+                    )
+                ],
+            ),
+            frozenset({"ja", "en", "peer", "primary", "secondary", "finalized"}),
+        ),
+        (
+            "chinese_self_finalized",
+            "settings.overlay.desktop.preview.fixture.chinese_self_finalized",
+            OverlayPresentationSnapshot(
+                revision=3,
+                blocks=[
+                    _preview_block(
+                        "preview-zh-self-finalized",
+                        channel="self",
+                        block_variant="finalized",
+                        appearance_seq=30,
+                        primary_text="我这边的桌面字幕会保持居中，并且在深色背景上也要清晰。",
+                        secondary_text="My desktop captions stay centered and readable on dark backgrounds.",
+                        secondary_enabled=True,
+                    )
+                ],
+            ),
+            frozenset({"zh-CN", "en", "self", "primary", "secondary", "finalized"}),
+        ),
+        (
+            "english_active_peer",
+            "settings.overlay.desktop.preview.fixture.english_active_peer",
+            OverlayPresentationSnapshot(
+                revision=4,
+                blocks=[
+                    _preview_block(
+                        "preview-en-active-peer",
+                        channel="peer",
+                        block_variant="active_peer",
+                        appearance_seq=40,
+                        primary_text="",
+                        secondary_text="Live peer captions are arriving right now...",
+                        secondary_enabled=True,
+                    )
+                ],
+            ),
+            frozenset({"en", "peer", "primary", "active"}),
+        ),
+        (
+            "mixed_script_emoji",
+            "settings.overlay.desktop.preview.fixture.mixed_script_emoji",
+            OverlayPresentationSnapshot(
+                revision=5,
+                blocks=[
+                    _preview_block(
+                        "preview-mixed-emoji-peer",
+                        channel="peer",
+                        block_variant="finalized",
+                        appearance_seq=50,
+                        primary_text="今日は PuriPuly Heart 좋아요 你好 😊✨",
+                        secondary_text="Mixed source: hello, 안녕, こんにちは, 你好 🎮",
+                        secondary_enabled=True,
+                    )
+                ],
+            ),
+            frozenset(
+                {
+                    "mixed_script",
+                    "emoji",
+                    "en",
+                    "ko",
+                    "ja",
+                    "zh-CN",
+                    "peer",
+                    "primary",
+                    "secondary",
+                    "finalized",
+                }
+            ),
+        ),
+        (
+            "no_captions",
+            "settings.overlay.desktop.preview.fixture.no_captions",
+            OverlayPresentationSnapshot(revision=6, blocks=[]),
+            frozenset({"no_caption", "edit_placeholder", "pass_through_transparent"}),
+        ),
+    )
+
+
+def _preview_block(
+    block_id: str,
+    *,
+    channel: str,
+    block_variant: str,
+    appearance_seq: int,
+    primary_text: str,
+    secondary_text: str,
+    secondary_enabled: bool,
+) -> OverlayPresentationBlock:
+    return OverlayPresentationBlock(
+        id=block_id,
+        occupant_key=f"preview:{channel}:{block_id}",
+        appearance_seq=appearance_seq,
+        channel=channel,  # type: ignore[arg-type]
+        block_variant=block_variant,  # type: ignore[arg-type]
+        primary_text=primary_text,
+        secondary_text=secondary_text,
+        secondary_enabled=secondary_enabled,
+    )
+
+
+def _caption_lines_for_snapshot(
+    snapshot: OverlayPresentationSnapshot,
+    *,
+    primary_font_size: int,
+    secondary_font_size: int,
+    font_family: str | None,
+) -> tuple[DesktopCaptionLine, ...]:
+    candidates: list[DesktopCaptionLine] = []
+    for block in snapshot.blocks:
+        candidates.extend(
+            _caption_lines_for_block(
+                block,
+                primary_font_size=primary_font_size,
+                secondary_font_size=secondary_font_size,
+                font_family=font_family,
+            )
+        )
+    return tuple(candidates)
+
+
+def _caption_lines_for_block(
+    block: OverlayPresentationBlock,
+    *,
+    primary_font_size: int,
+    secondary_font_size: int,
+    font_family: str | None,
+) -> tuple[DesktopCaptionLine, ...]:
+    primary_text = block.primary_text.strip()
+    secondary_text = block.secondary_text.strip()
+    if not primary_text and not secondary_text:
+        return ()
+
+    if block.block_variant == "active_self":
+        return _self_active_lines(
+            block,
+            primary_text=primary_text,
+            secondary_text=secondary_text,
+            primary_font_size=primary_font_size,
+            secondary_font_size=secondary_font_size,
+            font_family=font_family,
+        )
+    if block.block_variant == "active_peer":
+        return _peer_active_lines(
+            block,
+            primary_text=primary_text,
+            secondary_text=secondary_text,
+            primary_font_size=primary_font_size,
+            secondary_font_size=secondary_font_size,
+            font_family=font_family,
+        )
+    if block.channel == "peer":
+        return _peer_finalized_lines(
+            block,
+            primary_text=primary_text,
+            secondary_text=secondary_text,
+            primary_font_size=primary_font_size,
+            secondary_font_size=secondary_font_size,
+            font_family=font_family,
+        )
+    return _self_finalized_lines(
+        block,
+        primary_text=primary_text,
+        secondary_text=secondary_text,
+        primary_font_size=primary_font_size,
+        secondary_font_size=secondary_font_size,
+        font_family=font_family,
+    )
+
+
+def _self_active_lines(
+    block: OverlayPresentationBlock,
+    *,
+    primary_text: str,
+    secondary_text: str,
+    primary_font_size: int,
+    secondary_font_size: int,
+    font_family: str | None,
+) -> tuple[DesktopCaptionLine, ...]:
+    lines: list[DesktopCaptionLine] = []
+    if primary_text:
+        lines.append(
+            _caption_line(
+                block,
+                text=primary_text,
+                role="active_self_source",
+                slot="primary",
+                color=_DESKTOP_CAPTION_WHITE,
+                priority=100,
+                max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
+                font_size=primary_font_size,
+                font_family=font_family,
+                active=True,
+            )
+        )
+    if secondary_text and block.secondary_enabled:
+        lines.append(
+            _caption_line(
+                block,
+                text=secondary_text,
+                role="active_self_translation",
+                slot="secondary",
+                color=_DESKTOP_CAPTION_GOLD,
+                priority=85,
+                max_lines=_DESKTOP_CAPTION_SECONDARY_MAX_LINES,
+                font_size=secondary_font_size,
+                font_family=font_family,
+                active=True,
+            )
+        )
+    return tuple(lines)
+
+
+def _peer_active_lines(
+    block: OverlayPresentationBlock,
+    *,
+    primary_text: str,
+    secondary_text: str,
+    primary_font_size: int,
+    secondary_font_size: int,
+    font_family: str | None,
+) -> tuple[DesktopCaptionLine, ...]:
+    readable_text = primary_text or (secondary_text if block.secondary_enabled else "")
+    if not readable_text:
+        return ()
+    promoted = not primary_text and bool(secondary_text) and block.secondary_enabled
+    return (
+        _caption_line(
+            block,
+            text=readable_text,
+            role="active_peer_source",
+            slot="primary" if not promoted else "primary",
+            color=_DESKTOP_CAPTION_WHITE,
+            priority=95,
+            max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
+            font_size=primary_font_size if promoted else secondary_font_size,
+            font_family=font_family,
+            promoted=promoted,
+            active=True,
+        ),
+    )
+
+
+def _peer_finalized_lines(
+    block: OverlayPresentationBlock,
+    *,
+    primary_text: str,
+    secondary_text: str,
+    primary_font_size: int,
+    secondary_font_size: int,
+    font_family: str | None,
+) -> tuple[DesktopCaptionLine, ...]:
+    lines: list[DesktopCaptionLine] = []
+    if primary_text:
+        lines.append(
+            _caption_line(
+                block,
+                text=primary_text,
+                role="peer_translation",
+                slot="primary",
+                color=_DESKTOP_CAPTION_GOLD,
+                priority=90,
+                max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
+                font_size=primary_font_size,
+                font_family=font_family,
+            )
+        )
+        if secondary_text and block.secondary_enabled:
+            lines.append(
+                _caption_line(
+                    block,
+                    text=secondary_text,
+                    role="peer_source_original",
+                    slot="secondary",
+                    color=_DESKTOP_CAPTION_WHITE,
+                    priority=70,
+                    max_lines=_DESKTOP_CAPTION_SECONDARY_MAX_LINES,
+                    font_size=secondary_font_size,
+                    font_family=font_family,
+                )
+            )
+        return tuple(lines)
+    if secondary_text and block.secondary_enabled:
+        return (
+            _caption_line(
+                block,
+                text=secondary_text,
+                role="peer_source_original",
+                slot="primary",
+                color=_DESKTOP_CAPTION_WHITE,
+                priority=60,
+                max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
+                font_size=primary_font_size,
+                font_family=font_family,
+                promoted=True,
+            ),
+        )
+    return ()
+
+
+def _self_finalized_lines(
+    block: OverlayPresentationBlock,
+    *,
+    primary_text: str,
+    secondary_text: str,
+    primary_font_size: int,
+    secondary_font_size: int,
+    font_family: str | None,
+) -> tuple[DesktopCaptionLine, ...]:
+    lines: list[DesktopCaptionLine] = []
+    if primary_text:
+        lines.append(
+            _caption_line(
+                block,
+                text=primary_text,
+                role="self_source",
+                slot="primary",
+                color=_DESKTOP_CAPTION_WHITE,
+                priority=65,
+                max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
+                font_size=primary_font_size,
+                font_family=font_family,
+            )
+        )
+        if secondary_text and block.secondary_enabled:
+            lines.append(
+                _caption_line(
+                    block,
+                    text=secondary_text,
+                    role="self_translation",
+                    slot="secondary",
+                    color=_DESKTOP_CAPTION_GOLD,
+                    priority=50,
+                    max_lines=_DESKTOP_CAPTION_SECONDARY_MAX_LINES,
+                    font_size=secondary_font_size,
+                    font_family=font_family,
+                )
+            )
+        return tuple(lines)
+    if secondary_text and block.secondary_enabled:
+        return (
+            _caption_line(
+                block,
+                text=secondary_text,
+                role="self_translation",
+                slot="primary",
+                color=_DESKTOP_CAPTION_GOLD,
+                priority=55,
+                max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
+                font_size=primary_font_size,
+                font_family=font_family,
+                promoted=True,
+            ),
+        )
+    return ()
+
+
+def _caption_line(
+    block: OverlayPresentationBlock,
+    *,
+    text: str,
+    role: str,
+    slot: str,
+    color: str,
+    priority: int,
+    max_lines: int,
+    font_size: int,
+    font_family: str | None,
+    promoted: bool = False,
+    active: bool = False,
+) -> DesktopCaptionLine:
+    return DesktopCaptionLine(
+        text=text,
+        role=role,
+        slot=slot,
+        color=color,
+        priority=priority,
+        block_id=block.id,
+        channel=block.channel,
+        block_variant=block.block_variant,
+        appearance_seq=block.appearance_seq,
+        max_lines=max_lines,
+        font_size=font_size,
+        font_family=font_family,
+        promoted=promoted,
+        active=active,
+    )
+
+
+def _select_visible_caption_lines(
+    candidates: tuple[DesktopCaptionLine, ...],
+) -> tuple[DesktopCaptionLine, ...]:
+    selected: list[DesktopCaptionLine] = []
+    used_lines = 0
+    for line in sorted(
+        candidates,
+        key=lambda item: (item.priority, item.appearance_seq, -_slot_order(item.slot), item.text),
+        reverse=True,
+    ):
+        if used_lines + line.max_lines > _DESKTOP_CAPTION_MAX_VISIBLE_LINES:
+            continue
+        selected.append(line)
+        used_lines += line.max_lines
+        if used_lines >= _DESKTOP_CAPTION_MAX_VISIBLE_LINES:
+            break
+    return tuple(sorted(selected, key=lambda item: (item.appearance_seq, _slot_order(item.slot))))
+
+
+def _slot_order(slot: str) -> int:
+    if slot in {"primary", "primary_promoted", "primary_placeholder"}:
+        return 0
+    return 1
+
+
+def _validated_visual_state(
+    visual_state: DesktopCaptionVisualState | None,
+) -> DesktopCaptionVisualState:
+    source = visual_state or DesktopCaptionVisualState()
+    settings = DesktopFletOverlayVisualSettings(
+        text_scale=source.text_scale,
+        background_alpha=source.background_alpha,
+        outline_width=source.outline_width,
+    )
+    settings.validate()
+    return DesktopCaptionVisualState(
+        text_scale=settings.text_scale,
+        background_alpha=settings.background_alpha,
+        outline_width=settings.outline_width,
+    )
+
+
+def _desktop_caption_size_preset_for_dimensions(
+    width: int,
+    height: int,
+) -> DesktopCaptionSizePreset:
+    for preset_id in DESKTOP_FLET_SIZE_PRESET_ORDER:
+        preset = _DESKTOP_CAPTION_SIZE_PRESETS[preset_id]
+        settings_dimensions = DESKTOP_FLET_SIZE_PRESETS[preset_id]
+        if (preset.window_width, preset.window_height) != settings_dimensions:
+            raise RuntimeError("desktop caption preset dimensions diverged from settings")
+        if width == preset.window_width and height == preset.window_height:
+            return preset
+    return _DESKTOP_CAPTION_SIZE_PRESETS[DESKTOP_FLET_DEFAULT_SIZE_PRESET]
+
+
+def _caption_background_color(background_alpha: float) -> str:
+    if background_alpha <= 0:
+        return _DESKTOP_CAPTION_TRANSPARENT
+    alpha = int(round(_clamp(background_alpha, 0.0, 1.0) * 255))
+    return f"#{alpha:02X}{_DESKTOP_CAPTION_BACKGROUND_RGB}"
+
+
+def _positive_int_or_default(value: int | float, default: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return default
+    if value <= 0:
+        return default
+    return int(round(value))
+
+
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return min(maximum, max(minimum, value))
+
+
+def _build_flet_caption_line(ft: Any, plan: DesktopCaptionPlan, line: DesktopCaptionLine) -> Any:
+    return _build_flet_text(ft, plan, line)
+
+
+def _build_flet_text(
+    ft: Any,
+    plan: DesktopCaptionPlan,
+    line: DesktopCaptionLine,
+) -> Any:
+    return ft.Text(
+        value=line.text,
+        width=plan.text_width,
+        text_align=ft.TextAlign.CENTER,
+        font_family=line.font_family,
+        size=line.font_size,
+        weight=_flet_font_weight(ft, line.weight),
+        max_lines=line.max_lines,
+        overflow=ft.TextOverflow.ELLIPSIS,
+        no_wrap=False,
+        color=line.color,
+        style=ft.TextStyle(
+            size=line.font_size,
+            height=line.line_height,
+            weight=_flet_font_weight(ft, line.weight),
+            font_family=line.font_family,
+            foreground=None,
+        ),
+    )
+
+
+def _flet_font_weight(ft: Any, weight: str) -> Any:
+    if weight == "bold":
+        return ft.FontWeight.BOLD
+    return None
+
+
+class DesktopOverlayStartupError(Exception):
+    def __init__(self, failure_reason: str, message: str) -> None:
+        super().__init__(message)
+        self.failure_reason = failure_reason
+
+
+class LifecycleSink(Protocol):
+    async def emit(self, event: dict[str, object]) -> None: ...
+
+
+class RendererWindow(Protocol):
+    async def start(self, initial_snapshot: OverlayPresentationSnapshot) -> None: ...
+    async def run_until_closed(self) -> None: ...
+    async def close(self) -> None: ...
+    async def dispatch_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None: ...
+    async def dispatch_runtime_control(self, payload: dict[str, object]) -> None: ...
+
+
+class ParentMonitor(Protocol):
+    async def wait_for_parent_exit(self, stop_event: asyncio.Event) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeOutcome:
+    exit_code: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ProgrammaticBoundsEchoSuppression:
+    signature: tuple[float, float, float, float]
+    expires_at: float
+
+
+class StdoutLifecycleSink:
+    async def emit(self, event: dict[str, object]) -> None:
+        safe_event = _redact_event(event)
+        if safe_event.get("type") == "overlay_event":
+            return
+        stream = (
+            sys.stderr
+            if safe_event.get("type") in {"startup_error", "runtime_error"}
+            else sys.stdout
+        )
+        print(json.dumps(safe_event, sort_keys=True), file=stream, flush=True)
+
+
+class HeadlessRendererWindow:
+    """Minimal window lifecycle boundary until the Flet window implementation lands."""
+
+    def __init__(self) -> None:
+        self._closed = asyncio.Event()
+
+    async def start(self, initial_snapshot: OverlayPresentationSnapshot) -> None:
+        _ = initial_snapshot
+
+    async def run_until_closed(self) -> None:
+        await self._closed.wait()
+
+    async def close(self) -> None:
+        self._closed.set()
+
+    async def dispatch_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None:
+        _ = snapshot
+
+    async def dispatch_runtime_control(self, payload: dict[str, object]) -> None:
+        _ = payload
+
+
+type FletAppRunner = Callable[[Callable[[Any], object]], Awaitable[None]]
+type OverlayEventSink = Callable[[dict[str, object]], Awaitable[None]]
+type PreviewAppRunner = Callable[[Callable[[Any], object]], object]
+
+
+async def _default_flet_app_runner(target: Callable[[Any], object]) -> None:
+    import flet as ft
+
+    with _patch_flet_view_hidden_launcher():
+        await ft.app_async(target=target, view=ft.AppView.FLET_APP_HIDDEN)
+
+
+@contextlib.contextmanager
+def _patch_flet_view_hidden_launcher():
+    import flet_desktop
+
+    original = flet_desktop.open_flet_view_async
+    flet_desktop.open_flet_view_async = _open_flet_view_hidden_without_startup_flash
+    try:
+        yield
+    finally:
+        flet_desktop.open_flet_view_async = original
+
+
+async def _open_flet_view_hidden_without_startup_flash(
+    page_url: str,
+    assets_dir: str | None,
+    hidden: bool,
+) -> tuple[asyncio.subprocess.Process, str | None]:
+    import flet_desktop
+
+    args, flet_env, pid_file = flet_desktop.__locate_and_unpack_flet_view(
+        page_url,
+        assets_dir,
+        hidden,
+    )
+    kwargs: dict[str, object] = {"env": flet_env}
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        kwargs["startupinfo"] = startupinfo
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    return (
+        await asyncio.create_subprocess_exec(args[0], *args[1:], **kwargs),
+        pid_file,
+    )
+
+
+def _default_preview_app_runner(target: Callable[[Any], object]) -> None:
+    import flet as ft
+
+    ft.app(target=target)
+
+
+_REAL_DEFAULT_PREVIEW_APP_RUNNER = _default_preview_app_runner
+
+
+class FletDesktopRendererWindow:
+    """Flet 0.28.3 transparent desktop overlay window boundary.
+
+    The renderer remains persistence-free: this class only applies runtime
+    controls to the Flet page/window and emits renderer-originated overlay
+    events for the parent/controller to decide whether and how to persist.
+    """
+
+    def __init__(
+        self,
+        *,
+        app_runner: FletAppRunner | None = None,
+        event_sink: OverlayEventSink | None = None,
+        locale: str | None = None,
+        bounds_debounce_s: float = 0.15,
+        startup_timeout_s: float = 5.0,
+        preview_catalog: DesktopOverlayPreviewCatalog | None = None,
+    ) -> None:
+        self._app_runner = app_runner or _default_flet_app_runner
+        self._event_sink = event_sink
+        self._locale = locale
+        self._bounds_debounce_s = max(0.0, float(bounds_debounce_s))
+        self._startup_timeout_s = max(0.1, float(startup_timeout_s))
+        self._preview_catalog = preview_catalog
+        self._preview_fixture_id = preview_catalog.fixtures[0].id if preview_catalog else None
+        self._preview_background_surface_id = _DESKTOP_PREVIEW_DEFAULT_BACKGROUND_SURFACE_ID
+        self._preview_background_alpha = _DESKTOP_PREVIEW_DEFAULT_BACKGROUND_ALPHA
+        self._preview_size_preset_id = DESKTOP_FLET_DEFAULT_SIZE_PRESET
+        self._snapshot = OverlayPresentationSnapshot()
+        self._visual_state = DesktopCaptionVisualState()
+        self._interaction_mode = _DESKTOP_INTERACTION_MODE_EDIT
+        self._startup_interaction_mode: str | None = None
+        self._startup_visual_state: DesktopCaptionVisualState | None = None
+        self._startup_window_bounds: dict[str, int | float] | None = None
+        self._page: Any | None = None
+        self._page_ready = asyncio.Event()
+        self._closed = asyncio.Event()
+        self._app_task: asyncio.Task[None] | None = None
+        self._page_start_error: BaseException | None = None
+        self._bounds_sample_task: asyncio.Task[None] | None = None
+        self._scheduled_callback_tasks: set[asyncio.Future[Any] | ConcurrentFuture[Any]] = set()
+        self._programmatic_bounds_echo_suppression: _ProgrammaticBoundsEchoSuppression | None = None
+        self._last_reported_bounds: tuple[float, float, float, float] | None = None
+        self._bounds_epoch = 0
+
+    def prime_startup_runtime_controls(
+        self,
+        payloads: tuple[dict[str, object], ...],
+    ) -> tuple[dict[str, object], ...]:
+        """Apply startup controls that must affect the first Flet page render.
+
+        Returns controls that were not consumed during priming and still need
+        normal runtime dispatch after the Flet page exists.
+        """
+
+        self._startup_interaction_mode = None
+        self._startup_visual_state = None
+        self._startup_window_bounds = None
+        residual: list[dict[str, object]] = []
+        for payload in payloads:
+            command = payload.get("command")
+            if command == "set_interaction_mode":
+                mode = payload.get("mode")
+                if isinstance(mode, str) and mode in _DESKTOP_INTERACTION_MODES:
+                    self._startup_interaction_mode = mode
+                else:
+                    residual.append(payload)
+                continue
+            if command == "apply_visual_config":
+                visual_state = _parse_runtime_visual_state(payload)
+                if visual_state is not None:
+                    self._startup_visual_state = visual_state
+                else:
+                    residual.append(payload)
+                continue
+            if command == "apply_window_bounds":
+                bounds = _parse_runtime_window_bounds(payload)
+                bounds_epoch = _parse_runtime_bounds_epoch(payload)
+                if bounds is not None and (
+                    "bounds_epoch" not in payload or bounds_epoch is not None
+                ):
+                    if bounds_epoch is not None:
+                        self._bounds_epoch = bounds_epoch
+                    self._startup_window_bounds = bounds
+                else:
+                    residual.append(payload)
+                continue
+            residual.append(payload)
+        return tuple(residual)
+
+    async def start(self, initial_snapshot: OverlayPresentationSnapshot) -> None:
+        if self._preview_catalog is not None:
+            self._snapshot = self._preview_selected_fixture().snapshot
+            self._visual_state = self._preview_visual_state()
+        else:
+            self._snapshot = initial_snapshot
+            self._visual_state = self._startup_visual_state or DesktopCaptionVisualState()
+        self._page_ready.clear()
+        self._closed.clear()
+        self._page_start_error = None
+        self._interaction_mode = self._startup_interaction_mode or _DESKTOP_INTERACTION_MODE_EDIT
+        if self._app_task is None or self._app_task.done():
+            self._app_task = asyncio.create_task(self._app_runner(self._handle_page))
+
+        ready_task = asyncio.create_task(self._page_ready.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {ready_task, self._app_task},
+                timeout=self._startup_timeout_s,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if ready_task not in done:
+                if self._app_task in done:
+                    await self._app_task
+                raise RuntimeError("desktop overlay Flet page was not created")
+            if self._page_start_error is not None:
+                raise RuntimeError(
+                    "desktop overlay Flet page configuration failed"
+                ) from self._page_start_error
+        finally:
+            if not ready_task.done():
+                ready_task.cancel()
+            await asyncio.gather(ready_task, return_exceptions=True)
+
+    async def run_until_closed(self) -> None:
+        task = self._app_task
+        if task is None:
+            await self._closed.wait()
+            return
+        try:
+            await task
+        finally:
+            self._closed.set()
+
+    async def close(self) -> None:
+        self._closed.set()
+        page = self._page
+        if page is not None:
+            page.window.on_event = None
+        await self._cancel_scheduled_callback_tasks()
+        await self._cancel_bounds_sample()
+
+        if page is not None:
+            window = page.window
+            try:
+                window.close()
+            except Exception:
+                destroy = getattr(window, "destroy", None)
+                if callable(destroy):
+                    with contextlib.suppress(Exception):
+                        destroy()
+
+        task = self._app_task
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+            except TimeoutError:
+                if page is not None:
+                    destroy = getattr(page.window, "destroy", None)
+                    if callable(destroy):
+                        with contextlib.suppress(Exception):
+                            destroy()
+                    try:
+                        await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+                    except TimeoutError:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+
+    async def dispatch_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None:
+        self._snapshot = snapshot
+        self._render_page()
+
+    async def dispatch_runtime_control(self, payload: dict[str, object]) -> None:
+        if "logging_mode" in payload and payload.get("command") is None:
+            return
+        command = payload.get("command")
+        if command == "set_interaction_mode":
+            mode = payload.get("mode")
+            if not isinstance(mode, str) or mode not in _DESKTOP_INTERACTION_MODES:
+                logger.warning("[DesktopOverlay] Ignoring invalid interaction mode control")
+                return
+            await self._set_interaction_mode(mode, emit_event=True)
+            return
+        if command == "apply_window_bounds":
+            bounds = _parse_runtime_window_bounds(payload)
+            bounds_epoch = _parse_runtime_bounds_epoch(payload)
+            if bounds is None or ("bounds_epoch" in payload and bounds_epoch is None):
+                logger.warning("[DesktopOverlay] Ignoring invalid window bounds control")
+                return
+            if bounds_epoch is not None:
+                self._bounds_epoch = bounds_epoch
+            self._apply_window_bounds(bounds)
+            return
+        if command == "apply_visual_config":
+            visual_state = _parse_runtime_visual_state(payload)
+            if visual_state is None:
+                logger.warning("[DesktopOverlay] Ignoring invalid visual config control")
+                return
+            self._visual_state = visual_state
+            self._render_page()
+            return
+        logger.warning("[DesktopOverlay] Ignoring unsupported desktop runtime control: %r", command)
+
+    def _handle_page(self, page: Any) -> None:
+        self._page = page
+        try:
+            self._configure_base_window(page)
+            self._render_page()
+            self._page_ready.set()
+        except Exception as exc:
+            self._page_start_error = exc
+            self._page_ready.set()
+            raise
+
+    def _configure_base_window(self, page: Any) -> None:
+        import flet as ft
+
+        window = page.window
+        window.frameless = True
+        window.always_on_top = True
+        window.shadow = False
+        window.skip_task_bar = True
+        window.resizable = False
+        window.maximizable = False
+        window.bgcolor = ft.Colors.TRANSPARENT
+        window.ignore_mouse_events = (
+            self._interaction_mode == _DESKTOP_INTERACTION_MODE_PASS_THROUGH
+        )
+        if self._preview_catalog is not None:
+            size_preset = self._preview_selected_size_preset()
+            window.width = max(
+                size_preset.window_width,
+                _DESKTOP_PREVIEW_STAGE_WIDTH,
+            )
+            window.height = max(size_preset.window_height, _DESKTOP_PREVIEW_STAGE_HEIGHT)
+        elif self._startup_window_bounds is not None:
+            bounds = self._startup_window_bounds
+            window.left = bounds["x"]
+            window.top = bounds["y"]
+            window.width = bounds["width"]
+            window.height = bounds["height"]
+            self._programmatic_bounds_echo_suppression = _ProgrammaticBoundsEchoSuppression(
+                signature=_bounds_signature(bounds),
+                expires_at=time.monotonic() + _PROGRAMMATIC_BOUNDS_ECHO_SUPPRESSION_S,
+            )
+        elif _finite_non_bool_number(getattr(window, "width", None)) in {None, 0}:
+            window.width = DESKTOP_FLET_DEFAULT_WIDTH
+        if self._preview_catalog is None and _finite_non_bool_number(
+            getattr(window, "height", None)
+        ) in {None, 0}:
+            window.height = DESKTOP_FLET_DEFAULT_HEIGHT
+        window.on_event = self._on_window_event
+        if hasattr(window, "min_width"):
+            window.min_width = DESKTOP_FLET_MIN_WIDTH
+        if hasattr(window, "min_height"):
+            window.min_height = DESKTOP_FLET_MIN_HEIGHT
+        if self._preview_catalog is not None:
+            page.on_keyboard_event = self._on_preview_keyboard_event
+        page.bgcolor = ft.Colors.TRANSPARENT
+        if hasattr(page, "padding"):
+            page.padding = 0
+        if hasattr(page, "spacing"):
+            page.spacing = 0
+
+    def _render_page(self) -> None:
+        page = self._page
+        if page is None:
+            return
+        import flet as ft
+
+        if self._preview_catalog is not None:
+            root = self._build_preview_root(ft)
+            if hasattr(page, "clean"):
+                page.clean()
+            else:
+                page.controls.clear()
+            page.add(root)
+            self._apply_interaction_window_chrome()
+            self._reveal_window_if_supported()
+            page.update()
+            return
+
+        plan = build_desktop_caption_plan(
+            self._snapshot,
+            window_width=_page_window_number(page, "width", DESKTOP_FLET_DEFAULT_WIDTH),
+            window_height=_page_window_number(page, "height", DESKTOP_FLET_DEFAULT_HEIGHT),
+            visual_state=self._visual_state,
+            interaction_mode=self._interaction_mode,
+            locale=self._locale,
+        )
+        caption_surface = build_desktop_caption_surface(plan)
+        if self._interaction_mode == _DESKTOP_INTERACTION_MODE_EDIT:
+            content = ft.WindowDragArea(
+                content=caption_surface,
+                maximizable=False,
+            )
+        else:
+            content = caption_surface if plan.surface_visible else None
+        root = ft.Container(
+            content=content,
+            padding=0,
+            bgcolor=ft.Colors.TRANSPARENT,
+            alignment=ft.alignment.center,
+        )
+
+        if hasattr(page, "clean"):
+            page.clean()
+        else:
+            page.controls.clear()
+        page.add(root)
+        self._apply_interaction_window_chrome()
+        self._reveal_window_if_supported()
+        page.update()
+
+    def _apply_interaction_window_chrome(self) -> None:
+        page = self._page
+        if page is None:
+            return
+        locked = self._interaction_mode == _DESKTOP_INTERACTION_MODE_PASS_THROUGH
+        window = page.window
+        window.ignore_mouse_events = locked
+
+    def _reveal_window_if_supported(self) -> None:
+        page = self._page
+        if page is None:
+            return
+        window = page.window
+        if hasattr(window, "visible"):
+            window.visible = True
+
+    def _build_preview_root(self, ft: Any) -> Any:
+        caption_surface = build_desktop_caption_surface(self._current_preview_caption_plan())
+        return ft.Container(
+            content=ft.Column(
+                controls=[
+                    self._build_preview_controls(ft),
+                    self._build_preview_surface_backdrop(ft, caption_surface),
+                ],
+                spacing=12,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                scroll=ft.ScrollMode.AUTO,
+            ),
+            padding=16,
+            bgcolor="#101827",
+            alignment=ft.alignment.center,
+        )
+
+    def _build_preview_controls(self, ft: Any) -> Any:
+        catalog = self._preview_catalog
+        if catalog is None:
+            return ft.Container()
+        labels = catalog.labels
+        return ft.Column(
+            controls=[
+                self._build_preview_button_group(
+                    ft,
+                    labels.fixture,
+                    [
+                        (fixture.id, fixture.label, fixture.id == self._preview_fixture_id)
+                        for fixture in catalog.fixtures
+                    ],
+                    self._set_preview_fixture,
+                ),
+                self._build_preview_button_group(
+                    ft,
+                    labels.size_preset,
+                    [
+                        (preset.id, preset.label, preset.id == self._preview_size_preset_id)
+                        for preset in catalog.size_presets
+                    ],
+                    self._set_preview_size_preset,
+                ),
+                self._build_preview_button_group(
+                    ft,
+                    labels.background_alpha,
+                    [
+                        (str(value), f"{value:.2f}", value == self._preview_background_alpha)
+                        for value in catalog.background_alpha_presets
+                    ],
+                    lambda value: self._set_preview_background_alpha(float(value)),
+                ),
+                self._build_preview_button_group(
+                    ft,
+                    labels.background_surface,
+                    [
+                        (
+                            surface.id,
+                            surface.label,
+                            surface.id == self._preview_background_surface_id,
+                        )
+                        for surface in catalog.background_surfaces
+                    ],
+                    self._set_preview_background_surface,
+                ),
+            ],
+            spacing=6,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            tight=True,
+        )
+
+    def _build_preview_button_group(
+        self,
+        ft: Any,
+        label: str,
+        items: list[tuple[str, str, bool]],
+        on_select: Callable[[str], None],
+    ) -> Any:
+        return ft.Column(
+            controls=[
+                ft.Text(label, size=12, weight=ft.FontWeight.BOLD, color="#FFE7D6"),
+                ft.Row(
+                    controls=[
+                        ft.ElevatedButton(
+                            text=text,
+                            on_click=lambda _event, selected=value: self._select_preview(
+                                selected,
+                                on_select,
+                            ),
+                            disabled=selected,
+                        )
+                        for value, text, selected in items
+                    ],
+                    spacing=6,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    wrap=True,
+                ),
+            ],
+            spacing=4,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            tight=True,
+        )
+
+    def _build_preview_surface_backdrop(self, ft: Any, caption_surface: Any) -> Any:
+        surface = self._preview_selected_background_surface()
+        size_preset = self._preview_selected_size_preset()
+        controls: list[Any] = []
+        if surface.id == "busy":
+            controls.append(self._build_preview_busy_background(ft, size_preset))
+        controls.append(caption_surface)
+        content: Any = caption_surface
+        if len(controls) > 1:
+            content = ft.Stack(
+                controls=controls,
+                width=size_preset.window_width,
+                height=size_preset.window_height,
+                alignment=ft.alignment.center,
+            )
+        return ft.Container(
+            content=content,
+            width=size_preset.window_width,
+            height=size_preset.window_height,
+            bgcolor=surface.bgcolor,
+            padding=24,
+            border_radius=20,
+            alignment=ft.alignment.center,
+        )
+
+    def _build_preview_busy_background(
+        self,
+        ft: Any,
+        size_preset: DesktopOverlayPreviewSizePreset,
+    ) -> Any:
+        colors = (
+            "#475569",
+            "#7C3AED",
+            "#0EA5E9",
+            "#F97316",
+            "#22C55E",
+            "#334155",
+        )
+        rows = []
+        for row_index in range(5):
+            rows.append(
+                ft.Row(
+                    controls=[
+                        ft.Container(
+                            width=140 + (column_index % 3) * 46,
+                            height=54 + ((row_index + column_index) % 2) * 22,
+                            bgcolor=colors[(row_index + column_index) % len(colors)],
+                            border_radius=14,
+                            opacity=0.72,
+                        )
+                        for column_index in range(5)
+                    ],
+                    spacing=12,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                )
+            )
+        return ft.Container(
+            content=ft.Column(
+                controls=rows,
+                spacing=12,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            width=size_preset.window_width,
+            height=size_preset.window_height,
+            alignment=ft.alignment.center,
+        )
+
+    def _select_preview(self, value: str, on_select: Callable[[str], None]) -> None:
+        on_select(value)
+        self._render_page()
+
+    def _set_preview_fixture(self, fixture_id: str) -> None:
+        catalog = self._preview_catalog
+        if catalog is None or not any(fixture.id == fixture_id for fixture in catalog.fixtures):
+            return
+        self._preview_fixture_id = fixture_id
+        self._snapshot = self._preview_selected_fixture().snapshot
+
+    def _set_preview_background_alpha(self, value: float) -> None:
+        catalog = self._preview_catalog
+        if catalog is None or value not in catalog.background_alpha_presets:
+            return
+        self._preview_background_alpha = value
+        self._visual_state = self._preview_visual_state()
+
+    def _set_preview_size_preset(self, preset_id: str) -> None:
+        catalog = self._preview_catalog
+        if catalog is None or not any(preset.id == preset_id for preset in catalog.size_presets):
+            return
+        self._preview_size_preset_id = preset_id
+        self._apply_preview_window_size()
+        self._visual_state = self._preview_visual_state()
+
+    def _set_preview_background_surface(self, surface_id: str) -> None:
+        catalog = self._preview_catalog
+        if catalog is None or not any(
+            surface.id == surface_id for surface in catalog.background_surfaces
+        ):
+            return
+        self._preview_background_surface_id = surface_id
+
+    def _preview_selected_fixture(self) -> DesktopOverlayPreviewFixture:
+        catalog = self._preview_catalog
+        assert catalog is not None
+        for fixture in catalog.fixtures:
+            if fixture.id == self._preview_fixture_id:
+                return fixture
+        return catalog.fixtures[0]
+
+    def _preview_selected_background_surface(self) -> DesktopOverlayPreviewBackgroundSurface:
+        catalog = self._preview_catalog
+        assert catalog is not None
+        for surface in catalog.background_surfaces:
+            if surface.id == self._preview_background_surface_id:
+                return surface
+        return catalog.background_surfaces[0]
+
+    def _preview_selected_size_preset(self) -> DesktopOverlayPreviewSizePreset:
+        catalog = self._preview_catalog
+        assert catalog is not None
+        for preset in catalog.size_presets:
+            if preset.id == self._preview_size_preset_id:
+                return preset
+        return catalog.size_presets[1]
+
+    def _apply_preview_window_size(self) -> None:
+        page = self._page
+        if page is None or self._preview_catalog is None:
+            return
+        preset = self._preview_selected_size_preset()
+        page.window.width = preset.window_width
+        page.window.height = preset.window_height
+
+    def _current_preview_caption_plan(self) -> DesktopCaptionPlan:
+        preset = self._preview_selected_size_preset()
+        return build_desktop_caption_plan(
+            self._preview_selected_fixture().snapshot,
+            window_width=preset.window_width,
+            window_height=preset.window_height,
+            visual_state=self._preview_visual_state(),
+            interaction_mode=_DESKTOP_INTERACTION_MODE_PASS_THROUGH,
+            locale=self._locale,
+        )
+
+    def _preview_visual_state(self) -> DesktopCaptionVisualState:
+        return DesktopCaptionVisualState(
+            background_alpha=self._preview_background_alpha,
+        )
+
+    def _on_preview_keyboard_event(self, event: object) -> None:
+        key = str(getattr(event, "key", "")).lower()
+        if key not in {"e", "escape"}:
+            return
+        self._run_page_task(self._return_preview_to_edit_mode)
+
+    async def _return_preview_to_edit_mode(self) -> None:
+        await self._set_interaction_mode(_DESKTOP_INTERACTION_MODE_EDIT, emit_event=True)
+
+    async def _set_interaction_mode(self, mode: str, *, emit_event: bool) -> None:
+        if mode not in _DESKTOP_INTERACTION_MODES:
+            return
+        if mode == self._interaction_mode:
+            return
+        self._interaction_mode = mode
+        self._render_page()
+        if emit_event:
+            await self._emit_overlay_event({"event": "interaction_mode_changed", "mode": mode})
+
+    def _apply_window_bounds(self, bounds: dict[str, int | float]) -> None:
+        page = self._page
+        if page is None:
+            return
+        window = page.window
+        window.left = bounds["x"]
+        window.top = bounds["y"]
+        window.width = bounds["width"]
+        window.height = bounds["height"]
+        self._programmatic_bounds_echo_suppression = _ProgrammaticBoundsEchoSuppression(
+            signature=_bounds_signature(bounds),
+            expires_at=time.monotonic() + _PROGRAMMATIC_BOUNDS_ECHO_SUPPRESSION_S,
+        )
+        self._render_page()
+
+    def _on_window_event(self, event: object) -> None:
+        if self._closed.is_set():
+            return
+        if not _is_window_bounds_event(event):
+            return
+        self._run_page_task(self._schedule_bounds_sample)
+
+    async def _schedule_bounds_sample(self) -> None:
+        if self._closed.is_set():
+            return
+        await self._cancel_bounds_sample()
+        if self._closed.is_set():
+            return
+        self._bounds_sample_task = asyncio.create_task(self._emit_debounced_bounds_sample())
+
+    async def _cancel_bounds_sample(self) -> None:
+        task = self._bounds_sample_task
+        self._bounds_sample_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _emit_debounced_bounds_sample(self) -> None:
+        if self._closed.is_set():
+            return
+        if self._bounds_debounce_s > 0:
+            await asyncio.sleep(self._bounds_debounce_s)
+        if self._closed.is_set():
+            return
+        bounds = _sample_page_window_bounds(self._page)
+        if bounds is None:
+            return
+        signature = _bounds_signature(bounds)
+        if self._is_programmatic_bounds_echo(signature):
+            return
+        if self._interaction_mode != _DESKTOP_INTERACTION_MODE_EDIT:
+            return
+        if signature == self._last_reported_bounds:
+            return
+        self._programmatic_bounds_echo_suppression = None
+        self._last_reported_bounds = signature
+        await self._emit_overlay_event(
+            {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "bounds_epoch": self._bounds_epoch,
+                **bounds,
+            }
+        )
+
+    def _run_page_task(self, func: Callable[[], Awaitable[None]]) -> None:
+        if self._closed.is_set():
+            return
+        page = self._page
+        if page is not None:
+            run_task = getattr(page, "run_task", None)
+            if callable(run_task):
+                self._track_scheduled_callback_task(run_task(func))
+                return
+        self._track_scheduled_callback_task(asyncio.create_task(func()))
+
+    async def _emit_overlay_event(self, payload: dict[str, object]) -> None:
+        if self._closed.is_set():
+            return
+        if self._event_sink is None:
+            return
+        await self._event_sink({"type": "overlay_event", "payload": payload})
+
+    def _is_programmatic_bounds_echo(
+        self,
+        signature: tuple[float, float, float, float],
+    ) -> bool:
+        suppression = self._programmatic_bounds_echo_suppression
+        if suppression is None:
+            return False
+        if time.monotonic() > suppression.expires_at:
+            self._programmatic_bounds_echo_suppression = None
+            return False
+        return _bounds_signatures_close(signature, suppression.signature)
+
+    def _track_scheduled_callback_task(self, task: object) -> None:
+        if not isinstance(task, (asyncio.Future, ConcurrentFuture)):
+            return
+        self._scheduled_callback_tasks.add(task)
+        task.add_done_callback(self._scheduled_callback_tasks.discard)
+
+    async def _cancel_scheduled_callback_tasks(self) -> None:
+        tasks = tuple(self._scheduled_callback_tasks)
+        self._scheduled_callback_tasks.clear()
+        if not tasks:
+            return
+        current_task = asyncio.current_task()
+        awaitables: list[asyncio.Future[Any]] = []
+        for task in tasks:
+            if task is current_task:
+                continue
+            task.cancel()
+            if isinstance(task, asyncio.Future):
+                awaitables.append(task)
+            else:
+                awaitables.append(asyncio.wrap_future(task))
+        if awaitables:
+            await asyncio.gather(*awaitables, return_exceptions=True)
+
+
+def _page_window_number(page: Any, field_name: str, default: int) -> int | float:
+    return getattr(page.window, field_name, default) or default
+
+
+def _parse_runtime_window_bounds(
+    payload: dict[str, object],
+) -> dict[str, int | float] | None:
+    x = _finite_non_bool_number(payload.get("x"))
+    y = _finite_non_bool_number(payload.get("y"))
+    width = _finite_non_bool_number(payload.get("width"))
+    height = _finite_non_bool_number(payload.get("height"))
+    if x is None or y is None or width is None or height is None:
+        return None
+    if width < DESKTOP_FLET_MIN_WIDTH or height < DESKTOP_FLET_MIN_HEIGHT:
+        return None
+    return {"x": x, "y": y, "width": width, "height": height}
+
+
+def _parse_runtime_bounds_epoch(payload: dict[str, object]) -> int | None:
+    value = payload.get("bounds_epoch")
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _parse_runtime_visual_state(payload: dict[str, object]) -> DesktopCaptionVisualState | None:
+    text_scale = _finite_non_bool_number(payload.get("text_scale"))
+    background_alpha = _finite_non_bool_number(payload.get("background_alpha"))
+    outline_width_raw = payload.get("outline_width")
+    if text_scale is None or background_alpha is None:
+        return None
+    if not DESKTOP_FLET_MIN_TEXT_SCALE <= text_scale <= DESKTOP_FLET_MAX_TEXT_SCALE:
+        return None
+    if (
+        not DESKTOP_FLET_MIN_BACKGROUND_ALPHA
+        <= background_alpha
+        <= DESKTOP_FLET_MAX_BACKGROUND_ALPHA
+    ):
+        return None
+    outline_width: float | None = None
+    if outline_width_raw is not None:
+        outline_number = _finite_non_bool_number(outline_width_raw)
+        if outline_number is None:
+            return None
+        if not DESKTOP_FLET_MIN_OUTLINE_WIDTH <= outline_number <= DESKTOP_FLET_MAX_OUTLINE_WIDTH:
+            return None
+        outline_width = float(outline_number)
+    return DesktopCaptionVisualState(
+        text_scale=float(text_scale),
+        background_alpha=float(background_alpha),
+        outline_width=outline_width,
+    )
+
+
+def _sample_page_window_bounds(page: Any | None) -> dict[str, int | float] | None:
+    if page is None:
+        return None
+    window = page.window
+    bounds = {
+        "x": _finite_non_bool_number(getattr(window, "left", None)),
+        "y": _finite_non_bool_number(getattr(window, "top", None)),
+        "width": _finite_non_bool_number(getattr(window, "width", None)),
+        "height": _finite_non_bool_number(getattr(window, "height", None)),
+    }
+    if any(value is None for value in bounds.values()):
+        return None
+    typed_bounds = {key: value for key, value in bounds.items() if value is not None}
+    if (
+        typed_bounds["x"] == 0
+        and typed_bounds["y"] == 0
+        and typed_bounds["width"] == 0
+        and typed_bounds["height"] == 0
+    ):
+        return None
+    if typed_bounds["width"] <= 0 or typed_bounds["height"] <= 0:
+        return None
+    return typed_bounds
+
+
+def _is_window_bounds_event(event: object) -> bool:
+    event_type = getattr(event, "type", None)
+    if event_type is None:
+        event_type = getattr(event, "data", None)
+    event_name = getattr(event_type, "name", None)
+    if event_name is None:
+        event_name = getattr(event_type, "value", None)
+    if event_name is None:
+        event_name = str(event_type)
+    return str(event_name).split(".")[-1].upper() in _DESKTOP_WINDOW_BOUNDS_EVENT_NAMES
+
+
+def _bounds_signature(bounds: dict[str, int | float]) -> tuple[float, float, float, float]:
+    return (
+        float(bounds["x"]),
+        float(bounds["y"]),
+        float(bounds["width"]),
+        float(bounds["height"]),
+    )
+
+
+def _bounds_signatures_close(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+) -> bool:
+    return all(
+        abs(left - right) <= _PROGRAMMATIC_BOUNDS_ECHO_TOLERANCE_PX
+        for left, right in zip(first, second, strict=True)
+    )
+
+
+def _finite_non_bool_number(value: object) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+@dataclass(slots=True)
+class PollingParentMonitor:
+    parent_pid: int
+    poll_interval_s: float = 1.0
+
+    async def wait_for_parent_exit(self, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            if not self._pid_exists(self.parent_pid):
+                return
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=self.poll_interval_s)
+            except TimeoutError:
+                continue
+
+    @staticmethod
+    def _pid_exists(parent_pid: int) -> bool:
+        if parent_pid <= 0:
+            return False
+        try:
+            os.kill(parent_pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return True
+        return True
+
+
+@dataclass(slots=True)
+class BridgeDisconnectParentMonitor:
+    """Windows-safe fallback when no parent handle can be opened.
+
+    The bridge connection is owned by the parent process; if the parent exits, the
+    bridge reader reports the disconnect. This monitor intentionally performs no
+    PID probing so Windows fallback cannot signal or terminate the parent.
+    """
+
+    parent_pid: int
+
+    async def wait_for_parent_exit(self, stop_event: asyncio.Event) -> None:
+        _ = self.parent_pid
+        await stop_event.wait()
+
+
+@dataclass(slots=True)
+class WindowsParentHandleMonitor:
+    handle: object
+    poll_interval_s: float = 0.25
+    wait_handle_signaled: Callable[[object], bool] | None = None
+    close_handle: Callable[[object], None] | None = None
+    _closed: bool = field(init=False, default=False)
+
+    async def wait_for_parent_exit(self, stop_event: asyncio.Event) -> None:
+        wait_handle_signaled = self.wait_handle_signaled or _default_windows_handle_signaled
+        try:
+            while not stop_event.is_set():
+                if await asyncio.to_thread(wait_handle_signaled, self.handle):
+                    return
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=self.poll_interval_s)
+                except TimeoutError:
+                    continue
+        finally:
+            await asyncio.to_thread(self.close)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close_handle = self.close_handle or _default_close_windows_handle
+        close_handle(self.handle)
+
+
+def _default_open_windows_parent_handle(parent_pid: int) -> object | None:
+    if os.name != "nt" or parent_pid <= 0:
+        return None
+    try:
+        import ctypes
+
+        synchronize = 0x00100000
+        handle = ctypes.windll.kernel32.OpenProcess(synchronize, False, int(parent_pid))
+    except Exception:
+        return None
+    if not handle:
+        return None
+    return int(handle)
+
+
+def _default_windows_handle_signaled(handle: object) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+
+        wait_object_0 = 0x00000000
+        result = ctypes.windll.kernel32.WaitForSingleObject(int(handle), 0)
+    except Exception:
+        return False
+    return result == wait_object_0
+
+
+def _default_close_windows_handle(handle: object) -> None:
+    if os.name != "nt":
+        return
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        ctypes.windll.kernel32.CloseHandle(int(handle))
+
+
+def create_parent_monitor(
+    parent_pid: int,
+    *,
+    is_windows: bool | None = None,
+    open_windows_handle: Callable[[int], object | None] | None = None,
+) -> ParentMonitor:
+    windows = os.name == "nt" if is_windows is None else is_windows
+    if windows:
+        opener = open_windows_handle or _default_open_windows_parent_handle
+        handle = opener(parent_pid)
+        if handle is not None:
+            return WindowsParentHandleMonitor(handle=handle)
+        logger.warning(
+            "[DesktopOverlay] Unable to open parent process handle; "
+            "relying on bridge disconnect for parent-loss detection"
+        )
+        return BridgeDisconnectParentMonitor(parent_pid=parent_pid)
+    return PollingParentMonitor(parent_pid=parent_pid)
+
+
+def validate_desktop_bridge_url(bridge_url: str) -> str:
+    try:
+        parsed = urlsplit(bridge_url)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("desktop overlay bridge_url is invalid") from exc
+
+    if parsed.scheme != "ws":
+        raise ValueError("desktop overlay bridge_url must use ws")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("desktop overlay bridge_url must not include credentials")
+    if parsed.hostname not in _LOOPBACK_BRIDGE_HOSTS:
+        raise ValueError("desktop overlay bridge_url must be loopback-only")
+    if port is None or port <= 0:
+        raise ValueError("desktop overlay bridge_url must include a positive port")
+    return bridge_url
+
+
+def load_renderer_manifest(config_path: Path) -> OverlayLaunchManifest:
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise DesktopOverlayStartupError(
+            "manifest_invalid",
+            "desktop overlay launch manifest is invalid",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise DesktopOverlayStartupError(
+            "manifest_invalid",
+            "desktop overlay launch manifest is invalid",
+        )
+
+    try:
+        _validate_manifest_payload_shape(payload)
+        manifest = OverlayLaunchManifest.from_dict(payload)
+        _validate_runtime_manifest(manifest)
+    except DesktopOverlayStartupError:
+        raise
+    except Exception as exc:
+        raise DesktopOverlayStartupError(
+            "manifest_invalid",
+            "desktop overlay launch manifest is invalid",
+        ) from exc
+    return manifest
+
+
+class DesktopOverlayRenderer:
+    def __init__(
+        self,
+        manifest: OverlayLaunchManifest,
+        *,
+        window: RendererWindow | None = None,
+        lifecycle_sink: LifecycleSink | None = None,
+        parent_monitor: ParentMonitor | None = None,
+    ) -> None:
+        self.manifest = manifest
+        self.lifecycle_sink = lifecycle_sink or StdoutLifecycleSink()
+        self.window = window or FletDesktopRendererWindow(
+            event_sink=self._emit_lifecycle,
+            locale=manifest.locale,
+        )
+        self.parent_monitor = parent_monitor or create_parent_monitor(manifest.parent_pid)
+        self._shutdown_event = asyncio.Event()
+        self._shutdown_lock = asyncio.Lock()
+        self._shutdown_complete = False
+        self._websocket: Any | None = None
+        self._tasks: set[asyncio.Task[_RuntimeOutcome | None]] = set()
+        self._ui_queue: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
+        self._startup_pending_messages: asyncio.Queue[object] = asyncio.Queue()
+
+    @property
+    def is_shutdown(self) -> bool:
+        return self._shutdown_complete
+
+    async def run(self) -> int:
+        unexpected_startup_failure_reason = "renderer_init_failed"
+        try:
+            _validate_runtime_manifest(self.manifest)
+            unexpected_startup_failure_reason = "bridge_auth_failed"
+            websocket = await self._connect_bridge()
+            self._websocket = websocket
+            await websocket.send(
+                json.dumps({"type": "auth", "session_token": self.manifest.session_token})
+            )
+            unexpected_startup_failure_reason = "renderer_init_failed"
+            initial_snapshot, initial_runtime_controls = (
+                await self._receive_initial_snapshot_and_runtime_controls(websocket)
+            )
+            unexpected_startup_failure_reason = "window_configuration_failed"
+            prime_startup_runtime_controls = getattr(
+                self.window,
+                "prime_startup_runtime_controls",
+                None,
+            )
+            startup_runtime_controls_to_dispatch = initial_runtime_controls
+            if callable(prime_startup_runtime_controls):
+                startup_runtime_controls_to_dispatch = prime_startup_runtime_controls(
+                    initial_runtime_controls
+                )
+            await self.window.start(initial_snapshot)
+            for payload in startup_runtime_controls_to_dispatch:
+                await self.window.dispatch_runtime_control(payload)
+            unexpected_startup_failure_reason = "renderer_init_failed"
+            self._start_runtime_tasks(websocket)
+            await self._emit_lifecycle({"type": "overlay_ready"})
+            outcome = await self._wait_for_runtime_outcome()
+            return outcome.exit_code
+        except DesktopOverlayStartupError as exc:
+            await self._emit_lifecycle(
+                {"type": "startup_error", "failure_reason": exc.failure_reason}
+            )
+            return _STARTUP_FAILURE_EXIT_CODE
+        except Exception as exc:
+            logger.warning(
+                "[DesktopOverlay] Renderer startup failed: exception_type=%s",
+                type(exc).__name__,
+            )
+            await self._emit_lifecycle(
+                {"type": "startup_error", "failure_reason": unexpected_startup_failure_reason}
+            )
+            return _STARTUP_FAILURE_EXIT_CODE
+        finally:
+            await self.shutdown()
+
+    async def shutdown(self) -> None:
+        async with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self._shutdown_event.set()
+
+            websocket = self._websocket
+            self._websocket = None
+            if websocket is not None:
+                with contextlib.suppress(Exception):
+                    await websocket.close()
+
+            with contextlib.suppress(Exception):
+                await self.window.close()
+
+            current_task = asyncio.current_task()
+            pending_tasks = [
+                task for task in self._tasks if task is not current_task and not task.done()
+            ]
+            for task in pending_tasks:
+                task.cancel()
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
+            if self._tasks:
+                await asyncio.gather(*self._tasks, return_exceptions=True)
+            self._tasks.clear()
+            await _close_parent_monitor(self.parent_monitor)
+            self._shutdown_complete = True
+
+    async def _connect_bridge(self) -> Any:
+        timeout_s = max(0.1, self.manifest.startup_deadline_ms / 1000.0)
+        try:
+            return await asyncio.wait_for(
+                websockets.connect(self.manifest.bridge_url, ping_interval=None),
+                timeout=timeout_s,
+            )
+        except Exception as exc:
+            raise DesktopOverlayStartupError(
+                "bridge_auth_failed",
+                "desktop overlay bridge authentication failed",
+            ) from exc
+
+    async def _receive_initial_snapshot_and_runtime_controls(
+        self,
+        websocket: Any,
+    ) -> tuple[OverlayPresentationSnapshot, tuple[dict[str, object], ...]]:
+        snapshot = await self._receive_initial_snapshot(websocket)
+        runtime_controls = await self._drain_startup_runtime_controls(websocket)
+        return snapshot, runtime_controls
+
+    async def _receive_initial_snapshot(self, websocket: Any) -> OverlayPresentationSnapshot:
+        timeout_s = max(0.1, self.manifest.startup_deadline_ms / 1000.0)
+        try:
+            raw_message = await asyncio.wait_for(websocket.recv(), timeout=timeout_s)
+            message = _load_bridge_message(raw_message)
+        except DesktopOverlayStartupError:
+            raise
+        except Exception as exc:
+            raise DesktopOverlayStartupError(
+                "renderer_init_failed",
+                "desktop overlay initial snapshot is invalid",
+            ) from exc
+
+        message_type = message.get("type")
+        if message_type == "auth_error":
+            raise DesktopOverlayStartupError(
+                "bridge_auth_failed",
+                "desktop overlay bridge authentication failed",
+            )
+        if message_type != "snapshot":
+            raise DesktopOverlayStartupError(
+                "renderer_init_failed",
+                "desktop overlay initial snapshot is invalid",
+            )
+        try:
+            return _parse_snapshot_message(message)
+        except Exception as exc:
+            raise DesktopOverlayStartupError(
+                "renderer_init_failed",
+                "desktop overlay initial snapshot is invalid",
+            ) from exc
+
+    async def _drain_startup_runtime_controls(
+        self,
+        websocket: Any,
+    ) -> tuple[dict[str, object], ...]:
+        controls: list[dict[str, object]] = []
+        deadline = asyncio.get_running_loop().time() + _INITIAL_RUNTIME_CONTROL_DRAIN_TIMEOUT_S
+        while True:
+            timeout_s = max(0.0, deadline - asyncio.get_running_loop().time())
+            if timeout_s <= 0:
+                break
+            try:
+                raw_message = await asyncio.wait_for(websocket.recv(), timeout=timeout_s)
+            except TimeoutError:
+                break
+            except Exception:
+                break
+            try:
+                message = _load_bridge_message(raw_message)
+            except ValueError:
+                await self._startup_pending_messages.put(raw_message)
+                continue
+            if message.get("type") != "runtime_control":
+                await self._startup_pending_messages.put(raw_message)
+                continue
+            payload = _parse_runtime_control_payload(message)
+            if payload is None:
+                raise DesktopOverlayStartupError(
+                    "runtime_control_invalid",
+                    "desktop overlay initial runtime control is invalid",
+                )
+            if "logging_mode" in payload:
+                continue
+            controls.append(payload)
+        return tuple(controls)
+
+    def _start_runtime_tasks(self, websocket: Any) -> None:
+        self._tasks = {
+            asyncio.create_task(self._bridge_reader_loop(websocket)),
+            asyncio.create_task(self._parent_monitor_loop()),
+            asyncio.create_task(self._window_loop()),
+            asyncio.create_task(self._ui_update_loop()),
+            asyncio.create_task(self._heartbeat_loop()),
+        }
+
+    async def _wait_for_runtime_outcome(self) -> _RuntimeOutcome:
+        while self._tasks:
+            done, _pending = await asyncio.wait(
+                self._tasks,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                self._tasks.discard(task)
+                try:
+                    result = task.result()
+                except asyncio.CancelledError:
+                    continue
+                except Exception as exc:
+                    logger.warning(
+                        "[DesktopOverlay] Runtime task failed: exception_type=%s",
+                        type(exc).__name__,
+                    )
+                    await self._emit_runtime_error("runtime_crashed")
+                    return _RuntimeOutcome(_RUNTIME_FAILURE_EXIT_CODE)
+                if isinstance(result, _RuntimeOutcome):
+                    return result
+            if self._shutdown_event.is_set():
+                return _RuntimeOutcome(_SUCCESS_EXIT_CODE)
+        return _RuntimeOutcome(_SUCCESS_EXIT_CODE)
+
+    async def _bridge_reader_loop(self, websocket: Any) -> _RuntimeOutcome:
+        try:
+            while not self._startup_pending_messages.empty():
+                raw_message = await self._startup_pending_messages.get()
+                outcome = await self._handle_bridge_message(raw_message)
+                if outcome is not None:
+                    return outcome
+            async for raw_message in websocket:
+                outcome = await self._handle_bridge_message(raw_message)
+                if outcome is not None:
+                    return outcome
+        except ConnectionClosed:
+            if self._shutdown_event.is_set():
+                return _RuntimeOutcome(_SUCCESS_EXIT_CODE)
+            await self._emit_runtime_error("runtime_disconnected")
+            return _RuntimeOutcome(_RUNTIME_FAILURE_EXIT_CODE)
+        if self._shutdown_event.is_set():
+            return _RuntimeOutcome(_SUCCESS_EXIT_CODE)
+        await self._emit_runtime_error("runtime_disconnected")
+        return _RuntimeOutcome(_RUNTIME_FAILURE_EXIT_CODE)
+
+    async def _handle_bridge_message(self, raw_message: object) -> _RuntimeOutcome | None:
+        try:
+            message = _load_bridge_message(raw_message)
+        except ValueError:
+            logger.warning("[DesktopOverlay] Ignoring malformed bridge message")
+            return None
+
+        message_type = message.get("type")
+        if message_type == "heartbeat":
+            return None
+        if message_type == "shutdown":
+            return _RuntimeOutcome(_SUCCESS_EXIT_CODE)
+        if message_type == "snapshot":
+            try:
+                snapshot = _parse_snapshot_message(message)
+            except Exception:
+                logger.warning("[DesktopOverlay] Ignoring malformed snapshot update")
+                return None
+            await self._ui_queue.put(("snapshot", snapshot))
+            return None
+        if message_type == "runtime_control":
+            payload = _parse_runtime_control_payload(message)
+            if payload is None:
+                await self._emit_runtime_error("runtime_control_invalid")
+                return _RuntimeOutcome(_RUNTIME_FAILURE_EXIT_CODE)
+            await self._ui_queue.put(("runtime_control", payload))
+            return None
+        logger.warning(
+            "[DesktopOverlay] Ignoring unsupported bridge message type: %r", message_type
+        )
+        return None
+
+    async def _ui_update_loop(self) -> _RuntimeOutcome | None:
+        while not self._shutdown_event.is_set():
+            queue_task = asyncio.create_task(self._ui_queue.get())
+            stop_task = asyncio.create_task(self._shutdown_event.wait())
+            try:
+                done, _pending = await asyncio.wait(
+                    {queue_task, stop_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if stop_task in done:
+                    return None
+                kind, payload = queue_task.result()
+            finally:
+                for task in (queue_task, stop_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(queue_task, stop_task, return_exceptions=True)
+
+            try:
+                if kind == "snapshot" and isinstance(payload, OverlayPresentationSnapshot):
+                    await self.window.dispatch_snapshot(payload)
+                elif kind == "runtime_control" and isinstance(payload, dict):
+                    await self.window.dispatch_runtime_control(payload)
+            except Exception:
+                await self._emit_runtime_error("window_configuration_failed")
+                return _RuntimeOutcome(_RUNTIME_FAILURE_EXIT_CODE)
+        return None
+
+    async def _parent_monitor_loop(self) -> _RuntimeOutcome | None:
+        try:
+            await self.parent_monitor.wait_for_parent_exit(self._shutdown_event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "[DesktopOverlay] Parent monitor failed: exception_type=%s",
+                type(exc).__name__,
+            )
+            return None
+        if self._shutdown_event.is_set():
+            return None
+        await self._emit_runtime_error("runtime_disconnected")
+        return _RuntimeOutcome(_RUNTIME_FAILURE_EXIT_CODE)
+
+    async def _window_loop(self) -> _RuntimeOutcome | None:
+        try:
+            await self.window.run_until_closed()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await self._emit_runtime_error("window_configuration_failed")
+            return _RuntimeOutcome(_RUNTIME_FAILURE_EXIT_CODE)
+        if self._shutdown_event.is_set():
+            return None
+        return _RuntimeOutcome(_SUCCESS_EXIT_CODE)
+
+    async def _heartbeat_loop(self) -> None:
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=1.0)
+            except TimeoutError:
+                continue
+
+    async def _emit_runtime_error(self, failure_reason: str) -> None:
+        await self._emit_lifecycle({"type": "runtime_error", "failure_reason": failure_reason})
+
+    async def _emit_lifecycle(self, event: dict[str, object]) -> None:
+        safe_event = _redact_event(event)
+        websocket = self._websocket
+        if websocket is not None:
+            with contextlib.suppress(Exception):
+                await websocket.send(json.dumps(safe_event))
+        await self.lifecycle_sink.emit(safe_event)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="puripuly-heart desktop-overlay")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--config",
+        type=Path,
+        help="Path to overlay launch manifest JSON",
+    )
+    mode.add_argument(
+        "--preview",
+        action="store_true",
+        help="Run a local desktop overlay preview",
+    )
+    return parser
+
+
+def run_renderer(config_path: Path) -> int:
+    return asyncio.run(_run_renderer_async(config_path))
+
+
+async def _run_renderer_async(config_path: Path) -> int:
+    sink = StdoutLifecycleSink()
+    try:
+        manifest = load_renderer_manifest(config_path)
+    except DesktopOverlayStartupError as exc:
+        await sink.emit({"type": "startup_error", "failure_reason": exc.failure_reason})
+        return _STARTUP_FAILURE_EXIT_CODE
+    renderer = DesktopOverlayRenderer(manifest, lifecycle_sink=sink)
+    return await renderer.run()
+
+
+def run_preview(
+    *,
+    app_runner: PreviewAppRunner | None = None,
+    locale: str | None = None,
+) -> int:
+    catalog = build_desktop_overlay_preview_catalog(locale=locale)
+    secret_findings = preview_fixture_secret_findings(catalog)
+    if secret_findings:
+        for finding in secret_findings:
+            logger.error("Unsafe desktop overlay preview fixture data: %s", finding)
+        return _STARTUP_FAILURE_EXIT_CODE
+    runner = app_runner or _default_preview_app_runner
+    return asyncio.run(
+        _run_preview_async(
+            catalog=catalog,
+            app_runner=runner,
+            locale=locale,
+            allow_no_page=app_runner is not None or runner is not _REAL_DEFAULT_PREVIEW_APP_RUNNER,
+        )
+    )
+
+
+async def _run_preview_async(
+    *,
+    catalog: DesktopOverlayPreviewCatalog,
+    app_runner: PreviewAppRunner,
+    locale: str | None,
+    allow_no_page: bool,
+) -> int:
+    async def preview_app_runner(target: Callable[[Any], object]) -> None:
+        result = app_runner(target)
+        if inspect.isawaitable(result):
+            await result
+
+    async def preview_event_sink(event: dict[str, object]) -> None:
+        logger.debug("Desktop overlay preview event: %r", _redact_event(event))
+
+    window = FletDesktopRendererWindow(
+        app_runner=preview_app_runner,
+        event_sink=preview_event_sink,
+        locale=locale,
+        preview_catalog=catalog,
+    )
+    try:
+        try:
+            await window.start(catalog.fixtures[0].snapshot)
+        except RuntimeError:
+            if allow_no_page and window._page is None:
+                return _SUCCESS_EXIT_CODE
+            raise
+        await window.run_until_closed()
+    finally:
+        await window.close()
+    return _SUCCESS_EXIT_CODE
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.preview:
+        return run_preview()
+    return run_renderer(args.config)
+
+
+def _validate_runtime_manifest(manifest: OverlayLaunchManifest) -> None:
+    if manifest.contract_version != OVERLAY_CONTRACT_VERSION:
+        raise DesktopOverlayStartupError(
+            "contract_mismatch",
+            "desktop overlay contract version is not supported",
+        )
+    try:
+        validate_desktop_bridge_url(manifest.bridge_url)
+    except ValueError as exc:
+        raise DesktopOverlayStartupError(
+            "manifest_invalid",
+            "desktop overlay launch manifest is invalid",
+        ) from exc
+    if not manifest.session_token:
+        raise DesktopOverlayStartupError(
+            "manifest_invalid",
+            "desktop overlay launch manifest is invalid",
+        )
+    if manifest.parent_pid <= 0 or manifest.startup_deadline_ms <= 0:
+        raise DesktopOverlayStartupError(
+            "manifest_invalid",
+            "desktop overlay launch manifest is invalid",
+        )
+    if not manifest.log_dir or not manifest.log_level or not manifest.locale:
+        raise DesktopOverlayStartupError(
+            "manifest_invalid",
+            "desktop overlay launch manifest is invalid",
+        )
+
+
+def _validate_manifest_payload_shape(payload: dict[object, object]) -> None:
+    for field_name in _REQUIRED_MANIFEST_STRING_FIELDS:
+        value = payload.get(field_name)
+        if not isinstance(value, str) or not value:
+            raise DesktopOverlayStartupError(
+                "manifest_invalid",
+                "desktop overlay launch manifest is invalid",
+            )
+    for field_name in _REQUIRED_MANIFEST_INT_FIELDS:
+        value = payload.get(field_name)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise DesktopOverlayStartupError(
+                "manifest_invalid",
+                "desktop overlay launch manifest is invalid",
+            )
+
+
+def _load_bridge_message(raw_message: object) -> dict[str, object]:
+    if not isinstance(raw_message, str):
+        raise ValueError("desktop overlay bridge message must be text JSON")
+    payload = json.loads(raw_message)
+    if not isinstance(payload, dict):
+        raise ValueError("desktop overlay bridge message must decode to an object")
+    return payload
+
+
+def _parse_snapshot_message(message: dict[str, object]) -> OverlayPresentationSnapshot:
+    payload = message.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("desktop overlay snapshot payload must be an object")
+    return OverlayPresentationSnapshot.from_dict(payload)
+
+
+def _parse_runtime_control_payload(message: dict[str, object]) -> dict[str, object] | None:
+    payload = message.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    if "logging_mode" in payload:
+        if set(payload) != {"logging_mode"} or not isinstance(payload.get("logging_mode"), str):
+            return None
+        return dict(payload)
+    command = payload.get("command")
+    if not isinstance(command, str) or not command:
+        return None
+    return dict(payload)
+
+
+def _redact_event(event: dict[str, object]) -> dict[str, object]:
+    redacted = _redact_value(event)
+    if isinstance(redacted, dict):
+        return redacted
+    return {"type": "runtime_error", "failure_reason": "unknown"}
+
+
+def _redact_value(value: object) -> object:
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if _is_sensitive_event_key(key_text):
+                result[key_text] = "<redacted>"
+            else:
+                result[key_text] = _redact_value(item)
+        return result
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    return value
+
+
+def _is_sensitive_event_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    return normalized in _SENSITIVE_EVENT_KEYS
+
+
+async def _close_parent_monitor(parent_monitor: ParentMonitor) -> None:
+    close = getattr(parent_monitor, "close", None)
+    if not callable(close):
+        return
+    result = close()
+    if asyncio.iscoroutine(result):
+        await result
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
