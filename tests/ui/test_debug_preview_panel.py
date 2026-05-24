@@ -21,6 +21,7 @@ DEBUG_PREVIEW_I18N_KEYS = {
     "debug_preview.tooltip",
     "debug_preview.brake_notice",
     "debug_preview.revoked_notice",
+    "debug_preview.github_star_snackbar",
     "debug_preview.founder_letter",
     "debug_preview.pkce_failure",
     "debug_preview.discord_auth",
@@ -41,6 +42,7 @@ DEBUG_PREVIEW_I18N_KEYS = {
 ACTION_KEYS = [
     "brake_notice",
     "revoked_notice",
+    "github_star_snackbar",
     "founder_letter",
     "pkce_failure",
     "discord_auth",
@@ -57,6 +59,7 @@ def _callbacks(seen: list[str]):
     return {
         "on_brake_notice": lambda: seen.append("brake_notice"),
         "on_revoked_notice": lambda: seen.append("revoked_notice"),
+        "on_github_star_snackbar": lambda: seen.append("github_star_snackbar"),
         "on_founder_letter": lambda: seen.append("founder_letter"),
         "on_pkce_failure": lambda: seen.append("pkce_failure"),
         "on_discord_auth": lambda: seen.append("discord_auth"),
@@ -179,6 +182,7 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
         "DBG",
         "Brake notice",
         "Revoked notice",
+        "GitHub Star",
         "Founder letter",
         "PKCE failure",
         "Discord auth",
