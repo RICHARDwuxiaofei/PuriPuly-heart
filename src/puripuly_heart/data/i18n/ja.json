@@ -385,7 +385,7 @@
   "settings.vrc_mic.on": "オン",
   "settings.vrc_mic.off": "オフ",
   "settings.chatbox_include_source": "Chatbox出力形式",
-  "settings.clipboard_auto_translate": "クリップボード自動翻訳",
+  "settings.clipboard_auto_translate": "クリップボード自動検出",
   "settings.clipboard_auto_translate.on": "オン",
   "settings.clipboard_auto_translate.off": "オフ",
   "settings.chatbox_source.on": "原文 + 翻訳",

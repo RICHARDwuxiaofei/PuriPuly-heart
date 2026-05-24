@@ -385,7 +385,7 @@
   "settings.vrc_mic.on": "ON",
   "settings.vrc_mic.off": "OFF",
   "settings.chatbox_include_source": "Chatbox Output Format",
-  "settings.clipboard_auto_translate": "Clipboard auto translate",
+  "settings.clipboard_auto_translate": "Clipboard auto-detection",
   "settings.clipboard_auto_translate.on": "ON",
   "settings.clipboard_auto_translate.off": "OFF",
   "settings.chatbox_source.on": "Original + Translation",
