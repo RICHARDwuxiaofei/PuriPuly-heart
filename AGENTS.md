@@ -28,27 +28,6 @@
 - Broker Node verification (`pnpm`, `vitest`, `wrangler`) must run from a Linux / WSL workspace only; do not run it from Windows shells.
 - In WSL, install broker Node dependencies inside the Linux workspace; do not reuse Windows-installed `node_modules` from `/mnt/c/...`.
 
-## Verification Contract & Evidence
-
-- Verification is mandatory before claiming completion.
-- Choose a level by risk and escalate when in doubt.
-  - L0: Fast, relevant checks for touched area.
-  - L1: L0 plus broader local confidence checks.
-  - L2: Unit tests plus integration tests when feasible.
-  - L3: L2 plus Windows build/installer verification using project `.venv`.
-- Default escalation guidance:
-  - Code changes: at least L1.
-  - Provider, OSC, wiring changes: at least L2.
-  - Release/installer/build config changes: L3.
-- Skips are allowed only for real environment constraints; run the best lower level and record what was skipped and why.
-- Store verification evidence in `agents/logs/` as short Markdown notes including:
-  - Verification level.
-  - Commands run.
-  - PASS/FAIL outcome.
-  - Skipped items and reason (if any).
-  - Notes for key assumptions or mismatch resolution.
-- Do not encode verification detail inside commit messages.
-
 ## Security & Async Safety
 
 - Keep provider and I/O calls async; avoid blocking the event loop.
