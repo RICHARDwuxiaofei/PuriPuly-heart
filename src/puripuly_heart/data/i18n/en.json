@@ -131,7 +131,7 @@
   "settings.overlay.status.failed": "Overlay failed",
   "settings.overlay.status.stopping": "Overlay is stopping",
   "settings.overlay.status.failed_with_reason": "{status}: {reason}",
-  "settings.overlay.caption_location": "Caption location",
+  "settings.overlay.caption_location": "Overlay mode",
   "settings.overlay.target.steamvr": "VR",
   "settings.overlay.target.desktop": "Desktop",
   "settings.overlay.desktop.status.failed": "Desktop captions need attention",

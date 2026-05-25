@@ -131,7 +131,7 @@
     "settings.overlay.status.failed": "叠加层启动失败",
     "settings.overlay.status.stopping": "叠加层正在停止",
     "settings.overlay.status.failed_with_reason": "{status}：{reason}",
-    "settings.overlay.caption_location": "字幕位置",
+    "settings.overlay.caption_location": "叠加层模式",
     "settings.overlay.target.steamvr": "VR",
     "settings.overlay.target.desktop": "桌面",
     "settings.overlay.desktop.status.failed": "桌面字幕需要处理",

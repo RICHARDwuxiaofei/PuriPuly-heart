@@ -131,7 +131,7 @@
   "settings.overlay.status.failed": "オーバーレイの起動に失敗しました",
   "settings.overlay.status.stopping": "オーバーレイを停止中です",
   "settings.overlay.status.failed_with_reason": "{status}: {reason}",
-  "settings.overlay.caption_location": "字幕の表示先",
+  "settings.overlay.caption_location": "オーバーレイモード",
   "settings.overlay.target.steamvr": "VR",
   "settings.overlay.target.desktop": "デスクトップ",
   "settings.overlay.desktop.status.failed": "デスクトップ字幕の確認が必要です",

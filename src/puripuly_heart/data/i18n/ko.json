@@ -131,7 +131,7 @@
   "settings.overlay.status.failed": "오버레이 시작에 실패했어요",
   "settings.overlay.status.stopping": "오버레이를 중지하는 중이에요",
   "settings.overlay.status.failed_with_reason": "{status}: {reason}",
-  "settings.overlay.caption_location": "자막 위치",
+  "settings.overlay.caption_location": "오버레이 모드",
   "settings.overlay.target.steamvr": "VR",
   "settings.overlay.target.desktop": "데스크톱",
   "settings.overlay.desktop.status.failed": "데스크톱 자막을 확인해 주세요",
