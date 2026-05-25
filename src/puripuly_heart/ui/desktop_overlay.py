@@ -88,7 +88,7 @@ _DESKTOP_CAPTION_MAX_VISIBLE_SLOTS = 2
 _DESKTOP_CAPTION_MAX_VISIBLE_LINES = 6
 _DESKTOP_CAPTION_PRIMARY_MAX_LINES = 2
 _DESKTOP_CAPTION_SECONDARY_MAX_LINES = 1
-_DESKTOP_CAPTION_LINE_HEIGHT = 1.14
+_DESKTOP_CAPTION_LINE_HEIGHT = 1.24
 _DESKTOP_CAPTION_PRIMARY_REGION_ALIGNMENT_Y = -0.5
 _DESKTOP_CAPTION_TEXT_STACK_ALIGNMENT_Y = -0.08
 _DESKTOP_CAPTION_CONTACT_SHADOW_COLOR = "#C0000000"
@@ -280,10 +280,10 @@ class DesktopCaptionSizePreset:
 
 
 _DESKTOP_CAPTION_SIZE_PRESETS: dict[str, DesktopCaptionSizePreset] = {
-    "small": DesktopCaptionSizePreset("small", 1152, 272, 37, 23, 18, 8, 14, 8),
-    "medium": DesktopCaptionSizePreset("medium", 1344, 320, 43, 27, 22, 10, 16, 10),
-    "large": DesktopCaptionSizePreset("large", 1600, 384, 52, 32, 26, 12, 18, 12),
-    "xlarge": DesktopCaptionSizePreset("xlarge", 1792, 432, 58, 36, 30, 14, 20, 14),
+    "small": DesktopCaptionSizePreset("small", 1152, 288, 35, 21, 18, 8, 14, 8),
+    "medium": DesktopCaptionSizePreset("medium", 1344, 336, 41, 25, 22, 10, 16, 10),
+    "large": DesktopCaptionSizePreset("large", 1600, 400, 50, 30, 26, 12, 18, 12),
+    "xlarge": DesktopCaptionSizePreset("xlarge", 1792, 448, 56, 34, 30, 14, 20, 14),
 }
 
 
