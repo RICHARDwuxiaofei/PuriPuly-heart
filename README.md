@@ -93,29 +93,31 @@ So I built one that can.
 | LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | 8,350 | 2,530 | 3,130 | 1,120 |
-| **DeepSeek V4 Flash** | 6,110 | 2,280 | 2,750 | 1,070 |
+| **DeepSeek V4 Flash** | 10,420 | 2,710 | 3,380 | 1,150 |
+| **DeepSeek V4 Pro** | 3,380 | 1,760 | 2,020 | 930 |
 | **Gemini 3 Flash** | 1,630 | 1,130 | 1,230 | 720 |
 | **Gemini 3.1 Flash-Lite** | 3,260 | 1,720 | 1,970 | 930 |
 | **Qwen 3.5 Plus** | 7,090 | 2,400 | — | — |
-| **Local LLMs (Ollama)** | Unlimited | 3,660 | 5,000 | 1,290 |
+| **Local LLMs** | Unlimited | 3,660 | 5,000 | 1,290 |
 
 ### Cost per Utterance
 
 | LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
 |---|---|---|---|---|
 | **Gemma 4 26B A4B** | ~$0.0001 | ~$0.0004 | ~$0.0003 | ~$0.0009 |
-| **DeepSeek V4 Flash** | ~$0.0002 | ~$0.0004 | ~$0.0004 | ~$0.0009 |
+| **DeepSeek V4 Flash** | ~$0.0001 | ~$0.0004 | ~$0.0003 | ~$0.0009 |
+| **DeepSeek V4 Pro** | ~$0.0003 | ~$0.0006 | ~$0.0005 | ~$0.0011 |
 | **Gemini 3 Flash** | ~$0.0006 | ~$0.0009 | ~$0.0008 | ~$0.0014 |
 | **Gemini 3.1 Flash-Lite** | ~$0.0003 | ~$0.0006 | ~$0.0005 | ~$0.0011 |
 | **Qwen 3.5 Plus** | ~$0.0001 | ~$0.0004 | — | — |
-| **Local LLMs (Ollama)** | $0 | ~$0.0003 | ~$0.0002 | ~$0.0008 |
+| **Local LLMs** | $0 | ~$0.0003 | ~$0.0002 | ~$0.0008 |
 
-*   *Based on (Input 950 tokens + Output 12 tokens) × 1.2 avg LLM calls per utterance.*
+*   *Based on (Input 900 tokens + Output 12 tokens) × 1.2 avg LLM calls per utterance.*
 *   *Uses per Dollar is derived from the un-rounded values in the Cost per Utterance table.*
 *   *All costs and usage counts are approximate.*
-*   *Input cost reductions from cache hits are not factored in.*
+*   *DeepSeek assumes a 40% cache hit rate.*
 *   *Qwen API costs are based on the Beijing region.*
-*   *Pricing as of May 3, 2026 / Fast Response mode active.*
+*   *Pricing as of May 25, 2026 / Fast Response mode active.*
 
 ### Free Credits
 
@@ -154,7 +156,7 @@ So I built one that can.
 If Soniox/Gemini/Deepgram are blocked in your region, please use the following combination:
 
 - STT: **Qwen ASR**
-- LLM: **DeepSeek V4 Flash** or **Qwen 3.5 Plus**
+- LLM: **DeepSeek V4 Flash** or **DeepSeek V4 Pro**
 
    > When using the managed connection mode, choose **Managed (China)** instead of **Managed**.
 
