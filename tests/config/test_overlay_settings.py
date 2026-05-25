@@ -24,12 +24,14 @@ def test_overlay_settings_desktop_flet_defaults_serialize_canonical_shape() -> N
     assert data["overlay"]["desktop_flet"] == {
         "size_preset": "medium",
         "position": {"x": None, "y": None},
-        "locked": False,
         "visual": {"background_alpha": 0.5},
     }
+    assert "locked" not in data["overlay"]["desktop_flet"]
 
 
-def test_overlay_settings_desktop_flet_canonical_shape_round_trips() -> None:
+def test_overlay_settings_desktop_flet_legacy_locked_loads_startup_safe_and_is_not_serialized() -> (
+    None
+):
     settings = from_dict(
         {
             "overlay": {
@@ -51,14 +53,15 @@ def test_overlay_settings_desktop_flet_canonical_shape_round_trips() -> None:
     assert data["overlay"]["desktop_flet"] == {
         "size_preset": "large",
         "position": {"x": 320, "y": 720},
-        "locked": True,
         "visual": {"background_alpha": 0.45},
     }
+    assert "locked" not in data["overlay"]["desktop_flet"]
     assert round_tripped.overlay.target == "desktop"
     assert round_tripped.overlay.desktop_flet.size_preset == "large"
     assert round_tripped.overlay.desktop_flet.position.x == 320
     assert round_tripped.overlay.desktop_flet.position.y == 720
-    assert round_tripped.overlay.desktop_flet.locked is True
+    assert settings.overlay.desktop_flet.locked is False
+    assert round_tripped.overlay.desktop_flet.locked is False
     assert round_tripped.overlay.desktop_flet.visual.background_alpha == 0.45
 
 
@@ -143,9 +146,9 @@ def test_overlay_settings_desktop_flet_legacy_bounds_and_visual_migrate_to_canon
     assert data["overlay"]["desktop_flet"] == {
         "size_preset": "large",
         "position": {"x": 320, "y": 720},
-        "locked": False,
         "visual": {"background_alpha": 0.45},
     }
+    assert "locked" not in data["overlay"]["desktop_flet"]
     assert "bounds" not in data["overlay"]["desktop_flet"]
     assert "text_scale" not in data["overlay"]["desktop_flet"]["visual"]
     assert "outline_width" not in data["overlay"]["desktop_flet"]["visual"]

@@ -32,6 +32,7 @@ from puripuly_heart.config.settings import (
     TranslationConnection,
     TranslationModel,
     TranslationSettings,
+    to_dict,
 )
 from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.ui import i18n as i18n_module
@@ -3692,6 +3693,10 @@ def test_overlay_single_action_cards_use_broad_value_slot_click_targets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
+    desktop_settings = AppSettings()
+    desktop_settings.overlay.target = "desktop"
+    desktop_view, _ = _make_settings_view(monkeypatch)
+    desktop_view.load_from_settings(desktop_settings, config_path=Path("settings.json"))
 
     cases = [
         (
@@ -3715,13 +3720,13 @@ def test_overlay_single_action_cards_use_broad_value_slot_click_targets(
             t("settings.overlay.calibration.anchor.head_locked"),
         ),
         (
-            _overlay_tab_card(view, t("settings.overlay.desktop.size.title")),
-            view._desktop_overlay_size_button,
+            _overlay_tab_card(desktop_view, t("settings.overlay.desktop.size.title")),
+            desktop_view._desktop_overlay_size_button,
             t("settings.overlay.desktop.size.option.medium"),
         ),
         (
-            _overlay_tab_card(view, t("settings.overlay.desktop.lock.title")),
-            view._desktop_overlay_lock_button,
+            _overlay_tab_card(desktop_view, t("settings.overlay.desktop.lock.title")),
+            desktop_view._desktop_overlay_lock_button,
             t("settings.overlay.desktop.lock.value.move"),
         ),
     ]
@@ -3834,7 +3839,7 @@ def test_desktop_gui_caption_location_selector_updates_settings_with_localized_c
     assert changed == [settings]
 
 
-def test_desktop_gui_product_standard_cards_show_current_values_and_split_reset(
+def test_desktop_gui_product_standard_cards_show_current_values_and_desktop_only_controls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     previous_locale = i18n_module.get_locale()
@@ -3848,35 +3853,39 @@ def test_desktop_gui_product_standard_cards_show_current_values_and_split_reset(
         view.load_from_settings(settings, config_path=Path("settings.json"))
 
         overlay_titles = _overlay_tab_card_titles(view)
-        reset_card = _overlay_tab_card(view, t("settings.overlay.position_reset.title"))
+        reset_card = _overlay_tab_card(view, t("settings.overlay.position_reset.desktop.title"))
         reset_actions = _wrapped_card_column(reset_card).controls[1].content
 
+        assert t("settings.overlay.desktop.size.title") == "오버레이 크기"
+        assert t("settings.overlay.desktop.lock.title") == "오버레이 잠금"
+        assert t("settings.overlay.desktop.background_alpha.title") == "배경 투명도"
+        assert t("settings.overlay.position_reset.vr.title") == "위치 초기화"
+        assert t("settings.overlay.position_reset.desktop.title") == "위치 초기화"
         assert t("settings.overlay.desktop.size.title") in overlay_titles
+        assert t("settings.overlay.desktop.background_alpha.title") in overlay_titles
         assert t("settings.overlay.desktop.lock.title") in overlay_titles
-        assert t("settings.overlay.position_reset.title") in overlay_titles
+        assert t("settings.overlay.position_reset.desktop.title") in overlay_titles
+        assert t("settings.overlay.calibration.anchor") not in overlay_titles
+        assert t("settings.overlay.calibration.distance") not in overlay_titles
+        assert t("settings.overlay.calibration.offset_x") not in overlay_titles
+        assert t("settings.overlay.calibration.offset_y") not in overlay_titles
+        assert t("settings.overlay.calibration.text_scale") not in overlay_titles
         assert t("settings.overlay.status.off") not in overlay_titles
+        assert all(row.visible is False for row in view._overlay_vr_rows)
+        assert all(row.visible is True for row in view._overlay_desktop_rows)
         assert view._desktop_overlay_size_button.content.value == t(
             "settings.overlay.desktop.size.option.large"
         )
+        assert view._desktop_overlay_background_alpha_value_text.value == "50%"
         assert view._desktop_overlay_lock_button.content.value == t(
             "settings.overlay.desktop.lock.value.move"
         )
         assert view._desktop_overlay_status_card.visible is False
         assert view._desktop_overlay_recovery_row.visible is False
 
-        assert reset_actions is view._overlay_position_reset_actions
-        assert isinstance(reset_actions, ft.Column)
-        assert reset_actions.spacing >= 16
-        assert reset_actions.controls == [
-            view._overlay_vr_reset_button,
-            view._overlay_desktop_reset_button,
-        ]
-        assert view._overlay_vr_reset_button is not view._overlay_desktop_reset_button
-        assert view._overlay_vr_reset_button.on_click is not None
+        assert reset_actions is view._overlay_desktop_reset_button
         assert view._overlay_desktop_reset_button.on_click is not None
-        assert view._overlay_vr_reset_button.content.value == t(
-            "settings.overlay.position_reset.action.vr"
-        )
+        assert view._overlay_desktop_reset_button.content.size == 28
         assert view._overlay_desktop_reset_button.content.value == t(
             "settings.overlay.position_reset.action.desktop"
         )
@@ -3894,6 +3903,121 @@ def test_desktop_gui_product_standard_cards_show_current_values_and_split_reset(
         ]
     finally:
         i18n_module.set_locale(previous_locale)
+
+
+def test_overlay_tab_shows_only_vr_position_controls_for_vr_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "steamvr"
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert _overlay_tab_card_titles(view) == [
+        t("settings.overlay.caption_location"),
+        t("settings.overlay.show_translation"),
+        t("settings.overlay.show_peer_original"),
+        t("settings.overlay.calibration.anchor"),
+        t("settings.overlay.calibration.distance"),
+        t("settings.overlay.calibration.offset_x"),
+        t("settings.overlay.calibration.offset_y"),
+        t("settings.overlay.calibration.text_scale"),
+        t("settings.overlay.position_reset.vr.title"),
+    ]
+
+
+def test_overlay_tab_switches_visible_cards_when_caption_location_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "steamvr"
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_overlay_target_selected("desktop")
+
+    overlay_titles = _overlay_tab_card_titles(view)
+    assert t("settings.overlay.desktop.size.title") in overlay_titles
+    assert t("settings.overlay.desktop.background_alpha.title") in overlay_titles
+    assert t("settings.overlay.desktop.lock.title") in overlay_titles
+    assert t("settings.overlay.position_reset.desktop.title") in overlay_titles
+    assert t("settings.overlay.calibration.anchor") not in overlay_titles
+    assert all(row.visible is False for row in view._overlay_vr_rows)
+    assert all(row.visible is True for row in view._overlay_desktop_rows)
+
+
+def test_desktop_gui_background_transparency_card_adjusts_in_ten_percent_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "desktop"
+    settings.overlay.desktop_flet.visual.background_alpha = 0.5
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    assert view._desktop_overlay_background_alpha_value_text.value == "50%"
+
+    view._on_desktop_overlay_background_alpha_step(0.1)
+
+    assert view._settings is not None
+    assert view._settings.overlay.desktop_flet.visual.background_alpha == pytest.approx(0.4)
+    assert view._desktop_overlay_background_alpha_value_text.value == "60%"
+
+    view._on_desktop_overlay_background_alpha_step(-0.1)
+    view._on_desktop_overlay_background_alpha_step(-0.1)
+
+    assert view._settings.overlay.desktop_flet.visual.background_alpha == pytest.approx(0.6)
+    assert view._desktop_overlay_background_alpha_value_text.value == "40%"
+    assert [
+        incoming.overlay.desktop_flet.visual.background_alpha for incoming in changed
+    ] == pytest.approx([0.4, 0.5, 0.6])
+
+
+def test_desktop_gui_background_alpha_emits_copy_without_mutating_loaded_settings_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "desktop"
+    settings.overlay.desktop_flet.visual.background_alpha = 0.5
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._on_desktop_overlay_background_alpha_step(0.1)
+
+    assert settings.overlay.desktop_flet.visual.background_alpha == pytest.approx(0.5)
+    assert changed
+    assert changed[-1] is not settings
+    assert changed[-1].overlay.desktop_flet.visual.background_alpha == pytest.approx(0.4)
+    assert view._settings is changed[-1]
+
+
+def test_desktop_gui_background_transparency_card_clamps_to_zero_and_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "desktop"
+    settings.overlay.desktop_flet.visual.background_alpha = 0.05
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_desktop_overlay_background_alpha_step(0.1)
+    view._on_desktop_overlay_background_alpha_step(0.1)
+
+    assert view._settings is not None
+    assert view._settings.overlay.desktop_flet.visual.background_alpha == pytest.approx(0.0)
+    assert view._desktop_overlay_background_alpha_value_text.value == "100%"
+
+    view._settings.overlay.desktop_flet.visual.background_alpha = 0.95
+    view._sync_desktop_overlay_main_controls()
+    view._on_desktop_overlay_background_alpha_step(-0.1)
+    view._on_desktop_overlay_background_alpha_step(-0.1)
+
+    assert view._settings.overlay.desktop_flet.visual.background_alpha == pytest.approx(1.0)
+    assert view._desktop_overlay_background_alpha_value_text.value == "0%"
 
 
 def test_desktop_gui_size_card_opens_four_label_only_options(
@@ -4022,12 +4146,12 @@ def test_desktop_gui_size_runtime_callback_can_return_to_previous_preset(
     )
 
 
-def test_desktop_gui_lock_card_displays_current_state_and_persists(
+def test_desktop_gui_lock_card_displays_move_for_legacy_saved_lock_when_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
     settings.overlay.target = "desktop"
-    settings.overlay.desktop_flet.locked = False
+    settings.overlay.desktop_flet.locked = True
     changed: list[AppSettings] = []
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
@@ -4039,21 +4163,8 @@ def test_desktop_gui_lock_card_displays_current_state_and_persists(
     assert view._desktop_overlay_lock_button.content.value != t(
         "settings.overlay.desktop.action.lock_captions"
     )
-
-    view._on_desktop_overlay_lock_click(None)
-
     assert settings.overlay.desktop_flet.locked is True
-    assert view._desktop_overlay_lock_button.content.value == t(
-        "settings.overlay.desktop.lock.value.locked"
-    )
-
-    view._on_desktop_overlay_lock_selected("move")
-
-    assert settings.overlay.desktop_flet.locked is False
-    assert view._desktop_overlay_lock_button.content.value == t(
-        "settings.overlay.desktop.lock.value.move"
-    )
-    assert changed == [settings, settings]
+    assert changed == []
 
 
 def test_desktop_gui_runtime_lock_callback_is_authoritative_without_settings_emit(
@@ -4068,6 +4179,11 @@ def test_desktop_gui_runtime_lock_callback_is_authoritative_without_settings_emi
     view.load_from_settings(settings, config_path=Path("settings.json"))
     view.on_settings_changed = lambda incoming: changed.append(incoming)
     view.on_desktop_overlay_lock_change = runtime_lock_requests.append
+    view.set_overlay_runtime_state(
+        "connected",
+        overlay_target="desktop",
+        desktop_captions_locked=False,
+    )
 
     view._on_desktop_overlay_lock_selected("locked")
 
@@ -4081,12 +4197,12 @@ def test_desktop_gui_runtime_lock_callback_is_authoritative_without_settings_emi
     view._on_overlay_peer_original_selected("off")
 
     assert changed
-    assert changed[-1] is not settings
-    assert changed[-1].overlay.desktop_flet.locked is True
+    assert changed[-1].overlay.desktop_flet.locked is False
     assert changed[-1].overlay.show_peer_original is False
+    assert "locked" not in to_dict(changed[-1])["overlay"]["desktop_flet"]
 
 
-def test_desktop_gui_non_desktop_runtime_lock_sync_preserves_saved_desktop_lock(
+def test_desktop_gui_non_desktop_runtime_lock_sync_displays_move_for_legacy_saved_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -4106,11 +4222,11 @@ def test_desktop_gui_non_desktop_runtime_lock_sync_preserves_saved_desktop_lock(
     view._on_overlay_translation_selected("off")
 
     assert view._desktop_overlay_lock_button.content.value == t(
-        "settings.overlay.desktop.lock.value.locked"
+        "settings.overlay.desktop.lock.value.move"
     )
     assert changed
-    assert changed[-1].overlay.desktop_flet.locked is True
     assert changed[-1].overlay.show_translation is False
+    assert "locked" not in to_dict(changed[-1])["overlay"]["desktop_flet"]
 
 
 def test_desktop_gui_runtime_lock_notification_controls_next_toggle(
@@ -4136,6 +4252,76 @@ def test_desktop_gui_runtime_lock_notification_controls_next_toggle(
     view._on_desktop_overlay_lock_click(None)
 
     assert runtime_lock_requests == [False]
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.move"
+    )
+
+
+def test_desktop_gui_clears_pending_runtime_lock_when_runtime_becomes_inactive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "desktop"
+    runtime_lock_requests: list[bool] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_desktop_overlay_lock_change = runtime_lock_requests.append
+    view.set_overlay_runtime_state(
+        "connected",
+        overlay_target="desktop",
+        desktop_captions_locked=False,
+    )
+
+    view._on_desktop_overlay_lock_click(None)
+
+    assert runtime_lock_requests == [True]
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.locked"
+    )
+
+    view.set_overlay_runtime_state(
+        "off",
+        overlay_target="desktop",
+        desktop_captions_locked=True,
+    )
+
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.move"
+    )
+
+    view._on_desktop_overlay_lock_click(None)
+
+    assert runtime_lock_requests == [True]
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.move"
+    )
+
+
+@pytest.mark.parametrize("state", ["starting", "failed", "stopping", "off"])
+def test_desktop_gui_ignores_stale_runtime_lock_when_desktop_runtime_is_not_active(
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "desktop"
+    runtime_lock_requests: list[bool] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_desktop_overlay_lock_change = runtime_lock_requests.append
+
+    view.set_overlay_runtime_state(
+        state,
+        overlay_target="desktop",
+        desktop_captions_locked=True,
+    )
+
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.move"
+    )
+
+    view._on_desktop_overlay_lock_click(None)
+
+    assert runtime_lock_requests == []
     assert view._desktop_overlay_lock_button.content.value == t(
         "settings.overlay.desktop.lock.value.move"
     )
@@ -4685,8 +4871,14 @@ def test_overlay_tab_controls_are_localized(
     assert view._overlay_offset_x_title.value == t("settings.overlay.calibration.offset_x")
     assert view._overlay_offset_y_title.value == t("settings.overlay.calibration.offset_y")
     assert view._overlay_text_scale_title.value == t("settings.overlay.calibration.text_scale")
-    assert view._overlay_reset_title.value == t("settings.overlay.position_reset.title")
+    assert view._overlay_vr_reset_title.value == t("settings.overlay.position_reset.vr.title")
+    assert view._overlay_desktop_reset_title.value == t(
+        "settings.overlay.position_reset.desktop.title"
+    )
     assert view._desktop_overlay_size_title.value == t("settings.overlay.desktop.size.title")
+    assert view._desktop_overlay_background_alpha_title.value == t(
+        "settings.overlay.desktop.background_alpha.title"
+    )
     assert view._desktop_overlay_lock_title.value == t("settings.overlay.desktop.lock.title")
     assert view._desktop_overlay_status_card.visible is False
 
@@ -4712,8 +4904,10 @@ def test_overlay_immediate_card_labels_render_from_i18n(
         view._overlay_offset_x_title.value = "stale"
         view._overlay_offset_y_title.value = "stale"
         view._overlay_text_scale_title.value = "stale"
-        view._overlay_reset_title.value = "stale"
+        view._overlay_vr_reset_title.value = "stale"
+        view._overlay_desktop_reset_title.value = "stale"
         view._desktop_overlay_size_title.value = "stale"
+        view._desktop_overlay_background_alpha_title.value = "stale"
         view._desktop_overlay_lock_title.value = "stale"
         view._desktop_overlay_status_title.value = "stale"
 
@@ -4732,8 +4926,14 @@ def test_overlay_immediate_card_labels_render_from_i18n(
         assert view._overlay_offset_x_title.value == t("settings.overlay.calibration.offset_x")
         assert view._overlay_offset_y_title.value == t("settings.overlay.calibration.offset_y")
         assert view._overlay_text_scale_title.value == t("settings.overlay.calibration.text_scale")
-        assert view._overlay_reset_title.value == t("settings.overlay.position_reset.title")
+        assert view._overlay_vr_reset_title.value == t("settings.overlay.position_reset.vr.title")
+        assert view._overlay_desktop_reset_title.value == t(
+            "settings.overlay.position_reset.desktop.title"
+        )
         assert view._desktop_overlay_size_title.value == t("settings.overlay.desktop.size.title")
+        assert view._desktop_overlay_background_alpha_title.value == t(
+            "settings.overlay.desktop.background_alpha.title"
+        )
         assert view._desktop_overlay_lock_title.value == t("settings.overlay.desktop.lock.title")
         assert view._desktop_overlay_status_card.visible is False
         assert t("settings.overlay.caption_location") in overlay_labels
@@ -4744,14 +4944,17 @@ def test_overlay_immediate_card_labels_render_from_i18n(
         assert t("settings.overlay.calibration.offset_x") in overlay_labels
         assert t("settings.overlay.calibration.offset_y") in overlay_labels
         assert t("settings.overlay.calibration.text_scale") in overlay_labels
-        assert t("settings.overlay.desktop.size.title") in overlay_labels
-        assert t("settings.overlay.desktop.lock.title") in overlay_labels
-        assert t("settings.overlay.position_reset.title") in overlay_labels
+        assert t("settings.overlay.position_reset.vr.title") in overlay_labels
+        assert t("settings.overlay.desktop.size.title") not in overlay_labels
+        assert t("settings.overlay.desktop.background_alpha.title") not in overlay_labels
+        assert t("settings.overlay.desktop.lock.title") not in overlay_labels
+        assert all(row.visible is True for row in view._overlay_vr_rows)
+        assert all(row.visible is False for row in view._overlay_desktop_rows)
     finally:
         i18n_module.set_locale(old_locale)
 
 
-def test_overlay_tab_uses_four_rows_of_unit_cards(
+def test_overlay_tab_uses_target_specific_unit_card_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
@@ -4768,11 +4971,9 @@ def test_overlay_tab_uses_four_rows_of_unit_cards(
         t("settings.overlay.calibration.offset_x"),
         t("settings.overlay.calibration.offset_y"),
         t("settings.overlay.calibration.text_scale"),
-        t("settings.overlay.desktop.size.title"),
-        t("settings.overlay.desktop.lock.title"),
-        t("settings.overlay.position_reset.title"),
+        t("settings.overlay.position_reset.vr.title"),
     ]
-    assert len(overlay_controls) == 5
+    assert len(overlay_controls) == 6
     assert _row_card_titles(overlay_controls[0]) == [
         t("settings.overlay.caption_location"),
         t("settings.overlay.show_translation"),
@@ -4786,13 +4987,27 @@ def test_overlay_tab_uses_four_rows_of_unit_cards(
     assert _row_card_titles(overlay_controls[2]) == [
         t("settings.overlay.calibration.offset_y"),
         t("settings.overlay.calibration.text_scale"),
+        t("settings.overlay.position_reset.vr.title"),
     ]
     assert _row_card_titles(overlay_controls[3]) == [
         t("settings.overlay.desktop.size.title"),
         t("settings.overlay.desktop.lock.title"),
-        t("settings.overlay.position_reset.title"),
+        t("settings.overlay.desktop.background_alpha.title"),
     ]
+    assert _row_card_titles(overlay_controls[4]) == [
+        t("settings.overlay.position_reset.desktop.title"),
+    ]
+    assert len(_layout_cards(overlay_controls[4])) == 3
+    assert [getattr(card, "visible", True) for card in _layout_cards(overlay_controls[4])] == [
+        True,
+        True,
+        True,
+    ]
+    assert overlay_controls[1].visible is True
+    assert overlay_controls[2].visible is True
+    assert overlay_controls[3].visible is False
     assert overlay_controls[4].visible is False
+    assert overlay_controls[5].visible is False
 
 
 def test_legacy_vr_overlay_shell_removed_from_settings_subtabs(
@@ -4822,9 +5037,7 @@ def test_legacy_vr_overlay_shell_removed_from_settings_subtabs(
         t("settings.overlay.calibration.offset_x"),
         t("settings.overlay.calibration.offset_y"),
         t("settings.overlay.calibration.text_scale"),
-        t("settings.overlay.desktop.size.title"),
-        t("settings.overlay.desktop.lock.title"),
-        t("settings.overlay.position_reset.title"),
+        t("settings.overlay.position_reset.vr.title"),
     ]
     assert t("settings.section.overlay") not in prompt_labels
     assert t("settings.section.overlay") not in overlay_labels
@@ -4882,8 +5095,10 @@ def test_legacy_overlay_cleanup_copy_renders_from_i18n(
             view._overlay_offset_x_title.value = "stale"
             view._overlay_offset_y_title.value = "stale"
             view._overlay_text_scale_title.value = "stale"
-            view._overlay_reset_title.value = "stale"
+            view._overlay_vr_reset_title.value = "stale"
+            view._overlay_desktop_reset_title.value = "stale"
             view._desktop_overlay_size_title.value = "stale"
+            view._desktop_overlay_background_alpha_title.value = "stale"
             view._desktop_overlay_lock_title.value = "stale"
             view._desktop_overlay_status_title.value = "stale"
 
@@ -4911,9 +5126,17 @@ def test_legacy_overlay_cleanup_copy_renders_from_i18n(
             assert view._overlay_text_scale_title.value == t(
                 "settings.overlay.calibration.text_scale"
             )
-            assert view._overlay_reset_title.value == t("settings.overlay.position_reset.title")
+            assert view._overlay_vr_reset_title.value == t(
+                "settings.overlay.position_reset.vr.title"
+            )
+            assert view._overlay_desktop_reset_title.value == t(
+                "settings.overlay.position_reset.desktop.title"
+            )
             assert view._desktop_overlay_size_title.value == t(
                 "settings.overlay.desktop.size.title"
+            )
+            assert view._desktop_overlay_background_alpha_title.value == t(
+                "settings.overlay.desktop.background_alpha.title"
             )
             assert view._desktop_overlay_lock_title.value == t(
                 "settings.overlay.desktop.lock.title"
@@ -5277,8 +5500,14 @@ def test_overlay_tab_labels_and_headings_render_from_i18n(
         assert view._overlay_offset_x_title.value == t("settings.overlay.calibration.offset_x")
         assert view._overlay_offset_y_title.value == t("settings.overlay.calibration.offset_y")
         assert view._overlay_text_scale_title.value == t("settings.overlay.calibration.text_scale")
-        assert view._overlay_reset_title.value == t("settings.overlay.position_reset.title")
+        assert view._overlay_vr_reset_title.value == t("settings.overlay.position_reset.vr.title")
+        assert view._overlay_desktop_reset_title.value == t(
+            "settings.overlay.position_reset.desktop.title"
+        )
         assert view._desktop_overlay_size_title.value == t("settings.overlay.desktop.size.title")
+        assert view._desktop_overlay_background_alpha_title.value == t(
+            "settings.overlay.desktop.background_alpha.title"
+        )
         assert view._desktop_overlay_lock_title.value == t("settings.overlay.desktop.lock.title")
         assert view._desktop_overlay_status_card.visible is False
         assert t("settings.overlay.caption_location") in overlay_labels
@@ -5289,9 +5518,12 @@ def test_overlay_tab_labels_and_headings_render_from_i18n(
         assert t("settings.overlay.calibration.offset_x") in overlay_labels
         assert t("settings.overlay.calibration.offset_y") in overlay_labels
         assert t("settings.overlay.calibration.text_scale") in overlay_labels
-        assert t("settings.overlay.desktop.size.title") in overlay_labels
-        assert t("settings.overlay.desktop.lock.title") in overlay_labels
-        assert t("settings.overlay.position_reset.title") in overlay_labels
+        assert t("settings.overlay.position_reset.vr.title") in overlay_labels
+        assert t("settings.overlay.desktop.size.title") not in overlay_labels
+        assert t("settings.overlay.desktop.background_alpha.title") not in overlay_labels
+        assert t("settings.overlay.desktop.lock.title") not in overlay_labels
+        assert all(row.visible is True for row in view._overlay_vr_rows)
+        assert all(row.visible is False for row in view._overlay_desktop_rows)
     finally:
         i18n_module.set_locale(old_locale)
 

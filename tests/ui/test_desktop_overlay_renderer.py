@@ -376,13 +376,26 @@ def test_desktop_overlay_visual_config_uses_preset_tokens_and_no_outline_text() 
     assert plan.border_radius == 16
 
     surface = desktop_overlay.build_desktop_caption_surface(plan)
-    assert surface.bgcolor == "#61000000"
-    assert surface.padding.left == 22
-    assert surface.padding.top == 12
+    assert surface.bgcolor == ft.Colors.TRANSPARENT
     assert surface.border_radius == 16
-    column = surface.content
+    assert isinstance(surface.content, ft.Stack)
+    background_layer, text_layer = surface.content.controls
+    assert background_layer.bgcolor == "#61000000"
+    assert background_layer.border_radius == 16
+    assert background_layer.expand is None
+    assert (
+        background_layer.left,
+        background_layer.top,
+        background_layer.right,
+        background_layer.bottom,
+    ) == (0, 0, 0, 0)
+    assert text_layer.bgcolor == ft.Colors.TRANSPARENT
+    assert text_layer.padding.left == 22
+    assert text_layer.padding.top == 12
+    column = text_layer.content
     assert column.scroll is None
     assert all(isinstance(control, ft.Text) for control in column.controls)
+    assert not any(isinstance(control, ft.Text) for control in _walk_control_tree(background_layer))
     first_text = column.controls[0]
     assert first_text.color == "#FFD700"
     assert first_text.text_align == ft.TextAlign.CENTER
@@ -597,6 +610,23 @@ class FakeFletPage:
         return task
 
 
+class JumpingRevealFletPage(FakeFletPage):
+    def __init__(self, app: FakeFletApp) -> None:
+        super().__init__(app)
+        self.reveal_jump_done = False
+
+    def update(self) -> None:
+        super().update()
+        if (
+            not self.reveal_jump_done
+            and self.window.visible is True
+            and self.window.ignore_mouse_events is True
+        ):
+            self.window.left = 608
+            self.window.top = 1117
+            self.reveal_jump_done = True
+
+
 class FakeFletApp:
     def __init__(self) -> None:
         self.closed = asyncio.Event()
@@ -609,6 +639,13 @@ class FakeFletApp:
         if inspect.isawaitable(result):
             await result
         await self.closed.wait()
+
+
+class JumpingRevealFletApp(FakeFletApp):
+    def __init__(self) -> None:
+        self.closed = asyncio.Event()
+        self.page = JumpingRevealFletPage(self)
+        self.targets: list[Any] = []
 
 
 class FakeWindowEvent:
@@ -1046,7 +1083,7 @@ def test_desktop_overlay_preview_fixtures_use_real_overlay_window_surface_and_ed
 
     visible_text = _page_text_values(app.page)
     assert "Sample captions" in visible_text
-    assert "Desktop caption size" in visible_text
+    assert "Overlay size" in visible_text
     assert "Preview background" in visible_text
     assert "Outline width" not in visible_text
     assert "Text scale" not in visible_text
@@ -1093,8 +1130,8 @@ def test_desktop_overlay_preview_i18n_labels_resolve_for_all_controls() -> None:
     catalog = desktop_overlay.build_desktop_overlay_preview_catalog(locale="ja")
 
     assert catalog.labels.fixture == "サンプル字幕"
-    assert catalog.labels.size_preset == "デスクトップ字幕のサイズ"
-    assert catalog.labels.background_alpha == "背景の濃さ"
+    assert catalog.labels.size_preset == "オーバーレイサイズ"
+    assert catalog.labels.background_alpha == "背景の透明度"
     assert catalog.labels.background_surface == "プレビュー背景"
     assert [preset.label for preset in catalog.size_presets] == [
         "小さめ",
@@ -1137,12 +1174,12 @@ def test_desktop_overlay_preview_fixtures_run_local_app_without_renderer_or_pers
 
     visible_text = _page_text_values(app.page)
     assert "Sample captions" in visible_text
-    assert "Desktop caption size" in visible_text
-    assert "Background opacity" in visible_text
+    assert "Overlay size" in visible_text
+    assert "Background transparency" in visible_text
     assert "Preview background" in visible_text
     assert "Outline width" not in visible_text
     assert "Text scale" not in visible_text
-    assert {"0.35", "0.50", "0.65", "0.80"} <= visible_text
+    assert {"65%", "50%", "35%", "20%"} <= visible_text
     assert {"Small", "Medium", "Large", "Extra large"} <= visible_text
     assert {"Bright", "Dark", "Busy desktop"} <= visible_text
     assert "Korean long wrap" in visible_text
@@ -1259,11 +1296,89 @@ async def test_desktop_overlay_reveals_first_window_update_after_chrome_bounds_a
         assert (app.page.window.left, app.page.window.top) == (320, 720)
         assert (app.page.window.width, app.page.window.height) == (1344, 347)
         assert app.page.render_snapshots[0] == {
-            "ignore_mouse_events": True,
+            "ignore_mouse_events": False,
             "texts": set(),
-            "has_drag_area": False,
-            "card_count": 0,
+            "has_drag_area": True,
+            "card_count": 1,
         }
+    finally:
+        await window.close()
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_detail_logs_startup_render_and_snapshot_updates(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    app = FakeFletApp()
+    window = desktop_overlay.FletDesktopRendererWindow(
+        app_runner=app.run,
+        event_sink=RecordingLifecycleSink().emit,
+        locale="en",
+        bounds_debounce_s=0.01,
+    )
+    residual = window.prime_startup_runtime_controls(
+        (
+            {"logging_mode": "detailed"},
+            {"command": "set_interaction_mode", "mode": "pass_through"},
+            {
+                "command": "apply_window_bounds",
+                "x": 320,
+                "y": 720,
+                "width": 1344,
+                "height": 347,
+            },
+        )
+    )
+
+    try:
+        assert residual == ()
+        await window.start(OverlayPresentationSnapshot(revision=1, blocks=[]))
+
+        startup_output = capsys.readouterr().out
+        assert "[DesktopOverlay][Detail] render" in startup_output
+        assert "revision=1" in startup_output
+        assert "interaction_mode=edit" in startup_output
+        assert "surface_visible=True" in startup_output
+        assert "line_count=0" in startup_output
+        assert "content_kind=drag_area" in startup_output
+        assert "window=1344x347" in startup_output
+        assert "bounds_epoch" not in startup_output
+
+        await window.dispatch_runtime_control(
+            {"command": "set_interaction_mode", "mode": "pass_through"}
+        )
+
+        await window.dispatch_snapshot(
+            OverlayPresentationSnapshot(
+                revision=2,
+                blocks=[
+                    _block(
+                        "peer-translated",
+                        channel="peer",
+                        block_variant="finalized",
+                        appearance_seq=1,
+                        primary_text="좋아요",
+                        secondary_text="Sounds good",
+                        secondary_enabled=True,
+                    )
+                ],
+            )
+        )
+
+        update_output = capsys.readouterr().out
+        assert "[DesktopOverlay][Detail] snapshot_update revision=2 blocks=1" in update_output
+        assert "[DesktopOverlay][Detail] render" in update_output
+        assert "revision=2" in update_output
+        assert "surface_visible=True" in update_output
+        assert "line_count=2" in update_output
+        assert "content_kind=caption_surface" in update_output
+        assert "bounds_epoch" not in update_output
+
+        await window.dispatch_runtime_control({"logging_mode": "basic"})
+        capsys.readouterr()
+        await window.dispatch_snapshot(OverlayPresentationSnapshot(revision=3, blocks=[]))
+
+        assert capsys.readouterr().out == ""
     finally:
         await window.close()
 
@@ -1354,6 +1469,8 @@ async def test_desktop_overlay_display_matrix_moving_and_locked_with_captions() 
         await window.dispatch_runtime_control(
             {"command": "set_interaction_mode", "mode": "pass_through"}
         )
+        if app.page.tasks:
+            await asyncio.gather(*app.page.tasks)
 
         assert app.page.window.ignore_mouse_events is True
         assert (
@@ -1470,8 +1587,10 @@ async def test_desktop_overlay_preset_visual_tokens_match_product_table() -> Non
         assert plan.border_radius == radius
 
         surface = desktop_overlay.build_desktop_caption_surface(plan)
-        assert surface.padding.left == padding_h
-        assert surface.padding.top == padding_v
+        assert isinstance(surface.content, ft.Stack)
+        text_layer = surface.content.controls[1]
+        assert text_layer.padding.left == padding_h
+        assert text_layer.padding.top == padding_v
         assert surface.border_radius == radius
 
 
@@ -1613,7 +1732,6 @@ async def test_desktop_overlay_window_bounds_events_debounce_zero_samples_and_pr
                     "event": "window_bounds_changed",
                     "source": "user",
                     "persist": True,
-                    "bounds_epoch": 0,
                     "x": 100,
                     "y": 200,
                     "width": 900,
@@ -1635,6 +1753,23 @@ async def test_desktop_overlay_window_bounds_events_debounce_zero_samples_and_pr
         await asyncio.sleep(0.03)
         assert len(sink.events) == 1
 
+        app.page.window.left = 300
+        app.page.window.top = 400
+        app.page.window.width = 1280
+        app.page.window.height = 330
+        app.page.window.on_event(FakeWindowEvent(ft.WindowEventType.MOVED))
+        await window.dispatch_runtime_control(
+            {
+                "command": "apply_window_bounds",
+                "x": 500,
+                "y": 600,
+                "width": 1280,
+                "height": 330,
+            }
+        )
+        await asyncio.sleep(0.03)
+        assert len(sink.events) == 1
+
         app.page.window.left = 360
         app.page.window.top = 700
         app.page.window.width = 1280
@@ -1645,7 +1780,6 @@ async def test_desktop_overlay_window_bounds_events_debounce_zero_samples_and_pr
             "event": "window_bounds_changed",
             "source": "user",
             "persist": True,
-            "bounds_epoch": 0,
             "x": 360,
             "y": 700,
             "width": 1280,
@@ -1746,7 +1880,6 @@ async def test_desktop_overlay_bounds_programmatic_echo_suppression_is_bounded_a
                     "event": "window_bounds_changed",
                     "source": "user",
                     "persist": True,
-                    "bounds_epoch": 0,
                     "x": 360,
                     "y": 700,
                     "width": 1280,
@@ -1758,6 +1891,40 @@ async def test_desktop_overlay_bounds_programmatic_echo_suppression_is_bounded_a
         await window.close()
 
 
+@pytest.mark.asyncio
+async def test_desktop_overlay_drops_bounds_event_while_runtime_locked_after_unlock() -> None:
+    app = FakeFletApp()
+    sink = RecordingLifecycleSink()
+    window = desktop_overlay.FletDesktopRendererWindow(
+        app_runner=app.run,
+        event_sink=sink.emit,
+        locale="en",
+        bounds_debounce_s=0.01,
+    )
+
+    try:
+        await window.start(OverlayPresentationSnapshot(revision=1, blocks=[]))
+        await window.dispatch_runtime_control(
+            {"command": "set_interaction_mode", "mode": "pass_through"}
+        )
+        assert callable(app.page.window.on_event)
+
+        app.page.window.left = 608
+        app.page.window.top = 1117
+        app.page.window.width = 1344
+        app.page.window.height = 347
+        app.page.window.on_event(FakeWindowEvent(ft.WindowEventType.MOVED))
+        await window.dispatch_runtime_control({"command": "set_interaction_mode", "mode": "edit"})
+        await asyncio.sleep(0.03)
+
+        assert all(
+            event.get("payload", {}).get("event") != "window_bounds_changed"
+            for event in sink.events
+        )
+    finally:
+        await window.close()
+
+
 class FakeRendererWindow:
     def __init__(self) -> None:
         self.started = asyncio.Event()
@@ -1765,6 +1932,14 @@ class FakeRendererWindow:
         self.close_calls = 0
         self.snapshots: list[OverlayPresentationSnapshot] = []
         self.runtime_controls: list[dict[str, object]] = []
+        self.primed_runtime_controls: list[dict[str, object]] = []
+
+    def prime_startup_runtime_controls(
+        self,
+        payloads: tuple[dict[str, object], ...],
+    ) -> tuple[dict[str, object], ...]:
+        self.primed_runtime_controls.extend(dict(payload) for payload in payloads)
+        return ()
 
     async def start(self, initial_snapshot: OverlayPresentationSnapshot) -> None:
         self.snapshots.append(initial_snapshot)
@@ -2088,7 +2263,7 @@ async def test_desktop_overlay_later_malformed_snapshot_is_ignored_and_controls_
 
 
 @pytest.mark.asyncio
-async def test_desktop_overlay_initial_interaction_mode_and_bounds_controls_apply_before_ready_event() -> (
+async def test_desktop_overlay_initial_bounds_control_applies_before_ready_event_and_lock_is_ignored() -> (
     None
 ):
     token = "initial-control-token"
@@ -2122,7 +2297,7 @@ async def test_desktop_overlay_initial_interaction_mode_and_bounds_controls_appl
         run_task = asyncio.create_task(renderer.run())
         await _next_bridge_event(bridge, expected_type="overlay_ready")
 
-        assert window.runtime_controls == initial_controls
+        assert window.runtime_controls == []
 
         await bridge.broadcast_shutdown()
         assert await asyncio.wait_for(run_task, timeout=1.0) == 0
@@ -2132,9 +2307,7 @@ async def test_desktop_overlay_initial_interaction_mode_and_bounds_controls_appl
 
 
 @pytest.mark.asyncio
-async def test_desktop_overlay_initial_locked_runtime_control_applies_before_first_flet_render() -> (
-    None
-):
+async def test_desktop_overlay_initial_pass_through_control_does_not_lock_startup() -> None:
     token = "initial-locked-real-window-token"
     bridge = OverlayBridge(
         session_token=token,
@@ -2182,10 +2355,10 @@ async def test_desktop_overlay_initial_locked_runtime_control_applies_before_fir
         assert app.page.render_snapshots
         first_render = app.page.render_snapshots[0]
         assert first_render == {
-            "ignore_mouse_events": True,
+            "ignore_mouse_events": False,
             "texts": set(),
-            "has_drag_area": False,
-            "card_count": 0,
+            "has_drag_area": True,
+            "card_count": 1,
         }
         assert app.page.window.frameless is True
         assert app.page.window.shadow is False
@@ -2193,6 +2366,8 @@ async def test_desktop_overlay_initial_locked_runtime_control_applies_before_fir
         assert app.page.window.always_on_top is True
         assert app.page.window.title_bar_hidden is None
         assert app.page.window.title_bar_buttons_hidden is None
+        assert app.page.window.ignore_mouse_events is False
+        assert len(app.page.render_snapshots) == 1
 
         await bridge.broadcast_shutdown()
         assert await asyncio.wait_for(run_task, timeout=1.0) == 0
@@ -2218,7 +2393,7 @@ async def test_desktop_overlay_primed_initial_controls_are_not_replayed_after_st
             "background_alpha": 0.5,
             "outline_width": None,
         },
-        {"command": "set_interaction_mode", "mode": "pass_through"},
+        {"command": "set_interaction_mode", "mode": "edit"},
     ]
     bridge = OverlayBridge(
         session_token=token,
@@ -2248,10 +2423,10 @@ async def test_desktop_overlay_primed_initial_controls_are_not_replayed_after_st
 
         assert len(app.page.render_snapshots) == 1
         assert app.page.render_snapshots[0] == {
-            "ignore_mouse_events": True,
+            "ignore_mouse_events": False,
             "texts": set(),
-            "has_drag_area": False,
-            "card_count": 0,
+            "has_drag_area": True,
+            "card_count": 1,
         }
         assert (app.page.window.left, app.page.window.top) == (320, 720)
         assert (app.page.window.width, app.page.window.height) == (1344, 347)

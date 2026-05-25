@@ -6,6 +6,7 @@ import contextlib
 import copy
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Callable
 
@@ -19,6 +20,7 @@ from puripuly_heart.config.llm_profiles import (
 )
 from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
+    DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
     DESKTOP_FLET_SIZE_PRESET_ORDER,
     LOCAL_LLM_RESERVED_EXTRA_BODY_KEYS,
     LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS,
@@ -87,6 +89,7 @@ _OVERLAY_DISTANCE_MIN = 0.5
 _OVERLAY_DISTANCE_MAX = 2.0
 _OVERLAY_DISTANCE_DIVISIONS = 30
 _OVERLAY_OFFSET_STEP = 0.05
+_DESKTOP_OVERLAY_BACKGROUND_ALPHA_STEP = 0.1
 _OVERLAY_TEXT_SCALE_PRESETS = (
     ("large", 1.2),
     ("normal", 1.0),
@@ -382,7 +385,6 @@ class SettingsView(ft.Column):
             self._desktop_overlay_lock_button,
             self._overlay_vr_reset_button,
             self._overlay_desktop_reset_button,
-            self._overlay_reset_button,
             self._desktop_overlay_primary_action,
             self._desktop_overlay_view_logs_action,
             self._translation_connection_text,
@@ -1434,8 +1436,8 @@ class SettingsView(ft.Column):
             value=self._overlay_text_scale_text,
         )
 
-        self._overlay_reset_title = ft.Text(
-            t("settings.overlay.position_reset.title"),
+        self._overlay_vr_reset_title = ft.Text(
+            t("settings.overlay.position_reset.vr.title"),
             size=24,
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
@@ -1443,32 +1445,31 @@ class SettingsView(ft.Column):
         self._overlay_vr_reset_button = self._build_clickable_text(
             t("settings.overlay.position_reset.action.vr"),
             self._on_overlay_position_reset,
-            size=20,
             height=72,
             expand=False,
+        )
+        self._overlay_vr_reset_card = self._wrap_unit_card(
+            title=self._overlay_vr_reset_title,
+            value=self._overlay_vr_reset_button,
+        )
+
+        self._overlay_desktop_reset_title = ft.Text(
+            t("settings.overlay.position_reset.desktop.title"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
         )
         self._overlay_desktop_reset_button = self._build_clickable_text(
             t("settings.overlay.position_reset.action.desktop"),
             self._on_desktop_overlay_position_reset,
-            size=20,
             height=72,
             expand=False,
         )
-        self._overlay_reset_button = self._overlay_vr_reset_button
-        self._overlay_position_reset_actions = ft.Column(
-            [
-                self._overlay_vr_reset_button,
-                self._overlay_desktop_reset_button,
-            ],
-            spacing=18,
-            expand=True,
-            alignment=ft.MainAxisAlignment.CENTER,
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        self._overlay_desktop_reset_card = self._wrap_unit_card(
+            title=self._overlay_desktop_reset_title,
+            value=self._overlay_desktop_reset_button,
         )
-        self._overlay_reset_card = self._wrap_unit_card(
-            title=self._overlay_reset_title,
-            value=self._overlay_position_reset_actions,
-        )
+        self._overlay_reset_title = self._overlay_vr_reset_title
 
         self._desktop_overlay_size_title = ft.Text(
             t("settings.overlay.desktop.size.title"),
@@ -1485,6 +1486,42 @@ class SettingsView(ft.Column):
         self._desktop_overlay_size_card = self._wrap_unit_card(
             title=self._desktop_overlay_size_title,
             value=self._desktop_overlay_size_button,
+        )
+
+        self._desktop_overlay_background_alpha_title = ft.Text(
+            t("settings.overlay.desktop.background_alpha.title"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        self._desktop_overlay_background_alpha_value_text = ft.Text(
+            "50%",
+            size=28,
+            color=COLOR_ON_BACKGROUND,
+            text_align=ft.TextAlign.CENTER,
+        )
+        (
+            self._desktop_overlay_background_alpha_card_content,
+            self._desktop_overlay_background_alpha_decrease_button,
+            self._desktop_overlay_background_alpha_increase_button,
+            self._desktop_overlay_background_alpha_decrease_glyph,
+            self._desktop_overlay_background_alpha_increase_glyph,
+        ) = self._build_overlay_step_split_layout(
+            title=self._desktop_overlay_background_alpha_title,
+            value_text=self._desktop_overlay_background_alpha_value_text,
+            decrease_text="－",
+            increase_text="＋",
+            on_decrease=lambda _e: self._on_desktop_overlay_background_alpha_step(
+                -_DESKTOP_OVERLAY_BACKGROUND_ALPHA_STEP
+            ),
+            on_increase=lambda _e: self._on_desktop_overlay_background_alpha_step(
+                _DESKTOP_OVERLAY_BACKGROUND_ALPHA_STEP
+            ),
+        )
+        self._desktop_overlay_background_alpha_card = self._wrap_card(
+            self._desktop_overlay_background_alpha_card_content,
+            expand=True,
+            height=SettingsUnitCard.DEFAULT_HEIGHT,
         )
 
         self._desktop_overlay_lock_title = ft.Text(
@@ -1561,6 +1598,8 @@ class SettingsView(ft.Column):
             value=self._desktop_overlay_status_body,
         )
         self._overlay_empty_card = self._wrap_empty_unit_card()
+        self._overlay_desktop_reset_spacer_a = self._wrap_empty_unit_card()
+        self._overlay_desktop_reset_spacer_b = self._wrap_empty_unit_card()
 
         overlay_row1 = ft.Container(
             content=ft.Row(
@@ -1589,7 +1628,7 @@ class SettingsView(ft.Column):
                 [
                     self._overlay_offset_y_card,
                     self._overlay_text_scale_card,
-                    self._wrap_empty_unit_card(),
+                    self._overlay_vr_reset_card,
                 ],
                 spacing=16,
                 expand=True,
@@ -1600,13 +1639,24 @@ class SettingsView(ft.Column):
                 [
                     self._desktop_overlay_size_card,
                     self._desktop_overlay_lock_card,
-                    self._overlay_reset_card,
+                    self._desktop_overlay_background_alpha_card,
                 ],
                 spacing=16,
                 expand=True,
             ),
         )
         overlay_row5 = ft.Container(
+            content=ft.Row(
+                [
+                    self._overlay_desktop_reset_card,
+                    self._overlay_desktop_reset_spacer_a,
+                    self._overlay_desktop_reset_spacer_b,
+                ],
+                spacing=16,
+                expand=True,
+            ),
+        )
+        overlay_row6 = ft.Container(
             content=ft.Row(
                 [
                     self._desktop_overlay_status_card,
@@ -1618,8 +1668,11 @@ class SettingsView(ft.Column):
             ),
             visible=False,
         )
+        self._overlay_vr_rows = (overlay_row2, overlay_row3)
+        self._overlay_desktop_rows = (overlay_row4, overlay_row5)
         self._desktop_overlay_controls_row = overlay_row4
-        self._desktop_overlay_recovery_row = overlay_row5
+        self._desktop_overlay_recovery_row = overlay_row6
+        self._sync_overlay_target_specific_visibility()
 
         # === Row 7: Response Mode / Translation Connection / Fallback ===
         self._translation_connection_title = ft.Text(
@@ -1900,7 +1953,14 @@ class SettingsView(ft.Column):
                     general_clipboard_row,
                 ],
                 "prompt": [row7, persona_card],
-                "overlay": [overlay_row1, overlay_row2, overlay_row3, overlay_row4, overlay_row5],
+                "overlay": [
+                    overlay_row1,
+                    overlay_row2,
+                    overlay_row3,
+                    overlay_row4,
+                    overlay_row5,
+                    overlay_row6,
+                ],
             }
         )
         self.controls = [self._settings_subtab_shell]
@@ -2516,12 +2576,7 @@ class SettingsView(ft.Column):
         pending_position_reset = getattr(self, "_desktop_overlay_pending_position_reset", False)
         desktop_settings = settings.overlay.desktop_flet
         size_preset = self._current_desktop_overlay_size_preset()
-        locked = self._current_desktop_overlay_locked()
-        needs_copy = (
-            desktop_settings.size_preset != size_preset
-            or desktop_settings.locked != locked
-            or pending_position_reset
-        )
+        needs_copy = desktop_settings.size_preset != size_preset or pending_position_reset
         if not needs_copy:
             return settings
 
@@ -2532,8 +2587,6 @@ class SettingsView(ft.Column):
             updated_desktop.position.x = None
             updated_desktop.position.y = None
             updated_desktop.locked = False
-        else:
-            updated_desktop.locked = locked
         updated_desktop.validate()
         return updated
 
@@ -2609,7 +2662,7 @@ class SettingsView(ft.Column):
         self._desktop_overlay_pending_size_preset = None
         self._desktop_overlay_pending_position_reset = False
         self._desktop_overlay_pending_locked = None
-        self._desktop_overlay_captions_locked = bool(settings.overlay.desktop_flet.locked)
+        self._desktop_overlay_captions_locked = False
         if self._overlay_state == "off":
             self._overlay_runtime_target = self._current_overlay_target()
         self._sync_clickable_text_control_fonts(font_for_language(settings.ui.locale))
@@ -2725,7 +2778,7 @@ class SettingsView(ft.Column):
         self._desktop_overlay_pending_size_preset = None
         self._desktop_overlay_pending_position_reset = False
         self._desktop_overlay_pending_locked = None
-        self._desktop_overlay_captions_locked = bool(settings.overlay.desktop_flet.locked)
+        self._desktop_overlay_captions_locked = False
 
         self._set_unit_card_value_text(
             self._llm_text,
@@ -3513,11 +3566,35 @@ class SettingsView(ft.Column):
         )
         self._overlay_target_button.disabled = self._settings is None
 
+    def _sync_overlay_target_specific_visibility(self) -> None:
+        desktop_selected = self._current_overlay_target() == OVERLAY_TARGET_DESKTOP
+        for row in getattr(self, "_overlay_vr_rows", ()):
+            row.visible = not desktop_selected
+        for row in getattr(self, "_overlay_desktop_rows", ()):
+            row.visible = desktop_selected
+
     @staticmethod
     def _normalize_desktop_overlay_size_preset(value: object) -> str:
         if isinstance(value, str) and value in DESKTOP_FLET_SIZE_PRESET_ORDER:
             return value
         return "medium"
+
+    @staticmethod
+    def _normalize_desktop_overlay_background_alpha(value: object) -> float:
+        if isinstance(value, bool):
+            return DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA
+        try:
+            alpha = float(value)
+        except (TypeError, ValueError):
+            return DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA
+        if not math.isfinite(alpha):
+            return DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA
+        return max(0.0, min(1.0, alpha))
+
+    def _desktop_overlay_background_alpha_label_for(self, value: object) -> str:
+        alpha = self._normalize_desktop_overlay_background_alpha(value)
+        transparency = 1.0 - alpha
+        return f"{int(round(transparency * 100))}%"
 
     def _desktop_overlay_size_label_for(self, size_preset: object) -> str:
         normalized = self._normalize_desktop_overlay_size_preset(size_preset)
@@ -3533,6 +3610,13 @@ class SettingsView(ft.Column):
             self._settings.overlay.desktop_flet.size_preset
         )
 
+    def _current_desktop_overlay_background_alpha(self) -> float:
+        if self._settings is None:
+            return DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA
+        return self._normalize_desktop_overlay_background_alpha(
+            self._settings.overlay.desktop_flet.visual.background_alpha
+        )
+
     def _desktop_overlay_lock_label_for(self, locked: bool) -> str:
         return t(
             "settings.overlay.desktop.lock.value.locked"
@@ -3545,21 +3629,15 @@ class SettingsView(ft.Column):
             return False
         if getattr(self, "_desktop_overlay_pending_position_reset", False):
             return False
+        if not self._desktop_overlay_runtime_lock_applies():
+            return False
         pending_locked = getattr(self, "_desktop_overlay_pending_locked", None)
         if pending_locked is not None:
             return bool(pending_locked)
-        if self._desktop_overlay_runtime_lock_applies():
-            return bool(
-                getattr(
-                    self,
-                    "_desktop_overlay_captions_locked",
-                    self._settings.overlay.desktop_flet.locked,
-                )
-            )
-        return bool(self._settings.overlay.desktop_flet.locked)
+        return bool(getattr(self, "_desktop_overlay_captions_locked", False))
 
     def _desktop_overlay_runtime_lock_applies(self) -> bool:
-        if getattr(self, "_overlay_state", "off") == "off":
+        if getattr(self, "_overlay_state", "off") not in {"connected", "running"}:
             return False
         return (
             self._normalized_overlay_target(
@@ -3577,8 +3655,15 @@ class SettingsView(ft.Column):
             self._desktop_overlay_lock_button,
             self._desktop_overlay_lock_label_for(self._current_desktop_overlay_locked()),
         )
+        self._desktop_overlay_background_alpha_value_text.value = (
+            self._desktop_overlay_background_alpha_label_for(
+                self._current_desktop_overlay_background_alpha()
+            )
+        )
         disabled = self._settings is None
         self._desktop_overlay_size_button.disabled = disabled
+        self._desktop_overlay_background_alpha_decrease_button.disabled = disabled
+        self._desktop_overlay_background_alpha_increase_button.disabled = disabled
         self._desktop_overlay_lock_button.disabled = disabled
         self._overlay_vr_reset_button.disabled = disabled
         self._overlay_desktop_reset_button.disabled = disabled
@@ -3737,16 +3822,43 @@ class SettingsView(ft.Column):
         locked = value == "locked"
         if self._current_desktop_overlay_locked() == locked:
             return
+        if not self._desktop_overlay_runtime_lock_applies():
+            self._sync_desktop_overlay_main_controls()
+            return
         if self.on_desktop_overlay_lock_change:
             self._desktop_overlay_pending_locked = locked
             self._desktop_overlay_captions_locked = locked
             self._sync_desktop_overlay_main_controls()
             self.on_desktop_overlay_lock_change(locked)
             return
-        self._settings.overlay.desktop_flet.locked = locked
-        self._desktop_overlay_pending_locked = None
+        self._desktop_overlay_pending_locked = locked
         self._desktop_overlay_captions_locked = locked
         self._sync_desktop_overlay_main_controls()
+
+    def _on_desktop_overlay_background_alpha_step(self, delta: float) -> None:
+        if not self._settings or self._desktop_overlay_background_alpha_decrease_button.disabled:
+            return
+        current = self._current_desktop_overlay_background_alpha()
+        current_transparency = 1.0 - current
+        next_transparency = self._normalize_desktop_overlay_background_alpha(
+            round(current_transparency + delta, 2)
+        )
+        next_alpha = self._normalize_desktop_overlay_background_alpha(
+            round(1.0 - next_transparency, 2)
+        )
+        if current == next_alpha:
+            self._sync_desktop_overlay_main_controls()
+            if self.page:
+                self.update()
+            return
+        updated = copy.deepcopy(self._settings)
+        desktop_visual = updated.overlay.desktop_flet.visual
+        desktop_visual.background_alpha = next_alpha
+        desktop_visual.validate()
+        self._settings = updated
+        self._sync_desktop_overlay_main_controls()
+        if self.page:
+            self.update()
         self._emit_settings_changed()
 
     def _on_desktop_overlay_primary_action(self, e) -> None:
@@ -3964,7 +4076,7 @@ class SettingsView(ft.Column):
         self._desktop_overlay_pending_size_preset = None
         self._desktop_overlay_pending_position_reset = False
         self._desktop_overlay_pending_locked = None
-        self._desktop_overlay_captions_locked = bool(settings.overlay.desktop_flet.locked)
+        self._desktop_overlay_captions_locked = False
         if self._overlay_state == "off":
             self._overlay_runtime_target = self._current_overlay_target()
         self._sync_overlay_controls()
@@ -4007,6 +4119,7 @@ class SettingsView(ft.Column):
             ),
         )
         self._sync_overlay_target_control()
+        self._sync_overlay_target_specific_visibility()
         self._sync_desktop_overlay_main_controls()
         self._sync_desktop_overlay_status_control()
 
@@ -4020,6 +4133,8 @@ class SettingsView(ft.Column):
         self._overlay_offset_x_increase_button.disabled = self._settings is None
         self._overlay_offset_y_decrease_button.disabled = self._settings is None
         self._overlay_offset_y_increase_button.disabled = self._settings is None
+        self._desktop_overlay_background_alpha_decrease_button.disabled = self._settings is None
+        self._desktop_overlay_background_alpha_increase_button.disabled = self._settings is None
         self._overlay_vr_reset_button.disabled = self._settings is None
         self._overlay_desktop_reset_button.disabled = self._settings is None
         self._integrated_context_button.disabled = self._settings is None
@@ -4042,9 +4157,13 @@ class SettingsView(ft.Column):
             self._overlay_runtime_target = self._normalized_overlay_target(overlay_target)
         elif state == "off":
             self._overlay_runtime_target = self._current_overlay_target()
-        if desktop_captions_locked is not None and self._desktop_overlay_runtime_lock_applies():
-            self._desktop_overlay_pending_locked = None
-            self._desktop_overlay_captions_locked = bool(desktop_captions_locked)
+        if desktop_captions_locked is not None:
+            if self._desktop_overlay_runtime_lock_applies():
+                self._desktop_overlay_pending_locked = None
+                self._desktop_overlay_captions_locked = bool(desktop_captions_locked)
+            else:
+                self._desktop_overlay_pending_locked = None
+                self._desktop_overlay_captions_locked = False
         self._sync_overlay_controls()
 
     def _on_overlay_calibration_reset(self, e) -> None:
@@ -4512,16 +4631,19 @@ class SettingsView(ft.Column):
         self._overlay_offset_x_title.value = t("settings.overlay.calibration.offset_x")
         self._overlay_offset_y_title.value = t("settings.overlay.calibration.offset_y")
         self._overlay_text_scale_title.value = t("settings.overlay.calibration.text_scale")
-        self._overlay_reset_title.value = t("settings.overlay.position_reset.title")
+        self._overlay_vr_reset_title.value = t("settings.overlay.position_reset.vr.title")
+        self._overlay_desktop_reset_title.value = t("settings.overlay.position_reset.desktop.title")
         self._desktop_overlay_size_title.value = t("settings.overlay.desktop.size.title")
+        self._desktop_overlay_background_alpha_title.value = t(
+            "settings.overlay.desktop.background_alpha.title"
+        )
         self._desktop_overlay_lock_title.value = t("settings.overlay.desktop.lock.title")
         self._set_unit_card_value_text(
-            self._overlay_vr_reset_button, t("settings.overlay.position_reset.action.vr"), size=20
+            self._overlay_vr_reset_button, t("settings.overlay.position_reset.action.vr")
         )
         self._set_unit_card_value_text(
             self._overlay_desktop_reset_button,
             t("settings.overlay.position_reset.action.desktop"),
-            size=20,
         )
         _set_text_button_label(self._reset_prompt_btn, t("settings.reset_prompt"))
         self._sync_prompt_tab_copy()
@@ -4547,6 +4669,8 @@ class SettingsView(ft.Column):
             getattr(self, "_overlay_offset_x_increase_glyph", None),
             getattr(self, "_overlay_offset_y_decrease_glyph", None),
             getattr(self, "_overlay_offset_y_increase_glyph", None),
+            getattr(self, "_desktop_overlay_background_alpha_decrease_glyph", None),
+            getattr(self, "_desktop_overlay_background_alpha_increase_glyph", None),
         ):
             if glyph_text:
                 glyph_text.font_family = ui_font

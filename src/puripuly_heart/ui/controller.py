@@ -311,12 +311,6 @@ class GuiController:
         default=None,
         repr=False,
     )
-    _pending_desktop_bounds_epoch: int | None = field(
-        init=False,
-        default=None,
-        repr=False,
-    )
-    _desktop_bounds_epoch: int = field(init=False, default=0, repr=False)
     _desktop_suppressed_bounds_signatures: set[tuple[float, float, float, float]] = field(
         init=False,
         default_factory=set,
@@ -1352,7 +1346,18 @@ class GuiController:
         desktop_settings.validate()
         bounds = self._desktop_launch_bounds_for_current_launch(desktop_settings)
         visual = desktop_settings.visual
-        interaction_mode = self._desktop_interaction_mode_for_locked(desktop_settings.locked)
+        interaction_mode = DESKTOP_INTERACTION_MODE_EDIT
+        self.log_detailed(
+            "[DesktopOverlay][Launch] "
+            f"target=desktop locked={desktop_settings.locked} "
+            f"interaction_mode={interaction_mode} "
+            f"size_preset={desktop_settings.size_preset} "
+            f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+            f"height={bounds['height']} "
+            f"text_scale={visual.text_scale} "
+            f"background_alpha={visual.background_alpha} "
+            f"outline_width={visual.outline_width}"
+        )
         return [
             {
                 "command": "apply_window_bounds",
@@ -1360,7 +1365,6 @@ class GuiController:
                 "y": bounds["y"],
                 "width": bounds["width"],
                 "height": bounds["height"],
-                "bounds_epoch": self._desktop_bounds_epoch,
             },
             {
                 "command": "apply_visual_config",
@@ -1370,12 +1374,6 @@ class GuiController:
             },
             {"command": "set_interaction_mode", "mode": interaction_mode},
         ]
-
-    @staticmethod
-    def _desktop_interaction_mode_for_locked(locked: object) -> str:
-        if locked is True:
-            return DESKTOP_INTERACTION_MODE_PASS_THROUGH
-        return DESKTOP_INTERACTION_MODE_EDIT
 
     @staticmethod
     def _desktop_dimensions_for_size_preset(size_preset: object) -> tuple[int, int]:
@@ -1441,20 +1439,6 @@ class GuiController:
             float(bounds["height"]),
         )
 
-    @staticmethod
-    def _desktop_bounds_epoch_from_payload(
-        payload: dict[object, object],
-    ) -> int | None:
-        value = payload.get("bounds_epoch")
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-            return value
-        return None
-
-    def _next_desktop_bounds_epoch(self) -> int:
-        self._desktop_bounds_epoch += 1
-        self._discard_pending_desktop_bounds_persistence()
-        return self._desktop_bounds_epoch
-
     def _desktop_bounds_from_payload(
         self,
         payload: dict[object, object],
@@ -1488,8 +1472,6 @@ class GuiController:
         if source not in {"user", "reset", "programmatic", "launch_repair"}:
             return False
         expected_persist = source in {"user", "reset"}
-        if "bounds_epoch" in payload and self._desktop_bounds_epoch_from_payload(payload) is None:
-            return False
         return bool(
             payload.get("event") == "window_bounds_changed"
             and isinstance(persist, bool)
@@ -1512,15 +1494,43 @@ class GuiController:
         self._desktop_suppressed_bounds_signatures.discard(signature)
         return True
 
-    def _is_non_current_desktop_bounds_event_epoch(
-        self,
-        payload: dict[object, object],
-    ) -> bool:
-        bounds_epoch = self._desktop_bounds_epoch_from_payload(payload)
-        return bounds_epoch is not None and bounds_epoch != self._desktop_bounds_epoch
-
     def _discard_suppressed_desktop_bounds(self, bounds: dict[str, int | float]) -> None:
         self._desktop_suppressed_bounds_signatures.discard(self._desktop_bounds_signature(bounds))
+
+    @staticmethod
+    def _is_desktop_user_window_bounds_event(event: object) -> bool:
+        if not isinstance(event, dict):
+            return False
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return False
+        return bool(
+            payload.get("event") == "window_bounds_changed"
+            and payload.get("source") == "user"
+            and payload.get("persist") is True
+        )
+
+    def _drain_pending_desktop_user_bounds_events(self) -> None:
+        queue = self._desktop_renderer_events
+        if queue is None:
+            return
+        retained: list[dict[str, object]] = []
+        dropped = 0
+        while True:
+            try:
+                event = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if self._is_desktop_user_window_bounds_event(event):
+                dropped += 1
+                continue
+            retained.append(event)
+        for event in retained:
+            queue.put_nowait(event)
+        if dropped:
+            self.log_detailed(
+                f"[DesktopOverlay][Bounds] drained_pending_user_bounds count={dropped}"
+            )
 
     def _set_desktop_overlay_interaction_mode(self, mode: object) -> bool:
         if not isinstance(mode, str) or mode not in DESKTOP_INTERACTION_MODES:
@@ -1542,18 +1552,19 @@ class GuiController:
     async def set_desktop_overlay_captions_locked(self, locked: bool) -> None:
         if self.settings is None:
             return
-        if (
-            self._active_overlay_target != OVERLAY_TARGET_DESKTOP
-            and self._overlay_target_for_settings(self.settings) != OVERLAY_TARGET_DESKTOP
-        ):
+        if self.overlay_state != "connected":
+            return
+        if self._active_overlay_target != OVERLAY_TARGET_DESKTOP or self._overlay_bridge is None:
             return
 
         mode = DESKTOP_INTERACTION_MODE_PASS_THROUGH if locked else DESKTOP_INTERACTION_MODE_EDIT
-        self.settings.overlay.desktop_flet.locked = bool(locked)
-        self._save_settings()
-        await self._broadcast_desktop_runtime_control(
-            {"command": "set_interaction_mode", "mode": mode}
-        )
+        if not await self._broadcast_desktop_runtime_control(
+            {
+                "command": "set_interaction_mode",
+                "mode": mode,
+            }
+        ):
+            return
         self._set_desktop_overlay_interaction_mode(mode)
 
     async def set_desktop_overlay_size_preset(self, size_preset: str) -> None:
@@ -1601,7 +1612,6 @@ class GuiController:
             "y": bounds["y"],
             "width": bounds["width"],
             "height": bounds["height"],
-            "bounds_epoch": self._desktop_bounds_epoch,
         }
         if await self._broadcast_desktop_runtime_control(payload):
             self._track_desktop_apply_window_bounds_control(payload)
@@ -1649,35 +1659,70 @@ class GuiController:
         payload: dict[object, object],
     ) -> None:
         if not self._is_valid_desktop_window_bounds_event_payload(payload):
+            self.log_detailed(
+                "[DesktopOverlay][Bounds] ignored reason=invalid_payload "
+                f"keys={sorted(str(key) for key in payload)} "
+                f"source={payload.get('source')} persist={payload.get('persist')}"
+            )
             return
         bounds = self._desktop_bounds_from_payload(payload)
         if bounds is None:
+            self.log_detailed(
+                "[DesktopOverlay][Bounds] ignored reason=invalid_bounds "
+                f"source={payload.get('source')} persist={payload.get('persist')}"
+            )
             return
         source = payload.get("source")
+        interaction_mode = self.desktop_overlay_interaction_mode
+        self.log_detailed(
+            "[DesktopOverlay][Bounds] received "
+            f"source={source} persist={payload.get('persist')} "
+            f"interaction_mode={interaction_mode} "
+            f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+            f"height={bounds['height']}"
+        )
         if source in {"programmatic", "launch_repair"}:
+            self.log_detailed(
+                "[DesktopOverlay][Bounds] ignored reason=programmatic_source "
+                f"source={source} x={bounds['x']} y={bounds['y']} "
+                f"width={bounds['width']} height={bounds['height']}"
+            )
             self._discard_suppressed_desktop_bounds(bounds)
             return
         if source == "reset":
+            self.log_detailed(
+                "[DesktopOverlay][Bounds] reset_requested "
+                f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+                f"height={bounds['height']}"
+            )
             await self._handle_desktop_overlay_reset_requested(bounds=bounds)
             return
-        if source == "user" and self._is_non_current_desktop_bounds_event_epoch(payload):
+        if source == "user" and interaction_mode != DESKTOP_INTERACTION_MODE_EDIT:
+            self.log_detailed(
+                "[DesktopOverlay][Bounds] ignored reason=locked_interaction_mode "
+                f"interaction_mode={interaction_mode} x={bounds['x']} y={bounds['y']} "
+                f"width={bounds['width']} height={bounds['height']}"
+            )
             return
         if self._consume_suppressed_desktop_bounds(bounds):
+            self.log_detailed(
+                "[DesktopOverlay][Bounds] ignored reason=suppressed_signature "
+                f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+                f"height={bounds['height']}"
+            )
             return
-        event_epoch = self._desktop_bounds_epoch_from_payload(payload)
-        self._schedule_desktop_bounds_persistence(
-            bounds,
-            bounds_epoch=event_epoch if event_epoch is not None else self._desktop_bounds_epoch,
+        self._schedule_desktop_bounds_persistence(bounds)
+        self.log_detailed(
+            "[DesktopOverlay][Bounds] scheduled_persist "
+            f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+            f"height={bounds['height']}"
         )
 
     def _schedule_desktop_bounds_persistence(
         self,
         bounds: dict[str, int | float],
-        *,
-        bounds_epoch: int,
     ) -> None:
         self._pending_desktop_bounds = dict(bounds)
-        self._pending_desktop_bounds_epoch = bounds_epoch
         task = self._desktop_bounds_persist_task
         if task is not None and not task.done():
             task.cancel()
@@ -1690,12 +1735,8 @@ class GuiController:
         try:
             await asyncio.sleep(DESKTOP_BOUNDS_PERSIST_DEBOUNCE_S)
             bounds = self._pending_desktop_bounds
-            bounds_epoch = self._pending_desktop_bounds_epoch
             self._pending_desktop_bounds = None
-            self._pending_desktop_bounds_epoch = None
             if bounds is None:
-                return
-            if bounds_epoch != self._desktop_bounds_epoch:
                 return
             self._persist_desktop_bounds(bounds)
         except asyncio.CancelledError:
@@ -1713,6 +1754,11 @@ class GuiController:
         desktop_settings.position.x = bounds["x"]
         desktop_settings.position.y = bounds["y"]
         desktop_settings.position.validate()
+        self.log_detailed(
+            "[DesktopOverlay][Bounds] persisted "
+            f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+            f"height={bounds['height']} size_preset={desktop_settings.size_preset}"
+        )
         self._save_settings()
 
     async def _handle_desktop_overlay_reset_requested(
@@ -1732,6 +1778,7 @@ class GuiController:
         if not configured_for_desktop and not desktop_renderer_active:
             return
         await self._cancel_desktop_bounds_persistence()
+        self._drain_pending_desktop_user_bounds_events()
         _ = bounds
         desktop_settings = self.settings.overlay.desktop_flet
         desktop_settings.position.x = None
@@ -1739,12 +1786,14 @@ class GuiController:
         desktop_settings.locked = False
         desktop_settings.validate()
         self._set_desktop_overlay_interaction_mode(DESKTOP_INTERACTION_MODE_EDIT)
-        self._next_desktop_bounds_epoch()
         self._save_settings()
         if not desktop_renderer_active:
             return
         await self._broadcast_desktop_runtime_control(
-            {"command": "set_interaction_mode", "mode": DESKTOP_INTERACTION_MODE_EDIT}
+            {
+                "command": "set_interaction_mode",
+                "mode": DESKTOP_INTERACTION_MODE_EDIT,
+            }
         )
         await self._broadcast_desktop_window_bounds_control(
             self._desktop_center_bounds_for_current_preset()
@@ -1794,7 +1843,6 @@ class GuiController:
         task = self._desktop_bounds_persist_task
         self._desktop_bounds_persist_task = None
         self._pending_desktop_bounds = None
-        self._pending_desktop_bounds_epoch = None
         if task is not None and task is not current_task and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -1807,7 +1855,6 @@ class GuiController:
         task = self._desktop_bounds_persist_task
         self._desktop_bounds_persist_task = None
         self._pending_desktop_bounds = None
-        self._pending_desktop_bounds_epoch = None
         if task is not None and task is not current_task and not task.done():
             task.cancel()
 
@@ -1855,7 +1902,8 @@ class GuiController:
 
         controls: list[dict[str, object]] = []
         if previous_desktop.size_preset != next_desktop.size_preset:
-            self._next_desktop_bounds_epoch()
+            self._discard_pending_desktop_bounds_persistence()
+            self._drain_pending_desktop_user_bounds_events()
             bounds = self._desktop_center_preserving_bounds_for_size_preset_change(
                 previous_desktop_settings=previous_desktop,
                 next_size_preset=next_desktop.size_preset,
@@ -1866,11 +1914,19 @@ class GuiController:
                 next_desktop.position.validate()
             controls.append({"command": "apply_window_bounds", **bounds})
 
-        if previous_desktop.locked != next_desktop.locked:
+        previous_visual = previous_desktop.visual
+        next_visual = next_desktop.visual
+        if (
+            previous_visual.text_scale != next_visual.text_scale
+            or previous_visual.background_alpha != next_visual.background_alpha
+            or previous_visual.outline_width != next_visual.outline_width
+        ):
             controls.append(
                 {
-                    "command": "set_interaction_mode",
-                    "mode": self._desktop_interaction_mode_for_locked(next_desktop.locked),
+                    "command": "apply_visual_config",
+                    "text_scale": next_visual.text_scale,
+                    "background_alpha": next_visual.background_alpha,
+                    "outline_width": next_visual.outline_width,
                 }
             )
         return controls
@@ -1881,11 +1937,12 @@ class GuiController:
     ) -> None:
         if self._overlay_target_for_settings(settings) != OVERLAY_TARGET_DESKTOP:
             return
-        desktop_settings = settings.overlay.desktop_flet
-        desktop_settings.validate()
-        self._set_desktop_overlay_interaction_mode(
-            self._desktop_interaction_mode_for_locked(desktop_settings.locked)
-        )
+        if (
+            self._active_overlay_target == OVERLAY_TARGET_DESKTOP
+            and self._overlay_bridge is not None
+        ):
+            return
+        self._set_desktop_overlay_interaction_mode(DESKTOP_INTERACTION_MODE_EDIT)
 
     async def _broadcast_desktop_runtime_control_payloads(
         self,

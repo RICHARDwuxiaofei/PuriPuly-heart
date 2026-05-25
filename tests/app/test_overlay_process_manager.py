@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -995,7 +996,7 @@ async def test_overlay_process_manager_renderer_events_forwards_valid_window_bou
 
 
 @pytest.mark.asyncio
-async def test_overlay_process_manager_renderer_events_allows_window_bounds_epoch() -> None:
+async def test_overlay_process_manager_renderer_events_strips_legacy_window_bounds_epoch() -> None:
     bridge_messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
     renderer_events: asyncio.Queue[dict[str, object]] = asyncio.Queue()
     manager = OverlayProcessManager(
@@ -1023,7 +1024,10 @@ async def test_overlay_process_manager_renderer_events_allows_window_bounds_epoc
 
         forwarded = await asyncio.wait_for(renderer_events.get(), timeout=0.5)
 
-        assert forwarded == event
+        expected = copy.deepcopy(event)
+        assert isinstance(expected["payload"], dict)
+        expected["payload"].pop("bounds_epoch")
+        assert forwarded == expected
         assert manager.state == "connected"
         assert manager.failure_reason is None
     finally:

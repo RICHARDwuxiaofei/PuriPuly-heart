@@ -759,6 +759,11 @@ class OverlayProcessManager:
             )
             return
 
+        if renderer_event_type == "window_bounds_changed" and "bounds_epoch" in payload:
+            payload = dict(payload)
+            payload.pop("bounds_epoch", None)
+            event = {**event, "payload": payload}
+
         try:
             self.renderer_events.put_nowait(event)
         except asyncio.QueueFull:
