@@ -126,7 +126,7 @@ def test_overlay_settings_desktop_flet_legacy_bounds_and_visual_migrate_to_canon
         {
             "overlay": {
                 "desktop_flet": {
-                    "bounds": {"x": 320, "y": 720, "width": 1600, "height": 413},
+                    "bounds": {"x": 320, "y": 720, "width": 1600, "height": 384},
                     "visual": {
                         "text_scale": 1.25,
                         "background_alpha": 0.45,
@@ -159,7 +159,7 @@ def test_overlay_settings_desktop_flet_legacy_bounds_repair_and_tie_breaking() -
         {
             "overlay": {
                 "desktop_flet": {
-                    "bounds": {"x": 100, "y": math.inf, "width": math.nan, "height": 413}
+                    "bounds": {"x": 100, "y": math.inf, "width": math.nan, "height": 384}
                 }
             }
         }
@@ -170,7 +170,7 @@ def test_overlay_settings_desktop_flet_legacy_bounds_repair_and_tie_breaking() -
                 "desktop_flet": {
                     "bounds": {
                         "width": (2 * 1152 * 1344) / (1152 + 1344),
-                        "height": (2 * 297 * 347) / (297 + 347),
+                        "height": (2 * 272 * 320) / (272 + 320),
                     }
                 }
             }
@@ -182,7 +182,7 @@ def test_overlay_settings_desktop_flet_legacy_bounds_repair_and_tie_breaking() -
                 "desktop_flet": {
                     "bounds": {
                         "width": (2 * 1600 * 1792) / (1600 + 1792),
-                        "height": (2 * 413 * 462) / (413 + 462),
+                        "height": (2 * 384 * 432) / (384 + 432),
                     }
                 }
             }

@@ -56,10 +56,10 @@ DESKTOP_FLET_MAX_OUTLINE_WIDTH = 8.0
 DESKTOP_FLET_SIZE_PRESET_ORDER = ("small", "medium", "large", "xlarge")
 DESKTOP_FLET_DEFAULT_SIZE_PRESET = "medium"
 DESKTOP_FLET_SIZE_PRESETS: dict[str, tuple[int, int]] = {
-    "small": (1152, 297),
-    "medium": (1344, 347),
-    "large": (1600, 413),
-    "xlarge": (1792, 462),
+    "small": (1152, 272),
+    "medium": (1344, 320),
+    "large": (1600, 384),
+    "xlarge": (1792, 432),
 }
 DESKTOP_FLET_DEFAULT_WIDTH = DESKTOP_FLET_SIZE_PRESETS[DESKTOP_FLET_DEFAULT_SIZE_PRESET][0]
 DESKTOP_FLET_DEFAULT_HEIGHT = DESKTOP_FLET_SIZE_PRESETS[DESKTOP_FLET_DEFAULT_SIZE_PRESET][1]
