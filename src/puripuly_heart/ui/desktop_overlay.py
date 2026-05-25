@@ -49,7 +49,6 @@ from puripuly_heart.core.overlay.protocol import (
     OverlayPresentationBlock,
     OverlayPresentationSnapshot,
 )
-from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import t_for_locale
 
 logger = logging.getLogger(__name__)
@@ -81,14 +80,19 @@ _REQUIRED_MANIFEST_STRING_FIELDS = {
 _REQUIRED_MANIFEST_INT_FIELDS = {"contract_version", "parent_pid", "startup_deadline_ms"}
 _DESKTOP_CAPTION_WHITE = "#FFFFFF"
 _DESKTOP_CAPTION_GOLD = "#FFD700"
+_DESKTOP_CAPTION_LATIN_FONT_FAMILY = "Noto Sans"
+_DESKTOP_CAPTION_CJK_FONT_FAMILY = "Noto Sans CJK KR"
 _DESKTOP_CAPTION_BACKGROUND_RGB = "000000"
 _DESKTOP_CAPTION_TRANSPARENT = "transparent"
-_DESKTOP_CAPTION_MAX_VISIBLE_LINES = 4
+_DESKTOP_CAPTION_MAX_VISIBLE_SLOTS = 2
+_DESKTOP_CAPTION_MAX_VISIBLE_LINES = 6
 _DESKTOP_CAPTION_PRIMARY_MAX_LINES = 2
-_DESKTOP_CAPTION_SECONDARY_MAX_LINES = 2
+_DESKTOP_CAPTION_SECONDARY_MAX_LINES = 1
 _DESKTOP_CAPTION_LINE_HEIGHT = 1.14
+_DESKTOP_CAPTION_PRIMARY_REGION_ALIGNMENT_Y = -0.5
+_DESKTOP_CAPTION_TEXT_STACK_ALIGNMENT_Y = -0.08
 _DESKTOP_CAPTION_OVERFLOW_STRATEGY = (
-    "four-line-budget:newest-active,peer-translated-primary," "drop-secondary-then-older-finalized"
+    "two-turn-slots:presenter-selected-blocks,primary-two-lines,secondary-one-line"
 )
 _DESKTOP_INTERACTION_MODE_EDIT = "edit"
 _DESKTOP_INTERACTION_MODE_PASS_THROUGH = "pass_through"
@@ -151,7 +155,7 @@ DESKTOP_CAPTION_MAPPING_TABLE: tuple[DesktopCaptionMappingRule, ...] = (
         promoted=False,
         color=_DESKTOP_CAPTION_GOLD,
         priority="85 active/interim secondary",
-        truncation="max 2 lines; drops before active primary",
+        truncation="max 1 line; drops before active primary",
     ),
     DesktopCaptionMappingRule(
         snapshot_field="blocks[]",
@@ -181,7 +185,7 @@ DESKTOP_CAPTION_MAPPING_TABLE: tuple[DesktopCaptionMappingRule, ...] = (
         promoted=False,
         color=_DESKTOP_CAPTION_WHITE,
         priority="70 peer original/source secondary",
-        truncation="max 2 lines; drops before peer translated primary",
+        truncation="max 1 line; drops before peer translated primary",
     ),
     DesktopCaptionMappingRule(
         snapshot_field="blocks[]",
@@ -211,7 +215,7 @@ DESKTOP_CAPTION_MAPPING_TABLE: tuple[DesktopCaptionMappingRule, ...] = (
         promoted=False,
         color=_DESKTOP_CAPTION_GOLD,
         priority="50 self translation secondary",
-        truncation="max 2 lines; drops before finalized primary lines",
+        truncation="max 1 line; drops before finalized primary lines",
     ),
     DesktopCaptionMappingRule(
         snapshot_field="blocks[]",
@@ -266,13 +270,14 @@ class DesktopCaptionSizePreset:
     padding_horizontal: int
     padding_vertical: int
     border_radius: int
+    slot_gap: int
 
 
 _DESKTOP_CAPTION_SIZE_PRESETS: dict[str, DesktopCaptionSizePreset] = {
-    "small": DesktopCaptionSizePreset("small", 1152, 297, 37, 23, 18, 10, 14),
-    "medium": DesktopCaptionSizePreset("medium", 1344, 347, 43, 27, 22, 12, 16),
-    "large": DesktopCaptionSizePreset("large", 1600, 413, 52, 32, 26, 14, 18),
-    "xlarge": DesktopCaptionSizePreset("xlarge", 1792, 462, 58, 36, 30, 16, 20),
+    "small": DesktopCaptionSizePreset("small", 1152, 272, 37, 23, 18, 8, 14, 8),
+    "medium": DesktopCaptionSizePreset("medium", 1344, 320, 43, 27, 22, 10, 16, 10),
+    "large": DesktopCaptionSizePreset("large", 1600, 384, 52, 32, 26, 12, 18, 12),
+    "xlarge": DesktopCaptionSizePreset("xlarge", 1792, 432, 58, 36, 30, 14, 20, 14),
 }
 
 
@@ -304,7 +309,19 @@ class DesktopCaptionLine:
 
 
 @dataclass(frozen=True, slots=True)
+class DesktopCaptionSlot:
+    block_id: str
+    occupant_key: str
+    channel: str
+    block_variant: str
+    appearance_seq: int
+    lines: tuple[DesktopCaptionLine, ...]
+    active: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class DesktopCaptionPlan:
+    slots: tuple[DesktopCaptionSlot, ...]
     lines: tuple[DesktopCaptionLine, ...]
     size_preset: str
     window_width: int
@@ -315,12 +332,19 @@ class DesktopCaptionPlan:
     outline_width: float
     padding_horizontal: int
     padding_vertical: int
+    slot_gap: int
+    slot_height: float
+    primary_region_height: float
+    secondary_region_height: float
     border_radius: int
     background_alpha: float
     background_color: str
     surface_visible: bool
+    full_window_background_visible: bool
     no_scrollbars: bool = True
     max_visible_lines: int = _DESKTOP_CAPTION_MAX_VISIBLE_LINES
+    max_visible_slots: int = _DESKTOP_CAPTION_MAX_VISIBLE_SLOTS
+    secondary_line_max_lines: int = _DESKTOP_CAPTION_SECONDARY_MAX_LINES
     overflow_strategy: str = _DESKTOP_CAPTION_OVERFLOW_STRATEGY
 
 
@@ -410,21 +434,33 @@ def build_desktop_caption_plan(
     primary_font_size = preset.primary_font_size
     secondary_font_size = preset.secondary_font_size
     outline_width = 0.0
-    font_family = font_for_language(locale)
+    _ = locale
 
-    candidates = _caption_lines_for_snapshot(
+    candidate_slots = _caption_slots_for_snapshot(
         snapshot,
         primary_font_size=primary_font_size,
         secondary_font_size=secondary_font_size,
-        font_family=font_family,
     )
-    lines = _select_visible_caption_lines(candidates)
+    slots = candidate_slots[:_DESKTOP_CAPTION_MAX_VISIBLE_SLOTS]
+    lines = tuple(line for slot in slots for line in slot.lines)
 
-    surface_visible = bool(lines) or interaction_mode == _DESKTOP_INTERACTION_MODE_EDIT
+    full_window_background_visible = interaction_mode == _DESKTOP_INTERACTION_MODE_EDIT
+    surface_visible = bool(slots) or full_window_background_visible
     background_alpha = 0.0
     if surface_visible:
         background_alpha = visual.background_alpha
+    slot_height = max(
+        1.0,
+        (float(height) - preset.slot_gap) / _DESKTOP_CAPTION_MAX_VISIBLE_SLOTS,
+    )
+    primary_region_height = (
+        primary_font_size * _DESKTOP_CAPTION_LINE_HEIGHT * _DESKTOP_CAPTION_PRIMARY_MAX_LINES
+    )
+    secondary_region_height = (
+        secondary_font_size * _DESKTOP_CAPTION_LINE_HEIGHT * _DESKTOP_CAPTION_SECONDARY_MAX_LINES
+    )
     return DesktopCaptionPlan(
+        slots=slots,
         lines=lines,
         size_preset=preset.id,
         window_width=width,
@@ -435,51 +471,60 @@ def build_desktop_caption_plan(
         outline_width=outline_width,
         padding_horizontal=preset.padding_horizontal,
         padding_vertical=preset.padding_vertical,
+        slot_gap=preset.slot_gap,
+        slot_height=slot_height,
+        primary_region_height=primary_region_height,
+        secondary_region_height=secondary_region_height,
         border_radius=preset.border_radius,
         background_alpha=background_alpha,
         background_color=_caption_background_color(background_alpha),
         surface_visible=surface_visible,
+        full_window_background_visible=full_window_background_visible,
     )
 
 
 def build_desktop_caption_surface(plan: DesktopCaptionPlan) -> Any:
-    """Build no-outline Flet caption controls from a caption plan."""
+    """Build no-outline fixed-slot Flet caption controls from a caption plan."""
 
     import flet as ft
 
-    line_controls = [_build_flet_caption_line(ft, plan, line) for line in plan.lines]
-    column = ft.Column(
-        controls=line_controls,
-        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-        spacing=2,
-        tight=True,
-        scroll=None,
-    )
-    background_layer = ft.Container(
-        bgcolor=plan.background_color,
-        border_radius=plan.border_radius,
-        alignment=ft.alignment.center,
-        left=0,
-        top=0,
-        right=0,
-        bottom=0,
-    )
-    text_layer = ft.Container(
-        content=column,
-        width=plan.window_width,
-        bgcolor=ft.Colors.TRANSPARENT,
-        padding=ft.padding.symmetric(
-            horizontal=plan.padding_horizontal,
-            vertical=plan.padding_vertical,
-        ),
-        alignment=ft.alignment.center,
-    )
+    stack_controls: list[Any] = []
+    if plan.full_window_background_visible:
+        stack_controls.append(
+            ft.Container(
+                bgcolor=plan.background_color,
+                border_radius=plan.border_radius,
+                alignment=ft.alignment.center,
+                left=0,
+                top=0,
+                right=0,
+                bottom=0,
+            )
+        )
+    slot_controls = [_build_flet_caption_slot(ft, plan, slot) for slot in plan.slots]
+    if slot_controls:
+        slot_stack_height = (plan.slot_height * len(slot_controls)) + (
+            plan.slot_gap * max(0, len(slot_controls) - 1)
+        )
+        stack_controls.append(
+            ft.Column(
+                controls=slot_controls,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=plan.slot_gap,
+                tight=True,
+                width=plan.window_width,
+                height=slot_stack_height,
+            )
+        )
     return ft.Container(
         content=ft.Stack(
-            controls=[background_layer, text_layer],
+            controls=stack_controls,
             width=plan.window_width,
+            height=plan.window_height,
         ),
         width=plan.window_width,
+        height=plan.window_height,
         bgcolor=ft.Colors.TRANSPARENT,
         border_radius=plan.border_radius,
         alignment=ft.alignment.center,
@@ -828,24 +873,50 @@ def _preview_block(
     )
 
 
+def _caption_slots_for_snapshot(
+    snapshot: OverlayPresentationSnapshot,
+    *,
+    primary_font_size: int,
+    secondary_font_size: int,
+) -> tuple[DesktopCaptionSlot, ...]:
+    slots: list[DesktopCaptionSlot] = []
+    for block in sorted(snapshot.blocks, key=lambda item: (item.appearance_seq, item.occupant_key)):
+        lines = _caption_lines_for_block(
+            block,
+            primary_font_size=primary_font_size,
+            secondary_font_size=secondary_font_size,
+        )
+        if not lines:
+            continue
+        slots.append(
+            DesktopCaptionSlot(
+                block_id=block.id,
+                occupant_key=block.occupant_key,
+                channel=block.channel,
+                block_variant=block.block_variant,
+                appearance_seq=block.appearance_seq,
+                lines=lines,
+                active=block.block_variant in {"active_self", "active_peer"},
+            )
+        )
+    return tuple(slots)
+
+
 def _caption_lines_for_snapshot(
     snapshot: OverlayPresentationSnapshot,
     *,
     primary_font_size: int,
     secondary_font_size: int,
-    font_family: str | None,
 ) -> tuple[DesktopCaptionLine, ...]:
-    candidates: list[DesktopCaptionLine] = []
-    for block in snapshot.blocks:
-        candidates.extend(
-            _caption_lines_for_block(
-                block,
-                primary_font_size=primary_font_size,
-                secondary_font_size=secondary_font_size,
-                font_family=font_family,
-            )
+    return tuple(
+        line
+        for slot in _caption_slots_for_snapshot(
+            snapshot,
+            primary_font_size=primary_font_size,
+            secondary_font_size=secondary_font_size,
         )
-    return tuple(candidates)
+        for line in slot.lines
+    )
 
 
 def _caption_lines_for_block(
@@ -853,7 +924,6 @@ def _caption_lines_for_block(
     *,
     primary_font_size: int,
     secondary_font_size: int,
-    font_family: str | None,
 ) -> tuple[DesktopCaptionLine, ...]:
     primary_text = block.primary_text.strip()
     secondary_text = block.secondary_text.strip()
@@ -867,7 +937,6 @@ def _caption_lines_for_block(
             secondary_text=secondary_text,
             primary_font_size=primary_font_size,
             secondary_font_size=secondary_font_size,
-            font_family=font_family,
         )
     if block.block_variant == "active_peer":
         return _peer_active_lines(
@@ -876,7 +945,6 @@ def _caption_lines_for_block(
             secondary_text=secondary_text,
             primary_font_size=primary_font_size,
             secondary_font_size=secondary_font_size,
-            font_family=font_family,
         )
     if block.channel == "peer":
         return _peer_finalized_lines(
@@ -885,7 +953,6 @@ def _caption_lines_for_block(
             secondary_text=secondary_text,
             primary_font_size=primary_font_size,
             secondary_font_size=secondary_font_size,
-            font_family=font_family,
         )
     return _self_finalized_lines(
         block,
@@ -893,7 +960,6 @@ def _caption_lines_for_block(
         secondary_text=secondary_text,
         primary_font_size=primary_font_size,
         secondary_font_size=secondary_font_size,
-        font_family=font_family,
     )
 
 
@@ -904,7 +970,6 @@ def _self_active_lines(
     secondary_text: str,
     primary_font_size: int,
     secondary_font_size: int,
-    font_family: str | None,
 ) -> tuple[DesktopCaptionLine, ...]:
     lines: list[DesktopCaptionLine] = []
     if primary_text:
@@ -918,7 +983,6 @@ def _self_active_lines(
                 priority=100,
                 max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
                 font_size=primary_font_size,
-                font_family=font_family,
                 active=True,
             )
         )
@@ -933,7 +997,6 @@ def _self_active_lines(
                 priority=85,
                 max_lines=_DESKTOP_CAPTION_SECONDARY_MAX_LINES,
                 font_size=secondary_font_size,
-                font_family=font_family,
                 active=True,
             )
         )
@@ -947,7 +1010,6 @@ def _peer_active_lines(
     secondary_text: str,
     primary_font_size: int,
     secondary_font_size: int,
-    font_family: str | None,
 ) -> tuple[DesktopCaptionLine, ...]:
     readable_text = primary_text or (secondary_text if block.secondary_enabled else "")
     if not readable_text:
@@ -963,7 +1025,6 @@ def _peer_active_lines(
             priority=95,
             max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
             font_size=primary_font_size if promoted else secondary_font_size,
-            font_family=font_family,
             promoted=promoted,
             active=True,
         ),
@@ -977,7 +1038,6 @@ def _peer_finalized_lines(
     secondary_text: str,
     primary_font_size: int,
     secondary_font_size: int,
-    font_family: str | None,
 ) -> tuple[DesktopCaptionLine, ...]:
     lines: list[DesktopCaptionLine] = []
     if primary_text:
@@ -991,7 +1051,6 @@ def _peer_finalized_lines(
                 priority=90,
                 max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
                 font_size=primary_font_size,
-                font_family=font_family,
             )
         )
         if secondary_text and block.secondary_enabled:
@@ -1005,7 +1064,6 @@ def _peer_finalized_lines(
                     priority=70,
                     max_lines=_DESKTOP_CAPTION_SECONDARY_MAX_LINES,
                     font_size=secondary_font_size,
-                    font_family=font_family,
                 )
             )
         return tuple(lines)
@@ -1020,7 +1078,6 @@ def _peer_finalized_lines(
                 priority=60,
                 max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
                 font_size=primary_font_size,
-                font_family=font_family,
                 promoted=True,
             ),
         )
@@ -1034,7 +1091,6 @@ def _self_finalized_lines(
     secondary_text: str,
     primary_font_size: int,
     secondary_font_size: int,
-    font_family: str | None,
 ) -> tuple[DesktopCaptionLine, ...]:
     lines: list[DesktopCaptionLine] = []
     if primary_text:
@@ -1048,7 +1104,6 @@ def _self_finalized_lines(
                 priority=65,
                 max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
                 font_size=primary_font_size,
-                font_family=font_family,
             )
         )
         if secondary_text and block.secondary_enabled:
@@ -1062,7 +1117,6 @@ def _self_finalized_lines(
                     priority=50,
                     max_lines=_DESKTOP_CAPTION_SECONDARY_MAX_LINES,
                     font_size=secondary_font_size,
-                    font_family=font_family,
                 )
             )
         return tuple(lines)
@@ -1077,7 +1131,6 @@ def _self_finalized_lines(
                 priority=55,
                 max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
                 font_size=primary_font_size,
-                font_family=font_family,
                 promoted=True,
             ),
         )
@@ -1094,7 +1147,6 @@ def _caption_line(
     priority: int,
     max_lines: int,
     font_size: int,
-    font_family: str | None,
     promoted: bool = False,
     active: bool = False,
 ) -> DesktopCaptionLine:
@@ -1110,9 +1162,26 @@ def _caption_line(
         appearance_seq=block.appearance_seq,
         max_lines=max_lines,
         font_size=font_size,
-        font_family=font_family,
+        font_family=_desktop_caption_font_family_for_text(text),
         promoted=promoted,
         active=active,
+    )
+
+
+def _desktop_caption_font_family_for_text(text: str) -> str:
+    if _desktop_caption_text_contains_cjk(text):
+        return _DESKTOP_CAPTION_CJK_FONT_FAMILY
+    return _DESKTOP_CAPTION_LATIN_FONT_FAMILY
+
+
+def _desktop_caption_text_contains_cjk(text: str) -> bool:
+    return any(
+        0x3040 <= ord(char) <= 0x30FF
+        or 0x3400 <= ord(char) <= 0x4DBF
+        or 0x4E00 <= ord(char) <= 0x9FFF
+        or 0xAC00 <= ord(char) <= 0xD7AF
+        or 0xF900 <= ord(char) <= 0xFAFF
+        for char in text
     )
 
 
@@ -1196,8 +1265,88 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return min(maximum, max(minimum, value))
 
 
+def _build_flet_caption_slot(ft: Any, plan: DesktopCaptionPlan, slot: DesktopCaptionSlot) -> Any:
+    line_controls = [
+        _build_flet_caption_line(ft, plan, line)
+        for line in _slot_lines_with_reserved_regions(
+            slot,
+            secondary_font_size=plan.secondary_font_size,
+            font_family=slot.lines[0].font_family if slot.lines else None,
+        )
+    ]
+    column = ft.Column(
+        controls=line_controls,
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        spacing=0,
+        tight=True,
+        scroll=None,
+    )
+    text_layer = ft.Container(
+        content=column,
+        width=plan.text_width,
+        bgcolor=ft.Colors.TRANSPARENT,
+        alignment=ft.Alignment(0, _DESKTOP_CAPTION_TEXT_STACK_ALIGNMENT_Y),
+    )
+    return ft.Container(
+        content=text_layer,
+        width=plan.window_width,
+        height=plan.slot_height,
+        bgcolor=(
+            ft.Colors.TRANSPARENT if plan.full_window_background_visible else plan.background_color
+        ),
+        border_radius=plan.border_radius,
+        padding=ft.padding.symmetric(
+            horizontal=plan.padding_horizontal,
+            vertical=plan.padding_vertical,
+        ),
+        alignment=ft.alignment.center,
+    )
+
+
 def _build_flet_caption_line(ft: Any, plan: DesktopCaptionPlan, line: DesktopCaptionLine) -> Any:
-    return _build_flet_text(ft, plan, line)
+    height = plan.primary_region_height if line.slot == "primary" else plan.secondary_region_height
+    return ft.Container(
+        content=_build_flet_text(ft, plan, line),
+        width=plan.text_width,
+        height=height,
+        bgcolor=ft.Colors.TRANSPARENT,
+        alignment=_caption_line_region_alignment(ft, line),
+    )
+
+
+def _caption_line_region_alignment(ft: Any, line: DesktopCaptionLine) -> Any:
+    if line.slot == "primary":
+        return ft.Alignment(0, _DESKTOP_CAPTION_PRIMARY_REGION_ALIGNMENT_Y)
+    return ft.alignment.center
+
+
+def _slot_lines_with_reserved_regions(
+    slot: DesktopCaptionSlot,
+    *,
+    secondary_font_size: int,
+    font_family: str | None,
+) -> tuple[DesktopCaptionLine, ...]:
+    primary_lines = tuple(line for line in slot.lines if line.slot == "primary")
+    secondary_lines = tuple(line for line in slot.lines if line.slot == "secondary")
+    if secondary_lines:
+        return (*primary_lines, secondary_lines[0])
+    return (
+        *primary_lines,
+        DesktopCaptionLine(
+            text="",
+            role="reserved_secondary",
+            slot="secondary",
+            color=_DESKTOP_CAPTION_WHITE,
+            priority=0,
+            block_id=slot.block_id,
+            channel=slot.channel,
+            block_variant=slot.block_variant,
+            appearance_seq=slot.appearance_seq,
+            max_lines=_DESKTOP_CAPTION_SECONDARY_MAX_LINES,
+            font_size=secondary_font_size,
+            font_family=font_family,
+        ),
+    )
 
 
 def _build_flet_text(
