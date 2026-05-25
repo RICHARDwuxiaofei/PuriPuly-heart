@@ -29,11 +29,19 @@ from puripuly_heart.ui.controller import GuiController
 class DummyPage:
     def __init__(self) -> None:
         self.opened: list[object] = []
+        self.closed: list[object] = []
         self.tasks: list[object] = []
         self.updated = 0
 
     def open(self, control) -> None:  # noqa: ANN001
+        if hasattr(control, "open"):
+            control.open = True
         self.opened.append(control)
+
+    def close(self, control) -> None:  # noqa: ANN001
+        if hasattr(control, "open"):
+            control.open = False
+        self.closed.append(control)
 
     def run_task(self, task_factory) -> None:  # noqa: ANN001
         self.tasks.append(task_factory)
@@ -398,7 +406,7 @@ async def test_launch_github_star_snackbar_waits_opens_records_and_action_click_
 
     snackbar = page.opened[0]
     assert snackbar.bgcolor == app_module.COLOR_SUCCESS
-    assert snackbar.duration == 10000
+    assert snackbar.duration == 8000
     assert snackbar.behavior == ft.SnackBarBehavior.FLOATING
     assert getattr(snackbar, "show_close_icon", False) is not True
     assert isinstance(snackbar.content, ft.Row)
@@ -422,6 +430,8 @@ async def test_launch_github_star_snackbar_waits_opens_records_and_action_click_
     in_click_callback = False
 
     assert opened_urls == ["https://github.com/kapitalismho/PuriPuly-heart"]
+    assert page.closed == [snackbar]
+    assert snackbar.open is False
     assert click_callback_save_calls == []
     assert controller.settings.ui.github_star_prompt_clicked is False
     assert len(page.tasks) == 1
@@ -429,7 +439,6 @@ async def test_launch_github_star_snackbar_waits_opens_records_and_action_click_
 
     assert controller.settings.ui.github_star_prompt_clicked is True
     assert saved_payloads[-1]["ui"]["github_star_prompt_clicked"] is True
-    assert page.updated == 1
 
 
 @pytest.mark.asyncio
@@ -655,7 +664,7 @@ def test_debug_preview_github_star_snackbar_opens_without_mutating_prompt_state(
 
     snackbar = app.page.opened[0]
     assert snackbar.bgcolor == app_module.COLOR_SUCCESS
-    assert snackbar.duration == 10000
+    assert snackbar.duration == 8000
     assert snackbar.behavior == ft.SnackBarBehavior.FLOATING
     assert getattr(snackbar, "show_close_icon", False) is not True
     assert isinstance(snackbar.content, ft.Row)
@@ -667,5 +676,6 @@ def test_debug_preview_github_star_snackbar_opens_without_mutating_prompt_state(
     action.on_click(None)
 
     assert opened_urls == ["https://github.com/kapitalismho/PuriPuly-heart"]
+    assert app.page.closed == [snackbar]
+    assert snackbar.open is False
     assert to_dict(controller.settings)["ui"] == initial_prompt_state
-    assert app.page.updated == 1
