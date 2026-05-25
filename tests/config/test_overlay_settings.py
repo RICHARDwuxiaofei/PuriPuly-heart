@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 import math
 
-from puripuly_heart.config.settings import SETTINGS_SCHEMA_VERSION, from_dict, to_dict
+from puripuly_heart.config.settings import (
+    DESKTOP_FLET_SIZE_PRESETS,
+    SETTINGS_SCHEMA_VERSION,
+    from_dict,
+    to_dict,
+)
 
 
 def test_overlay_settings_desktop_flet_defaults_serialize_canonical_shape() -> None:
@@ -27,6 +32,15 @@ def test_overlay_settings_desktop_flet_defaults_serialize_canonical_shape() -> N
         "visual": {"background_alpha": 0.6},
     }
     assert "locked" not in data["overlay"]["desktop_flet"]
+
+
+def test_overlay_settings_desktop_flet_size_presets_match_descender_budget() -> None:
+    assert DESKTOP_FLET_SIZE_PRESETS == {
+        "small": (1152, 288),
+        "medium": (1344, 336),
+        "large": (1600, 400),
+        "xlarge": (1792, 448),
+    }
 
 
 def test_overlay_settings_desktop_flet_legacy_locked_loads_startup_safe_and_is_not_serialized() -> (
@@ -126,7 +140,7 @@ def test_overlay_settings_desktop_flet_legacy_bounds_and_visual_migrate_to_canon
         {
             "overlay": {
                 "desktop_flet": {
-                    "bounds": {"x": 320, "y": 720, "width": 1600, "height": 384},
+                    "bounds": {"x": 320, "y": 720, "width": 1600, "height": 400},
                     "visual": {
                         "text_scale": 1.25,
                         "background_alpha": 0.45,
@@ -159,7 +173,7 @@ def test_overlay_settings_desktop_flet_legacy_bounds_repair_and_tie_breaking() -
         {
             "overlay": {
                 "desktop_flet": {
-                    "bounds": {"x": 100, "y": math.inf, "width": math.nan, "height": 384}
+                    "bounds": {"x": 100, "y": math.inf, "width": math.nan, "height": 400}
                 }
             }
         }
@@ -170,7 +184,7 @@ def test_overlay_settings_desktop_flet_legacy_bounds_repair_and_tie_breaking() -
                 "desktop_flet": {
                     "bounds": {
                         "width": (2 * 1152 * 1344) / (1152 + 1344),
-                        "height": (2 * 272 * 320) / (272 + 320),
+                        "height": (2 * 288 * 336) / (288 + 336),
                     }
                 }
             }
@@ -182,7 +196,7 @@ def test_overlay_settings_desktop_flet_legacy_bounds_repair_and_tie_breaking() -
                 "desktop_flet": {
                     "bounds": {
                         "width": (2 * 1600 * 1792) / (1600 + 1792),
-                        "height": (2 * 384 * 432) / (384 + 432),
+                        "height": (2 * 400 * 448) / (400 + 448),
                     }
                 }
             }

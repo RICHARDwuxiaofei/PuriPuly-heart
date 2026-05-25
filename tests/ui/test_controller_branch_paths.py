@@ -4206,7 +4206,7 @@ async def test_desktop_initial_control_manifest_always_launches_edit_even_with_l
             "x": 24,
             "y": 48,
             "width": 1152,
-            "height": 272,
+            "height": 288,
         },
         {
             "command": "apply_visual_config",
@@ -4317,7 +4317,7 @@ async def test_desktop_initial_control_manifest_uses_saved_position_without_clam
         "x": -5000,
         "y": 9999,
         "width": 1792,
-        "height": 432,
+        "height": 448,
     }
     assert (
         controller.settings.overlay.desktop_flet.position.x,
@@ -4401,7 +4401,7 @@ async def test_desktop_move_persistence_debounces_position_only_and_ignores_prog
                 "x": 111,
                 "y": 222,
                 "width": 1792,
-                "height": 432,
+                "height": 448,
             },
         }
     )
@@ -4415,7 +4415,7 @@ async def test_desktop_move_persistence_debounces_position_only_and_ignores_prog
                 "x": 333,
                 "y": 444,
                 "width": 1152,
-                "height": 272,
+                "height": 288,
             },
         }
     )
@@ -4473,7 +4473,7 @@ async def test_desktop_locked_mode_user_bounds_events_do_not_persist(
                 "x": 608,
                 "y": 1117,
                 "width": 1344,
-                "height": 320,
+                "height": 336,
             },
         }
     )
@@ -4603,7 +4603,7 @@ async def test_desktop_size_preset_change_preserves_current_center_without_clamp
         "x": pytest.approx(expected_x),
         "y": pytest.approx(expected_y),
         "width": 1792,
-        "height": 432,
+        "height": 448,
     }
 
     await controller.set_overlay_enabled(False)
@@ -4660,7 +4660,7 @@ async def test_desktop_size_preset_change_drains_queued_pre_resize_user_bounds(
                 "x": 300,
                 "y": 400,
                 "width": 1152,
-                "height": 272,
+                "height": 288,
             },
         }
     )
@@ -4719,7 +4719,7 @@ async def test_desktop_size_preset_change_supersedes_pending_user_position_debou
                 "x": 111,
                 "y": 222,
                 "width": 1152,
-                "height": 272,
+                "height": 288,
             },
         }
     )
@@ -4815,9 +4815,9 @@ async def test_desktop_reset_clears_position_unlocks_preserves_size_and_alpha_an
     assert bridge.desktop_runtime_control_payloads[-1] == {
         "command": "apply_window_bounds",
         "x": pytest.approx(160),
-        "y": pytest.approx(348),
+        "y": pytest.approx(340),
         "width": 1600,
-        "height": 384,
+        "height": 400,
     }
 
     await controller.set_overlay_enabled(False)
@@ -5013,7 +5013,7 @@ async def test_desktop_reset_drains_queued_pre_reset_user_bounds(
                 "x": 300,
                 "y": 400,
                 "width": 1600,
-                "height": 384,
+                "height": 400,
             },
         }
     )
@@ -5168,7 +5168,7 @@ def test_desktop_initial_controls_emit_launch_diagnostics_only_in_detailed_mode(
         and "x=597" in message
         and "y=1017" in message
         and "width=1344" in message
-        and "height=320" in message
+        and "height=336" in message
         and "background_alpha=0.5" in message
         for message in messages
     )
@@ -5197,7 +5197,7 @@ async def test_desktop_bounds_events_emit_diagnostics_only_in_detailed_mode() ->
         "x": 111,
         "y": 222,
         "width": 1152,
-        "height": 272,
+        "height": 288,
     }
 
     try:
@@ -5212,7 +5212,7 @@ async def test_desktop_bounds_events_emit_diagnostics_only_in_detailed_mode() ->
             and "x=111" in message
             and "y=222" in message
             and "width=1152" in message
-            and "height=272" in message
+            and "height=288" in message
             for message in messages
         )
         assert any(
