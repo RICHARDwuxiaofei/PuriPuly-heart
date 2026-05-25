@@ -20,6 +20,10 @@ _Avoid_: response, output text
 The side of a conversation that an utterance belongs to: either the user's own speech path or another participant's speech path when peer voice translation is enabled.
 _Avoid_: stream, role, side, local user, remote user
 
+**Content Language**:
+The language of a displayed Transcript or Translation line, used when presentation must respect the language of the text itself.
+_Avoid_: UI language, system locale, font language
+
 **Context Memory**:
 Recent conversation history that can be supplied to translation so nearby turns influence wording and tone.
 _Avoid_: chat history, memory cache
