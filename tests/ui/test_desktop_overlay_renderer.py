@@ -409,6 +409,43 @@ def test_desktop_overlay_visual_config_uses_preset_tokens_and_no_outline_text() 
     assert first_text.style.foreground is None
 
 
+def test_desktop_overlay_caption_text_uses_layered_shadow_without_stroke() -> None:
+    snapshot = OverlayPresentationSnapshot(
+        blocks=[
+            _block(
+                "peer-translated",
+                channel="peer",
+                block_variant="finalized",
+                appearance_seq=1,
+                primary_text="오늘은 천천히 말해줘서 고마워요",
+                secondary_text="Thanks for speaking slowly today.",
+                secondary_enabled=True,
+            )
+        ]
+    )
+    plan = desktop_overlay.build_desktop_caption_plan(snapshot)
+
+    surface = desktop_overlay.build_desktop_caption_surface(plan)
+    slot_column = surface.content.controls[0]
+    slot_card = slot_column.controls[0]
+    text_column = slot_card.content.content
+
+    primary_text = text_column.controls[0].content
+    secondary_text = text_column.controls[1].content
+    for text in (primary_text, secondary_text):
+        assert text.style.foreground is None
+        assert isinstance(text.style.shadow, list)
+        assert len(text.style.shadow) == 2
+
+        contact_shadow, ambient_shadow = text.style.shadow
+        assert contact_shadow.color == "#C0000000"
+        assert contact_shadow.offset == (0, 1)
+        assert contact_shadow.blur_radius == pytest.approx(1.0)
+        assert ambient_shadow.color == "#66000000"
+        assert ambient_shadow.offset == (0, 0)
+        assert ambient_shadow.blur_radius == pytest.approx(3.0)
+
+
 def test_desktop_overlay_uses_fixed_two_turn_slots_with_secondary_one_line() -> None:
     snapshot = OverlayPresentationSnapshot(
         blocks=[
