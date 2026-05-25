@@ -104,7 +104,7 @@ _DESKTOP_WINDOW_BOUNDS_EVENT_NAMES = {"MOVE", "MOVED", "RESIZE", "RESIZED"}
 _INITIAL_RUNTIME_CONTROL_DRAIN_TIMEOUT_S = 0.05
 _PROGRAMMATIC_BOUNDS_ECHO_SUPPRESSION_S = 0.25
 _PROGRAMMATIC_BOUNDS_ECHO_TOLERANCE_PX = 2.0
-_DESKTOP_PREVIEW_BACKGROUND_ALPHA_PRESETS = (0.35, 0.5, 0.65, 0.8)
+_DESKTOP_PREVIEW_BACKGROUND_ALPHA_PRESETS = (0.35, 0.5, 0.6, 0.8)
 _DESKTOP_PREVIEW_DEFAULT_BACKGROUND_ALPHA = DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA
 _DESKTOP_PREVIEW_DEFAULT_BACKGROUND_SURFACE_ID = "bright"
 _DESKTOP_PREVIEW_STAGE_WIDTH = 1180
@@ -303,7 +303,7 @@ class DesktopCaptionLine:
     font_size: int
     font_family: str | None
     line_height: float = _DESKTOP_CAPTION_LINE_HEIGHT
-    weight: str = "bold"
+    weight: str = "semibold"
     promoted: bool = False
     active: bool = False
 
@@ -1376,6 +1376,10 @@ def _build_flet_text(
 
 
 def _flet_font_weight(ft: Any, weight: str) -> Any:
+    if weight == "semibold":
+        return ft.FontWeight.W_600
+    if weight == "medium":
+        return ft.FontWeight.W_500
     if weight == "bold":
         return ft.FontWeight.BOLD
     return None

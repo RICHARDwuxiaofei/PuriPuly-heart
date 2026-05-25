@@ -3876,7 +3876,7 @@ def test_desktop_gui_product_standard_cards_show_current_values_and_desktop_only
         assert view._desktop_overlay_size_button.content.value == t(
             "settings.overlay.desktop.size.option.large"
         )
-        assert view._desktop_overlay_background_alpha_value_text.value == "50%"
+        assert view._desktop_overlay_background_alpha_value_text.value == "40%"
         assert view._desktop_overlay_lock_button.content.value == t(
             "settings.overlay.desktop.lock.value.move"
         )

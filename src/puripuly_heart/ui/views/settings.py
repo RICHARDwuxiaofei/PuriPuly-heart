@@ -1495,7 +1495,7 @@ class SettingsView(ft.Column):
             color=COLOR_NEUTRAL,
         )
         self._desktop_overlay_background_alpha_value_text = ft.Text(
-            "50%",
+            "40%",
             size=28,
             color=COLOR_ON_BACKGROUND,
             text_align=ft.TextAlign.CENTER,

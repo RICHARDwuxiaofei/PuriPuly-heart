@@ -16,7 +16,7 @@ def test_overlay_settings_desktop_flet_defaults_serialize_canonical_shape() -> N
     assert settings.overlay.desktop_flet.position.x is None
     assert settings.overlay.desktop_flet.position.y is None
     assert settings.overlay.desktop_flet.locked is False
-    assert settings.overlay.desktop_flet.visual.background_alpha == 0.5
+    assert settings.overlay.desktop_flet.visual.background_alpha == 0.6
 
     data = to_dict(settings)
 
@@ -24,7 +24,7 @@ def test_overlay_settings_desktop_flet_defaults_serialize_canonical_shape() -> N
     assert data["overlay"]["desktop_flet"] == {
         "size_preset": "medium",
         "position": {"x": None, "y": None},
-        "visual": {"background_alpha": 0.5},
+        "visual": {"background_alpha": 0.6},
     }
     assert "locked" not in data["overlay"]["desktop_flet"]
 
@@ -93,7 +93,7 @@ def test_overlay_settings_desktop_flet_invalid_canonical_values_repair() -> None
     assert settings.overlay.desktop_flet.position.x is None
     assert settings.overlay.desktop_flet.position.y is None
     assert settings.overlay.desktop_flet.locked is False
-    assert settings.overlay.desktop_flet.visual.background_alpha == 0.5
+    assert settings.overlay.desktop_flet.visual.background_alpha == 0.6
 
     missing_and_non_finite = from_dict(
         {
@@ -110,7 +110,7 @@ def test_overlay_settings_desktop_flet_invalid_canonical_values_repair() -> None
     assert missing_and_non_finite.overlay.desktop_flet.size_preset == "xlarge"
     assert missing_and_non_finite.overlay.desktop_flet.position.x is None
     assert missing_and_non_finite.overlay.desktop_flet.position.y is None
-    assert missing_and_non_finite.overlay.desktop_flet.visual.background_alpha == 0.5
+    assert missing_and_non_finite.overlay.desktop_flet.visual.background_alpha == 0.6
 
 
 def test_overlay_settings_desktop_flet_background_alpha_clamps() -> None:
