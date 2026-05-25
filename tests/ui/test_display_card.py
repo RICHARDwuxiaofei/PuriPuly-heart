@@ -174,6 +174,18 @@ def test_display_card_display_text_is_always_selectable() -> None:
     assert card._display_secondary.selectable is True
 
 
+def test_display_card_primary_wraps_to_two_lines_and_secondary_stays_single_line() -> None:
+    card = DisplayCard(on_submit=lambda _text: None)
+
+    assert card._display_primary._get_attr("nowrap") is False
+    assert card._display_primary.max_lines == 2
+    assert card._display_primary.overflow == display_card_module.ft.TextOverflow.ELLIPSIS
+
+    assert card._display_secondary._get_attr("nowrap") is True
+    assert card._display_secondary.max_lines == 1
+    assert card._display_secondary.overflow == display_card_module.ft.TextOverflow.ELLIPSIS
+
+
 def test_display_card_debug_prefix_is_rendered_before_visible_lines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
