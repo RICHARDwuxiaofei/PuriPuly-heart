@@ -29,12 +29,19 @@ GITHUB_STAR_SNACKBAR_KEYS = (
     "github_star.snackbar.message",
     "github_star.snackbar.action",
 )
+OVERLAY_STEAMVR_NOT_RUNNING_KEY = "settings.overlay.failure.steamvr_not_running"
 
 INTENTIONAL_PENDING_RUNTIME_KEYS: set[str] = set()
 
 EXPECTED_GITHUB_STAR_SNACKBAR_KO_COPY = {
     "github_star.snackbar.message": "PuriPuly가 도움이 됐다면 GitHub에서 Star를 눌러주세요! 큰 힘이 되어요!",
     "github_star.snackbar.action": "이동",
+}
+EXPECTED_OVERLAY_STEAMVR_NOT_RUNNING_COPY = {
+    "en": "SteamVR is off. If you want to use the desktop overlay, change it in Settings.",
+    "ko": "SteamVR이 꺼져 있어요. 혹시 데스크톱 오버레이를 쓰고싶다면 설정을 바꿔주세요.",
+    "zh-CN": "SteamVR 尚未运行。如果您想使用桌面叠加层，请在设置中更改。",
+    "ja": "SteamVRがオフです。デスクトップオーバーレイを使いたい場合は、設定を変更してください。",
 }
 
 
@@ -133,6 +140,13 @@ def test_github_star_snackbar_korean_copy_matches_source_spec() -> None:
     assert {
         key: ko[key] for key in GITHUB_STAR_SNACKBAR_KEYS
     } == EXPECTED_GITHUB_STAR_SNACKBAR_KO_COPY
+
+
+def test_overlay_steamvr_not_running_copy_points_to_desktop_overlay_setting() -> None:
+    bundles = _load_bundles()
+
+    for locale, expected in EXPECTED_OVERLAY_STEAMVR_NOT_RUNNING_COPY.items():
+        assert bundles[locale][OVERLAY_STEAMVR_NOT_RUNNING_KEY] == expected
 
 
 def test_local_llm_keys_are_localized() -> None:
