@@ -76,7 +76,7 @@ FOUNDER_README_DEFAULT_API_KEYS_ANCHOR = "using-your-own-api-keys"
 DEBUG_PREVIEW_TALK_TOGETHER_PASS_ID = "7KQ9M2"
 GITHUB_STAR_REPOSITORY_URL = "https://github.com/kapitalismho/PuriPuly-heart"
 GITHUB_STAR_PROMPT_DELAY_S = 2.5
-GITHUB_STAR_PROMPT_DURATION_MS = 10000
+GITHUB_STAR_PROMPT_DURATION_MS = 8000
 
 
 def founder_readme_url_for_locale(locale: str | None) -> str:
@@ -311,9 +311,7 @@ class TranslatorApp:
             self._queue_settings_mutation_task(_persist_click)
             webbrowser.open(GITHUB_STAR_REPOSITORY_URL)
             if snackbar is not None:
-                snackbar.open = False
-            with contextlib.suppress(Exception):
-                self.page.update()
+                self._close_github_star_prompt_snackbar(snackbar)
 
         snackbar = self._build_github_star_prompt_snackbar(_open_repository)
         self._github_star_prompt_shown_this_launch = True
@@ -355,15 +353,23 @@ class TranslatorApp:
             padding=20,
         )
 
+    def _close_github_star_prompt_snackbar(self, snackbar: ft.SnackBar) -> None:
+        close = getattr(self.page, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close(snackbar)
+                return
+        snackbar.open = False
+        with contextlib.suppress(Exception):
+            self.page.update()
+
     def _preview_github_star_snackbar(self) -> None:
         snackbar = None
 
         def _open_repository(_event) -> None:  # noqa: ANN001
             webbrowser.open(GITHUB_STAR_REPOSITORY_URL)
             if snackbar is not None:
-                snackbar.open = False
-            with contextlib.suppress(Exception):
-                self.page.update()
+                self._close_github_star_prompt_snackbar(snackbar)
 
         snackbar = self._build_github_star_prompt_snackbar(_open_repository)
         self.page.open(snackbar)
