@@ -40,7 +40,11 @@ from puripuly_heart.config.settings import (
     DESKTOP_FLET_SIZE_PRESETS,
     DesktopFletOverlayVisualSettings,
 )
-from puripuly_heart.core.overlay.manifest import OVERLAY_CONTRACT_VERSION, OverlayLaunchManifest
+from puripuly_heart.core.overlay.manifest import (
+    OVERLAY_CONTRACT_VERSION,
+    OverlayLaunchManifest,
+    normalize_overlay_logging_mode,
+)
 from puripuly_heart.core.overlay.protocol import (
     OverlayPresentationBlock,
     OverlayPresentationSnapshot,
@@ -451,17 +455,48 @@ def build_desktop_caption_surface(plan: DesktopCaptionPlan) -> Any:
         tight=True,
         scroll=None,
     )
-    return ft.Container(
+    background_layer = ft.Container(
+        bgcolor=plan.background_color,
+        border_radius=plan.border_radius,
+        alignment=ft.alignment.center,
+        left=0,
+        top=0,
+        right=0,
+        bottom=0,
+    )
+    text_layer = ft.Container(
         content=column,
         width=plan.window_width,
-        bgcolor=plan.background_color,
+        bgcolor=ft.Colors.TRANSPARENT,
         padding=ft.padding.symmetric(
             horizontal=plan.padding_horizontal,
             vertical=plan.padding_vertical,
         ),
+        alignment=ft.alignment.center,
+    )
+    return ft.Container(
+        content=ft.Stack(
+            controls=[background_layer, text_layer],
+            width=plan.window_width,
+        ),
+        width=plan.window_width,
+        bgcolor=ft.Colors.TRANSPARENT,
         border_radius=plan.border_radius,
         alignment=ft.alignment.center,
         visible=plan.surface_visible,
+    )
+
+
+def build_desktop_transparent_sizing_host(plan: DesktopCaptionPlan) -> Any:
+    """Build a transparent, layout-stable host for locked empty runtime state."""
+
+    import flet as ft
+
+    return ft.Container(
+        width=plan.window_width,
+        height=plan.window_height,
+        bgcolor=ft.Colors.TRANSPARENT,
+        alignment=ft.alignment.center,
     )
 
 
@@ -1144,6 +1179,11 @@ def _caption_background_color(background_alpha: float) -> str:
     return f"#{alpha:02X}{_DESKTOP_CAPTION_BACKGROUND_RGB}"
 
 
+def _background_transparency_label_for_alpha(background_alpha: float) -> str:
+    transparency = 1.0 - _clamp(background_alpha, 0.0, 1.0)
+    return f"{int(round(transparency * 100))}%"
+
+
 def _positive_int_or_default(value: int | float, default: int) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return default
@@ -1333,6 +1373,7 @@ class FletDesktopRendererWindow:
         app_runner: FletAppRunner | None = None,
         event_sink: OverlayEventSink | None = None,
         locale: str | None = None,
+        logging_mode: str = "basic",
         bounds_debounce_s: float = 0.15,
         startup_timeout_s: float = 5.0,
         preview_catalog: DesktopOverlayPreviewCatalog | None = None,
@@ -1340,6 +1381,7 @@ class FletDesktopRendererWindow:
         self._app_runner = app_runner or _default_flet_app_runner
         self._event_sink = event_sink
         self._locale = locale
+        self._logging_mode = normalize_overlay_logging_mode(logging_mode)
         self._bounds_debounce_s = max(0.0, float(bounds_debounce_s))
         self._startup_timeout_s = max(0.1, float(startup_timeout_s))
         self._preview_catalog = preview_catalog
@@ -1350,7 +1392,6 @@ class FletDesktopRendererWindow:
         self._snapshot = OverlayPresentationSnapshot()
         self._visual_state = DesktopCaptionVisualState()
         self._interaction_mode = _DESKTOP_INTERACTION_MODE_EDIT
-        self._startup_interaction_mode: str | None = None
         self._startup_visual_state: DesktopCaptionVisualState | None = None
         self._startup_window_bounds: dict[str, int | float] | None = None
         self._page: Any | None = None
@@ -1362,7 +1403,6 @@ class FletDesktopRendererWindow:
         self._scheduled_callback_tasks: set[asyncio.Future[Any] | ConcurrentFuture[Any]] = set()
         self._programmatic_bounds_echo_suppression: _ProgrammaticBoundsEchoSuppression | None = None
         self._last_reported_bounds: tuple[float, float, float, float] | None = None
-        self._bounds_epoch = 0
 
     def prime_startup_runtime_controls(
         self,
@@ -1374,18 +1414,17 @@ class FletDesktopRendererWindow:
         normal runtime dispatch after the Flet page exists.
         """
 
-        self._startup_interaction_mode = None
         self._startup_visual_state = None
         self._startup_window_bounds = None
         residual: list[dict[str, object]] = []
         for payload in payloads:
             command = payload.get("command")
+            if command is None and "logging_mode" in payload:
+                if self._set_logging_mode(payload.get("logging_mode")):
+                    continue
+                residual.append(payload)
+                continue
             if command == "set_interaction_mode":
-                mode = payload.get("mode")
-                if isinstance(mode, str) and mode in _DESKTOP_INTERACTION_MODES:
-                    self._startup_interaction_mode = mode
-                else:
-                    residual.append(payload)
                 continue
             if command == "apply_visual_config":
                 visual_state = _parse_runtime_visual_state(payload)
@@ -1396,12 +1435,7 @@ class FletDesktopRendererWindow:
                 continue
             if command == "apply_window_bounds":
                 bounds = _parse_runtime_window_bounds(payload)
-                bounds_epoch = _parse_runtime_bounds_epoch(payload)
-                if bounds is not None and (
-                    "bounds_epoch" not in payload or bounds_epoch is not None
-                ):
-                    if bounds_epoch is not None:
-                        self._bounds_epoch = bounds_epoch
+                if bounds is not None:
                     self._startup_window_bounds = bounds
                 else:
                     residual.append(payload)
@@ -1419,7 +1453,7 @@ class FletDesktopRendererWindow:
         self._page_ready.clear()
         self._closed.clear()
         self._page_start_error = None
-        self._interaction_mode = self._startup_interaction_mode or _DESKTOP_INTERACTION_MODE_EDIT
+        self._interaction_mode = _DESKTOP_INTERACTION_MODE_EDIT
         if self._app_task is None or self._app_task.done():
             self._app_task = asyncio.create_task(self._app_runner(self._handle_page))
 
@@ -1492,11 +1526,15 @@ class FletDesktopRendererWindow:
                 pass
 
     async def dispatch_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None:
+        self._emit_detailed_log(
+            f"snapshot_update revision={snapshot.revision} blocks={len(snapshot.blocks)}"
+        )
         self._snapshot = snapshot
         self._render_page()
 
     async def dispatch_runtime_control(self, payload: dict[str, object]) -> None:
         if "logging_mode" in payload and payload.get("command") is None:
+            self._set_logging_mode(payload.get("logging_mode"))
             return
         command = payload.get("command")
         if command == "set_interaction_mode":
@@ -1508,12 +1546,15 @@ class FletDesktopRendererWindow:
             return
         if command == "apply_window_bounds":
             bounds = _parse_runtime_window_bounds(payload)
-            bounds_epoch = _parse_runtime_bounds_epoch(payload)
-            if bounds is None or ("bounds_epoch" in payload and bounds_epoch is None):
+            if bounds is None:
                 logger.warning("[DesktopOverlay] Ignoring invalid window bounds control")
                 return
-            if bounds_epoch is not None:
-                self._bounds_epoch = bounds_epoch
+            self._emit_detailed_log(
+                "runtime_control command=apply_window_bounds "
+                f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+                f"height={bounds['height']}"
+            )
+            await self._cancel_bounds_sample()
             self._apply_window_bounds(bounds)
             return
         if command == "apply_visual_config":
@@ -1522,6 +1563,12 @@ class FletDesktopRendererWindow:
                 logger.warning("[DesktopOverlay] Ignoring invalid visual config control")
                 return
             self._visual_state = visual_state
+            self._emit_detailed_log(
+                "runtime_control command=apply_visual_config "
+                f"text_scale={visual_state.text_scale} "
+                f"background_alpha={visual_state.background_alpha} "
+                f"outline_width={visual_state.outline_width}"
+            )
             self._render_page()
             return
         logger.warning("[DesktopOverlay] Ignoring unsupported desktop runtime control: %r", command)
@@ -1615,12 +1662,29 @@ class FletDesktopRendererWindow:
         )
         caption_surface = build_desktop_caption_surface(plan)
         if self._interaction_mode == _DESKTOP_INTERACTION_MODE_EDIT:
+            content_kind = "drag_area"
             content = ft.WindowDragArea(
                 content=caption_surface,
                 maximizable=False,
             )
         else:
-            content = caption_surface if plan.surface_visible else None
+            if plan.surface_visible:
+                content_kind = "caption_surface"
+                content = caption_surface
+            else:
+                content_kind = "transparent_host"
+                content = build_desktop_transparent_sizing_host(plan)
+        self._emit_detailed_log(
+            "render "
+            f"revision={self._snapshot.revision} "
+            f"blocks={len(self._snapshot.blocks)} "
+            f"interaction_mode={self._interaction_mode} "
+            f"surface_visible={plan.surface_visible} "
+            f"line_count={len(plan.lines)} "
+            f"content_kind={content_kind} "
+            f"window={plan.window_width}x{plan.window_height} "
+            f"background_alpha={plan.background_alpha}"
+        )
         root = ft.Container(
             content=content,
             padding=0,
@@ -1699,7 +1763,11 @@ class FletDesktopRendererWindow:
                     ft,
                     labels.background_alpha,
                     [
-                        (str(value), f"{value:.2f}", value == self._preview_background_alpha)
+                        (
+                            str(value),
+                            _background_transparency_label_for_alpha(value),
+                            value == self._preview_background_alpha,
+                        )
                         for value in catalog.background_alpha_presets
                     ],
                     lambda value: self._set_preview_background_alpha(float(value)),
@@ -1918,7 +1986,9 @@ class FletDesktopRendererWindow:
             return
         if mode == self._interaction_mode:
             return
+        previous_mode = self._interaction_mode
         self._interaction_mode = mode
+        self._emit_detailed_log(f"interaction_mode {previous_mode}->{mode}")
         self._render_page()
         if emit_event:
             await self._emit_overlay_event({"event": "interaction_mode_changed", "mode": mode})
@@ -1927,21 +1997,42 @@ class FletDesktopRendererWindow:
         page = self._page
         if page is None:
             return
-        window = page.window
-        window.left = bounds["x"]
-        window.top = bounds["y"]
-        window.width = bounds["width"]
-        window.height = bounds["height"]
+        self._emit_detailed_log(
+            "apply_window_bounds "
+            f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+            f"height={bounds['height']}"
+        )
+        self._apply_window_bounds_without_rerender(bounds)
         self._programmatic_bounds_echo_suppression = _ProgrammaticBoundsEchoSuppression(
             signature=_bounds_signature(bounds),
             expires_at=time.monotonic() + _PROGRAMMATIC_BOUNDS_ECHO_SUPPRESSION_S,
         )
         self._render_page()
 
+    def _apply_window_bounds_without_rerender(self, bounds: dict[str, int | float]) -> None:
+        page = self._page
+        if page is None:
+            return
+        window = page.window
+        window.left = bounds["x"]
+        window.top = bounds["y"]
+        window.width = bounds["width"]
+        window.height = bounds["height"]
+
     def _on_window_event(self, event: object) -> None:
         if self._closed.is_set():
             return
         if not _is_window_bounds_event(event):
+            return
+        self._emit_detailed_log(
+            f"window_event type={getattr(event, 'type', getattr(event, 'data', None))} "
+            f"interaction_mode={self._interaction_mode}"
+        )
+        if self._interaction_mode != _DESKTOP_INTERACTION_MODE_EDIT:
+            self._emit_detailed_log(
+                "bounds_sample dropped reason=event_interaction_mode "
+                f"interaction_mode={self._interaction_mode}"
+            )
             return
         self._run_page_task(self._schedule_bounds_sample)
 
@@ -1951,6 +2042,9 @@ class FletDesktopRendererWindow:
         await self._cancel_bounds_sample()
         if self._closed.is_set():
             return
+        self._emit_detailed_log(
+            f"bounds_sample scheduled interaction_mode={self._interaction_mode}"
+        )
         self._bounds_sample_task = asyncio.create_task(self._emit_debounced_bounds_sample())
 
     async def _cancel_bounds_sample(self) -> None:
@@ -1969,22 +2063,43 @@ class FletDesktopRendererWindow:
             return
         bounds = _sample_page_window_bounds(self._page)
         if bounds is None:
+            self._emit_detailed_log("bounds_sample dropped reason=no_bounds")
             return
         signature = _bounds_signature(bounds)
         if self._is_programmatic_bounds_echo(signature):
+            self._emit_detailed_log(
+                "bounds_sample dropped reason=programmatic_echo "
+                f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+                f"height={bounds['height']}"
+            )
             return
         if self._interaction_mode != _DESKTOP_INTERACTION_MODE_EDIT:
+            self._emit_detailed_log(
+                "bounds_sample dropped reason=interaction_mode "
+                f"interaction_mode={self._interaction_mode} "
+                f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+                f"height={bounds['height']}"
+            )
             return
         if signature == self._last_reported_bounds:
+            self._emit_detailed_log(
+                "bounds_sample dropped reason=unchanged "
+                f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+                f"height={bounds['height']}"
+            )
             return
         self._programmatic_bounds_echo_suppression = None
         self._last_reported_bounds = signature
+        self._emit_detailed_log(
+            "bounds_sample emitted source=user persist=True "
+            f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+            f"height={bounds['height']}"
+        )
         await self._emit_overlay_event(
             {
                 "event": "window_bounds_changed",
                 "source": "user",
                 "persist": True,
-                "bounds_epoch": self._bounds_epoch,
                 **bounds,
             }
         )
@@ -2006,6 +2121,20 @@ class FletDesktopRendererWindow:
         if self._event_sink is None:
             return
         await self._event_sink({"type": "overlay_event", "payload": payload})
+
+    def _set_logging_mode(self, mode: object) -> bool:
+        try:
+            normalized_mode = normalize_overlay_logging_mode(mode)
+        except Exception:
+            return False
+        self._logging_mode = normalized_mode
+        self._emit_detailed_log(f"logging_mode mode={normalized_mode}")
+        return True
+
+    def _emit_detailed_log(self, message: str) -> None:
+        if self._logging_mode != "detailed":
+            return
+        print(f"[DesktopOverlay][Detail] {message}", flush=True)
 
     def _is_programmatic_bounds_echo(
         self,
@@ -2060,13 +2189,6 @@ def _parse_runtime_window_bounds(
     if width < DESKTOP_FLET_MIN_WIDTH or height < DESKTOP_FLET_MIN_HEIGHT:
         return None
     return {"x": x, "y": y, "width": width, "height": height}
-
-
-def _parse_runtime_bounds_epoch(payload: dict[str, object]) -> int | None:
-    value = payload.get("bounds_epoch")
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-        return value
-    return None
 
 
 def _parse_runtime_visual_state(payload: dict[str, object]) -> DesktopCaptionVisualState | None:
@@ -2353,6 +2475,7 @@ class DesktopOverlayRenderer:
         self.window = window or FletDesktopRendererWindow(
             event_sink=self._emit_lifecycle,
             locale=manifest.locale,
+            logging_mode=manifest.logging_mode,
         )
         self.parent_monitor = parent_monitor or create_parent_monitor(manifest.parent_pid)
         self._shutdown_event = asyncio.Event()
@@ -2529,8 +2652,6 @@ class DesktopOverlayRenderer:
                     "runtime_control_invalid",
                     "desktop overlay initial runtime control is invalid",
                 )
-            if "logging_mode" in payload:
-                continue
             controls.append(payload)
         return tuple(controls)
 

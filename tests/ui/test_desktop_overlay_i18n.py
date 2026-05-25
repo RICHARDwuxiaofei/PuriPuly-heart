@@ -10,54 +10,66 @@ EXPECTED_SPEC_LOCALES = {"en", "ko", "ja", "zh-CN"}
 
 CANONICAL_DESKTOP_OVERLAY_I18N_COPY = {
     "en": {
-        "settings.overlay.desktop.size.title": "Desktop caption size",
+        "settings.overlay.desktop.size.title": "Overlay size",
         "settings.overlay.desktop.size.option.small": "Small",
         "settings.overlay.desktop.size.option.medium": "Medium",
         "settings.overlay.desktop.size.option.large": "Large",
         "settings.overlay.desktop.size.option.xlarge": "Extra large",
-        "settings.overlay.desktop.lock.title": "Desktop overlay lock",
+        "settings.overlay.desktop.lock.title": "Overlay lock",
+        "settings.overlay.desktop.background_alpha.title": "Background transparency",
         "settings.overlay.desktop.lock.value.move": "Move",
         "settings.overlay.desktop.lock.value.locked": "Locked",
         "settings.overlay.position_reset.title": "Reset overlay position",
+        "settings.overlay.position_reset.vr.title": "Reset position",
+        "settings.overlay.position_reset.desktop.title": "Reset position",
         "settings.overlay.position_reset.action.vr": "Reset VR",
         "settings.overlay.position_reset.action.desktop": "Reset desktop",
     },
     "ko": {
-        "settings.overlay.desktop.size.title": "오버레이 크기 (데스크톱)",
+        "settings.overlay.desktop.size.title": "오버레이 크기",
         "settings.overlay.desktop.size.option.small": "작게",
         "settings.overlay.desktop.size.option.medium": "보통",
         "settings.overlay.desktop.size.option.large": "크게",
         "settings.overlay.desktop.size.option.xlarge": "더 크게",
-        "settings.overlay.desktop.lock.title": "오버레이 잠금 (데스크톱)",
+        "settings.overlay.desktop.lock.title": "오버레이 잠금",
+        "settings.overlay.desktop.background_alpha.title": "배경 투명도",
         "settings.overlay.desktop.lock.value.move": "이동",
         "settings.overlay.desktop.lock.value.locked": "고정",
         "settings.overlay.position_reset.title": "오버레이 위치 초기화",
+        "settings.overlay.position_reset.vr.title": "위치 초기화",
+        "settings.overlay.position_reset.desktop.title": "위치 초기화",
         "settings.overlay.position_reset.action.vr": "VR 초기화",
         "settings.overlay.position_reset.action.desktop": "데스크톱 초기화",
     },
     "ja": {
-        "settings.overlay.desktop.size.title": "デスクトップ字幕のサイズ",
+        "settings.overlay.desktop.size.title": "オーバーレイサイズ",
         "settings.overlay.desktop.size.option.small": "小さめ",
         "settings.overlay.desktop.size.option.medium": "標準",
         "settings.overlay.desktop.size.option.large": "大きめ",
         "settings.overlay.desktop.size.option.xlarge": "さらに大きく",
-        "settings.overlay.desktop.lock.title": "デスクトップオーバーレイの固定",
+        "settings.overlay.desktop.lock.title": "オーバーレイ固定",
+        "settings.overlay.desktop.background_alpha.title": "背景の透明度",
         "settings.overlay.desktop.lock.value.move": "移動",
         "settings.overlay.desktop.lock.value.locked": "固定",
         "settings.overlay.position_reset.title": "オーバーレイ位置をリセット",
+        "settings.overlay.position_reset.vr.title": "位置をリセット",
+        "settings.overlay.position_reset.desktop.title": "位置をリセット",
         "settings.overlay.position_reset.action.vr": "VRをリセット",
         "settings.overlay.position_reset.action.desktop": "デスクトップをリセット",
     },
     "zh-CN": {
-        "settings.overlay.desktop.size.title": "桌面字幕大小",
+        "settings.overlay.desktop.size.title": "叠加层大小",
         "settings.overlay.desktop.size.option.small": "小",
         "settings.overlay.desktop.size.option.medium": "中",
         "settings.overlay.desktop.size.option.large": "大",
         "settings.overlay.desktop.size.option.xlarge": "特大",
-        "settings.overlay.desktop.lock.title": "桌面叠加层锁定",
+        "settings.overlay.desktop.lock.title": "叠加层锁定",
+        "settings.overlay.desktop.background_alpha.title": "背景透明度",
         "settings.overlay.desktop.lock.value.move": "移动",
         "settings.overlay.desktop.lock.value.locked": "固定",
         "settings.overlay.position_reset.title": "重置叠加层位置",
+        "settings.overlay.position_reset.vr.title": "重置位置",
+        "settings.overlay.position_reset.desktop.title": "重置位置",
         "settings.overlay.position_reset.action.vr": "重置 VR",
         "settings.overlay.position_reset.action.desktop": "重置桌面",
     },
@@ -208,7 +220,7 @@ def test_desktop_overlay_i18n_english_copy_uses_product_language() -> None:
 
     assert bundle["settings.overlay.target.steamvr"] == "VR"
     assert bundle["settings.overlay.target.desktop"] == "Desktop"
-    assert bundle["settings.overlay.desktop.size.title"] == "Desktop caption size"
+    assert bundle["settings.overlay.desktop.size.title"] == "Overlay size"
     assert bundle["settings.overlay.desktop.lock.value.move"] == "Move"
     assert bundle["settings.overlay.desktop.lock.value.locked"] == "Locked"
     assert bundle["settings.overlay.position_reset.action.desktop"] == "Reset desktop"
