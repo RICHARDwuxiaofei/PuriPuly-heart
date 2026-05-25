@@ -91,6 +91,12 @@ _DESKTOP_CAPTION_SECONDARY_MAX_LINES = 1
 _DESKTOP_CAPTION_LINE_HEIGHT = 1.14
 _DESKTOP_CAPTION_PRIMARY_REGION_ALIGNMENT_Y = -0.5
 _DESKTOP_CAPTION_TEXT_STACK_ALIGNMENT_Y = -0.08
+_DESKTOP_CAPTION_CONTACT_SHADOW_COLOR = "#C0000000"
+_DESKTOP_CAPTION_CONTACT_SHADOW_OFFSET = (0, 1)
+_DESKTOP_CAPTION_CONTACT_SHADOW_BLUR = 1.0
+_DESKTOP_CAPTION_AMBIENT_SHADOW_COLOR = "#66000000"
+_DESKTOP_CAPTION_AMBIENT_SHADOW_OFFSET = (0, 0)
+_DESKTOP_CAPTION_AMBIENT_SHADOW_BLUR = 3.0
 _DESKTOP_CAPTION_OVERFLOW_STRATEGY = (
     "two-turn-slots:presenter-selected-blocks,primary-two-lines,secondary-one-line"
 )
@@ -1370,9 +1376,25 @@ def _build_flet_text(
             height=line.line_height,
             weight=_flet_font_weight(ft, line.weight),
             font_family=line.font_family,
+            shadow=_caption_text_shadow(ft),
             foreground=None,
         ),
     )
+
+
+def _caption_text_shadow(ft: Any) -> list[Any]:
+    return [
+        ft.BoxShadow(
+            color=_DESKTOP_CAPTION_CONTACT_SHADOW_COLOR,
+            offset=_DESKTOP_CAPTION_CONTACT_SHADOW_OFFSET,
+            blur_radius=_DESKTOP_CAPTION_CONTACT_SHADOW_BLUR,
+        ),
+        ft.BoxShadow(
+            color=_DESKTOP_CAPTION_AMBIENT_SHADOW_COLOR,
+            offset=_DESKTOP_CAPTION_AMBIENT_SHADOW_OFFSET,
+            blur_radius=_DESKTOP_CAPTION_AMBIENT_SHADOW_BLUR,
+        ),
+    ]
 
 
 def _flet_font_weight(ft: Any, weight: str) -> Any:
