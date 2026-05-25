@@ -338,8 +338,8 @@ def test_desktop_overlay_caption_rendering_no_caption_states_use_empty_moving_ca
 
     assert edit_plan.lines == ()
     assert edit_plan.surface_visible is True
-    assert edit_plan.background_alpha == pytest.approx(0.5)
-    assert edit_plan.background_color == "#80000000"
+    assert edit_plan.background_alpha == pytest.approx(0.6)
+    assert edit_plan.background_color == "#99000000"
     assert locked_plan.lines == ()
     assert locked_plan.surface_visible is False
     assert locked_plan.background_alpha == 0
@@ -697,6 +697,31 @@ def test_desktop_overlay_caption_font_policy_matches_vr_primary_faces_without_pa
     ]
 
 
+def test_desktop_overlay_caption_weight_uses_vr_semibold_default() -> None:
+    plan = desktop_overlay.build_desktop_caption_plan(
+        OverlayPresentationSnapshot(
+            blocks=[
+                _block(
+                    "caption-weight",
+                    channel="peer",
+                    block_variant="finalized",
+                    appearance_seq=1,
+                    primary_text="Readable semibold caption",
+                )
+            ]
+        )
+    )
+
+    assert {line.weight for line in plan.lines} == {"semibold"}
+
+    surface = desktop_overlay.build_desktop_caption_surface(plan)
+    slot_column = surface.content.controls[0]
+    slot_card = slot_column.controls[0]
+    text_control = slot_card.content.content.controls[0].content
+    assert text_control.weight == ft.FontWeight.W_600
+    assert text_control.style.weight == ft.FontWeight.W_600
+
+
 class RecordingLifecycleSink:
     def __init__(self) -> None:
         self.events: list[dict[str, object]] = []
@@ -903,7 +928,7 @@ def _caption_card_controls(page: FakeFletPage) -> list[ft.Container]:
         for item in _walk_control_tree(control):
             if (
                 isinstance(item, ft.Container)
-                and getattr(item, "bgcolor", None) == "#80000000"
+                and getattr(item, "bgcolor", None) in {"#80000000", "#99000000"}
                 and getattr(item, "border_radius", None) in {14, 16, 18, 20}
             ):
                 cards.append(item)
@@ -923,7 +948,7 @@ def test_desktop_overlay_preview_fixtures_cover_required_local_qa_cases() -> Non
         "large",
         "xlarge",
     )
-    assert tuple(catalog.background_alpha_presets) == (0.35, 0.5, 0.65, 0.8)
+    assert tuple(catalog.background_alpha_presets) == (0.35, 0.5, 0.6, 0.8)
     assert tuple(surface.id for surface in catalog.background_surfaces) == (
         "bright",
         "dark",
@@ -996,7 +1021,7 @@ def test_desktop_overlay_preview_no_caption_fixture_supports_manual_qa_states() 
     )
     assert edit_plan.lines == ()
     assert edit_plan.surface_visible is True
-    assert edit_plan.background_alpha == pytest.approx(0.5)
+    assert edit_plan.background_alpha == pytest.approx(0.6)
     assert locked_plan.lines == ()
     assert locked_plan.surface_visible is False
 
@@ -1368,7 +1393,7 @@ def test_desktop_overlay_preview_fixtures_run_local_app_without_renderer_or_pers
     assert "Preview background" in visible_text
     assert "Outline width" not in visible_text
     assert "Text scale" not in visible_text
-    assert {"65%", "50%", "35%", "20%"} <= visible_text
+    assert {"65%", "50%", "40%", "20%"} <= visible_text
     assert {"Small", "Medium", "Large", "Extra large"} <= visible_text
     assert {"Bright", "Dark", "Busy desktop"} <= visible_text
     assert "Korean long wrap" in visible_text
@@ -1608,7 +1633,7 @@ async def test_desktop_overlay_flet_window_starts_frameless_transparent_moving_e
         assert _page_contains_control_type(page, ft.WindowDragArea)
         cards = _caption_card_controls(page)
         assert len(cards) == 1
-        assert cards[0].bgcolor == "#80000000"
+        assert cards[0].bgcolor == "#99000000"
     finally:
         await window.close()
 
