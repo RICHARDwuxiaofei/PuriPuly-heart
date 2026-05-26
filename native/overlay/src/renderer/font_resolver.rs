@@ -401,6 +401,7 @@ impl FontResolver {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn resolve_order6_layout_draw_safe(
         &self,
         language: Option<&str>,

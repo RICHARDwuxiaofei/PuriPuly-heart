@@ -20,7 +20,8 @@ use crate::openvr::{
 };
 use crate::renderer::{
     CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionDebugOverlay, CaptionLayoutResult,
-    CaptionPresentation, CaptionRenderer, RenderDiagnostics, VisibleCaptionBlock,
+    CaptionPresentation, CaptionRenderer, RenderDiagnostics, StyleBucketSourceCount,
+    VisibleCaptionBlock,
 };
 use crate::state::{
     OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationSnapshot,
@@ -1368,7 +1369,7 @@ fn format_frame_timing_log(
 
 fn format_cache_stats_log(diagnostics: &RenderDiagnostics) -> String {
     format!(
-        "cache_stats text_format_size={} layout_size={} line_size={} block_size={} text_format_hits={} text_format_misses={} font_warmup_attempts={} font_warmup_failures={} directwrite_layout_successes={} heuristic_layout_fallbacks={} layout_hits={} layout_misses={} line_hits={} line_misses={} block_hits={} block_misses={}",
+        "cache_stats text_format_size={} layout_size={} line_size={} block_size={} text_format_hits={} text_format_misses={} font_warmup_attempts={} font_warmup_failures={} directwrite_layout_successes={} heuristic_layout_fallbacks={} layout_hits={} layout_misses={} line_hits={} line_misses={} block_hits={} block_misses={} style_bucket_source_counts=[{}]",
         diagnostics.text_format_cache_size,
         diagnostics.layout_cache_size,
         diagnostics.line_cache_size,
@@ -1385,7 +1386,16 @@ fn format_cache_stats_log(diagnostics: &RenderDiagnostics) -> String {
         diagnostics.line_cache_misses,
         diagnostics.block_cache_hits,
         diagnostics.block_cache_misses,
+        format_style_bucket_source_counts(&diagnostics.style_bucket_source_counts),
     )
+}
+
+fn format_style_bucket_source_counts(counts: &[StyleBucketSourceCount]) -> String {
+    counts
+        .iter()
+        .map(|count| format!("{:?}/{:?}:{}", count.bucket, count.source, count.count))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn format_peer_first_render_visibility_checkpoint_log(
@@ -1713,6 +1723,10 @@ fn caption_block_for_strip(strip: &OverlaySlot, visual_debug_prefixes: bool) -> 
         .with_channel(channel)
         .with_variant(variant)
         .with_secondary_text(secondary_text, strip.secondary_enabled)
+        .with_language_metadata(
+            strip.primary_language.clone(),
+            strip.secondary_language.clone(),
+        )
         .with_visual_state(1.0, 0.0, 1.0)
         .with_slot(strip.slot_index, strip.anchor_top_px)
 }
@@ -1778,7 +1792,8 @@ mod tests {
     use crate::openvr::{FrameTimingSample, OpenVrError, OpenVrStartupPreflightError};
     use crate::renderer::{
         CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
-        CaptionPresentation, RenderDiagnostics,
+        CaptionPresentation, FontLanguageBucket, FontSource, RenderDiagnostics,
+        StyleBucketSourceCount,
     };
     use crate::state::{
         OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
@@ -2573,12 +2588,24 @@ mod tests {
             line_cache_misses: 14,
             block_cache_hits: 15,
             block_cache_misses: 16,
+            style_bucket_source_counts: vec![
+                StyleBucketSourceCount {
+                    bucket: FontLanguageBucket::CjkJa,
+                    source: FontSource::SystemFont,
+                    count: 2,
+                },
+                StyleBucketSourceCount {
+                    bucket: FontLanguageBucket::CjkZhHant,
+                    source: FontSource::BundledNotoCjkMedium,
+                    count: 1,
+                },
+            ],
             ..RenderDiagnostics::default()
         };
 
         assert_eq!(
             format_cache_stats_log(&diagnostics),
-            "cache_stats text_format_size=3 layout_size=4 line_size=5 block_size=6 text_format_hits=7 text_format_misses=8 font_warmup_attempts=9 font_warmup_failures=1 directwrite_layout_successes=10 heuristic_layout_fallbacks=2 layout_hits=11 layout_misses=12 line_hits=13 line_misses=14 block_hits=15 block_misses=16"
+            "cache_stats text_format_size=3 layout_size=4 line_size=5 block_size=6 text_format_hits=7 text_format_misses=8 font_warmup_attempts=9 font_warmup_failures=1 directwrite_layout_successes=10 heuristic_layout_fallbacks=2 layout_hits=11 layout_misses=12 line_hits=13 line_misses=14 block_hits=15 block_misses=16 style_bucket_source_counts=[CjkJa/SystemFont:2,CjkZhHant/BundledNotoCjkMedium:1]"
         );
     }
 
