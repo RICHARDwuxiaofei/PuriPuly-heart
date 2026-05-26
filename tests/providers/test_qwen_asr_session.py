@@ -222,6 +222,7 @@ async def test_qwen_asr_session_run_sync_processes_audio_commit_and_final_event(
 
     session._audio_q.put_nowait(b"pcm")
     session._audio_q.put_nowait(_COMMIT)
+    session._audio_q.put_nowait(_COMMIT)
     session._audio_q.put_nowait(_STOP)
     session._run_sync()
     await asyncio.sleep(0)
@@ -231,7 +232,7 @@ async def test_qwen_asr_session_run_sync_processes_audio_commit_and_final_event(
     assert first.text == "final transcript"
     assert latest_dashscope["pkg"].api_key == "k"
     assert append_calls
-    assert commit_calls == 1
+    assert commit_calls == 2
     assert session._connected.is_set() is True
     assert closed is True
 

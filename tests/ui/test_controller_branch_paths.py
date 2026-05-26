@@ -6704,6 +6704,7 @@ async def test_start_mic_loop_wires_self_vad_diagnostics(
     await controller._start_mic_loop()
     await asyncio.sleep(0)
 
+    assert vad_calls[0].get("max_segment_ms") is None
     assert vad_calls[0]["diagnostic_label"] == "self"
     diagnostics_enabled = vad_calls[0]["diagnostics_enabled"]
     assert callable(diagnostics_enabled)
