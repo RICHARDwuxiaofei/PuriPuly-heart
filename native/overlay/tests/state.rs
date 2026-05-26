@@ -21,6 +21,8 @@ fn block(
         primary_text: primary_text.to_string(),
         secondary_text: secondary_text.to_string(),
         secondary_enabled,
+        primary_language: None,
+        secondary_language: None,
         update_id: None,
         origin_wall_clock_ms: None,
         session_scope: None,
@@ -45,6 +47,8 @@ fn slot_block(
         primary_text: primary_text.to_string(),
         secondary_text: secondary_text.to_string(),
         secondary_enabled,
+        primary_language: None,
+        secondary_language: None,
         update_id: None,
         origin_wall_clock_ms: None,
         session_scope: None,
@@ -111,6 +115,81 @@ fn overlay_state_deserializes_active_peer_variant() {
     assert_eq!(snapshot.blocks[0].primary_text, "");
     assert_eq!(snapshot.blocks[0].secondary_text, "Can you hear me?");
     assert!(snapshot.blocks[0].secondary_enabled);
+}
+
+#[test]
+fn overlay_state_deserializes_missing_language_fields_as_none() {
+    let snapshot: OverlayPresentationSnapshot = serde_json::from_value(json!({
+        "revision": 1,
+        "calibration": OverlayPresentationCalibration::default(),
+        "blocks": [{
+            "id": "self:legacy",
+            "occupant_key": "self:legacy",
+            "appearance_seq": 1,
+            "channel": "self",
+            "block_variant": "finalized",
+            "primary_text": "hello",
+            "secondary_text": "",
+            "secondary_enabled": true
+        }]
+    }))
+    .unwrap();
+
+    assert_eq!(snapshot.blocks[0].primary_language, None);
+    assert_eq!(snapshot.blocks[0].secondary_language, None);
+}
+
+#[test]
+fn overlay_state_treats_language_only_update_as_visual_change_without_reassigning_slot() {
+    let initial: OverlayPresentationSnapshot = serde_json::from_value(json!({
+        "revision": 1,
+        "calibration": OverlayPresentationCalibration::default(),
+        "blocks": [{
+            "id": "self:language",
+            "occupant_key": "self:language",
+            "appearance_seq": 1,
+            "channel": "self",
+            "block_variant": "finalized",
+            "primary_text": "こんにちは",
+            "secondary_text": "",
+            "secondary_enabled": true,
+            "primary_language": "ko"
+        }]
+    }))
+    .unwrap();
+    let updated: OverlayPresentationSnapshot = serde_json::from_value(json!({
+        "revision": 2,
+        "calibration": OverlayPresentationCalibration::default(),
+        "blocks": [{
+            "id": "self:language",
+            "occupant_key": "self:language",
+            "appearance_seq": 1,
+            "channel": "self",
+            "block_variant": "finalized",
+            "primary_text": "こんにちは",
+            "secondary_text": "",
+            "secondary_enabled": true,
+            "primary_language": "ja"
+        }]
+    }))
+    .unwrap();
+    let mut state = OverlayState::default();
+
+    assert!(state.apply_snapshot(&initial));
+    let slot = state.scene().slots()[0].as_ref().unwrap();
+    let original_slot_index = slot.slot_index;
+    let original_anchor_top_px = slot.anchor_top_px;
+    let original_slot_entry_order = slot.slot_entry_order;
+
+    assert!(state.apply_snapshot(&updated));
+
+    let slot = state.scene().slots()[0].as_ref().unwrap();
+    assert_eq!(slot.slot_index, original_slot_index);
+    assert_eq!(slot.anchor_top_px, original_anchor_top_px);
+    assert_eq!(slot.slot_entry_order, original_slot_entry_order);
+    assert_eq!(slot.occupant_key, "self:language");
+    assert_eq!(slot.appearance_seq, 1);
+    assert_eq!(slot.primary_language.as_deref(), Some("ja"));
 }
 
 #[test]
@@ -255,6 +334,8 @@ fn overlay_state_promotes_matching_occupant_key_without_reassigning_slot() {
             primary_text: "hello live".into(),
             secondary_text: String::new(),
             secondary_enabled: true,
+            primary_language: None,
+            secondary_language: None,
             update_id: None,
             origin_wall_clock_ms: None,
             session_scope: None,
@@ -302,6 +383,8 @@ fn overlay_state_promotes_active_peer_matching_occupant_key_without_reassigning_
             primary_text: "Can you hear me?".into(),
             secondary_text: String::new(),
             secondary_enabled: false,
+            primary_language: None,
+            secondary_language: None,
             update_id: None,
             origin_wall_clock_ms: None,
             session_scope: None,
@@ -322,6 +405,8 @@ fn overlay_state_promotes_active_peer_matching_occupant_key_without_reassigning_
             primary_text: "들려?".into(),
             secondary_text: "Can you hear me?".into(),
             secondary_enabled: true,
+            primary_language: None,
+            secondary_language: None,
             update_id: None,
             origin_wall_clock_ms: None,
             session_scope: None,

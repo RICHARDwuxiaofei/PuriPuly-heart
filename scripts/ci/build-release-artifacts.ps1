@@ -11,6 +11,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $PinnedOpenVrVendorDllSha256 = "bab8ac6ef64e68a9ca53315b0014d131088584b2efdfa6db511d67ec03cfcb4a"
+$PinnedNotoCjkFontSha256 = "197d5e1e019faca33a4d55931c7d68b8056f3b97cb862049f5cb8de9efdfb8ce"
 
 function Invoke-External {
     param(
@@ -313,6 +314,10 @@ $overlayStagedPath = Join-Path $overlayBuildDir "PuriPulyHeartOverlay.exe"
 $overlayBundledDllPath = Join-Path $overlayBuildDir "openvr_api.dll"
 $openVrVendorDllPath = Join-Path $PWD "third_party/openvr/win64/openvr_api.dll"
 $openVrVendorSha256Path = Join-Path $PWD "third_party/openvr/win64/openvr_api.dll.sha256"
+$notoCjkFontSourcePath = Join-Path $PWD "third_party/noto-sans-cjk/NotoSansCJK-Medium.ttc"
+$notoCjkFontLicensePath = Join-Path $PWD "third_party/noto-sans-cjk/OFL.txt"
+$notoCjkFontReadmePath = Join-Path $PWD "third_party/noto-sans-cjk/README.md"
+$notoCjkFontSha256SumsPath = Join-Path $PWD "third_party/noto-sans-cjk/SHA256SUMS.txt"
 $pyInstallerBuildDir = Join-Path $PWD "build/build"
 $distDir = Join-Path $PWD "dist/PuriPulyHeart"
 $soxrLicenseTextPath = Join-Path $PWD "src\puripuly_heart\data\licenses\COPYING.LGPL-2.1.txt"
@@ -327,11 +332,22 @@ $packagedSoxrComplianceDir = Join-Path $distDir "third_party\soxr"
 $packagedSoxrLicensePath = Join-Path $packagedSoxrComplianceDir "COPYING.LGPL-2.1.txt"
 $packagedSoxrSourceBundlePath = $null
 $packagedOverlayDllPath = Join-Path $distDir "openvr_api.dll"
+$packagedNotoCjkFontPath = Join-Path $distDir "fonts\NotoSansCJK-Medium.ttc"
+$packagedNotoCjkProvenanceDir = Join-Path $distDir "third_party\noto-sans-cjk"
+$packagedNotoCjkLicensePath = Join-Path $packagedNotoCjkProvenanceDir "OFL.txt"
+$packagedNotoCjkReadmePath = Join-Path $packagedNotoCjkProvenanceDir "README.md"
+$packagedNotoCjkSha256SumsPath = Join-Path $packagedNotoCjkProvenanceDir "SHA256SUMS.txt"
 $pinnedOpenVrVendorDllSha256FromFile = Get-PinnedSha256FromFile -Path $openVrVendorSha256Path
 if ($pinnedOpenVrVendorDllSha256FromFile -ne $PinnedOpenVrVendorDllSha256) {
     throw "Vendored OpenVR runtime DLL pinned SHA256 literal drifted from $openVrVendorSha256Path"
 }
 Assert-FileSha256Equals -Path $openVrVendorDllPath -ExpectedSha256 $PinnedOpenVrVendorDllSha256 -Label "Vendored OpenVR runtime DLL"
+Assert-FileSha256Equals -Path $notoCjkFontSourcePath -ExpectedSha256 $PinnedNotoCjkFontSha256 -Label "Source Noto Sans CJK Medium TTC"
+foreach ($notoCjkProvenancePath in @($notoCjkFontLicensePath, $notoCjkFontReadmePath, $notoCjkFontSha256SumsPath)) {
+    if (-not (Test-Path $notoCjkProvenancePath)) {
+        throw "Noto Sans CJK provenance file not found: $notoCjkProvenancePath"
+    }
+}
 
 Write-Host "Building Rust overlay executable..."
 Invoke-External -FilePath $cargoCommand -ArgumentList @(
@@ -399,6 +415,12 @@ if (-not (Test-Path $packagedOnnxRuntimeProvidersSharedDllPath)) {
 }
 if (-not (Test-Path $soxrReleaseInputsManifestPath)) {
     throw "Prepared soxr release inputs manifest not found: $soxrReleaseInputsManifestPath"
+}
+Assert-FileSha256Equals -Path $packagedNotoCjkFontPath -ExpectedSha256 $PinnedNotoCjkFontSha256 -Label "Packaged Noto Sans CJK Medium TTC"
+foreach ($packagedNotoCjkProvenancePath in @($packagedNotoCjkLicensePath, $packagedNotoCjkReadmePath, $packagedNotoCjkSha256SumsPath)) {
+    if (-not (Test-Path $packagedNotoCjkProvenancePath)) {
+        throw "Packaged Noto Sans CJK provenance file not found: $packagedNotoCjkProvenancePath"
+    }
 }
 
 $soxrReleaseInputsManifest = Get-Content -Path $soxrReleaseInputsManifestPath -Raw -Encoding utf8 | ConvertFrom-Json
@@ -558,6 +580,11 @@ $InstallerSmokeLogPath = Join-Path $env:TEMP "PuriPulyHeart-LocalSTT-Test.log"
 $InstallerReinstallSmokeLogPath = Join-Path $env:TEMP "PuriPulyHeart-LocalSTT-Test-reinstall.log"
 $installedExePath = Join-Path $InstallerSmokeDir "PuriPulyHeart.exe"
 $installedOpenVrDllPath = Join-Path $InstallerSmokeDir "openvr_api.dll"
+$installedNotoCjkFontPath = Join-Path $InstallerSmokeDir "fonts\NotoSansCJK-Medium.ttc"
+$installedNotoCjkProvenanceDir = Join-Path $InstallerSmokeDir "third_party\noto-sans-cjk"
+$installedNotoCjkLicensePath = Join-Path $installedNotoCjkProvenanceDir "OFL.txt"
+$installedNotoCjkReadmePath = Join-Path $installedNotoCjkProvenanceDir "README.md"
+$installedNotoCjkSha256SumsPath = Join-Path $installedNotoCjkProvenanceDir "SHA256SUMS.txt"
 $installedSoxrDllPath = Join-Path $InstallerSmokeDir "soxr\soxr.dll"
 $installedSoxrExtensionPath = Join-Path $InstallerSmokeDir (Join-Path "soxr" ([System.IO.Path]::GetFileName($packagedSoxrExtensionPath)))
 $legacyRootLevelSoxrDllPath = Join-Path $InstallerSmokeDir "soxr.dll"
@@ -652,6 +679,12 @@ if (-not (Test-Path $installedOpenVrDllPath)) {
     throw "Installed OpenVR runtime DLL not found after installer smoke: $installedOpenVrDllPath"
 }
 Assert-FileSha256Equals -Path $installedOpenVrDllPath -ExpectedSha256 $PinnedOpenVrVendorDllSha256 -Label "Installed OpenVR runtime DLL"
+Assert-FileSha256Equals -Path $installedNotoCjkFontPath -ExpectedSha256 $PinnedNotoCjkFontSha256 -Label "Installed Noto Sans CJK Medium TTC"
+foreach ($installedNotoCjkProvenancePath in @($installedNotoCjkLicensePath, $installedNotoCjkReadmePath, $installedNotoCjkSha256SumsPath)) {
+    if (-not (Test-Path $installedNotoCjkProvenancePath)) {
+        throw "Installed Noto Sans CJK provenance file not found after installer smoke: $installedNotoCjkProvenancePath"
+    }
+}
 if (-not (Test-Path $installedSoxrDllPath)) {
     throw "Installed app soxr runtime DLL not found after installer smoke: $installedSoxrDllPath"
 }

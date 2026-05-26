@@ -7,6 +7,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use puripuly_heart_overlay::logging::OverlayLogger;
+use puripuly_heart_overlay::runtime::SnapshotApplyOutcome;
 use puripuly_heart_overlay::{
     run_with_manifest, submit_texture, validate_manifest, BridgeClient, CaptionBlock,
     CaptionChannel, CaptionRenderer, FakeOpenVr, OpenVrError, OverlayBridgeEvent,
@@ -81,6 +82,8 @@ fn block(
         primary_text: primary_text.to_string(),
         secondary_text: secondary_text.to_string(),
         secondary_enabled,
+        primary_language: None,
+        secondary_language: None,
         update_id: None,
         origin_wall_clock_ms: None,
         session_scope: None,
@@ -105,6 +108,8 @@ fn slot_block(
         primary_text: primary_text.to_string(),
         secondary_text: secondary_text.to_string(),
         secondary_enabled,
+        primary_language: None,
+        secondary_language: None,
         update_id: None,
         origin_wall_clock_ms: None,
         session_scope: None,
@@ -121,6 +126,8 @@ fn active_self_block(id: &str, primary_text: &str) -> OverlayPresentationBlock {
         primary_text: primary_text.to_string(),
         secondary_text: String::new(),
         secondary_enabled: true,
+        primary_language: None,
+        secondary_language: None,
         update_id: None,
         origin_wall_clock_ms: None,
         session_scope: None,
@@ -355,6 +362,11 @@ fn runtime_accepts_app_version_mismatch_when_contract_version_matches() {
 }
 
 #[test]
+fn runtime_expected_contract_version_includes_language_metadata_boundary() {
+    assert_eq!(EXPECTED_CONTRACT_VERSION, 6);
+}
+
+#[test]
 fn runtime_returns_standardized_startup_failure_codes_before_ready() {
     assert_eq!(StartupError::ContractMismatch("bad".into()).exit_code(), 10);
     assert_eq!(StartupError::BridgeAuth("bad token".into()).exit_code(), 12);
@@ -540,6 +552,78 @@ async fn runtime_caption_blocks_keep_channel_metadata_for_color_only_rendering()
     );
 }
 
+#[tokio::test]
+async fn runtime_caption_blocks_carry_primary_and_secondary_languages_from_slots() {
+    let mut localized = block("peer:localized", "peer", "日本語", "번역", true);
+    localized.primary_language = Some("ja".into());
+    localized.secondary_language = Some("ko".into());
+    let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 4,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![localized],
+    });
+
+    let blocks = runtime.caption_blocks();
+
+    assert_eq!(blocks[0].primary_language.as_deref(), Some("ja"));
+    assert_eq!(blocks[0].secondary_language.as_deref(), Some("ko"));
+}
+
+#[test]
+fn runtime_language_only_snapshot_redraws_without_slot_identity_reset() {
+    let mut initial = slot_block(
+        "self:language",
+        "self:language",
+        7,
+        "self",
+        "こんにちは",
+        "",
+        true,
+    );
+    initial.primary_language = Some("ko".into());
+    initial.update_id = Some("update-stays".into());
+    let mut updated = initial.clone();
+    updated.primary_language = Some("ja".into());
+    let mut runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+        revision: 1,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![initial],
+    });
+    runtime.clear_redraw_flag();
+    let original_slot = runtime.state().scene().slots()[0]
+        .as_ref()
+        .expect("initial slot should exist")
+        .clone();
+
+    let outcome = runtime.apply_snapshot(OverlayPresentationSnapshot {
+        revision: 2,
+        calibration: OverlayPresentationCalibration::default(),
+        blocks: vec![updated],
+    });
+
+    assert!(matches!(
+        outcome,
+        SnapshotApplyOutcome::Applied {
+            visual_changed: true,
+            redraw_requested: true,
+            ..
+        }
+    ));
+    let slot = runtime.state().scene().slots()[0]
+        .as_ref()
+        .expect("updated slot should stay assigned");
+    assert_eq!(slot.slot_index, original_slot.slot_index);
+    assert_eq!(slot.slot_entry_order, original_slot.slot_entry_order);
+    assert_eq!(slot.occupant_key, original_slot.occupant_key);
+    assert_eq!(slot.appearance_seq, original_slot.appearance_seq);
+    assert_eq!(slot.update_id, original_slot.update_id);
+    assert_eq!(slot.primary_language.as_deref(), Some("ja"));
+    assert_eq!(
+        runtime.caption_blocks()[0].primary_language.as_deref(),
+        Some("ja")
+    );
+}
+
 #[test]
 fn runtime_seeds_initial_snapshot_with_static_block_visual_state() {
     let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
@@ -638,6 +722,8 @@ fn runtime_keeps_active_self_and_finalized_rows_visible_within_two_slot_cap() {
                 primary_text: "speaking".into(),
                 secondary_text: String::new(),
                 secondary_enabled: true,
+                primary_language: None,
+                secondary_language: None,
                 update_id: None,
                 origin_wall_clock_ms: None,
                 session_scope: None,
@@ -831,6 +917,8 @@ async fn runtime_submits_same_peer_refresh_target_when_session_scope_nonce_chang
         primary_text: "translated peer line".into(),
         secondary_text: "source peer line".into(),
         secondary_enabled: true,
+        primary_language: None,
+        secondary_language: None,
         update_id: Some("peer-update-1".into()),
         origin_wall_clock_ms: None,
         session_scope: Some("peer_presentation_refresh=1".into()),

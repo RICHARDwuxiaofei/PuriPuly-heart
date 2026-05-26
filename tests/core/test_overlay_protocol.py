@@ -100,6 +100,46 @@ def test_overlay_presentation_block_round_trips_occupant_metadata() -> None:
     assert OverlayPresentationBlock.from_dict(encoded) == block
 
 
+def test_overlay_presentation_block_round_trips_optional_content_languages() -> None:
+    block = OverlayPresentationBlock(
+        id="self:1234",
+        occupant_key="self:1234",
+        appearance_seq=7,
+        channel="self",
+        block_variant="finalized",
+        primary_text="안녕하세요",
+        secondary_text="hello",
+        secondary_enabled=True,
+        primary_language="ko",
+        secondary_language="en",
+    )
+
+    encoded = block.to_dict()
+
+    assert encoded["primary_language"] == "ko"
+    assert encoded["secondary_language"] == "en"
+    assert OverlayPresentationBlock.from_dict(encoded) == block
+
+
+def test_overlay_presentation_block_defaults_missing_or_null_content_languages_to_none() -> None:
+    restored = OverlayPresentationBlock.from_dict(
+        {
+            "id": "self:1",
+            "occupant_key": "self:1",
+            "appearance_seq": 1,
+            "channel": "self",
+            "block_variant": "finalized",
+            "primary_text": "hello",
+            "secondary_text": "",
+            "secondary_enabled": False,
+            "primary_language": None,
+        }
+    )
+
+    assert restored.primary_language is None
+    assert restored.secondary_language is None
+
+
 def test_overlay_event_adapter_self_active_update_carries_occupant_key() -> None:
     adapter = OverlayEventAdapter()
     utterance_id = uuid4()

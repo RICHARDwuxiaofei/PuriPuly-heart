@@ -61,6 +61,10 @@ pub struct OverlayPresentationBlock {
     pub secondary_text: String,
     #[serde(default = "default_secondary_enabled")]
     pub secondary_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_language: Option<String>,
     #[serde(default)]
     pub update_id: Option<String>,
     #[serde(default)]
@@ -94,6 +98,8 @@ pub struct OverlaySlot {
     pub primary_text: String,
     pub secondary_text: String,
     pub secondary_enabled: bool,
+    pub primary_language: Option<String>,
+    pub secondary_language: Option<String>,
     pub update_id: Option<String>,
     pub origin_wall_clock_ms: Option<u64>,
     pub session_scope: Option<String>,
@@ -117,6 +123,8 @@ impl OverlaySlot {
             primary_text: block.primary_text.clone(),
             secondary_text: block.secondary_text.clone(),
             secondary_enabled: block.secondary_enabled,
+            primary_language: block.primary_language.clone(),
+            secondary_language: block.secondary_language.clone(),
             update_id: block.update_id.clone(),
             origin_wall_clock_ms: block.origin_wall_clock_ms,
             session_scope: block.session_scope.clone(),
@@ -133,6 +141,8 @@ impl OverlaySlot {
         self.primary_text = block.primary_text.clone();
         self.secondary_text = block.secondary_text.clone();
         self.secondary_enabled = block.secondary_enabled;
+        self.primary_language = block.primary_language.clone();
+        self.secondary_language = block.secondary_language.clone();
         self.update_id = block.update_id.clone();
         self.origin_wall_clock_ms = block.origin_wall_clock_ms;
         self.session_scope = block.session_scope.clone();
@@ -338,6 +348,8 @@ mod tests {
             primary_text: "hello".to_string(),
             secondary_text: String::new(),
             secondary_enabled: true,
+            primary_language: None,
+            secondary_language: None,
             update_id: None,
             origin_wall_clock_ms: None,
             session_scope: None,
