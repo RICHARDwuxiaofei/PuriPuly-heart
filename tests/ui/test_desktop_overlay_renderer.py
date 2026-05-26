@@ -2158,6 +2158,15 @@ async def test_desktop_overlay_empty_moving_state_renders_text_only_lock_action(
         assert action.style.color[ft.ControlState.FOCUSED] == "#FF6B6B"
         assert action.style.color[ft.ControlState.HOVERED] == "#FF6B6B"
         action_text_style = action.style.text_style[ft.ControlState.DEFAULT]
+        assert isinstance(action_text_style.shadow, list)
+        assert len(action_text_style.shadow) == 2
+        contact_shadow, ambient_shadow = action_text_style.shadow
+        assert contact_shadow.color == "#C0000000"
+        assert contact_shadow.offset == (0, 1)
+        assert contact_shadow.blur_radius == pytest.approx(1.0)
+        assert ambient_shadow.color == "#66000000"
+        assert ambient_shadow.offset == (0, 0)
+        assert ambient_shadow.blur_radius == pytest.approx(3.0)
         action_padding = action.style.padding[ft.ControlState.DEFAULT]
         required_label_width = desktop_overlay._estimated_caption_line_width(
             "고정하기",

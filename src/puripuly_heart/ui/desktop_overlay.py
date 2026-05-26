@@ -559,6 +559,7 @@ def build_desktop_empty_lock_action(
         height=1.0,
         weight=ft.FontWeight.BOLD,
         font_family=_desktop_caption_font_family_for_text(label),
+        shadow=_caption_text_shadow(ft),
         decoration=None,
     )
     return ft.TextButton(
