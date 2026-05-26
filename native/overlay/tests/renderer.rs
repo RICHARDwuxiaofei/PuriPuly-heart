@@ -1,9 +1,14 @@
+use std::path::{Path, PathBuf};
+
 use puripuly_heart_overlay::renderer::LineRole;
+#[cfg(windows)]
+use puripuly_heart_overlay::WindowsBundledFontCollection;
 use puripuly_heart_overlay::{
-    BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionDebugOverlay,
-    CaptionLayoutPolicy, CaptionPresentation, CaptionRenderer, DamageBand, OverlayPlacementPolicy,
-    OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
-    OverlayPresentationSnapshot, OverlayState,
+    bundled_font_path_from_exe_dir, BlockBounds, BundledFaceId, CaptionBlock, CaptionBlockVariant,
+    CaptionChannel, CaptionDebugOverlay, CaptionLayoutPolicy, CaptionPresentation, CaptionRenderer,
+    DamageBand, FontFallbackReason, FontLanguageBucket, FontResolver, FontSource, FontWeight,
+    OverlayPlacementPolicy, OverlayPresentationBlock, OverlayPresentationBlockVariant,
+    OverlayPresentationCalibration, OverlayPresentationSnapshot, OverlayState,
 };
 fn assert_close(actual: f32, expected: f32) {
     assert!(
@@ -50,8 +55,386 @@ fn renderer_preferred_face_resolution_uses_latin_and_cjk_order_before_system_fal
         policy.latin_face_chain().last(),
         Some(&"DirectWrite system fallback")
     );
+    assert_eq!(policy.cjk_face_chain()[0], "Malgun Gothic");
     assert!(policy.cjk_face_chain().contains(&"Segoe UI"));
-    assert_eq!(policy.cjk_face_chain()[0], "Noto Sans CJK KR");
+    for installed_noto_cjk in [
+        "Noto Sans CJK KR",
+        "Noto Sans CJK JP",
+        "Noto Sans CJK SC",
+        "Noto Sans CJK TC",
+    ] {
+        assert!(
+            !policy.cjk_face_chain().contains(&installed_noto_cjk),
+            "installed {installed_noto_cjk} must not be searched as an intermediate system candidate"
+        );
+    }
+}
+
+#[test]
+fn renderer_font_language_bucket_normalizes_cjk_and_general_languages() {
+    assert_eq!(
+        FontLanguageBucket::for_text(Some("ko"), "hello"),
+        FontLanguageBucket::CjkKo
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text(Some("ko-KR"), "hello"),
+        FontLanguageBucket::CjkKo
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text(Some("ja-JP"), "hello"),
+        FontLanguageBucket::CjkJa
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text(Some("zh-CN"), "hello"),
+        FontLanguageBucket::CjkZhHans
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text(Some("zh-Hans"), "hello"),
+        FontLanguageBucket::CjkZhHans
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text(Some("zh-TW"), "hello"),
+        FontLanguageBucket::CjkZhHant
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text(Some("zh-Hant"), "hello"),
+        FontLanguageBucket::CjkZhHant
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text(Some("zh-HK"), "hello"),
+        FontLanguageBucket::CjkZhHant
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text(Some("fr-CA"), "bonjour"),
+        FontLanguageBucket::General
+    );
+}
+
+#[test]
+fn renderer_font_language_bucket_uses_heuristic_for_missing_and_unknown_language() {
+    assert_eq!(
+        FontLanguageBucket::for_text(None, "日本語"),
+        FontLanguageBucket::CjkKo,
+        "missing-language CJK keeps the compatibility KR-first default"
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text(Some("x-madeup"), "中文"),
+        FontLanguageBucket::CjkKo,
+        "unknown explicit CJK language uses the unknown-CJK compatibility path"
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text(Some("x-madeup"), "hello"),
+        FontLanguageBucket::General
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text(None, "hello"),
+        FontLanguageBucket::General
+    );
+}
+
+#[test]
+fn renderer_font_language_bucket_prefers_ui_language_hint_for_unknown_cjk_text() {
+    assert_eq!(
+        FontLanguageBucket::for_text_with_ui_language(None, "日本語", Some("ja-JP")),
+        FontLanguageBucket::CjkJa
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text_with_ui_language(Some("x-madeup"), "中文", Some("zh-Hans")),
+        FontLanguageBucket::CjkZhHans
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text_with_ui_language(None, "繁體", Some("zh-HK")),
+        FontLanguageBucket::CjkZhHant
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text_with_ui_language(None, "안녕", Some("ko-KR")),
+        FontLanguageBucket::CjkKo
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text_with_ui_language(None, "中文", Some("fr-FR")),
+        FontLanguageBucket::CjkKo,
+        "unmapped UI languages keep the KR-first compatibility default"
+    );
+    assert_eq!(
+        FontLanguageBucket::for_text_with_ui_language(None, "hello", Some("ja-JP")),
+        FontLanguageBucket::General,
+        "UI CJK hint must not force General text onto a CJK branch"
+    );
+}
+
+#[test]
+fn renderer_font_resolver_selects_bundled_faces_and_locales_by_bucket() {
+    let resolver = FontResolver::with_bundle_available();
+    let cases = [
+        (
+            "ko-KR",
+            "안녕하세요",
+            FontLanguageBucket::CjkKo,
+            "ko-KR",
+            BundledFaceId::NotoCjkKrMedium,
+            "Noto Sans CJK KR",
+            &["Malgun Gothic", "Segoe UI", "DirectWrite system fallback"] as &[&str],
+        ),
+        (
+            "ja-JP",
+            "日本語",
+            FontLanguageBucket::CjkJa,
+            "ja-JP",
+            BundledFaceId::NotoCjkJpMedium,
+            "Noto Sans CJK JP",
+            &[
+                "Yu Gothic UI",
+                "Meiryo UI",
+                "Segoe UI",
+                "DirectWrite system fallback",
+            ],
+        ),
+        (
+            "zh-Hans",
+            "中文",
+            FontLanguageBucket::CjkZhHans,
+            "zh-CN",
+            BundledFaceId::NotoCjkScMedium,
+            "Noto Sans CJK SC",
+            &[
+                "Microsoft YaHei UI",
+                "Segoe UI",
+                "DirectWrite system fallback",
+            ],
+        ),
+        (
+            "zh-HK",
+            "繁體",
+            FontLanguageBucket::CjkZhHant,
+            "zh-TW",
+            BundledFaceId::NotoCjkTcMedium,
+            "Noto Sans CJK TC",
+            &[
+                "Microsoft JhengHei UI",
+                "Segoe UI",
+                "DirectWrite system fallback",
+            ],
+        ),
+    ];
+
+    for (language, text, bucket, locale, face, family, system_fallbacks) in cases {
+        let style = resolver.resolve(Some(language), text);
+
+        assert_eq!(style.bucket, bucket);
+        assert_eq!(style.source, FontSource::BundledNotoCjkMedium);
+        assert_eq!(style.bundled_face, Some(face));
+        assert_eq!(style.family_name, family);
+        assert_eq!(style.weight, FontWeight::Medium);
+        assert_eq!(style.locale, locale);
+        assert_eq!(style.system_fallback_families(), system_fallbacks);
+        assert_no_installed_noto_cjk_intermediates(style.system_fallback_families());
+    }
+}
+
+#[test]
+fn renderer_font_resolver_uses_ui_language_hint_for_missing_unknown_cjk_text() {
+    let japanese_hint = FontResolver::with_bundle_available().with_ui_language_hint("ja-JP");
+    let japanese = japanese_hint.resolve(None, "日本語");
+    assert_eq!(japanese.bucket, FontLanguageBucket::CjkJa);
+    assert_eq!(japanese.locale, "ja-JP");
+    assert_eq!(japanese.bundled_face, Some(BundledFaceId::NotoCjkJpMedium));
+
+    let hong_kong_hint = FontResolver::with_bundle_available().with_ui_language_hint("zh-HK");
+    let traditional = hong_kong_hint.resolve(Some("x-madeup"), "繁體");
+    assert_eq!(traditional.bucket, FontLanguageBucket::CjkZhHant);
+    assert_eq!(traditional.locale, "zh-TW");
+    assert_eq!(
+        traditional.bundled_face,
+        Some(BundledFaceId::NotoCjkTcMedium)
+    );
+
+    let unmapped_hint = FontResolver::with_bundle_available().with_ui_language_hint("fr-FR");
+    assert_eq!(
+        unmapped_hint.resolve(None, "中文").bucket,
+        FontLanguageBucket::CjkKo
+    );
+}
+
+#[test]
+fn renderer_font_resolver_uses_system_branches_when_bundle_unavailable() {
+    let resolver = FontResolver::with_bundle_unavailable("missing test bundle");
+    let cases = [
+        (
+            "ko",
+            "안녕",
+            FontLanguageBucket::CjkKo,
+            "ko-KR",
+            "Malgun Gothic",
+            &["Malgun Gothic", "Segoe UI", "DirectWrite system fallback"] as &[&str],
+        ),
+        (
+            "ja",
+            "日本語",
+            FontLanguageBucket::CjkJa,
+            "ja-JP",
+            "Yu Gothic UI",
+            &[
+                "Yu Gothic UI",
+                "Meiryo UI",
+                "Segoe UI",
+                "DirectWrite system fallback",
+            ],
+        ),
+        (
+            "zh-CN",
+            "中文",
+            FontLanguageBucket::CjkZhHans,
+            "zh-CN",
+            "Microsoft YaHei UI",
+            &[
+                "Microsoft YaHei UI",
+                "Segoe UI",
+                "DirectWrite system fallback",
+            ],
+        ),
+        (
+            "zh-Hant",
+            "繁體",
+            FontLanguageBucket::CjkZhHant,
+            "zh-TW",
+            "Microsoft JhengHei UI",
+            &[
+                "Microsoft JhengHei UI",
+                "Segoe UI",
+                "DirectWrite system fallback",
+            ],
+        ),
+    ];
+
+    for (language, text, bucket, locale, family, system_fallbacks) in cases {
+        let style = resolver.resolve(Some(language), text);
+
+        assert_eq!(style.bucket, bucket);
+        assert_eq!(style.source, FontSource::SystemFont);
+        assert_eq!(style.bundled_face, None);
+        assert_eq!(style.family_name, family);
+        assert_eq!(style.locale, locale);
+        assert_eq!(style.system_fallback_families(), system_fallbacks);
+        assert_no_installed_noto_cjk_intermediates(style.system_fallback_families());
+    }
+}
+
+#[test]
+fn renderer_general_font_resolver_preserves_explicit_locale_and_defaults_en_us() {
+    let resolver = FontResolver::with_bundle_available();
+    let explicit = resolver.resolve(Some("fr-ca"), "bonjour");
+    let german = resolver.resolve(Some("de-DE"), "guten tag");
+    let missing = resolver.resolve(None, "hello");
+    let private_use = resolver.resolve(Some("x-madeup"), "hello");
+    let undefined = resolver.resolve(Some("und"), "hello");
+    let invalid = resolver.resolve(Some("not a tag!"), "hello");
+
+    assert_eq!(explicit.bucket, FontLanguageBucket::General);
+    assert_eq!(explicit.source, FontSource::SystemFont);
+    assert_eq!(explicit.bundled_face, None);
+    assert_eq!(explicit.family_name, "Noto Sans");
+    assert_eq!(explicit.locale, "fr-CA");
+    assert_eq!(
+        explicit.system_fallback_families(),
+        &["Noto Sans", "Segoe UI", "DirectWrite system fallback"]
+    );
+
+    assert_eq!(german.bucket, FontLanguageBucket::General);
+    assert_eq!(german.locale, "de-DE");
+    assert_eq!(missing.bucket, FontLanguageBucket::General);
+    assert_eq!(missing.locale, "en-US");
+    assert_eq!(private_use.bucket, FontLanguageBucket::General);
+    assert_eq!(private_use.locale, "en-US");
+    assert_eq!(undefined.bucket, FontLanguageBucket::General);
+    assert_eq!(undefined.locale, "en-US");
+    assert_eq!(invalid.bucket, FontLanguageBucket::General);
+    assert_eq!(invalid.locale, "en-US");
+}
+
+#[test]
+fn renderer_runtime_bundled_font_path_uses_exe_fonts_directory() {
+    assert_eq!(
+        bundled_font_path_from_exe_dir(Path::new("C:/PuriPulyHeart")),
+        PathBuf::from("C:/PuriPulyHeart")
+            .join("fonts")
+            .join("NotoSansCJK-Medium.ttc")
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn renderer_windows_loads_committed_ttc_as_bundled_collection() {
+    let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("third_party")
+        .join("noto-sans-cjk")
+        .join("NotoSansCJK-Medium.ttc");
+
+    assert!(font_path.exists(), "expected source TTC at {font_path:?}");
+    let expected_path = font_path
+        .canonicalize()
+        .expect("source TTC path should canonicalize");
+    let collection = WindowsBundledFontCollection::load_from_path(&font_path)
+        .expect("source NotoSansCJK-Medium.ttc should load as a DirectWrite font collection");
+
+    assert_eq!(collection.path(), expected_path.as_path());
+}
+
+#[test]
+fn renderer_style_resolution_failure_fallback_is_distinct_from_layout_fallback() {
+    let style = FontResolver::style_resolution_failure_fallback(FontLanguageBucket::CjkJa);
+
+    assert_eq!(style.source, FontSource::SystemFallbackSentinel);
+    assert_eq!(style.family_name, "Segoe UI");
+    assert_eq!(style.weight, FontWeight::Regular);
+    assert_eq!(style.locale, "ja-JP");
+    assert_eq!(
+        FontFallbackReason::DirectWriteStyleResolutionFailure.log_label(),
+        "directwrite_style_resolution_failure"
+    );
+    assert!(!FontFallbackReason::DirectWriteStyleResolutionFailure.uses_heuristic_layout_fallback());
+    assert!(
+        FontFallbackReason::CatastrophicDirectWriteLayoutFailure.uses_heuristic_layout_fallback()
+    );
+}
+
+#[test]
+fn renderer_style_resolution_fallback_for_requested_style_stays_out_of_layout_fallback() {
+    let requested = FontResolver::with_bundle_available().resolve(Some("zh-Hant"), "繁體");
+    let fallback = FontResolver::style_resolution_failure_fallback_for_style(&requested);
+
+    assert_eq!(fallback.bucket, FontLanguageBucket::CjkZhHant);
+    assert_eq!(fallback.source, FontSource::SystemFallbackSentinel);
+    assert_eq!(fallback.family_name, "Segoe UI");
+    assert_eq!(fallback.weight, FontWeight::Regular);
+    assert_eq!(fallback.locale, "zh-TW");
+    assert_eq!(
+        fallback.fallback_reason,
+        Some(FontFallbackReason::DirectWriteStyleResolutionFailure)
+    );
+    assert!(!fallback
+        .fallback_reason
+        .expect("style fallback reason")
+        .uses_heuristic_layout_fallback());
+    assert_eq!(
+        FontFallbackReason::CatastrophicDirectWriteLayoutFailure.log_label(),
+        "catastrophic_directwrite_layout_failure"
+    );
+}
+
+fn assert_no_installed_noto_cjk_intermediates(candidates: &[&str]) {
+    for installed_noto_cjk in [
+        "Noto Sans CJK KR",
+        "Noto Sans CJK JP",
+        "Noto Sans CJK SC",
+        "Noto Sans CJK TC",
+    ] {
+        assert!(
+            !candidates.contains(&installed_noto_cjk),
+            "installed {installed_noto_cjk} must not be searched as an intermediate system candidate"
+        );
+    }
 }
 
 #[test]
