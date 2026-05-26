@@ -15,12 +15,15 @@ use super::types::{
 };
 #[cfg(windows)]
 use windows::core::PCWSTR;
+#[cfg(all(windows, test))]
+use windows::Win32::Graphics::DirectWrite::{
+    DWriteCreateFactory, IDWriteFactory2, DWRITE_FACTORY_TYPE_SHARED,
+};
 #[cfg(windows)]
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, IDWriteFactory2, IDWriteFontCollection,
-    IDWriteFontFallback, IDWriteFontFamily, IDWriteInlineObject, IDWriteTextFormat,
-    IDWriteTextFormat1, IDWriteTextLayout, IDWriteTextLayout2, DWRITE_FACTORY_TYPE_SHARED,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
+    IDWriteFactory, IDWriteFontCollection, IDWriteFontFallback, IDWriteFontFamily,
+    IDWriteInlineObject, IDWriteTextFormat, IDWriteTextFormat1, IDWriteTextLayout,
+    IDWriteTextLayout2, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
     DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_METRICS, DWRITE_TRIMMING,
     DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
@@ -159,20 +162,6 @@ impl CaptionLayoutPolicy {
         surface_height_px: u32,
         presentation: &CaptionPresentation,
     ) -> ResolvedFrameLayout {
-        #[cfg(windows)]
-        match self.resolve_blocks_for_presentation_windows_cached(
-            blocks.clone(),
-            surface_width_px,
-            surface_height_px,
-            presentation,
-            None,
-        ) {
-            Ok(layout) => return layout,
-            Err(error) => eprintln!(
-                "[overlay][WARN] catastrophic_directwrite_layout_failure stage=layout_measure error={error}"
-            ),
-        }
-
         self.resolve_blocks_for_presentation_fallback(
             blocks,
             surface_width_px,
@@ -469,9 +458,9 @@ impl CaptionLayoutPolicy {
         surface_width_px: u32,
         surface_height_px: u32,
         presentation: &CaptionPresentation,
+        engine: &DirectWriteLayoutEngine,
         mut layout_cache: Option<&mut LayoutCache>,
     ) -> Result<ResolvedFrameLayout, windows::core::Error> {
-        let engine = DirectWriteLayoutEngine::new()?;
         let content_width_px = self.content_width_px(surface_width_px);
         let text_scale = presentation.text_scale.max(0.1);
         let strip_left_px = self.horizontal_padding_px as f32;
@@ -485,7 +474,7 @@ impl CaptionLayoutPolicy {
                     cached.clone()
                 } else {
                     let template = self.build_windows_block_template(
-                        &engine,
+                        engine,
                         &block,
                         content_width_px,
                         text_scale,
@@ -494,7 +483,7 @@ impl CaptionLayoutPolicy {
                     template
                 }
             } else {
-                self.build_windows_block_template(&engine, &block, content_width_px, text_scale)?
+                self.build_windows_block_template(engine, &block, content_width_px, text_scale)?
             };
             let stable_block_height_px = template.bounds.bottom_px - template.bounds.top_px;
             let block_top_px = if block.slot_assigned {
@@ -559,15 +548,31 @@ impl DirectWriteResolvedTextStyle {
 }
 
 #[cfg(windows)]
-struct DirectWriteLayoutEngine {
+pub(crate) struct DirectWriteLayoutEngine {
     factory: IDWriteFactory,
     system_font_collection: IDWriteFontCollection,
     system_font_fallback: IDWriteFontFallback,
+    font_resolver: FontResolver,
 }
 
 #[cfg(windows)]
 impl DirectWriteLayoutEngine {
-    fn new() -> Result<Self, windows::core::Error> {
+    pub(crate) fn from_shared_resources(
+        factory: &IDWriteFactory,
+        system_font_collection: &IDWriteFontCollection,
+        system_font_fallback: &IDWriteFontFallback,
+        font_resolver: FontResolver,
+    ) -> Self {
+        Self {
+            factory: factory.clone(),
+            system_font_collection: system_font_collection.clone(),
+            system_font_fallback: system_font_fallback.clone(),
+            font_resolver,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Result<Self, windows::core::Error> {
         let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
         let factory2: IDWriteFactory2 = factory.cast()?;
         let mut collection = None;
@@ -578,6 +583,9 @@ impl DirectWriteLayoutEngine {
             factory,
             system_font_collection: collection.expect("system font collection"),
             system_font_fallback: unsafe { factory2.GetSystemFontFallback()? },
+            font_resolver: FontResolver::with_bundle_unavailable(
+                "test DirectWrite layout engine uses system fallback resources",
+            ),
         })
     }
 
@@ -889,10 +897,9 @@ impl DirectWriteLayoutEngine {
         policy: &CaptionLayoutPolicy,
         text: &str,
     ) -> DirectWriteResolvedTextStyle {
-        let requested_style = FontResolver::with_bundle_unavailable(
-            "layout measurement uses system fallback until shared resolver propagation",
-        )
-        .resolve_order6_layout_draw_safe(None, text);
+        let requested_style = self
+            .font_resolver
+            .resolve_order6_layout_draw_safe(None, text);
         for family_name in requested_style
             .system_fallback_families()
             .iter()
@@ -1348,6 +1355,8 @@ mod tests {
     #[test]
     fn windows_directwrite_layout_secondary_origin_includes_scaled_primary_secondary_gap() {
         let policy = CaptionLayoutPolicy::default();
+        let engine = super::DirectWriteLayoutEngine::new_for_test()
+            .expect("DirectWrite layout should initialize on Windows");
         let layout = policy
             .resolve_blocks_for_presentation_windows_cached(
                 vec![CaptionBlock::new("peer:translated", "translated peer text")
@@ -1355,6 +1364,7 @@ mod tests {
                 3840,
                 1024,
                 &CaptionPresentation::default(),
+                &engine,
                 None,
             )
             .expect("DirectWrite layout should initialize on Windows");
