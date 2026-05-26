@@ -183,27 +183,7 @@ class VadGating:
         if prob >= self.speech_threshold:
             self._silence_run = 0
             if self._max_segment_reached():
-                logger.info(
-                    "[VAD] SpeechEnd: id=%s, reason=max_duration, speech_audio_ms=%.1f",
-                    str(self._utterance_id)[:8],
-                    self._speech_sample_count * 1000.0 / self.sample_rate_hz,
-                )
-                with contextlib.suppress(Exception):
-                    if self._diagnostics_enabled():
-                        speech_audio_ms = self._speech_sample_count * 1000.0 / self.sample_rate_hz
-                        assert self.diagnostic_event_callback is not None
-                        self.diagnostic_event_callback(
-                            f"[AudioDiag][VAD][{self.diagnostic_label}] event=SpeechEnd "
-                            f"utterance_id={str(self._utterance_id)[:8]} "
-                            f"reason=max_duration trailing_silence_ms=0 "
-                            f"speech_audio_ms={speech_audio_ms:.1f} "
-                            f"chunk_count={self._speech_chunk_count}"
-                        )
-
-                events.append(
-                    SpeechEnd(self._utterance_id, trailing_silence_ms=0, reason="max_duration")
-                )  # type: ignore[arg-type]
-                self._reset_active_segment()
+                self._emit_max_duration_end(events)
             self._ring.append(chunk)
             return events
 
@@ -320,7 +300,34 @@ class VadGating:
         events.extend(
             SpeechChunk(utterance_id, chunk=buffered.copy()) for buffered in buffered_chunks[1:]
         )
+        if self._max_segment_reached():
+            self._emit_max_duration_end(events)
         return events
+
+    def _emit_max_duration_end(self, events: list[VadEvent]) -> None:
+        utterance_id = self._utterance_id
+        if utterance_id is None:
+            return
+
+        logger.info(
+            "[VAD] SpeechEnd: id=%s, reason=max_duration, speech_audio_ms=%.1f",
+            str(utterance_id)[:8],
+            self._speech_sample_count * 1000.0 / self.sample_rate_hz,
+        )
+        with contextlib.suppress(Exception):
+            if self._diagnostics_enabled():
+                speech_audio_ms = self._speech_sample_count * 1000.0 / self.sample_rate_hz
+                assert self.diagnostic_event_callback is not None
+                self.diagnostic_event_callback(
+                    f"[AudioDiag][VAD][{self.diagnostic_label}] event=SpeechEnd "
+                    f"utterance_id={str(utterance_id)[:8]} "
+                    f"reason=max_duration trailing_silence_ms=0 "
+                    f"speech_audio_ms={speech_audio_ms:.1f} "
+                    f"chunk_count={self._speech_chunk_count}"
+                )
+
+        events.append(SpeechEnd(utterance_id, trailing_silence_ms=0, reason="max_duration"))
+        self._reset_active_segment()
 
     def _drop_pending_start(self) -> None:
         if self._pending_start_id is None:

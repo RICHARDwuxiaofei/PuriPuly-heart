@@ -161,6 +161,30 @@ def test_vad_gating_excludes_pre_roll_from_max_segment_accounting():
     assert end.reason == "max_duration"
 
 
+def test_vad_gating_forces_when_debounce_commit_already_exceeds_budget():
+    gating = VadGating(
+        SequenceVadEngine(probs=[0.9, 0.9, 0.9]),
+        sample_rate_hz=16000,
+        ring_buffer_ms=96,
+        hangover_ms=640,
+        max_segment_ms=64,
+        start_debounce_chunks=3,
+        start_commit_chunks=3,
+    )
+
+    assert gating.process_chunk(chunk_samples(1.0, n=gating.chunk_samples)) == []
+    assert gating.process_chunk(chunk_samples(2.0, n=gating.chunk_samples)) == []
+    events = gating.process_chunk(chunk_samples(3.0, n=gating.chunk_samples))
+
+    assert [type(event) for event in events] == [SpeechStart, SpeechChunk, SpeechChunk, SpeechEnd]
+    end = events[-1]
+    assert isinstance(end, SpeechEnd)
+    assert end.reason == "max_duration"
+    assert end.trailing_silence_ms == 0
+    assert gating.in_speech is False
+    assert gating.utterance_id is None
+
+
 def test_vad_gating_pre_roll_contains_previous_audio():
     probs = [0.0, 0.0, 0.9]
     engine = SequenceVadEngine(probs=probs)
@@ -175,6 +199,63 @@ def test_vad_gating_pre_roll_contains_previous_audio():
     assert start.pre_roll.shape[0] == 1024
     assert np.allclose(start.pre_roll[:512], 0.0)
     assert np.allclose(start.pre_roll[512:], 1.0)
+    assert not np.any(np.isclose(start.pre_roll, 2.0))
+
+
+def test_vad_gating_appends_each_processed_chunk_to_ring_exactly_once():
+    gating = VadGating(
+        SequenceVadEngine(probs=[0.0, 0.9, 0.9, 0.9, 0.0]),
+        sample_rate_hz=16000,
+        ring_buffer_ms=160,
+        hangover_ms=640,
+        max_segment_ms=64,
+    )
+
+    for value in range(5):
+        gating.process_chunk(chunk_samples(float(value), n=gating.chunk_samples))
+
+    recent_audio = gating._ring.get_last_samples(gating._ring.capacity_samples)
+    chunks = recent_audio.reshape(5, gating.chunk_samples)
+    assert [float(chunk[0]) for chunk in chunks] == [0.0, 1.0, 2.0, 3.0, 4.0]
+
+
+def test_vad_gating_forced_continuation_uses_ring_overlap_after_debounce():
+    gating = VadGating(
+        SequenceVadEngine(probs=[0.9, 0.9, 0.9, 0.9, 0.9]),
+        sample_rate_hz=16000,
+        ring_buffer_ms=64,
+        hangover_ms=640,
+        max_segment_ms=96,
+        start_debounce_chunks=2,
+        start_commit_chunks=2,
+    )
+
+    first_commit_events = []
+    first_commit_events.extend(gating.process_chunk(chunk_samples(10.0, n=gating.chunk_samples)))
+    first_commit_events.extend(gating.process_chunk(chunk_samples(20.0, n=gating.chunk_samples)))
+    boundary_events = gating.process_chunk(chunk_samples(30.0, n=gating.chunk_samples))
+    first_candidate_events = gating.process_chunk(chunk_samples(40.0, n=gating.chunk_samples))
+    second_commit_events = gating.process_chunk(chunk_samples(50.0, n=gating.chunk_samples))
+
+    first_start = next(event for event in first_commit_events if isinstance(event, SpeechStart))
+    boundary_chunk = next(event for event in boundary_events if isinstance(event, SpeechChunk))
+    forced_end = next(event for event in boundary_events if isinstance(event, SpeechEnd))
+    second_start = next(event for event in second_commit_events if isinstance(event, SpeechStart))
+    second_actual_chunks = [
+        second_start.chunk,
+        *[event.chunk for event in second_commit_events if isinstance(event, SpeechChunk)],
+    ]
+
+    assert first_candidate_events == []
+    assert boundary_chunk.utterance_id == first_start.utterance_id
+    assert forced_end.utterance_id == first_start.utterance_id
+    assert forced_end.reason == "max_duration"
+    assert second_start.utterance_id != first_start.utterance_id
+    assert second_start.pre_roll.shape[0] == 1024
+    assert np.allclose(second_start.pre_roll[:512], 20.0)
+    assert np.allclose(second_start.pre_roll[512:], 30.0)
+    assert [float(chunk[0]) for chunk in second_actual_chunks] == [40.0, 50.0]
+    assert all(not np.allclose(chunk, 30.0) for chunk in second_actual_chunks)
 
 
 def test_vad_gating_starts_on_first_positive_chunk_by_default():
