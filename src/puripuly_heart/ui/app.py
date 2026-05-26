@@ -367,10 +367,34 @@ class TranslatorApp:
         if callable(close):
             with contextlib.suppress(Exception):
                 close(snackbar)
-                return
-        snackbar.open = False
+        else:
+            snackbar.open = False
+            with contextlib.suppress(Exception):
+                self.page.update()
+        self._displace_current_snackbar_for_flet_028()
+
+    def _displace_current_snackbar_for_flet_028(self) -> None:
+        """Force-dismiss the visible SnackBar on Flet 0.28.x.
+
+        Flet 0.28.3 updates the Python-side ``SnackBar.open`` flag on
+        ``page.close(snackbar)`` but the Flutter-side snackbar remains visible
+        until its duration expires. Opening another SnackBar first removes the
+        current one, so use a transparent 1 ms replacement as a narrow shim.
+        """
+
+        open_control = getattr(self.page, "open", None)
+        if not callable(open_control):
+            return
+        dismissor = ft.SnackBar(
+            content=ft.Text("", size=0),
+            bgcolor=ft.Colors.TRANSPARENT,
+            duration=1,
+            behavior=ft.SnackBarBehavior.FLOATING,
+            margin=ft.margin.only(bottom=90),
+            padding=0,
+        )
         with contextlib.suppress(Exception):
-            self.page.update()
+            open_control(dismissor)
 
     def _preview_github_star_snackbar(self) -> None:
         snackbar = None
