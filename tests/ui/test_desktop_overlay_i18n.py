@@ -11,6 +11,7 @@ EXPECTED_SPEC_LOCALES = {"en", "ko", "ja", "zh-CN"}
 CANONICAL_DESKTOP_OVERLAY_I18N_COPY = {
     "en": {
         "settings.overlay.desktop.size.title": "Overlay size",
+        "settings.overlay.desktop.size.option.xsmall": "Extra small",
         "settings.overlay.desktop.size.option.small": "Small",
         "settings.overlay.desktop.size.option.medium": "Medium",
         "settings.overlay.desktop.size.option.large": "Large",
@@ -28,6 +29,7 @@ CANONICAL_DESKTOP_OVERLAY_I18N_COPY = {
     },
     "ko": {
         "settings.overlay.desktop.size.title": "오버레이 크기",
+        "settings.overlay.desktop.size.option.xsmall": "더 작게",
         "settings.overlay.desktop.size.option.small": "작게",
         "settings.overlay.desktop.size.option.medium": "보통",
         "settings.overlay.desktop.size.option.large": "크게",
@@ -45,6 +47,7 @@ CANONICAL_DESKTOP_OVERLAY_I18N_COPY = {
     },
     "ja": {
         "settings.overlay.desktop.size.title": "オーバーレイサイズ",
+        "settings.overlay.desktop.size.option.xsmall": "さらに小さく",
         "settings.overlay.desktop.size.option.small": "小さめ",
         "settings.overlay.desktop.size.option.medium": "標準",
         "settings.overlay.desktop.size.option.large": "大きめ",
@@ -62,6 +65,7 @@ CANONICAL_DESKTOP_OVERLAY_I18N_COPY = {
     },
     "zh-CN": {
         "settings.overlay.desktop.size.title": "叠加层大小",
+        "settings.overlay.desktop.size.option.xsmall": "特小",
         "settings.overlay.desktop.size.option.small": "小",
         "settings.overlay.desktop.size.option.medium": "中",
         "settings.overlay.desktop.size.option.large": "大",
