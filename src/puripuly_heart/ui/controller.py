@@ -2499,6 +2499,11 @@ class GuiController:
             presenter = self._overlay_presenter
             overlay_instance_id = f"overlay-{secrets.token_hex(8)}"
             diagnostics = OverlayDiagnosticsRecorder(overlay_instance_id=overlay_instance_id)
+            overlay_target = self._active_overlay_target or self._overlay_target_for_settings(
+                self.settings
+            )
+            self._active_overlay_target = overlay_target
+            peer_presentation_refresh_burst = overlay_target != OVERLAY_TARGET_DESKTOP
 
             if presenter is None:
                 presenter = OverlayPresenter(
@@ -2508,17 +2513,15 @@ class GuiController:
                     runtime_log_detailed=self.log_detailed,
                     show_translation=self.settings.overlay.show_translation,
                     show_peer_original=self.settings.overlay.show_peer_original,
-                    peer_presentation_refresh_burst=True,
+                    peer_presentation_refresh_burst=peer_presentation_refresh_burst,
                 )
                 self._overlay_presenter = presenter
             else:
                 presenter.diagnostics = diagnostics
                 presenter.runtime_log_detailed = self.log_detailed
-                await presenter.update_peer_presentation_refresh_burst(True)
-            overlay_target = self._active_overlay_target or self._overlay_target_for_settings(
-                self.settings
-            )
-            self._active_overlay_target = overlay_target
+                await presenter.update_peer_presentation_refresh_burst(
+                    peer_presentation_refresh_burst
+                )
             bridge = OverlayBridge(
                 session_token=secrets.token_urlsafe(16),
                 initial_snapshot=presenter.snapshot(),

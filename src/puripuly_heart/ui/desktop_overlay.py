@@ -1295,6 +1295,43 @@ def _caption_card_width_memory_key(slot: DesktopCaptionSlot) -> tuple[str, str, 
     return (slot.block_id, slot.occupant_key, slot.appearance_seq)
 
 
+def _caption_width_key_label(key: tuple[str, str, int]) -> str:
+    return f"{key[0]}/{key[1]}/{key[2]}"
+
+
+def _desktop_snapshot_rows_summary(snapshot: OverlayPresentationSnapshot) -> str:
+    return "; ".join(
+        _desktop_snapshot_block_summary(index, block) for index, block in enumerate(snapshot.blocks)
+    )
+
+
+def _desktop_snapshot_block_summary(
+    index: int,
+    block: OverlayPresentationBlock,
+) -> str:
+    secondary_len = len(block.secondary_text) if block.secondary_enabled else 0
+    return (
+        f"idx={index} "
+        f"id={block.id} "
+        f"occupant_key={block.occupant_key} "
+        f"appearance_seq={block.appearance_seq} "
+        f"channel={block.channel} "
+        f"variant={block.block_variant} "
+        f"primary_len={len(block.primary_text)} "
+        f"secondary_len={secondary_len} "
+        f"secondary_enabled={block.secondary_enabled} "
+        f"update_id={_optional_log_value(block.update_id)} "
+        f"origin_wall_clock_ms={_optional_log_value(block.origin_wall_clock_ms)} "
+        f"session_scope={_optional_log_value(block.session_scope)}"
+    )
+
+
+def _optional_log_value(value: object | None) -> str:
+    if value is None:
+        return "none"
+    return str(value)
+
+
 def _estimated_caption_line_width(text: str, font_size: int) -> float:
     return sum(_estimated_caption_char_width(char, font_size) for char in text)
 
@@ -1648,6 +1685,17 @@ class _ProgrammaticBoundsEchoSuppression:
     expires_at: float
 
 
+@dataclass(frozen=True, slots=True)
+class _DesktopRenderTrace:
+    content_kind: str
+    surface_visible: bool
+    slot_count: int
+    line_count: int
+    window_width: int
+    window_height: int
+    background_alpha: float
+
+
 class StdoutLifecycleSink:
     async def emit(self, event: dict[str, object]) -> None:
         safe_event = _redact_event(event)
@@ -1791,6 +1839,7 @@ class FletDesktopRendererWindow:
         self._programmatic_bounds_echo_suppression: _ProgrammaticBoundsEchoSuppression | None = None
         self._last_reported_bounds: tuple[float, float, float, float] | None = None
         self._caption_card_width_floor_by_block: dict[tuple[str, str, int], float] = {}
+        self._last_render_trace: _DesktopRenderTrace | None = None
 
     def prime_startup_runtime_controls(
         self,
@@ -1915,7 +1964,8 @@ class FletDesktopRendererWindow:
 
     async def dispatch_snapshot(self, snapshot: OverlayPresentationSnapshot) -> None:
         self._emit_detailed_log(
-            f"snapshot_update revision={snapshot.revision} blocks={len(snapshot.blocks)}"
+            f"snapshot_update revision={snapshot.revision} blocks={len(snapshot.blocks)} "
+            f"rows=[{_desktop_snapshot_rows_summary(snapshot)}]"
         )
         self._snapshot = snapshot
         self._render_page()
@@ -2055,7 +2105,7 @@ class FletDesktopRendererWindow:
             page.update()
             return
 
-        plan = build_desktop_caption_plan(
+        raw_plan = build_desktop_caption_plan(
             self._snapshot,
             window_width=_page_window_number(page, "width", DESKTOP_FLET_DEFAULT_WIDTH),
             window_height=_page_window_number(page, "height", DESKTOP_FLET_DEFAULT_HEIGHT),
@@ -2063,7 +2113,9 @@ class FletDesktopRendererWindow:
             interaction_mode=self._interaction_mode,
             locale=self._locale,
         )
-        plan = self._plan_with_grow_only_caption_card_widths(plan)
+        previous_width_floors = dict(self._caption_card_width_floor_by_block)
+        plan = self._plan_with_grow_only_caption_card_widths(raw_plan)
+        self._emit_caption_width_diagnostics(raw_plan, plan, previous_width_floors)
         caption_surface = build_desktop_caption_surface(plan)
         if self._interaction_mode == _DESKTOP_INTERACTION_MODE_EDIT:
             drag_area = ft.WindowDragArea(
@@ -2105,6 +2157,17 @@ class FletDesktopRendererWindow:
             f"content_kind={content_kind} "
             f"window={plan.window_width}x{plan.window_height} "
             f"background_alpha={plan.background_alpha}"
+        )
+        self._emit_render_transition(
+            _DesktopRenderTrace(
+                content_kind=content_kind,
+                surface_visible=plan.surface_visible,
+                slot_count=len(plan.slots),
+                line_count=len(plan.lines),
+                window_width=plan.window_width,
+                window_height=plan.window_height,
+                background_alpha=plan.background_alpha,
+            )
         )
         root = ft.Container(
             content=content,
@@ -2436,6 +2499,55 @@ class FletDesktopRendererWindow:
             plan,
             slots=tuple(grown_slots),
             lines=tuple(line for slot in grown_slots for line in slot.lines),
+        )
+
+    def _emit_caption_width_diagnostics(
+        self,
+        raw_plan: DesktopCaptionPlan,
+        applied_plan: DesktopCaptionPlan,
+        previous_width_floors: dict[tuple[str, str, int], float],
+    ) -> None:
+        if self._logging_mode != "detailed":
+            return
+        raw_slots_by_key = {_caption_card_width_memory_key(slot): slot for slot in raw_plan.slots}
+        for slot_index, slot in enumerate(applied_plan.slots):
+            key = _caption_card_width_memory_key(slot)
+            raw_slot = raw_slots_by_key.get(key)
+            if raw_slot is None:
+                continue
+            previous_floor = previous_width_floors.get(key, 0.0)
+            floor_hit = slot.card_width > raw_slot.card_width + 0.01
+            self._emit_detailed_log(
+                "render_width "
+                f"revision={self._snapshot.revision} "
+                f"slot={slot_index} "
+                f"key={_caption_width_key_label(key)} "
+                f"raw_card_width={raw_slot.card_width:.1f} "
+                f"applied_card_width={slot.card_width:.1f} "
+                f"raw_text_width={raw_slot.card_text_width:.1f} "
+                f"applied_text_width={slot.card_text_width:.1f} "
+                f"previous_floor={previous_floor:.1f} "
+                f"floor_hit={floor_hit} "
+                f"line_count={len(slot.lines)} "
+                f"primary_len={sum(len(line.text) for line in slot.lines if line.slot == 'primary')} "
+                f"secondary_len={sum(len(line.text) for line in slot.lines if line.slot == 'secondary')}"
+            )
+
+    def _emit_render_transition(self, trace: _DesktopRenderTrace) -> None:
+        previous = self._last_render_trace
+        self._last_render_trace = trace
+        if previous is None:
+            return
+        self._emit_detailed_log(
+            "render_transition "
+            f"revision={self._snapshot.revision} "
+            f"content_kind {previous.content_kind}->{trace.content_kind} "
+            f"surface_visible {previous.surface_visible}->{trace.surface_visible} "
+            f"slot_count {previous.slot_count}->{trace.slot_count} "
+            f"line_count {previous.line_count}->{trace.line_count} "
+            f"window {previous.window_width}x{previous.window_height}->"
+            f"{trace.window_width}x{trace.window_height} "
+            f"background_alpha {previous.background_alpha:.3f}->{trace.background_alpha:.3f}"
         )
 
     def _preview_visual_state(self) -> DesktopCaptionVisualState:
