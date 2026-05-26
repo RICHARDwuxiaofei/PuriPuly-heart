@@ -136,6 +136,7 @@ _DESKTOP_EMPTY_LOCK_ACTION_FOCUS_COLOR = "#FF6B6B"
 _DESKTOP_EMPTY_LOCK_ACTION_MIN_HIT_TARGET = 44
 _DESKTOP_EMPTY_LOCK_ACTION_HORIZONTAL_PADDING = 28
 _DESKTOP_EMPTY_LOCK_ACTION_VERTICAL_PADDING = 12
+_DESKTOP_EMPTY_LOCK_ACTION_TEXT_WIDTH_SAFETY = 24
 
 
 def _desktop_caption_color_for_channel(channel: str) -> str:
@@ -533,6 +534,15 @@ def _desktop_empty_lock_action_font_size(plan: DesktopCaptionPlan) -> int:
     return max(_DESKTOP_EMPTY_LOCK_ACTION_MIN_HIT_TARGET, plan.primary_font_size)
 
 
+def _desktop_empty_lock_action_width(label: str, font_size: int) -> float:
+    return max(
+        _DESKTOP_EMPTY_LOCK_ACTION_MIN_HIT_TARGET,
+        _estimated_caption_line_width(label, font_size)
+        + (_DESKTOP_EMPTY_LOCK_ACTION_HORIZONTAL_PADDING * 2)
+        + _DESKTOP_EMPTY_LOCK_ACTION_TEXT_WIDTH_SAFETY,
+    )
+
+
 def build_desktop_empty_lock_action(
     plan: DesktopCaptionPlan,
     *,
@@ -555,10 +565,7 @@ def build_desktop_empty_lock_action(
         text=label,
         tooltip=label,
         on_click=on_click,
-        width=max(
-            _DESKTOP_EMPTY_LOCK_ACTION_MIN_HIT_TARGET,
-            (len(label) * font_size * 0.72) + (_DESKTOP_EMPTY_LOCK_ACTION_HORIZONTAL_PADDING * 2),
-        ),
+        width=_desktop_empty_lock_action_width(label, font_size),
         height=max(
             _DESKTOP_EMPTY_LOCK_ACTION_MIN_HIT_TARGET,
             font_size + (_DESKTOP_EMPTY_LOCK_ACTION_VERTICAL_PADDING * 2),
@@ -578,6 +585,7 @@ def build_desktop_empty_lock_action(
             ),
             text_style=text_style,
             mouse_cursor=ft.MouseCursor.CLICK,
+            animation_duration=0,
         ),
     )
 
