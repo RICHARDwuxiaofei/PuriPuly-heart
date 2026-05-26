@@ -577,6 +577,9 @@ async def test_back_to_back_peer_parent_segments_keep_derived_output_boundaries(
         }
         assert exposed_output_ids == peer_turn_id_set
         assert parent_vad_id_set.isdisjoint(hub.peer_runtime.utterances)
+        assert hub.peer_runtime.utterance_start_times == {}
+        assert hub.peer_runtime.speech_ended_ids == set()
+        assert hub._latency_timelines == {}
         assert hub._peer_parent_turn_ids == {}
         assert hub._peer_turn_parent_ids == {}
         assert hub._peer_completed_turn_ids == set()
@@ -923,6 +926,10 @@ async def test_peer_overlay_success_clears_latency_timeline() -> None:
     assert hub._latency_timelines == {}
     assert hub.peer_runtime.utterance_start_times == {}
     assert hub.peer_runtime.speech_ended_ids == set()
+    assert hub._peer_turn_parent_ids == {}
+    assert hub._peer_parent_turn_ids == {}
+    assert hub._peer_completed_turn_ids == set()
+    assert hub._peer_parent_speech_end_times == {}
 
 
 @pytest.mark.asyncio
@@ -953,6 +960,11 @@ async def test_peer_overlay_translation_defers_bookkeeping_cleanup_until_chatbox
         )
         assert enqueue_utterance_id == peer_turn_id
         assert enqueue_utterance_id != utterance_id
+        assert hub._peer_turn_parent_ids[peer_turn_id] == utterance_id
+        assert hub._peer_parent_turn_ids == {utterance_id: {peer_turn_id}}
+        assert hub._peer_completed_turn_ids == set()
+        assert hub._peer_parent_speech_end_times == {utterance_id: 10.0}
+        assert ("peer", utterance_id) in hub._latency_timelines
         assert enqueue_utterance_id in hub.peer_runtime.utterance_start_times
         assert enqueue_utterance_id in hub.peer_runtime.speech_ended_ids
         saw_live_peer_state = True
@@ -975,12 +987,20 @@ async def test_peer_overlay_translation_defers_bookkeeping_cleanup_until_chatbox
             ),
         )
     )
-    await asyncio.gather(*hub.peer_runtime.translation_tasks.values(), return_exceptions=True)
+    results = await asyncio.gather(
+        *hub.peer_runtime.translation_tasks.values(),
+        return_exceptions=True,
+    )
 
+    assert results == [None]
     assert saw_live_peer_state is True
     assert hub._latency_timelines == {}
     assert hub.peer_runtime.utterance_start_times == {}
     assert hub.peer_runtime.speech_ended_ids == set()
+    assert hub._peer_turn_parent_ids == {}
+    assert hub._peer_parent_turn_ids == {}
+    assert hub._peer_completed_turn_ids == set()
+    assert hub._peer_parent_speech_end_times == {}
 
 
 @pytest.mark.asyncio

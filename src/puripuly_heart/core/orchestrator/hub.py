@@ -2716,6 +2716,7 @@ class ClientHub:
                 self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
             return
 
+        publish_to_chatbox = self._should_publish_to_chatbox(runtime)
         bundle = self.get_or_create_bundle(utterance_id, channel=runtime.channel)
         bundle.with_translation(translation)
         self._emit_translation_ready_for_output(
@@ -2732,9 +2733,8 @@ class ClientHub:
                 utterance_id=utterance_id,
                 channel=runtime.channel,
                 is_final=True,
-                finalize_latency=not self._should_publish_to_chatbox(runtime),
+                finalize_latency=not publish_to_chatbox,
             )
-            self._complete_peer_logical_turn(utterance_id)
         await self.ui_events.put(
             UIEvent(
                 type=UIEventType.TRANSLATION_DONE,
@@ -2754,7 +2754,7 @@ class ClientHub:
                 is_final=True,
                 finalize_latency=not self._should_publish_to_chatbox(runtime),
             )
-        if self._should_publish_to_chatbox(runtime):
+        if publish_to_chatbox:
             await self._enqueue_osc(
                 utterance_id,
                 transcript_text=text,
@@ -2762,7 +2762,7 @@ class ClientHub:
             )
         else:
             self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
-        if runtime.channel == "peer" and not peer_overlay_active:
+        if runtime.channel == "peer":
             self._complete_peer_logical_turn(utterance_id)
 
     async def handle_peer_transcript_final_for_test(
