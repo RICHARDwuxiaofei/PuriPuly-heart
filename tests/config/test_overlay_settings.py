@@ -36,6 +36,7 @@ def test_overlay_settings_desktop_flet_defaults_serialize_canonical_shape() -> N
 
 def test_overlay_settings_desktop_flet_size_presets_match_c_light_caption_layout() -> None:
     assert DESKTOP_FLET_SIZE_PRESETS == {
+        "xsmall": (960, 240),
         "small": (1152, 288),
         "medium": (1344, 336),
         "large": (1600, 400),

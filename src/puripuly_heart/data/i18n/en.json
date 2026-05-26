@@ -172,6 +172,7 @@
   "settings.overlay.position_reset.action.desktop": "Reset desktop",
   "settings.overlay.desktop.size.title": "Overlay size",
   "settings.overlay.desktop.background_alpha.title": "Background transparency",
+  "settings.overlay.desktop.size.option.xsmall": "Extra small",
   "settings.overlay.desktop.size.option.small": "Small",
   "settings.overlay.desktop.size.option.medium": "Medium",
   "settings.overlay.desktop.size.option.large": "Large",

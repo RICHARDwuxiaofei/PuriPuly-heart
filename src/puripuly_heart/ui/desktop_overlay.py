@@ -303,6 +303,7 @@ class DesktopCaptionSizePreset:
 
 
 _DESKTOP_CAPTION_SIZE_PRESETS: dict[str, DesktopCaptionSizePreset] = {
+    "xsmall": DesktopCaptionSizePreset("xsmall", 960, 240, 29, 18, 14, 6, 12, 6),
     "small": DesktopCaptionSizePreset("small", 1152, 288, 35, 21, 18, 8, 14, 8),
     "medium": DesktopCaptionSizePreset("medium", 1344, 336, 41, 25, 22, 10, 16, 10),
     "large": DesktopCaptionSizePreset("large", 1600, 400, 50, 30, 26, 12, 18, 12),
