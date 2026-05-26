@@ -504,7 +504,7 @@ def test_desktop_overlay_slots_reserve_stable_line_regions() -> None:
                 channel="self",
                 block_variant="active_self",
                 appearance_seq=1,
-                primary_text="말하는 중인 원문",
+                primary_text="active self source",
                 secondary_text="",
                 secondary_enabled=False,
             ),
@@ -513,7 +513,7 @@ def test_desktop_overlay_slots_reserve_stable_line_regions() -> None:
                 channel="peer",
                 block_variant="finalized",
                 appearance_seq=2,
-                primary_text="번역된 상대 발화",
+                primary_text="translated peer utterance",
                 secondary_text="original peer utterance",
                 secondary_enabled=True,
             ),
@@ -549,21 +549,15 @@ def test_desktop_overlay_slots_reserve_stable_line_regions() -> None:
     first_slot, second_slot = slot_column.controls
     assert first_slot.height == pytest.approx(expected_slot_height)
     assert second_slot.height == pytest.approx(expected_slot_height)
-    assert first_slot.content.alignment.x == 0
-    assert first_slot.content.alignment.y == pytest.approx(-0.08)
+    assert first_slot.alignment == ft.alignment.center
+    assert first_slot.content.alignment == ft.alignment.center
     assert second_slot.content.alignment.y == pytest.approx(-0.08)
 
     first_column = first_slot.content.content
-    first_primary_region, first_secondary_region = first_column.controls
+    (first_primary_region,) = first_column.controls
     assert first_primary_region.height == pytest.approx(expected_primary_height)
-    assert first_primary_region.alignment.x == 0
-    assert first_primary_region.alignment.y == pytest.approx(-0.5)
-    assert first_secondary_region.height == pytest.approx(expected_secondary_height)
-    assert first_secondary_region.alignment == ft.alignment.center
-    assert first_secondary_region.content.value == ""
-    assert first_secondary_region.content.max_lines == 1
+    assert first_primary_region.alignment == ft.alignment.center
     assert first_primary_region.content.style.height == pytest.approx(1.24)
-    assert first_secondary_region.content.style.height == pytest.approx(1.24)
 
     second_column = second_slot.content.content
     second_primary_region, second_secondary_region = second_column.controls
@@ -574,6 +568,135 @@ def test_desktop_overlay_slots_reserve_stable_line_regions() -> None:
     assert second_secondary_region.content.value == "original peer utterance"
     assert second_primary_region.content.style.height == pytest.approx(1.24)
     assert second_secondary_region.content.style.height == pytest.approx(1.24)
+
+
+def test_desktop_overlay_secondary_disabled_slots_do_not_reserve_secondary_region() -> None:
+    snapshot = OverlayPresentationSnapshot(
+        blocks=[
+            _block(
+                "disabled-secondary",
+                channel="self",
+                block_variant="active_self",
+                appearance_seq=1,
+                primary_text="active self source",
+                secondary_text="disabled translation",
+                secondary_enabled=False,
+            )
+        ]
+    )
+
+    plan = desktop_overlay.build_desktop_caption_plan(
+        snapshot,
+        window_width=1344,
+        window_height=336,
+        visual_state=desktop_overlay.DesktopCaptionVisualState(background_alpha=0.38),
+    )
+
+    assert [(line.text, line.slot) for line in plan.lines] == [("active self source", "primary")]
+
+    surface = desktop_overlay.build_desktop_caption_surface(plan)
+    slot_column = surface.content.controls[0]
+    slot_card = slot_column.controls[0]
+    text_layer = slot_card.content
+    assert slot_card.alignment == ft.alignment.center
+    assert text_layer.alignment == ft.alignment.center
+    text_column = text_layer.content
+    (primary_region,) = text_column.controls
+    assert primary_region.alignment == ft.alignment.center
+    assert primary_region.content.value == "active self source"
+
+
+def test_desktop_overlay_secondary_enabled_empty_slots_reserve_secondary_region() -> None:
+    snapshot = OverlayPresentationSnapshot(
+        blocks=[
+            _block(
+                "pending-secondary",
+                channel="self",
+                block_variant="active_self",
+                appearance_seq=1,
+                primary_text="active self source",
+                secondary_text="",
+                secondary_enabled=True,
+            )
+        ]
+    )
+
+    plan = desktop_overlay.build_desktop_caption_plan(
+        snapshot,
+        window_width=1344,
+        window_height=336,
+        visual_state=desktop_overlay.DesktopCaptionVisualState(background_alpha=0.38),
+    )
+
+    assert [(line.text, line.slot) for line in plan.lines] == [("active self source", "primary")]
+
+    surface = desktop_overlay.build_desktop_caption_surface(plan)
+    slot_column = surface.content.controls[0]
+    slot_card = slot_column.controls[0]
+    text_layer = slot_card.content
+    assert slot_card.alignment == ft.alignment.center
+    assert text_layer.alignment.y == pytest.approx(-0.08)
+    text_column = text_layer.content
+    primary_region, reserved_secondary_region = text_column.controls
+    assert primary_region.alignment.y == pytest.approx(-0.5)
+    assert primary_region.content.value == "active self source"
+    assert reserved_secondary_region.height == pytest.approx(plan.secondary_region_height)
+    assert reserved_secondary_region.alignment == ft.alignment.center
+    assert reserved_secondary_region.content.value == ""
+    assert reserved_secondary_region.content.max_lines == 1
+
+
+def test_desktop_overlay_secondary_only_promoted_lines_do_not_reserve_secondary_region() -> None:
+    snapshot = OverlayPresentationSnapshot(
+        blocks=[
+            _block(
+                "peer-secondary-only",
+                channel="peer",
+                block_variant="finalized",
+                appearance_seq=1,
+                primary_text="",
+                secondary_text="peer source only",
+                secondary_enabled=True,
+            ),
+            _block(
+                "self-secondary-only",
+                channel="self",
+                block_variant="finalized",
+                appearance_seq=2,
+                primary_text="",
+                secondary_text="self translation only",
+                secondary_enabled=True,
+            ),
+        ]
+    )
+
+    plan = desktop_overlay.build_desktop_caption_plan(
+        snapshot,
+        window_width=1344,
+        window_height=336,
+        visual_state=desktop_overlay.DesktopCaptionVisualState(background_alpha=0.38),
+    )
+
+    assert [(line.text, line.slot, line.promoted) for line in plan.lines] == [
+        ("peer source only", "primary", True),
+        ("self translation only", "primary", True),
+    ]
+
+    surface = desktop_overlay.build_desktop_caption_surface(plan)
+    slot_column = surface.content.controls[0]
+    assert len(slot_column.controls) == 2
+    for slot_card, expected_text in zip(
+        slot_column.controls,
+        ("peer source only", "self translation only"),
+        strict=True,
+    ):
+        text_layer = slot_card.content
+        assert slot_card.alignment == ft.alignment.center
+        assert text_layer.alignment == ft.alignment.center
+        text_column = text_layer.content
+        (primary_region,) = text_column.controls
+        assert primary_region.alignment == ft.alignment.center
+        assert primary_region.content.value == expected_text
 
 
 def test_desktop_overlay_edit_mode_background_covers_full_window() -> None:
