@@ -129,6 +129,13 @@ _DESKTOP_PREVIEW_BACKGROUND_SURFACE_DATA = (
     ("dark", "settings.overlay.desktop.preview.background_surface.dark", "#111827"),
     ("busy", "settings.overlay.desktop.preview.background_surface.busy", "#1F2937"),
 )
+_DESKTOP_EMPTY_LOCK_ACTION_I18N_KEY = "settings.overlay.desktop.empty_state.action.lock"
+_DESKTOP_EMPTY_LOCK_ACTION_DEFAULT_LABEL = "Lock"
+_DESKTOP_EMPTY_LOCK_ACTION_DEFAULT_COLOR = "#FFF8F4"
+_DESKTOP_EMPTY_LOCK_ACTION_FOCUS_COLOR = "#FF6B6B"
+_DESKTOP_EMPTY_LOCK_ACTION_MIN_HIT_TARGET = 44
+_DESKTOP_EMPTY_LOCK_ACTION_HORIZONTAL_PADDING = 28
+_DESKTOP_EMPTY_LOCK_ACTION_VERTICAL_PADDING = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,7 +267,7 @@ DESKTOP_CAPTION_MAPPING_TABLE: tuple[DesktopCaptionMappingRule, ...] = (
         promoted=False,
         color="none",
         priority="0 edit-mode empty caption surface",
-        truncation="renders empty caption card with no text",
+        truncation="renders empty caption card with centered lock text action",
     ),
     DesktopCaptionMappingRule(
         snapshot_field="blocks[]",
@@ -505,6 +512,67 @@ def build_desktop_caption_plan(
         background_color=_caption_background_color(background_alpha),
         surface_visible=surface_visible,
         full_window_background_visible=full_window_background_visible,
+    )
+
+
+def desktop_empty_lock_action_label(locale: str | None) -> str:
+    return t_for_locale(
+        locale,
+        _DESKTOP_EMPTY_LOCK_ACTION_I18N_KEY,
+        default=_DESKTOP_EMPTY_LOCK_ACTION_DEFAULT_LABEL,
+    )
+
+
+def _desktop_empty_lock_action_font_size(plan: DesktopCaptionPlan) -> int:
+    return max(_DESKTOP_EMPTY_LOCK_ACTION_MIN_HIT_TARGET, plan.primary_font_size)
+
+
+def build_desktop_empty_lock_action(
+    plan: DesktopCaptionPlan,
+    *,
+    label: str,
+    on_click: Callable[[object], object] | None,
+) -> Any:
+    """Build the bounded text-only lock action shown in empty moving mode."""
+
+    import flet as ft
+
+    font_size = _desktop_empty_lock_action_font_size(plan)
+    text_style = ft.TextStyle(
+        size=font_size,
+        height=1.0,
+        weight=ft.FontWeight.BOLD,
+        font_family=_desktop_caption_font_family_for_text(label),
+        decoration=None,
+    )
+    return ft.TextButton(
+        text=label,
+        tooltip=label,
+        on_click=on_click,
+        width=max(
+            _DESKTOP_EMPTY_LOCK_ACTION_MIN_HIT_TARGET,
+            (len(label) * font_size * 0.72) + (_DESKTOP_EMPTY_LOCK_ACTION_HORIZONTAL_PADDING * 2),
+        ),
+        height=max(
+            _DESKTOP_EMPTY_LOCK_ACTION_MIN_HIT_TARGET,
+            font_size + (_DESKTOP_EMPTY_LOCK_ACTION_VERTICAL_PADDING * 2),
+        ),
+        style=ft.ButtonStyle(
+            color={
+                ft.ControlState.DEFAULT: _DESKTOP_EMPTY_LOCK_ACTION_DEFAULT_COLOR,
+                ft.ControlState.HOVERED: _DESKTOP_EMPTY_LOCK_ACTION_FOCUS_COLOR,
+                ft.ControlState.FOCUSED: _DESKTOP_EMPTY_LOCK_ACTION_FOCUS_COLOR,
+            },
+            bgcolor=ft.Colors.TRANSPARENT,
+            overlay_color=ft.Colors.TRANSPARENT,
+            elevation=0,
+            padding=ft.padding.symmetric(
+                horizontal=_DESKTOP_EMPTY_LOCK_ACTION_HORIZONTAL_PADDING,
+                vertical=_DESKTOP_EMPTY_LOCK_ACTION_VERTICAL_PADDING,
+            ),
+            text_style=text_style,
+            mouse_cursor=ft.MouseCursor.CLICK,
+        ),
     )
 
 
@@ -1943,6 +2011,15 @@ class FletDesktopRendererWindow:
         if hasattr(page, "spacing"):
             page.spacing = 0
 
+    def _on_empty_lock_action_click(self, _event: object | None = None) -> None:
+        self._run_page_task(self._lock_from_empty_action)
+
+    async def _lock_from_empty_action(self) -> None:
+        await self._set_interaction_mode(
+            _DESKTOP_INTERACTION_MODE_PASS_THROUGH,
+            emit_event=True,
+        )
+
     def _render_page(self) -> None:
         page = self._page
         if page is None:
@@ -1972,11 +2049,28 @@ class FletDesktopRendererWindow:
         plan = self._plan_with_grow_only_caption_card_widths(plan)
         caption_surface = build_desktop_caption_surface(plan)
         if self._interaction_mode == _DESKTOP_INTERACTION_MODE_EDIT:
-            content_kind = "drag_area"
-            content = ft.WindowDragArea(
+            drag_area = ft.WindowDragArea(
                 content=caption_surface,
                 maximizable=False,
             )
+            if plan.full_window_background_visible and not plan.slots:
+                content_kind = "drag_area_with_empty_lock_action"
+                content = ft.Stack(
+                    controls=[
+                        drag_area,
+                        build_desktop_empty_lock_action(
+                            plan,
+                            label=desktop_empty_lock_action_label(self._locale),
+                            on_click=self._on_empty_lock_action_click,
+                        ),
+                    ],
+                    width=plan.window_width,
+                    height=plan.window_height,
+                    alignment=ft.alignment.center,
+                )
+            else:
+                content_kind = "drag_area"
+                content = drag_area
         else:
             if plan.surface_visible:
                 content_kind = "caption_surface"
@@ -2028,7 +2122,22 @@ class FletDesktopRendererWindow:
             window.visible = True
 
     def _build_preview_root(self, ft: Any) -> Any:
-        caption_surface = build_desktop_caption_surface(self._current_preview_caption_plan())
+        preview_plan = self._current_preview_caption_plan()
+        caption_surface = build_desktop_caption_surface(preview_plan)
+        if preview_plan.full_window_background_visible and not preview_plan.slots:
+            caption_surface = ft.Stack(
+                controls=[
+                    caption_surface,
+                    build_desktop_empty_lock_action(
+                        preview_plan,
+                        label=desktop_empty_lock_action_label(self._locale),
+                        on_click=self._on_empty_lock_action_click,
+                    ),
+                ],
+                width=preview_plan.window_width,
+                height=preview_plan.window_height,
+                alignment=ft.alignment.center,
+            )
         return ft.Container(
             content=ft.Column(
                 controls=[
@@ -2273,7 +2382,7 @@ class FletDesktopRendererWindow:
             window_width=preset.window_width,
             window_height=preset.window_height,
             visual_state=self._preview_visual_state(),
-            interaction_mode=_DESKTOP_INTERACTION_MODE_PASS_THROUGH,
+            interaction_mode=self._interaction_mode,
             locale=self._locale,
         )
         return self._plan_with_grow_only_caption_card_widths(plan)

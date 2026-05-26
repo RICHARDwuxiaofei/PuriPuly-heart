@@ -103,7 +103,7 @@ def test_desktop_overlay_snapshot_mapping_table_documents_current_block_contract
     assert rows[("calibration", "all", "none")].role == "desktop_visual_ignored"
     assert rows[("blocks[]", "none/edit", "none")].role == "edit_no_caption_empty_card"
     assert rows[("blocks[]", "none/edit", "none")].truncation == (
-        "renders empty caption card with no text"
+        "renders empty caption card with centered lock text action"
     )
     assert rows[("blocks[]", "none/pass_through", "none")].truncation == (
         "renders no text and no background"
@@ -1224,6 +1224,23 @@ def _find_control_with_text(page: FakeFletPage, text: str) -> object:
     raise AssertionError(f"control text not found: {text}")
 
 
+def _find_text_button(page: FakeFletPage, text: str) -> ft.TextButton:
+    for control in page.controls:
+        for item in _walk_control_tree(control):
+            if isinstance(item, ft.TextButton) and getattr(item, "text", None) == text:
+                return item
+    raise AssertionError(f"text button not found: {text}")
+
+
+def _text_buttons(page: FakeFletPage) -> list[ft.TextButton]:
+    return [
+        item
+        for control in page.controls
+        for item in _walk_control_tree(control)
+        if isinstance(item, ft.TextButton)
+    ]
+
+
 def _page_contains_control_type(page: FakeFletPage, control_type: type[object]) -> bool:
     return any(
         isinstance(item, control_type)
@@ -1465,6 +1482,30 @@ def test_desktop_overlay_preview_no_caption_fixture_supports_manual_qa_states() 
     assert edit_plan.background_alpha == pytest.approx(0.6)
     assert locked_plan.lines == ()
     assert locked_plan.surface_visible is False
+
+
+def test_desktop_overlay_preview_uses_edit_mode_for_no_caption_empty_state() -> None:
+    app = FakeFletApp()
+    catalog = desktop_overlay.build_desktop_overlay_preview_catalog(locale="en")
+    window = desktop_overlay.FletDesktopRendererWindow(
+        app_runner=app.run,
+        event_sink=RecordingLifecycleSink().emit,
+        locale="en",
+        preview_catalog=catalog,
+        bounds_debounce_s=0.01,
+    )
+    no_caption_fixture = next(
+        fixture for fixture in catalog.fixtures if "no_caption" in fixture.coverage_tags
+    )
+
+    window._preview_fixture_id = no_caption_fixture.id  # noqa: SLF001 - preview state test
+    window._page = app.page  # noqa: SLF001 - render preview without starting Flet app loop
+    window._interaction_mode = "edit"  # noqa: SLF001 - preview must expose edit empty state
+
+    window._render_page()  # noqa: SLF001 - verify preview rendering contract
+
+    assert "Lock" in _page_text_values(app.page)
+    assert len(_text_buttons(app.page)) == 1
 
 
 def test_desktop_overlay_preview_fixture_data_secret_guard_rejects_bearer_tokens() -> None:
@@ -1952,7 +1993,7 @@ async def test_desktop_overlay_reveals_first_window_update_after_chrome_bounds_a
         assert (app.page.window.width, app.page.window.height) == (1344, 320)
         assert app.page.render_snapshots[0] == {
             "ignore_mouse_events": False,
-            "texts": set(),
+            "texts": {"Lock"},
             "has_drag_area": True,
             "card_count": 1,
         }
@@ -1995,7 +2036,7 @@ async def test_desktop_overlay_detail_logs_startup_render_and_snapshot_updates(
         assert "interaction_mode=edit" in startup_output
         assert "surface_visible=True" in startup_output
         assert "line_count=0" in startup_output
-        assert "content_kind=drag_area" in startup_output
+        assert "content_kind=drag_area_with_empty_lock_action" in startup_output
         assert "window=1344x320" in startup_output
         assert "bounds_epoch" not in startup_output
 
@@ -2069,12 +2110,91 @@ async def test_desktop_overlay_flet_window_starts_frameless_transparent_moving_e
         assert page.window.width == 1344
         assert page.window.height == 336
 
-        assert _page_text_values(page) == set()
+        assert _page_text_values(page) == {"Lock"}
         _assert_no_overlay_local_renderer_text(page)
+        assert [button.text for button in _text_buttons(page)] == ["Lock"]
         assert _page_contains_control_type(page, ft.WindowDragArea)
         cards = _caption_card_controls(page)
         assert len(cards) == 1
         assert cards[0].bgcolor == "#99000000"
+    finally:
+        await window.close()
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_empty_moving_state_renders_text_only_lock_action() -> None:
+    app = FakeFletApp()
+    sink = RecordingLifecycleSink()
+    window = desktop_overlay.FletDesktopRendererWindow(
+        app_runner=app.run,
+        event_sink=sink.emit,
+        locale="ko",
+        bounds_debounce_s=0.01,
+    )
+
+    try:
+        await window.start(OverlayPresentationSnapshot(revision=1, blocks=[]))
+
+        assert "고정하기" in _page_text_values(app.page)
+        action = _find_text_button(app.page, "고정하기")
+        assert action.width >= 44
+        assert action.height >= 44
+        assert action.tooltip == "고정하기"
+        assert action.style.bgcolor == ft.Colors.TRANSPARENT
+        assert action.style.overlay_color == ft.Colors.TRANSPARENT
+        assert action.style.elevation == 0
+        assert action.style.color[ft.ControlState.DEFAULT] == "#FFF8F4"
+        assert action.style.color[ft.ControlState.FOCUSED] == "#FF6B6B"
+        assert action.style.color[ft.ControlState.HOVERED] == "#FF6B6B"
+        assert len(_text_buttons(app.page)) == 1
+        assert _page_contains_control_type(app.page, ft.WindowDragArea)
+        assert len(_caption_card_controls(app.page)) == 1
+        assert action.width < app.page.window.width
+        assert action.height < app.page.window.height
+        root = app.page.controls[0]
+        stack = root.content
+        assert isinstance(stack, ft.Stack)
+        assert isinstance(stack.controls[0], ft.WindowDragArea)
+        assert stack.controls[1] is action
+    finally:
+        await window.close()
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_empty_lock_action_hides_when_captions_arrive() -> None:
+    app = FakeFletApp()
+    sink = RecordingLifecycleSink()
+    window = desktop_overlay.FletDesktopRendererWindow(
+        app_runner=app.run,
+        event_sink=sink.emit,
+        locale="ko",
+        bounds_debounce_s=0.01,
+    )
+    captions = OverlayPresentationSnapshot(
+        revision=2,
+        blocks=[
+            _block(
+                "peer-translated",
+                channel="peer",
+                block_variant="finalized",
+                appearance_seq=1,
+                primary_text="좋아요",
+                secondary_text="Sounds good",
+                secondary_enabled=True,
+            )
+        ],
+    )
+
+    try:
+        await window.start(OverlayPresentationSnapshot(revision=1, blocks=[]))
+        assert "고정하기" in _page_text_values(app.page)
+
+        await window.dispatch_snapshot(captions)
+
+        assert "고정하기" not in _page_text_values(app.page)
+        assert {"좋아요", "Sounds good"} <= _page_text_values(app.page)
+        assert _text_buttons(app.page) == []
+        assert _page_contains_control_type(app.page, ft.WindowDragArea)
     finally:
         await window.close()
 
@@ -2217,6 +2337,37 @@ async def test_desktop_overlay_render_page_applies_grow_only_card_width_to_visib
 
 
 @pytest.mark.asyncio
+async def test_desktop_overlay_empty_lock_action_switches_to_pass_through() -> None:
+    app = FakeFletApp()
+    sink = RecordingLifecycleSink()
+    window = desktop_overlay.FletDesktopRendererWindow(
+        app_runner=app.run,
+        event_sink=sink.emit,
+        locale="en",
+        bounds_debounce_s=0.01,
+    )
+
+    try:
+        await window.start(OverlayPresentationSnapshot(revision=1, blocks=[]))
+        action = _find_text_button(app.page, "Lock")
+
+        action.on_click(None)
+        if app.page.tasks:
+            await asyncio.gather(*app.page.tasks)
+
+        assert app.page.window.ignore_mouse_events is True
+        assert _page_text_values(app.page) == set()
+        assert _caption_card_controls(app.page) == []
+        assert not _page_contains_control_type(app.page, ft.WindowDragArea)
+        assert sink.events[-1] == {
+            "type": "overlay_event",
+            "payload": {"event": "interaction_mode_changed", "mode": "pass_through"},
+        }
+    finally:
+        await window.close()
+
+
+@pytest.mark.asyncio
 async def test_desktop_overlay_display_matrix_locked_no_captions_is_fully_transparent() -> None:
     app = FakeFletApp()
     sink = RecordingLifecycleSink()
@@ -2235,6 +2386,8 @@ async def test_desktop_overlay_display_matrix_locked_no_captions_is_fully_transp
         assert app.page.window.resizable is False
         assert app.page.window.always_on_top is True
         assert app.page.window.ignore_mouse_events is False
+        assert "Lock" in _page_text_values(app.page)
+        assert len(_text_buttons(app.page)) == 1
         assert _page_contains_control_type(app.page, ft.WindowDragArea)
         assert len(_caption_card_controls(app.page)) == 1
 
@@ -2259,6 +2412,8 @@ async def test_desktop_overlay_display_matrix_locked_no_captions_is_fully_transp
         assert app.page.window.title_bar_buttons_hidden is None
         assert app.page.window.resizable is False
         assert app.page.window.ignore_mouse_events is False
+        assert "Lock" in _page_text_values(app.page)
+        assert len(_text_buttons(app.page)) == 1
         assert _page_contains_control_type(app.page, ft.WindowDragArea)
         assert len(_caption_card_controls(app.page)) == 1
     finally:
@@ -2351,8 +2506,10 @@ async def test_desktop_overlay_shipping_surface_has_no_overlay_local_controls() 
         assert app.page.run_task_calls == 0
         assert sink.events == []
         _assert_no_overlay_local_renderer_text(app.page)
+        buttons = _text_buttons(app.page)
+        assert [button.text for button in buttons] == ["Lock"]
         assert not any(
-            isinstance(item, (ft.ElevatedButton, ft.TextButton))
+            isinstance(item, ft.ElevatedButton)
             for control in app.page.controls
             for item in _walk_control_tree(control)
         )
@@ -3125,7 +3282,7 @@ async def test_desktop_overlay_initial_pass_through_control_does_not_lock_startu
         first_render = app.page.render_snapshots[0]
         assert first_render == {
             "ignore_mouse_events": False,
-            "texts": set(),
+            "texts": {"Lock"},
             "has_drag_area": True,
             "card_count": 1,
         }
@@ -3193,7 +3350,7 @@ async def test_desktop_overlay_primed_initial_controls_are_not_replayed_after_st
         assert len(app.page.render_snapshots) == 1
         assert app.page.render_snapshots[0] == {
             "ignore_mouse_events": False,
-            "texts": set(),
+            "texts": {"Lock"},
             "has_drag_area": True,
             "card_count": 1,
         }

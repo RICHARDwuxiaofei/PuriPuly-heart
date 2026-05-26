@@ -180,6 +180,7 @@
   "settings.overlay.desktop.lock.title": "오버레이 잠금",
   "settings.overlay.desktop.lock.value.move": "이동",
   "settings.overlay.desktop.lock.value.locked": "고정",
+  "settings.overlay.desktop.empty_state.action.lock": "고정하기",
   "settings.overlay.desktop.recovery.message.reopen": "자막이 잠시 멈췄어요. 준비되면 다시 열어주세요.",
   "settings.overlay.desktop.recovery.message.retry": "자막이 잠시 멈췄어요. 준비되면 다시 시도해 주세요.",
   "settings.overlay.desktop.recovery.action.reopen": "다시 열기",

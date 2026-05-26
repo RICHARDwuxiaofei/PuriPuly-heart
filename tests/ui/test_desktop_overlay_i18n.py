@@ -19,6 +19,7 @@ CANONICAL_DESKTOP_OVERLAY_I18N_COPY = {
         "settings.overlay.desktop.background_alpha.title": "Background transparency",
         "settings.overlay.desktop.lock.value.move": "Move",
         "settings.overlay.desktop.lock.value.locked": "Locked",
+        "settings.overlay.desktop.empty_state.action.lock": "Lock",
         "settings.overlay.position_reset.title": "Reset overlay position",
         "settings.overlay.position_reset.vr.title": "Reset position",
         "settings.overlay.position_reset.desktop.title": "Reset position",
@@ -35,6 +36,7 @@ CANONICAL_DESKTOP_OVERLAY_I18N_COPY = {
         "settings.overlay.desktop.background_alpha.title": "배경 투명도",
         "settings.overlay.desktop.lock.value.move": "이동",
         "settings.overlay.desktop.lock.value.locked": "고정",
+        "settings.overlay.desktop.empty_state.action.lock": "고정하기",
         "settings.overlay.position_reset.title": "오버레이 위치 초기화",
         "settings.overlay.position_reset.vr.title": "위치 초기화",
         "settings.overlay.position_reset.desktop.title": "위치 초기화",
@@ -51,6 +53,7 @@ CANONICAL_DESKTOP_OVERLAY_I18N_COPY = {
         "settings.overlay.desktop.background_alpha.title": "背景の透明度",
         "settings.overlay.desktop.lock.value.move": "移動",
         "settings.overlay.desktop.lock.value.locked": "固定",
+        "settings.overlay.desktop.empty_state.action.lock": "固定する",
         "settings.overlay.position_reset.title": "オーバーレイ位置をリセット",
         "settings.overlay.position_reset.vr.title": "位置をリセット",
         "settings.overlay.position_reset.desktop.title": "位置をリセット",
@@ -67,6 +70,7 @@ CANONICAL_DESKTOP_OVERLAY_I18N_COPY = {
         "settings.overlay.desktop.background_alpha.title": "背景透明度",
         "settings.overlay.desktop.lock.value.move": "移动",
         "settings.overlay.desktop.lock.value.locked": "固定",
+        "settings.overlay.desktop.empty_state.action.lock": "固定",
         "settings.overlay.position_reset.title": "重置叠加层位置",
         "settings.overlay.position_reset.vr.title": "重置位置",
         "settings.overlay.position_reset.desktop.title": "重置位置",
@@ -223,6 +227,7 @@ def test_desktop_overlay_i18n_english_copy_uses_product_language() -> None:
     assert bundle["settings.overlay.desktop.size.title"] == "Overlay size"
     assert bundle["settings.overlay.desktop.lock.value.move"] == "Move"
     assert bundle["settings.overlay.desktop.lock.value.locked"] == "Locked"
+    assert bundle["settings.overlay.desktop.empty_state.action.lock"] == "Lock"
     assert bundle["settings.overlay.position_reset.action.desktop"] == "Reset desktop"
 
     user_facing_copy = [
