@@ -1411,6 +1411,7 @@ def test_desktop_overlay_preview_fixtures_cover_required_local_qa_cases() -> Non
     catalog = desktop_overlay.build_desktop_overlay_preview_catalog(locale="en")
 
     assert tuple(preset.id for preset in catalog.size_presets) == (
+        "xsmall",
         "small",
         "medium",
         "large",
@@ -1840,6 +1841,7 @@ def test_desktop_overlay_preview_i18n_labels_resolve_for_all_controls() -> None:
     assert catalog.labels.background_alpha == "背景の透明度"
     assert catalog.labels.background_surface == "プレビュー背景"
     assert [preset.label for preset in catalog.size_presets] == [
+        "さらに小さく",
         "小さめ",
         "標準",
         "大きめ",
@@ -2441,6 +2443,7 @@ async def test_desktop_overlay_display_matrix_locked_no_captions_is_fully_transp
 @pytest.mark.asyncio
 async def test_desktop_overlay_preset_visual_tokens_match_product_table() -> None:
     expected = {
+        "xsmall": (960, 240, 29, 18, 14, 6, 12, 6, 932),
         "small": (1152, 288, 35, 21, 18, 8, 14, 8, 1116),
         "medium": (1344, 336, 41, 25, 22, 10, 16, 10, 1300),
         "large": (1600, 400, 50, 30, 26, 12, 18, 12, 1548),

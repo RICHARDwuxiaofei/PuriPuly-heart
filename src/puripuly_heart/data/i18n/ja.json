@@ -172,6 +172,7 @@
   "settings.overlay.position_reset.action.desktop": "デスクトップをリセット",
   "settings.overlay.desktop.size.title": "オーバーレイサイズ",
   "settings.overlay.desktop.background_alpha.title": "背景の透明度",
+  "settings.overlay.desktop.size.option.xsmall": "さらに小さく",
   "settings.overlay.desktop.size.option.small": "小さめ",
   "settings.overlay.desktop.size.option.medium": "標準",
   "settings.overlay.desktop.size.option.large": "大きめ",
