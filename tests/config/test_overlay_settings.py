@@ -34,7 +34,7 @@ def test_overlay_settings_desktop_flet_defaults_serialize_canonical_shape() -> N
     assert "locked" not in data["overlay"]["desktop_flet"]
 
 
-def test_overlay_settings_desktop_flet_size_presets_match_descender_budget() -> None:
+def test_overlay_settings_desktop_flet_size_presets_match_c_light_caption_layout() -> None:
     assert DESKTOP_FLET_SIZE_PRESETS == {
         "small": (1152, 288),
         "medium": (1344, 336),
