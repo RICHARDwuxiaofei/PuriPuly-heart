@@ -50,6 +50,8 @@ class OverlayPresentationBlock:
     primary_text: str
     secondary_text: str
     secondary_enabled: bool
+    primary_language: str | None = None
+    secondary_language: str | None = None
     update_id: str | None = None
     origin_wall_clock_ms: int | None = None
     session_scope: str | None = None
@@ -70,6 +72,10 @@ class OverlayPresentationBlock:
         }
         if self.update_id is not None:
             payload["update_id"] = self.update_id
+        if self.primary_language is not None:
+            payload["primary_language"] = self.primary_language
+        if self.secondary_language is not None:
+            payload["secondary_language"] = self.secondary_language
         if self.origin_wall_clock_ms is not None:
             payload["origin_wall_clock_ms"] = self.origin_wall_clock_ms
         if self.session_scope is not None:
@@ -109,6 +115,8 @@ class OverlayPresentationBlock:
             primary_text=_require_string_field(data, "primary_text"),
             secondary_text=_require_string_field(data, "secondary_text"),
             secondary_enabled=_require_bool_field(data, "secondary_enabled"),
+            primary_language=_optional_string_field(data, "primary_language"),
+            secondary_language=_optional_string_field(data, "secondary_language"),
             update_id=_optional_string_field(data, "update_id"),
             origin_wall_clock_ms=_optional_int_field(data, "origin_wall_clock_ms"),
             session_scope=_optional_string_field(data, "session_scope"),

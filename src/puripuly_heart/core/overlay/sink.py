@@ -63,6 +63,8 @@ class SelfActiveUpdate(OverlayEvent):
     text: str
     occupant_key: str
     secondary_text: str = ""
+    source_language: str = ""
+    target_language: str = ""
 
     EVENT_TYPE: ClassVar[str] = "self_active_update"
 
@@ -81,6 +83,8 @@ class PeerActiveUpdate(OverlayEvent):
 
     text: str
     occupant_key: str
+    source_language: str = ""
+    target_language: str = ""
 
     EVENT_TYPE: ClassVar[str] = "peer_active_update"
 
@@ -282,6 +286,8 @@ class OverlayEventAdapter:
         utterance_id: UUID,
         secondary_text: str = "",
         occupant_key: str,
+        source_language: str = "",
+        target_language: str = "",
         created_at: float | None = None,
         update_id: str | None = None,
         origin_wall_clock_ms: int | None = None,
@@ -305,6 +311,8 @@ class OverlayEventAdapter:
             text=text,
             secondary_text=secondary_text,
             occupant_key=occupant_key,
+            source_language=source_language,
+            target_language=target_language,
         )
 
     def peer_active_update(
@@ -313,6 +321,8 @@ class OverlayEventAdapter:
         text: str,
         utterance_id: UUID,
         occupant_key: str,
+        source_language: str = "",
+        target_language: str = "",
         created_at: float | None = None,
         update_id: str | None = None,
         origin_wall_clock_ms: int | None = None,
@@ -335,6 +345,8 @@ class OverlayEventAdapter:
             ),
             text=text,
             occupant_key=occupant_key,
+            source_language=source_language,
+            target_language=target_language,
         )
 
     def self_active_clear(self, *, created_at: float | None = None) -> SelfActiveClear:
