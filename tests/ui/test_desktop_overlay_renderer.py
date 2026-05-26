@@ -24,6 +24,7 @@ from puripuly_heart.core.overlay.protocol import (
     OverlayPresentationSnapshot,
 )
 from puripuly_heart.ui import desktop_overlay
+from puripuly_heart.ui.fonts import assets_dir
 
 
 def _manifest(**overrides: object) -> OverlayLaunchManifest:
@@ -1085,6 +1086,7 @@ class FakeFletWindow:
         self.title_bar_buttons_hidden: bool | None = None
         self.maximizable: bool | None = None
         self.bgcolor: object | None = None
+        self.icon: str | None = None
         self.ignore_mouse_events: bool | None = None
         self.left: int | float = 0
         self.top: int | float = 0
@@ -1111,6 +1113,7 @@ class FakeFletWindow:
 class FakeFletPage:
     def __init__(self, app: FakeFletApp) -> None:
         self.window = FakeFletWindow(app)
+        self.title: str | None = None
         self.controls: list[object] = []
         self.bgcolor: object | None = None
         self.padding: object | None = None
@@ -1776,9 +1779,11 @@ def test_desktop_overlay_preview_fixtures_use_real_overlay_window_surface_and_ed
     assert desktop_overlay.run_preview(app_runner=run_preview_target, locale="en") == 0
 
     assert app.page.window.frameless is True
+    assert app.page.title == "PuriPuly Overlay"
+    assert app.page.window.icon == "icons/icon.ico"
     assert app.page.window.always_on_top is True
     assert app.page.window.shadow is False
-    assert app.page.window.skip_task_bar is True
+    assert app.page.window.skip_task_bar is False
     assert app.page.window.resizable is False
     assert app.page.window.bgcolor == ft.Colors.TRANSPARENT
     assert app.page.bgcolor == ft.Colors.TRANSPARENT
@@ -1835,6 +1840,12 @@ async def test_desktop_overlay_preview_controls_apply_size_preset_without_outlin
 def test_desktop_overlay_preview_i18n_labels_resolve_for_all_controls() -> None:
     catalog = desktop_overlay.build_desktop_overlay_preview_catalog(locale="ja")
 
+    assert desktop_overlay.t_for_locale("en", "desktop_overlay.window.title") == "PuriPuly Overlay"
+    assert desktop_overlay.t_for_locale("ko", "desktop_overlay.window.title") == "PuriPuly Overlay"
+    assert desktop_overlay.t_for_locale("ja", "desktop_overlay.window.title") == "PuriPuly Overlay"
+    assert (
+        desktop_overlay.t_for_locale("zh-CN", "desktop_overlay.window.title") == "PuriPuly Overlay"
+    )
     assert catalog.labels.fixture == "サンプル字幕"
     assert catalog.labels.size_preset == "オーバーレイサイズ"
     assert catalog.labels.background_alpha == "背景の透明度"
@@ -1908,7 +1919,13 @@ async def test_default_flet_app_runner_starts_hidden_to_prevent_startup_flash(
 
     await desktop_overlay._default_flet_app_runner(target)  # noqa: SLF001 - verify runner policy
 
-    assert calls == [{"target": target, "view": ft.AppView.FLET_APP_HIDDEN}]
+    assert calls == [
+        {
+            "target": target,
+            "view": ft.AppView.FLET_APP_HIDDEN,
+            "assets_dir": str(assets_dir()),
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -2105,9 +2122,11 @@ async def test_desktop_overlay_flet_window_starts_frameless_transparent_moving_e
 
         page = app.page
         assert page.window.frameless is True
+        assert page.title == "PuriPuly Overlay"
+        assert page.window.icon == "icons/icon.ico"
         assert page.window.always_on_top is True
         assert page.window.shadow is False
-        assert page.window.skip_task_bar is True
+        assert page.window.skip_task_bar is False
         assert page.window.resizable is False
         assert page.window.maximizable is False
         assert page.window.bgcolor == ft.Colors.TRANSPARENT

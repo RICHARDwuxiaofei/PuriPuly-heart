@@ -50,6 +50,7 @@ from puripuly_heart.core.overlay.protocol import (
     OverlayPresentationBlock,
     OverlayPresentationSnapshot,
 )
+from puripuly_heart.ui.fonts import assets_dir
 from puripuly_heart.ui.i18n import t_for_locale
 
 logger = logging.getLogger(__name__)
@@ -1689,7 +1690,11 @@ async def _default_flet_app_runner(target: Callable[[Any], object]) -> None:
     import flet as ft
 
     with _patch_flet_view_hidden_launcher():
-        await ft.app_async(target=target, view=ft.AppView.FLET_APP_HIDDEN)
+        await ft.app_async(
+            target=target,
+            view=ft.AppView.FLET_APP_HIDDEN,
+            assets_dir=str(assets_dir()),
+        )
 
 
 @contextlib.contextmanager
@@ -1969,10 +1974,16 @@ class FletDesktopRendererWindow:
         import flet as ft
 
         window = page.window
+        page.title = t_for_locale(
+            self._locale,
+            "desktop_overlay.window.title",
+            default="PuriPuly Overlay",
+        )
+        window.icon = "icons/icon.ico"
         window.frameless = True
         window.always_on_top = True
         window.shadow = False
-        window.skip_task_bar = True
+        window.skip_task_bar = False
         window.resizable = False
         window.maximizable = False
         window.bgcolor = ft.Colors.TRANSPARENT
