@@ -39,6 +39,9 @@ from puripuly_heart.core.overlay.openvr_vendor import collect_vendored_openvr_ru
 block_cipher = None
 SOXR_RELEASE_INPUTS_MANIFEST_PATH = Path("build/soxr-release-inputs/manifest.json").resolve()
 SOXR_PACKAGED_RUNTIME_RELATIVE_DIR = Path("soxr")
+NOTO_CJK_SOURCE_DIR = Path("third_party/noto-sans-cjk").resolve()
+NOTO_CJK_PACKAGED_FONT_RELATIVE_DIR = Path("fonts")
+NOTO_CJK_PACKAGED_PROVENANCE_RELATIVE_DIR = Path("third_party/noto-sans-cjk")
 
 
 def get_prepared_soxr_runtime_paths() -> tuple[Path, Path]:
@@ -106,6 +109,11 @@ datas = [
     (str(src_path / "puripuly_heart" / "data"), "puripuly_heart/data"),
     # Prompt templates
     ("prompts", "prompts"),
+    # Native VR Subtitle Overlay bundled CJK font and distribution provenance.
+    (str(NOTO_CJK_SOURCE_DIR / "NotoSansCJK-Medium.ttc"), NOTO_CJK_PACKAGED_FONT_RELATIVE_DIR.as_posix()),
+    (str(NOTO_CJK_SOURCE_DIR / "OFL.txt"), NOTO_CJK_PACKAGED_PROVENANCE_RELATIVE_DIR.as_posix()),
+    (str(NOTO_CJK_SOURCE_DIR / "README.md"), NOTO_CJK_PACKAGED_PROVENANCE_RELATIVE_DIR.as_posix()),
+    (str(NOTO_CJK_SOURCE_DIR / "SHA256SUMS.txt"), NOTO_CJK_PACKAGED_PROVENANCE_RELATIVE_DIR.as_posix()),
 ] + collect_data_files("flet_desktop")
 
 runtime_binaries = collect_dynamic_libs(
