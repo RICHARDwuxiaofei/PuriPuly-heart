@@ -1080,6 +1080,68 @@ async def test_managed_stt_provider_multiple_pending_finals_resolve_fifo() -> No
         await stt.close()
 
 
+async def test_managed_stt_provider_repeated_forced_boundaries_reuse_session_and_finalize_fifo() -> (
+    None
+):
+    backend = Float32Backend()
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        channel="peer",
+        reset_deadline_s=90.0,
+    )
+
+    first_utterance_id = uuid4()
+    second_utterance_id = uuid4()
+    stream = stt.events()
+
+    try:
+        await stt.handle_vad_event(
+            SpeechStart(
+                first_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(1.0),
+            )
+        )
+        await _next_state(stream, STTSessionState.STREAMING)
+        await stt.handle_vad_event(
+            SpeechEnd(first_utterance_id, trailing_silence_ms=0, reason="max_duration")
+        )
+
+        await stt.handle_vad_event(
+            SpeechStart(
+                second_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(0.5),
+            )
+        )
+        await stt.handle_vad_event(
+            SpeechEnd(second_utterance_id, trailing_silence_ms=0, reason="max_duration")
+        )
+
+        assert len(backend.sessions) == 1
+        session = backend.sessions[0]
+        assert session.calls == ["on_speech_end", "on_speech_end"]
+        assert len(session.audio_f32) == 2
+
+        await session._queue.put(STTBackendTranscriptEvent(text="first forced", is_final=True))
+        await session._queue.put(STTBackendTranscriptEvent(text="second forced", is_final=True))
+
+        first_event = await _next_typed_event(stream, STTFinalEvent)
+        second_event = await _next_typed_event(stream, STTFinalEvent)
+
+        assert [first_event.utterance_id, second_event.utterance_id] == [
+            first_utterance_id,
+            second_utterance_id,
+        ]
+        assert [first_event.transcript.text, second_event.transcript.text] == [
+            "first forced",
+            "second forced",
+        ]
+    finally:
+        await stt.close()
+
+
 async def test_managed_stt_provider_partials_do_not_consume_pending_finals() -> None:
     backend = Float32Backend()
     stt = ManagedSTTProvider(backend=backend, sample_rate_hz=16000, reset_deadline_s=90.0)

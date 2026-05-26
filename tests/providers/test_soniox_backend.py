@@ -167,6 +167,57 @@ async def test_soniox_session_on_speech_end_none_injects_configured_trailing_sil
 
 
 @pytest.mark.asyncio
+async def test_soniox_session_repeated_finalize_boundaries_clear_each_final_segment() -> None:
+    session = _make_session()
+
+    await session.on_speech_end(trailing_silence_ms=0)
+    await session.on_speech_end(trailing_silence_ms=0)
+
+    first_finalize = await session._audio_q.get()
+    second_finalize = await session._audio_q.get()
+    assert isinstance(first_finalize, _FinalizeRequest)
+    assert isinstance(second_finalize, _FinalizeRequest)
+
+    session._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": "First", "is_final": True, "end_ms": 100},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+    session._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": "Second", "is_final": True, "end_ms": 200},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+
+    await session.on_speech_end(trailing_silence_ms=0)
+    third_finalize = await session._audio_q.get()
+    assert isinstance(third_finalize, _FinalizeRequest)
+    session._handle_message(
+        json.dumps(
+            {
+                "tokens": [
+                    {"text": "Third", "is_final": True, "end_ms": 300},
+                    {"text": "<fin>", "is_final": True},
+                ]
+            }
+        )
+    )
+
+    events = [session._events.get_nowait() for _ in range(3)]
+    assert [event.text for event in events] == ["First", "Second", "Third"]
+
+
+@pytest.mark.asyncio
 async def test_soniox_session_send_audio_and_stop() -> None:
     session = _make_session()
 
