@@ -1,5 +1,6 @@
 {
     "app.title": "PuriPuly <3",
+    "desktop_overlay.window.title": "PuriPuly Overlay",
     "dashboard.stt_label": "语音识别",
     "dashboard.peer_label": "PEER",
     "dashboard.trans_label": "翻译",

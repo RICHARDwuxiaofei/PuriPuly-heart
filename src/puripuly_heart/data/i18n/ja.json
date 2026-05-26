@@ -1,5 +1,6 @@
 {
   "app.title": "PuriPuly <3",
+  "desktop_overlay.window.title": "PuriPuly Overlay",
   "dashboard.stt_label": "STT",
   "dashboard.peer_label": "PEER",
   "dashboard.trans_label": "TRANS",
