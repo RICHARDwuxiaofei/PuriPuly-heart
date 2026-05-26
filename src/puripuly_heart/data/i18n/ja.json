@@ -180,6 +180,7 @@
   "settings.overlay.desktop.lock.title": "オーバーレイ固定",
   "settings.overlay.desktop.lock.value.move": "移動",
   "settings.overlay.desktop.lock.value.locked": "固定",
+  "settings.overlay.desktop.empty_state.action.lock": "固定する",
   "settings.overlay.desktop.recovery.message.reopen": "字幕が一時停止しました。準備できたら開き直してください。",
   "settings.overlay.desktop.recovery.message.retry": "字幕が一時停止しました。準備できたらもう一度お試しください。",
   "settings.overlay.desktop.recovery.action.reopen": "開き直す",

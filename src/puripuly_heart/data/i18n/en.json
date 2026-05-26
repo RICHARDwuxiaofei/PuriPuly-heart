@@ -180,6 +180,7 @@
   "settings.overlay.desktop.lock.title": "Overlay lock",
   "settings.overlay.desktop.lock.value.move": "Move",
   "settings.overlay.desktop.lock.value.locked": "Locked",
+  "settings.overlay.desktop.empty_state.action.lock": "Lock",
   "settings.overlay.desktop.recovery.message.reopen": "Captions paused. Reopen them when you're ready.",
   "settings.overlay.desktop.recovery.message.retry": "Captions paused. Try again when you're ready.",
   "settings.overlay.desktop.recovery.action.reopen": "Reopen",
