@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future as ConcurrentFuture
 from dataclasses import dataclass, field
@@ -2745,9 +2746,20 @@ class DesktopOverlayRenderer:
             )
             return _STARTUP_FAILURE_EXIT_CODE
         except Exception as exc:
+            safe_exception_message = _redact_renderer_startup_exception_text(
+                str(exc),
+                self.manifest,
+            )
+            safe_exception_traceback = _redact_renderer_startup_exception_text(
+                "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                self.manifest,
+            )
             logger.warning(
-                "[DesktopOverlay] Renderer startup failed: exception_type=%s",
+                "[DesktopOverlay] Renderer startup failed: "
+                "exception_type=%s exception_message=%s exception_traceback=%s",
                 type(exc).__name__,
+                safe_exception_message,
+                safe_exception_traceback,
             )
             await self._emit_lifecycle(
                 {"type": "startup_error", "failure_reason": unexpected_startup_failure_reason}
@@ -3202,6 +3214,18 @@ def _parse_runtime_control_payload(message: dict[str, object]) -> dict[str, obje
     if not isinstance(command, str) or not command:
         return None
     return dict(payload)
+
+
+def _redact_renderer_startup_exception_text(
+    text: str,
+    manifest: OverlayLaunchManifest,
+) -> str:
+    redacted = text
+    if manifest.session_token:
+        redacted = redacted.replace(manifest.session_token, "<redacted>")
+    for _, pattern in _DESKTOP_PREVIEW_SECRET_PATTERNS:
+        redacted = pattern.sub("<redacted>", redacted)
+    return redacted
 
 
 def _redact_event(event: dict[str, object]) -> dict[str, object]:
