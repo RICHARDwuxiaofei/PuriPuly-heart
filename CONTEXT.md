@@ -4,8 +4,12 @@ PuriPuly is a two-way conversation translator for VRChat. It turns spoken turns 
 
 ## Language
 
-**Utterance**:
-A single spoken turn that PuriPuly follows from speech detection through transcript, translation, and output.
+**Spoken Turn**:
+A continuous span of speech from one Channel as experienced by the speaker. A long Spoken Turn may be divided into multiple Utterance Segments for display and translation flow.
+_Avoid_: sentence, message, audio clip
+
+**Utterance Segment**:
+A bounded processing unit that PuriPuly follows from speech detection through transcript, translation, and output. Most Spoken Turns produce one Utterance Segment; long continuous Spoken Turns may produce several.
 _Avoid_: sentence, message, audio clip
 
 **Transcript**:
@@ -17,7 +21,7 @@ Localized text produced from a transcript for the configured target language whi
 _Avoid_: response, output text
 
 **Channel**:
-The side of a conversation that an utterance belongs to: either the user's own speech path or another participant's speech path when peer voice translation is enabled.
+The side of a conversation that a Utterance Segment belongs to: either the user's own speech path or another participant's speech path when peer voice translation is enabled.
 _Avoid_: stream, role, side, local user, remote user
 
 **Content Language**:
@@ -64,9 +68,9 @@ _Avoid_: desktop renderer, Flet overlay, subtitle window
 
 ## Example dialogue
 
-Developer: "Should a peer-channel utterance be sent to the VRChat chatbox?"
+Developer: "Should a peer-channel Utterance Segment be sent to the VRChat chatbox?"
 
-Domain expert: "No. A peer-channel utterance represents another participant's speech. Its transcript and translation belong in the VR Subtitle Overlay; the VRChat chatbox is for sending the user's own translated speech into VRChat."
+Domain expert: "No. A peer-channel Utterance Segment represents another participant's speech. Its transcript and translation belong in the VR Subtitle Overlay; the VRChat chatbox is for sending the user's own translated speech into VRChat."
 
 Developer: "If a new user chooses Managed Connection, do they need an OpenRouter API key first?"
 
