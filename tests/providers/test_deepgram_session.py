@@ -292,6 +292,7 @@ async def test_deepgram_session_run_sync_handles_message_finalize_and_stop(
     monkeypatch.setattr(deepgram_module.threading, "Thread", NoopThread)
 
     session._audio_q.put_nowait(_FINALIZE)
+    session._audio_q.put_nowait(_FINALIZE)
     session._audio_q.put_nowait(b"pcm")
     session._audio_q.put_nowait(_STOP)
     session._run_sync()
@@ -300,7 +301,7 @@ async def test_deepgram_session_run_sync_handles_message_finalize_and_stop(
     first = await session._events.get()
     assert isinstance(first, STTBackendTranscriptEvent)
     assert first.text == "hello world"
-    assert sent_controls == ["Finalize"]
+    assert sent_controls == ["Finalize", "Finalize"]
     assert sent_media == [b"pcm"]
     assert session._connected.is_set() is True
     assert "diarize" not in connect_kwargs

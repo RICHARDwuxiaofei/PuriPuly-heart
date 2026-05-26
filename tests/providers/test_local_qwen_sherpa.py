@@ -294,6 +294,67 @@ async def test_local_qwen_session_send_audio_f32_preserves_float32_samples(
 
 
 @pytest.mark.asyncio
+async def test_local_qwen_session_repeated_speech_end_decodes_and_clears_each_segment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recognizer_state: dict[str, object] = {}
+    texts = iter(["first local", "second local"])
+
+    class FakeStream:
+        def __init__(self) -> None:
+            self.accepted: list[tuple[int, np.ndarray]] = []
+            self.result = SimpleNamespace(text=next(texts))
+
+        def accept_waveform(self, sample_rate: int, samples) -> None:
+            self.accepted.append((sample_rate, np.asarray(samples, dtype=np.float32).copy()))
+
+    class FakeRecognizer:
+        def __init__(self) -> None:
+            self.streams: list[FakeStream] = []
+
+        def create_stream(self) -> FakeStream:
+            stream = FakeStream()
+            self.streams.append(stream)
+            return stream
+
+        def decode_stream(self, stream: FakeStream) -> None:
+            _ = stream
+
+    def make_recognizer(_config) -> FakeRecognizer:
+        recognizer = FakeRecognizer()
+        recognizer_state["recognizer"] = recognizer
+        return recognizer
+
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    _install_fake_sherpa(monkeypatch, recognizer_factory=make_recognizer)
+
+    backend = LocalQwenSherpaSTTBackend(model_dir=Path("/models/qwen"), sample_rate_hz=16000)
+    session = await backend.open_session()
+    first = np.array([0.1, 0.2], dtype=np.float32)
+    second = np.array([0.3], dtype=np.float32)
+
+    await session.send_audio_f32(first)
+    await session.on_speech_end()
+    await session.send_audio_f32(second)
+    await session.on_speech_end()
+
+    gen = session.events()
+    first_event = await gen.__anext__()
+    second_event = await gen.__anext__()
+
+    recognizer = recognizer_state["recognizer"]
+    assert isinstance(recognizer, FakeRecognizer)
+    assert [first_event.text, second_event.text] == ["first local", "second local"]
+    assert len(recognizer.streams) == 2
+    np.testing.assert_array_equal(recognizer.streams[0].accepted[0][1], first)
+    np.testing.assert_array_equal(recognizer.streams[1].accepted[0][1], second)
+
+
+@pytest.mark.asyncio
 async def test_local_qwen_session_clips_float32_before_accept_waveform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

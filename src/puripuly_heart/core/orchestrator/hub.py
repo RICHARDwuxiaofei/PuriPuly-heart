@@ -542,31 +542,57 @@ class ClientHub:
             source_utterance_ids=[parent_utterance_id],
         )
 
-    def _clear_peer_parent_vad_bookkeeping(self, parent_utterance_id: UUID) -> None:
+    def _clear_peer_parent_vad_bookkeeping(
+        self,
+        parent_utterance_id: UUID,
+        *,
+        preserve_parent_speech_end_time: bool = False,
+    ) -> None:
         peer_turn_ids = self._peer_parent_turn_ids.pop(parent_utterance_id, set())
         for peer_turn_id in peer_turn_ids:
             self._peer_turn_parent_ids.pop(peer_turn_id, None)
             self._peer_completed_turn_ids.discard(peer_turn_id)
         self.peer_runtime.utterance_start_times.pop(parent_utterance_id, None)
         self.peer_runtime.speech_ended_ids.discard(parent_utterance_id)
+        if not preserve_parent_speech_end_time:
+            self._peer_parent_speech_end_times.pop(parent_utterance_id, None)
         self._clear_latency_timeline(channel="peer", utterance_id=parent_utterance_id)
 
-    def _maybe_clear_completed_peer_parent(self, parent_utterance_id: UUID) -> None:
+    def _maybe_clear_completed_peer_parent(
+        self,
+        parent_utterance_id: UUID,
+        *,
+        preserve_parent_speech_end_time: bool = False,
+    ) -> None:
         peer_turn_ids = self._peer_parent_turn_ids.get(parent_utterance_id)
         if not peer_turn_ids:
-            self._clear_peer_parent_vad_bookkeeping(parent_utterance_id)
+            self._clear_peer_parent_vad_bookkeeping(
+                parent_utterance_id,
+                preserve_parent_speech_end_time=preserve_parent_speech_end_time,
+            )
             return
         if not self._peer_parent_speech_ended(parent_utterance_id):
             return
         if peer_turn_ids.issubset(self._peer_completed_turn_ids):
-            self._clear_peer_parent_vad_bookkeeping(parent_utterance_id)
+            self._clear_peer_parent_vad_bookkeeping(
+                parent_utterance_id,
+                preserve_parent_speech_end_time=preserve_parent_speech_end_time,
+            )
 
-    def _complete_peer_logical_turn(self, peer_turn_id: UUID) -> None:
+    def _complete_peer_logical_turn(
+        self,
+        peer_turn_id: UUID,
+        *,
+        preserve_parent_speech_end_time: bool = False,
+    ) -> None:
         parent_utterance_id = self._peer_turn_parent_ids.get(peer_turn_id)
         if parent_utterance_id is None:
             return
         self._peer_completed_turn_ids.add(peer_turn_id)
-        self._maybe_clear_completed_peer_parent(parent_utterance_id)
+        self._maybe_clear_completed_peer_parent(
+            parent_utterance_id,
+            preserve_parent_speech_end_time=preserve_parent_speech_end_time,
+        )
 
     def _peer_logical_turn_transcript(self, transcript: Transcript) -> tuple[UUID, Transcript]:
         parent_utterance_id = transcript.utterance_id
@@ -1122,6 +1148,7 @@ class ClientHub:
                 transcript,
                 close_is_final=True,
                 finalize_latency=not self._should_publish_to_chatbox(runtime),
+                preserve_parent_speech_end_time=True,
             )
             if self._should_publish_to_chatbox(runtime):
                 await self._enqueue_osc(
@@ -1149,6 +1176,7 @@ class ClientHub:
         *,
         close_is_final: bool,
         finalize_latency: bool,
+        preserve_parent_speech_end_time: bool = False,
     ) -> None:
         if self.overlay_sink is not None:
             self._record_overlay_emit(
@@ -1176,7 +1204,10 @@ class ClientHub:
             is_final=close_is_final,
             finalize_latency=finalize_latency,
         )
-        self._complete_peer_logical_turn(transcript.utterance_id)
+        self._complete_peer_logical_turn(
+            transcript.utterance_id,
+            preserve_parent_speech_end_time=preserve_parent_speech_end_time,
+        )
 
     async def _emit_overlay_utterance_closed(
         self,
@@ -2685,6 +2716,7 @@ class ClientHub:
                 self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
             return
 
+        publish_to_chatbox = self._should_publish_to_chatbox(runtime)
         bundle = self.get_or_create_bundle(utterance_id, channel=runtime.channel)
         bundle.with_translation(translation)
         self._emit_translation_ready_for_output(
@@ -2701,9 +2733,8 @@ class ClientHub:
                 utterance_id=utterance_id,
                 channel=runtime.channel,
                 is_final=True,
-                finalize_latency=not self._should_publish_to_chatbox(runtime),
+                finalize_latency=not publish_to_chatbox,
             )
-            self._complete_peer_logical_turn(utterance_id)
         await self.ui_events.put(
             UIEvent(
                 type=UIEventType.TRANSLATION_DONE,
@@ -2723,7 +2754,7 @@ class ClientHub:
                 is_final=True,
                 finalize_latency=not self._should_publish_to_chatbox(runtime),
             )
-        if self._should_publish_to_chatbox(runtime):
+        if publish_to_chatbox:
             await self._enqueue_osc(
                 utterance_id,
                 transcript_text=text,
@@ -2731,7 +2762,7 @@ class ClientHub:
             )
         else:
             self._finalize_latency_timeline(channel=runtime.channel, utterance_id=utterance_id)
-        if runtime.channel == "peer" and not peer_overlay_active:
+        if runtime.channel == "peer":
             self._complete_peer_logical_turn(utterance_id)
 
     async def handle_peer_transcript_final_for_test(

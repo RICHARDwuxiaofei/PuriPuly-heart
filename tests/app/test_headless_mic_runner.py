@@ -714,6 +714,7 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
     vad_path.write_text("dummy", encoding="utf-8")
 
     helper_calls: list[dict[str, object]] = []
+    self_vad_calls: list[dict[str, object]] = []
     engine = object()
 
     class FakeSender:
@@ -754,6 +755,10 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
         )
         return object()
 
+    def fake_self_vad_gating(*_args, **kwargs):
+        self_vad_calls.append(dict(kwargs))
+        return object()
+
     monkeypatch.setattr(headless_mic, "default_vad_model_path", lambda: vad_path)
     monkeypatch.setattr(headless_mic, "ensure_silero_vad_onnx", lambda target_path: vad_path)
     monkeypatch.setattr(headless_mic, "create_secret_store", lambda *_a, **_k: "secrets")
@@ -765,7 +770,7 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
     monkeypatch.setattr(headless_mic, "ChatboxPaginator", lambda *a, **k: object())
     monkeypatch.setattr(headless_mic, "ClientHub", FakeHub)
     monkeypatch.setattr(headless_mic, "SileroVadOnnx", lambda *a, **k: engine)
-    monkeypatch.setattr(headless_mic, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(headless_mic, "VadGating", fake_self_vad_gating)
     monkeypatch.setattr(headless_mic, "create_peer_vad_gating", fake_create_peer_vad_gating)
     monkeypatch.setattr(headless_mic, "SoundDeviceAudioSource", lambda *a, **k: FakeSource())
     monkeypatch.setattr(
@@ -790,6 +795,7 @@ async def test_headless_mic_runner_uses_shared_peer_vad_policy_helper(
     result = await runner.run()
 
     assert result == 0
+    assert self_vad_calls[0].get("max_segment_ms") is None
     assert helper_calls == [
         {
             "engine": engine,
