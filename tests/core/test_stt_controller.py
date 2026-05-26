@@ -15,7 +15,12 @@ from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRunti
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
 from puripuly_heart.core.vad.gating import SpeechEnd, SpeechStart
-from puripuly_heart.domain.events import STTFinalEvent, STTSessionState, STTSessionStateEvent
+from puripuly_heart.domain.events import (
+    STTFinalEvent,
+    STTPartialEvent,
+    STTSessionState,
+    STTSessionStateEvent,
+)
 from tests.helpers.fakes import samples
 
 
@@ -188,6 +193,38 @@ class Float32Backend:
         return session
 
 
+class StopFinalizingSession(Float32Session):
+    __slots__ = ("stop_final_text",)
+
+    def __init__(self, *, stop_final_text: str | None = None) -> None:
+        super().__init__()
+        self.stop_final_text = stop_final_text
+
+    async def stop(self) -> None:
+        self.calls.append("stop")
+        if self.stop_final_text is not None:
+            await self._queue.put(
+                STTBackendTranscriptEvent(text=self.stop_final_text, is_final=True)
+            )
+        await self._queue.put(None)
+
+
+@dataclass(slots=True)
+class StopFinalizingBackend:
+    sessions: list[StopFinalizingSession]
+    first_stop_final_text: str
+
+    def __init__(self, *, first_stop_final_text: str) -> None:
+        self.sessions = []
+        self.first_stop_final_text = first_stop_final_text
+
+    async def open_session(self) -> StopFinalizingSession:
+        stop_final_text = self.first_stop_final_text if not self.sessions else None
+        session = StopFinalizingSession(stop_final_text=stop_final_text)
+        self.sessions.append(session)
+        return session
+
+
 @dataclass(slots=True)
 class EventOnlySession:
     items: list[object]
@@ -311,6 +348,14 @@ async def _next_state(stream, state, *, max_events: int = 5):
         if isinstance(event, STTSessionStateEvent) and event.state == state:
             return event
     raise AssertionError(f"Expected state {state}")
+
+
+async def _next_typed_event(stream, event_type, *, max_events: int = 10):
+    for _ in range(max_events):
+        event = await _next_event(stream)
+        if isinstance(event, event_type):
+            return event
+    raise AssertionError(f"Expected event of type {event_type.__name__}")
 
 
 async def test_stt_controller_connects_on_speech_start():
@@ -947,6 +992,211 @@ async def test_stt_controller_without_runtime_logging_stays_basic_only(caplog) -
         await stt.close()
 
 
+async def test_managed_stt_provider_final_after_next_speech_start_uses_ended_utterance() -> None:
+    backend = Float32Backend()
+    stt = ManagedSTTProvider(backend=backend, sample_rate_hz=16000, reset_deadline_s=90.0)
+
+    first_utterance_id = uuid4()
+    second_utterance_id = uuid4()
+    stream = stt.events()
+
+    try:
+        await stt.handle_vad_event(
+            SpeechStart(
+                first_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(1.0),
+            )
+        )
+        await _next_state(stream, STTSessionState.STREAMING)
+        await stt.handle_vad_event(SpeechEnd(first_utterance_id))
+
+        await stt.handle_vad_event(
+            SpeechStart(
+                second_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(0.5),
+            )
+        )
+        await backend.sessions[0]._queue.put(
+            STTBackendTranscriptEvent(text="first final", is_final=True)
+        )
+
+        event = await _next_typed_event(stream, STTFinalEvent)
+
+        assert event.utterance_id == first_utterance_id
+        assert event.transcript.utterance_id == first_utterance_id
+        assert event.transcript.text == "first final"
+    finally:
+        await stt.close()
+
+
+async def test_managed_stt_provider_multiple_pending_finals_resolve_fifo() -> None:
+    backend = Float32Backend()
+    stt = ManagedSTTProvider(backend=backend, sample_rate_hz=16000, reset_deadline_s=90.0)
+
+    first_utterance_id = uuid4()
+    second_utterance_id = uuid4()
+    stream = stt.events()
+
+    try:
+        await stt.handle_vad_event(
+            SpeechStart(
+                first_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(1.0),
+            )
+        )
+        await _next_state(stream, STTSessionState.STREAMING)
+        await stt.handle_vad_event(SpeechEnd(first_utterance_id))
+        await stt.handle_vad_event(
+            SpeechStart(
+                second_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(0.5),
+            )
+        )
+        await stt.handle_vad_event(SpeechEnd(second_utterance_id))
+
+        await backend.sessions[0]._queue.put(
+            STTBackendTranscriptEvent(text="first final", is_final=True)
+        )
+        await backend.sessions[0]._queue.put(
+            STTBackendTranscriptEvent(text="second final", is_final=True)
+        )
+
+        first_event = await _next_typed_event(stream, STTFinalEvent)
+        second_event = await _next_typed_event(stream, STTFinalEvent)
+
+        assert [first_event.utterance_id, second_event.utterance_id] == [
+            first_utterance_id,
+            second_utterance_id,
+        ]
+        assert [first_event.transcript.text, second_event.transcript.text] == [
+            "first final",
+            "second final",
+        ]
+    finally:
+        await stt.close()
+
+
+async def test_managed_stt_provider_partials_do_not_consume_pending_finals() -> None:
+    backend = Float32Backend()
+    stt = ManagedSTTProvider(backend=backend, sample_rate_hz=16000, reset_deadline_s=90.0)
+
+    ended_utterance_id = uuid4()
+    active_utterance_id = uuid4()
+    stream = stt.events()
+
+    try:
+        await stt.handle_vad_event(
+            SpeechStart(
+                ended_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(1.0),
+            )
+        )
+        await _next_state(stream, STTSessionState.STREAMING)
+        await stt.handle_vad_event(SpeechEnd(ended_utterance_id))
+        await stt.handle_vad_event(
+            SpeechStart(
+                active_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(0.5),
+            )
+        )
+
+        await backend.sessions[0]._queue.put(
+            STTBackendTranscriptEvent(text="active partial", is_final=False)
+        )
+        await backend.sessions[0]._queue.put(
+            STTBackendTranscriptEvent(text="ended final", is_final=True)
+        )
+
+        partial_event = await _next_typed_event(stream, STTPartialEvent)
+        final_event = await _next_typed_event(stream, STTFinalEvent)
+
+        assert partial_event.utterance_id == active_utterance_id
+        assert partial_event.transcript.text == "active partial"
+        assert final_event.utterance_id == ended_utterance_id
+        assert final_event.transcript.text == "ended final"
+    finally:
+        await stt.close()
+
+
+async def test_managed_stt_provider_final_without_pending_uses_active_fallback() -> None:
+    backend = Float32Backend()
+    stt = ManagedSTTProvider(backend=backend, sample_rate_hz=16000, reset_deadline_s=90.0)
+
+    active_utterance_id = uuid4()
+    stream = stt.events()
+
+    try:
+        await stt.handle_vad_event(
+            SpeechStart(
+                active_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(1.0),
+            )
+        )
+        await _next_state(stream, STTSessionState.STREAMING)
+        await backend.sessions[0]._queue.put(
+            STTBackendTranscriptEvent(text="active final", is_final=True)
+        )
+
+        event = await _next_typed_event(stream, STTFinalEvent)
+
+        assert event.utterance_id == active_utterance_id
+        assert event.transcript.utterance_id == active_utterance_id
+        assert event.transcript.text == "active final"
+    finally:
+        await stt.close()
+
+
+async def test_managed_stt_provider_bridging_reset_preserves_pending_final() -> None:
+    backend = StopFinalizingBackend(first_stop_final_text="drained final")
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        reset_deadline_s=90.0,
+        drain_timeout_s=0.2,
+        bridging_ms=64,
+        finalize_grace_s=0.0,
+    )
+
+    pending_utterance_id = uuid4()
+    active_utterance_id = uuid4()
+    stream = stt.events()
+
+    try:
+        await stt.handle_vad_event(
+            SpeechStart(
+                pending_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(1.0),
+            )
+        )
+        await _next_state(stream, STTSessionState.STREAMING)
+        await stt.handle_vad_event(SpeechEnd(pending_utterance_id))
+        await stt.handle_vad_event(
+            SpeechStart(
+                active_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(0.5),
+            )
+        )
+
+        await stt._reset_with_bridging()
+
+        event = await _next_typed_event(stream, STTFinalEvent)
+
+        assert len(backend.sessions) == 2
+        assert event.utterance_id == pending_utterance_id
+        assert event.transcript.text == "drained final"
+    finally:
+        await stt.close()
+
+
 async def test_managed_stt_provider_peer_channel_produces_final_event():
     provider = ManagedSTTProvider(
         backend=FakeBackend(),
@@ -954,7 +1204,7 @@ async def test_managed_stt_provider_peer_channel_produces_final_event():
         channel="peer",
     )
     utterance_id = uuid4()
-    provider._pending_final_utterance_id = utterance_id
+    provider._pending_final_utterance_ids.append(utterance_id)
 
     await provider._consume_session_events(
         EventOnlySession(
