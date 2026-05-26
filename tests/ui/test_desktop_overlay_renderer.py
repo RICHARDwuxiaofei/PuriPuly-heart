@@ -81,25 +81,31 @@ def test_desktop_overlay_snapshot_mapping_table_documents_current_block_contract
     assert rows[("blocks[]", "active_self/self", "primary")].role == "active_self_source"
     assert rows[("blocks[]", "active_self/self", "primary")].color == "#FFFFFF"
     assert rows[("blocks[]", "active_self/self", "secondary")].role == "active_self_translation"
-    assert rows[("blocks[]", "active_self/self", "secondary")].color == "#FFD700"
+    assert rows[("blocks[]", "active_self/self", "secondary")].color == "#FFFFFF"
     assert rows[("blocks[]", "active_self/self", "secondary")].truncation.startswith("max 1 line")
     active_peer_row = rows[("blocks[]", "active_peer/peer", "primary")]
     assert active_peer_row.role == "active_peer_source"
     assert active_peer_row.promoted is True
+    assert active_peer_row.color == "#FFD700"
     assert rows[("blocks[]", "finalized/peer translated", "primary")].role == ("peer_translation")
+    assert rows[("blocks[]", "finalized/peer translated", "primary")].color == "#FFD700"
+    assert rows[("blocks[]", "finalized/peer translated", "secondary")].color == "#FFD700"
     assert rows[("blocks[]", "finalized/peer translated", "secondary")].truncation.startswith(
         "max 1 line"
     )
     peer_source_only_row = rows[("blocks[]", "finalized/peer source-only", "primary")]
     assert peer_source_only_row.promoted is True
+    assert peer_source_only_row.color == "#FFD700"
     assert peer_source_only_row.truncation == (
         "max 2 lines; drops before active and translated primary lines"
     )
     assert rows[("blocks[]", "finalized/self", "secondary")].role == "self_translation"
+    assert rows[("blocks[]", "finalized/self", "secondary")].color == "#FFFFFF"
     assert rows[("blocks[]", "finalized/self", "secondary")].truncation.startswith("max 1 line")
     self_secondary_only_row = rows[("blocks[]", "finalized/self secondary-only", "primary")]
     assert self_secondary_only_row.role == "self_translation"
     assert self_secondary_only_row.promoted is True
+    assert self_secondary_only_row.color == "#FFFFFF"
     assert rows[("calibration", "all", "none")].role == "desktop_visual_ignored"
     assert rows[("blocks[]", "none/edit", "none")].role == "edit_no_caption_empty_card"
     assert rows[("blocks[]", "none/edit", "none")].truncation == (
@@ -211,7 +217,7 @@ def test_desktop_overlay_snapshot_mapping_table_matches_emitted_caption_lines() 
             )
 
 
-def test_desktop_overlay_snapshot_mapping_roles_secondary_promotion_and_colors() -> None:
+def test_desktop_overlay_snapshot_mapping_roles_secondary_promotion_and_channel_colors() -> None:
     active_self_plan = desktop_overlay.build_desktop_caption_plan(
         OverlayPresentationSnapshot(
             revision=12,
@@ -271,12 +277,16 @@ def test_desktop_overlay_snapshot_mapping_roles_secondary_promotion_and_colors()
     assert line_by_text["I can hear you"].color == "#FFFFFF"
     assert line_by_text["들려요"].role == "active_self_translation"
     assert line_by_text["들려요"].slot == "secondary"
-    assert line_by_text["들려요"].color == "#FFD700"
+    assert line_by_text["들려요"].color == "#FFFFFF"
     assert line_by_text["typing live source"].role == "active_peer_source"
     assert line_by_text["typing live source"].slot == "primary"
     assert line_by_text["typing live source"].promoted is True
+    assert line_by_text["typing live source"].color == "#FFD700"
     assert line_by_text["좋아요"].role == "peer_translation"
     assert line_by_text["좋아요"].color == "#FFD700"
+    assert line_by_text["Sounds good"].role == "peer_source_original"
+    assert line_by_text["Sounds good"].slot == "secondary"
+    assert line_by_text["Sounds good"].color == "#FFD700"
     for plan in (active_self_plan, peer_translated_plan, active_peer_plan):
         assert sum(line.max_lines for line in plan.lines) <= 3
 
