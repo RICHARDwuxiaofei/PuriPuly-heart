@@ -6,9 +6,11 @@ use windows::Win32::Graphics::Direct2D::ID2D1CommandList;
 #[cfg(windows)]
 use windows::Win32::Graphics::DirectWrite::IDWriteTextFormat;
 
-use super::types::{BlockBounds, LayoutCacheKey, LineRole, VisualBounds};
 #[cfg(windows)]
-use super::types::{BlockCacheKey, LineCacheKey, TextScriptBucket};
+use super::font_resolver::TextStyleKey;
+use super::types::{BlockBounds, LayoutCacheKey, LineRole, TextStyleDescriptor, VisualBounds};
+#[cfg(windows)]
+use super::types::{BlockCacheKey, LineCacheKey};
 
 pub(crate) const TEXT_FORMAT_CACHE_CAP: usize = 32;
 pub(crate) const LAYOUT_CACHE_CAP: usize = 512;
@@ -79,6 +81,8 @@ where
 pub(crate) struct CachedLineLayoutTemplate {
     pub text: String,
     pub role: LineRole,
+    pub style_key: super::font_resolver::TextStyleKey,
+    pub style: TextStyleDescriptor,
     pub width_px: f32,
     pub origin_x: f32,
     pub origin_y: f32,
@@ -152,7 +156,7 @@ pub(crate) struct CachedBlockVisual {
 #[cfg(windows)]
 #[derive(Debug)]
 pub(crate) struct WindowsRendererCaches {
-    pub text_format_cache: BoundedLruCache<(TextScriptBucket, u32), IDWriteTextFormat>,
+    pub text_format_cache: BoundedLruCache<(TextStyleKey, u32), IDWriteTextFormat>,
     #[allow(dead_code)]
     pub layout_cache: LayoutCache,
     pub line_cache: BoundedLruCache<LineCacheKey, CachedLineVisual>,
@@ -178,13 +182,36 @@ mod tests {
         BLOCK_CACHE_CAP, LAYOUT_CACHE_CAP, LINE_CACHE_CAP, TEXT_FORMAT_CACHE_CAP,
     };
     use crate::renderer::{
-        BlockBounds, CaptionBlockVariant, LayoutCacheKey, LineRole, VisualBounds,
+        BlockBounds, BlockCacheKey, BundledFaceId, CaptionBlockVariant, FontLanguageBucket,
+        FontResolver, FontSource, LayoutCacheKey, LineCacheKey, LineRole, TextStyleDescriptor,
+        TextStyleKey, VisualBounds,
     };
+
+    fn style_key(language: &str) -> TextStyleKey {
+        FontResolver::with_bundle_available()
+            .resolve(Some(language), "漢字")
+            .style_key()
+    }
+
+    fn style_descriptor(language: &str) -> TextStyleDescriptor {
+        let style = FontResolver::with_bundle_available().resolve(Some(language), "漢字");
+        let style_key = style.style_key();
+        TextStyleDescriptor::from_parts(
+            style.family_name,
+            style.weight,
+            style.locale,
+            style.source,
+            style.bucket,
+            style_key,
+        )
+    }
 
     fn layout_key(seed: usize) -> LayoutCacheKey {
         LayoutCacheKey {
             primary_text: format!("primary {seed}"),
             secondary_text: format!("secondary {seed}"),
+            primary_style_key: style_key("ko"),
+            secondary_style_key: style_key("ja"),
             channel: None,
             block_variant: CaptionBlockVariant::Finalized,
             secondary_enabled: true,
@@ -196,11 +223,26 @@ mod tests {
         }
     }
 
+    fn line_key(style_key: TextStyleKey) -> LineCacheKey {
+        LineCacheKey {
+            text: "漢字".into(),
+            role: LineRole::Primary,
+            style_key,
+            channel: None,
+            block_variant: CaptionBlockVariant::Finalized,
+            font_size_key: 13_200,
+            content_width_key: 3_200,
+            text_scale_key: 100,
+        }
+    }
+
     fn layout_template(seed: usize) -> CachedBlockLayoutTemplate {
         CachedBlockLayoutTemplate {
             primary_lines: vec![CachedLineLayoutTemplate {
                 text: format!("primary {seed}"),
                 role: LineRole::Primary,
+                style_key: style_key("ko"),
+                style: style_descriptor("ko"),
                 width_px: 100.0,
                 origin_x: 10.0,
                 origin_y: 20.0,
@@ -244,6 +286,89 @@ mod tests {
         assert_eq!(cache.get(&"old-but-used"), Some(&1));
         assert_eq!(cache.get(&"middle"), None);
         assert_eq!(cache.get(&"new"), Some(&3));
+    }
+
+    #[test]
+    fn text_format_cache_keys_keep_same_text_and_size_separate_per_cjk_style() {
+        let font_size_key = 13_200;
+        let cases = [
+            ("ko", FontLanguageBucket::CjkKo),
+            ("ja", FontLanguageBucket::CjkJa),
+            ("zh-Hans", FontLanguageBucket::CjkZhHans),
+            ("zh-Hant", FontLanguageBucket::CjkZhHant),
+        ];
+        let mut cache = BoundedLruCache::with_capacity(cases.len());
+
+        for (index, (language, bucket)) in cases.into_iter().enumerate() {
+            let style_key = style_key(language);
+            assert_eq!(style_key.bucket, bucket);
+            cache.insert((style_key, font_size_key), index);
+        }
+
+        assert_eq!(cache.len(), cases.len());
+        for (index, (language, _)) in cases.into_iter().enumerate() {
+            assert_eq!(
+                cache.get(&(style_key(language), font_size_key)),
+                Some(&index)
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_kr_jp_sc_tc_style_keys_have_distinct_face_identities() {
+        let cases = [
+            ("ko", BundledFaceId::NotoCjkKrMedium),
+            ("ja", BundledFaceId::NotoCjkJpMedium),
+            ("zh-Hans", BundledFaceId::NotoCjkScMedium),
+            ("zh-Hant", BundledFaceId::NotoCjkTcMedium),
+        ];
+        let mut keys = std::collections::HashSet::new();
+
+        for (language, face) in cases {
+            let style_key = style_key(language);
+            assert_eq!(style_key.source, FontSource::BundledNotoCjkMedium);
+            assert_eq!(style_key.bundled_face, Some(face));
+            keys.insert(style_key);
+        }
+
+        assert_eq!(keys.len(), cases.len());
+    }
+
+    #[test]
+    fn layout_and_block_cache_keys_include_primary_and_secondary_style_identity() {
+        let base = layout_key(7);
+        let changed_primary = LayoutCacheKey {
+            primary_style_key: style_key("zh-Hans"),
+            ..base.clone()
+        };
+        let changed_secondary = LayoutCacheKey {
+            secondary_style_key: style_key("zh-Hant"),
+            ..base.clone()
+        };
+
+        assert_ne!(base, changed_primary);
+        assert_ne!(base, changed_secondary);
+        assert_ne!(
+            (BlockCacheKey {
+                id: "same-block".into(),
+                layout: base.clone(),
+            }),
+            (BlockCacheKey {
+                id: "same-block".into(),
+                layout: changed_secondary,
+            })
+        );
+    }
+
+    #[test]
+    fn line_cache_key_includes_line_style_identity() {
+        let ko = line_key(style_key("ko"));
+        let ja = LineCacheKey {
+            style_key: style_key("ja"),
+            ..ko.clone()
+        };
+
+        assert_ne!(ko, ja);
     }
 
     #[test]

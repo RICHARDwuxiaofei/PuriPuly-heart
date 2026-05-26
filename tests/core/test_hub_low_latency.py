@@ -145,6 +145,12 @@ class RecordingOverlaySink:
                 source_text_hash=getattr(event, "source_text_hash", None),
                 source_text_len=getattr(event, "source_text_len", None),
                 logical_turn_key=getattr(event, "logical_turn_key", None),
+                primary_language=(str(getattr(event, "source_language", "") or "").strip() or None),
+                secondary_language=(
+                    str(getattr(event, "target_language", "") or "").strip() or None
+                    if getattr(event, "secondary_text", "").strip()
+                    else None
+                ),
             )
         elif event_type == "self_active_clear":
             self.active_self_metadata = None
@@ -161,6 +167,8 @@ def active_self_metadata_for_buffer(
     *,
     text: str,
     secondary_text: str,
+    source_language: str = "",
+    target_language: str = "",
 ) -> ActiveSelfOverlayMetadata:
     return ActiveSelfOverlayMetadata(
         text=text,
@@ -173,6 +181,10 @@ def active_self_metadata_for_buffer(
         source_text_hash=None,
         source_text_len=None,
         logical_turn_key=None,
+        primary_language=(str(source_language or "").strip() or None),
+        secondary_language=(
+            (str(target_language or "").strip() or None) if secondary_text.strip() else None
+        ),
     )
 
 
@@ -1285,6 +1297,8 @@ class TestResumeEndTimeout:
             buffer,
             text="첫 번째",
             secondary_text="translated live",
+            source_language=hub.source_language,
+            target_language=hub.target_language,
         )
 
         await hub.handle_vad_event(SpeechChunk(resumed_utterance_id, chunk=samples(0.5)))

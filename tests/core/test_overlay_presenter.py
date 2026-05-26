@@ -22,6 +22,7 @@ from puripuly_heart.core.overlay.protocol import (
 )
 from puripuly_heart.core.overlay.sink import (
     OverlayEventAdapter,
+    PeerActiveUpdate,
     SelfActiveClear,
     SelfActiveUpdate,
     SelfTranscriptFinal,
@@ -233,6 +234,136 @@ async def test_presenter_shows_first_self_transcript_without_waiting_for_next_ut
 
 
 @pytest.mark.asyncio
+async def test_presenter_self_rows_use_source_and_target_content_languages() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    self_turn_id = uuid4()
+
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=self_turn_id,
+                channel="self",
+                text="안녕하세요",
+                is_final=True,
+                created_at=10.0,
+            ),
+            source_language="ko",
+            target_language="en",
+        )
+    )
+
+    block = presenter.snapshot().blocks[0]
+    assert block.primary_language == "ko"
+    assert block.secondary_language is None
+
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=self_turn_id,
+            channel="self",
+            text="hello",
+            source_language="ko",
+            target_language="en",
+            applied_context_mode=None,
+            created_at=10.1,
+        )
+    )
+
+    block = presenter.snapshot().blocks[0]
+    assert block.primary_language == "ko"
+    assert block.secondary_language == "en"
+
+
+@pytest.mark.asyncio
+async def test_presenter_self_active_row_uses_source_and_target_content_languages() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    self_turn_id = uuid4()
+
+    await presenter.emit(
+        adapter.self_active_update(
+            text="안녕 live",
+            secondary_text="hello live",
+            utterance_id=self_turn_id,
+            occupant_key=f"self:{self_turn_id}",
+            source_language="ko",
+            target_language="en",
+            created_at=10.0,
+        )
+    )
+
+    block = presenter.snapshot().blocks[0]
+    assert block.primary_language == "ko"
+    assert block.secondary_language == "en"
+
+
+@pytest.mark.asyncio
+async def test_presenter_language_only_self_active_update_publishes_without_resetting_visible_identity() -> (
+    None
+):
+    bridge = RecordingPresentationBridge()
+    clock = FakeClock(_now=10.0)
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=clock,
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=clock)
+    self_turn_id = uuid4()
+
+    await presenter.emit(
+        adapter.self_active_update(
+            text="こんにちは",
+            utterance_id=self_turn_id,
+            occupant_key=f"self:{self_turn_id}",
+            source_language="ko",
+            target_language="en",
+            created_at=10.0,
+        )
+    )
+
+    initial_snapshot = presenter.snapshot()
+    initial_block = initial_snapshot.blocks[0]
+    entry = presenter._entries[("self", self_turn_id)]
+    initial_visible_since = entry.visible_since
+    initial_last_meaningful_visible_at = entry.last_meaningful_visible_at
+    initial_occupant_key = entry.occupant_key
+    initial_entry_appearance_seq = entry.appearance_seq
+
+    clock.advance(2.0)
+    await presenter.emit(
+        adapter.self_active_update(
+            text="こんにちは",
+            utterance_id=self_turn_id,
+            occupant_key=f"self:{self_turn_id}",
+            source_language="ja",
+            target_language="en",
+            created_at=12.0,
+        )
+    )
+
+    updated_snapshot = presenter.snapshot()
+    updated_block = updated_snapshot.blocks[0]
+
+    assert updated_snapshot.revision == initial_snapshot.revision + 1
+    assert len(bridge.snapshots) == 2
+    assert updated_block.primary_language == "ja"
+    assert updated_block.primary_text == initial_block.primary_text
+    assert updated_block.occupant_key == initial_block.occupant_key == initial_occupant_key
+    assert updated_block.appearance_seq == initial_block.appearance_seq
+    assert entry.appearance_seq == initial_entry_appearance_seq
+    assert entry.visible_since == initial_visible_since == 10.0
+    assert entry.last_meaningful_visible_at == initial_last_meaningful_visible_at == 10.0
+
+
+@pytest.mark.asyncio
 async def test_presenter_does_not_reorder_existing_turn_when_translation_updates() -> None:
     bridge = RecordingPresentationBridge()
     presenter = OverlayPresenter(
@@ -331,6 +462,54 @@ async def test_presenter_reserved_peer_active_update_can_emit_compatibility_row(
 
 
 @pytest.mark.asyncio
+async def test_presenter_peer_rows_use_translation_primary_and_source_secondary_languages() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    peer_turn_id = uuid4()
+
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=peer_turn_id,
+                channel="peer",
+                text="peer source",
+                is_final=True,
+                created_at=10.0,
+            ),
+            source_language="en",
+            target_language="ko",
+        )
+    )
+
+    source_only_block = presenter.snapshot().blocks[0]
+    assert source_only_block.primary_text == ""
+    assert source_only_block.primary_language is None
+    assert source_only_block.secondary_text == "peer source"
+    assert source_only_block.secondary_language == "en"
+
+    await presenter.emit(
+        adapter.translation_final(
+            utterance_id=peer_turn_id,
+            channel="peer",
+            text="상대 번역",
+            source_language="en",
+            target_language="ko",
+            applied_context_mode=None,
+            created_at=10.1,
+        )
+    )
+
+    translated_block = presenter.snapshot().blocks[0]
+    assert translated_block.primary_text == "상대 번역"
+    assert translated_block.primary_language == "ko"
+    assert translated_block.secondary_text == "peer source"
+    assert translated_block.secondary_language == "en"
+
+
+@pytest.mark.asyncio
 async def test_presenter_reserved_peer_active_source_renders_secondary_only_before_translation() -> (
     None
 ):
@@ -356,6 +535,33 @@ async def test_presenter_reserved_peer_active_source_renders_secondary_only_befo
     assert block.primary_text == ""
     assert block.secondary_text == "What about now?"
     assert block.secondary_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_presenter_reserved_peer_active_source_only_block_uses_secondary_language() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    peer_turn_id = uuid4()
+
+    await presenter.emit(
+        adapter.peer_active_update(
+            text="何ですか",
+            utterance_id=peer_turn_id,
+            occupant_key=f"peer:{peer_turn_id}",
+            source_language="ja",
+            target_language="ko",
+            created_at=10.0,
+        )
+    )
+
+    block = presenter.snapshot().blocks[0]
+    assert block.primary_text == ""
+    assert block.primary_language is None
+    assert block.secondary_text == "何ですか"
+    assert block.secondary_language == "ja"
 
 
 @pytest.mark.asyncio
@@ -524,6 +730,113 @@ def test_presentation_state_self_reducers_return_diagnostics_without_emit_callba
     assert initial_result.changed is True
     assert stale_result.changed is False
     assert [decision.decision for decision in stale_result.decisions] == ["overlay_turn_superseded"]
+
+
+def test_presentation_state_coalesced_self_active_update_refreshes_language_metadata() -> None:
+    state = OverlayPresentationState()
+    utterance_id = uuid4()
+
+    initial_result = state.apply_self_active_update(
+        SelfActiveUpdate(
+            event_id="self-active-initial-language",
+            seq=1,
+            utterance_id=utterance_id,
+            channel="self",
+            created_at=10.0,
+            text="こんにちは",
+            secondary_text="",
+            occupant_key=f"self:{utterance_id}",
+            source_language="ko",
+            target_language="en",
+        ),
+        now=10.0,
+        show_translation=True,
+        terminal_update_reason=lambda _channel, _utterance_id: None,
+    )
+
+    metadata = state.active_self_overlay_metadata()
+    assert initial_result.changed is True
+    assert metadata is not None
+    assert metadata.primary_language == "ko"
+
+    language_only_result = state.apply_self_active_update(
+        SelfActiveUpdate(
+            event_id="self-active-provider-language",
+            seq=2,
+            utterance_id=utterance_id,
+            channel="self",
+            created_at=10.1,
+            text="こんにちは",
+            secondary_text="",
+            occupant_key=f"self:{utterance_id}",
+            source_language="ja",
+            target_language="zh-TW",
+        ),
+        now=10.1,
+        show_translation=True,
+        terminal_update_reason=lambda _channel, _utterance_id: None,
+    )
+
+    metadata = state.active_self_overlay_metadata()
+    assert language_only_result.changed is True
+    assert [decision.disposition for decision in language_only_result.decisions] == ["coalesced"]
+    assert metadata is not None
+    assert metadata.primary_language == "ja"
+    assert metadata.secondary_language is None
+
+
+def test_presentation_state_coalesced_peer_active_update_refreshes_language_metadata() -> None:
+    state = OverlayPresentationState()
+    utterance_id = uuid4()
+    next_appearance_seq = 0
+
+    def next_seq() -> int:
+        nonlocal next_appearance_seq
+        next_appearance_seq += 1
+        return next_appearance_seq
+
+    initial_result = state.apply_peer_active_update(
+        PeerActiveUpdate(
+            event_id="peer-active-initial-language",
+            seq=1,
+            utterance_id=utterance_id,
+            channel="peer",
+            created_at=10.0,
+            text="こんにちは",
+            occupant_key=f"peer:{utterance_id}",
+            source_language="ko",
+            target_language="en",
+        ),
+        now=10.0,
+        show_peer_original=True,
+        next_appearance_seq=next_seq,
+        terminal_update_reason=lambda _channel, _utterance_id: None,
+    )
+    entry = state.entries[("peer", utterance_id)]
+    assert initial_result.changed is True
+    assert entry.original_language == "ko"
+
+    language_only_result = state.apply_peer_active_update(
+        PeerActiveUpdate(
+            event_id="peer-active-provider-language",
+            seq=2,
+            utterance_id=utterance_id,
+            channel="peer",
+            created_at=10.1,
+            text="こんにちは",
+            occupant_key=f"peer:{utterance_id}",
+            source_language="ja",
+            target_language="zh-TW",
+        ),
+        now=10.1,
+        show_peer_original=True,
+        next_appearance_seq=next_seq,
+        terminal_update_reason=lambda _channel, _utterance_id: None,
+    )
+
+    assert language_only_result.changed is True
+    assert [decision.disposition for decision in language_only_result.decisions] == ["coalesced"]
+    assert entry.original_language == "ja"
 
 
 def test_presentation_state_peer_reducers_return_diagnostics_without_emit_callbacks() -> None:

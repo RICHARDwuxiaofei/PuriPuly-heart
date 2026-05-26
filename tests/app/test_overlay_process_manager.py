@@ -14,7 +14,7 @@ import pytest
 
 from puripuly_heart.core.overlay import openvr_vendor as openvr_vendor_module
 from puripuly_heart.core.overlay import process as process_module
-from puripuly_heart.core.overlay.manifest import OverlayLaunchManifest
+from puripuly_heart.core.overlay.manifest import OVERLAY_CONTRACT_VERSION, OverlayLaunchManifest
 from puripuly_heart.core.overlay.openvr_vendor import VendoredOpenVrBundle
 from puripuly_heart.core.overlay.process import (
     DefaultOverlayProcessRunner,
@@ -139,7 +139,7 @@ class MissingExecutableRunner:
 
 def _overlay_manifest() -> OverlayLaunchManifest:
     return OverlayLaunchManifest(
-        contract_version=5,
+        contract_version=OVERLAY_CONTRACT_VERSION,
         app_version="test",
         overlay_instance_id="overlay-test",
         bridge_url="ws://127.0.0.1:8765",

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::logging::OverlayLoggingMode;
 use crate::runtime::StartupError;
 
-pub const EXPECTED_CONTRACT_VERSION: u32 = 5;
+pub const EXPECTED_CONTRACT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OverlayManifest {

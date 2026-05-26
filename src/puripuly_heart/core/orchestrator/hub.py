@@ -1162,11 +1162,14 @@ class ClientHub:
     async def _emit_final_transcript_to_overlay(self, transcript: Transcript) -> None:
         if self.overlay_sink is None:
             return
+        source_language, target_language = self._self_overlay_languages_for_utterance(
+            transcript.utterance_id
+        )
         await self._emit_overlay_event(
             self.overlay_event_adapter.transcript_final(
                 transcript,
-                source_language=self.source_language,
-                target_language=self.target_language,
+                source_language=source_language,
+                target_language=target_language,
             )
         )
 
@@ -1256,6 +1259,44 @@ class ClientHub:
             "logical_turn_key": translation.logical_turn_key,
         }
 
+    @staticmethod
+    def _language_or_fallback(language: str | None, fallback: str) -> str:
+        if language is not None and language.strip():
+            return language
+        return fallback
+
+    @staticmethod
+    def _metadata_language(metadata: object | None, field_name: str) -> str | None:
+        value = getattr(metadata, field_name, None)
+        if not isinstance(value, str):
+            return None
+        return value
+
+    def _active_self_display_languages_for_utterance(
+        self,
+        utterance_id: UUID,
+    ) -> tuple[str | None, str | None]:
+        metadata = self._current_active_self_metadata()
+        if metadata is None:
+            return None, None
+        if getattr(metadata, "utterance_id", None) != utterance_id:
+            return None, None
+        if getattr(metadata, "occupant_key", None) != f"self:{utterance_id}":
+            return None, None
+        return (
+            self._metadata_language(metadata, "primary_language"),
+            self._metadata_language(metadata, "secondary_language"),
+        )
+
+    def _self_overlay_languages_for_utterance(self, utterance_id: UUID) -> tuple[str, str]:
+        primary_language, secondary_language = self._active_self_display_languages_for_utterance(
+            utterance_id
+        )
+        return (
+            self._language_or_fallback(primary_language, self.source_language),
+            self._language_or_fallback(secondary_language, self.target_language),
+        )
+
     def _current_active_self_metadata(self) -> object | None:
         provider = getattr(self.overlay_sink, "active_self_overlay_metadata", None)
         if not callable(provider):
@@ -1307,6 +1348,54 @@ class ClientHub:
         ):
             return self._active_self_translation_metadata(metadata)
         return self._active_self_translation_metadata(None)
+
+    def _active_self_overlay_languages(
+        self,
+        *,
+        buffer: _MergeBuffer,
+        source: str,
+        secondary_text: str,
+        current_metadata: object | None,
+    ) -> tuple[str, str]:
+        source_language = self._source_language_for(self.self_runtime)
+        target_language = self._target_language_for(self.self_runtime)
+        if source == "spec" and isinstance(buffer.spec_translation, Translation):
+            return (
+                self._language_or_fallback(
+                    buffer.spec_translation.source_language,
+                    source_language,
+                ),
+                self._language_or_fallback(
+                    buffer.spec_translation.target_language,
+                    target_language,
+                ),
+            )
+        metadata_matches_active_self = (
+            current_metadata is not None
+            and getattr(current_metadata, "utterance_id", None) == buffer.merge_id
+            and getattr(current_metadata, "occupant_key", None)
+            == self._active_self_occupant_key(buffer)
+        )
+        if secondary_text and source == "sticky_cache" and metadata_matches_active_self:
+            return (
+                self._language_or_fallback(
+                    self._metadata_language(current_metadata, "primary_language"),
+                    source_language,
+                ),
+                self._language_or_fallback(
+                    self._metadata_language(current_metadata, "secondary_language"),
+                    target_language,
+                ),
+            )
+        if not secondary_text and metadata_matches_active_self:
+            return (
+                self._language_or_fallback(
+                    self._metadata_language(current_metadata, "primary_language"),
+                    source_language,
+                ),
+                target_language,
+            )
+        return source_language, target_language
 
     def _translation_ready_elapsed_ms(
         self,
@@ -1368,8 +1457,14 @@ class ClientHub:
                 utterance_id=translation.utterance_id,
                 channel=translation.channel,
                 text=translation.text,
-                source_language=self.source_language,
-                target_language=self.target_language,
+                source_language=self._language_or_fallback(
+                    translation.source_language,
+                    self.source_language,
+                ),
+                target_language=self._language_or_fallback(
+                    translation.target_language,
+                    self.target_language,
+                ),
                 applied_context_mode=applied_context_mode,
                 created_at=translation.created_at,
                 **self._translation_overlay_metadata(translation),
@@ -1404,8 +1499,14 @@ class ClientHub:
                 channel=translation.channel,
                 text=translation.text,
                 source_text=translation.source_text,
-                source_language=self._source_language_for(runtime),
-                target_language=self._target_language_for(runtime),
+                source_language=self._language_or_fallback(
+                    translation.source_language,
+                    self._source_language_for(runtime),
+                ),
+                target_language=self._language_or_fallback(
+                    translation.target_language,
+                    self._target_language_for(runtime),
+                ),
                 applied_context_mode=applied_context_mode,
                 created_at=translation.created_at,
                 **self._translation_overlay_metadata(translation),
@@ -1488,20 +1589,30 @@ class ClientHub:
             source=source,
             reuse_mode=reuse_mode,
         )
+        current_metadata = self._current_active_self_metadata()
         translation_metadata = self._overlay_secondary_translation_metadata(
             buffer=buffer,
             source=source,
             secondary_text=secondary_text,
         )
-        current_metadata = self._current_active_self_metadata()
         current_translation_metadata = self._active_self_translation_metadata(current_metadata)
         occupant_key = self._active_self_occupant_key(buffer)
+        source_language, target_language = self._active_self_overlay_languages(
+            buffer=buffer,
+            source=source,
+            secondary_text=secondary_text,
+            current_metadata=current_metadata,
+        )
+        primary_language = source_language.strip() or None
+        secondary_language = (target_language.strip() or None) if secondary_text.strip() else None
         if (
             current_metadata is not None
             and buffer.merge_id == getattr(current_metadata, "utterance_id", None)
             and occupant_key == getattr(current_metadata, "occupant_key", None)
             and active_text == getattr(current_metadata, "text", None)
             and secondary_text == getattr(current_metadata, "secondary_text", "")
+            and primary_language == getattr(current_metadata, "primary_language", None)
+            and secondary_language == getattr(current_metadata, "secondary_language", None)
             and translation_metadata == current_translation_metadata
         ):
             return
@@ -1518,6 +1629,8 @@ class ClientHub:
                 utterance_id=buffer.merge_id,
                 secondary_text=secondary_text,
                 occupant_key=occupant_key,
+                source_language=source_language,
+                target_language=target_language,
                 created_at=created_at,
                 **translation_metadata,
             )
@@ -2188,6 +2301,9 @@ class ClientHub:
             final_text=final_text,
             reuse_mode=reuse_mode,
         ):
+            source_language, target_language = self._self_overlay_languages_for_utterance(
+                buffer.merge_id
+            )
             self._record_overlay_emit(
                 event_kind="active_self",
                 utterance_id=buffer.merge_id,
@@ -2200,6 +2316,8 @@ class ClientHub:
                     utterance_id=buffer.merge_id,
                     secondary_text="",
                     occupant_key=self._active_self_occupant_key(buffer),
+                    source_language=source_language,
+                    target_language=target_language,
                     created_at=self.clock.now(),
                 )
             )
@@ -2520,13 +2638,21 @@ class ClientHub:
         *,
         runtime: ChannelRuntime,
         text: str,
+        source_language: str,
+        target_language: str,
     ) -> Translation:
         return Translation(
             utterance_id=translation.utterance_id,
             translated_text=translation.text,
             source_text=text,
-            source_language=self._source_language_for(runtime),
-            target_language=self._target_language_for(runtime),
+            source_language=self._language_or_fallback(
+                translation.source_language,
+                source_language,
+            ),
+            target_language=self._language_or_fallback(
+                translation.target_language,
+                target_language,
+            ),
             channel=runtime.channel,
             created_at=translation.created_at,
             update_id=translation.update_id,
@@ -2559,12 +2685,14 @@ class ClientHub:
                 utterance_id=utterance_id,
                 stage="llm_request_start",
             )
+        request_source_language = self._source_language_for(runtime)
+        request_target_language = self._target_language_for(runtime)
         translation = await self.llm.translate(
             utterance_id=utterance_id,
             text=text,
             system_prompt=formatted_prompt,
-            source_language=self._source_language_for(runtime),
-            target_language=self._target_language_for(runtime),
+            source_language=request_source_language,
+            target_language=request_target_language,
             context=context_str,
         )
         if record_latency:
@@ -2577,6 +2705,8 @@ class ClientHub:
             translation,
             runtime=runtime,
             text=text,
+            source_language=request_source_language,
+            target_language=request_target_language,
         )
 
     async def _ensure_translation(self, transcript: Transcript) -> None:
@@ -2628,18 +2758,22 @@ class ClientHub:
                 stage="llm_request_start",
             )
 
+            request_source_language = self._source_language_for(runtime)
+            request_target_language = self._target_language_for(runtime)
             raw_translation = await self.llm.translate(
                 utterance_id=utterance_id,
                 text=text,
                 system_prompt=formatted_prompt,
-                source_language=self._source_language_for(runtime),
-                target_language=self._target_language_for(runtime),
+                source_language=request_source_language,
+                target_language=request_target_language,
                 context=context_str,
             )
             translation = self._normalize_translation(
                 raw_translation,
                 runtime=runtime,
                 text=text,
+                source_language=request_source_language,
+                target_language=request_target_language,
             )
             self._record_latency_stage(
                 channel=runtime.channel,
