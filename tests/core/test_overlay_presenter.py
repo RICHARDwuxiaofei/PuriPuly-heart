@@ -304,6 +304,66 @@ async def test_presenter_self_active_row_uses_source_and_target_content_language
 
 
 @pytest.mark.asyncio
+async def test_presenter_language_only_self_active_update_publishes_without_resetting_visible_identity() -> (
+    None
+):
+    bridge = RecordingPresentationBridge()
+    clock = FakeClock(_now=10.0)
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        clock=clock,
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=clock)
+    self_turn_id = uuid4()
+
+    await presenter.emit(
+        adapter.self_active_update(
+            text="こんにちは",
+            utterance_id=self_turn_id,
+            occupant_key=f"self:{self_turn_id}",
+            source_language="ko",
+            target_language="en",
+            created_at=10.0,
+        )
+    )
+
+    initial_snapshot = presenter.snapshot()
+    initial_block = initial_snapshot.blocks[0]
+    entry = presenter._entries[("self", self_turn_id)]
+    initial_visible_since = entry.visible_since
+    initial_last_meaningful_visible_at = entry.last_meaningful_visible_at
+    initial_occupant_key = entry.occupant_key
+    initial_entry_appearance_seq = entry.appearance_seq
+
+    clock.advance(2.0)
+    await presenter.emit(
+        adapter.self_active_update(
+            text="こんにちは",
+            utterance_id=self_turn_id,
+            occupant_key=f"self:{self_turn_id}",
+            source_language="ja",
+            target_language="en",
+            created_at=12.0,
+        )
+    )
+
+    updated_snapshot = presenter.snapshot()
+    updated_block = updated_snapshot.blocks[0]
+
+    assert updated_snapshot.revision == initial_snapshot.revision + 1
+    assert len(bridge.snapshots) == 2
+    assert updated_block.primary_language == "ja"
+    assert updated_block.primary_text == initial_block.primary_text
+    assert updated_block.occupant_key == initial_block.occupant_key == initial_occupant_key
+    assert updated_block.appearance_seq == initial_block.appearance_seq
+    assert entry.appearance_seq == initial_entry_appearance_seq
+    assert entry.visible_since == initial_visible_since == 10.0
+    assert entry.last_meaningful_visible_at == initial_last_meaningful_visible_at == 10.0
+
+
+@pytest.mark.asyncio
 async def test_presenter_does_not_reorder_existing_turn_when_translation_updates() -> None:
     bridge = RecordingPresentationBridge()
     presenter = OverlayPresenter(
@@ -718,7 +778,7 @@ def test_presentation_state_coalesced_self_active_update_refreshes_language_meta
     )
 
     metadata = state.active_self_overlay_metadata()
-    assert language_only_result.changed is False
+    assert language_only_result.changed is True
     assert [decision.disposition for decision in language_only_result.decisions] == ["coalesced"]
     assert metadata is not None
     assert metadata.primary_language == "ja"
@@ -774,7 +834,7 @@ def test_presentation_state_coalesced_peer_active_update_refreshes_language_meta
         terminal_update_reason=lambda _channel, _utterance_id: None,
     )
 
-    assert language_only_result.changed is False
+    assert language_only_result.changed is True
     assert [decision.disposition for decision in language_only_result.decisions] == ["coalesced"]
     assert entry.original_language == "ja"
 
