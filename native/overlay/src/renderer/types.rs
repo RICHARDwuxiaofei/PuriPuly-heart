@@ -3,6 +3,7 @@ use thiserror::Error;
 #[cfg(windows)]
 use windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT;
 
+use super::font_resolver::TextStyleKey;
 #[cfg(windows)]
 use super::font_resolver::{FontLanguageBucket, FontSource};
 
@@ -319,6 +320,7 @@ pub enum LineRole {
 pub struct ResolvedLineLayout {
     pub text: String,
     pub role: LineRole,
+    pub style_key: TextStyleKey,
     pub width_px: f32,
     pub origin_x: f32,
     pub origin_y: f32,
@@ -410,6 +412,8 @@ impl From<ResolvedFrameLayout> for CaptionLayoutResult {
 pub struct LayoutCacheKey {
     pub primary_text: String,
     pub secondary_text: String,
+    pub primary_style_key: TextStyleKey,
+    pub secondary_style_key: TextStyleKey,
     pub channel: Option<CaptionChannel>,
     pub block_variant: CaptionBlockVariant,
     pub secondary_enabled: bool,
@@ -424,6 +428,7 @@ pub struct LayoutCacheKey {
 pub struct LineCacheKey {
     pub text: String,
     pub role: LineRole,
+    pub style_key: TextStyleKey,
     pub channel: Option<CaptionChannel>,
     pub block_variant: CaptionBlockVariant,
     pub font_size_key: u32,
@@ -459,7 +464,7 @@ pub struct RenderDiagnostics {
     pub debug_overlay_clear_count: u32,
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TextScriptBucket {
     Latin,
@@ -474,6 +479,7 @@ pub(crate) struct ResolvedTextStyle {
     pub locale: String,
     pub source: FontSource,
     pub bucket: FontLanguageBucket,
+    pub style_key: TextStyleKey,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -511,7 +517,7 @@ pub(crate) fn contains_cjk(text: &str) -> bool {
     })
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) fn text_script_bucket(text: &str) -> TextScriptBucket {
     if contains_cjk(text) {
         TextScriptBucket::Cjk

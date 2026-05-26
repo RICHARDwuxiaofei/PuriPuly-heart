@@ -129,6 +129,123 @@ pub enum FontSource {
 pub enum FontWeight {
     Regular,
     Medium,
+    SemiBold,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextFamilyKey {
+    NotoSans,
+    SegoeUi,
+    MalgunGothic,
+    YuGothicUi,
+    MeiryoUi,
+    MicrosoftYaHeiUi,
+    MicrosoftJhengHeiUi,
+    NotoSansCjkKr,
+    NotoSansCjkJp,
+    NotoSansCjkSc,
+    NotoSansCjkTc,
+    Other(u64),
+}
+
+impl TextFamilyKey {
+    pub fn from_family_name(family_name: &str) -> Self {
+        match family_name {
+            "Noto Sans" => Self::NotoSans,
+            "Segoe UI" => Self::SegoeUi,
+            "Malgun Gothic" => Self::MalgunGothic,
+            "Yu Gothic UI" => Self::YuGothicUi,
+            "Meiryo UI" => Self::MeiryoUi,
+            "Microsoft YaHei UI" => Self::MicrosoftYaHeiUi,
+            "Microsoft JhengHei UI" => Self::MicrosoftJhengHeiUi,
+            "Noto Sans CJK KR" => Self::NotoSansCjkKr,
+            "Noto Sans CJK JP" => Self::NotoSansCjkJp,
+            "Noto Sans CJK SC" => Self::NotoSansCjkSc,
+            "Noto Sans CJK TC" => Self::NotoSansCjkTc,
+            other => Self::Other(stable_compact_hash(other)),
+        }
+    }
+
+    pub fn family_name(self) -> Option<&'static str> {
+        match self {
+            Self::NotoSans => Some("Noto Sans"),
+            Self::SegoeUi => Some("Segoe UI"),
+            Self::MalgunGothic => Some("Malgun Gothic"),
+            Self::YuGothicUi => Some("Yu Gothic UI"),
+            Self::MeiryoUi => Some("Meiryo UI"),
+            Self::MicrosoftYaHeiUi => Some("Microsoft YaHei UI"),
+            Self::MicrosoftJhengHeiUi => Some("Microsoft JhengHei UI"),
+            Self::NotoSansCjkKr => Some("Noto Sans CJK KR"),
+            Self::NotoSansCjkJp => Some("Noto Sans CJK JP"),
+            Self::NotoSansCjkSc => Some("Noto Sans CJK SC"),
+            Self::NotoSansCjkTc => Some("Noto Sans CJK TC"),
+            Self::Other(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextLocaleKey {
+    EnUs,
+    KoKr,
+    JaJp,
+    ZhCn,
+    ZhTw,
+    Other(u64),
+}
+
+impl TextLocaleKey {
+    pub fn from_locale(locale: &str) -> Self {
+        match locale {
+            "en-US" => Self::EnUs,
+            "ko-KR" => Self::KoKr,
+            "ja-JP" => Self::JaJp,
+            "zh-CN" => Self::ZhCn,
+            "zh-TW" => Self::ZhTw,
+            other => Self::Other(stable_compact_hash(other)),
+        }
+    }
+
+    pub fn locale_name(self) -> Option<&'static str> {
+        match self {
+            Self::EnUs => Some("en-US"),
+            Self::KoKr => Some("ko-KR"),
+            Self::JaJp => Some("ja-JP"),
+            Self::ZhCn => Some("zh-CN"),
+            Self::ZhTw => Some("zh-TW"),
+            Self::Other(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextStyleKey {
+    pub bucket: FontLanguageBucket,
+    pub source: FontSource,
+    pub bundled_face: Option<BundledFaceId>,
+    pub family: TextFamilyKey,
+    pub weight: FontWeight,
+    pub locale: TextLocaleKey,
+}
+
+impl TextStyleKey {
+    pub fn from_parts(
+        bucket: FontLanguageBucket,
+        source: FontSource,
+        bundled_face: Option<BundledFaceId>,
+        family_name: &str,
+        weight: FontWeight,
+        locale: &str,
+    ) -> Self {
+        Self {
+            bucket,
+            source,
+            bundled_face,
+            family: TextFamilyKey::from_family_name(family_name),
+            weight,
+            locale: TextLocaleKey::from_locale(locale),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -165,6 +282,17 @@ pub struct ResolvedFontStyle {
 }
 
 impl ResolvedFontStyle {
+    pub fn style_key(&self) -> TextStyleKey {
+        TextStyleKey::from_parts(
+            self.bucket,
+            self.source,
+            self.bundled_face,
+            self.family_name,
+            self.weight,
+            &self.locale,
+        )
+    }
+
     pub fn system_fallback_families(&self) -> &'static [&'static str] {
         self.system_fallback_families
     }
@@ -453,6 +581,15 @@ fn first_real_family(families: &'static [&'static str]) -> &'static str {
         .copied()
         .find(|family| *family != DIRECTWRITE_SYSTEM_FALLBACK)
         .unwrap_or("Segoe UI")
+}
+
+fn stable_compact_hash(value: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    value.bytes().fold(FNV_OFFSET, |hash, byte| {
+        (hash ^ byte as u64).wrapping_mul(FNV_PRIME)
+    })
 }
 
 fn unknown_cjk_bucket() -> FontLanguageBucket {

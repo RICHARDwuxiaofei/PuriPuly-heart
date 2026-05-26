@@ -10,8 +10,8 @@ pub use backend::{CaptionRenderer, RenderedFrame};
 pub use font_resolver::WindowsBundledFontCollection;
 pub use font_resolver::{
     bundled_font_path_from_exe_dir, runtime_bundled_font_path, BundledFaceId, FontFallbackReason,
-    FontLanguageBucket, FontResolver, FontSource, FontWeight, ResolvedFontStyle,
-    BUNDLED_NOTO_CJK_FILE_NAME,
+    FontLanguageBucket, FontResolver, FontSource, FontWeight, ResolvedFontStyle, TextFamilyKey,
+    TextLocaleKey, TextStyleKey, BUNDLED_NOTO_CJK_FILE_NAME,
 };
 pub use layout::CaptionLayoutPolicy;
 #[allow(unused_imports)]

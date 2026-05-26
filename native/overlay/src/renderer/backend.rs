@@ -54,7 +54,7 @@ use super::cache::{CachedBlockVisual, CachedLineVisual, WindowsRendererCaches};
 #[cfg(windows)]
 use super::font_resolver::{
     runtime_bundled_font_path, system_ui_language_hint, FontResolver, FontSource, FontWeight,
-    ResolvedFontStyle, WindowsBundledFontCollection,
+    ResolvedFontStyle, TextStyleKey, WindowsBundledFontCollection,
 };
 #[cfg(windows)]
 use super::glyph_run::render_text_layout_to_command_list;
@@ -64,7 +64,7 @@ use super::layout::{resolved_layout_has_drawable_text, CaptionLayoutPolicy};
 #[cfg(windows)]
 use super::types::{
     contains_cjk, effective_background_alpha, fill_color_for_channel, outline_offsets_px,
-    text_script_bucket, BlockCacheKey, CaptionBlockVariant, CaptionChannel, LineCacheKey, LineRole,
+    BlockCacheKey, CaptionBlockVariant, CaptionChannel, LineCacheKey, LineRole,
     ResolvedBlockLayout, ResolvedLineLayout, ResolvedTextStyle, DEFAULT_FONT_SIZE_PX,
     DEFAULT_SURFACE_HEIGHT_PX, DEFAULT_SURFACE_WIDTH_PX, SECONDARY_FONT_SCALE, TEXT_OUTLINE_COLOR,
 };
@@ -118,6 +118,14 @@ struct FontWarmupStats {
     elapsed_ms: u128,
     attempts: u32,
     failures: u32,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextFormatCollectionRoute {
+    Bundled,
+    System,
+    FallbackToSystem,
 }
 
 pub struct CaptionRenderer {
@@ -558,7 +566,7 @@ impl WindowsCaptionRenderer {
         let requested_style = self.font_resolver.resolve(Some(language), sample);
         let resolved_style =
             self.resolve_requested_text_style(&CaptionLayoutPolicy::default(), requested_style);
-        let text_format = self.create_text_format_for_resolved_style(
+        let (text_format, _) = self.create_text_format_for_resolved_style(
             &resolved_style,
             font_size_px,
             DWRITE_WORD_WRAPPING_NO_WRAP,
@@ -601,6 +609,7 @@ impl WindowsCaptionRenderer {
         LineCacheKey {
             text: line.text.clone(),
             role,
+            style_key: line.style_key,
             channel: block.channel,
             block_variant: block.block_variant,
             font_size_key: (line.font_size_px * 100.0).round() as u32,
@@ -719,8 +728,9 @@ impl WindowsCaptionRenderer {
         } else {
             None
         };
-        let text_layout = self.create_text_layout(
-            policy,
+        let _ = policy;
+        let text_layout = self.create_text_layout_for_style_key(
+            line.style_key,
             line.text.trim(),
             line.font_size_px,
             block.content_width_px,
@@ -1027,7 +1037,12 @@ impl WindowsCaptionRenderer {
             None
         };
         for block in &blocks {
-            let key = policy.layout_cache_key_for_block(block, width, presentation);
+            let key = policy.layout_cache_key_for_block_windows(
+                block,
+                width,
+                presentation,
+                &self.layout_engine,
+            );
             if self.caches.layout_cache.contains_key(&key) {
                 diagnostics.layout_cache_hits += 1;
             } else {
@@ -1228,19 +1243,43 @@ impl WindowsCaptionRenderer {
         text: &str,
         font_size_px: f32,
     ) -> Result<IDWriteTextFormat, CaptionRenderError> {
-        let bucket = text_script_bucket(text);
         let font_size_key = (font_size_px * 100.0).round() as u32;
-        let text_format_key = (bucket, font_size_key);
+        let resolved_style =
+            self.text_format_style_for_available_collections(self.resolve_text_style(policy, text));
+        self.cached_text_format_for_resolved_style(resolved_style, font_size_key, font_size_px)
+    }
+
+    fn create_text_format_for_style_key(
+        &mut self,
+        style_key: TextStyleKey,
+        font_size_px: f32,
+    ) -> Result<IDWriteTextFormat, CaptionRenderError> {
+        let resolved_style = resolved_text_style_from_style_key(style_key).ok_or_else(|| {
+            CaptionRenderError::Draw(format!(
+                "line style key cannot be reconstructed for DirectWrite: {style_key:?}"
+            ))
+        })?;
+        let resolved_style = self.text_format_style_for_available_collections(resolved_style);
+        let font_size_key = (font_size_px * 100.0).round() as u32;
+        self.cached_text_format_for_resolved_style(resolved_style, font_size_key, font_size_px)
+    }
+
+    fn cached_text_format_for_resolved_style(
+        &mut self,
+        resolved_style: ResolvedTextStyle,
+        font_size_key: u32,
+        font_size_px: f32,
+    ) -> Result<IDWriteTextFormat, CaptionRenderError> {
+        let text_format_key = (resolved_style.style_key, font_size_key);
         if let Some(text_format) = self.caches.text_format_cache.get(&text_format_key).cloned() {
             self.frame_text_format_cache_hits += 1;
             return Ok(text_format);
         }
         self.frame_text_format_cache_misses += 1;
 
-        let resolved_style = self.resolve_text_style(policy, text);
         eprintln!(
-            "[overlay][DIAG] text_format_cache_miss script_bucket={:?} font_size_key={} resolved_bucket={:?} source={:?} family={} locale={} cache_size_before={}",
-            bucket,
+            "[overlay][DIAG] text_format_cache_miss style_key={:?} font_size_key={} resolved_bucket={:?} source={:?} family={} locale={} cache_size_before={}",
+            resolved_style.style_key,
             font_size_key,
             resolved_style.bucket,
             resolved_style.source,
@@ -1248,15 +1287,43 @@ impl WindowsCaptionRenderer {
             resolved_style.locale,
             self.caches.text_format_cache.len()
         );
-        let text_format = self.create_text_format_for_resolved_style(
+        let (text_format, actual_style_key) = self.create_text_format_for_resolved_style(
             &resolved_style,
             font_size_px,
             DWRITE_WORD_WRAPPING_NO_WRAP,
         )?;
         self.caches
             .text_format_cache
-            .insert(text_format_key, text_format.clone());
+            .insert((actual_style_key, font_size_key), text_format.clone());
         Ok(text_format)
+    }
+
+    #[cfg(test)]
+    fn text_format_cache_key_for_test(
+        &self,
+        policy: &CaptionLayoutPolicy,
+        text: &str,
+        font_size_px: f32,
+    ) -> (TextStyleKey, u32) {
+        (
+            self.text_format_style_for_available_collections(self.resolve_text_style(policy, text))
+                .style_key,
+            (font_size_px * 100.0).round() as u32,
+        )
+    }
+
+    #[cfg(test)]
+    fn text_format_cache_key_for_line_test(
+        &self,
+        line: &ResolvedLineLayout,
+    ) -> (TextStyleKey, u32) {
+        let resolved_style = resolved_text_style_from_style_key(line.style_key)
+            .expect("test line style key should be reconstructable");
+        let resolved_style = self.text_format_style_for_available_collections(resolved_style);
+        (
+            resolved_style.style_key,
+            (line.font_size_px * 100.0).round() as u32,
+        )
     }
 
     fn create_text_format_for_resolved_style(
@@ -1264,11 +1331,40 @@ impl WindowsCaptionRenderer {
         resolved_style: &ResolvedTextStyle,
         font_size_px: f32,
         word_wrapping: windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING,
-    ) -> Result<IDWriteTextFormat, CaptionRenderError> {
+    ) -> Result<(IDWriteTextFormat, TextStyleKey), CaptionRenderError> {
+        match text_format_collection_route(
+            resolved_style.source,
+            self.bundled_font_collection.is_some(),
+        ) {
+            TextFormatCollectionRoute::FallbackToSystem => {
+                eprintln!(
+                    "[overlay][WARN] bundled_font_collection_missing_before_text_format family={} locale={}",
+                    resolved_style.family_name, resolved_style.locale
+                );
+                let fallback_style = fallback_resolved_text_style_for_bucket_locale(
+                    resolved_style.bucket,
+                    resolved_style.locale.clone(),
+                );
+                return self.create_text_format_for_resolved_style(
+                    &fallback_style,
+                    font_size_px,
+                    word_wrapping,
+                );
+            }
+            TextFormatCollectionRoute::Bundled | TextFormatCollectionRoute::System => {}
+        }
+
         let locale = utf16_null(&resolved_style.locale);
         let face_name = utf16_null(&resolved_style.family_name);
-        let create_result = if resolved_style.source == FontSource::BundledNotoCjkMedium {
-            if let Some(collection) = self.bundled_font_collection.as_ref() {
+        let create_result = match text_format_collection_route(
+            resolved_style.source,
+            self.bundled_font_collection.is_some(),
+        ) {
+            TextFormatCollectionRoute::Bundled => {
+                let collection = self
+                    .bundled_font_collection
+                    .as_ref()
+                    .expect("bundled collection route requires bundled collection");
                 unsafe {
                     self.dwrite_factory.CreateTextFormat(
                         PCWSTR::from_raw(face_name.as_ptr()),
@@ -1280,21 +1376,8 @@ impl WindowsCaptionRenderer {
                         PCWSTR::from_raw(locale.as_ptr()),
                     )
                 }
-            } else {
-                unsafe {
-                    self.dwrite_factory.CreateTextFormat(
-                        PCWSTR::from_raw(face_name.as_ptr()),
-                        None,
-                        resolved_style.weight,
-                        DWRITE_FONT_STYLE_NORMAL,
-                        DWRITE_FONT_STRETCH_NORMAL,
-                        font_size_px,
-                        PCWSTR::from_raw(locale.as_ptr()),
-                    )
-                }
             }
-        } else {
-            unsafe {
+            TextFormatCollectionRoute::System => unsafe {
                 self.dwrite_factory.CreateTextFormat(
                     PCWSTR::from_raw(face_name.as_ptr()),
                     None,
@@ -1304,7 +1387,10 @@ impl WindowsCaptionRenderer {
                     font_size_px,
                     PCWSTR::from_raw(locale.as_ptr()),
                 )
-            }
+            },
+            TextFormatCollectionRoute::FallbackToSystem => unreachable!(
+                "FallbackToSystem route returns before DirectWrite text format creation"
+            ),
         };
         let text_format = match create_result {
             Ok(text_format) => text_format,
@@ -1317,13 +1403,7 @@ impl WindowsCaptionRenderer {
                     resolved_style.bucket,
                     resolved_style.locale.clone(),
                 );
-                let fallback_style = ResolvedTextStyle {
-                    family_name: fallback.family_name.to_string(),
-                    weight: dwrite_weight(fallback.weight),
-                    locale: fallback.locale,
-                    source: fallback.source,
-                    bucket: fallback.bucket,
-                };
+                let fallback_style = resolved_text_style_from_resolved_font_style(fallback);
                 return self.create_text_format_for_resolved_style(
                     &fallback_style,
                     font_size_px,
@@ -1345,7 +1425,7 @@ impl WindowsCaptionRenderer {
                     .map_err(|error| CaptionRenderError::Draw(error.to_string()))?;
             }
         }
-        Ok(text_format)
+        Ok((text_format, resolved_style.style_key))
     }
 
     fn create_text_layout(
@@ -1373,11 +1453,62 @@ impl WindowsCaptionRenderer {
         Ok(text_layout)
     }
 
+    fn create_text_layout_for_style_key(
+        &mut self,
+        style_key: TextStyleKey,
+        text: &str,
+        font_size_px: f32,
+        max_width_px: f32,
+        max_height_px: f32,
+    ) -> Result<IDWriteTextLayout, CaptionRenderError> {
+        let text_format = self.create_text_format_for_style_key(style_key, font_size_px)?;
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        let text_layout = unsafe {
+            self.dwrite_factory
+                .CreateTextLayout(&utf16, &text_format, max_width_px, max_height_px)
+                .map_err(|error| CaptionRenderError::Draw(error.to_string()))?
+        };
+        if let Ok(text_layout_2) = text_layout.cast::<IDWriteTextLayout2>() {
+            unsafe {
+                text_layout_2
+                    .SetFontFallback(&self.system_font_fallback)
+                    .map_err(|error| CaptionRenderError::Draw(error.to_string()))?;
+            }
+        }
+        Ok(text_layout)
+    }
+
     fn resolve_text_style(&self, policy: &CaptionLayoutPolicy, text: &str) -> ResolvedTextStyle {
         let requested_style = self
             .font_resolver
             .resolve_order6_layout_draw_safe(None, text);
         self.resolve_requested_text_style(policy, requested_style)
+    }
+
+    fn text_format_style_for_available_collections(
+        &self,
+        resolved_style: ResolvedTextStyle,
+    ) -> ResolvedTextStyle {
+        if text_format_collection_route(
+            resolved_style.source,
+            self.bundled_font_collection.is_some(),
+        ) == TextFormatCollectionRoute::FallbackToSystem
+        {
+            return fallback_resolved_text_style_for_bucket_locale(
+                resolved_style.bucket,
+                resolved_style.locale,
+            );
+        }
+        resolved_style
+    }
+
+    #[cfg(test)]
+    fn resolved_text_style_key_for_test(
+        &self,
+        policy: &CaptionLayoutPolicy,
+        text: &str,
+    ) -> TextStyleKey {
+        self.resolve_text_style(policy, text).style_key
     }
 
     fn resolve_requested_text_style(
@@ -1388,12 +1519,14 @@ impl WindowsCaptionRenderer {
         if requested_style.source == FontSource::BundledNotoCjkMedium
             && self.bundled_font_collection.is_some()
         {
+            let style_key = requested_style.style_key();
             return ResolvedTextStyle {
                 family_name: requested_style.family_name.to_string(),
                 weight: dwrite_weight(requested_style.weight),
                 locale: requested_style.locale,
                 source: requested_style.source,
                 bucket: requested_style.bucket,
+                style_key,
             };
         }
 
@@ -1426,22 +1559,34 @@ impl WindowsCaptionRenderer {
             }) else {
                 continue;
             };
+            let weight_key = font_weight_from_dwrite_weight(weight);
+            let style_key = TextStyleKey::from_parts(
+                requested_style.bucket,
+                FontSource::SystemFont,
+                None,
+                family_name,
+                weight_key,
+                &requested_style.locale,
+            );
             return ResolvedTextStyle {
                 family_name: family_name.to_string(),
                 weight,
                 locale: requested_style.locale,
                 source: FontSource::SystemFont,
                 bucket: requested_style.bucket,
+                style_key,
             };
         }
 
         let fallback = FontResolver::style_resolution_failure_fallback(requested_style.bucket);
+        let style_key = fallback.style_key();
         ResolvedTextStyle {
             family_name: fallback.family_name.to_string(),
             weight: dwrite_weight(fallback.weight),
             locale: fallback.locale,
             source: fallback.source,
             bucket: fallback.bucket,
+            style_key,
         }
     }
 
@@ -1556,7 +1701,74 @@ fn dwrite_weight(weight: FontWeight) -> DWRITE_FONT_WEIGHT {
     match weight {
         FontWeight::Regular => DWRITE_FONT_WEIGHT_NORMAL,
         FontWeight::Medium => DWRITE_FONT_WEIGHT_MEDIUM,
+        FontWeight::SemiBold => DWRITE_FONT_WEIGHT_SEMI_BOLD,
     }
+}
+
+#[cfg(windows)]
+fn resolved_text_style_from_resolved_font_style(style: ResolvedFontStyle) -> ResolvedTextStyle {
+    let style_key = style.style_key();
+    ResolvedTextStyle {
+        family_name: style.family_name.to_string(),
+        weight: dwrite_weight(style.weight),
+        locale: style.locale,
+        source: style.source,
+        bucket: style.bucket,
+        style_key,
+    }
+}
+
+#[cfg(windows)]
+fn resolved_text_style_from_style_key(style_key: TextStyleKey) -> Option<ResolvedTextStyle> {
+    Some(ResolvedTextStyle {
+        family_name: style_key.family.family_name()?.to_string(),
+        weight: dwrite_weight(style_key.weight),
+        locale: style_key.locale.locale_name()?.to_string(),
+        source: style_key.source,
+        bucket: style_key.bucket,
+        style_key,
+    })
+}
+
+#[cfg(windows)]
+fn fallback_resolved_text_style_for_bucket_locale(
+    bucket: super::font_resolver::FontLanguageBucket,
+    locale: String,
+) -> ResolvedTextStyle {
+    resolved_text_style_from_resolved_font_style(
+        FontResolver::style_resolution_failure_fallback_for_bucket_locale(bucket, locale),
+    )
+}
+
+#[cfg(windows)]
+fn font_weight_from_dwrite_weight(weight: DWRITE_FONT_WEIGHT) -> FontWeight {
+    if weight == DWRITE_FONT_WEIGHT_SEMI_BOLD {
+        FontWeight::SemiBold
+    } else if weight == DWRITE_FONT_WEIGHT_MEDIUM {
+        FontWeight::Medium
+    } else {
+        FontWeight::Regular
+    }
+}
+
+#[cfg(windows)]
+fn text_format_collection_route(
+    source: FontSource,
+    bundled_collection_available: bool,
+) -> TextFormatCollectionRoute {
+    match (source, bundled_collection_available) {
+        (FontSource::BundledNotoCjkMedium, true) => TextFormatCollectionRoute::Bundled,
+        (FontSource::BundledNotoCjkMedium, false) => TextFormatCollectionRoute::FallbackToSystem,
+        _ => TextFormatCollectionRoute::System,
+    }
+}
+
+#[cfg(all(windows, test))]
+fn text_format_collection_route_for_test(
+    source: FontSource,
+    bundled_collection_available: bool,
+) -> TextFormatCollectionRoute {
+    text_format_collection_route(source, bundled_collection_available)
 }
 
 #[cfg(windows)]
@@ -1821,14 +2033,24 @@ fn bounds_intersect_damage_band(bounds: BlockBounds, damage_band: DamageBand) ->
 mod tests {
     use super::prepare_layout_for_render;
     use crate::renderer::{
-        BlockBounds, CaptionBlockVariant, CaptionChannel, FontLanguageBucket, LayoutCacheKey,
-        ResolvedBlockLayout, ResolvedFrameLayout, VisualBounds,
+        BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
+        CaptionPresentation, FontLanguageBucket, FontResolver, FontSource, LayoutCacheKey,
+        LineRole, ResolvedBlockLayout, ResolvedFrameLayout, ResolvedLineLayout, TextStyleKey,
+        VisualBounds,
     };
+
+    fn style_key(language: &str) -> TextStyleKey {
+        FontResolver::with_bundle_available()
+            .resolve(Some(language), "漢字")
+            .style_key()
+    }
 
     fn layout_key(seed: &str) -> LayoutCacheKey {
         LayoutCacheKey {
             primary_text: seed.to_string(),
             secondary_text: String::new(),
+            primary_style_key: style_key("ko"),
+            secondary_style_key: style_key("ja"),
             channel: Some(CaptionChannel::PeerChannel),
             block_variant: CaptionBlockVariant::Finalized,
             secondary_enabled: false,
@@ -1986,6 +2208,89 @@ mod tests {
         assert_eq!(
             unavailable.resolve(Some("x-madeup"), "繁體").bucket,
             FontLanguageBucket::CjkZhHant
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn line_cache_key_and_text_format_key_share_resolved_style_identity() {
+        let renderer = super::WindowsCaptionRenderer::new()
+            .expect("Windows caption renderer should initialize for style-key test");
+        let policy = CaptionLayoutPolicy::default();
+        let layout = policy
+            .resolve_blocks_for_presentation_windows_cached(
+                vec![CaptionBlock::new("latin", "hello style identity")],
+                3840,
+                1024,
+                &CaptionPresentation::default(),
+                &renderer.layout_engine,
+                None,
+            )
+            .expect("DirectWrite layout should initialize on Windows");
+
+        let block = &layout.visible_blocks[0];
+        let line = block
+            .primary_lines
+            .first()
+            .expect("primary line should be present");
+        let resolved_style_key = renderer.resolved_text_style_key_for_test(&policy, &line.text);
+        let line_cache_key = renderer.line_cache_key(block, line, line.role);
+        let text_format_key =
+            renderer.text_format_cache_key_for_test(&policy, &line.text, line.font_size_px);
+
+        assert_eq!(block.layout_cache_key.primary_style_key, resolved_style_key);
+        assert_eq!(line.style_key, resolved_style_key);
+        assert_eq!(line_cache_key.style_key, resolved_style_key);
+        assert_eq!(text_format_key.0, resolved_style_key);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn line_text_format_cache_key_uses_measured_line_style_without_reresolving_text() {
+        let renderer = super::WindowsCaptionRenderer::new()
+            .expect("Windows caption renderer should initialize for style-key test");
+        let policy = CaptionLayoutPolicy::default();
+        let line_style_key = FontResolver::with_bundle_unavailable("test style")
+            .resolve(Some("ja"), "日本語")
+            .style_key();
+        let line = ResolvedLineLayout {
+            text: "plain latin text".into(),
+            role: LineRole::Primary,
+            style_key: line_style_key,
+            width_px: 120.0,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            font_size_px: 132.0,
+            visual_bounds: VisualBounds::new(0.0, 0.0, 120.0, 150.0),
+        };
+
+        assert_ne!(
+            renderer
+                .text_format_cache_key_for_test(&policy, &line.text, line.font_size_px)
+                .0,
+            line.style_key,
+            "test setup requires text-only re-resolution to differ from measured style"
+        );
+        assert_eq!(
+            renderer.text_format_cache_key_for_line_test(&line).0,
+            line.style_key
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_source_without_collection_routes_to_system_fallback_before_text_format_creation() {
+        assert_eq!(
+            super::text_format_collection_route_for_test(FontSource::BundledNotoCjkMedium, false),
+            super::TextFormatCollectionRoute::FallbackToSystem
+        );
+        assert_eq!(
+            super::text_format_collection_route_for_test(FontSource::BundledNotoCjkMedium, true),
+            super::TextFormatCollectionRoute::Bundled
+        );
+        assert_eq!(
+            super::text_format_collection_route_for_test(FontSource::SystemFont, false),
+            super::TextFormatCollectionRoute::System
         );
     }
 }
