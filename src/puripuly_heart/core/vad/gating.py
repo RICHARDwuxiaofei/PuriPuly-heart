@@ -391,6 +391,7 @@ class VadGating:
 PEER_VAD_SPEECH_THRESHOLD = 0.60
 PEER_VAD_START_DEBOUNCE_CHUNKS = 3
 PEER_VAD_START_COMMIT_CHUNKS = 3
+PEER_MAX_SEGMENT_MS = 7000
 
 
 def create_peer_vad_gating(
@@ -410,6 +411,7 @@ def create_peer_vad_gating(
         ring_buffer_ms=max(1, ring_buffer_ms),
         speech_threshold=speech_threshold,
         hangover_ms=hangover_ms,
+        max_segment_ms=PEER_MAX_SEGMENT_MS,
         start_debounce_chunks=PEER_VAD_START_DEBOUNCE_CHUNKS,
         start_commit_chunks=PEER_VAD_START_COMMIT_CHUNKS,
         candidate_log_label="Peer",
