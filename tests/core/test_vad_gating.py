@@ -344,6 +344,8 @@ def test_create_peer_vad_gating_uses_helper_defaults():
         hangover_ms=64,
     )
 
+    assert getattr(gating_module, "PEER_MAX_SEGMENT_MS", None) == 7000
+    assert gating.max_segment_ms == 7000
     assert gating.speech_threshold == PEER_VAD_SPEECH_THRESHOLD
     assert gating.start_debounce_chunks == PEER_VAD_START_DEBOUNCE_CHUNKS
     assert gating.start_commit_chunks == PEER_VAD_START_COMMIT_CHUNKS
