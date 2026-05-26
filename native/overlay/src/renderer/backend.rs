@@ -50,14 +50,19 @@ use windows_numerics::{Matrix3x2, Vector2};
 #[cfg(windows)]
 use super::cache::{CachedBlockVisual, CachedLineVisual, WindowsRendererCaches};
 #[cfg(windows)]
+use super::font_resolver::{
+    runtime_bundled_font_path, system_ui_language_hint, FontResolver, FontSource, FontWeight,
+    WindowsBundledFontCollection,
+};
+#[cfg(windows)]
 use super::glyph_run::render_text_layout_to_command_list;
 use super::layout::{resolved_layout_has_drawable_text, CaptionLayoutPolicy};
 #[cfg(windows)]
 use super::types::{
     effective_background_alpha, fill_color_for_channel, outline_offsets_px, text_script_bucket,
     BlockCacheKey, CaptionBlockVariant, CaptionChannel, LineCacheKey, LineRole,
-    ResolvedBlockLayout, ResolvedLineLayout, ResolvedTextStyle, TextScriptBucket,
-    DEFAULT_SURFACE_HEIGHT_PX, DEFAULT_SURFACE_WIDTH_PX, TEXT_OUTLINE_COLOR,
+    ResolvedBlockLayout, ResolvedLineLayout, ResolvedTextStyle, DEFAULT_SURFACE_HEIGHT_PX,
+    DEFAULT_SURFACE_WIDTH_PX, TEXT_OUTLINE_COLOR,
 };
 use super::types::{
     BlockBounds, CaptionDebugOverlay, CaptionLayoutResult, CaptionPresentation, CaptionRenderError,
@@ -332,6 +337,8 @@ struct WindowsCaptionRenderer {
     dwrite_factory: IDWriteFactory,
     system_font_collection: IDWriteFontCollection,
     system_font_fallback: IDWriteFontFallback,
+    font_resolver: FontResolver,
+    bundled_font_collection: Option<WindowsBundledFontCollection>,
     d2d_context: ID2D1DeviceContext,
     cache_outline_brush: ID2D1SolidColorBrush,
     cache_self_text_brush: ID2D1SolidColorBrush,
@@ -359,6 +366,8 @@ impl WindowsCaptionRenderer {
                 .GetSystemFontFallback()
                 .map_err(|error| CaptionRenderError::Init(error.to_string()))?
         };
+        let (font_resolver, bundled_font_collection) =
+            initialize_bundled_font_collection(&dwrite_factory);
         let texture = create_target_texture(&device)?;
         let d2d_context = create_d2d_context(&device, &d2d_factory)?;
         let dxgi_surface: IDXGISurface = texture
@@ -409,6 +418,8 @@ impl WindowsCaptionRenderer {
             dwrite_factory,
             system_font_collection,
             system_font_fallback,
+            font_resolver,
+            bundled_font_collection,
             d2d_context,
             cache_outline_brush,
             cache_self_text_brush,
@@ -838,7 +849,12 @@ impl WindowsCaptionRenderer {
             Some(&mut self.caches.layout_cache),
         ) {
             Ok(layout) => layout,
-            Err(_) => policy.resolve_blocks_for_presentation(blocks, width, height, presentation),
+            Err(error) => {
+                eprintln!(
+                    "[overlay][WARN] catastrophic_directwrite_layout_failure stage=layout_cache error={error}"
+                );
+                policy.resolve_blocks_for_presentation(blocks, width, height, presentation)
+            }
         };
         let layout = prepare_layout_for_render(&mut self.previous_layout, layout);
         let layout_has_drawable_text = resolved_layout_has_drawable_text(&layout);
@@ -993,12 +1009,55 @@ impl WindowsCaptionRenderer {
             return Ok(text_format.clone());
         }
 
-        let resolved_style = self.resolve_text_style(policy, bucket)?;
-        let locale = utf16_null("en-us");
+        let resolved_style = self.resolve_text_style(policy, text);
+        let text_format = self.create_text_format_for_resolved_style(
+            &resolved_style,
+            font_size_px,
+            DWRITE_WORD_WRAPPING_NO_WRAP,
+        )?;
+        self.caches
+            .text_format_cache
+            .insert(text_format_key, text_format.clone());
+        Ok(text_format)
+    }
+
+    fn create_text_format_for_resolved_style(
+        &self,
+        resolved_style: &ResolvedTextStyle,
+        font_size_px: f32,
+        word_wrapping: windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING,
+    ) -> Result<IDWriteTextFormat, CaptionRenderError> {
+        let locale = utf16_null(&resolved_style.locale);
         let face_name = utf16_null(&resolved_style.family_name);
-        let text_format = unsafe {
-            self.dwrite_factory
-                .CreateTextFormat(
+        let create_result = if resolved_style.source == FontSource::BundledNotoCjkMedium {
+            if let Some(collection) = self.bundled_font_collection.as_ref() {
+                unsafe {
+                    self.dwrite_factory.CreateTextFormat(
+                        PCWSTR::from_raw(face_name.as_ptr()),
+                        collection.collection(),
+                        resolved_style.weight,
+                        DWRITE_FONT_STYLE_NORMAL,
+                        DWRITE_FONT_STRETCH_NORMAL,
+                        font_size_px,
+                        PCWSTR::from_raw(locale.as_ptr()),
+                    )
+                }
+            } else {
+                unsafe {
+                    self.dwrite_factory.CreateTextFormat(
+                        PCWSTR::from_raw(face_name.as_ptr()),
+                        None,
+                        resolved_style.weight,
+                        DWRITE_FONT_STYLE_NORMAL,
+                        DWRITE_FONT_STRETCH_NORMAL,
+                        font_size_px,
+                        PCWSTR::from_raw(locale.as_ptr()),
+                    )
+                }
+            }
+        } else {
+            unsafe {
+                self.dwrite_factory.CreateTextFormat(
                     PCWSTR::from_raw(face_name.as_ptr()),
                     None,
                     resolved_style.weight,
@@ -1007,11 +1066,37 @@ impl WindowsCaptionRenderer {
                     font_size_px,
                     PCWSTR::from_raw(locale.as_ptr()),
                 )
-                .map_err(|error| CaptionRenderError::Draw(error.to_string()))?
+            }
+        };
+        let text_format = match create_result {
+            Ok(text_format) => text_format,
+            Err(error) if resolved_style.source != FontSource::SystemFallbackSentinel => {
+                eprintln!(
+                    "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
+                    resolved_style.family_name, resolved_style.locale, error
+                );
+                let fallback = FontResolver::style_resolution_failure_fallback_for_bucket_locale(
+                    resolved_style.bucket,
+                    resolved_style.locale.clone(),
+                );
+                let fallback_style = ResolvedTextStyle {
+                    family_name: fallback.family_name.to_string(),
+                    weight: dwrite_weight(fallback.weight),
+                    locale: fallback.locale,
+                    source: fallback.source,
+                    bucket: fallback.bucket,
+                };
+                return self.create_text_format_for_resolved_style(
+                    &fallback_style,
+                    font_size_px,
+                    word_wrapping,
+                );
+            }
+            Err(error) => return Err(CaptionRenderError::Draw(error.to_string())),
         };
         unsafe {
             text_format
-                .SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)
+                .SetWordWrapping(word_wrapping)
                 .map_err(|error| CaptionRenderError::Draw(error.to_string()))?;
             text_format
                 .SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)
@@ -1022,9 +1107,6 @@ impl WindowsCaptionRenderer {
                     .map_err(|error| CaptionRenderError::Draw(error.to_string()))?;
             }
         }
-        self.caches
-            .text_format_cache
-            .insert(text_format_key, text_format.clone());
         Ok(text_format)
     }
 
@@ -1053,33 +1135,68 @@ impl WindowsCaptionRenderer {
         Ok(text_layout)
     }
 
-    fn resolve_text_style(
-        &self,
-        policy: &CaptionLayoutPolicy,
-        bucket: TextScriptBucket,
-    ) -> Result<ResolvedTextStyle, CaptionRenderError> {
-        for family_name in select_face_chain(policy, bucket)
+    fn resolve_text_style(&self, policy: &CaptionLayoutPolicy, text: &str) -> ResolvedTextStyle {
+        let requested_style = self
+            .font_resolver
+            .resolve_order6_layout_draw_safe(None, text);
+        if requested_style.source == FontSource::BundledNotoCjkMedium
+            && self.bundled_font_collection.is_some()
+        {
+            return ResolvedTextStyle {
+                family_name: requested_style.family_name.to_string(),
+                weight: dwrite_weight(requested_style.weight),
+                locale: requested_style.locale,
+                source: requested_style.source,
+                bucket: requested_style.bucket,
+            };
+        }
+
+        for family_name in requested_style
+            .system_fallback_families()
             .iter()
             .copied()
             .filter(|candidate| *candidate != "DirectWrite system fallback")
         {
-            let family = match self.find_font_family(family_name)? {
-                Some(family) => family,
-                None => continue,
+            let family = match self.find_font_family(family_name) {
+                Ok(Some(family)) => family,
+                Ok(None) => continue,
+                Err(error) => {
+                    eprintln!(
+                        "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
+                        family_name, requested_style.locale, error
+                    );
+                    break;
+                }
             };
-            let Some(weight) = resolve_family_weight(&family, policy)? else {
+            let Some(weight) = (match resolve_family_weight(&family, policy) {
+                Ok(weight) => weight,
+                Err(error) => {
+                    eprintln!(
+                        "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
+                        family_name, requested_style.locale, error
+                    );
+                    break;
+                }
+            }) else {
                 continue;
             };
-            return Ok(ResolvedTextStyle {
+            return ResolvedTextStyle {
                 family_name: family_name.to_string(),
                 weight,
-            });
+                locale: requested_style.locale,
+                source: FontSource::SystemFont,
+                bucket: requested_style.bucket,
+            };
         }
 
-        Ok(ResolvedTextStyle {
-            family_name: "Segoe UI".to_string(),
-            weight: DWRITE_FONT_WEIGHT_NORMAL,
-        })
+        let fallback = FontResolver::style_resolution_failure_fallback(requested_style.bucket);
+        ResolvedTextStyle {
+            family_name: fallback.family_name.to_string(),
+            weight: dwrite_weight(fallback.weight),
+            locale: fallback.locale,
+            source: fallback.source,
+            bucket: fallback.bucket,
+        }
     }
 
     fn find_font_family(
@@ -1123,6 +1240,59 @@ fn create_dwrite_factory() -> Result<IDWriteFactory, CaptionRenderError> {
     unsafe {
         DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
             .map_err(|error| CaptionRenderError::Init(error.to_string()))
+    }
+}
+
+#[cfg(windows)]
+fn initialize_bundled_font_collection(
+    factory: &IDWriteFactory,
+) -> (FontResolver, Option<WindowsBundledFontCollection>) {
+    let ui_language_hint = system_ui_language_hint();
+    let path = match runtime_bundled_font_path() {
+        Ok(path) => path,
+        Err(error) => {
+            let reason = format!("resolve bundled font runtime path: {error}");
+            eprintln!("[overlay][WARN] bundled_font_unavailable {reason}");
+            return (
+                font_resolver_with_bundle_unavailable(reason, ui_language_hint),
+                None,
+            );
+        }
+    };
+    match WindowsBundledFontCollection::load_with_factory(factory, &path) {
+        Ok(collection) => (
+            font_resolver_with_bundle_available(ui_language_hint),
+            Some(collection),
+        ),
+        Err(error) => {
+            let reason = format!("{} ({})", path.display(), error);
+            eprintln!("[overlay][WARN] bundled_font_unavailable {reason}");
+            (
+                font_resolver_with_bundle_unavailable(reason, ui_language_hint),
+                None,
+            )
+        }
+    }
+}
+
+#[cfg(windows)]
+fn font_resolver_with_bundle_available(ui_language_hint: Option<String>) -> FontResolver {
+    FontResolver::with_bundle_available().with_optional_ui_language_hint(ui_language_hint)
+}
+
+#[cfg(windows)]
+fn font_resolver_with_bundle_unavailable(
+    reason: String,
+    ui_language_hint: Option<String>,
+) -> FontResolver {
+    FontResolver::with_bundle_unavailable(reason).with_optional_ui_language_hint(ui_language_hint)
+}
+
+#[cfg(windows)]
+fn dwrite_weight(weight: FontWeight) -> DWRITE_FONT_WEIGHT {
+    match weight {
+        FontWeight::Regular => DWRITE_FONT_WEIGHT_NORMAL,
+        FontWeight::Medium => DWRITE_FONT_WEIGHT_MEDIUM,
     }
 }
 
@@ -1380,8 +1550,8 @@ fn bounds_intersect_damage_band(bounds: BlockBounds, damage_band: DamageBand) ->
 mod tests {
     use super::prepare_layout_for_render;
     use crate::renderer::{
-        BlockBounds, CaptionBlockVariant, CaptionChannel, LayoutCacheKey, ResolvedBlockLayout,
-        ResolvedFrameLayout, VisualBounds,
+        BlockBounds, CaptionBlockVariant, CaptionChannel, FontLanguageBucket, LayoutCacheKey,
+        ResolvedBlockLayout, ResolvedFrameLayout, VisualBounds,
     };
 
     fn layout_key(seed: &str) -> LayoutCacheKey {
@@ -1504,17 +1674,24 @@ mod tests {
         assert_eq!(damage_band.top_px, 0.0);
         assert_eq!(damage_band.bottom_px, 500.0);
     }
-}
 
-#[cfg(windows)]
-fn select_face_chain<'a>(
-    policy: &'a CaptionLayoutPolicy,
-    bucket: TextScriptBucket,
-) -> &'a [&'static str] {
-    if matches!(bucket, TextScriptBucket::Cjk) {
-        policy.cjk_face_chain()
-    } else {
-        policy.latin_face_chain()
+    #[cfg(windows)]
+    #[test]
+    fn production_font_resolver_construction_applies_ui_language_hint_to_bundle_states() {
+        let available = super::font_resolver_with_bundle_available(Some("ja-JP".to_string()));
+        assert_eq!(
+            available.resolve(None, "日本語").bucket,
+            FontLanguageBucket::CjkJa
+        );
+
+        let unavailable = super::font_resolver_with_bundle_unavailable(
+            "missing bundled TTC".to_string(),
+            Some("zh-HK".to_string()),
+        );
+        assert_eq!(
+            unavailable.resolve(Some("x-madeup"), "繁體").bucket,
+            FontLanguageBucket::CjkZhHant
+        );
     }
 }
 

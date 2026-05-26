@@ -1,6 +1,8 @@
 #[cfg(windows)]
 use super::cache::LayoutCache;
 use super::cache::{CachedBlockLayoutTemplate, CachedLineLayoutTemplate};
+#[cfg(windows)]
+use super::font_resolver::{FontLanguageBucket, FontResolver, ResolvedFontStyle};
 use super::types::{
     BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionLayoutResult, CaptionPresentation,
     LayoutCacheKey, LineRole, ResolvedBlockLayout, ResolvedFrameLayout, ResolvedLineLayout,
@@ -18,10 +20,10 @@ use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFactory2, IDWriteFontCollection,
     IDWriteFontFallback, IDWriteFontFamily, IDWriteInlineObject, IDWriteTextFormat,
     IDWriteTextFormat1, IDWriteTextLayout, IDWriteTextLayout2, DWRITE_FACTORY_TYPE_SHARED,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_MEDIUM,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-    DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
+    DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_METRICS, DWRITE_TRIMMING,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 #[cfg(windows)]
 use windows_core::Interface;
@@ -30,7 +32,7 @@ use windows_core::Interface;
 pub struct CaptionLayoutPolicy {
     preferred_weights: [&'static str; 3],
     latin_face_chain: [&'static str; 3],
-    cjk_face_chain: [&'static str; 10],
+    cjk_face_chain: [&'static str; 6],
     channel_uses_color_only: bool,
     show_speaker_labels_by_default: bool,
     visible_window_target_blocks: usize,
@@ -50,10 +52,6 @@ impl Default for CaptionLayoutPolicy {
             preferred_weights: ["Semibold", "Medium", "Regular"],
             latin_face_chain: ["Noto Sans", "Segoe UI", "DirectWrite system fallback"],
             cjk_face_chain: [
-                "Noto Sans CJK KR",
-                "Noto Sans CJK JP",
-                "Noto Sans CJK SC",
-                "Noto Sans CJK TC",
                 "Malgun Gothic",
                 "Yu Gothic UI",
                 "Microsoft YaHei UI",
@@ -162,14 +160,17 @@ impl CaptionLayoutPolicy {
         presentation: &CaptionPresentation,
     ) -> ResolvedFrameLayout {
         #[cfg(windows)]
-        if let Ok(layout) = self.resolve_blocks_for_presentation_windows_cached(
+        match self.resolve_blocks_for_presentation_windows_cached(
             blocks.clone(),
             surface_width_px,
             surface_height_px,
             presentation,
             None,
         ) {
-            return layout;
+            Ok(layout) => return layout,
+            Err(error) => eprintln!(
+                "[overlay][WARN] catastrophic_directwrite_layout_failure stage=layout_measure error={error}"
+            ),
         }
 
         self.resolve_blocks_for_presentation_fallback(
@@ -532,6 +533,32 @@ struct MeasuredLine {
 }
 
 #[cfg(windows)]
+#[derive(Debug, Clone)]
+struct DirectWriteResolvedTextStyle {
+    family_name: String,
+    weight: DWRITE_FONT_WEIGHT,
+    locale: String,
+    bucket: FontLanguageBucket,
+    is_style_failure_fallback: bool,
+}
+
+#[cfg(windows)]
+impl DirectWriteResolvedTextStyle {
+    fn from_style(style: ResolvedFontStyle, weight: DWRITE_FONT_WEIGHT) -> Self {
+        Self {
+            family_name: style.family_name.to_string(),
+            weight,
+            locale: style.locale,
+            bucket: style.bucket,
+            is_style_failure_fallback: style.fallback_reason
+                == Some(
+                    super::font_resolver::FontFallbackReason::DirectWriteStyleResolutionFailure,
+                ),
+        }
+    }
+}
+
+#[cfg(windows)]
 struct DirectWriteLayoutEngine {
     factory: IDWriteFactory,
     system_font_collection: IDWriteFontCollection,
@@ -787,14 +814,50 @@ impl DirectWriteLayoutEngine {
         word_wrapping: windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING,
         trimming_sign: Option<&IDWriteInlineObject>,
     ) -> Result<IDWriteTextFormat, windows::core::Error> {
-        let (family_name, weight) = self.resolve_text_style(policy, text)?;
-        let locale = utf16_null("en-us");
-        let face_name = utf16_null(&family_name);
+        let resolved_style = self.resolve_text_style(policy, text);
+        match self.create_text_format_for_resolved_style(
+            &resolved_style,
+            font_size_px,
+            word_wrapping,
+            trimming_sign,
+        ) {
+            Ok(text_format) => Ok(text_format),
+            Err(error) if !resolved_style.is_style_failure_fallback => {
+                eprintln!(
+                    "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
+                    resolved_style.family_name, resolved_style.locale, error
+                );
+                let fallback = FontResolver::style_resolution_failure_fallback_for_bucket_locale(
+                    resolved_style.bucket,
+                    resolved_style.locale.clone(),
+                );
+                let fallback_style =
+                    DirectWriteResolvedTextStyle::from_style(fallback, DWRITE_FONT_WEIGHT_NORMAL);
+                self.create_text_format_for_resolved_style(
+                    &fallback_style,
+                    font_size_px,
+                    word_wrapping,
+                    trimming_sign,
+                )
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn create_text_format_for_resolved_style(
+        &self,
+        resolved_style: &DirectWriteResolvedTextStyle,
+        font_size_px: f32,
+        word_wrapping: windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING,
+        trimming_sign: Option<&IDWriteInlineObject>,
+    ) -> Result<IDWriteTextFormat, windows::core::Error> {
+        let locale = utf16_null(&resolved_style.locale);
+        let face_name = utf16_null(&resolved_style.family_name);
         let text_format = unsafe {
             self.factory.CreateTextFormat(
                 PCWSTR::from_raw(face_name.as_ptr()),
                 None,
-                weight,
+                resolved_style.weight,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
                 font_size_px,
@@ -825,29 +888,50 @@ impl DirectWriteLayoutEngine {
         &self,
         policy: &CaptionLayoutPolicy,
         text: &str,
-    ) -> Result<
-        (
-            String,
-            windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT,
-        ),
-        windows::core::Error,
-    > {
-        let bucket = super::types::text_script_bucket(text);
-        for family_name in select_face_chain(policy, bucket)
+    ) -> DirectWriteResolvedTextStyle {
+        let requested_style = FontResolver::with_bundle_unavailable(
+            "layout measurement uses system fallback until shared resolver propagation",
+        )
+        .resolve_order6_layout_draw_safe(None, text);
+        for family_name in requested_style
+            .system_fallback_families()
             .iter()
             .copied()
             .filter(|candidate| *candidate != "DirectWrite system fallback")
         {
-            let family = match self.find_font_family(family_name)? {
-                Some(family) => family,
-                None => continue,
+            let family = match self.find_font_family(family_name) {
+                Ok(Some(family)) => family,
+                Ok(None) => continue,
+                Err(error) => {
+                    eprintln!(
+                        "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
+                        family_name, requested_style.locale, error
+                    );
+                    break;
+                }
             };
-            let Some(weight) = resolve_family_weight(&family, policy)? else {
+            let Some(weight) = (match resolve_family_weight(&family, policy) {
+                Ok(weight) => weight,
+                Err(error) => {
+                    eprintln!(
+                        "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
+                        family_name, requested_style.locale, error
+                    );
+                    break;
+                }
+            }) else {
                 continue;
             };
-            return Ok((family_name.to_string(), weight));
+            return DirectWriteResolvedTextStyle {
+                family_name: family_name.to_string(),
+                weight,
+                locale: requested_style.locale,
+                bucket: requested_style.bucket,
+                is_style_failure_fallback: false,
+            };
         }
-        Ok(("Segoe UI".to_string(), DWRITE_FONT_WEIGHT_NORMAL))
+        let fallback = FontResolver::style_resolution_failure_fallback_for_style(&requested_style);
+        DirectWriteResolvedTextStyle::from_style(fallback, DWRITE_FONT_WEIGHT_NORMAL)
     }
 
     fn find_font_family(
@@ -1158,18 +1242,6 @@ fn measure_text_width(text: &str, average_glyph_advance_px: f32) -> f32 {
             _ => average_glyph_advance_px * 0.72,
         })
         .sum()
-}
-
-#[cfg(windows)]
-fn select_face_chain<'a>(
-    policy: &'a CaptionLayoutPolicy,
-    bucket: super::types::TextScriptBucket,
-) -> &'a [&'static str] {
-    if matches!(bucket, super::types::TextScriptBucket::Cjk) {
-        policy.cjk_face_chain()
-    } else {
-        policy.latin_face_chain()
-    }
 }
 
 #[cfg(windows)]

@@ -3,6 +3,9 @@ use thiserror::Error;
 #[cfg(windows)]
 use windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT;
 
+#[cfg(windows)]
+use super::font_resolver::{FontLanguageBucket, FontSource};
+
 pub(crate) const DEFAULT_SURFACE_WIDTH_PX: u32 = 4096;
 pub(crate) const DEFAULT_SURFACE_HEIGHT_PX: u32 = 1056;
 pub(crate) const DEFAULT_HORIZONTAL_PADDING_PX: u32 = 48;
@@ -462,6 +465,9 @@ pub(crate) enum TextScriptBucket {
 pub(crate) struct ResolvedTextStyle {
     pub family_name: String,
     pub weight: DWRITE_FONT_WEIGHT,
+    pub locale: String,
+    pub source: FontSource,
+    pub bucket: FontLanguageBucket,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
