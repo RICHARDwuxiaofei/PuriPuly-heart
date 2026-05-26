@@ -2,7 +2,10 @@
 use super::cache::LayoutCache;
 use super::cache::{CachedBlockLayoutTemplate, CachedLineLayoutTemplate};
 #[cfg(windows)]
-use super::font_resolver::{FontLanguageBucket, FontResolver, ResolvedFontStyle};
+use super::font_resolver::{FontLanguageBucket, ResolvedFontStyle};
+use super::font_resolver::{FontResolver, TextStyleKey};
+#[cfg(windows)]
+use super::font_resolver::{FontSource, FontWeight};
 use super::types::{
     BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionLayoutResult, CaptionPresentation,
     LayoutCacheKey, LineRole, ResolvedBlockLayout, ResolvedFrameLayout, ResolvedLineLayout,
@@ -141,17 +144,40 @@ impl CaptionLayoutPolicy {
         .into()
     }
 
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[allow(dead_code)]
     pub(crate) fn layout_cache_key_for_block(
         &self,
         block: &CaptionBlock,
         surface_width_px: u32,
         presentation: &CaptionPresentation,
     ) -> LayoutCacheKey {
+        let primary_style_key = fallback_style_key_for_text(&block.primary_text);
+        let secondary_style_key = fallback_style_key_for_text(&block.secondary_text);
         layout_cache_key_for_block(
             block,
             self.content_width_px(surface_width_px),
             presentation.text_scale.max(0.1),
+            primary_style_key,
+            secondary_style_key,
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn layout_cache_key_for_block_windows(
+        &self,
+        block: &CaptionBlock,
+        surface_width_px: u32,
+        presentation: &CaptionPresentation,
+        engine: &DirectWriteLayoutEngine,
+    ) -> LayoutCacheKey {
+        let primary_style_key = engine.line_style_key(self, &block.primary_text);
+        let secondary_style_key = engine.line_style_key(self, &block.secondary_text);
+        layout_cache_key_for_block(
+            block,
+            self.content_width_px(surface_width_px),
+            presentation.text_scale.max(0.1),
+            primary_style_key,
+            secondary_style_key,
         )
     }
 
@@ -184,7 +210,15 @@ impl CaptionLayoutPolicy {
         let mut resolved_blocks = Vec::with_capacity(blocks.len());
 
         for block in blocks {
-            let layout_cache_key = layout_cache_key_for_block(&block, content_width_px, text_scale);
+            let primary_style_key = fallback_style_key_for_text(&block.primary_text);
+            let secondary_style_key = fallback_style_key_for_text(&block.secondary_text);
+            let layout_cache_key = layout_cache_key_for_block(
+                &block,
+                content_width_px,
+                text_scale,
+                primary_style_key,
+                secondary_style_key,
+            );
             let template = self.build_fallback_block_template(&block, content_width_px, text_scale);
             let stable_block_height_px = template.bounds.bottom_px - template.bounds.top_px;
             let block_top_px = if block.slot_assigned {
@@ -280,6 +314,7 @@ impl CaptionLayoutPolicy {
             .enumerate()
             .map(|(index, text)| {
                 let width_px = measure_text_width(&text, primary_advance_px);
+                let style_key = fallback_style_key_for_text(&text);
                 let origin_x = self.strip_horizontal_padding_px as f32
                     + ((content_width_px - width_px).max(0.0) * 0.5);
                 let origin_y = vertical_padding_px + index as f32 * primary_line_height_px;
@@ -288,6 +323,7 @@ impl CaptionLayoutPolicy {
                         .translate(origin_x, origin_y),
                     text,
                     role: LineRole::Primary,
+                    style_key,
                     width_px,
                     origin_x,
                     origin_y,
@@ -306,6 +342,7 @@ impl CaptionLayoutPolicy {
         };
         let secondary_line = secondary_text.map(|text| {
             let width_px = measure_text_width(&text, primary_advance_px * SECONDARY_FONT_SCALE);
+            let style_key = fallback_style_key_for_text(&text);
             let origin_x = self.strip_horizontal_padding_px as f32
                 + ((content_width_px - width_px).max(0.0) * 0.5);
             let origin_y = vertical_padding_px
@@ -316,6 +353,7 @@ impl CaptionLayoutPolicy {
                     .translate(origin_x, origin_y),
                 text,
                 role: LineRole::Secondary,
+                style_key,
                 width_px,
                 origin_x,
                 origin_y,
@@ -389,6 +427,7 @@ impl CaptionLayoutPolicy {
                 Ok::<CachedLineLayoutTemplate, windows::core::Error>(CachedLineLayoutTemplate {
                     text: text.clone(),
                     role: LineRole::Primary,
+                    style_key: measured.style_key,
                     width_px: measured.width_px,
                     origin_x,
                     origin_y,
@@ -421,6 +460,7 @@ impl CaptionLayoutPolicy {
                     Ok::<CachedLineLayoutTemplate, windows::core::Error>(CachedLineLayoutTemplate {
                         text: text.clone(),
                         role: LineRole::Secondary,
+                        style_key: measured.style_key,
                         width_px: measured.width_px,
                         origin_x,
                         origin_y,
@@ -468,7 +508,15 @@ impl CaptionLayoutPolicy {
         let mut resolved_blocks = Vec::with_capacity(blocks.len());
 
         for block in blocks {
-            let layout_cache_key = layout_cache_key_for_block(&block, content_width_px, text_scale);
+            let primary_style_key = engine.line_style_key(self, &block.primary_text);
+            let secondary_style_key = engine.line_style_key(self, &block.secondary_text);
+            let layout_cache_key = layout_cache_key_for_block(
+                &block,
+                content_width_px,
+                text_scale,
+                primary_style_key,
+                secondary_style_key,
+            );
             let template = if let Some(cache) = layout_cache.as_deref_mut() {
                 if let Some(cached) = cache.get(&layout_cache_key) {
                     cached.clone()
@@ -516,6 +564,7 @@ impl CaptionLayoutPolicy {
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy)]
 struct MeasuredLine {
+    style_key: TextStyleKey,
     width_px: f32,
     origin_x_px: f32,
     visual_bounds: VisualBounds,
@@ -528,17 +577,20 @@ struct DirectWriteResolvedTextStyle {
     weight: DWRITE_FONT_WEIGHT,
     locale: String,
     bucket: FontLanguageBucket,
+    style_key: TextStyleKey,
     is_style_failure_fallback: bool,
 }
 
 #[cfg(windows)]
 impl DirectWriteResolvedTextStyle {
     fn from_style(style: ResolvedFontStyle, weight: DWRITE_FONT_WEIGHT) -> Self {
+        let style_key = style.style_key();
         Self {
             family_name: style.family_name.to_string(),
             weight,
             locale: style.locale,
             bucket: style.bucket,
+            style_key,
             is_style_failure_fallback: style.fallback_reason
                 == Some(
                     super::font_resolver::FontFallbackReason::DirectWriteStyleResolutionFailure,
@@ -569,6 +621,19 @@ impl DirectWriteLayoutEngine {
             system_font_fallback: system_font_fallback.clone(),
             font_resolver,
         }
+    }
+
+    fn line_style_key(&self, policy: &CaptionLayoutPolicy, text: &str) -> TextStyleKey {
+        self.resolve_text_style(policy, text).style_key
+    }
+
+    #[cfg(test)]
+    fn resolved_text_style_key_for_test(
+        &self,
+        policy: &CaptionLayoutPolicy,
+        text: &str,
+    ) -> TextStyleKey {
+        self.resolve_text_style(policy, text).style_key
     }
 
     #[cfg(test)]
@@ -763,7 +828,7 @@ impl DirectWriteLayoutEngine {
         content_width_px: f32,
         font_size_px: f32,
     ) -> Result<MeasuredLine, windows::core::Error> {
-        let text_layout = self.create_text_layout(
+        let (text_layout, style_key) = self.create_text_layout(
             policy,
             text,
             font_size_px,
@@ -778,6 +843,7 @@ impl DirectWriteLayoutEngine {
         }
         let overhang = unsafe { text_layout.GetOverhangMetrics()? };
         Ok(MeasuredLine {
+            style_key,
             width_px: metrics.width,
             origin_x_px: metrics.left,
             visual_bounds: VisualBounds::new(
@@ -798,8 +864,8 @@ impl DirectWriteLayoutEngine {
         max_height_px: f32,
         word_wrapping: windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING,
         trimming_sign: Option<&IDWriteInlineObject>,
-    ) -> Result<IDWriteTextLayout, windows::core::Error> {
-        let text_format =
+    ) -> Result<(IDWriteTextLayout, TextStyleKey), windows::core::Error> {
+        let (text_format, style_key) =
             self.create_text_format(policy, text, font_size_px, word_wrapping, trimming_sign)?;
         let utf16: Vec<u16> = text.encode_utf16().collect();
         let text_layout = unsafe {
@@ -811,7 +877,7 @@ impl DirectWriteLayoutEngine {
                 text_layout_2.SetFontFallback(&self.system_font_fallback)?;
             }
         }
-        Ok(text_layout)
+        Ok((text_layout, style_key))
     }
 
     fn create_text_format(
@@ -821,7 +887,7 @@ impl DirectWriteLayoutEngine {
         font_size_px: f32,
         word_wrapping: windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING,
         trimming_sign: Option<&IDWriteInlineObject>,
-    ) -> Result<IDWriteTextFormat, windows::core::Error> {
+    ) -> Result<(IDWriteTextFormat, TextStyleKey), windows::core::Error> {
         let resolved_style = self.resolve_text_style(policy, text);
         match self.create_text_format_for_resolved_style(
             &resolved_style,
@@ -829,7 +895,7 @@ impl DirectWriteLayoutEngine {
             word_wrapping,
             trimming_sign,
         ) {
-            Ok(text_format) => Ok(text_format),
+            Ok(text_format) => Ok((text_format, resolved_style.style_key)),
             Err(error) if !resolved_style.is_style_failure_fallback => {
                 eprintln!(
                     "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
@@ -847,6 +913,7 @@ impl DirectWriteLayoutEngine {
                     word_wrapping,
                     trimming_sign,
                 )
+                .map(|text_format| (text_format, fallback_style.style_key))
             }
             Err(error) => Err(error),
         }
@@ -929,11 +996,20 @@ impl DirectWriteLayoutEngine {
             }) else {
                 continue;
             };
+            let style_key = TextStyleKey::from_parts(
+                requested_style.bucket,
+                FontSource::SystemFont,
+                None,
+                family_name,
+                font_weight_from_dwrite_weight(weight),
+                &requested_style.locale,
+            );
             return DirectWriteResolvedTextStyle {
                 family_name: family_name.to_string(),
                 weight,
                 locale: requested_style.locale,
                 bucket: requested_style.bucket,
+                style_key,
                 is_style_failure_fallback: false,
             };
         }
@@ -979,10 +1055,14 @@ fn layout_cache_key_for_block(
     block: &CaptionBlock,
     content_width_px: f32,
     text_scale: f32,
+    primary_style_key: TextStyleKey,
+    secondary_style_key: TextStyleKey,
 ) -> LayoutCacheKey {
     LayoutCacheKey {
         primary_text: block.primary_text.clone(),
         secondary_text: block.secondary_text.clone(),
+        primary_style_key,
+        secondary_style_key,
         channel: block.channel,
         block_variant: block.block_variant,
         secondary_enabled: block.secondary_enabled,
@@ -994,6 +1074,12 @@ fn layout_cache_key_for_block(
         content_width_key: content_width_px.round() as u32,
         text_scale_key: scalar_key(text_scale),
     }
+}
+
+fn fallback_style_key_for_text(text: &str) -> TextStyleKey {
+    FontResolver::default()
+        .resolve_order6_layout_draw_safe(None, text)
+        .style_key()
 }
 
 fn block_reserves_secondary_row(block: &CaptionBlock) -> bool {
@@ -1057,6 +1143,7 @@ fn materialize_resolved_line_layout(
     ResolvedLineLayout {
         text: line.text.clone(),
         role: line.role,
+        style_key: line.style_key,
         width_px: line.width_px,
         origin_x: strip_left_px + line.origin_x,
         origin_y: render_top_px + line.origin_y * render_height_scale,
@@ -1288,6 +1375,17 @@ fn preferred_weight_chain(
 }
 
 #[cfg(windows)]
+fn font_weight_from_dwrite_weight(weight: DWRITE_FONT_WEIGHT) -> FontWeight {
+    if weight == DWRITE_FONT_WEIGHT_SEMI_BOLD {
+        FontWeight::SemiBold
+    } else if weight == DWRITE_FONT_WEIGHT_MEDIUM {
+        FontWeight::Medium
+    } else {
+        FontWeight::Regular
+    }
+}
+
+#[cfg(windows)]
 fn utf16_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -1378,6 +1476,89 @@ mod tests {
             secondary.origin_y,
             block.bounds.top_px + 32.0 + 2.0 * 150.0 + 30.0,
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_layout_key_and_line_key_use_same_resolved_style_as_measurement() {
+        let policy = CaptionLayoutPolicy::default();
+        let engine = super::DirectWriteLayoutEngine::new_for_test()
+            .expect("DirectWrite layout should initialize on Windows");
+        let layout = policy
+            .resolve_blocks_for_presentation_windows_cached(
+                vec![CaptionBlock::new("latin", "hello style identity")],
+                3840,
+                1024,
+                &CaptionPresentation::default(),
+                &engine,
+                None,
+            )
+            .expect("DirectWrite layout should initialize on Windows");
+
+        let block = &layout.visible_blocks[0];
+        let line = block
+            .primary_lines
+            .first()
+            .expect("primary line should be present");
+        let resolved_style_key = engine.resolved_text_style_key_for_test(&policy, &line.text);
+
+        assert_eq!(block.layout_cache_key.primary_style_key, resolved_style_key);
+        assert_eq!(line.style_key, resolved_style_key);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_wrapped_mixed_script_layout_cache_key_is_reachable_on_second_resolve() {
+        let policy = CaptionLayoutPolicy::default();
+        let engine = super::DirectWriteLayoutEngine::new_for_test()
+            .expect("DirectWrite layout should initialize on Windows");
+        let presentation = CaptionPresentation::default();
+        let block = CaptionBlock::new(
+            "mixed",
+            format!(
+                "{} 日本語",
+                "streaming translation captions should keep the newest utterance readable "
+                    .repeat(4)
+            ),
+        );
+        let mut cache = super::LayoutCache::with_capacity(4);
+
+        let first = policy
+            .resolve_blocks_for_presentation_windows_cached(
+                vec![block.clone()],
+                1100,
+                900,
+                &presentation,
+                &engine,
+                Some(&mut cache),
+            )
+            .expect("DirectWrite layout should initialize on Windows");
+        assert!(
+            first.visible_blocks[0].primary_lines.len() > 1,
+            "test text must wrap so lookup and measured-line style can diverge"
+        );
+
+        let lookup_key =
+            policy.layout_cache_key_for_block_windows(&block, 1100, &presentation, &engine);
+        assert!(
+            cache.get(&lookup_key).is_some(),
+            "first resolve should insert using the same key the second resolve will look up"
+        );
+        let cache_len_after_first = cache.len();
+
+        let _ = policy
+            .resolve_blocks_for_presentation_windows_cached(
+                vec![block],
+                1100,
+                900,
+                &presentation,
+                &engine,
+                Some(&mut cache),
+            )
+            .expect("DirectWrite layout should initialize on Windows");
+
+        assert_eq!(cache.len(), cache_len_after_first);
+        assert!(cache.get(&lookup_key).is_some());
     }
 
     #[test]

@@ -22,7 +22,8 @@ pub use renderer::{
     CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionDebugOverlay, CaptionLayoutPolicy,
     CaptionLayoutResult, CaptionLineLayout, CaptionPresentation, CaptionRenderError,
     CaptionRenderer, DamageBand, FontFallbackReason, FontLanguageBucket, FontResolver, FontSource,
-    FontWeight, RenderedFrame, ResolvedFontStyle, VisibleCaptionBlock,
+    FontWeight, RenderedFrame, ResolvedFontStyle, TextFamilyKey, TextLocaleKey, TextStyleKey,
+    VisibleCaptionBlock,
 };
 pub use runtime::{run_cli, run_with_manifest, OverlayRuntime, RuntimeFailure, StartupError};
 pub use state::{
