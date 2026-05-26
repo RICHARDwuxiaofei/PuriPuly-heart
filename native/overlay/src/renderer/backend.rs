@@ -53,9 +53,10 @@ use windows_numerics::{Matrix3x2, Vector2};
 use super::cache::{CachedBlockVisual, CachedLineVisual, WindowsRendererCaches};
 #[cfg(windows)]
 use super::font_resolver::{
-    runtime_bundled_font_path, system_ui_language_hint, FontResolver, FontSource, FontWeight,
+    runtime_bundled_font_path, system_ui_language_hint, FontResolver, FontWeight,
     ResolvedFontStyle, TextStyleKey, WindowsBundledFontCollection,
 };
+use super::font_resolver::{FontLanguageBucket, FontSource};
 #[cfg(windows)]
 use super::glyph_run::render_text_layout_to_command_list;
 #[cfg(windows)]
@@ -70,7 +71,8 @@ use super::types::{
 };
 use super::types::{
     BlockBounds, CaptionDebugOverlay, CaptionLayoutResult, CaptionPresentation, CaptionRenderError,
-    DamageBand, RenderDiagnostics, ResolvedFrameLayout,
+    DamageBand, RenderDiagnostics, ResolvedFrameLayout, StyleBucketSourceCount,
+    TextStyleDescriptor,
 };
 
 #[cfg(windows)]
@@ -373,13 +375,15 @@ impl TestCaptionRenderer {
             debug_overlay
         };
         let public_layout: CaptionLayoutResult = layout.clone().into();
+        let mut diagnostics = RenderDiagnostics::default();
+        diagnostics.style_bucket_source_counts = style_bucket_source_counts(&layout);
 
         Ok(RenderedFrame {
             width: public_layout.surface_width_px,
             height: public_layout.surface_height_px,
             fully_transparent,
             layout: public_layout,
-            diagnostics: RenderDiagnostics::default(),
+            diagnostics,
             texture: TextureHandle::Test(TestTextureHandle::new()),
             debug_overlay,
         })
@@ -437,6 +441,7 @@ impl WindowsCaptionRenderer {
             &system_font_collection,
             &system_font_fallback,
             font_resolver.clone(),
+            bundled_font_collection.clone(),
         );
         let texture = create_target_texture(&device)?;
         let d2d_context = create_d2d_context(&device, &d2d_factory)?;
@@ -729,8 +734,8 @@ impl WindowsCaptionRenderer {
             None
         };
         let _ = policy;
-        let text_layout = self.create_text_layout_for_style_key(
-            line.style_key,
+        let text_layout = self.create_text_layout_for_line_style(
+            &line.style,
             line.text.trim(),
             line.font_size_px,
             block.content_width_px,
@@ -1030,7 +1035,7 @@ impl WindowsCaptionRenderer {
         self.frame_text_format_cache_hits = 0;
         self.frame_text_format_cache_misses = 0;
         let mut diagnostics = RenderDiagnostics::default();
-        let contains_cjk_text = caption_blocks_contain_cjk(&blocks);
+        let contains_cjk_text = caption_blocks_contain_cjk_style(&blocks);
         let cjk_layout_started = if contains_cjk_text && !self.first_cjk_layout_logged {
             Some(Instant::now())
         } else {
@@ -1098,6 +1103,7 @@ impl WindowsCaptionRenderer {
             }
         };
         let layout = prepare_layout_for_render(&mut self.previous_layout, layout);
+        diagnostics.style_bucket_source_counts = style_bucket_source_counts(&layout);
         let layout_has_drawable_text = resolved_layout_has_drawable_text(&layout);
         let debug_overlay = if layout_has_drawable_text {
             debug_overlay
@@ -1249,16 +1255,12 @@ impl WindowsCaptionRenderer {
         self.cached_text_format_for_resolved_style(resolved_style, font_size_key, font_size_px)
     }
 
-    fn create_text_format_for_style_key(
+    fn create_text_format_for_line_style(
         &mut self,
-        style_key: TextStyleKey,
+        style: &TextStyleDescriptor,
         font_size_px: f32,
     ) -> Result<IDWriteTextFormat, CaptionRenderError> {
-        let resolved_style = resolved_text_style_from_style_key(style_key).ok_or_else(|| {
-            CaptionRenderError::Draw(format!(
-                "line style key cannot be reconstructed for DirectWrite: {style_key:?}"
-            ))
-        })?;
+        let resolved_style = resolved_text_style_from_descriptor(style);
         let resolved_style = self.text_format_style_for_available_collections(resolved_style);
         let font_size_key = (font_size_px * 100.0).round() as u32;
         self.cached_text_format_for_resolved_style(resolved_style, font_size_key, font_size_px)
@@ -1317,8 +1319,7 @@ impl WindowsCaptionRenderer {
         &self,
         line: &ResolvedLineLayout,
     ) -> (TextStyleKey, u32) {
-        let resolved_style = resolved_text_style_from_style_key(line.style_key)
-            .expect("test line style key should be reconstructable");
+        let resolved_style = resolved_text_style_from_descriptor(&line.style);
         let resolved_style = self.text_format_style_for_available_collections(resolved_style);
         (
             resolved_style.style_key,
@@ -1453,15 +1454,15 @@ impl WindowsCaptionRenderer {
         Ok(text_layout)
     }
 
-    fn create_text_layout_for_style_key(
+    fn create_text_layout_for_line_style(
         &mut self,
-        style_key: TextStyleKey,
+        style: &TextStyleDescriptor,
         text: &str,
         font_size_px: f32,
         max_width_px: f32,
         max_height_px: f32,
     ) -> Result<IDWriteTextLayout, CaptionRenderError> {
-        let text_format = self.create_text_format_for_style_key(style_key, font_size_px)?;
+        let text_format = self.create_text_format_for_line_style(style, font_size_px)?;
         let utf16: Vec<u16> = text.encode_utf16().collect();
         let text_layout = unsafe {
             self.dwrite_factory
@@ -1479,9 +1480,7 @@ impl WindowsCaptionRenderer {
     }
 
     fn resolve_text_style(&self, policy: &CaptionLayoutPolicy, text: &str) -> ResolvedTextStyle {
-        let requested_style = self
-            .font_resolver
-            .resolve_order6_layout_draw_safe(None, text);
+        let requested_style = self.font_resolver.resolve(None, text);
         self.resolve_requested_text_style(policy, requested_style)
     }
 
@@ -1719,15 +1718,15 @@ fn resolved_text_style_from_resolved_font_style(style: ResolvedFontStyle) -> Res
 }
 
 #[cfg(windows)]
-fn resolved_text_style_from_style_key(style_key: TextStyleKey) -> Option<ResolvedTextStyle> {
-    Some(ResolvedTextStyle {
-        family_name: style_key.family.family_name()?.to_string(),
-        weight: dwrite_weight(style_key.weight),
-        locale: style_key.locale.locale_name()?.to_string(),
-        source: style_key.source,
-        bucket: style_key.bucket,
-        style_key,
-    })
+fn resolved_text_style_from_descriptor(style: &TextStyleDescriptor) -> ResolvedTextStyle {
+    ResolvedTextStyle {
+        family_name: style.family_name.clone(),
+        weight: dwrite_weight(style.weight),
+        locale: style.locale.clone(),
+        source: style.source,
+        bucket: style.bucket,
+        style_key: style.style_key,
+    }
 }
 
 #[cfg(windows)]
@@ -1929,10 +1928,15 @@ fn block_lines(
 }
 
 #[cfg(windows)]
-fn caption_blocks_contain_cjk(blocks: &[super::types::CaptionBlock]) -> bool {
+fn caption_blocks_contain_cjk_style(blocks: &[super::types::CaptionBlock]) -> bool {
     blocks.iter().any(|block| {
-        contains_cjk(&block.primary_text)
-            || (block.secondary_enabled && contains_cjk(&block.secondary_text))
+        FontLanguageBucket::for_text(block.primary_language.as_deref(), &block.primary_text)
+            != FontLanguageBucket::General
+            || (block.secondary_enabled
+                && FontLanguageBucket::for_text(
+                    block.secondary_language.as_deref(),
+                    &block.secondary_text,
+                ) != FontLanguageBucket::General)
     })
 }
 
@@ -1943,6 +1947,65 @@ fn prepare_layout_for_render(
     layout.damage_band = compute_damage_band(previous_layout.as_ref(), &layout);
     *previous_layout = Some(layout.clone());
     layout
+}
+
+fn style_bucket_source_counts(layout: &ResolvedFrameLayout) -> Vec<StyleBucketSourceCount> {
+    let mut counts = [[0u32; 3]; 5];
+    for block in &layout.visible_blocks {
+        for line in block
+            .primary_lines
+            .iter()
+            .chain(block.secondary_line.iter())
+            .filter(|line| !line.text.trim().is_empty())
+        {
+            counts[bucket_index(line.style_key.bucket)][source_index(line.style_key.source)] += 1;
+        }
+    }
+
+    let buckets = [
+        FontLanguageBucket::General,
+        FontLanguageBucket::CjkKo,
+        FontLanguageBucket::CjkJa,
+        FontLanguageBucket::CjkZhHans,
+        FontLanguageBucket::CjkZhHant,
+    ];
+    let sources = [
+        FontSource::BundledNotoCjkMedium,
+        FontSource::SystemFont,
+        FontSource::SystemFallbackSentinel,
+    ];
+    let mut out = Vec::new();
+    for (bucket_i, bucket) in buckets.into_iter().enumerate() {
+        for (source_i, source) in sources.into_iter().enumerate() {
+            let count = counts[bucket_i][source_i];
+            if count > 0 {
+                out.push(StyleBucketSourceCount {
+                    bucket,
+                    source,
+                    count,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn bucket_index(bucket: FontLanguageBucket) -> usize {
+    match bucket {
+        FontLanguageBucket::General => 0,
+        FontLanguageBucket::CjkKo => 1,
+        FontLanguageBucket::CjkJa => 2,
+        FontLanguageBucket::CjkZhHans => 3,
+        FontLanguageBucket::CjkZhHant => 4,
+    }
+}
+
+fn source_index(source: FontSource) -> usize {
+    match source {
+        FontSource::BundledNotoCjkMedium => 0,
+        FontSource::SystemFont => 1,
+        FontSource::SystemFallbackSentinel => 2,
+    }
 }
 
 fn compute_damage_band(
@@ -2250,13 +2313,22 @@ mod tests {
         let renderer = super::WindowsCaptionRenderer::new()
             .expect("Windows caption renderer should initialize for style-key test");
         let policy = CaptionLayoutPolicy::default();
-        let line_style_key = FontResolver::with_bundle_unavailable("test style")
-            .resolve(Some("ja"), "日本語")
-            .style_key();
+        let resolved_line_style =
+            FontResolver::with_bundle_unavailable("test style").resolve(Some("ja"), "日本語");
+        let line_style_key = resolved_line_style.style_key();
+        let line_style = crate::renderer::TextStyleDescriptor::from_parts(
+            resolved_line_style.family_name,
+            resolved_line_style.weight,
+            resolved_line_style.locale,
+            resolved_line_style.source,
+            resolved_line_style.bucket,
+            line_style_key,
+        );
         let line = ResolvedLineLayout {
             text: "plain latin text".into(),
             role: LineRole::Primary,
             style_key: line_style_key,
+            style: line_style,
             width_px: 120.0,
             origin_x: 0.0,
             origin_y: 0.0,

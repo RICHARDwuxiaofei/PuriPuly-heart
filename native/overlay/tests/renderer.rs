@@ -30,6 +30,19 @@ fn bilingual_block(
     CaptionBlock::new(id, primary_text).with_secondary_text(secondary_text, secondary_enabled)
 }
 
+fn localized_bilingual_block(
+    id: &str,
+    primary_text: &str,
+    primary_language: &str,
+    secondary_text: &str,
+    secondary_language: &str,
+) -> CaptionBlock {
+    CaptionBlock::new(id, primary_text)
+        .with_primary_language(primary_language)
+        .with_secondary_text(secondary_text, true)
+        .with_secondary_language(secondary_language)
+}
+
 fn long_block(id: &str) -> CaptionBlock {
     let text = "streaming translation captions should keep the newest utterance readable while \
                 older blocks are dropped when the fixed overlay surface overflows "
@@ -978,6 +991,83 @@ fn renderer_source_only_peer_remains_secondary_only_with_readable_default_size()
 }
 
 #[test]
+fn renderer_layout_uses_primary_and_secondary_language_style_keys() {
+    let policy = CaptionLayoutPolicy::default();
+    let primary_text = "日本語";
+    let secondary_text = "繁體";
+    let result = policy.resolve_blocks_for_presentation(
+        vec![localized_bilingual_block(
+            "localized",
+            primary_text,
+            "ja",
+            secondary_text,
+            "zh-Hant",
+        )],
+        3840,
+        1024,
+        &CaptionPresentation::default(),
+    );
+
+    let block = &result.visible_blocks[0];
+    let primary = block
+        .primary_lines
+        .first()
+        .expect("primary line should be present");
+    let secondary = block
+        .secondary_line
+        .as_ref()
+        .expect("secondary line should be present");
+    let resolver = FontResolver::default();
+    let expected_primary = resolver.resolve(Some("ja"), primary_text).style_key();
+    let expected_secondary = resolver
+        .resolve(Some("zh-Hant"), secondary_text)
+        .style_key();
+
+    assert_eq!(block.layout_cache_key.primary_style_key, expected_primary);
+    assert_eq!(primary.style_key, expected_primary);
+    assert_eq!(
+        block.layout_cache_key.secondary_style_key,
+        expected_secondary
+    );
+    assert_eq!(secondary.style_key, expected_secondary);
+}
+
+#[test]
+fn renderer_same_text_with_different_languages_produces_different_style_keys_without_flush() {
+    let policy = CaptionLayoutPolicy::default();
+    let korean = CaptionBlock::new("same-text", "漢字").with_primary_language("ko");
+    let japanese = CaptionBlock::new("same-text", "漢字").with_primary_language("ja");
+
+    let korean_layout = policy.resolve_blocks_for_presentation(
+        vec![korean],
+        3840,
+        1024,
+        &CaptionPresentation::default(),
+    );
+    let japanese_layout = policy.resolve_blocks_for_presentation(
+        vec![japanese],
+        3840,
+        1024,
+        &CaptionPresentation::default(),
+    );
+    let korean_block = &korean_layout.visible_blocks[0];
+    let japanese_block = &japanese_layout.visible_blocks[0];
+
+    assert_ne!(
+        korean_block.layout_cache_key.primary_style_key,
+        japanese_block.layout_cache_key.primary_style_key
+    );
+    assert_ne!(
+        korean_block.block_cache_key(),
+        japanese_block.block_cache_key()
+    );
+    assert_eq!(
+        korean_block.layout_cache_key.primary_text, japanese_block.layout_cache_key.primary_text,
+        "only style metadata should separate these cache entries"
+    );
+}
+
+#[test]
 fn renderer_render_path_expands_damage_band_to_rendered_bounds_with_safety_margin() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
     let first = renderer
@@ -1673,6 +1763,20 @@ fn renderer_windows_text_format_cache_reports_hits_for_same_bucket_new_line_visu
     assert!(first_frame.diagnostics().text_format_cache_misses >= 1);
     assert!(second_frame.diagnostics().line_cache_misses >= 1);
     assert!(second_frame.diagnostics().text_format_cache_hits >= 1);
+}
+
+#[cfg(windows)]
+#[test]
+fn renderer_windows_draws_general_text_with_explicit_non_default_locale() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let frame = renderer
+        .render_blocks(vec![
+            CaptionBlock::new("fr", "bonjour tout le monde").with_primary_language("fr-CA")
+        ])
+        .unwrap();
+
+    assert!(!frame.is_fully_transparent());
+    assert_eq!(frame.diagnostics().heuristic_layout_fallback_count, 0);
 }
 
 #[cfg(windows)]

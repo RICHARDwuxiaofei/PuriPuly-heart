@@ -8,7 +8,7 @@ use windows::Win32::Graphics::DirectWrite::IDWriteTextFormat;
 
 #[cfg(windows)]
 use super::font_resolver::TextStyleKey;
-use super::types::{BlockBounds, LayoutCacheKey, LineRole, VisualBounds};
+use super::types::{BlockBounds, LayoutCacheKey, LineRole, TextStyleDescriptor, VisualBounds};
 #[cfg(windows)]
 use super::types::{BlockCacheKey, LineCacheKey};
 
@@ -82,6 +82,7 @@ pub(crate) struct CachedLineLayoutTemplate {
     pub text: String,
     pub role: LineRole,
     pub style_key: super::font_resolver::TextStyleKey,
+    pub style: TextStyleDescriptor,
     pub width_px: f32,
     pub origin_x: f32,
     pub origin_y: f32,
@@ -182,14 +183,27 @@ mod tests {
     };
     use crate::renderer::{
         BlockBounds, BlockCacheKey, BundledFaceId, CaptionBlockVariant, FontLanguageBucket,
-        FontResolver, FontSource, LayoutCacheKey, LineCacheKey, LineRole, TextStyleKey,
-        VisualBounds,
+        FontResolver, FontSource, LayoutCacheKey, LineCacheKey, LineRole, TextStyleDescriptor,
+        TextStyleKey, VisualBounds,
     };
 
     fn style_key(language: &str) -> TextStyleKey {
         FontResolver::with_bundle_available()
             .resolve(Some(language), "漢字")
             .style_key()
+    }
+
+    fn style_descriptor(language: &str) -> TextStyleDescriptor {
+        let style = FontResolver::with_bundle_available().resolve(Some(language), "漢字");
+        let style_key = style.style_key();
+        TextStyleDescriptor::from_parts(
+            style.family_name,
+            style.weight,
+            style.locale,
+            style.source,
+            style.bucket,
+            style_key,
+        )
     }
 
     fn layout_key(seed: usize) -> LayoutCacheKey {
@@ -228,6 +242,7 @@ mod tests {
                 text: format!("primary {seed}"),
                 role: LineRole::Primary,
                 style_key: style_key("ko"),
+                style: style_descriptor("ko"),
                 width_px: 100.0,
                 origin_x: 10.0,
                 origin_y: 20.0,

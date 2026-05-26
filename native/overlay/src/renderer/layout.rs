@@ -2,15 +2,15 @@
 use super::cache::LayoutCache;
 use super::cache::{CachedBlockLayoutTemplate, CachedLineLayoutTemplate};
 #[cfg(windows)]
-use super::font_resolver::{FontLanguageBucket, ResolvedFontStyle};
+use super::font_resolver::{
+    FontLanguageBucket, FontSource, FontWeight, ResolvedFontStyle, WindowsBundledFontCollection,
+};
 use super::font_resolver::{FontResolver, TextStyleKey};
-#[cfg(windows)]
-use super::font_resolver::{FontSource, FontWeight};
 use super::types::{
     BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionLayoutResult, CaptionPresentation,
     LayoutCacheKey, LineRole, ResolvedBlockLayout, ResolvedFrameLayout, ResolvedLineLayout,
-    VisualBounds, DEFAULT_AVERAGE_GLYPH_ADVANCE_PX, DEFAULT_BLOCK_SPACING_PX, DEFAULT_FONT_SIZE_PX,
-    DEFAULT_HORIZONTAL_PADDING_PX, DEFAULT_PRIMARY_LINE_HEIGHT_PX,
+    TextStyleDescriptor, VisualBounds, DEFAULT_AVERAGE_GLYPH_ADVANCE_PX, DEFAULT_BLOCK_SPACING_PX,
+    DEFAULT_FONT_SIZE_PX, DEFAULT_HORIZONTAL_PADDING_PX, DEFAULT_PRIMARY_LINE_HEIGHT_PX,
     DEFAULT_SECONDARY_LINE_HEIGHT_PX, DEFAULT_STRIP_HORIZONTAL_PADDING_PX,
     DEFAULT_STRIP_VERTICAL_PADDING_PX, DEFAULT_SURFACE_HEIGHT_PX, DEFAULT_SURFACE_WIDTH_PX,
     DEFAULT_VERTICAL_PADDING_PX, PRIMARY_SECONDARY_GAP_PX, SECONDARY_FONT_SCALE,
@@ -151,14 +151,23 @@ impl CaptionLayoutPolicy {
         surface_width_px: u32,
         presentation: &CaptionPresentation,
     ) -> LayoutCacheKey {
-        let primary_style_key = fallback_style_key_for_text(&block.primary_text);
-        let secondary_style_key = fallback_style_key_for_text(&block.secondary_text);
+        let resolver = FontResolver::default();
+        let primary_style = style_descriptor_for_text(
+            &resolver,
+            block.primary_language.as_deref(),
+            &block.primary_text,
+        );
+        let secondary_style = style_descriptor_for_text(
+            &resolver,
+            block.secondary_language.as_deref(),
+            &block.secondary_text,
+        );
         layout_cache_key_for_block(
             block,
             self.content_width_px(surface_width_px),
             presentation.text_scale.max(0.1),
-            primary_style_key,
-            secondary_style_key,
+            primary_style.style_key,
+            secondary_style.style_key,
         )
     }
 
@@ -170,8 +179,13 @@ impl CaptionLayoutPolicy {
         presentation: &CaptionPresentation,
         engine: &DirectWriteLayoutEngine,
     ) -> LayoutCacheKey {
-        let primary_style_key = engine.line_style_key(self, &block.primary_text);
-        let secondary_style_key = engine.line_style_key(self, &block.secondary_text);
+        let primary_style_key =
+            engine.line_style_key(self, block.primary_language.as_deref(), &block.primary_text);
+        let secondary_style_key = engine.line_style_key(
+            self,
+            block.secondary_language.as_deref(),
+            &block.secondary_text,
+        );
         layout_cache_key_for_block(
             block,
             self.content_width_px(surface_width_px),
@@ -208,18 +222,33 @@ impl CaptionLayoutPolicy {
         let strip_left_px = self.horizontal_padding_px as f32;
         let mut top_px = self.vertical_padding_px as f32;
         let mut resolved_blocks = Vec::with_capacity(blocks.len());
+        let resolver = FontResolver::default();
 
         for block in blocks {
-            let primary_style_key = fallback_style_key_for_text(&block.primary_text);
-            let secondary_style_key = fallback_style_key_for_text(&block.secondary_text);
+            let primary_style = style_descriptor_for_text(
+                &resolver,
+                block.primary_language.as_deref(),
+                &block.primary_text,
+            );
+            let secondary_style = style_descriptor_for_text(
+                &resolver,
+                block.secondary_language.as_deref(),
+                &block.secondary_text,
+            );
             let layout_cache_key = layout_cache_key_for_block(
                 &block,
                 content_width_px,
                 text_scale,
-                primary_style_key,
-                secondary_style_key,
+                primary_style.style_key,
+                secondary_style.style_key,
             );
-            let template = self.build_fallback_block_template(&block, content_width_px, text_scale);
+            let template = self.build_fallback_block_template(
+                &block,
+                content_width_px,
+                text_scale,
+                primary_style,
+                secondary_style,
+            );
             let stable_block_height_px = template.bounds.bottom_px - template.bounds.top_px;
             let block_top_px = if block.slot_assigned {
                 block.slot_top_px
@@ -289,6 +318,8 @@ impl CaptionLayoutPolicy {
         block: &CaptionBlock,
         content_width_px: f32,
         text_scale: f32,
+        primary_style: TextStyleDescriptor,
+        secondary_style: TextStyleDescriptor,
     ) -> CachedBlockLayoutTemplate {
         let content_width_px = content_width_px.max(1.0);
         let secondary_row_reserved = self.reserves_secondary_row(block);
@@ -314,7 +345,6 @@ impl CaptionLayoutPolicy {
             .enumerate()
             .map(|(index, text)| {
                 let width_px = measure_text_width(&text, primary_advance_px);
-                let style_key = fallback_style_key_for_text(&text);
                 let origin_x = self.strip_horizontal_padding_px as f32
                     + ((content_width_px - width_px).max(0.0) * 0.5);
                 let origin_y = vertical_padding_px + index as f32 * primary_line_height_px;
@@ -323,7 +353,8 @@ impl CaptionLayoutPolicy {
                         .translate(origin_x, origin_y),
                     text,
                     role: LineRole::Primary,
-                    style_key,
+                    style_key: primary_style.style_key,
+                    style: primary_style.clone(),
                     width_px,
                     origin_x,
                     origin_y,
@@ -342,7 +373,6 @@ impl CaptionLayoutPolicy {
         };
         let secondary_line = secondary_text.map(|text| {
             let width_px = measure_text_width(&text, primary_advance_px * SECONDARY_FONT_SCALE);
-            let style_key = fallback_style_key_for_text(&text);
             let origin_x = self.strip_horizontal_padding_px as f32
                 + ((content_width_px - width_px).max(0.0) * 0.5);
             let origin_y = vertical_padding_px
@@ -353,7 +383,8 @@ impl CaptionLayoutPolicy {
                     .translate(origin_x, origin_y),
                 text,
                 role: LineRole::Secondary,
-                style_key,
+                style_key: secondary_style.style_key,
+                style: secondary_style,
                 width_px,
                 origin_x,
                 origin_y,
@@ -385,6 +416,8 @@ impl CaptionLayoutPolicy {
         block: &CaptionBlock,
         content_width_px: f32,
         text_scale: f32,
+        primary_style: &DirectWriteResolvedTextStyle,
+        secondary_style: &DirectWriteResolvedTextStyle,
     ) -> Result<CachedBlockLayoutTemplate, windows::core::Error> {
         let secondary_row_reserved = self.reserves_secondary_row(block);
         let primary_budget = self.primary_line_budget(block);
@@ -407,6 +440,7 @@ impl CaptionLayoutPolicy {
 
         let (primary_lines_text, truncated_primary) = engine.wrap_primary_text(
             self,
+            primary_style,
             &block.primary_text,
             content_width_px,
             primary_font_size_px,
@@ -416,8 +450,9 @@ impl CaptionLayoutPolicy {
             .iter()
             .enumerate()
             .map(|(index, text)| {
-                let measured = engine.measure_centered_line(
+                let measured = engine.measure_centered_line_for_resolved_style(
                     self,
+                    primary_style,
                     text,
                     content_width_px,
                     primary_font_size_px,
@@ -428,6 +463,7 @@ impl CaptionLayoutPolicy {
                     text: text.clone(),
                     role: LineRole::Primary,
                     style_key: measured.style_key,
+                    style: measured.style,
                     width_px: measured.width_px,
                     origin_x,
                     origin_y,
@@ -440,6 +476,7 @@ impl CaptionLayoutPolicy {
         let (secondary_line, truncated_secondary) = if block.secondary_enabled {
             let (text, truncated) = engine.ellipsize_secondary_text(
                 self,
+                secondary_style,
                 &block.secondary_text,
                 content_width_px,
                 secondary_font_size_px,
@@ -447,8 +484,9 @@ impl CaptionLayoutPolicy {
             let line = text
                 .as_ref()
                 .map(|text| {
-                    let measured = engine.measure_centered_line(
+                    let measured = engine.measure_centered_line_for_resolved_style(
                         self,
+                        secondary_style,
                         text,
                         content_width_px,
                         secondary_font_size_px,
@@ -461,6 +499,7 @@ impl CaptionLayoutPolicy {
                         text: text.clone(),
                         role: LineRole::Secondary,
                         style_key: measured.style_key,
+                        style: measured.style,
                         width_px: measured.width_px,
                         origin_x,
                         origin_y,
@@ -508,8 +547,18 @@ impl CaptionLayoutPolicy {
         let mut resolved_blocks = Vec::with_capacity(blocks.len());
 
         for block in blocks {
-            let primary_style_key = engine.line_style_key(self, &block.primary_text);
-            let secondary_style_key = engine.line_style_key(self, &block.secondary_text);
+            let primary_style = engine.resolve_text_style(
+                self,
+                block.primary_language.as_deref(),
+                &block.primary_text,
+            );
+            let secondary_style = engine.resolve_text_style(
+                self,
+                block.secondary_language.as_deref(),
+                &block.secondary_text,
+            );
+            let primary_style_key = primary_style.style_key;
+            let secondary_style_key = secondary_style.style_key;
             let layout_cache_key = layout_cache_key_for_block(
                 &block,
                 content_width_px,
@@ -526,12 +575,21 @@ impl CaptionLayoutPolicy {
                         &block,
                         content_width_px,
                         text_scale,
+                        &primary_style,
+                        &secondary_style,
                     )?;
                     cache.insert(layout_cache_key.clone(), template.clone());
                     template
                 }
             } else {
-                self.build_windows_block_template(engine, &block, content_width_px, text_scale)?
+                self.build_windows_block_template(
+                    engine,
+                    &block,
+                    content_width_px,
+                    text_scale,
+                    &primary_style,
+                    &secondary_style,
+                )?
             };
             let stable_block_height_px = template.bounds.bottom_px - template.bounds.top_px;
             let block_top_px = if block.slot_assigned {
@@ -562,9 +620,10 @@ impl CaptionLayoutPolicy {
 }
 
 #[cfg(windows)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct MeasuredLine {
     style_key: TextStyleKey,
+    style: TextStyleDescriptor,
     width_px: f32,
     origin_x_px: f32,
     visual_bounds: VisualBounds,
@@ -576,6 +635,7 @@ struct DirectWriteResolvedTextStyle {
     family_name: String,
     weight: DWRITE_FONT_WEIGHT,
     locale: String,
+    source: FontSource,
     bucket: FontLanguageBucket,
     style_key: TextStyleKey,
     is_style_failure_fallback: bool,
@@ -589,6 +649,7 @@ impl DirectWriteResolvedTextStyle {
             family_name: style.family_name.to_string(),
             weight,
             locale: style.locale,
+            source: style.source,
             bucket: style.bucket,
             style_key,
             is_style_failure_fallback: style.fallback_reason
@@ -596,6 +657,17 @@ impl DirectWriteResolvedTextStyle {
                     super::font_resolver::FontFallbackReason::DirectWriteStyleResolutionFailure,
                 ),
         }
+    }
+
+    fn descriptor(&self) -> TextStyleDescriptor {
+        TextStyleDescriptor::from_parts(
+            self.family_name.clone(),
+            font_weight_from_dwrite_weight(self.weight),
+            self.locale.clone(),
+            self.source,
+            self.bucket,
+            self.style_key,
+        )
     }
 }
 
@@ -605,6 +677,7 @@ pub(crate) struct DirectWriteLayoutEngine {
     system_font_collection: IDWriteFontCollection,
     system_font_fallback: IDWriteFontFallback,
     font_resolver: FontResolver,
+    bundled_font_collection: Option<WindowsBundledFontCollection>,
 }
 
 #[cfg(windows)]
@@ -614,17 +687,24 @@ impl DirectWriteLayoutEngine {
         system_font_collection: &IDWriteFontCollection,
         system_font_fallback: &IDWriteFontFallback,
         font_resolver: FontResolver,
+        bundled_font_collection: Option<WindowsBundledFontCollection>,
     ) -> Self {
         Self {
             factory: factory.clone(),
             system_font_collection: system_font_collection.clone(),
             system_font_fallback: system_font_fallback.clone(),
             font_resolver,
+            bundled_font_collection,
         }
     }
 
-    fn line_style_key(&self, policy: &CaptionLayoutPolicy, text: &str) -> TextStyleKey {
-        self.resolve_text_style(policy, text).style_key
+    fn line_style_key(
+        &self,
+        policy: &CaptionLayoutPolicy,
+        language: Option<&str>,
+        text: &str,
+    ) -> TextStyleKey {
+        self.resolve_text_style(policy, language, text).style_key
     }
 
     #[cfg(test)]
@@ -633,7 +713,7 @@ impl DirectWriteLayoutEngine {
         policy: &CaptionLayoutPolicy,
         text: &str,
     ) -> TextStyleKey {
-        self.resolve_text_style(policy, text).style_key
+        self.resolve_text_style(policy, None, text).style_key
     }
 
     #[cfg(test)]
@@ -651,12 +731,14 @@ impl DirectWriteLayoutEngine {
             font_resolver: FontResolver::with_bundle_unavailable(
                 "test DirectWrite layout engine uses system fallback resources",
             ),
+            bundled_font_collection: None,
         })
     }
 
     fn wrap_primary_text(
         &self,
         policy: &CaptionLayoutPolicy,
+        style: &DirectWriteResolvedTextStyle,
         text: &str,
         max_width_px: f32,
         font_size_px: f32,
@@ -670,7 +752,7 @@ impl DirectWriteLayoutEngine {
 
         while !remaining.is_empty() && lines.len() < budget {
             let line =
-                self.longest_fitting_prefix(policy, remaining, max_width_px, font_size_px)?;
+                self.longest_fitting_prefix(policy, style, remaining, max_width_px, font_size_px)?;
             if line.is_empty() {
                 break;
             }
@@ -686,6 +768,7 @@ impl DirectWriteLayoutEngine {
     fn ellipsize_secondary_text(
         &self,
         policy: &CaptionLayoutPolicy,
+        style: &DirectWriteResolvedTextStyle,
         text: &str,
         max_width_px: f32,
         font_size_px: f32,
@@ -695,14 +778,20 @@ impl DirectWriteLayoutEngine {
             return Ok((None, false));
         }
         if self
-            .measure_centered_line(policy, trimmed, max_width_px, font_size_px)?
+            .measure_centered_line_for_resolved_style(
+                policy,
+                style,
+                trimmed,
+                max_width_px,
+                font_size_px,
+            )?
             .width_px
             <= max_width_px
         {
             return Ok((Some(trimmed.to_string()), false));
         }
         Ok((
-            Some(self.ellipsize_text(policy, trimmed, max_width_px, font_size_px)?),
+            Some(self.ellipsize_text(policy, style, trimmed, max_width_px, font_size_px)?),
             true,
         ))
     }
@@ -710,6 +799,7 @@ impl DirectWriteLayoutEngine {
     fn ellipsize_text(
         &self,
         policy: &CaptionLayoutPolicy,
+        style: &DirectWriteResolvedTextStyle,
         text: &str,
         max_width_px: f32,
         font_size_px: f32,
@@ -717,7 +807,13 @@ impl DirectWriteLayoutEngine {
         let trimmed = text.trim();
         let ellipsis = "...";
         let ellipsis_width = self
-            .measure_centered_line(policy, ellipsis, max_width_px, font_size_px)?
+            .measure_centered_line_for_resolved_style(
+                policy,
+                style,
+                ellipsis,
+                max_width_px,
+                font_size_px,
+            )?
             .width_px;
         if ellipsis_width >= max_width_px {
             return Ok(ellipsis.to_string());
@@ -734,7 +830,13 @@ impl DirectWriteLayoutEngine {
                 None => format!("{trimmed}{ellipsis}"),
             };
             let fits = self
-                .measure_centered_line(policy, &candidate, max_width_px, font_size_px)?
+                .measure_centered_line_for_resolved_style(
+                    policy,
+                    style,
+                    &candidate,
+                    max_width_px,
+                    font_size_px,
+                )?
                 .width_px
                 <= max_width_px;
             if fits {
@@ -757,6 +859,7 @@ impl DirectWriteLayoutEngine {
     fn longest_fitting_prefix<'a>(
         &self,
         policy: &CaptionLayoutPolicy,
+        style: &DirectWriteResolvedTextStyle,
         text: &'a str,
         max_width_px: f32,
         font_size_px: f32,
@@ -767,7 +870,13 @@ impl DirectWriteLayoutEngine {
         }
 
         if self
-            .measure_centered_line(policy, trimmed, max_width_px, font_size_px)?
+            .measure_centered_line_for_resolved_style(
+                policy,
+                style,
+                trimmed,
+                max_width_px,
+                font_size_px,
+            )?
             .width_px
             <= max_width_px
         {
@@ -782,7 +891,13 @@ impl DirectWriteLayoutEngine {
                 continue;
             }
             if self
-                .measure_centered_line(policy, candidate, max_width_px, font_size_px)?
+                .measure_centered_line_for_resolved_style(
+                    policy,
+                    style,
+                    candidate,
+                    max_width_px,
+                    font_size_px,
+                )?
                 .width_px
                 <= max_width_px
             {
@@ -797,7 +912,13 @@ impl DirectWriteLayoutEngine {
                 let end = index + ch.len_utf8();
                 let candidate = &trimmed[..end];
                 if self
-                    .measure_centered_line(policy, candidate, max_width_px, font_size_px)?
+                    .measure_centered_line_for_resolved_style(
+                        policy,
+                        style,
+                        candidate,
+                        max_width_px,
+                        font_size_px,
+                    )?
                     .width_px
                     > max_width_px
                 {
@@ -821,15 +942,17 @@ impl DirectWriteLayoutEngine {
         }
     }
 
-    fn measure_centered_line(
+    fn measure_centered_line_for_resolved_style(
         &self,
         policy: &CaptionLayoutPolicy,
+        resolved_style: &DirectWriteResolvedTextStyle,
         text: &str,
         content_width_px: f32,
         font_size_px: f32,
     ) -> Result<MeasuredLine, windows::core::Error> {
-        let (text_layout, style_key) = self.create_text_layout(
+        let (text_layout, style) = self.create_text_layout_for_resolved_style(
             policy,
+            resolved_style,
             text,
             font_size_px,
             content_width_px,
@@ -843,7 +966,8 @@ impl DirectWriteLayoutEngine {
         }
         let overhang = unsafe { text_layout.GetOverhangMetrics()? };
         Ok(MeasuredLine {
-            style_key,
+            style_key: style.style_key,
+            style,
             width_px: metrics.width,
             origin_x_px: metrics.left,
             visual_bounds: VisualBounds::new(
@@ -855,47 +979,24 @@ impl DirectWriteLayoutEngine {
         })
     }
 
-    fn create_text_layout(
+    fn create_text_layout_for_resolved_style(
         &self,
-        policy: &CaptionLayoutPolicy,
+        _policy: &CaptionLayoutPolicy,
+        resolved_style: &DirectWriteResolvedTextStyle,
         text: &str,
         font_size_px: f32,
         max_width_px: f32,
         max_height_px: f32,
         word_wrapping: windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING,
         trimming_sign: Option<&IDWriteInlineObject>,
-    ) -> Result<(IDWriteTextLayout, TextStyleKey), windows::core::Error> {
-        let (text_format, style_key) =
-            self.create_text_format(policy, text, font_size_px, word_wrapping, trimming_sign)?;
-        let utf16: Vec<u16> = text.encode_utf16().collect();
-        let text_layout = unsafe {
-            self.factory
-                .CreateTextLayout(&utf16, &text_format, max_width_px, max_height_px)?
-        };
-        if let Ok(text_layout_2) = text_layout.cast::<IDWriteTextLayout2>() {
-            unsafe {
-                text_layout_2.SetFontFallback(&self.system_font_fallback)?;
-            }
-        }
-        Ok((text_layout, style_key))
-    }
-
-    fn create_text_format(
-        &self,
-        policy: &CaptionLayoutPolicy,
-        text: &str,
-        font_size_px: f32,
-        word_wrapping: windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING,
-        trimming_sign: Option<&IDWriteInlineObject>,
-    ) -> Result<(IDWriteTextFormat, TextStyleKey), windows::core::Error> {
-        let resolved_style = self.resolve_text_style(policy, text);
-        match self.create_text_format_for_resolved_style(
-            &resolved_style,
+    ) -> Result<(IDWriteTextLayout, TextStyleDescriptor), windows::core::Error> {
+        let (text_format, style) = match self.create_text_format_for_resolved_style(
+            resolved_style,
             font_size_px,
             word_wrapping,
             trimming_sign,
         ) {
-            Ok(text_format) => Ok((text_format, resolved_style.style_key)),
+            Ok(text_format) => (text_format, resolved_style.descriptor()),
             Err(error) if !resolved_style.is_style_failure_fallback => {
                 eprintln!(
                     "[overlay][WARN] directwrite_style_resolution_failure family={} locale={} error={}",
@@ -907,16 +1008,27 @@ impl DirectWriteLayoutEngine {
                 );
                 let fallback_style =
                     DirectWriteResolvedTextStyle::from_style(fallback, DWRITE_FONT_WEIGHT_NORMAL);
-                self.create_text_format_for_resolved_style(
+                let text_format = self.create_text_format_for_resolved_style(
                     &fallback_style,
                     font_size_px,
                     word_wrapping,
                     trimming_sign,
-                )
-                .map(|text_format| (text_format, fallback_style.style_key))
+                )?;
+                (text_format, fallback_style.descriptor())
             }
-            Err(error) => Err(error),
+            Err(error) => return Err(error),
+        };
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        let text_layout = unsafe {
+            self.factory
+                .CreateTextLayout(&utf16, &text_format, max_width_px, max_height_px)?
+        };
+        if let Ok(text_layout_2) = text_layout.cast::<IDWriteTextLayout2>() {
+            unsafe {
+                text_layout_2.SetFontFallback(&self.system_font_fallback)?;
+            }
         }
+        Ok((text_layout, style))
     }
 
     fn create_text_format_for_resolved_style(
@@ -926,12 +1038,34 @@ impl DirectWriteLayoutEngine {
         word_wrapping: windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING,
         trimming_sign: Option<&IDWriteInlineObject>,
     ) -> Result<IDWriteTextFormat, windows::core::Error> {
+        if resolved_style.source == FontSource::BundledNotoCjkMedium
+            && self.bundled_font_collection.is_none()
+        {
+            let fallback = FontResolver::style_resolution_failure_fallback_for_bucket_locale(
+                resolved_style.bucket,
+                resolved_style.locale.clone(),
+            );
+            let fallback_style =
+                DirectWriteResolvedTextStyle::from_style(fallback, DWRITE_FONT_WEIGHT_NORMAL);
+            return self.create_text_format_for_resolved_style(
+                &fallback_style,
+                font_size_px,
+                word_wrapping,
+                trimming_sign,
+            );
+        }
         let locale = utf16_null(&resolved_style.locale);
         let face_name = utf16_null(&resolved_style.family_name);
         let text_format = unsafe {
             self.factory.CreateTextFormat(
                 PCWSTR::from_raw(face_name.as_ptr()),
-                None,
+                if resolved_style.source == FontSource::BundledNotoCjkMedium {
+                    self.bundled_font_collection
+                        .as_ref()
+                        .map(|collection| collection.collection())
+                } else {
+                    None
+                },
                 resolved_style.weight,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
@@ -962,11 +1096,18 @@ impl DirectWriteLayoutEngine {
     fn resolve_text_style(
         &self,
         policy: &CaptionLayoutPolicy,
+        language: Option<&str>,
         text: &str,
     ) -> DirectWriteResolvedTextStyle {
-        let requested_style = self
-            .font_resolver
-            .resolve_order6_layout_draw_safe(None, text);
+        let requested_style = self.font_resolver.resolve(language, text);
+        if requested_style.source == FontSource::BundledNotoCjkMedium
+            && self.bundled_font_collection.is_some()
+        {
+            return DirectWriteResolvedTextStyle::from_style(
+                requested_style,
+                DWRITE_FONT_WEIGHT_MEDIUM,
+            );
+        }
         for family_name in requested_style
             .system_fallback_families()
             .iter()
@@ -1008,6 +1149,7 @@ impl DirectWriteLayoutEngine {
                 family_name: family_name.to_string(),
                 weight,
                 locale: requested_style.locale,
+                source: FontSource::SystemFont,
                 bucket: requested_style.bucket,
                 style_key,
                 is_style_failure_fallback: false,
@@ -1076,10 +1218,21 @@ fn layout_cache_key_for_block(
     }
 }
 
-fn fallback_style_key_for_text(text: &str) -> TextStyleKey {
-    FontResolver::default()
-        .resolve_order6_layout_draw_safe(None, text)
-        .style_key()
+fn style_descriptor_for_text(
+    resolver: &FontResolver,
+    language: Option<&str>,
+    text: &str,
+) -> TextStyleDescriptor {
+    let style = resolver.resolve(language, text);
+    let style_key = style.style_key();
+    TextStyleDescriptor::from_parts(
+        style.family_name,
+        style.weight,
+        style.locale,
+        style.source,
+        style.bucket,
+        style_key,
+    )
 }
 
 fn block_reserves_secondary_row(block: &CaptionBlock) -> bool {
@@ -1144,6 +1297,7 @@ fn materialize_resolved_line_layout(
         text: line.text.clone(),
         role: line.role,
         style_key: line.style_key,
+        style: line.style.clone(),
         width_px: line.width_px,
         origin_x: strip_left_px + line.origin_x,
         origin_y: render_top_px + line.origin_y * render_height_scale,
@@ -1395,8 +1549,26 @@ mod tests {
     use super::{measure_text_width, wrap_text, CaptionLayoutPolicy};
     use crate::renderer::{
         effective_background_alpha, fill_color_for_channel, outline_offsets_px, text_script_bucket,
-        CaptionBlock, CaptionChannel, CaptionPresentation, TextScriptBucket,
+        CaptionBlock, CaptionChannel, CaptionPresentation, FontResolver, TextScriptBucket,
     };
+
+    fn fallback_styles(
+        block: &CaptionBlock,
+    ) -> (super::TextStyleDescriptor, super::TextStyleDescriptor) {
+        let resolver = FontResolver::default();
+        (
+            super::style_descriptor_for_text(
+                &resolver,
+                block.primary_language.as_deref(),
+                &block.primary_text,
+            ),
+            super::style_descriptor_for_text(
+                &resolver,
+                block.secondary_language.as_deref(),
+                &block.secondary_text,
+            ),
+        )
+    }
 
     #[test]
     fn wrap_text_splits_long_words_into_measured_chunks() {
@@ -1419,10 +1591,14 @@ mod tests {
     #[test]
     fn fallback_layout_uses_scaled_average_glyph_advance_for_132px_primary() {
         let policy = CaptionLayoutPolicy::default();
+        let block = CaptionBlock::new("fallback", "aaaaaaaaaaaaaaa");
+        let (primary_style, secondary_style) = fallback_styles(&block);
         let template = policy.build_fallback_block_template(
-            &CaptionBlock::new("fallback", "aaaaaaaaaaaaaaa"),
+            &block,
             699.0,
             1.0,
+            primary_style,
+            secondary_style,
         );
 
         let primary_texts = template
@@ -1440,7 +1616,14 @@ mod tests {
         let policy = CaptionLayoutPolicy::default();
         let block = CaptionBlock::new("peer:translated", "translated peer text")
             .with_secondary_text("source peer text", true);
-        let template = policy.build_fallback_block_template(&block, 3200.0, 1.25);
+        let (primary_style, secondary_style) = fallback_styles(&block);
+        let template = policy.build_fallback_block_template(
+            &block,
+            3200.0,
+            1.25,
+            primary_style,
+            secondary_style,
+        );
         let secondary = template
             .secondary_line
             .as_ref()
