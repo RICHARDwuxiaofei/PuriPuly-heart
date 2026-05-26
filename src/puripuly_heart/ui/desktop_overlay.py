@@ -15,7 +15,7 @@ import time
 import traceback
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future as ConcurrentFuture
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
@@ -92,6 +92,14 @@ _DESKTOP_CAPTION_SECONDARY_MAX_LINES = 1
 _DESKTOP_CAPTION_LINE_HEIGHT = 1.24
 _DESKTOP_CAPTION_PRIMARY_REGION_ALIGNMENT_Y = -0.5
 _DESKTOP_CAPTION_TEXT_STACK_ALIGNMENT_Y = -0.08
+_DESKTOP_CAPTION_MIN_DYNAMIC_CARD_WIDTH = 320.0
+_DESKTOP_CAPTION_DYNAMIC_WIDTH_SAFETY = 24.0
+_DESKTOP_CAPTION_CJK_WIDTH_EM = 1.0
+_DESKTOP_CAPTION_LATIN_WIDE_WIDTH_EM = 0.62
+_DESKTOP_CAPTION_LATIN_NARROW_WIDTH_EM = 0.42
+_DESKTOP_CAPTION_SPACE_WIDTH_EM = 0.32
+_DESKTOP_CAPTION_PUNCT_WIDTH_EM = 0.38
+_DESKTOP_CAPTION_EMOJI_WIDTH_EM = 1.15
 _DESKTOP_CAPTION_CONTACT_SHADOW_COLOR = "#C0000000"
 _DESKTOP_CAPTION_CONTACT_SHADOW_OFFSET = (0, 1)
 _DESKTOP_CAPTION_CONTACT_SHADOW_BLUR = 1.0
@@ -324,6 +332,8 @@ class DesktopCaptionSlot:
     appearance_seq: int
     lines: tuple[DesktopCaptionLine, ...]
     secondary_enabled: bool
+    card_width: float = 0.0
+    card_text_width: float = 0.0
     active: bool = False
 
 
@@ -449,7 +459,14 @@ def build_desktop_caption_plan(
         primary_font_size=primary_font_size,
         secondary_font_size=secondary_font_size,
     )
-    slots = candidate_slots[:_DESKTOP_CAPTION_MAX_VISIBLE_SLOTS]
+    slots = tuple(
+        _caption_slot_with_dynamic_width(
+            slot,
+            padding_horizontal=preset.padding_horizontal,
+            max_card_width=width,
+        )
+        for slot in candidate_slots[:_DESKTOP_CAPTION_MAX_VISIBLE_SLOTS]
+    )
     lines = tuple(line for slot in slots for line in slot.lines)
 
     full_window_background_visible = interaction_mode == _DESKTOP_INTERACTION_MODE_EDIT
@@ -1177,6 +1194,72 @@ def _caption_line(
     )
 
 
+def _caption_slot_with_dynamic_width(
+    slot: DesktopCaptionSlot,
+    *,
+    padding_horizontal: int,
+    max_card_width: int,
+) -> DesktopCaptionSlot:
+    max_width = max(1.0, float(max_card_width))
+    minimum_width = min(_DESKTOP_CAPTION_MIN_DYNAMIC_CARD_WIDTH, max_width)
+    estimated_text_width = max(
+        (_estimated_caption_line_width(line.text, line.font_size) for line in slot.lines),
+        default=0.0,
+    )
+    estimated_card_width = (
+        estimated_text_width
+        + (float(padding_horizontal) * 2)
+        + _DESKTOP_CAPTION_DYNAMIC_WIDTH_SAFETY
+    )
+    card_width = min(max_width, max(minimum_width, estimated_card_width))
+    card_text_width = max(1.0, card_width - (float(padding_horizontal) * 2))
+    return replace(slot, card_width=card_width, card_text_width=card_text_width)
+
+
+def _caption_card_width_memory_key(slot: DesktopCaptionSlot) -> tuple[str, str, int]:
+    return (slot.block_id, slot.occupant_key, slot.appearance_seq)
+
+
+def _estimated_caption_line_width(text: str, font_size: int) -> float:
+    return sum(_estimated_caption_char_width(char, font_size) for char in text)
+
+
+def _estimated_caption_char_width(char: str, font_size: int) -> float:
+    codepoint = ord(char)
+    if char.isspace():
+        return font_size * _DESKTOP_CAPTION_SPACE_WIDTH_EM
+    if _is_caption_emoji_or_symbol(codepoint):
+        return font_size * _DESKTOP_CAPTION_EMOJI_WIDTH_EM
+    if _is_caption_cjk_or_hangul(codepoint):
+        return font_size * _DESKTOP_CAPTION_CJK_WIDTH_EM
+    if char in ".,;:!?'\"-–—()[]{}·…":
+        return font_size * _DESKTOP_CAPTION_PUNCT_WIDTH_EM
+    if char in "ilI|":
+        return font_size * _DESKTOP_CAPTION_LATIN_NARROW_WIDTH_EM
+    if char.isascii():
+        return font_size * _DESKTOP_CAPTION_LATIN_WIDE_WIDTH_EM
+    return font_size * _DESKTOP_CAPTION_CJK_WIDTH_EM
+
+
+def _is_caption_cjk_or_hangul(codepoint: int) -> bool:
+    return (
+        0x1100 <= codepoint <= 0x11FF
+        or 0x3040 <= codepoint <= 0x30FF
+        or 0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xAC00 <= codepoint <= 0xD7AF
+        or 0xF900 <= codepoint <= 0xFAFF
+    )
+
+
+def _is_caption_emoji_or_symbol(codepoint: int) -> bool:
+    return 0x1F000 <= codepoint <= 0x1FAFF
+
+
+def _desktop_caption_char_is_cjk(char: str) -> bool:
+    return _is_caption_cjk_or_hangul(ord(char))
+
+
 def _desktop_caption_font_family_for_text(text: str) -> str:
     if _desktop_caption_text_contains_cjk(text):
         return _DESKTOP_CAPTION_CJK_FONT_FAMILY
@@ -1184,14 +1267,7 @@ def _desktop_caption_font_family_for_text(text: str) -> str:
 
 
 def _desktop_caption_text_contains_cjk(text: str) -> bool:
-    return any(
-        0x3040 <= ord(char) <= 0x30FF
-        or 0x3400 <= ord(char) <= 0x4DBF
-        or 0x4E00 <= ord(char) <= 0x9FFF
-        or 0xAC00 <= ord(char) <= 0xD7AF
-        or 0xF900 <= ord(char) <= 0xFAFF
-        for char in text
-    )
+    return any(_desktop_caption_char_is_cjk(char) for char in text)
 
 
 def _select_visible_caption_lines(
@@ -1275,6 +1351,12 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
 
 
 def _build_flet_caption_slot(ft: Any, plan: DesktopCaptionPlan, slot: DesktopCaptionSlot) -> Any:
+    if plan.full_window_background_visible:
+        card_text_width = plan.text_width
+        card_width = plan.window_width
+    else:
+        card_text_width = slot.card_text_width or plan.text_width
+        card_width = slot.card_width or plan.window_width
     slot_lines = _slot_lines_with_reserved_regions(
         slot,
         secondary_font_size=plan.secondary_font_size,
@@ -1286,6 +1368,7 @@ def _build_flet_caption_slot(ft: Any, plan: DesktopCaptionPlan, slot: DesktopCap
             ft,
             plan,
             line,
+            text_width=card_text_width,
             center_primary_region=not has_secondary_region,
         )
         for line in slot_lines
@@ -1299,7 +1382,7 @@ def _build_flet_caption_slot(ft: Any, plan: DesktopCaptionPlan, slot: DesktopCap
     )
     text_layer = ft.Container(
         content=column,
-        width=plan.text_width,
+        width=card_text_width,
         bgcolor=ft.Colors.TRANSPARENT,
         alignment=(
             ft.Alignment(0, _DESKTOP_CAPTION_TEXT_STACK_ALIGNMENT_Y)
@@ -1307,9 +1390,9 @@ def _build_flet_caption_slot(ft: Any, plan: DesktopCaptionPlan, slot: DesktopCap
             else ft.alignment.center
         ),
     )
-    return ft.Container(
+    inner_card = ft.Container(
         content=text_layer,
-        width=plan.window_width,
+        width=card_width,
         height=plan.slot_height,
         bgcolor=(
             ft.Colors.TRANSPARENT if plan.full_window_background_visible else plan.background_color
@@ -1321,6 +1404,13 @@ def _build_flet_caption_slot(ft: Any, plan: DesktopCaptionPlan, slot: DesktopCap
         ),
         alignment=ft.alignment.center,
     )
+    return ft.Container(
+        content=inner_card,
+        width=plan.window_width,
+        height=plan.slot_height,
+        bgcolor=ft.Colors.TRANSPARENT,
+        alignment=ft.alignment.center,
+    )
 
 
 def _build_flet_caption_line(
@@ -1328,12 +1418,13 @@ def _build_flet_caption_line(
     plan: DesktopCaptionPlan,
     line: DesktopCaptionLine,
     *,
+    text_width: float,
     center_primary_region: bool = False,
 ) -> Any:
     height = plan.primary_region_height if line.slot == "primary" else plan.secondary_region_height
     return ft.Container(
-        content=_build_flet_text(ft, plan, line),
-        width=plan.text_width,
+        content=_build_flet_text(ft, line, text_width),
+        width=text_width,
         height=height,
         bgcolor=ft.Colors.TRANSPARENT,
         alignment=_caption_line_region_alignment(
@@ -1399,12 +1490,12 @@ def _slot_should_reserve_empty_secondary_region(
 
 def _build_flet_text(
     ft: Any,
-    plan: DesktopCaptionPlan,
     line: DesktopCaptionLine,
+    text_width: float,
 ) -> Any:
     return ft.Text(
         value=line.text,
-        width=plan.text_width,
+        width=text_width,
         text_align=ft.TextAlign.CENTER,
         font_family=line.font_family,
         size=line.font_size,
@@ -1620,6 +1711,7 @@ class FletDesktopRendererWindow:
         self._scheduled_callback_tasks: set[asyncio.Future[Any] | ConcurrentFuture[Any]] = set()
         self._programmatic_bounds_echo_suppression: _ProgrammaticBoundsEchoSuppression | None = None
         self._last_reported_bounds: tuple[float, float, float, float] | None = None
+        self._caption_card_width_floor_by_block: dict[tuple[str, str, int], float] = {}
 
     def prime_startup_runtime_controls(
         self,
@@ -1877,6 +1969,7 @@ class FletDesktopRendererWindow:
             interaction_mode=self._interaction_mode,
             locale=self._locale,
         )
+        plan = self._plan_with_grow_only_caption_card_widths(plan)
         caption_surface = build_desktop_caption_surface(plan)
         if self._interaction_mode == _DESKTOP_INTERACTION_MODE_EDIT:
             content_kind = "drag_area"
@@ -2175,13 +2268,48 @@ class FletDesktopRendererWindow:
 
     def _current_preview_caption_plan(self) -> DesktopCaptionPlan:
         preset = self._preview_selected_size_preset()
-        return build_desktop_caption_plan(
+        plan = build_desktop_caption_plan(
             self._preview_selected_fixture().snapshot,
             window_width=preset.window_width,
             window_height=preset.window_height,
             visual_state=self._preview_visual_state(),
             interaction_mode=_DESKTOP_INTERACTION_MODE_PASS_THROUGH,
             locale=self._locale,
+        )
+        return self._plan_with_grow_only_caption_card_widths(plan)
+
+    def _plan_with_grow_only_caption_card_widths(
+        self,
+        plan: DesktopCaptionPlan,
+    ) -> DesktopCaptionPlan:
+        if not plan.slots:
+            self._caption_card_width_floor_by_block.clear()
+            return plan
+        if plan.full_window_background_visible:
+            return plan
+
+        active_keys = {_caption_card_width_memory_key(slot) for slot in plan.slots}
+        for key in tuple(self._caption_card_width_floor_by_block):
+            if key not in active_keys:
+                del self._caption_card_width_floor_by_block[key]
+
+        grown_slots: list[DesktopCaptionSlot] = []
+        for slot in plan.slots:
+            key = _caption_card_width_memory_key(slot)
+            previous_width = self._caption_card_width_floor_by_block.get(key, 0.0)
+            card_width = _clamp(max(slot.card_width, previous_width), 1.0, float(plan.window_width))
+            self._caption_card_width_floor_by_block[key] = card_width
+            grown_slots.append(
+                replace(
+                    slot,
+                    card_width=card_width,
+                    card_text_width=max(1.0, card_width - (plan.padding_horizontal * 2)),
+                )
+            )
+        return replace(
+            plan,
+            slots=tuple(grown_slots),
+            lines=tuple(line for slot in grown_slots for line in slot.lines),
         )
 
     def _preview_visual_state(self) -> DesktopCaptionVisualState:
