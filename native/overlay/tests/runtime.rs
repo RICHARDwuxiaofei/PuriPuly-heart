@@ -81,6 +81,8 @@ fn block(
         primary_text: primary_text.to_string(),
         secondary_text: secondary_text.to_string(),
         secondary_enabled,
+        primary_language: None,
+        secondary_language: None,
         update_id: None,
         origin_wall_clock_ms: None,
         session_scope: None,
@@ -105,6 +107,8 @@ fn slot_block(
         primary_text: primary_text.to_string(),
         secondary_text: secondary_text.to_string(),
         secondary_enabled,
+        primary_language: None,
+        secondary_language: None,
         update_id: None,
         origin_wall_clock_ms: None,
         session_scope: None,
@@ -121,6 +125,8 @@ fn active_self_block(id: &str, primary_text: &str) -> OverlayPresentationBlock {
         primary_text: primary_text.to_string(),
         secondary_text: String::new(),
         secondary_enabled: true,
+        primary_language: None,
+        secondary_language: None,
         update_id: None,
         origin_wall_clock_ms: None,
         session_scope: None,
@@ -352,6 +358,11 @@ fn runtime_accepts_app_version_mismatch_when_contract_version_matches() {
     let result = validate_manifest(&manifest);
 
     assert!(result.is_ok());
+}
+
+#[test]
+fn runtime_expected_contract_version_includes_language_metadata_boundary() {
+    assert_eq!(EXPECTED_CONTRACT_VERSION, 6);
 }
 
 #[test]
@@ -638,6 +649,8 @@ fn runtime_keeps_active_self_and_finalized_rows_visible_within_two_slot_cap() {
                 primary_text: "speaking".into(),
                 secondary_text: String::new(),
                 secondary_enabled: true,
+                primary_language: None,
+                secondary_language: None,
                 update_id: None,
                 origin_wall_clock_ms: None,
                 session_scope: None,
@@ -831,6 +844,8 @@ async fn runtime_submits_same_peer_refresh_target_when_session_scope_nonce_chang
         primary_text: "translated peer line".into(),
         secondary_text: "source peer line".into(),
         secondary_enabled: true,
+        primary_language: None,
+        secondary_language: None,
         update_id: Some("peer-update-1".into()),
         origin_wall_clock_ms: None,
         session_scope: Some("peer_presentation_refresh=1".into()),
