@@ -389,26 +389,173 @@ def test_desktop_overlay_visual_config_uses_preset_tokens_and_no_outline_text() 
     assert isinstance(surface.content, ft.Stack)
     assert len(surface.content.controls) == 1
     slot_column = surface.content.controls[0]
-    slot_card = slot_column.controls[0]
-    assert slot_card.bgcolor == "#61000000"
-    assert slot_card.border_radius == 16
-    assert slot_card.padding.left == 22
-    assert slot_card.padding.top == 10
-    text_layer = slot_card.content
+    outer_slot = slot_column.controls[0]
+    inner_card = outer_slot.content
+    assert outer_slot.bgcolor == ft.Colors.TRANSPARENT
+    assert inner_card.bgcolor == "#61000000"
+    assert inner_card.border_radius == 16
+    assert inner_card.padding.left == 22
+    assert inner_card.padding.top == 10
+    text_layer = inner_card.content
     assert text_layer.bgcolor == ft.Colors.TRANSPARENT
-    assert text_layer.width == 1300
+    assert text_layer.width == pytest.approx(plan.slots[0].card_text_width)
     column = text_layer.content
     assert column.scroll is None
     assert all(isinstance(control.content, ft.Text) for control in column.controls)
     assert not any(
         getattr(control, "bgcolor", None) in {"#C3CEDA", "#D2A24F"}
-        for control in _walk_control_tree(slot_card)
+        for control in _walk_control_tree(inner_card)
     )
     first_text = column.controls[0].content
     assert first_text.color == "#FFD700"
     assert first_text.text_align == ft.TextAlign.CENTER
     assert first_text.overflow == ft.TextOverflow.ELLIPSIS
+    assert first_text.style.height == pytest.approx(1.24)
     assert first_text.style.foreground is None
+
+
+def test_desktop_overlay_locked_slot_uses_dynamic_inner_card_width_for_short_text() -> None:
+    snapshot = OverlayPresentationSnapshot(
+        blocks=[
+            _block(
+                "short-peer",
+                channel="peer",
+                block_variant="finalized",
+                appearance_seq=1,
+                primary_text="응",
+            )
+        ]
+    )
+
+    plan = desktop_overlay.build_desktop_caption_plan(
+        snapshot,
+        window_width=1344,
+        window_height=336,
+        visual_state=desktop_overlay.DesktopCaptionVisualState(background_alpha=0.5),
+        interaction_mode="pass_through",
+    )
+
+    slot = plan.slots[0]
+    assert slot.card_width < plan.window_width
+    assert slot.card_width == pytest.approx(320.0)
+    assert slot.card_text_width == pytest.approx(slot.card_width - (plan.padding_horizontal * 2))
+
+    surface = desktop_overlay.build_desktop_caption_surface(plan)
+    slot_column = surface.content.controls[0]
+    outer_slot = slot_column.controls[0]
+    assert outer_slot.width == 1344
+    assert outer_slot.height == pytest.approx(plan.slot_height)
+    assert outer_slot.bgcolor == ft.Colors.TRANSPARENT
+
+    inner_card = outer_slot.content
+    assert inner_card.width == pytest.approx(slot.card_width)
+    assert inner_card.bgcolor == "#80000000"
+    assert inner_card.border_radius == 16
+    assert inner_card.padding.left == 22
+    assert inner_card.padding.top == 10
+
+    text_layer = inner_card.content
+    assert text_layer.width == pytest.approx(slot.card_text_width)
+    first_line_region = text_layer.content.controls[0]
+    assert first_line_region.width == pytest.approx(slot.card_text_width)
+    assert first_line_region.content.width == pytest.approx(slot.card_text_width)
+
+
+def test_desktop_overlay_modest_latin_width_estimate_keeps_medium_caption_tight() -> None:
+    snapshot = OverlayPresentationSnapshot(
+        blocks=[
+            _block(
+                "latin-peer",
+                channel="peer",
+                block_variant="finalized",
+                appearance_seq=1,
+                primary_text="talk like real friends",
+            )
+        ]
+    )
+
+    plan = desktop_overlay.build_desktop_caption_plan(
+        snapshot,
+        window_width=1344,
+        window_height=336,
+        interaction_mode="pass_through",
+    )
+
+    slot = plan.slots[0]
+    assert 520.0 <= slot.card_width <= 580.0
+    assert slot.card_text_width == pytest.approx(slot.card_width - (plan.padding_horizontal * 2))
+
+
+def test_desktop_overlay_edit_mode_caption_text_keeps_full_preset_width() -> None:
+    snapshot = OverlayPresentationSnapshot(
+        blocks=[
+            _block(
+                "edit-peer",
+                channel="peer",
+                block_variant="finalized",
+                appearance_seq=1,
+                primary_text="응",
+            )
+        ]
+    )
+    edit_plan = desktop_overlay.build_desktop_caption_plan(
+        snapshot,
+        window_width=1344,
+        window_height=336,
+        interaction_mode="edit",
+    )
+
+    edit_surface = desktop_overlay.build_desktop_caption_surface(edit_plan)
+    full_background = edit_surface.content.controls[0]
+    slot_column = edit_surface.content.controls[-1]
+    outer_slot = slot_column.controls[0]
+    inner_card = outer_slot.content
+    text_layer = inner_card.content
+
+    assert full_background.bgcolor == edit_plan.background_color
+    assert outer_slot.width == edit_plan.window_width
+    assert outer_slot.bgcolor == ft.Colors.TRANSPARENT
+    assert inner_card.width == edit_plan.window_width
+    assert inner_card.bgcolor == ft.Colors.TRANSPARENT
+    assert text_layer.width == edit_plan.text_width
+
+
+def test_desktop_overlay_dynamic_inner_card_width_clamps_to_narrow_window() -> None:
+    snapshot = OverlayPresentationSnapshot(
+        blocks=[
+            _block(
+                "narrow-peer",
+                channel="peer",
+                block_variant="finalized",
+                appearance_seq=1,
+                primary_text="narrow window caption",
+            )
+        ]
+    )
+
+    plan = desktop_overlay.build_desktop_caption_plan(
+        snapshot,
+        window_width=240,
+        window_height=160,
+        interaction_mode="pass_through",
+    )
+
+    slot = plan.slots[0]
+    assert slot.card_width == pytest.approx(plan.window_width)
+    assert slot.card_text_width == pytest.approx(
+        max(1.0, plan.window_width - (plan.padding_horizontal * 2))
+    )
+
+    surface = desktop_overlay.build_desktop_caption_surface(plan)
+    outer_slot = surface.content.controls[0].controls[0]
+    inner_card = outer_slot.content
+    text_layer = inner_card.content
+    first_line_region = text_layer.content.controls[0]
+    assert outer_slot.width == plan.window_width
+    assert outer_slot.bgcolor == ft.Colors.TRANSPARENT
+    assert inner_card.width == pytest.approx(plan.window_width)
+    assert text_layer.width == pytest.approx(slot.card_text_width)
+    assert first_line_region.width == pytest.approx(slot.card_text_width)
 
 
 def test_desktop_overlay_caption_text_uses_layered_shadow_without_stroke() -> None:
@@ -429,8 +576,10 @@ def test_desktop_overlay_caption_text_uses_layered_shadow_without_stroke() -> No
 
     surface = desktop_overlay.build_desktop_caption_surface(plan)
     slot_column = surface.content.controls[0]
-    slot_card = slot_column.controls[0]
-    text_column = slot_card.content.content
+    outer_slot = slot_column.controls[0]
+    inner_card = outer_slot.content
+    text_layer = inner_card.content
+    text_column = text_layer.content
 
     primary_text = text_column.controls[0].content
     secondary_text = text_column.controls[1].content
@@ -506,7 +655,7 @@ def test_desktop_overlay_slots_reserve_stable_line_regions() -> None:
                 channel="self",
                 block_variant="active_self",
                 appearance_seq=1,
-                primary_text="active self source",
+                primary_text="말하는 중인 원문",
                 secondary_text="",
                 secondary_enabled=False,
             ),
@@ -515,7 +664,7 @@ def test_desktop_overlay_slots_reserve_stable_line_regions() -> None:
                 channel="peer",
                 block_variant="finalized",
                 appearance_seq=2,
-                primary_text="translated peer utterance",
+                primary_text="번역된 상대 발화",
                 secondary_text="original peer utterance",
                 secondary_enabled=True,
             ),
@@ -535,7 +684,6 @@ def test_desktop_overlay_slots_reserve_stable_line_regions() -> None:
     assert plan.slot_height == pytest.approx(expected_slot_height)
     assert plan.primary_region_height == pytest.approx(expected_primary_height)
     assert plan.secondary_region_height == pytest.approx(expected_secondary_height)
-    assert all(line.line_height == pytest.approx(1.24) for line in plan.lines)
     assert (
         plan.slot_height
         - (plan.padding_vertical * 2)
@@ -551,25 +699,26 @@ def test_desktop_overlay_slots_reserve_stable_line_regions() -> None:
     first_slot, second_slot = slot_column.controls
     assert first_slot.height == pytest.approx(expected_slot_height)
     assert second_slot.height == pytest.approx(expected_slot_height)
-    assert first_slot.alignment == ft.alignment.center
-    assert first_slot.content.alignment == ft.alignment.center
-    assert second_slot.content.alignment.y == pytest.approx(-0.08)
+    first_inner_card = first_slot.content
+    second_inner_card = second_slot.content
+    first_text_layer = first_inner_card.content
+    second_text_layer = second_inner_card.content
+    assert first_inner_card.alignment == ft.alignment.center
+    assert first_text_layer.alignment == ft.alignment.center
+    assert second_text_layer.alignment.y == pytest.approx(-0.08)
 
-    first_column = first_slot.content.content
+    first_column = first_text_layer.content
     (first_primary_region,) = first_column.controls
     assert first_primary_region.height == pytest.approx(expected_primary_height)
     assert first_primary_region.alignment == ft.alignment.center
-    assert first_primary_region.content.style.height == pytest.approx(1.24)
 
-    second_column = second_slot.content.content
+    second_column = second_text_layer.content
     second_primary_region, second_secondary_region = second_column.controls
     assert second_primary_region.height == pytest.approx(expected_primary_height)
     assert second_primary_region.alignment.y == pytest.approx(-0.5)
     assert second_secondary_region.height == pytest.approx(expected_secondary_height)
     assert second_secondary_region.alignment == ft.alignment.center
     assert second_secondary_region.content.value == "original peer utterance"
-    assert second_primary_region.content.style.height == pytest.approx(1.24)
-    assert second_secondary_region.content.style.height == pytest.approx(1.24)
 
 
 def test_desktop_overlay_secondary_disabled_slots_do_not_reserve_secondary_region() -> None:
@@ -580,7 +729,7 @@ def test_desktop_overlay_secondary_disabled_slots_do_not_reserve_secondary_regio
                 channel="self",
                 block_variant="active_self",
                 appearance_seq=1,
-                primary_text="active self source",
+                primary_text="말하는 중인 원문",
                 secondary_text="disabled translation",
                 secondary_enabled=False,
             )
@@ -594,18 +743,19 @@ def test_desktop_overlay_secondary_disabled_slots_do_not_reserve_secondary_regio
         visual_state=desktop_overlay.DesktopCaptionVisualState(background_alpha=0.38),
     )
 
-    assert [(line.text, line.slot) for line in plan.lines] == [("active self source", "primary")]
+    assert [(line.text, line.slot) for line in plan.lines] == [("말하는 중인 원문", "primary")]
 
     surface = desktop_overlay.build_desktop_caption_surface(plan)
     slot_column = surface.content.controls[0]
-    slot_card = slot_column.controls[0]
-    text_layer = slot_card.content
-    assert slot_card.alignment == ft.alignment.center
+    outer_slot = slot_column.controls[0]
+    inner_card = outer_slot.content
+    text_layer = inner_card.content
+    assert inner_card.alignment == ft.alignment.center
     assert text_layer.alignment == ft.alignment.center
     text_column = text_layer.content
     (primary_region,) = text_column.controls
     assert primary_region.alignment == ft.alignment.center
-    assert primary_region.content.value == "active self source"
+    assert primary_region.content.value == "말하는 중인 원문"
 
 
 def test_desktop_overlay_secondary_enabled_empty_slots_reserve_secondary_region() -> None:
@@ -616,7 +766,7 @@ def test_desktop_overlay_secondary_enabled_empty_slots_reserve_secondary_region(
                 channel="self",
                 block_variant="active_self",
                 appearance_seq=1,
-                primary_text="active self source",
+                primary_text="말하는 중인 원문",
                 secondary_text="",
                 secondary_enabled=True,
             )
@@ -630,18 +780,19 @@ def test_desktop_overlay_secondary_enabled_empty_slots_reserve_secondary_region(
         visual_state=desktop_overlay.DesktopCaptionVisualState(background_alpha=0.38),
     )
 
-    assert [(line.text, line.slot) for line in plan.lines] == [("active self source", "primary")]
+    assert [(line.text, line.slot) for line in plan.lines] == [("말하는 중인 원문", "primary")]
 
     surface = desktop_overlay.build_desktop_caption_surface(plan)
     slot_column = surface.content.controls[0]
-    slot_card = slot_column.controls[0]
-    text_layer = slot_card.content
-    assert slot_card.alignment == ft.alignment.center
+    outer_slot = slot_column.controls[0]
+    inner_card = outer_slot.content
+    text_layer = inner_card.content
+    assert inner_card.alignment == ft.alignment.center
     assert text_layer.alignment.y == pytest.approx(-0.08)
     text_column = text_layer.content
     primary_region, reserved_secondary_region = text_column.controls
     assert primary_region.alignment.y == pytest.approx(-0.5)
-    assert primary_region.content.value == "active self source"
+    assert primary_region.content.value == "말하는 중인 원문"
     assert reserved_secondary_region.height == pytest.approx(plan.secondary_region_height)
     assert reserved_secondary_region.alignment == ft.alignment.center
     assert reserved_secondary_region.content.value == ""
@@ -687,13 +838,14 @@ def test_desktop_overlay_secondary_only_promoted_lines_do_not_reserve_secondary_
     surface = desktop_overlay.build_desktop_caption_surface(plan)
     slot_column = surface.content.controls[0]
     assert len(slot_column.controls) == 2
-    for slot_card, expected_text in zip(
+    for outer_slot, expected_text in zip(
         slot_column.controls,
         ("peer source only", "self translation only"),
         strict=True,
     ):
-        text_layer = slot_card.content
-        assert slot_card.alignment == ft.alignment.center
+        inner_card = outer_slot.content
+        text_layer = inner_card.content
+        assert inner_card.alignment == ft.alignment.center
         assert text_layer.alignment == ft.alignment.center
         text_column = text_layer.content
         (primary_region,) = text_column.controls
@@ -883,8 +1035,11 @@ def test_desktop_overlay_caption_weight_uses_vr_semibold_default() -> None:
 
     surface = desktop_overlay.build_desktop_caption_surface(plan)
     slot_column = surface.content.controls[0]
-    slot_card = slot_column.controls[0]
-    text_control = slot_card.content.content.controls[0].content
+    outer_slot = slot_column.controls[0]
+    inner_card = outer_slot.content
+    text_layer = inner_card.content
+    text_column = text_layer.content
+    text_control = text_column.controls[0].content
     assert text_control.weight == ft.FontWeight.W_600
     assert text_control.style.weight == ft.FontWeight.W_600
 
@@ -1106,6 +1261,125 @@ def _assert_no_overlay_local_renderer_text(page: FakeFletPage) -> None:
     assert _page_text_values(page).isdisjoint(OLD_OVERLAY_LOCAL_RENDERER_TEXT)
 
 
+def test_desktop_overlay_caption_card_width_grows_only_within_same_block() -> None:
+    window = desktop_overlay.FletDesktopRendererWindow()
+
+    short_plan = desktop_overlay.build_desktop_caption_plan(
+        OverlayPresentationSnapshot(
+            blocks=[
+                _block(
+                    "same-peer",
+                    channel="peer",
+                    block_variant="finalized",
+                    appearance_seq=1,
+                    primary_text="응",
+                )
+            ]
+        ),
+        window_width=1344,
+        window_height=336,
+    )
+    widened_plan = desktop_overlay.build_desktop_caption_plan(
+        OverlayPresentationSnapshot(
+            blocks=[
+                _block(
+                    "same-peer",
+                    channel="peer",
+                    block_variant="finalized",
+                    appearance_seq=1,
+                    primary_text="오늘 만나서 정말 반가웠어요 다음에도 같이 이야기해요",
+                )
+            ]
+        ),
+        window_width=1344,
+        window_height=336,
+    )
+    shortened_plan = desktop_overlay.build_desktop_caption_plan(
+        OverlayPresentationSnapshot(
+            blocks=[
+                _block(
+                    "same-peer",
+                    channel="peer",
+                    block_variant="finalized",
+                    appearance_seq=1,
+                    primary_text="응",
+                )
+            ]
+        ),
+        window_width=1344,
+        window_height=336,
+    )
+
+    short_applied = window._plan_with_grow_only_caption_card_widths(short_plan)
+    widened_applied = window._plan_with_grow_only_caption_card_widths(widened_plan)
+    shortened_applied = window._plan_with_grow_only_caption_card_widths(shortened_plan)
+
+    assert short_applied.slots[0].card_width < widened_applied.slots[0].card_width
+    assert shortened_plan.slots[0].card_width == pytest.approx(short_plan.slots[0].card_width)
+    assert shortened_applied.slots[0].card_width == pytest.approx(
+        widened_applied.slots[0].card_width
+    )
+    assert shortened_applied.slots[0].card_text_width == pytest.approx(
+        shortened_applied.slots[0].card_width - (shortened_applied.padding_horizontal * 2)
+    )
+    assert shortened_applied.lines == tuple(
+        line for slot in shortened_applied.slots for line in slot.lines
+    )
+
+    shortened_surface = desktop_overlay.build_desktop_caption_surface(shortened_applied)
+    outer_slot = shortened_surface.content.controls[0].controls[0]
+    inner_card = outer_slot.content
+    text_layer = inner_card.content
+    first_line_region = text_layer.content.controls[0]
+    assert inner_card.width == pytest.approx(shortened_applied.slots[0].card_width)
+    assert text_layer.width == pytest.approx(shortened_applied.slots[0].card_text_width)
+    assert first_line_region.width == pytest.approx(shortened_applied.slots[0].card_text_width)
+
+
+def test_desktop_overlay_caption_card_width_resets_for_new_block_even_same_occupant() -> None:
+    window = desktop_overlay.FletDesktopRendererWindow()
+
+    old_block = replace(
+        _block(
+            "old-peer",
+            channel="peer",
+            block_variant="finalized",
+            appearance_seq=1,
+            primary_text="오늘 만나서 정말 반가웠어요 다음에도 같이 이야기해요",
+        ),
+        occupant_key="peer:same-speaker",
+    )
+    new_block = replace(
+        _block(
+            "new-peer",
+            channel="peer",
+            block_variant="finalized",
+            appearance_seq=2,
+            primary_text="응",
+        ),
+        occupant_key="peer:same-speaker",
+    )
+
+    long_plan = desktop_overlay.build_desktop_caption_plan(
+        OverlayPresentationSnapshot(blocks=[old_block]),
+        window_width=1344,
+        window_height=336,
+    )
+    new_short_plan = desktop_overlay.build_desktop_caption_plan(
+        OverlayPresentationSnapshot(blocks=[new_block]),
+        window_width=1344,
+        window_height=336,
+    )
+
+    long_applied = window._plan_with_grow_only_caption_card_widths(long_plan)
+    new_short_applied = window._plan_with_grow_only_caption_card_widths(new_short_plan)
+
+    assert long_applied.slots[0].card_width > new_short_applied.slots[0].card_width
+    assert new_short_applied.slots[0].card_width == pytest.approx(
+        new_short_plan.slots[0].card_width
+    )
+
+
 def test_desktop_overlay_preview_fixtures_cover_required_local_qa_cases() -> None:
     catalog = desktop_overlay.build_desktop_overlay_preview_catalog(locale="en")
 
@@ -1160,7 +1434,7 @@ def test_desktop_overlay_preview_fixtures_cover_required_local_qa_cases() -> Non
         plan = desktop_overlay.build_desktop_caption_plan(
             fixture.snapshot,
             window_width=1344,
-            window_height=336,
+            window_height=320,
             visual_state=desktop_overlay.DesktopCaptionVisualState(
                 text_scale=1.0,
                 background_alpha=0.5,
@@ -1659,7 +1933,7 @@ async def test_desktop_overlay_reveals_first_window_update_after_chrome_bounds_a
                 "x": 320,
                 "y": 720,
                 "width": 1344,
-                "height": 336,
+                "height": 320,
             },
             {"command": "set_interaction_mode", "mode": "pass_through"},
         )
@@ -1675,7 +1949,7 @@ async def test_desktop_overlay_reveals_first_window_update_after_chrome_bounds_a
         assert app.page.window.resizable is False
         assert app.page.window.always_on_top is True
         assert (app.page.window.left, app.page.window.top) == (320, 720)
-        assert (app.page.window.width, app.page.window.height) == (1344, 336)
+        assert (app.page.window.width, app.page.window.height) == (1344, 320)
         assert app.page.render_snapshots[0] == {
             "ignore_mouse_events": False,
             "texts": set(),
@@ -1706,7 +1980,7 @@ async def test_desktop_overlay_detail_logs_startup_render_and_snapshot_updates(
                 "x": 320,
                 "y": 720,
                 "width": 1344,
-                "height": 336,
+                "height": 320,
             },
         )
     )
@@ -1722,7 +1996,7 @@ async def test_desktop_overlay_detail_logs_startup_render_and_snapshot_updates(
         assert "surface_visible=True" in startup_output
         assert "line_count=0" in startup_output
         assert "content_kind=drag_area" in startup_output
-        assert "window=1344x336" in startup_output
+        assert "window=1344x320" in startup_output
         assert "bounds_epoch" not in startup_output
 
         await window.dispatch_runtime_control(
@@ -1875,6 +2149,74 @@ async def test_desktop_overlay_display_matrix_moving_and_locked_with_captions() 
 
 
 @pytest.mark.asyncio
+async def test_desktop_overlay_render_page_applies_grow_only_card_width_to_visible_surface() -> (
+    None
+):
+    app = FakeFletApp()
+    window = desktop_overlay.FletDesktopRendererWindow(
+        app_runner=app.run,
+        event_sink=RecordingLifecycleSink().emit,
+        locale="en",
+        bounds_debounce_s=0.01,
+    )
+    window.prime_startup_runtime_controls(
+        (
+            {
+                "command": "apply_window_bounds",
+                "x": 320,
+                "y": 720,
+                "width": 1344,
+                "height": 336,
+            },
+        )
+    )
+
+    same_short_block = _block(
+        "same-peer",
+        channel="peer",
+        block_variant="finalized",
+        appearance_seq=1,
+        primary_text="응",
+    )
+    same_long_block = _block(
+        "same-peer",
+        channel="peer",
+        block_variant="finalized",
+        appearance_seq=1,
+        primary_text=(
+            "This visible caption is intentionally long enough to widen "
+            "the dynamic card beyond its minimum width."
+        ),
+    )
+
+    try:
+        await window.start(OverlayPresentationSnapshot(revision=1, blocks=[]))
+        await window.dispatch_runtime_control(
+            {"command": "set_interaction_mode", "mode": "pass_through"}
+        )
+
+        await window.dispatch_snapshot(
+            OverlayPresentationSnapshot(revision=2, blocks=[same_short_block])
+        )
+        short_width = _caption_card_controls(app.page)[0].width
+
+        await window.dispatch_snapshot(
+            OverlayPresentationSnapshot(revision=3, blocks=[same_long_block])
+        )
+        long_width = _caption_card_controls(app.page)[0].width
+
+        await window.dispatch_snapshot(
+            OverlayPresentationSnapshot(revision=4, blocks=[same_short_block])
+        )
+        shortened_width = _caption_card_controls(app.page)[0].width
+
+        assert short_width < long_width
+        assert shortened_width == pytest.approx(long_width)
+    finally:
+        await window.close()
+
+
+@pytest.mark.asyncio
 async def test_desktop_overlay_display_matrix_locked_no_captions_is_fully_transparent() -> None:
     app = FakeFletApp()
     sink = RecordingLifecycleSink()
@@ -1975,7 +2317,6 @@ async def test_desktop_overlay_preset_visual_tokens_match_product_table() -> Non
         assert plan.slot_height == pytest.approx(expected_slot_height)
         assert plan.primary_region_height == pytest.approx(primary * 1.24 * 2)
         assert plan.secondary_region_height == pytest.approx(secondary * 1.24)
-        assert all(line.line_height == pytest.approx(1.24) for line in plan.lines)
         assert (
             plan.slot_height
             - (plan.padding_vertical * 2)
@@ -1986,10 +2327,11 @@ async def test_desktop_overlay_preset_visual_tokens_match_product_table() -> Non
         surface = desktop_overlay.build_desktop_caption_surface(plan)
         assert isinstance(surface.content, ft.Stack)
         slot_column = surface.content.controls[-1]
-        slot_card = slot_column.controls[0]
-        assert slot_card.height == pytest.approx(expected_slot_height)
-        assert slot_card.padding.left == padding_h
-        assert slot_card.padding.top == padding_v
+        outer_slot = slot_column.controls[0]
+        inner_card = outer_slot.content
+        assert outer_slot.height == pytest.approx(expected_slot_height)
+        assert inner_card.padding.left == padding_h
+        assert inner_card.padding.top == padding_v
         assert surface.border_radius == radius
 
 
@@ -2311,7 +2653,7 @@ async def test_desktop_overlay_drops_bounds_event_while_runtime_locked_after_unl
         app.page.window.left = 608
         app.page.window.top = 1117
         app.page.window.width = 1344
-        app.page.window.height = 336
+        app.page.window.height = 320
         app.page.window.on_event(FakeWindowEvent(ft.WindowEventType.MOVED))
         await window.dispatch_runtime_control({"command": "set_interaction_mode", "mode": "edit"})
         await asyncio.sleep(0.03)
@@ -2700,7 +3042,7 @@ async def test_desktop_overlay_initial_bounds_control_applies_before_ready_event
             "x": 320,
             "y": 720,
             "width": 1600,
-            "height": 400,
+            "height": 384,
         },
         {"command": "set_interaction_mode", "mode": "pass_through"},
     ]
@@ -2749,7 +3091,7 @@ async def test_desktop_overlay_initial_pass_through_control_does_not_lock_startu
                 "x": 320,
                 "y": 720,
                 "width": 1344,
-                "height": 336,
+                "height": 320,
             },
             {
                 "command": "apply_visual_config",
@@ -2812,7 +3154,7 @@ async def test_desktop_overlay_primed_initial_controls_are_not_replayed_after_st
             "x": 320,
             "y": 720,
             "width": 1344,
-            "height": 336,
+            "height": 320,
         },
         {
             "command": "apply_visual_config",
@@ -2856,7 +3198,7 @@ async def test_desktop_overlay_primed_initial_controls_are_not_replayed_after_st
             "card_count": 1,
         }
         assert (app.page.window.left, app.page.window.top) == (320, 720)
-        assert (app.page.window.width, app.page.window.height) == (1344, 336)
+        assert (app.page.window.width, app.page.window.height) == (1344, 320)
 
         await bridge.broadcast_shutdown()
         assert await asyncio.wait_for(run_task, timeout=1.0) == 0
