@@ -21,6 +21,7 @@ from puripuly_heart.config.audio_host_api import (
 from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
     DESKTOP_FLET_SIZE_PRESETS,
+    OVERLAY_TARGET_DESKTOP,
     AppSettings,
     LLMProviderName,
     LocalLLMBackend,
@@ -5615,6 +5616,28 @@ async def test_overlay_start_enables_peer_presentation_refresh_for_new_presenter
 
 
 @pytest.mark.asyncio
+async def test_desktop_overlay_start_disables_peer_presentation_refresh_for_new_presenter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    assert controller._overlay_presenter is not None
+    assert controller._overlay_presenter.peer_presentation_refresh_burst is False
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
 async def test_overlay_start_product_enables_existing_peer_presentation_refresh_presenter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5638,6 +5661,36 @@ async def test_overlay_start_product_enables_existing_peer_presentation_refresh_
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
 
     assert controller._overlay_presenter.peer_presentation_refresh_burst is True
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_start_disables_existing_peer_presentation_refresh_presenter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
+    controller.hub = DummyHub()
+    controller._overlay_presenter = OverlayPresenter(
+        calibration=controller.overlay_calibration.copy(),
+        clock=controller.clock,
+        peer_presentation_refresh_burst=True,
+    )
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    assert controller._overlay_presenter.peer_presentation_refresh_burst is False
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
     await controller.set_overlay_enabled(False)

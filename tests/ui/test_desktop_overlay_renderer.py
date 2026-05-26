@@ -2109,6 +2109,93 @@ async def test_desktop_overlay_detail_logs_startup_render_and_snapshot_updates(
 
 
 @pytest.mark.asyncio
+async def test_desktop_overlay_detail_logs_layout_diagnostics_only_when_detailed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    app = FakeFletApp()
+    window = desktop_overlay.FletDesktopRendererWindow(
+        app_runner=app.run,
+        event_sink=RecordingLifecycleSink().emit,
+        locale="en",
+        bounds_debounce_s=0.01,
+    )
+    window.prime_startup_runtime_controls(
+        (
+            {"logging_mode": "detailed"},
+            {
+                "command": "apply_window_bounds",
+                "x": 320,
+                "y": 720,
+                "width": 1344,
+                "height": 336,
+            },
+        )
+    )
+    short_peer = _block(
+        "peer-translated",
+        channel="peer",
+        block_variant="finalized",
+        appearance_seq=1,
+        primary_text="응",
+        secondary_text="Sounds good",
+        secondary_enabled=True,
+    )
+    long_peer = _block(
+        "peer-translated",
+        channel="peer",
+        block_variant="finalized",
+        appearance_seq=1,
+        primary_text="This visible caption is intentionally long enough to widen the card.",
+        secondary_text="Sounds good",
+        secondary_enabled=True,
+    )
+
+    try:
+        await window.start(OverlayPresentationSnapshot(revision=1, blocks=[]))
+        await window.dispatch_runtime_control(
+            {"command": "set_interaction_mode", "mode": "pass_through"}
+        )
+        capsys.readouterr()
+
+        await window.dispatch_snapshot(OverlayPresentationSnapshot(revision=2, blocks=[short_peer]))
+
+        first_output = capsys.readouterr().out
+        assert "snapshot_update revision=2 blocks=1 rows=[" in first_output
+        assert "idx=0" in first_output
+        assert "id=peer-translated" in first_output
+        assert "occupant_key=peer:peer-translated" in first_output
+        assert "channel=peer" in first_output
+        assert "variant=finalized" in first_output
+        assert "primary_len=1" in first_output
+        assert "secondary_len=11" in first_output
+        assert "render_transition revision=2" in first_output
+        assert "content_kind transparent_host->caption_surface" in first_output
+        assert "surface_visible False->True" in first_output
+        assert "slot_count 0->1" in first_output
+        assert "line_count 0->2" in first_output
+        assert "render_width revision=2 slot=0" in first_output
+        assert "key=peer-translated/peer:peer-translated/1" in first_output
+        assert "previous_floor=0.0" in first_output
+
+        await window.dispatch_snapshot(OverlayPresentationSnapshot(revision=3, blocks=[long_peer]))
+        capsys.readouterr()
+
+        await window.dispatch_snapshot(OverlayPresentationSnapshot(revision=4, blocks=[short_peer]))
+
+        floor_output = capsys.readouterr().out
+        assert "render_width revision=4 slot=0" in floor_output
+        assert "floor_hit=True" in floor_output
+
+        await window.dispatch_runtime_control({"logging_mode": "basic"})
+        capsys.readouterr()
+        await window.dispatch_snapshot(OverlayPresentationSnapshot(revision=5, blocks=[short_peer]))
+
+        assert capsys.readouterr().out == ""
+    finally:
+        await window.close()
+
+
+@pytest.mark.asyncio
 async def test_desktop_overlay_flet_window_starts_frameless_transparent_moving_empty_card() -> None:
     app = FakeFletApp()
     sink = RecordingLifecycleSink()
