@@ -1368,11 +1368,19 @@ fn format_frame_timing_log(
 
 fn format_cache_stats_log(diagnostics: &RenderDiagnostics) -> String {
     format!(
-        "cache_stats text_format_size={} layout_size={} line_size={} block_size={} line_hits={} line_misses={} block_hits={} block_misses={}",
+        "cache_stats text_format_size={} layout_size={} line_size={} block_size={} text_format_hits={} text_format_misses={} font_warmup_attempts={} font_warmup_failures={} directwrite_layout_successes={} heuristic_layout_fallbacks={} layout_hits={} layout_misses={} line_hits={} line_misses={} block_hits={} block_misses={}",
         diagnostics.text_format_cache_size,
         diagnostics.layout_cache_size,
         diagnostics.line_cache_size,
         diagnostics.block_cache_size,
+        diagnostics.text_format_cache_hits,
+        diagnostics.text_format_cache_misses,
+        diagnostics.font_warmup_attempts,
+        diagnostics.font_warmup_failures,
+        diagnostics.directwrite_layout_success_count,
+        diagnostics.heuristic_layout_fallback_count,
+        diagnostics.layout_cache_hits,
+        diagnostics.layout_cache_misses,
         diagnostics.line_cache_hits,
         diagnostics.line_cache_misses,
         diagnostics.block_cache_hits,
@@ -2553,16 +2561,24 @@ mod tests {
             layout_cache_size: 4,
             line_cache_size: 5,
             block_cache_size: 6,
-            line_cache_hits: 7,
-            line_cache_misses: 8,
-            block_cache_hits: 9,
-            block_cache_misses: 10,
+            text_format_cache_hits: 7,
+            text_format_cache_misses: 8,
+            font_warmup_attempts: 9,
+            font_warmup_failures: 1,
+            directwrite_layout_success_count: 10,
+            heuristic_layout_fallback_count: 2,
+            layout_cache_hits: 11,
+            layout_cache_misses: 12,
+            line_cache_hits: 13,
+            line_cache_misses: 14,
+            block_cache_hits: 15,
+            block_cache_misses: 16,
             ..RenderDiagnostics::default()
         };
 
         assert_eq!(
             format_cache_stats_log(&diagnostics),
-            "cache_stats text_format_size=3 layout_size=4 line_size=5 block_size=6 line_hits=7 line_misses=8 block_hits=9 block_misses=10"
+            "cache_stats text_format_size=3 layout_size=4 line_size=5 block_size=6 text_format_hits=7 text_format_misses=8 font_warmup_attempts=9 font_warmup_failures=1 directwrite_layout_successes=10 heuristic_layout_fallbacks=2 layout_hits=11 layout_misses=12 line_hits=13 line_misses=14 block_hits=15 block_misses=16"
         );
     }
 

@@ -1475,7 +1475,7 @@ fn renderer_returns_a_renderable_d3d11_texture_result() {
 
 #[cfg(windows)]
 #[test]
-fn renderer_windows_layout_handles_mixed_script_text_with_directwrite_fallback() {
+fn renderer_windows_public_layout_api_uses_fallback_measurement_for_mixed_script_text() {
     let policy = CaptionLayoutPolicy::default();
     let text = "fallback hello 안녕하세요 你好 mixed text";
     let result = policy.layout_blocks(vec![CaptionBlock::new("mix", text)], 1200, 900);
@@ -1498,7 +1498,22 @@ fn renderer_windows_layout_handles_mixed_script_text_with_directwrite_fallback()
 
 #[cfg(windows)]
 #[test]
-fn renderer_windows_pipeline_renders_mixed_script_frame() {
+fn renderer_windows_startup_warmup_reports_attempts_without_populating_visual_caches() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let frame = renderer.render_empty_frame().unwrap();
+    let diagnostics = frame.diagnostics();
+
+    assert!(frame.is_fully_transparent());
+    assert_eq!(diagnostics.font_warmup_attempts, 8);
+    assert!(diagnostics.font_warmup_failures <= diagnostics.font_warmup_attempts);
+    assert_eq!(diagnostics.text_format_cache_size, 0);
+    assert_eq!(diagnostics.line_cache_size, 0);
+    assert_eq!(diagnostics.block_cache_size, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn renderer_windows_pipeline_reports_directwrite_layout_for_mixed_script_frame() {
     let renderer = CaptionRenderer::new_for_test().unwrap();
     let frame = renderer
         .render_blocks(vec![CaptionBlock::new(
@@ -1511,6 +1526,8 @@ fn renderer_windows_pipeline_renders_mixed_script_frame() {
     assert!(frame.texture_ptr().is_some());
     assert!(frame.d3d11_texture().is_some());
     assert!(!frame.layout().visible_blocks[0].primary_lines.is_empty());
+    assert_eq!(frame.diagnostics().directwrite_layout_success_count, 1);
+    assert_eq!(frame.diagnostics().heuristic_layout_fallback_count, 0);
 }
 
 #[cfg(windows)]
@@ -1628,6 +1645,7 @@ fn renderer_windows_second_render_hits_layout_and_block_caches() {
     let first = renderer.render_blocks(vec![block.clone()]).unwrap();
     let second = renderer.render_blocks(vec![block]).unwrap();
 
+    assert!(first.diagnostics().text_format_cache_misses >= 1);
     assert!(first.diagnostics().layout_cache_misses >= 1);
     assert!(first.diagnostics().block_cache_misses >= 1);
     assert!(second.diagnostics().layout_cache_hits >= 1);
@@ -1636,6 +1654,25 @@ fn renderer_windows_second_render_hits_layout_and_block_caches() {
     assert!(second.diagnostics().layout_cache_size <= 512);
     assert!(second.diagnostics().line_cache_size <= 2048);
     assert!(second.diagnostics().block_cache_size <= 1024);
+}
+
+#[cfg(windows)]
+#[test]
+fn renderer_windows_text_format_cache_reports_hits_for_same_bucket_new_line_visual() {
+    let renderer = CaptionRenderer::new_for_test().unwrap();
+    let first = CaptionBlock::new("self:active", "live preview one")
+        .with_variant(CaptionBlockVariant::ActiveSelf)
+        .with_channel(CaptionChannel::SelfChannel);
+    let second = CaptionBlock::new("self:active", "live preview two")
+        .with_variant(CaptionBlockVariant::ActiveSelf)
+        .with_channel(CaptionChannel::SelfChannel);
+
+    let first_frame = renderer.render_blocks(vec![first]).unwrap();
+    let second_frame = renderer.render_blocks(vec![second]).unwrap();
+
+    assert!(first_frame.diagnostics().text_format_cache_misses >= 1);
+    assert!(second_frame.diagnostics().line_cache_misses >= 1);
+    assert!(second_frame.diagnostics().text_format_cache_hits >= 1);
 }
 
 #[cfg(windows)]
