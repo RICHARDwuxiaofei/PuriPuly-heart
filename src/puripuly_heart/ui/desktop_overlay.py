@@ -322,6 +322,7 @@ class DesktopCaptionSlot:
     block_variant: str
     appearance_seq: int
     lines: tuple[DesktopCaptionLine, ...]
+    secondary_enabled: bool
     active: bool = False
 
 
@@ -902,6 +903,7 @@ def _caption_slots_for_snapshot(
                 block_variant=block.block_variant,
                 appearance_seq=block.appearance_seq,
                 lines=lines,
+                secondary_enabled=block.secondary_enabled,
                 active=block.block_variant in {"active_self", "active_peer"},
             )
         )
@@ -1272,13 +1274,20 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
 
 
 def _build_flet_caption_slot(ft: Any, plan: DesktopCaptionPlan, slot: DesktopCaptionSlot) -> Any:
+    slot_lines = _slot_lines_with_reserved_regions(
+        slot,
+        secondary_font_size=plan.secondary_font_size,
+        font_family=slot.lines[0].font_family if slot.lines else None,
+    )
+    has_secondary_region = any(line.slot == "secondary" for line in slot_lines)
     line_controls = [
-        _build_flet_caption_line(ft, plan, line)
-        for line in _slot_lines_with_reserved_regions(
-            slot,
-            secondary_font_size=plan.secondary_font_size,
-            font_family=slot.lines[0].font_family if slot.lines else None,
+        _build_flet_caption_line(
+            ft,
+            plan,
+            line,
+            center_primary_region=not has_secondary_region,
         )
+        for line in slot_lines
     ]
     column = ft.Column(
         controls=line_controls,
@@ -1291,7 +1300,11 @@ def _build_flet_caption_slot(ft: Any, plan: DesktopCaptionPlan, slot: DesktopCap
         content=column,
         width=plan.text_width,
         bgcolor=ft.Colors.TRANSPARENT,
-        alignment=ft.Alignment(0, _DESKTOP_CAPTION_TEXT_STACK_ALIGNMENT_Y),
+        alignment=(
+            ft.Alignment(0, _DESKTOP_CAPTION_TEXT_STACK_ALIGNMENT_Y)
+            if has_secondary_region
+            else ft.alignment.center
+        ),
     )
     return ft.Container(
         content=text_layer,
@@ -1309,19 +1322,36 @@ def _build_flet_caption_slot(ft: Any, plan: DesktopCaptionPlan, slot: DesktopCap
     )
 
 
-def _build_flet_caption_line(ft: Any, plan: DesktopCaptionPlan, line: DesktopCaptionLine) -> Any:
+def _build_flet_caption_line(
+    ft: Any,
+    plan: DesktopCaptionPlan,
+    line: DesktopCaptionLine,
+    *,
+    center_primary_region: bool = False,
+) -> Any:
     height = plan.primary_region_height if line.slot == "primary" else plan.secondary_region_height
     return ft.Container(
         content=_build_flet_text(ft, plan, line),
         width=plan.text_width,
         height=height,
         bgcolor=ft.Colors.TRANSPARENT,
-        alignment=_caption_line_region_alignment(ft, line),
+        alignment=_caption_line_region_alignment(
+            ft,
+            line,
+            center_primary_region=center_primary_region,
+        ),
     )
 
 
-def _caption_line_region_alignment(ft: Any, line: DesktopCaptionLine) -> Any:
+def _caption_line_region_alignment(
+    ft: Any,
+    line: DesktopCaptionLine,
+    *,
+    center_primary_region: bool = False,
+) -> Any:
     if line.slot == "primary":
+        if center_primary_region:
+            return ft.alignment.center
         return ft.Alignment(0, _DESKTOP_CAPTION_PRIMARY_REGION_ALIGNMENT_Y)
     return ft.alignment.center
 
@@ -1336,6 +1366,8 @@ def _slot_lines_with_reserved_regions(
     secondary_lines = tuple(line for line in slot.lines if line.slot == "secondary")
     if secondary_lines:
         return (*primary_lines, secondary_lines[0])
+    if not _slot_should_reserve_empty_secondary_region(slot, primary_lines):
+        return primary_lines
     return (
         *primary_lines,
         DesktopCaptionLine(
@@ -1353,6 +1385,15 @@ def _slot_lines_with_reserved_regions(
             font_family=font_family,
         ),
     )
+
+
+def _slot_should_reserve_empty_secondary_region(
+    slot: DesktopCaptionSlot,
+    primary_lines: tuple[DesktopCaptionLine, ...],
+) -> bool:
+    if not slot.secondary_enabled:
+        return False
+    return any(not line.promoted for line in primary_lines)
 
 
 def _build_flet_text(
