@@ -11,6 +11,7 @@
 #define MyOverlayExeName "PuriPulyHeartOverlay.exe"
 #define MyPackagedAppDir "dist\PuriPulyHeart"
 #define MyStagedOverlayDir "build\overlay"
+#define NotoCjkFontRelativePath "fonts\NotoSansCJK-Medium.ttc"
 #define LocalSttManifestRelativePath "puripuly_heart\data\models\qwen3-asr-0.6b-int8-sherpa.manifest.json"
 
 #ifndef MyAppId
@@ -92,6 +93,7 @@ Source: "{#MyPackagedAppDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreve
 Source: "{#MyStagedOverlayDir}\{#MyOverlayExeName}"; DestDir: "{app}"; Flags: ignoreversion
 ; Vendored OpenVR runtime DLL comes from dist\PuriPulyHeart\openvr_api.dll in the packaged tree built by build.spec.
 ; Installer build/install never resolves SteamVR paths for openvr_api.dll.
+; Bundled CJK font is staged at {#MyPackagedAppDir}\{#NotoCjkFontRelativePath}; the recursive packaged-tree copy installs it to {app}\{#NotoCjkFontRelativePath}.
 Source: "{#MyPackagedAppDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "{#MyAppExeName},{#MyOverlayExeName}"
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 

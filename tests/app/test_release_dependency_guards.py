@@ -61,7 +61,7 @@ OPENVR_NOTICE_PACKAGED_BUILD_EXPLANATION = (
     "packaging source for that app-private DLL, so packaged and installed builds do not depend on "
     "a shared SteamVR system copy."
 )
-OPENVR_NOTICE_NEXT_SECTION_HEADER = "NanumSquareRound"
+OPENVR_NOTICE_NEXT_SECTION_HEADER = "Noto Sans CJK Medium TTC"
 
 
 def _slice_section(text: str, start_marker: str, end_marker: str | None = None) -> str:
