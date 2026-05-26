@@ -5,7 +5,7 @@ import logging
 import math
 import uuid
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Callable, Literal, Protocol
 from uuid import UUID
 
 import numpy as np
@@ -39,6 +39,7 @@ class SpeechChunk:
 class SpeechEnd:
     utterance_id: UUID
     trailing_silence_ms: int = 0
+    reason: Literal["silence", "max_duration"] = "silence"
 
 
 VadEvent = SpeechStart | SpeechChunk | SpeechEnd
@@ -61,6 +62,7 @@ class VadGating:
     chunk_samples: int
     start_debounce_chunks: int
     start_commit_chunks: int
+    max_segment_ms: int | None
     candidate_log_label: str | None
     diagnostic_event_callback: Callable[[str], object] | None
     diagnostics_enabled: Callable[[], bool] | None
@@ -85,6 +87,7 @@ class VadGating:
         ring_buffer_ms: int = 500,
         speech_threshold: float = 0.5,
         hangover_ms: int = 1100,
+        max_segment_ms: int | None = None,
         chunk_samples: int | None = None,
         start_debounce_chunks: int = 1,
         start_commit_chunks: int = 1,
@@ -105,6 +108,8 @@ class VadGating:
             raise ValueError("start_commit_chunks must be > 0")
         if start_commit_chunks < start_debounce_chunks:
             raise ValueError("start_commit_chunks must be >= start_debounce_chunks")
+        if max_segment_ms is not None and max_segment_ms <= 0:
+            raise ValueError("max_segment_ms must be > 0")
 
         self.engine = engine
         self.sample_rate_hz = sample_rate_hz
@@ -112,6 +117,7 @@ class VadGating:
         self.chunk_samples = chunk_samples or default_chunk_samples(sample_rate_hz)
         self.start_debounce_chunks = start_debounce_chunks
         self.start_commit_chunks = start_commit_chunks
+        self.max_segment_ms = max_segment_ms
         self.candidate_log_label = candidate_log_label
         self.diagnostic_event_callback = diagnostic_event_callback
         self.diagnostics_enabled = diagnostics_enabled
@@ -176,6 +182,29 @@ class VadGating:
 
         if prob >= self.speech_threshold:
             self._silence_run = 0
+            if self._max_segment_reached():
+                logger.info(
+                    "[VAD] SpeechEnd: id=%s, reason=max_duration, speech_audio_ms=%.1f",
+                    str(self._utterance_id)[:8],
+                    self._speech_sample_count * 1000.0 / self.sample_rate_hz,
+                )
+                with contextlib.suppress(Exception):
+                    if self._diagnostics_enabled():
+                        speech_audio_ms = self._speech_sample_count * 1000.0 / self.sample_rate_hz
+                        assert self.diagnostic_event_callback is not None
+                        self.diagnostic_event_callback(
+                            f"[AudioDiag][VAD][{self.diagnostic_label}] event=SpeechEnd "
+                            f"utterance_id={str(self._utterance_id)[:8]} "
+                            f"reason=max_duration trailing_silence_ms=0 "
+                            f"speech_audio_ms={speech_audio_ms:.1f} "
+                            f"chunk_count={self._speech_chunk_count}"
+                        )
+
+                events.append(
+                    SpeechEnd(self._utterance_id, trailing_silence_ms=0, reason="max_duration")
+                )  # type: ignore[arg-type]
+                self._reset_active_segment()
+            self._ring.append(chunk)
             return events
 
         self._silence_run += 1
@@ -195,23 +224,37 @@ class VadGating:
                     self.diagnostic_event_callback(
                         f"[AudioDiag][VAD][{self.diagnostic_label}] event=SpeechEnd "
                         f"utterance_id={str(self._utterance_id)[:8]} "
+                        f"reason=silence "
                         f"trailing_silence_ms={trailing_silence_ms} "
                         f"speech_audio_ms={speech_audio_ms:.1f} "
                         f"chunk_count={self._speech_chunk_count}"
                     )
 
             events.append(
-                SpeechEnd(self._utterance_id, trailing_silence_ms=trailing_silence_ms)
+                SpeechEnd(
+                    self._utterance_id,
+                    trailing_silence_ms=trailing_silence_ms,
+                    reason="silence",
+                )
             )  # type: ignore[arg-type]
-            self._in_speech = False
-            self._utterance_id = None
-            self._silence_run = 0
-            self._speech_chunk_count = 0
-            self._speech_sample_count = 0
+            self._reset_active_segment()
             self.engine.reset()
 
         self._ring.append(chunk)
         return events
+
+    def _max_segment_reached(self) -> bool:
+        if self.max_segment_ms is None:
+            return False
+        speech_audio_ms = self._speech_sample_count * 1000.0 / self.sample_rate_hz
+        return speech_audio_ms >= self.max_segment_ms
+
+    def _reset_active_segment(self) -> None:
+        self._in_speech = False
+        self._utterance_id = None
+        self._silence_run = 0
+        self._speech_chunk_count = 0
+        self._speech_sample_count = 0
 
     def _handle_pending_start(self, chunk: np.ndarray, prob: float) -> list[VadEvent]:
         if self._pending_start_id is None:
