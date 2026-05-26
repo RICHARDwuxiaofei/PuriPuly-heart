@@ -2472,6 +2472,93 @@ async def test_desktop_overlay_render_page_applies_grow_only_card_width_to_visib
 
 
 @pytest.mark.asyncio
+async def test_desktop_overlay_locked_size_change_clears_stale_card_width_floor() -> None:
+    app = FakeFletApp()
+    window = desktop_overlay.FletDesktopRendererWindow(
+        app_runner=app.run,
+        event_sink=RecordingLifecycleSink().emit,
+        locale="en",
+        bounds_debounce_s=0.01,
+    )
+    window.prime_startup_runtime_controls(
+        (
+            {
+                "command": "apply_window_bounds",
+                "x": 320,
+                "y": 720,
+                "width": 1344,
+                "height": 336,
+            },
+        )
+    )
+    same_long_block = _block(
+        "same-peer",
+        channel="peer",
+        block_variant="finalized",
+        appearance_seq=1,
+        primary_text=(
+            "This visible caption is intentionally long enough to widen "
+            "the dynamic card to the current overlay width."
+        ),
+    )
+    same_short_block = _block(
+        "same-peer",
+        channel="peer",
+        block_variant="finalized",
+        appearance_seq=1,
+        primary_text="응",
+    )
+
+    try:
+        await window.start(OverlayPresentationSnapshot(revision=1, blocks=[]))
+        await window.dispatch_runtime_control(
+            {"command": "set_interaction_mode", "mode": "pass_through"}
+        )
+        await window.dispatch_snapshot(
+            OverlayPresentationSnapshot(revision=2, blocks=[same_long_block])
+        )
+        await window.dispatch_snapshot(
+            OverlayPresentationSnapshot(revision=3, blocks=[same_short_block])
+        )
+        assert _caption_card_controls(app.page)[0].width == pytest.approx(1344)
+
+        await window.dispatch_runtime_control(
+            {
+                "command": "apply_window_bounds",
+                "x": 420,
+                "y": 780,
+                "width": 1152,
+                "height": 288,
+            }
+        )
+
+        assert app.page.window.width == 1152
+        assert app.page.window.height == 288
+        assert _caption_card_controls(app.page)[0].width == pytest.approx(320.0)
+    finally:
+        await window.close()
+
+
+def test_desktop_overlay_window_size_change_detection_keeps_position_only_cache() -> None:
+    app = FakeFletApp()
+    app.page.window.width = 1152
+    app.page.window.height = 288
+
+    assert not desktop_overlay._page_window_size_differs_from_bounds(  # noqa: SLF001 - verify invalidation boundary
+        app.page,
+        {"x": 400, "y": 500, "width": 1152, "height": 288},
+    )
+    assert desktop_overlay._page_window_size_differs_from_bounds(  # noqa: SLF001 - verify invalidation boundary
+        app.page,
+        {"x": 400, "y": 500, "width": 1153, "height": 288},
+    )
+    assert desktop_overlay._page_window_size_differs_from_bounds(  # noqa: SLF001 - verify invalidation boundary
+        app.page,
+        {"x": 400, "y": 500, "width": 1152, "height": 289},
+    )
+
+
+@pytest.mark.asyncio
 async def test_desktop_overlay_empty_lock_action_switches_to_pass_through() -> None:
     app = FakeFletApp()
     sink = RecordingLifecycleSink()
