@@ -140,6 +140,15 @@ class TranslatorApp:
         self.view_settings.on_verify_api_key = self._on_verify_api_key
         self.view_settings.on_secret_cleared = self._on_secret_cleared
         self.view_settings.on_local_llm_secret_changed = self._on_local_llm_secret_changed
+        self.view_settings.on_desktop_overlay_lock_change = self._on_desktop_overlay_lock_change
+        self.view_settings.on_desktop_overlay_size_change = self._on_desktop_overlay_size_change
+        self.view_settings.on_desktop_overlay_recovery_action = (
+            self._on_desktop_overlay_recovery_action
+        )
+        self.view_settings.on_desktop_overlay_position_reset = (
+            self._on_desktop_overlay_position_reset
+        )
+        self.view_settings.on_view_logs = self._open_logs_tab
         self.view_settings.show_snackbar = self._show_snackbar
         self.view_logs.on_mode_change = self._on_runtime_logging_mode_change
         self.view_logs.set_runtime_logging_mode(self.controller.runtime_logging_mode)
@@ -545,6 +554,16 @@ class TranslatorApp:
 
             self.page.run_task(_scroll)
 
+    def _open_logs_tab(self) -> None:
+        self._on_nav_change(2)
+        selected_attr = getattr(self.bottom_nav, "_selected", None)
+        if selected_attr != 2 and hasattr(self.bottom_nav, "_selected"):
+            self.bottom_nav._selected = 2
+        update_visuals = getattr(self.bottom_nav, "_update_visuals", None)
+        if callable(update_visuals):
+            with contextlib.suppress(Exception):
+                update_visuals()
+
     def apply_locale(self) -> None:
         self.page.title = t("app.title")
         self.page.theme = get_app_theme(font_family=font_for_language(get_locale()))
@@ -576,6 +595,74 @@ class TranslatorApp:
         set_dashboard_contract = getattr(view_dashboard, "set_overlay_peer_contract", None)
         if callable(set_dashboard_contract):
             set_dashboard_contract(contract)
+
+    def _sync_settings_overlay_runtime_state(self) -> None:
+        view_settings = getattr(self, "view_settings", None)
+        set_state = getattr(view_settings, "set_overlay_runtime_state", None)
+        if not callable(set_state):
+            return
+        controller = getattr(self, "controller", None)
+        settings = getattr(controller, "settings", None)
+        overlay_target = None
+        if settings is not None:
+            overlay_target = getattr(settings.overlay, "target", None)
+        desktop_locked = False
+        if controller is not None:
+            desktop_locked = bool(getattr(controller, "desktop_overlay_captions_locked", False))
+        set_state(
+            self.overlay_state,
+            failure_reason=self.overlay_failure_reason,
+            overlay_target=overlay_target,
+            desktop_captions_locked=desktop_locked,
+        )
+
+    def _on_desktop_overlay_lock_change(self, locked: bool) -> None:
+        async def _task():
+            await self.controller.set_desktop_overlay_captions_locked(bool(locked))
+            self._refresh_settings_desktop_overlay_state()
+
+        self.page.run_task(_task)
+
+    def _on_desktop_overlay_size_change(self, size_preset: str) -> None:
+        async def _task():
+            await self.controller.set_desktop_overlay_size_preset(size_preset)
+            self._refresh_settings_desktop_overlay_state()
+
+        self.page.run_task(_task)
+
+    def _on_desktop_overlay_recovery_action(self, action: str) -> None:
+        if action not in {"retry", "reopen"}:
+            return
+
+        async def _task():
+            await self.controller.set_overlay_enabled(True)
+
+        self.page.run_task(_task)
+
+    def _on_desktop_overlay_position_reset(self) -> None:
+        async def _task():
+            await self.controller.reset_desktop_overlay_position()
+            self._refresh_settings_desktop_overlay_state()
+
+        self.page.run_task(_task)
+
+    def _refresh_settings_desktop_overlay_state(self) -> None:
+        controller = getattr(self, "controller", None)
+        settings = getattr(controller, "settings", None)
+        view_settings = getattr(self, "view_settings", None)
+        sync_settings = getattr(view_settings, "sync_desktop_overlay_settings", None)
+        if settings is not None and callable(sync_settings):
+            sync_settings(settings)
+        self._sync_settings_overlay_runtime_state()
+
+    def on_desktop_overlay_state_changed(
+        self,
+        *,
+        interaction_mode: str | None = None,
+        captions_locked: bool | None = None,
+    ) -> None:
+        _ = (interaction_mode, captions_locked)
+        self._sync_settings_overlay_runtime_state()
 
     def _on_manual_submit(self, _source: str, text: str) -> None:
         async def _task():
@@ -1189,7 +1276,7 @@ class TranslatorApp:
         self._log_detailed(
             f"[Overlay] State detail: overlay_state={state} failure_reason={failure_reason}"
         )
-        self.view_settings.set_overlay_runtime_state(state, failure_reason=failure_reason)
+        self._sync_settings_overlay_runtime_state()
         self.refresh_overlay_peer_contract()
 
 

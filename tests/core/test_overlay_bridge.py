@@ -342,6 +342,137 @@ async def test_overlay_bridge_replays_runtime_logging_mode_after_authentication(
 
 
 @pytest.mark.asyncio
+async def test_overlay_bridge_runtime_control_logging_wire_format_remains_exact() -> None:
+    bridge = OverlayBridge(
+        session_token="expected-token",
+        initial_snapshot=OverlayPresentationSnapshot(
+            revision=0,
+            calibration=OverlayPresentationCalibration(),
+            blocks=[],
+        ),
+    )
+    connection = _RecordingSendConnection()
+    bridge._authenticated_connections.add(connection)  # type: ignore[arg-type]
+
+    await bridge.broadcast_runtime_control(logging_mode="detailed")
+
+    assert connection.sent_payloads == [
+        {
+            "type": "runtime_control",
+            "payload": {"logging_mode": "detailed"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_overlay_bridge_desktop_runtime_control_broadcasts_payload_when_enabled() -> None:
+    bridge = OverlayBridge(
+        session_token="expected-token",
+        desktop_runtime_controls_enabled=True,
+        initial_snapshot=OverlayPresentationSnapshot(
+            revision=0,
+            calibration=OverlayPresentationCalibration(),
+            blocks=[],
+        ),
+    )
+    connection = _RecordingSendConnection()
+    bridge._authenticated_connections.add(connection)  # type: ignore[arg-type]
+    payload = {"command": "set_interaction_mode", "mode": "edit"}
+
+    await bridge.broadcast_desktop_runtime_control(payload)
+
+    assert connection.sent_payloads == [
+        {
+            "type": "runtime_control",
+            "payload": payload,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_overlay_bridge_desktop_initial_control_replay_after_snapshot_and_logging() -> None:
+    bridge = OverlayBridge(
+        session_token="expected-token",
+        desktop_runtime_controls_enabled=True,
+        runtime_logging_mode="detailed",
+        initial_snapshot=OverlayPresentationSnapshot(
+            revision=0,
+            calibration=OverlayPresentationCalibration(),
+            blocks=[],
+        ),
+    )
+    initial_controls = [
+        {"command": "set_interaction_mode", "mode": "edit"},
+        {
+            "command": "apply_window_bounds",
+            "x": 320,
+            "y": 720,
+            "width": 1280,
+            "height": 330,
+        },
+    ]
+    bridge.set_initial_desktop_runtime_controls(initial_controls)
+    await bridge.start()
+
+    try:
+        async with connect(bridge.url) as ws:
+            await ws.send(json.dumps({"type": "auth", "session_token": "expected-token"}))
+            messages = [
+                json.loads(await asyncio.wait_for(ws.recv(), timeout=0.5)) for _ in range(4)
+            ]
+    finally:
+        await bridge.stop()
+
+    assert messages == [
+        {
+            "type": "snapshot",
+            "payload": {
+                "revision": 0,
+                "calibration": OverlayPresentationCalibration().to_dict(),
+                "blocks": [],
+            },
+        },
+        {
+            "type": "runtime_control",
+            "payload": {"logging_mode": "detailed"},
+        },
+        {
+            "type": "runtime_control",
+            "payload": initial_controls[0],
+        },
+        {
+            "type": "runtime_control",
+            "payload": initial_controls[1],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_overlay_bridge_desktop_runtime_control_is_target_gated_from_steamvr_path() -> None:
+    bridge = OverlayBridge(
+        session_token="expected-token",
+        initial_snapshot=OverlayPresentationSnapshot(
+            revision=0,
+            calibration=OverlayPresentationCalibration(),
+            blocks=[],
+        ),
+    )
+    connection = _RecordingSendConnection()
+    bridge._authenticated_connections.add(connection)  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="desktop runtime controls"):
+        await bridge.broadcast_desktop_runtime_control(
+            {"command": "set_interaction_mode", "mode": "edit"}
+        )
+    with pytest.raises(RuntimeError, match="desktop runtime controls"):
+        bridge.set_initial_desktop_runtime_controls(
+            [{"command": "set_interaction_mode", "mode": "edit"}]
+        )
+
+    assert connection.sent_payloads == []
+
+
+@pytest.mark.asyncio
 async def test_overlay_bridge_broadcasts_runtime_logging_mode_updates() -> None:
     bridge = OverlayBridge(
         session_token="expected-token",

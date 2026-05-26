@@ -94,9 +94,7 @@ def test_deepgram_peer_session_drops_empty_final_with_dedicated_log(
 ) -> None:
     session = _make_session(stream_label="peer")
     result = types.SimpleNamespace(
-        channel=types.SimpleNamespace(
-            alternatives=[types.SimpleNamespace(transcript="")]
-        ),
+        channel=types.SimpleNamespace(alternatives=[types.SimpleNamespace(transcript="")]),
         is_final=True,
         speech_final=False,
     )
@@ -106,7 +104,9 @@ def test_deepgram_peer_session_drops_empty_final_with_dedicated_log(
 
     assert event is None
     assert session._empty_final_drops == 1
-    assert any("[STT][peer] Empty final transcript dropped" in message for message in caplog.messages)
+    assert any(
+        "[STT][peer] Empty final transcript dropped" in message for message in caplog.messages
+    )
 
 
 def test_deepgram_peer_session_counts_emitted_finals() -> None:
@@ -132,16 +132,12 @@ async def test_deepgram_peer_session_logs_summary_once_on_shutdown(
 ) -> None:
     session = _make_session(stream_label="peer")
     empty_result = types.SimpleNamespace(
-        channel=types.SimpleNamespace(
-            alternatives=[types.SimpleNamespace(transcript="")]
-        ),
+        channel=types.SimpleNamespace(alternatives=[types.SimpleNamespace(transcript="")]),
         is_final=True,
         speech_final=False,
     )
     final_result = types.SimpleNamespace(
-        channel=types.SimpleNamespace(
-            alternatives=[types.SimpleNamespace(transcript="hello")]
-        ),
+        channel=types.SimpleNamespace(alternatives=[types.SimpleNamespace(transcript="hello")]),
         is_final=True,
         speech_final=False,
     )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -955,6 +956,280 @@ async def test_overlay_process_manager_maps_bridge_runtime_error_after_ready() -
 
     assert manager.state == "failed"
     assert manager.failure_reason == "runtime_disconnected"
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_renderer_events_forwards_valid_window_bounds_from_bridge() -> (
+    None
+):
+    bridge_messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    renderer_events: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    manager = OverlayProcessManager(
+        process_runner=FakeProcessRunner(ready_event_delay_ms=0),
+        bridge_messages=bridge_messages,
+        renderer_events=renderer_events,
+    )
+    event: dict[str, object] = {
+        "type": "overlay_event",
+        "payload": {
+            "event": "window_bounds_changed",
+            "source": "user",
+            "persist": True,
+            "x": 320,
+            "y": 720,
+            "width": 1280,
+            "height": 330,
+        },
+    }
+
+    try:
+        await manager.start()
+        await bridge_messages.put(event)
+
+        forwarded = await asyncio.wait_for(renderer_events.get(), timeout=0.5)
+
+        assert forwarded == event
+        assert manager.state == "connected"
+        assert manager.failure_reason is None
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_renderer_events_strips_legacy_window_bounds_epoch() -> None:
+    bridge_messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    renderer_events: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    manager = OverlayProcessManager(
+        process_runner=FakeProcessRunner(ready_event_delay_ms=0),
+        bridge_messages=bridge_messages,
+        renderer_events=renderer_events,
+    )
+    event: dict[str, object] = {
+        "type": "overlay_event",
+        "payload": {
+            "event": "window_bounds_changed",
+            "source": "user",
+            "persist": True,
+            "x": 320,
+            "y": 720,
+            "width": 1280,
+            "height": 330,
+            "bounds_epoch": 2,
+        },
+    }
+
+    try:
+        await manager.start()
+        await bridge_messages.put(event)
+
+        forwarded = await asyncio.wait_for(renderer_events.get(), timeout=0.5)
+
+        expected = copy.deepcopy(event)
+        assert isinstance(expected["payload"], dict)
+        expected["payload"].pop("bounds_epoch")
+        assert forwarded == expected
+        assert manager.state == "connected"
+        assert manager.failure_reason is None
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_renderer_events_forwards_valid_mode_and_reset_events() -> (
+    None
+):
+    bridge_messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    renderer_events: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    manager = OverlayProcessManager(
+        process_runner=FakeProcessRunner(ready_event_delay_ms=0),
+        bridge_messages=bridge_messages,
+        renderer_events=renderer_events,
+    )
+    mode_event: dict[str, object] = {
+        "type": "overlay_event",
+        "payload": {
+            "event": "interaction_mode_changed",
+            "mode": "pass_through",
+        },
+    }
+    reset_event: dict[str, object] = {
+        "type": "overlay_event",
+        "payload": {"event": "reset_to_bottom_center_requested"},
+    }
+
+    try:
+        await manager.start()
+        await bridge_messages.put(mode_event)
+        await bridge_messages.put(reset_event)
+
+        forwarded_mode = await asyncio.wait_for(renderer_events.get(), timeout=0.5)
+        forwarded_reset = await asyncio.wait_for(renderer_events.get(), timeout=0.5)
+
+        assert forwarded_mode == mode_event
+        assert forwarded_reset == reset_event
+        assert manager.state == "connected"
+        assert manager.failure_reason is None
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_message",
+    [
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "programmatic",
+                "persist": True,
+                "x": 320,
+                "y": 720,
+                "width": 1280,
+                "height": 330,
+            },
+        },
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": 320,
+                "y": 720,
+                "width": 0,
+                "height": 330,
+            },
+        },
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": 320,
+                "y": 720,
+                "width": 1280,
+                "height": 330,
+                "bounds_epoch": -1,
+            },
+        },
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": 320,
+                "y": 720,
+                "width": 1280,
+                "height": 330,
+                "bounds_epoch": True,
+            },
+        },
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": 320,
+                "y": 720,
+                "width": 1280,
+                "height": 330,
+                "bounds_epoch": "2",
+            },
+        },
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "interaction_mode_changed",
+                "mode": "dragging",
+            },
+        },
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "interaction_mode_changed",
+                "mode": ["edit"],
+            },
+        },
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "interaction_mode_changed",
+                "mode": "edit",
+                "persist": True,
+            },
+        },
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "reset_to_bottom_center_requested",
+                "source": "user",
+                "persist": True,
+            },
+        },
+        "not-a-renderer-message",
+    ],
+)
+async def test_overlay_process_manager_renderer_events_ignores_invalid_messages_without_failure(
+    invalid_message: object,
+) -> None:
+    bridge_messages: asyncio.Queue[object] = asyncio.Queue()
+    renderer_events: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    manager = OverlayProcessManager(
+        process_runner=FakeProcessRunner(ready_event_delay_ms=0),
+        bridge_messages=bridge_messages,  # type: ignore[arg-type]
+        renderer_events=renderer_events,
+    )
+
+    try:
+        await manager.start()
+        await bridge_messages.put(invalid_message)
+        await asyncio.sleep(0.05)
+
+        assert renderer_events.empty()
+        assert manager.state == "connected"
+        assert manager.failure_reason is None
+        assert manager._monitor_task is not None
+        assert not manager._monitor_task.done()
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_overlay_process_manager_renderer_events_without_queue_are_diagnostic_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bridge_messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    manager = OverlayProcessManager(
+        process_runner=FakeProcessRunner(ready_event_delay_ms=0),
+        bridge_messages=bridge_messages,
+    )
+
+    try:
+        await manager.start()
+        with caplog.at_level("INFO", logger="puripuly_heart.core.overlay.process"):
+            await bridge_messages.put(
+                {
+                    "type": "overlay_event",
+                    "payload": {
+                        "event": "interaction_mode_changed",
+                        "mode": "edit",
+                    },
+                }
+            )
+            await asyncio.sleep(0.05)
+
+        assert manager.state == "connected"
+        assert manager.failure_reason is None
+        assert any(
+            "Renderer event ignored without controller queue" in message
+            for message in caplog.messages
+        )
+    finally:
+        await manager.stop()
 
 
 @pytest.mark.asyncio
