@@ -4,8 +4,10 @@ import asyncio
 import builtins
 import inspect
 import json
+import logging
 import subprocess
 import sys
+import traceback
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -2362,6 +2364,16 @@ class FailingStartWindow(FakeRendererWindow):
         raise RuntimeError("window bootstrap failed")
 
 
+class SensitiveFailingStartWindow(FakeRendererWindow):
+    def __init__(self, secret: str) -> None:
+        super().__init__()
+        self.secret = secret
+
+    async def start(self, initial_snapshot: OverlayPresentationSnapshot) -> None:
+        await super().start(initial_snapshot)
+        raise RuntimeError(f"window bootstrap failed with token {self.secret}")
+
+
 class FakeParentMonitor:
     def __init__(self) -> None:
         self.exited = asyncio.Event()
@@ -2588,7 +2600,9 @@ async def test_desktop_overlay_malformed_initial_snapshot_is_startup_error_with_
 
 
 @pytest.mark.asyncio
-async def test_desktop_overlay_window_start_failure_reports_window_configuration_error() -> None:
+async def test_desktop_overlay_window_start_failure_reports_window_configuration_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     token = "window-start-secret-token"
     bridge = OverlayBridge(
         session_token=token,
@@ -2600,12 +2614,13 @@ async def test_desktop_overlay_window_start_failure_reports_window_configuration
     sink = RecordingLifecycleSink()
     renderer = desktop_overlay.DesktopOverlayRenderer(
         _manifest(bridge_url=bridge.url, session_token=token),
-        window=FailingStartWindow(),
+        window=SensitiveFailingStartWindow(token),
         lifecycle_sink=sink,
         parent_monitor=FakeParentMonitor(),
     )
 
     try:
+        caplog.set_level(logging.WARNING, logger="puripuly_heart.ui.desktop_overlay")
         assert await renderer.run() == 1
         bridge_event = await _next_bridge_event(bridge, expected_type="startup_error")
     finally:
@@ -2617,6 +2632,21 @@ async def test_desktop_overlay_window_start_failure_reports_window_configuration
     assert sink.events[-1] == expected
     assert token not in json.dumps(sink.events)
     assert token not in json.dumps(bridge_event)
+    assert any(
+        "Renderer startup failed" in record.message
+        and "exception_type=RuntimeError" in record.message
+        and "exception_message=window bootstrap failed with token <redacted>" in record.message
+        and "exception_traceback=" in record.message
+        and record.exc_info is None
+        for record in caplog.records
+    )
+    formatted_tracebacks = "\n".join(
+        "".join(traceback.format_exception(*record.exc_info))
+        for record in caplog.records
+        if record.exc_info is not None
+    )
+    assert token not in json.dumps(caplog.messages)
+    assert token not in formatted_tracebacks
 
 
 @pytest.mark.asyncio
