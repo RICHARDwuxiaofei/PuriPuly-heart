@@ -2580,6 +2580,8 @@ class FletDesktopRendererWindow:
         page = self._page
         if page is None:
             return
+        if _page_window_size_differs_from_bounds(page, bounds):
+            self._caption_card_width_floor_by_block.clear()
         self._emit_detailed_log(
             "apply_window_bounds "
             f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
@@ -2758,6 +2760,20 @@ class FletDesktopRendererWindow:
 
 def _page_window_number(page: Any, field_name: str, default: int) -> int | float:
     return getattr(page.window, field_name, default) or default
+
+
+def _page_window_size_differs_from_bounds(
+    page: Any,
+    bounds: dict[str, int | float],
+) -> bool:
+    window = page.window
+    current_width = _finite_non_bool_number(getattr(window, "width", None))
+    current_height = _finite_non_bool_number(getattr(window, "height", None))
+    if current_width is None or current_height is None:
+        return True
+    width_changed = float(current_width) != float(bounds["width"])
+    height_changed = float(current_height) != float(bounds["height"])
+    return width_changed or height_changed
 
 
 def _parse_runtime_window_bounds(
