@@ -13,9 +13,7 @@ LOCAL_STT_MODEL_ID = "qwen3-asr-0.6b-int8-sherpa"
 LOCAL_STT_ENGINE = "sherpa-onnx"
 LOCAL_STT_INSTALL_DIRNAME = "qwen3-asr-0.6b-int8-sherpa"
 LOCAL_STT_INSTALLED_MANIFEST_FILENAME = "installed-manifest.json"
-LOCAL_STT_MANIFEST_RELATIVE_PATH = (
-    f"data/models/{LOCAL_STT_INSTALL_DIRNAME}.manifest.json"
-)
+LOCAL_STT_MANIFEST_RELATIVE_PATH = f"data/models/{LOCAL_STT_INSTALL_DIRNAME}.manifest.json"
 
 
 class LocalSTTAssetError(RuntimeError):
@@ -251,7 +249,14 @@ def _load_installed_local_stt_manifest(
         installed = InstalledLocalSTTManifest.from_dict(payload)
     except LocalSTTManifestInvalidError:
         raise
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
         raise LocalSTTManifestInvalidError("invalid local STT installed manifest") from exc
     if installed.manifest_version != manifest.installed_manifest_version:
         raise LocalSTTManifestInvalidError("stale installed manifest version")

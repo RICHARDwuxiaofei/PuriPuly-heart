@@ -138,7 +138,9 @@ async def test_ensure_local_stt_installed_downloads_preferred_source_successfull
     assert installed.selected_source == "huggingface"
     assert statuses[0] == RuntimeLocalSTTStatusUpdate(status="downloading", percent=0)
     assert statuses[-1] == RuntimeLocalSTTStatusUpdate(status="ready", percent=None)
-    state = inspect_local_stt_install_state((temp_dir / "appdata" / "models") / manifest.install_dirname, manifest=manifest)
+    state = inspect_local_stt_install_state(
+        (temp_dir / "appdata" / "models") / manifest.install_dirname, manifest=manifest
+    )
     assert state.status == "ready"
 
 

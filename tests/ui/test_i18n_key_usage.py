@@ -5,6 +5,10 @@ from pathlib import Path
 
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.i18n import available_locales, source_label
+from tests.ui.test_desktop_overlay_i18n import (
+    DESKTOP_OVERLAY_RECOVERY_I18N_KEYS,
+    SHIPPING_DESKTOP_OVERLAY_I18N_KEYS,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 I18N_DIR = REPO_ROOT / "src" / "puripuly_heart" / "data" / "i18n"
@@ -31,8 +35,6 @@ GITHUB_STAR_SNACKBAR_KEYS = (
 )
 OVERLAY_STEAMVR_NOT_RUNNING_KEY = "settings.overlay.failure.steamvr_not_running"
 
-INTENTIONAL_PENDING_RUNTIME_KEYS: set[str] = set()
-
 EXPECTED_GITHUB_STAR_SNACKBAR_KO_COPY = {
     "github_star.snackbar.message": "PuriPuly가 도움이 됐다면 GitHub에서 Star를 눌러주세요! 큰 힘이 되어요!",
     "github_star.snackbar.action": "이동",
@@ -43,6 +45,20 @@ EXPECTED_OVERLAY_STEAMVR_NOT_RUNNING_COPY = {
     "zh-CN": "SteamVR 尚未运行。如果您想使用桌面叠加层，请在设置中更改。",
     "ja": "SteamVRがオフです。デスクトップオーバーレイを使いたい場合は、設定を変更してください。",
 }
+
+# Overlay target labels are selected with a runtime suffix; keep this exact so target typos fail.
+EXACT_DYNAMIC_I18N_KEYS = frozenset(
+    {
+        "settings.overlay.target.desktop",
+        "settings.overlay.target.steamvr",
+    }
+)
+
+# Desktop-overlay copy is seeded before every product-standard key is referenced in runtime code.
+# Keep this exact, temporary allowlist narrow so typo or stale desktop-overlay keys still fail.
+TEMPORARILY_ALLOWED_UNREFERENCED_I18N_KEYS = frozenset(
+    SHIPPING_DESKTOP_OVERLAY_I18N_KEYS | DESKTOP_OVERLAY_RECOVERY_I18N_KEYS
+)
 
 
 def _load_bundles() -> dict[str, dict[str, str]]:
@@ -56,6 +72,17 @@ def _runtime_python_source() -> str:
     return "\n".join(
         path.read_text(encoding="utf-8") for path in sorted(RUNTIME_SOURCE_DIR.rglob("*.py"))
     )
+
+
+def _unused_i18n_keys(keys: list[str], runtime_source: str) -> list[str]:
+    return [
+        key
+        for key in keys
+        if key not in runtime_source
+        and not key.startswith(DYNAMIC_I18N_PREFIXES)
+        and key not in EXACT_DYNAMIC_I18N_KEYS
+        and key not in TEMPORARILY_ALLOWED_UNREFERENCED_I18N_KEYS
+    ]
 
 
 def test_i18n_bundles_share_the_same_keys() -> None:
@@ -296,12 +323,29 @@ def test_i18n_bundles_do_not_keep_unused_runtime_keys() -> None:
     all_keys = sorted(set().union(*(bundle.keys() for bundle in bundles.values())))
     runtime_source = _runtime_python_source()
 
-    unused_keys = [
-        key
-        for key in all_keys
-        if key not in runtime_source
-        and key not in INTENTIONAL_PENDING_RUNTIME_KEYS
-        and not key.startswith(DYNAMIC_I18N_PREFIXES)
-    ]
+    unused_keys = _unused_i18n_keys(all_keys, runtime_source)
+
+    assert unused_keys == []
+
+
+def test_unused_key_guard_flags_desktop_overlay_typos() -> None:
+    runtime_source = ""
+    typo_like_keys = {
+        "debug_preview.desktop_overlay_typo",
+        "settings.overlay.caption_location.extra",
+        "settings.overlay.desktop.typo",
+        "settings.overlay.target.typo",
+    }
+
+    unused_keys = _unused_i18n_keys(sorted(typo_like_keys), runtime_source)
+
+    assert unused_keys == sorted(typo_like_keys)
+
+
+def test_desktop_overlay_seed_keys_are_exactly_allowlisted() -> None:
+    unused_keys = _unused_i18n_keys(
+        sorted(TEMPORARILY_ALLOWED_UNREFERENCED_I18N_KEYS),
+        runtime_source="",
+    )
 
     assert unused_keys == []

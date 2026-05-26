@@ -57,7 +57,9 @@ def _to_windows_path(path: Path) -> str:
     return subprocess.check_output(["wslpath", "-w", str(path)], text=True).strip()
 
 
-def _run_installer_script(*, manifest_path: Path, app_data_root: Path, selected_source: str) -> None:
+def _run_installer_script(
+    *, manifest_path: Path, app_data_root: Path, selected_source: str
+) -> None:
     completed = subprocess.run(
         [
             str(POWERSHELL),
@@ -173,7 +175,10 @@ def test_installer_script_recovers_invalid_existing_install_and_writes_bomless_m
     installed_manifest = install_dir / "installed-manifest.json"
     assert installed_manifest.exists()
     assert not installed_manifest.read_bytes().startswith(codecs.BOM_UTF8)
-    assert json.loads(installed_manifest.read_text(encoding="utf-8"))["selected_source"] == "huggingface"
+    assert (
+        json.loads(installed_manifest.read_text(encoding="utf-8"))["selected_source"]
+        == "huggingface"
+    )
     assert (install_dir / "model.int8.onnx").read_bytes() == b"model-bytes"
     assert (install_dir / "tokens.txt").read_bytes() == b"token-bytes"
 
@@ -247,9 +252,12 @@ def test_installer_script_preserves_existing_install_until_staging_succeeds(
     assert completed.returncode != 0
     assert (install_dir / "model.int8.onnx").read_bytes() == b"old-model-bytes"
     assert (install_dir / "tokens.txt").read_bytes() == b"old-token-bytes"
-    assert json.loads((install_dir / "installed-manifest.json").read_text(encoding="utf-8"))[
-        "selected_revision"
-    ] == "hf-rev-1"
+    assert (
+        json.loads((install_dir / "installed-manifest.json").read_text(encoding="utf-8"))[
+            "selected_revision"
+        ]
+        == "hf-rev-1"
+    )
 
 
 def test_promote_staging_install_restores_backup_when_destination_move_fails(
@@ -266,7 +274,9 @@ def test_promote_staging_install_restores_backup_when_destination_move_fails(
 
     script_text = SCRIPT_PATH.read_text(encoding="utf-8")
     functions_only = script_text.split("$manifest = Read-JsonObject -Path $ManifestPath", 1)[0]
-    functions_only = functions_only.split("$DefaultInstalledManifestFilename = \"installed-manifest.json\"\n", 1)[1]
+    functions_only = functions_only.split(
+        '$DefaultInstalledManifestFilename = "installed-manifest.json"\n', 1
+    )[1]
     command = "\n".join(
         [
             '$ErrorActionPreference = "Stop"',

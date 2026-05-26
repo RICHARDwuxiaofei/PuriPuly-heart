@@ -3,19 +3,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from puripuly_heart.app.headless_stdin import HeadlessStdinRunner
-from puripuly_heart.app.local_qwen_runtime_check import run_local_qwen_runtime_check
-from puripuly_heart.app.soxr_runtime_check import run_soxr_runtime_check
-from puripuly_heart.app.wiring import create_llm_provider, create_secret_store
 from puripuly_heart.config.paths import default_settings_path, default_vad_model_path
-from puripuly_heart.config.settings import AppSettings, load_settings, new_settings_for_first_run
-from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.runtime_logging import configure_main_logging
-from puripuly_heart.core.soxr_runtime import (
-    SoxrRuntimeAvailabilityError,
-    ensure_soxr_runtime_available_for_startup,
-)
+
+if TYPE_CHECKING:
+    from puripuly_heart.config.settings import AppSettings
+
+
+HeadlessStdinRunner: Any | None = None
+VrchatOscUdpSender: Any | None = None
+SoxrRuntimeAvailabilityError: type[Exception] | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,6 +59,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Translate STT final results using configured LLM provider",
     )
 
+    desktop_overlay = sub.add_parser(
+        "run-desktop-overlay",
+        help="Run the desktop Flet overlay renderer",
+    )
+    desktop_overlay.add_argument(
+        "--config",
+        type=Path,
+        required=True,
+        help="Path to overlay launch manifest JSON",
+    )
+    sub.add_parser(
+        "run-desktop-overlay-preview",
+        help="Run the desktop Flet overlay preview",
+    )
+
     sub.add_parser(
         "local-qwen-runtime-check",
         help="Verify the Local Qwen Windows runtime DLL directory",
@@ -96,6 +110,77 @@ def _load_headless_mic_types():
     return HeadlessMicRunner, HeadlessMicInitializationError
 
 
+def _load_headless_stdin_runner():
+    global HeadlessStdinRunner
+    if HeadlessStdinRunner is None:
+        from puripuly_heart.app.headless_stdin import HeadlessStdinRunner as LoadedRunner
+
+        HeadlessStdinRunner = LoadedRunner
+    return HeadlessStdinRunner
+
+
+def _load_vrchat_osc_udp_sender():
+    global VrchatOscUdpSender
+    if VrchatOscUdpSender is None:
+        from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender as LoadedSender
+
+        VrchatOscUdpSender = LoadedSender
+    return VrchatOscUdpSender
+
+
+def _soxr_runtime_availability_error_type() -> type[Exception]:
+    global SoxrRuntimeAvailabilityError
+    if SoxrRuntimeAvailabilityError is None:
+        from puripuly_heart.core.soxr_runtime import (
+            SoxrRuntimeAvailabilityError as LoadedError,
+        )
+
+        SoxrRuntimeAvailabilityError = LoadedError
+    return SoxrRuntimeAvailabilityError
+
+
+def ensure_soxr_runtime_available_for_startup():
+    from puripuly_heart.core.soxr_runtime import ensure_soxr_runtime_available_for_startup as run
+
+    return run()
+
+
+def run_local_qwen_runtime_check() -> int:
+    from puripuly_heart.app.local_qwen_runtime_check import run_local_qwen_runtime_check as run
+
+    return run()
+
+
+def run_soxr_runtime_check() -> int:
+    from puripuly_heart.app.soxr_runtime_check import run_soxr_runtime_check as run
+
+    return run()
+
+
+def create_secret_store(*args, **kwargs):
+    from puripuly_heart.app.wiring import create_secret_store as create
+
+    return create(*args, **kwargs)
+
+
+def create_llm_provider(*args, **kwargs):
+    from puripuly_heart.app.wiring import create_llm_provider as create
+
+    return create(*args, **kwargs)
+
+
+def load_settings(path: Path):
+    from puripuly_heart.config.settings import load_settings as load
+
+    return load(path)
+
+
+def new_settings_for_first_run():
+    from puripuly_heart.config.settings import new_settings_for_first_run as make_settings
+
+    return make_settings()
+
+
 def _requires_soxr_runtime_startup_check(args: argparse.Namespace) -> bool:
     return args.command == "run-mic"
 
@@ -117,6 +202,18 @@ def _run_gui(config_path: Path, *, debug_ui_preview: bool) -> int:
     return 0
 
 
+def _run_desktop_overlay(config_path: Path) -> int:
+    from puripuly_heart.ui.desktop_overlay import main as desktop_overlay_main
+
+    return desktop_overlay_main(["--config", str(config_path)])
+
+
+def _run_desktop_overlay_preview() -> int:
+    from puripuly_heart.ui.desktop_overlay import main as desktop_overlay_main
+
+    return desktop_overlay_main(["--preview"])
+
+
 def main(argv: list[str] | None = None) -> int:
     logging_sinks = configure_main_logging()
     try:
@@ -132,8 +229,14 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if _requires_soxr_runtime_startup_check(args):
                 ensure_soxr_runtime_available_for_startup()
-        except SoxrRuntimeAvailabilityError as exc:
+        except _soxr_runtime_availability_error_type() as exc:
             return _print_runtime_error("packaged soxr runtime", exc)
+
+        if args.command == "run-desktop-overlay":
+            return _run_desktop_overlay(args.config)
+
+        if args.command == "run-desktop-overlay-preview":
+            return _run_desktop_overlay_preview()
 
         if args.command == "run-gui":
             return _run_gui(
@@ -150,7 +253,8 @@ def main(argv: list[str] | None = None) -> int:
         settings = _load_settings_or_default(args.config)
 
         if args.command == "osc-send":
-            sender = VrchatOscUdpSender(
+            sender_cls = _load_vrchat_osc_udp_sender()
+            sender = sender_cls(
                 host=settings.osc.host,
                 port=settings.osc.port,
                 chatbox_address=settings.osc.chatbox_address,
@@ -172,7 +276,8 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception as exc:
                     return _print_initialization_error("LLM provider", exc)
 
-            runner = HeadlessStdinRunner(settings=settings, llm=llm)
+            runner_cls = _load_headless_stdin_runner()
+            runner = runner_cls(settings=settings, llm=llm)
             return asyncio.run(runner.run())
 
         if args.command == "run-mic":
