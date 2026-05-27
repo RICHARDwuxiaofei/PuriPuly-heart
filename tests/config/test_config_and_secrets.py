@@ -12,6 +12,7 @@ from puripuly_heart.config.audio_host_api import (
 )
 from puripuly_heart.config.llm_profiles import (
     OPENROUTER_FALLBACK_SELECTION_ALIASES,
+    get_openrouter_llm_profile,
     openrouter_alias_for_fields,
     resolve_openrouter_fallback_model,
 )
@@ -275,7 +276,7 @@ def test_migrate_v17_strips_directsound_host_api_before_migration_and_preserves_
 
 
 def test_migrate_v18_preserves_directsound_when_removing_legacy_osc_rate_limits() -> None:
-    assert SETTINGS_SCHEMA_VERSION == 23
+    assert SETTINGS_SCHEMA_VERSION == 24
 
     raw = to_dict(AppSettings())
     raw["settings_version"] = 17
@@ -319,7 +320,7 @@ def test_load_settings_persists_v17_directsound_migration(tmp_path) -> None:
 
 
 def test_load_settings_persists_v18_osc_rate_limit_key_removal(tmp_path) -> None:
-    assert SETTINGS_SCHEMA_VERSION == 23
+    assert SETTINGS_SCHEMA_VERSION == 24
 
     path = tmp_path / "settings.json"
     raw = to_dict(AppSettings())
@@ -378,6 +379,7 @@ def test_translation_model_public_member_names_and_values_match_plan() -> None:
     assert tuple((member.name, member.value) for member in TranslationModel) == (
         ("GEMMA4", "gemma4"),
         ("DEEPSEEK_V4_FLASH", "deepseek_v4_flash"),
+        ("DEEPSEEK_V4_PRO", "deepseek_v4_pro"),
         ("GEMINI_3_FLASH", "gemini3_flash"),
         ("GEMINI_31_FLASH_LITE", "gemini31_flash_lite"),
         ("QWEN_35_PLUS", "qwen35_plus"),
@@ -742,6 +744,110 @@ def test_materialize_translation_settings_returns_mutated_settings() -> None:
     assert returned is settings
     assert settings.provider.llm == LLMProviderName.DEEPSEEK
     assert settings.deepseek.llm_model == DeepSeekLLMModel.DEEPSEEK_V4_FLASH
+
+
+def test_deepseek_v4_pro_translation_supports_official_byok_only() -> None:
+    deepseek_v4_pro = getattr(TranslationModel, "DEEPSEEK_V4_PRO", None)
+
+    assert deepseek_v4_pro is not None
+    assert supported_translation_connections(deepseek_v4_pro) == (
+        TranslationConnection.OFFICIAL_BYOK,
+    )
+
+
+def test_materialize_translation_settings_maps_deepseek_v4_pro_official_byok() -> None:
+    deepseek_v4_pro = getattr(TranslationModel, "DEEPSEEK_V4_PRO", None)
+    deepseek_model = getattr(DeepSeekLLMModel, "DEEPSEEK_V4_PRO", None)
+
+    assert deepseek_v4_pro is not None
+    assert deepseek_model is not None
+
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=deepseek_v4_pro,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
+
+    returned = materialize_translation_settings(settings)
+
+    assert returned is settings
+    assert settings.provider.llm == LLMProviderName.DEEPSEEK
+    assert settings.deepseek.llm_model == deepseek_model
+
+
+def test_materialize_translation_settings_normalizes_deepseek_v4_pro_openrouter_to_official_byok() -> (
+    None
+):
+    deepseek_v4_pro = getattr(TranslationModel, "DEEPSEEK_V4_PRO", None)
+    deepseek_model = getattr(DeepSeekLLMModel, "DEEPSEEK_V4_PRO", None)
+
+    assert deepseek_v4_pro is not None
+    assert deepseek_model is not None
+
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=deepseek_v4_pro,
+        connection=TranslationConnection.OPENROUTER,
+        connection_history={deepseek_v4_pro.value: TranslationConnection.OPENROUTER},
+    )
+
+    returned = materialize_translation_settings(settings)
+
+    assert returned is settings
+    assert settings.translation.connection == TranslationConnection.OFFICIAL_BYOK
+    assert settings.provider.llm == LLMProviderName.DEEPSEEK
+    assert settings.deepseek.llm_model == deepseek_model
+    assert settings.openrouter.provider_routing == OpenRouterProviderRouting.DEFAULT
+
+
+def test_from_dict_roundtrips_deepseek_v4_pro_official_byok() -> None:
+    deepseek_v4_pro = getattr(TranslationModel, "DEEPSEEK_V4_PRO", None)
+    deepseek_model = getattr(DeepSeekLLMModel, "DEEPSEEK_V4_PRO", None)
+
+    assert deepseek_v4_pro is not None
+    assert deepseek_model is not None
+
+    data = to_dict(AppSettings())
+    data["translation"] = {
+        "model": deepseek_v4_pro.value,
+        "connection": TranslationConnection.OFFICIAL_BYOK.value,
+        "connection_history": {
+            deepseek_v4_pro.value: TranslationConnection.OFFICIAL_BYOK.value,
+        },
+    }
+    data["provider"]["llm"] = LLMProviderName.DEEPSEEK.value
+    data["deepseek"] = {"llm_model": deepseek_model.value}
+
+    loaded = from_dict(data)
+    persisted = to_dict(loaded)
+
+    assert loaded.translation.model == deepseek_v4_pro
+    assert loaded.translation.connection == TranslationConnection.OFFICIAL_BYOK
+    assert loaded.provider.llm == LLMProviderName.DEEPSEEK
+    assert loaded.deepseek.llm_model == deepseek_model
+    assert persisted["translation"]["model"] == deepseek_v4_pro.value
+    assert persisted["provider"]["llm"] == LLMProviderName.DEEPSEEK.value
+    assert persisted["deepseek"]["llm_model"] == deepseek_model.value
+
+
+def test_openrouter_alias_for_fields_does_not_expose_deepseek_v4_pro() -> None:
+    assert getattr(OpenRouterLLMModel, "DEEPSEEK_V4_PRO", None) is None
+    assert getattr(OpenRouterSelectionAlias, "DEEPSEEK_V4_PRO_BYOK", None) is None
+    assert (
+        openrouter_alias_for_fields(
+            model="deepseek/deepseek-v4-pro",
+            source=OpenRouterCredentialSource.BYOK.value,
+        )
+        is None
+    )
+    assert (
+        openrouter_alias_for_fields(
+            model="deepseek/deepseek-v4-pro",
+            source=OpenRouterCredentialSource.MANAGED.value,
+        )
+        is None
+    )
+    assert get_openrouter_llm_profile("deepseek_v4_pro_byok") is None
 
 
 def test_materialize_translation_settings_maps_deepseek_managed_china_to_deepseek_only_openrouter() -> (

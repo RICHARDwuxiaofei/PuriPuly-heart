@@ -6,6 +6,7 @@ import copy
 import inspect
 import json
 import logging
+import math
 import os
 import secrets
 import sys
@@ -13,6 +14,7 @@ import threading
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -29,6 +31,11 @@ from puripuly_heart.app.wiring import (
 from puripuly_heart.config.audio_host_api import normalize_input_host_api
 from puripuly_heart.config.llm_profiles import profile_for_alias
 from puripuly_heart.config.settings import (
+    DESKTOP_FLET_MIN_HEIGHT,
+    DESKTOP_FLET_MIN_WIDTH,
+    DESKTOP_FLET_SIZE_PRESETS,
+    OVERLAY_TARGET_DESKTOP,
+    OVERLAY_TARGET_STEAMVR,
     AppSettings,
     LLMProviderName,
     OpenRouterCredentialSource,
@@ -103,7 +110,12 @@ from puripuly_heart.core.osc.udp_sender import VrchatOscUdpSender
 from puripuly_heart.core.overlay.bridge import OverlayBridge
 from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
-from puripuly_heart.core.overlay.process import OverlayProcessManager
+from puripuly_heart.core.overlay.process import (
+    DefaultOverlayProcessRunner,
+    DesktopFletOverlayRunner,
+    OverlayProcessManager,
+    OverlayProcessRunner,
+)
 from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.controller import ManagedSTTProvider
@@ -113,7 +125,6 @@ from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
 from puripuly_heart.core.vad.silero import SileroVadOnnx
 from puripuly_heart.providers.llm.deepseek import DeepSeekLLMProvider
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
-from puripuly_heart.providers.llm.local_openai import LocalOpenAICompatibleLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterKeyMetadata, OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -135,6 +146,12 @@ logger = logging.getLogger(__name__)
 STT_RESET_DEADLINE_S = 300.0
 OVERLAY_STARTUP_TIMEOUT_MS = 3000
 OVERLAY_SHUTDOWN_GRACE_S = 0.05
+DESKTOP_BOUNDS_PERSIST_DEBOUNCE_S = 0.05
+DESKTOP_INTERACTION_MODE_EDIT = "edit"
+DESKTOP_INTERACTION_MODE_PASS_THROUGH = "pass_through"
+DESKTOP_INTERACTION_MODES = frozenset(
+    {DESKTOP_INTERACTION_MODE_EDIT, DESKTOP_INTERACTION_MODE_PASS_THROUGH}
+)
 _PASS_STATUS_UNSET = object()
 _OVERLAY_FAILURE_REASONS = frozenset(
     {
@@ -154,8 +171,24 @@ _OVERLAY_FAILURE_REASONS = frozenset(
         "openvr_init_failed",
         "renderer_init_failed",
         "runtime_disconnected",
+        "window_configuration_failed",
+        "runtime_control_invalid",
         "runtime_crashed",
         "unknown",
+    }
+)
+GITHUB_STAR_PROMPT_MANAGED_REMAINING_PERCENT_THRESHOLD = 60
+GITHUB_STAR_PROMPT_RECENCY_WINDOW = timedelta(days=14)
+_GITHUB_STAR_PROMPT_MANAGED_CONNECTIONS = frozenset(
+    {
+        TranslationConnection.MANAGED,
+        TranslationConnection.MANAGED_CHINA,
+    }
+)
+_GITHUB_STAR_PROMPT_USER_OWNED_CLOUD_CONNECTIONS = frozenset(
+    {
+        TranslationConnection.OPENROUTER,
+        TranslationConnection.OFFICIAL_BYOK,
     }
 )
 DISCORD_AUTH_ERROR_KEY_BY_SUBCODE = {
@@ -181,6 +214,55 @@ def _callable_accepts_keyword(callable_obj: object, keyword: str) -> bool:
     return keyword in parameters or any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
     )
+
+
+def _github_star_prompt_utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _github_star_prompt_utc_timestamp(value: datetime | None = None) -> str:
+    resolved = value or _github_star_prompt_utc_now()
+    if resolved.tzinfo is None:
+        resolved = resolved.replace(tzinfo=timezone.utc)
+    return (
+        resolved.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
+
+
+def _parse_github_star_prompt_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    parse_value = f"{normalized[:-1]}+00:00" if normalized.endswith("Z") else normalized
+    try:
+        parsed = datetime.fromisoformat(parse_value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _github_star_prompt_non_negative_count(value: object) -> int:
+    if type(value) is int and value >= 0:
+        return value
+    return 0
+
+
+def _github_star_prompt_latest_timestamp(*values: str | None) -> str | None:
+    latest: tuple[datetime, str] | None = None
+    for value in values:
+        parsed = _parse_github_star_prompt_timestamp(value)
+        if parsed is None:
+            continue
+        normalized_value = _github_star_prompt_utc_timestamp(parsed)
+        if latest is None or parsed > latest[0]:
+            latest = (parsed, normalized_value)
+    return latest[1] if latest is not None else None
 
 
 class ClipboardWatcherRuntime(Protocol):
@@ -272,6 +354,32 @@ class GuiController:
     _overlay_start_task: asyncio.Task[None] | None = None
     _overlay_monitor_task: asyncio.Task[None] | None = None
     _overlay_lock: asyncio.Lock | None = None
+    _active_overlay_target: str | None = field(init=False, default=None)
+    _desktop_renderer_events: asyncio.Queue[dict[str, object]] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _desktop_renderer_events_task: asyncio.Task[None] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _desktop_bounds_persist_task: asyncio.Task[None] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _pending_desktop_bounds: dict[str, int | float] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _desktop_suppressed_bounds_signatures: set[tuple[float, float, float, float]] = field(
+        init=False,
+        default_factory=set,
+        repr=False,
+    )
     _managed_trial_pending_auth: bool = field(init=False, default=False)
     _discord_managed_auth_in_progress: bool = field(init=False, default=False)
     _discord_managed_auth_callback_received_hook: Callable[[], None] | None = field(
@@ -298,11 +406,25 @@ class GuiController:
     )
     _translation_toggle_intent_enabled: bool = field(init=False, default=False)
     _translation_toggle_generation: int = field(init=False, default=0)
+    _github_star_prompt_translation_success_task: asyncio.Task[bool] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _github_star_prompt_persistence_lock: asyncio.Lock | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     _runtime_logging: SessionRuntimeLoggingService | None = field(init=False, default=None)
 
     overlay_state: str = "off"
     failure_reason: str | None = None
     auto_restart_scheduled: bool = False
+    desktop_overlay_interaction_mode: str = field(
+        init=False,
+        default=DESKTOP_INTERACTION_MODE_EDIT,
+    )
     overlay_calibration: OverlayCalibration = field(default_factory=OverlayCalibration)
     _overlay_calibration_draft: OverlayCalibration | None = None
 
@@ -315,6 +437,10 @@ class GuiController:
     @property
     def managed_auth_pending(self) -> bool:
         return self._managed_trial_pending_auth
+
+    @property
+    def desktop_overlay_captions_locked(self) -> bool:
+        return self.desktop_overlay_interaction_mode == DESKTOP_INTERACTION_MODE_PASS_THROUGH
 
     @property
     def discord_managed_auth_in_progress(self) -> bool:
@@ -777,6 +903,285 @@ class GuiController:
         return max(
             0, min(100, round((usage_metadata.remaining_usd / usage_metadata.limit_usd) * 100))
         )
+
+    def _github_star_prompt_translation_connection_for(
+        self,
+        settings: AppSettings | None,
+    ) -> TranslationConnection | None:
+        if settings is None:
+            return None
+        connection = settings.translation.connection
+        if isinstance(connection, TranslationConnection):
+            return connection
+        with contextlib.suppress(ValueError, TypeError):
+            return TranslationConnection(connection)
+        return None
+
+    def _github_star_prompt_current_translation_connection(self) -> TranslationConnection | None:
+        return self._github_star_prompt_translation_connection_for(self.settings)
+
+    def _github_star_prompt_settings_has_user_owned_cloud_connection(
+        self,
+        settings: AppSettings | None,
+    ) -> bool:
+        return (
+            self._github_star_prompt_translation_connection_for(settings)
+            in _GITHUB_STAR_PROMPT_USER_OWNED_CLOUD_CONNECTIONS
+        )
+
+    def _github_star_prompt_has_managed_connection(self) -> bool:
+        return (
+            self._github_star_prompt_current_translation_connection()
+            in _GITHUB_STAR_PROMPT_MANAGED_CONNECTIONS
+        )
+
+    def _github_star_prompt_has_user_owned_cloud_connection(self) -> bool:
+        return (
+            self._github_star_prompt_current_translation_connection()
+            in _GITHUB_STAR_PROMPT_USER_OWNED_CLOUD_CONNECTIONS
+        )
+
+    def is_github_star_prompt_eligible(self) -> bool:
+        if self.settings is None:
+            return False
+        if self._github_star_prompt_has_managed_connection():
+            remaining_percent = self._managed_trial_remaining_percent(
+                self._managed_trial_usage_metadata
+            )
+            return (
+                remaining_percent is not None
+                and remaining_percent <= GITHUB_STAR_PROMPT_MANAGED_REMAINING_PERCENT_THRESHOLD
+            )
+        if self._github_star_prompt_has_user_owned_cloud_connection():
+            return bool(self.settings.ui.github_star_prompt_translation_success_observed)
+        return False
+
+    def should_show_github_star_prompt(self, *, now: datetime | None = None) -> bool:
+        settings = self.settings
+        if settings is None:
+            return False
+        if settings.ui.github_star_prompt_clicked:
+            return False
+        if not self.is_github_star_prompt_eligible():
+            return False
+
+        last_shown_at = _parse_github_star_prompt_timestamp(
+            settings.ui.github_star_prompt_last_shown_at
+        )
+        if last_shown_at is None:
+            return True
+
+        resolved_now = now or _github_star_prompt_utc_now()
+        if resolved_now.tzinfo is None:
+            resolved_now = resolved_now.replace(tzinfo=timezone.utc)
+        elapsed = resolved_now.astimezone(timezone.utc) - last_shown_at
+        return elapsed >= GITHUB_STAR_PROMPT_RECENCY_WINDOW
+
+    def _get_github_star_prompt_persistence_lock(self) -> asyncio.Lock:
+        if self._github_star_prompt_persistence_lock is None:
+            self._github_star_prompt_persistence_lock = asyncio.Lock()
+        return self._github_star_prompt_persistence_lock
+
+    def _github_star_prompt_state_snapshot(self, settings: AppSettings) -> tuple[object, ...]:
+        return (
+            settings.ui.github_star_prompt_clicked,
+            settings.ui.github_star_prompt_last_shown_at,
+            settings.ui.github_star_prompt_show_count,
+            settings.ui.github_star_prompt_translation_success_observed,
+        )
+
+    def _restore_github_star_prompt_state_snapshot(
+        self,
+        settings: AppSettings,
+        snapshot: tuple[object, ...],
+    ) -> None:
+        (
+            clicked,
+            last_shown_at,
+            show_count,
+            translation_success_observed,
+        ) = snapshot
+        settings.ui.github_star_prompt_clicked = bool(clicked)
+        settings.ui.github_star_prompt_last_shown_at = (
+            last_shown_at if isinstance(last_shown_at, str) else None
+        )
+        settings.ui.github_star_prompt_show_count = _github_star_prompt_non_negative_count(
+            show_count
+        )
+        settings.ui.github_star_prompt_translation_success_observed = bool(
+            translation_success_observed
+        )
+
+    def _log_github_star_prompt_save_failure(
+        self,
+        failure_context: str,
+        exc: Exception,
+    ) -> None:
+        self.log_basic(
+            f"[GitHubStar] Failed to persist prompt {failure_context}: {exc}",
+            level=logging.WARNING,
+        )
+
+    async def _persist_github_star_prompt_mutation(
+        self,
+        *,
+        failure_context: str,
+        mutate,
+    ) -> bool:
+        attempted_mutation = False
+        while True:
+            async with self._get_github_star_prompt_persistence_lock():
+                settings = self.settings
+                if settings is None:
+                    return False
+                snapshot = self._github_star_prompt_state_snapshot(settings)
+                if not mutate(settings):
+                    return attempted_mutation
+                attempted_mutation = True
+                try:
+                    await asyncio.to_thread(save_settings, self.config_path, settings)
+                except asyncio.CancelledError:
+                    if self.settings is settings:
+                        self._restore_github_star_prompt_state_snapshot(settings, snapshot)
+                    raise
+                except Exception as exc:
+                    if self.settings is settings:
+                        self._restore_github_star_prompt_state_snapshot(settings, snapshot)
+                    self._log_github_star_prompt_save_failure(failure_context, exc)
+                    return False
+                if self.settings is settings:
+                    return True
+            await asyncio.sleep(0)
+
+    async def persist_github_star_prompt_opened(
+        self,
+        *,
+        opened_at: datetime | None = None,
+    ) -> bool:
+        opened_timestamp = _github_star_prompt_utc_timestamp(opened_at)
+
+        def _mutate(settings: AppSettings) -> bool:
+            settings.ui.github_star_prompt_last_shown_at = opened_timestamp
+            settings.ui.github_star_prompt_show_count = (
+                _github_star_prompt_non_negative_count(settings.ui.github_star_prompt_show_count)
+                + 1
+            )
+            return True
+
+        return await self._persist_github_star_prompt_mutation(
+            failure_context="open state",
+            mutate=_mutate,
+        )
+
+    def _run_github_star_prompt_persistence_sync(self, coro) -> bool:  # noqa: ANN001
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return bool(asyncio.run(coro))
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
+        return False
+
+    def record_github_star_prompt_opened(self, *, opened_at: datetime | None = None) -> bool:
+        return self._run_github_star_prompt_persistence_sync(
+            self.persist_github_star_prompt_opened(opened_at=opened_at)
+        )
+
+    async def persist_github_star_prompt_clicked(self) -> bool:
+        def _mutate(settings: AppSettings) -> bool:
+            settings.ui.github_star_prompt_clicked = True
+            return True
+
+        return await self._persist_github_star_prompt_mutation(
+            failure_context="click state",
+            mutate=_mutate,
+        )
+
+    def record_github_star_prompt_clicked(self) -> bool:
+        return self._run_github_star_prompt_persistence_sync(
+            self.persist_github_star_prompt_clicked()
+        )
+
+    async def persist_github_star_prompt_translation_success_observed(self) -> bool:
+        def _mutate(settings: AppSettings) -> bool:
+            if not self._github_star_prompt_settings_has_user_owned_cloud_connection(settings):
+                return False
+            if settings.ui.github_star_prompt_translation_success_observed:
+                return False
+            settings.ui.github_star_prompt_translation_success_observed = True
+            return True
+
+        return await self._persist_github_star_prompt_mutation(
+            failure_context="translation success observation",
+            mutate=_mutate,
+        )
+
+    def record_github_star_prompt_translation_success_observed(self) -> bool:
+        return self._run_github_star_prompt_persistence_sync(
+            self.persist_github_star_prompt_translation_success_observed()
+        )
+
+    def schedule_github_star_prompt_translation_success_observed(self) -> bool:
+        if self.settings is None:
+            return False
+        if not self._github_star_prompt_has_user_owned_cloud_connection():
+            return False
+        if self.settings.ui.github_star_prompt_translation_success_observed:
+            return False
+        existing_task = self._github_star_prompt_translation_success_task
+        if existing_task is not None and not existing_task.done():
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return self.record_github_star_prompt_translation_success_observed()
+
+        task = loop.create_task(self.persist_github_star_prompt_translation_success_observed())
+        self._github_star_prompt_translation_success_task = task
+
+        def _clear_completed_task(completed_task: asyncio.Task[bool]) -> None:
+            if self._github_star_prompt_translation_success_task is completed_task:
+                self._github_star_prompt_translation_success_task = None
+
+        task.add_done_callback(_clear_completed_task)
+        return True
+
+    async def _drain_github_star_prompt_translation_success_task(self) -> None:
+        task = self._github_star_prompt_translation_success_task
+        if task is None:
+            return
+        await asyncio.gather(task, return_exceptions=True)
+        if self._github_star_prompt_translation_success_task is task:
+            self._github_star_prompt_translation_success_task = None
+
+    async def _preserve_github_star_prompt_observation_before_settings_replace(
+        self,
+        replacement_settings: AppSettings,
+    ) -> None:
+        await self._drain_github_star_prompt_translation_success_task()
+        async with self._get_github_star_prompt_persistence_lock():
+            if self.settings is None:
+                return
+            current_ui = self.settings.ui
+            replacement_ui = replacement_settings.ui
+            replacement_ui.github_star_prompt_clicked = bool(
+                replacement_ui.github_star_prompt_clicked or current_ui.github_star_prompt_clicked
+            )
+            replacement_ui.github_star_prompt_translation_success_observed = bool(
+                replacement_ui.github_star_prompt_translation_success_observed
+                or current_ui.github_star_prompt_translation_success_observed
+            )
+            replacement_ui.github_star_prompt_show_count = max(
+                _github_star_prompt_non_negative_count(
+                    replacement_ui.github_star_prompt_show_count
+                ),
+                _github_star_prompt_non_negative_count(current_ui.github_star_prompt_show_count),
+            )
+            replacement_ui.github_star_prompt_last_shown_at = _github_star_prompt_latest_timestamp(
+                replacement_ui.github_star_prompt_last_shown_at,
+                current_ui.github_star_prompt_last_shown_at,
+            )
 
     def _current_owned_referral_id(self) -> str | None:
         if self.settings is None:
@@ -1271,6 +1676,655 @@ class GuiController:
             and self._overlay_bridge is not None
         )
 
+    @staticmethod
+    def _normalized_overlay_target(value: object) -> str:
+        if value == OVERLAY_TARGET_DESKTOP:
+            return OVERLAY_TARGET_DESKTOP
+        return OVERLAY_TARGET_STEAMVR
+
+    def _overlay_target_for_settings(self, settings: AppSettings | None = None) -> str:
+        resolved_settings = settings or self.settings
+        if resolved_settings is None:
+            return OVERLAY_TARGET_STEAMVR
+        return self._normalized_overlay_target(resolved_settings.overlay.target)
+
+    def _overlay_runtime_is_active(self) -> bool:
+        start_task = self._overlay_start_task
+        return bool(
+            self.overlay_state in {"starting", "connected"}
+            or self._overlay_bridge is not None
+            or self._overlay_manager is not None
+            or (start_task is not None and not start_task.done())
+        )
+
+    def _previous_overlay_target_for_apply(self) -> str:
+        if self._overlay_runtime_is_active() and self._active_overlay_target is not None:
+            return self._active_overlay_target
+        return self._overlay_target_for_settings(self.settings)
+
+    def _overlay_process_runner_for_target(self, target: str) -> OverlayProcessRunner:
+        if target == OVERLAY_TARGET_DESKTOP:
+            return DesktopFletOverlayRunner()
+        return DefaultOverlayProcessRunner()
+
+    def _build_initial_desktop_runtime_controls(
+        self,
+        settings: AppSettings,
+    ) -> list[dict[str, object]]:
+        desktop_settings = copy.deepcopy(settings.overlay.desktop_flet)
+        desktop_settings.validate()
+        bounds = self._desktop_launch_bounds_for_current_launch(desktop_settings)
+        visual = desktop_settings.visual
+        interaction_mode = DESKTOP_INTERACTION_MODE_EDIT
+        self.log_detailed(
+            "[DesktopOverlay][Launch] "
+            f"target=desktop locked={desktop_settings.locked} "
+            f"interaction_mode={interaction_mode} "
+            f"size_preset={desktop_settings.size_preset} "
+            f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+            f"height={bounds['height']} "
+            f"text_scale={visual.text_scale} "
+            f"background_alpha={visual.background_alpha} "
+            f"outline_width={visual.outline_width}"
+        )
+        return [
+            {
+                "command": "apply_window_bounds",
+                "x": bounds["x"],
+                "y": bounds["y"],
+                "width": bounds["width"],
+                "height": bounds["height"],
+            },
+            {
+                "command": "apply_visual_config",
+                "text_scale": visual.text_scale,
+                "background_alpha": visual.background_alpha,
+                "outline_width": visual.outline_width,
+            },
+            {"command": "set_interaction_mode", "mode": interaction_mode},
+        ]
+
+    @staticmethod
+    def _desktop_dimensions_for_size_preset(size_preset: object) -> tuple[int, int]:
+        if isinstance(size_preset, str) and size_preset in DESKTOP_FLET_SIZE_PRESETS:
+            return DESKTOP_FLET_SIZE_PRESETS[size_preset]
+        return DESKTOP_FLET_SIZE_PRESETS["medium"]
+
+    def _desktop_launch_bounds_for_current_launch(
+        self,
+        desktop_settings: object,
+    ) -> dict[str, int | float]:
+        position = getattr(desktop_settings, "position", None)
+        x = getattr(position, "x", None)
+        y = getattr(position, "y", None)
+        width, height = self._desktop_dimensions_for_size_preset(
+            getattr(desktop_settings, "size_preset", None)
+        )
+        if self._is_finite_non_bool_number(x) and self._is_finite_non_bool_number(y):
+            return {"x": x, "y": y, "width": width, "height": height}  # type: ignore[dict-item]
+        return self._desktop_centered_bounds_for_dimensions(width=width, height=height)
+
+    def _desktop_centered_bounds_for_dimensions(
+        self,
+        *,
+        width: int | float,
+        height: int | float,
+    ) -> dict[str, int | float]:
+        work_area = self._desktop_work_area_for_current_launch()
+        if work_area is None:
+            return {"x": 0, "y": 0, "width": width, "height": height}
+        left, top, work_width, work_height = work_area
+        if not (
+            self._is_finite_non_bool_number(left)
+            and self._is_finite_non_bool_number(top)
+            and self._is_finite_non_bool_number(work_width)
+            and self._is_finite_non_bool_number(work_height)
+            and work_width > 0
+            and work_height > 0
+        ):
+            return {"x": 0, "y": 0, "width": width, "height": height}
+
+        return {
+            "x": left + ((work_width - width) / 2),
+            "y": top + ((work_height - height) / 2),
+            "width": width,
+            "height": height,
+        }
+
+    @staticmethod
+    def _is_finite_non_bool_number(value: object) -> bool:
+        return (
+            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        )
+
+    @staticmethod
+    def _desktop_bounds_signature(
+        bounds: dict[str, int | float],
+    ) -> tuple[float, float, float, float]:
+        return (
+            float(bounds["x"]),
+            float(bounds["y"]),
+            float(bounds["width"]),
+            float(bounds["height"]),
+        )
+
+    def _desktop_bounds_from_payload(
+        self,
+        payload: dict[object, object],
+    ) -> dict[str, int | float] | None:
+        x = payload.get("x")
+        y = payload.get("y")
+        width = payload.get("width")
+        height = payload.get("height")
+        if not (
+            self._is_finite_non_bool_number(x)
+            and self._is_finite_non_bool_number(y)
+            and self._is_finite_non_bool_number(width)
+            and self._is_finite_non_bool_number(height)
+        ):
+            return None
+        if width < DESKTOP_FLET_MIN_WIDTH or height < DESKTOP_FLET_MIN_HEIGHT:  # type: ignore[operator]
+            return None
+        return {
+            "x": x,  # type: ignore[dict-item]
+            "y": y,  # type: ignore[dict-item]
+            "width": width,  # type: ignore[dict-item]
+            "height": height,  # type: ignore[dict-item]
+        }
+
+    def _is_valid_desktop_window_bounds_event_payload(
+        self,
+        payload: dict[object, object],
+    ) -> bool:
+        source = payload.get("source")
+        persist = payload.get("persist")
+        if source not in {"user", "reset", "programmatic", "launch_repair"}:
+            return False
+        expected_persist = source in {"user", "reset"}
+        return bool(
+            payload.get("event") == "window_bounds_changed"
+            and isinstance(persist, bool)
+            and persist is expected_persist
+            and self._desktop_bounds_from_payload(payload) is not None
+        )
+
+    def _track_desktop_apply_window_bounds_control(self, payload: dict[str, object]) -> None:
+        if payload.get("command") != "apply_window_bounds":
+            return
+        bounds = self._desktop_bounds_from_payload(payload)
+        if bounds is None:
+            return
+        self._desktop_suppressed_bounds_signatures.add(self._desktop_bounds_signature(bounds))
+
+    def _consume_suppressed_desktop_bounds(self, bounds: dict[str, int | float]) -> bool:
+        signature = self._desktop_bounds_signature(bounds)
+        if signature not in self._desktop_suppressed_bounds_signatures:
+            return False
+        self._desktop_suppressed_bounds_signatures.discard(signature)
+        return True
+
+    def _discard_suppressed_desktop_bounds(self, bounds: dict[str, int | float]) -> None:
+        self._desktop_suppressed_bounds_signatures.discard(self._desktop_bounds_signature(bounds))
+
+    @staticmethod
+    def _is_desktop_user_window_bounds_event(event: object) -> bool:
+        if not isinstance(event, dict):
+            return False
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return False
+        return bool(
+            payload.get("event") == "window_bounds_changed"
+            and payload.get("source") == "user"
+            and payload.get("persist") is True
+        )
+
+    def _drain_pending_desktop_user_bounds_events(self) -> None:
+        queue = self._desktop_renderer_events
+        if queue is None:
+            return
+        retained: list[dict[str, object]] = []
+        dropped = 0
+        while True:
+            try:
+                event = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if self._is_desktop_user_window_bounds_event(event):
+                dropped += 1
+                continue
+            retained.append(event)
+        for event in retained:
+            queue.put_nowait(event)
+        if dropped:
+            self.log_detailed(
+                f"[DesktopOverlay][Bounds] drained_pending_user_bounds count={dropped}"
+            )
+
+    def _set_desktop_overlay_interaction_mode(self, mode: object) -> bool:
+        if not isinstance(mode, str) or mode not in DESKTOP_INTERACTION_MODES:
+            return False
+        previous_mode = self.desktop_overlay_interaction_mode
+        self.desktop_overlay_interaction_mode = mode
+        if previous_mode != mode:
+            self._notify_desktop_overlay_interaction_mode()
+        return True
+
+    def _notify_desktop_overlay_interaction_mode(self) -> None:
+        handler = getattr(self.app, "on_desktop_overlay_state_changed", None)
+        if callable(handler):
+            handler(
+                interaction_mode=self.desktop_overlay_interaction_mode,
+                captions_locked=self.desktop_overlay_captions_locked,
+            )
+
+    async def set_desktop_overlay_captions_locked(self, locked: bool) -> None:
+        if self.settings is None:
+            return
+        if self.overlay_state != "connected":
+            return
+        if self._active_overlay_target != OVERLAY_TARGET_DESKTOP or self._overlay_bridge is None:
+            return
+
+        mode = DESKTOP_INTERACTION_MODE_PASS_THROUGH if locked else DESKTOP_INTERACTION_MODE_EDIT
+        if not await self._broadcast_desktop_runtime_control(
+            {
+                "command": "set_interaction_mode",
+                "mode": mode,
+            }
+        ):
+            return
+        self._set_desktop_overlay_interaction_mode(mode)
+
+    async def set_desktop_overlay_size_preset(self, size_preset: str) -> None:
+        if self.settings is None:
+            return
+        normalized_size_preset = (
+            size_preset if size_preset in DESKTOP_FLET_SIZE_PRESETS else "medium"
+        )
+        if self.settings.overlay.desktop_flet.size_preset == normalized_size_preset:
+            return
+        updated = copy.deepcopy(self.settings)
+        updated.overlay.desktop_flet.size_preset = normalized_size_preset
+        await self.apply_settings(updated)
+
+    async def reset_desktop_overlay_position(self) -> None:
+        await self._handle_desktop_overlay_reset_requested()
+
+    async def _broadcast_desktop_runtime_control(self, payload: dict[str, object]) -> bool:
+        if self._active_overlay_target != OVERLAY_TARGET_DESKTOP:
+            return False
+        bridge = self._overlay_bridge
+        if bridge is None:
+            return False
+        broadcast = getattr(bridge, "broadcast_desktop_runtime_control", None)
+        if not callable(broadcast):
+            return False
+        try:
+            await broadcast(payload)
+        except Exception as exc:
+            self.log_detailed(
+                "[Overlay] Failed to send desktop runtime control",
+                level=logging.WARNING,
+                exception=exc,
+            )
+            return False
+        return True
+
+    async def _broadcast_desktop_window_bounds_control(
+        self,
+        bounds: dict[str, int | float],
+    ) -> None:
+        payload: dict[str, object] = {
+            "command": "apply_window_bounds",
+            "x": bounds["x"],
+            "y": bounds["y"],
+            "width": bounds["width"],
+            "height": bounds["height"],
+        }
+        if await self._broadcast_desktop_runtime_control(payload):
+            self._track_desktop_apply_window_bounds_control(payload)
+
+    async def _consume_desktop_renderer_events(
+        self,
+        queue: asyncio.Queue[dict[str, object]],
+    ) -> None:
+        try:
+            while True:
+                event = await queue.get()
+                try:
+                    await self._handle_desktop_renderer_event(event)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self.log_detailed(
+                        "[Overlay] Ignoring desktop renderer event after controller error",
+                        level=logging.WARNING,
+                        exception=exc,
+                    )
+        except asyncio.CancelledError:
+            raise
+
+    async def _handle_desktop_renderer_event(self, event: object) -> None:
+        if self._active_overlay_target != OVERLAY_TARGET_DESKTOP:
+            return
+        if not isinstance(event, dict):
+            return
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return
+        event_type = payload.get("event")
+        if event_type == "window_bounds_changed":
+            await self._handle_desktop_window_bounds_changed(payload)
+            return
+        if event_type == "reset_to_bottom_center_requested":
+            await self._handle_desktop_overlay_reset_requested()
+            return
+        if event_type == "interaction_mode_changed":
+            self._set_desktop_overlay_interaction_mode(payload.get("mode"))
+
+    async def _handle_desktop_window_bounds_changed(
+        self,
+        payload: dict[object, object],
+    ) -> None:
+        if not self._is_valid_desktop_window_bounds_event_payload(payload):
+            self.log_detailed(
+                "[DesktopOverlay][Bounds] ignored reason=invalid_payload "
+                f"keys={sorted(str(key) for key in payload)} "
+                f"source={payload.get('source')} persist={payload.get('persist')}"
+            )
+            return
+        bounds = self._desktop_bounds_from_payload(payload)
+        if bounds is None:
+            self.log_detailed(
+                "[DesktopOverlay][Bounds] ignored reason=invalid_bounds "
+                f"source={payload.get('source')} persist={payload.get('persist')}"
+            )
+            return
+        source = payload.get("source")
+        interaction_mode = self.desktop_overlay_interaction_mode
+        self.log_detailed(
+            "[DesktopOverlay][Bounds] received "
+            f"source={source} persist={payload.get('persist')} "
+            f"interaction_mode={interaction_mode} "
+            f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+            f"height={bounds['height']}"
+        )
+        if source in {"programmatic", "launch_repair"}:
+            self.log_detailed(
+                "[DesktopOverlay][Bounds] ignored reason=programmatic_source "
+                f"source={source} x={bounds['x']} y={bounds['y']} "
+                f"width={bounds['width']} height={bounds['height']}"
+            )
+            self._discard_suppressed_desktop_bounds(bounds)
+            return
+        if source == "reset":
+            self.log_detailed(
+                "[DesktopOverlay][Bounds] reset_requested "
+                f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+                f"height={bounds['height']}"
+            )
+            await self._handle_desktop_overlay_reset_requested(bounds=bounds)
+            return
+        if source == "user" and interaction_mode != DESKTOP_INTERACTION_MODE_EDIT:
+            self.log_detailed(
+                "[DesktopOverlay][Bounds] ignored reason=locked_interaction_mode "
+                f"interaction_mode={interaction_mode} x={bounds['x']} y={bounds['y']} "
+                f"width={bounds['width']} height={bounds['height']}"
+            )
+            return
+        if self._consume_suppressed_desktop_bounds(bounds):
+            self.log_detailed(
+                "[DesktopOverlay][Bounds] ignored reason=suppressed_signature "
+                f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+                f"height={bounds['height']}"
+            )
+            return
+        self._schedule_desktop_bounds_persistence(bounds)
+        self.log_detailed(
+            "[DesktopOverlay][Bounds] scheduled_persist "
+            f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+            f"height={bounds['height']}"
+        )
+
+    def _schedule_desktop_bounds_persistence(
+        self,
+        bounds: dict[str, int | float],
+    ) -> None:
+        self._pending_desktop_bounds = dict(bounds)
+        task = self._desktop_bounds_persist_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._desktop_bounds_persist_task = asyncio.create_task(
+            self._persist_desktop_bounds_after_debounce()
+        )
+
+    async def _persist_desktop_bounds_after_debounce(self) -> None:
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(DESKTOP_BOUNDS_PERSIST_DEBOUNCE_S)
+            bounds = self._pending_desktop_bounds
+            self._pending_desktop_bounds = None
+            if bounds is None:
+                return
+            self._persist_desktop_bounds(bounds)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self._desktop_bounds_persist_task is current_task:
+                self._desktop_bounds_persist_task = None
+
+    def _persist_desktop_bounds(self, bounds: dict[str, int | float]) -> None:
+        if self.settings is None or self._active_overlay_target != OVERLAY_TARGET_DESKTOP:
+            return
+        if self._desktop_bounds_from_payload({"event": "window_bounds_changed", **bounds}) is None:
+            return
+        desktop_settings = self.settings.overlay.desktop_flet
+        desktop_settings.position.x = bounds["x"]
+        desktop_settings.position.y = bounds["y"]
+        desktop_settings.position.validate()
+        self.log_detailed(
+            "[DesktopOverlay][Bounds] persisted "
+            f"x={bounds['x']} y={bounds['y']} width={bounds['width']} "
+            f"height={bounds['height']} size_preset={desktop_settings.size_preset}"
+        )
+        self._save_settings()
+
+    async def _handle_desktop_overlay_reset_requested(
+        self,
+        *,
+        bounds: dict[str, int | float] | None = None,
+    ) -> None:
+        if self.settings is None:
+            return
+        configured_for_desktop = (
+            self._overlay_target_for_settings(self.settings) == OVERLAY_TARGET_DESKTOP
+        )
+        desktop_renderer_active = bool(
+            self._active_overlay_target == OVERLAY_TARGET_DESKTOP
+            and self._overlay_bridge is not None
+        )
+        if not configured_for_desktop and not desktop_renderer_active:
+            return
+        await self._cancel_desktop_bounds_persistence()
+        self._drain_pending_desktop_user_bounds_events()
+        _ = bounds
+        desktop_settings = self.settings.overlay.desktop_flet
+        desktop_settings.position.x = None
+        desktop_settings.position.y = None
+        desktop_settings.locked = False
+        desktop_settings.validate()
+        self._set_desktop_overlay_interaction_mode(DESKTOP_INTERACTION_MODE_EDIT)
+        self._save_settings()
+        if not desktop_renderer_active:
+            return
+        await self._broadcast_desktop_runtime_control(
+            {
+                "command": "set_interaction_mode",
+                "mode": DESKTOP_INTERACTION_MODE_EDIT,
+            }
+        )
+        await self._broadcast_desktop_window_bounds_control(
+            self._desktop_center_bounds_for_current_preset()
+        )
+
+    def _desktop_center_bounds_for_current_preset(self) -> dict[str, int | float]:
+        assert self.settings is not None
+        width, height = self._desktop_dimensions_for_size_preset(
+            self.settings.overlay.desktop_flet.size_preset
+        )
+        return self._desktop_centered_bounds_for_dimensions(width=width, height=height)
+
+    def _desktop_work_area_for_current_launch(
+        self,
+    ) -> tuple[int | float, int | float, int | float, int | float] | None:
+        _ = self
+        if sys.platform != "win32":
+            return None
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            rect = wintypes.RECT()
+            # SPI_GETWORKAREA returns the primary monitor work area excluding taskbars.
+            if not ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+                return None
+            return (
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+            )
+        except Exception:
+            return None
+
+    async def _cancel_desktop_renderer_event_task(self) -> None:
+        current_task = asyncio.current_task()
+        task = self._desktop_renderer_events_task
+        self._desktop_renderer_events_task = None
+        self._desktop_renderer_events = None
+        if task is not None and task is not current_task and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _cancel_desktop_bounds_persistence(self) -> None:
+        current_task = asyncio.current_task()
+        task = self._desktop_bounds_persist_task
+        self._desktop_bounds_persist_task = None
+        self._pending_desktop_bounds = None
+        if task is not None and task is not current_task and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    def _discard_pending_desktop_bounds_persistence(self) -> None:
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        task = self._desktop_bounds_persist_task
+        self._desktop_bounds_persist_task = None
+        self._pending_desktop_bounds = None
+        if task is not None and task is not current_task and not task.done():
+            task.cancel()
+
+    def _desktop_runtime_is_running_for_settings_update(
+        self,
+        settings: AppSettings,
+    ) -> bool:
+        return bool(
+            settings.ui.overlay_enabled
+            and self._active_overlay_target == OVERLAY_TARGET_DESKTOP
+            and self._overlay_bridge is not None
+        )
+
+    def _desktop_center_preserving_bounds_for_size_preset_change(
+        self,
+        *,
+        previous_desktop_settings: object,
+        next_size_preset: object,
+    ) -> dict[str, int | float]:
+        previous_bounds = self._desktop_launch_bounds_for_current_launch(previous_desktop_settings)
+        next_width, next_height = self._desktop_dimensions_for_size_preset(next_size_preset)
+        old_center_x = previous_bounds["x"] + (previous_bounds["width"] / 2)
+        old_center_y = previous_bounds["y"] + (previous_bounds["height"] / 2)
+        return {
+            "x": old_center_x - (next_width / 2),
+            "y": old_center_y - (next_height / 2),
+            "width": next_width,
+            "height": next_height,
+        }
+
+    def _prepare_desktop_runtime_settings_update(
+        self,
+        previous_settings: AppSettings | None,
+        next_settings: AppSettings,
+    ) -> list[dict[str, object]]:
+        if previous_settings is None:
+            return []
+        previous_desktop = copy.deepcopy(previous_settings.overlay.desktop_flet)
+        previous_desktop.validate()
+        next_desktop = next_settings.overlay.desktop_flet
+        next_desktop.validate()
+
+        if not self._desktop_runtime_is_running_for_settings_update(next_settings):
+            return []
+
+        controls: list[dict[str, object]] = []
+        if previous_desktop.size_preset != next_desktop.size_preset:
+            self._discard_pending_desktop_bounds_persistence()
+            self._drain_pending_desktop_user_bounds_events()
+            bounds = self._desktop_center_preserving_bounds_for_size_preset_change(
+                previous_desktop_settings=previous_desktop,
+                next_size_preset=next_desktop.size_preset,
+            )
+            if previous_desktop.position.x is not None and previous_desktop.position.y is not None:
+                next_desktop.position.x = bounds["x"]
+                next_desktop.position.y = bounds["y"]
+                next_desktop.position.validate()
+            controls.append({"command": "apply_window_bounds", **bounds})
+
+        previous_visual = previous_desktop.visual
+        next_visual = next_desktop.visual
+        if (
+            previous_visual.text_scale != next_visual.text_scale
+            or previous_visual.background_alpha != next_visual.background_alpha
+            or previous_visual.outline_width != next_visual.outline_width
+        ):
+            controls.append(
+                {
+                    "command": "apply_visual_config",
+                    "text_scale": next_visual.text_scale,
+                    "background_alpha": next_visual.background_alpha,
+                    "outline_width": next_visual.outline_width,
+                }
+            )
+        return controls
+
+    def _sync_desktop_overlay_interaction_mode_from_settings(
+        self,
+        settings: AppSettings,
+    ) -> None:
+        if self._overlay_target_for_settings(settings) != OVERLAY_TARGET_DESKTOP:
+            return
+        if (
+            self._active_overlay_target == OVERLAY_TARGET_DESKTOP
+            and self._overlay_bridge is not None
+        ):
+            return
+        self._set_desktop_overlay_interaction_mode(DESKTOP_INTERACTION_MODE_EDIT)
+
+    async def _broadcast_desktop_runtime_control_payloads(
+        self,
+        payloads: list[dict[str, object]],
+    ) -> None:
+        for payload in payloads:
+            if payload.get("command") == "apply_window_bounds":
+                bounds = self._desktop_bounds_from_payload(payload)
+                if bounds is not None:
+                    await self._broadcast_desktop_window_bounds_control(bounds)
+                continue
+            await self._broadcast_desktop_runtime_control(payload)
+
     def _build_peer_runtime_config(self, settings: AppSettings) -> PeerRuntimeConfig:
         backend = resolve_peer_stt_config(settings)
         provider_signature = build_peer_stt_provider_signature(settings)
@@ -1292,6 +2346,7 @@ class GuiController:
         )
 
     async def stop(self) -> None:
+        await self._drain_github_star_prompt_translation_success_task()
         await self._stop_clipboard_watcher()
         await self._cancel_local_stt_download()
         await self.set_stt_enabled(False)
@@ -1425,6 +2480,7 @@ class GuiController:
                 return
 
             await self._teardown_overlay_runtime(preserve_presenter_state=True)
+            self._active_overlay_target = self._overlay_target_for_settings(self.settings)
             previous_state = self.overlay_state
             self.overlay_state = "starting"
             self.auto_restart_scheduled = False
@@ -1436,12 +2492,18 @@ class GuiController:
         current_task = asyncio.current_task()
         try:
             if self.settings is None or self.hub is None:
+                self._active_overlay_target = None
                 self.on_overlay_start_failed("unknown")
                 return
 
             presenter = self._overlay_presenter
             overlay_instance_id = f"overlay-{secrets.token_hex(8)}"
             diagnostics = OverlayDiagnosticsRecorder(overlay_instance_id=overlay_instance_id)
+            overlay_target = self._active_overlay_target or self._overlay_target_for_settings(
+                self.settings
+            )
+            self._active_overlay_target = overlay_target
+            peer_presentation_refresh_burst = overlay_target != OVERLAY_TARGET_DESKTOP
 
             if presenter is None:
                 presenter = OverlayPresenter(
@@ -1451,20 +2513,32 @@ class GuiController:
                     runtime_log_detailed=self.log_detailed,
                     show_translation=self.settings.overlay.show_translation,
                     show_peer_original=self.settings.overlay.show_peer_original,
-                    peer_presentation_refresh_burst=True,
+                    peer_presentation_refresh_burst=peer_presentation_refresh_burst,
                 )
                 self._overlay_presenter = presenter
             else:
                 presenter.diagnostics = diagnostics
                 presenter.runtime_log_detailed = self.log_detailed
-                await presenter.update_peer_presentation_refresh_burst(True)
+                await presenter.update_peer_presentation_refresh_burst(
+                    peer_presentation_refresh_burst
+                )
             bridge = OverlayBridge(
                 session_token=secrets.token_urlsafe(16),
                 initial_snapshot=presenter.snapshot(),
                 overlay_instance_id=overlay_instance_id,
                 diagnostics=diagnostics,
                 runtime_logging_mode=self.runtime_logging_mode,
+                desktop_runtime_controls_enabled=overlay_target == OVERLAY_TARGET_DESKTOP,
             )
+            if overlay_target == OVERLAY_TARGET_DESKTOP:
+                initial_desktop_controls = self._build_initial_desktop_runtime_controls(
+                    self.settings
+                )
+                initial_interaction_control = initial_desktop_controls[-1]
+                self._set_desktop_overlay_interaction_mode(initial_interaction_control.get("mode"))
+                for payload in initial_desktop_controls:
+                    self._track_desktop_apply_window_bounds_control(payload)
+                bridge.set_initial_desktop_runtime_controls(initial_desktop_controls)
             await bridge.start()
             presenter.attach_bridge(bridge)
             latest_snapshot = presenter.snapshot()
@@ -1475,12 +2549,22 @@ class GuiController:
             self.hub.overlay_sink = presenter
             self.hub.overlay_diagnostics = diagnostics
 
+            renderer_events: asyncio.Queue[dict[str, object]] | None = None
+            if overlay_target == OVERLAY_TARGET_DESKTOP:
+                renderer_events = asyncio.Queue(maxsize=64)
+                self._desktop_renderer_events = renderer_events
+                self._desktop_renderer_events_task = asyncio.create_task(
+                    self._consume_desktop_renderer_events(renderer_events)
+                )
+
             manager = OverlayProcessManager(
+                process_runner=self._overlay_process_runner_for_target(overlay_target),
                 bridge_url=bridge.url,
                 bridge_messages=bridge.messages,
                 session_token=bridge.session_token,
                 locale=self.settings.ui.locale,
                 startup_timeout_ms=OVERLAY_STARTUP_TIMEOUT_MS,
+                renderer_events=renderer_events,
                 overlay_instance_id=overlay_instance_id,
                 logging_mode=self.runtime_logging_mode,
                 diagnostics=diagnostics,
@@ -1616,6 +2700,9 @@ class GuiController:
         if monitor_task is not None and monitor_task.done():
             self._overlay_monitor_task = None
 
+        await self._cancel_desktop_renderer_event_task()
+        await self._cancel_desktop_bounds_persistence()
+
         presenter = self._overlay_presenter
         if not preserve_presenter_state and presenter is not None:
             with contextlib.suppress(Exception):
@@ -1649,6 +2736,10 @@ class GuiController:
         if bridge is not None:
             with contextlib.suppress(Exception):
                 await bridge.stop()
+        self._active_overlay_target = None
+        self._desktop_suppressed_bounds_signatures.clear()
+        if not preserve_presenter_state:
+            self._set_desktop_overlay_interaction_mode(DESKTOP_INTERACTION_MODE_EDIT)
         if not preserve_presenter_state:
             self._overlay_diagnostics = None
 
@@ -2383,9 +3474,31 @@ class GuiController:
         def _effective_peer_language(language: str, peer_language: str) -> str:
             return peer_language or language
 
+        await self._preserve_github_star_prompt_observation_before_settings_replace(settings)
+
         prev_locale = get_locale()
         prev_overlay_enabled = (
             self.settings.ui.overlay_enabled if self.settings is not None else False
+        )
+        previous_settings_for_desktop = (
+            copy.deepcopy(self.settings) if self.settings is not None else None
+        )
+        prev_overlay_target = self._previous_overlay_target_for_apply()
+        next_overlay_target = self._overlay_target_for_settings(settings)
+        if (
+            prev_overlay_target != next_overlay_target
+            and prev_overlay_enabled
+            and settings.ui.overlay_enabled
+            and self._overlay_runtime_is_active()
+        ):
+            self.log_basic(
+                "[Overlay] Target changed while running; stopping current overlay before switch"
+            )
+            settings = copy.deepcopy(settings)
+            settings.ui.overlay_enabled = False
+        desktop_runtime_controls = self._prepare_desktop_runtime_settings_update(
+            previous_settings_for_desktop,
+            settings,
         )
         prev_peer_translation_enabled = (
             self._last_peer_translation_enabled
@@ -2464,7 +3577,9 @@ class GuiController:
             )
         self.settings = settings
         self._sync_overlay_calibration_cache(settings)
+        self._sync_desktop_overlay_interaction_mode_from_settings(settings)
         self._save_settings()
+        await self._broadcast_desktop_runtime_control_payloads(desktop_runtime_controls)
         await self._sync_clipboard_watcher()
         self._refresh_local_stt_runtime_state()
         self._clear_local_stt_pending_enable_if_provider_switched_away()
@@ -2634,6 +3749,8 @@ class GuiController:
         )
         if next_settings is None:
             return
+
+        await self._preserve_github_star_prompt_observation_before_settings_replace(next_settings)
 
         prev_settings = self.settings
         prev_self_provider_signature = self._last_self_stt_provider_signature
@@ -4034,15 +5151,7 @@ class GuiController:
                 elif provider_name == "qwen":
                     llm_valid = await _verify_alibaba_selected()
                 elif provider_name == LLMProviderName.LOCAL_LLM:
-                    key = (
-                        (secrets.get("local_llm_api_key") if secrets is not None else None) or ""
-                    ).strip()
-                    llm_valid = await LocalOpenAICompatibleLLMProvider.verify_connection(
-                        base_url=self.settings.local_llm.base_url,
-                        model=self.settings.local_llm.model,
-                        api_key=key,
-                        extra_body=self.settings.local_llm.extra_body,
-                    )
+                    llm_valid = True
                 else:
                     # Assume valid for others or if no key usage known
                     llm_valid = True

@@ -621,6 +621,38 @@ def test_dashboard_overlay_failure_notice_is_lowest_priority_notice_source(
     ]
 
 
+def test_dashboard_steamvr_overlay_failure_notice_uses_actionable_reason_without_status_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = _make_dashboard(monkeypatch)
+    expected_notice = dashboard_module.t(
+        "settings.overlay.failure.steamvr_not_running",
+        default="steamvr_not_running",
+    )
+
+    view.set_overlay_peer_contract(
+        OverlayPeerConsumerContract(
+            overlay=OverlayPeerToggleContract(
+                intent_enabled=True,
+                effective_enabled=False,
+                action_enabled=True,
+                state="warning",
+                status_text="stale contract literal",
+                failure_reason="steamvr_not_running",
+            ),
+            peer=OverlayPeerToggleContract(
+                intent_enabled=False,
+                effective_enabled=False,
+                action_enabled=True,
+                state="off",
+                status_text="Off",
+            ),
+        )
+    )
+
+    assert view.display_card.notice_calls[-1] == (expected_notice, "error")
+
+
 def test_dashboard_overlay_failure_notice_relocalizes_on_apply_locale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

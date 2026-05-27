@@ -37,6 +37,8 @@ class OverlayLogicalTurnEntry:
     first_input_seq: int | None = None
     live_text: str = ""
     live_secondary_text: str = ""
+    live_primary_language: str | None = None
+    live_secondary_language: str | None = None
     live_update_id: str | None = None
     live_origin_wall_clock_ms: int | None = None
     live_session_scope: str | None = None
@@ -45,8 +47,10 @@ class OverlayLogicalTurnEntry:
     live_logical_turn_key: str | None = None
     live_seq: int | None = None
     original_text: str = ""
+    original_language: str | None = None
     original_seq: int | None = None
     translation_text: str = ""
+    translation_language: str | None = None
     translation_update_id: str | None = None
     translation_origin_wall_clock_ms: int | None = None
     translation_session_scope: str | None = None
@@ -87,6 +91,8 @@ class ActiveSelfOverlayMetadata:
     source_text_hash: str | None
     source_text_len: int | None
     logical_turn_key: str | None
+    primary_language: str | None = None
+    secondary_language: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +129,8 @@ class OverlayPresentationEntry(Protocol):
     first_input_seq: int | None
     live_text: str
     live_secondary_text: str
+    live_primary_language: str | None
+    live_secondary_language: str | None
     live_update_id: str | None
     live_origin_wall_clock_ms: int | None
     live_session_scope: str | None
@@ -130,7 +138,9 @@ class OverlayPresentationEntry(Protocol):
     live_source_text_len: int | None
     live_logical_turn_key: str | None
     original_text: str
+    original_language: str | None
     translation_text: str
+    translation_language: str | None
     translation_update_id: str | None
     translation_origin_wall_clock_ms: int | None
     translation_session_scope: str | None
@@ -200,6 +210,8 @@ class OverlayPresentationState:
             source_text_hash=entry.live_source_text_hash,
             source_text_len=entry.live_source_text_len,
             logical_turn_key=entry.live_logical_turn_key,
+            primary_language=entry.live_primary_language,
+            secondary_language=entry.live_secondary_language,
         )
 
     def drain_pending_removals(self) -> list[OverlayEntryRemovalRecord]:
@@ -371,6 +383,14 @@ class OverlayPresentationState:
             source_text_len=event.source_text_len,
             logical_turn_key=event.logical_turn_key,
         ):
+            next_primary_language = _line_language(event.source_language, event.text)
+            next_secondary_language = _line_language(event.target_language, event.secondary_text)
+            language_changed = (
+                entry.live_primary_language != next_primary_language
+                or entry.live_secondary_language != next_secondary_language
+            )
+            entry.live_primary_language = next_primary_language
+            entry.live_secondary_language = next_secondary_language
             decisions.append(
                 OverlayTurnDecisionRecord(
                     decision="overlay_turn_coalesced",
@@ -381,7 +401,7 @@ class OverlayPresentationState:
                 )
             )
             entry.last_updated_seq = event.seq
-            return OverlayReductionResult(False, tuple(decisions))
+            return OverlayReductionResult(language_changed, tuple(decisions))
 
         self._remember_entry_input_seq(entry, event_seq=event.seq)
         if not entry.occupant_key:
@@ -392,10 +412,15 @@ class OverlayPresentationState:
         if retired_preview_seq is not None and event.seq > retired_preview_seq:
             self.retired_preview_self_seqs.pop(key, None)
         entry.live_text = event.text
+        entry.live_primary_language = _line_language(event.source_language, event.text)
         entry.live_seq = event.seq
         entry.original_seq = event.seq
         entry.live_secondary_text = event.secondary_text
         if event.secondary_text.strip():
+            entry.live_secondary_language = _line_language(
+                event.target_language,
+                event.secondary_text,
+            )
             entry.live_update_id = event.update_id
             entry.live_origin_wall_clock_ms = event.origin_wall_clock_ms
             entry.live_session_scope = event.session_scope
@@ -404,6 +429,7 @@ class OverlayPresentationState:
             entry.live_logical_turn_key = event.logical_turn_key
             entry.translation_seq = event.seq
         else:
+            entry.live_secondary_language = None
             entry.live_update_id = None
             entry.live_origin_wall_clock_ms = None
             entry.live_session_scope = None
@@ -512,7 +538,12 @@ class OverlayPresentationState:
                 )
             )
             return OverlayReductionResult(False, tuple(decisions))
-        if entry.original_text == event.text and entry.last_updated_seq == event.seq:
+        event_source_language = _content_language_or_none(event.source_language)
+        if (
+            entry.original_text == event.text
+            and entry.original_language == event_source_language
+            and entry.last_updated_seq == event.seq
+        ):
             decisions.append(
                 OverlayTurnDecisionRecord(
                     decision="overlay_turn_coalesced",
@@ -527,12 +558,14 @@ class OverlayPresentationState:
         previous_rendered_translation_text = self._rendered_self_translation_text(entry)
         self._remember_entry_input_seq(entry, event_seq=event.seq)
         entry.original_text = event.text
+        entry.original_language = event_source_language
         entry.original_seq = event.seq
         entry.last_updated_seq = event.seq
         if self.live_self_turn_key == key:
             promoted_secondary_text = entry.live_secondary_text.strip()
             if promoted_secondary_text:
                 entry.translation_text = promoted_secondary_text
+                entry.translation_language = entry.live_secondary_language
                 entry.translation_update_id = entry.live_update_id
                 entry.translation_origin_wall_clock_ms = entry.live_origin_wall_clock_ms
                 entry.translation_session_scope = entry.live_session_scope
@@ -595,7 +628,14 @@ class OverlayPresentationState:
                 )
             )
             return OverlayReductionResult(False, tuple(decisions))
-        if entry.translation_text == event.text and entry.last_updated_seq == event.seq:
+        event_source_language = _content_language_or_none(event.source_language)
+        event_target_language = _content_language_or_none(event.target_language)
+        if (
+            entry.translation_text == event.text
+            and (event_source_language is None or entry.original_language == event_source_language)
+            and entry.translation_language == event_target_language
+            and entry.last_updated_seq == event.seq
+        ):
             decisions.append(
                 OverlayTurnDecisionRecord(
                     decision="overlay_turn_coalesced",
@@ -606,6 +646,8 @@ class OverlayPresentationState:
                 )
             )
             return OverlayReductionResult(False, tuple(decisions))
+        if event_source_language is not None:
+            entry.original_language = event_source_language
         previous_rendered_translation_text = self._rendered_self_translation_text(entry)
         self._remember_entry_input_seq(entry, event_seq=event.seq)
         if entry.retained_hidden and event.text.strip():
@@ -613,6 +655,7 @@ class OverlayPresentationState:
             entry.window_evicted_at = None
         entry.translation_text = event.text
         if event.text.strip():
+            entry.translation_language = event_target_language
             entry.translation_update_id = event.update_id
             entry.translation_origin_wall_clock_ms = event.origin_wall_clock_ms
             entry.translation_session_scope = event.session_scope
@@ -621,6 +664,7 @@ class OverlayPresentationState:
             entry.translation_logical_turn_key = event.logical_turn_key
             entry.translation_seq = event.seq
         else:
+            entry.translation_language = None
             entry.translation_update_id = None
             entry.translation_origin_wall_clock_ms = None
             entry.translation_session_scope = None
@@ -729,6 +773,9 @@ class OverlayPresentationState:
             source_text_len=event.source_text_len,
             logical_turn_key=event.logical_turn_key,
         ):
+            next_original_language = _line_language(event.source_language, event.text)
+            language_changed = entry.original_language != next_original_language
+            entry.original_language = next_original_language
             decisions.append(
                 OverlayTurnDecisionRecord(
                     decision="overlay_turn_coalesced",
@@ -739,13 +786,14 @@ class OverlayPresentationState:
                 )
             )
             entry.last_updated_seq = event.seq
-            return OverlayReductionResult(False, tuple(decisions))
+            return OverlayReductionResult(language_changed, tuple(decisions))
 
         self._remember_entry_input_seq(entry, event_seq=event.seq)
         if not entry.occupant_key:
             entry.occupant_key = event.occupant_key
         entry.live_text = event.text
         entry.original_text = event.text
+        entry.original_language = _line_language(event.source_language, event.text)
         entry.live_seq = event.seq
         entry.original_seq = event.seq
         entry.last_updated_seq = event.seq
@@ -792,7 +840,12 @@ class OverlayPresentationState:
                 )
             )
             return OverlayReductionResult(False, tuple(decisions))
-        if entry.original_text == event.text and entry.last_updated_seq == event.seq:
+        event_source_language = _content_language_or_none(event.source_language)
+        if (
+            entry.original_text == event.text
+            and entry.original_language == event_source_language
+            and entry.last_updated_seq == event.seq
+        ):
             decisions.append(
                 OverlayTurnDecisionRecord(
                     decision="overlay_turn_coalesced",
@@ -806,6 +859,7 @@ class OverlayPresentationState:
 
         self._remember_entry_input_seq(entry, event_seq=event.seq)
         entry.original_text = event.text
+        entry.original_language = event_source_language
         entry.original_seq = event.seq
         entry.live_text = ""
         entry.live_seq = None
@@ -850,7 +904,14 @@ class OverlayPresentationState:
                 )
             )
             return OverlayReductionResult(False, tuple(decisions))
-        if entry.translation_text == event.text and entry.last_updated_seq == event.seq:
+        event_source_language = _content_language_or_none(event.source_language)
+        event_target_language = _content_language_or_none(event.target_language)
+        if (
+            entry.translation_text == event.text
+            and (event_source_language is None or entry.original_language == event_source_language)
+            and entry.translation_language == event_target_language
+            and entry.last_updated_seq == event.seq
+        ):
             decisions.append(
                 OverlayTurnDecisionRecord(
                     decision="overlay_turn_coalesced",
@@ -865,7 +926,10 @@ class OverlayPresentationState:
         self._remember_entry_input_seq(entry, event_seq=event.seq)
         if event.source_text.strip():
             entry.original_text = event.source_text
+            entry.original_language = event_source_language
             entry.original_seq = event.seq
+        elif event_source_language is not None:
+            entry.original_language = event_source_language
         if not entry.retained_hidden:
             entry.translation_visible_since = self._next_translation_visible_since(
                 previous_text=entry.translation_text,
@@ -875,6 +939,7 @@ class OverlayPresentationState:
             )
         entry.translation_text = event.text
         if event.text.strip():
+            entry.translation_language = event_target_language
             entry.translation_update_id = event.update_id
             entry.translation_origin_wall_clock_ms = event.origin_wall_clock_ms
             entry.translation_session_scope = event.session_scope
@@ -885,6 +950,7 @@ class OverlayPresentationState:
             entry.live_text = ""
             entry.live_seq = None
         else:
+            entry.translation_language = None
             entry.translation_update_id = None
             entry.translation_origin_wall_clock_ms = None
             entry.translation_session_scope = None
@@ -1109,22 +1175,7 @@ class OverlayPresentationState:
     def rendered_block_signature(
         self,
         block: OverlayPresentationBlock,
-    ) -> tuple[
-        str,
-        str,
-        int,
-        str,
-        str,
-        str,
-        str,
-        bool,
-        str | None,
-        int | None,
-        str | None,
-        str | None,
-        int | None,
-        str | None,
-    ]:
+    ) -> tuple[object, ...]:
         secondary_text = block.secondary_text if block.secondary_enabled else ""
         include_translation_metadata = block.channel == "peer" or bool(secondary_text)
         return (
@@ -1136,6 +1187,8 @@ class OverlayPresentationState:
             block.primary_text,
             secondary_text,
             block.secondary_enabled,
+            block.primary_language,
+            block.secondary_language if block.secondary_enabled else None,
             block.update_id if include_translation_metadata else None,
             block.origin_wall_clock_ms if include_translation_metadata else None,
             block.session_scope if include_translation_metadata else None,
@@ -1385,6 +1438,8 @@ class OverlayPresentationState:
     def _clear_self_live_payload(self, entry: OverlayLogicalTurnEntry) -> None:
         entry.live_text = ""
         entry.live_secondary_text = ""
+        entry.live_primary_language = None
+        entry.live_secondary_language = None
         entry.live_update_id = None
         entry.live_origin_wall_clock_ms = None
         entry.live_session_scope = None
@@ -1563,6 +1618,9 @@ class OverlayPresentationState:
                 return None
             live_secondary_text = entry.live_secondary_text.strip()
             secondary_text = live_secondary_text or entry.translation_text.strip()
+            secondary_language = (
+                entry.live_secondary_language if live_secondary_text else entry.translation_language
+            )
             if live_secondary_text:
                 update_id = entry.live_update_id
                 origin_wall_clock_ms = entry.live_origin_wall_clock_ms
@@ -1586,6 +1644,12 @@ class OverlayPresentationState:
                 primary_text=primary_text,
                 secondary_text=secondary_text,
                 secondary_enabled=show_translation,
+                primary_language=_line_language(entry.live_primary_language, primary_text),
+                secondary_language=_line_language(
+                    secondary_language,
+                    secondary_text,
+                    enabled=show_translation,
+                ),
                 update_id=update_id,
                 origin_wall_clock_ms=origin_wall_clock_ms,
                 session_scope=session_scope,
@@ -1611,6 +1675,15 @@ class OverlayPresentationState:
                     primary_text=translated_text,
                     secondary_text=original_text,
                     secondary_enabled=show_peer_original and bool(original_text),
+                    primary_language=_line_language(
+                        entry.translation_language,
+                        translated_text,
+                    ),
+                    secondary_language=_line_language(
+                        entry.original_language,
+                        original_text,
+                        enabled=show_peer_original,
+                    ),
                     update_id=entry.translation_update_id,
                     origin_wall_clock_ms=entry.translation_origin_wall_clock_ms,
                     session_scope=self._peer_session_scope_with_presentation_refresh(
@@ -1635,6 +1708,8 @@ class OverlayPresentationState:
                     primary_text="",
                     secondary_text=active_text,
                     secondary_enabled=True,
+                    primary_language=None,
+                    secondary_language=_line_language(entry.original_language, active_text),
                     session_scope=self._peer_session_scope_with_presentation_refresh(
                         entry,
                         None,
@@ -1657,6 +1732,8 @@ class OverlayPresentationState:
                     primary_text="",
                     secondary_text=original_text,
                     secondary_enabled=True,
+                    primary_language=None,
+                    secondary_language=_line_language(entry.original_language, original_text),
                     session_scope=self._peer_session_scope_with_presentation_refresh(
                         entry,
                         None,
@@ -1680,6 +1757,12 @@ class OverlayPresentationState:
             primary_text=primary_text,
             secondary_text=secondary_text,
             secondary_enabled=secondary_enabled,
+            primary_language=_line_language(entry.original_language, primary_text),
+            secondary_language=_line_language(
+                entry.translation_language,
+                secondary_text,
+                enabled=secondary_enabled,
+            ),
             update_id=entry.translation_update_id,
             origin_wall_clock_ms=entry.translation_origin_wall_clock_ms,
             session_scope=entry.translation_session_scope,
@@ -1759,3 +1842,21 @@ class OverlayPresentationState:
 
     def _format_entry_key(self, key: OverlayEntryKey) -> str:
         return f"{key[0]}:{key[1]}"
+
+
+def _content_language_or_none(language: str | None) -> str | None:
+    if language is None:
+        return None
+    normalized = language.strip()
+    return normalized or None
+
+
+def _line_language(
+    language: str | None,
+    text: str,
+    *,
+    enabled: bool = True,
+) -> str | None:
+    if not enabled or not text.strip():
+        return None
+    return _content_language_or_none(language)

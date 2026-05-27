@@ -20,6 +20,8 @@ from puripuly_heart.config.audio_host_api import (
 )
 from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
+    DESKTOP_FLET_SIZE_PRESETS,
+    OVERLAY_TARGET_DESKTOP,
     AppSettings,
     LLMProviderName,
     LocalLLMBackend,
@@ -37,6 +39,7 @@ from puripuly_heart.config.settings import (
     TranslationConnection,
     TranslationModel,
     TranslationSettings,
+    to_dict,
 )
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.audio.source import (
@@ -74,6 +77,7 @@ from puripuly_heart.core.runtime_logging import (
 )
 from puripuly_heart.domain.models import Transcript
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
+from puripuly_heart.providers.llm.local_openai import LocalOpenAICompatibleLLMProvider
 from puripuly_heart.providers.llm.openrouter import OpenRouterLLMProvider
 from puripuly_heart.providers.llm.qwen import QwenLLMProvider
 from puripuly_heart.providers.llm.qwen_async import AsyncQwenLLMProvider
@@ -439,11 +443,16 @@ class FakeOverlayBridge:
         self.current_snapshot = initial_snapshot
         self.messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
         self.url = "ws://127.0.0.1:8765"
+        self.desktop_runtime_controls_enabled = bool(
+            _kwargs.get("desktop_runtime_controls_enabled", False)
+        )
         self.started = False
         self.stopped = False
         self.snapshots: list[object] = []
         self.shutdown_calls = 0
         self.runtime_control_messages: list[str] = []
+        self.desktop_runtime_control_payloads: list[dict[str, object]] = []
+        self.initial_desktop_runtime_controls: list[dict[str, object]] = []
         self.__class__.instances.append(self)
 
     async def start(self) -> None:
@@ -461,6 +470,12 @@ class FakeOverlayBridge:
 
     async def broadcast_runtime_control(self, *, logging_mode: str) -> None:
         self.runtime_control_messages.append(logging_mode)
+
+    async def broadcast_desktop_runtime_control(self, payload) -> None:
+        self.desktop_runtime_control_payloads.append(dict(payload))
+
+    def set_initial_desktop_runtime_controls(self, sequence) -> None:
+        self.initial_desktop_runtime_controls = [dict(payload) for payload in sequence]
 
     def snapshot(self):
         return self.current_snapshot
@@ -484,6 +499,9 @@ class FakeOverlayProcessManager:
         self.session_token = session_token
         self.locale = locale
         self.startup_timeout_ms = startup_timeout_ms
+        self.process_runner = _kwargs.get("process_runner")
+        self.extra_kwargs = dict(_kwargs)
+        self.renderer_events = _kwargs.get("renderer_events")
         self.state = "off"
         self.failure_reason: str | None = None
         self.restart_scheduled = False
@@ -562,6 +580,41 @@ def _patch_overlay_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeOverlayProcessManager.instances = []
     monkeypatch.setattr(controller_module, "OverlayBridge", FakeOverlayBridge)
     monkeypatch.setattr(controller_module, "OverlayProcessManager", FakeOverlayProcessManager)
+
+
+@pytest.mark.parametrize(
+    "failure_reason",
+    [
+        "missing_executable",
+        "spawn_failed",
+        "manifest_invalid",
+        "contract_mismatch",
+        "startup_timeout",
+        "bridge_auth_failed",
+        "renderer_init_failed",
+        "runtime_disconnected",
+        "window_configuration_failed",
+        "runtime_control_invalid",
+        "runtime_crashed",
+        "unknown",
+    ],
+)
+def test_desktop_gui_overlay_failure_i18n_reasons_survive_controller_normalization(
+    failure_reason: str,
+) -> None:
+    reported: list[tuple[str, str | None]] = []
+    controller = _make_controller(app=SimpleNamespace())
+    controller._ui_event_bridge = SimpleNamespace(
+        report_overlay_state=lambda state, failure_reason=None: reported.append(
+            (state, failure_reason)
+        )
+    )
+
+    controller.on_overlay_start_failed(failure_reason)
+
+    assert controller.overlay_state == "failed"
+    assert controller.failure_reason == failure_reason
+    assert reported == [("failed", failure_reason)]
 
 
 def _patch_init_pipeline_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
@@ -956,6 +1009,49 @@ async def test_start_local_llm_without_runtime_does_not_show_api_key_warning(
 
     assert dash.translation_needs_key is False
     assert dash.translation_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_verify_and_update_status_trusts_local_llm_runtime_without_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.LOCAL_LLM
+    settings.translation = TranslationSettings(
+        model=TranslationModel.LOCAL_LLM,
+        connection=TranslationConnection.OLLAMA,
+    )
+
+    dash = DummyDashboard()
+    app = SimpleNamespace(view_dashboard=dash)
+    controller = _make_controller(app=app)
+    controller.settings = settings
+    controller.hub = DummyHub(llm=object(), stt=object())
+
+    probe_calls = 0
+
+    async def fake_verify_connection(*_args, **_kwargs) -> bool:
+        nonlocal probe_calls
+        probe_calls += 1
+        return False
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_secret_store",
+        lambda *_args, **_kwargs: DummySecrets({}),
+    )
+    monkeypatch.setattr(
+        LocalOpenAICompatibleLLMProvider,
+        "verify_connection",
+        staticmethod(fake_verify_connection),
+    )
+
+    await controller._verify_and_update_status()
+
+    assert probe_calls == 0
+    assert dash.translation_needs_key is False
+    assert dash.translation_enabled is True
+    assert controller.hub.translation_enabled is True
 
 
 @pytest.mark.asyncio
@@ -4059,6 +4155,1393 @@ async def test_overlay_toggle_starts_and_stops_overlay_runtime(
 
 
 @pytest.mark.asyncio
+async def test_overlay_target_routing_installs_steamvr_runner_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+
+    class FakeSteamVrRunner:
+        pass
+
+    class FakeDesktopRunner:
+        pass
+
+    monkeypatch.setattr(
+        controller_module,
+        "DefaultOverlayProcessRunner",
+        FakeSteamVrRunner,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "DesktopFletOverlayRunner",
+        FakeDesktopRunner,
+        raising=False,
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "steamvr"
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    manager = FakeOverlayProcessManager.instances[0]
+    assert isinstance(manager.process_runner, FakeSteamVrRunner)
+    assert not isinstance(manager.process_runner, FakeDesktopRunner)
+
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_initial_control_manifest_always_launches_edit_even_with_legacy_locked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    state_changes: list[dict[str, object]] = []
+
+    class FakeSteamVrRunner:
+        pass
+
+    class FakeDesktopRunner:
+        pass
+
+    monkeypatch.setattr(
+        controller_module,
+        "DefaultOverlayProcessRunner",
+        FakeSteamVrRunner,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "DesktopFletOverlayRunner",
+        FakeDesktopRunner,
+        raising=False,
+    )
+
+    controller = _make_controller(
+        app=SimpleNamespace(
+            on_desktop_overlay_state_changed=lambda **state: state_changes.append(dict(state))
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.size_preset = "small"
+    controller.settings.overlay.desktop_flet.position.x = 24
+    controller.settings.overlay.desktop_flet.position.y = 48
+    controller.settings.overlay.desktop_flet.locked = True
+    controller.settings.overlay.desktop_flet.visual.background_alpha = 0.44
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    manager = FakeOverlayProcessManager.instances[0]
+    bridge = FakeOverlayBridge.instances[0]
+    assert isinstance(manager.process_runner, FakeDesktopRunner)
+    assert not isinstance(manager.process_runner, FakeSteamVrRunner)
+    assert "overlay_target" not in manager.extra_kwargs
+    assert bridge.desktop_runtime_controls_enabled is True
+    assert bridge.initial_desktop_runtime_controls == [
+        {
+            "command": "apply_window_bounds",
+            "x": 24,
+            "y": 48,
+            "width": 1152,
+            "height": 288,
+        },
+        {
+            "command": "apply_visual_config",
+            "text_scale": 1.0,
+            "background_alpha": 0.44,
+            "outline_width": None,
+        },
+        {"command": "set_interaction_mode", "mode": "edit"},
+    ]
+    assert controller.desktop_overlay_captions_locked is False
+    assert controller.desktop_overlay_interaction_mode == "edit"
+    assert state_changes == []
+
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_initial_control_manifest_centers_null_position_without_persisting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    saved_desktop: list[tuple[object, object, str, bool, float]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        desktop = self.settings.overlay.desktop_flet
+        saved_desktop.append(
+            (
+                desktop.position.x,
+                desktop.position.y,
+                desktop.size_preset,
+                desktop.locked,
+                desktop.visual.background_alpha,
+            )
+        )
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(
+        GuiController,
+        "_desktop_work_area_for_current_launch",
+        lambda self: (0, 0, 1920, 1080),
+        raising=False,
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    bridge = FakeOverlayBridge.instances[0]
+    medium_width, medium_height = DESKTOP_FLET_SIZE_PRESETS["medium"]
+    assert bridge.initial_desktop_runtime_controls[0] == {
+        "command": "apply_window_bounds",
+        "x": pytest.approx((1920 - medium_width) / 2),
+        "y": pytest.approx((1080 - medium_height) / 2),
+        "width": medium_width,
+        "height": medium_height,
+    }
+    assert controller.settings.overlay.desktop_flet.position.x is None
+    assert controller.settings.overlay.desktop_flet.position.y is None
+    assert saved_desktop == []
+
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_initial_control_manifest_uses_saved_position_without_clamping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    saved_desktop: list[tuple[object, object, str]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        desktop = self.settings.overlay.desktop_flet
+        saved_desktop.append((desktop.position.x, desktop.position.y, desktop.size_preset))
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(
+        GuiController,
+        "_desktop_work_area_for_current_launch",
+        lambda self: (100, 50, 800, 600),
+        raising=False,
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.size_preset = "xlarge"
+    controller.settings.overlay.desktop_flet.position.x = -5000
+    controller.settings.overlay.desktop_flet.position.y = 9999
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    bridge = FakeOverlayBridge.instances[0]
+    assert bridge.initial_desktop_runtime_controls[0] == {
+        "command": "apply_window_bounds",
+        "x": -5000,
+        "y": 9999,
+        "width": 1792,
+        "height": 448,
+    }
+    assert (
+        controller.settings.overlay.desktop_flet.position.x,
+        controller.settings.overlay.desktop_flet.position.y,
+        controller.settings.overlay.desktop_flet.size_preset,
+    ) == (-5000, 9999, "xlarge")
+    assert saved_desktop == []
+
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_move_persistence_debounces_position_only_and_ignores_programmatic_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    saved_desktop: list[tuple[object, object, str]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        desktop = self.settings.overlay.desktop_flet
+        saved_desktop.append((desktop.position.x, desktop.position.y, desktop.size_preset))
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    renderer_events = manager.renderer_events
+    assert isinstance(renderer_events, asyncio.Queue)
+
+    await renderer_events.put(
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "programmatic",
+                "persist": False,
+                "x": 24,
+                "y": 48,
+                "width": 960,
+                "height": 240,
+            },
+        }
+    )
+    await renderer_events.put(
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": True,
+                "y": 48,
+                "width": 960,
+                "height": 240,
+            },
+        }
+    )
+    await asyncio.sleep(0.05)
+    assert saved_desktop == []
+
+    await renderer_events.put(
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": 111,
+                "y": 222,
+                "width": 1792,
+                "height": 448,
+            },
+        }
+    )
+    await renderer_events.put(
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": 333,
+                "y": 444,
+                "width": 1152,
+                "height": 288,
+            },
+        }
+    )
+
+    await _wait_until(lambda: len(saved_desktop) == 1, attempts=20, delay_s=0.02)
+
+    assert saved_desktop == [(333, 444, "medium")]
+    assert controller.settings.overlay.desktop_flet.position.x == 333
+    assert controller.settings.overlay.desktop_flet.position.y == 444
+    assert controller.settings.overlay.desktop_flet.size_preset == "medium"
+
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_locked_mode_user_bounds_events_do_not_persist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    saved_desktop: list[tuple[object, object, str]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        desktop = self.settings.overlay.desktop_flet
+        saved_desktop.append((desktop.position.x, desktop.position.y, desktop.size_preset))
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.locked = True
+    controller.settings.overlay.desktop_flet.position.x = 320
+    controller.settings.overlay.desktop_flet.position.y = 720
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await controller.set_desktop_overlay_captions_locked(True)
+    assert controller.desktop_overlay_captions_locked is True
+    assert saved_desktop == []
+
+    renderer_events = manager.renderer_events
+    assert isinstance(renderer_events, asyncio.Queue)
+    await renderer_events.put(
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": 608,
+                "y": 1117,
+                "width": 1344,
+                "height": 336,
+            },
+        }
+    )
+    await asyncio.sleep(0.10)
+
+    assert saved_desktop == []
+    assert controller.settings.overlay.desktop_flet.position.x == 320
+    assert controller.settings.overlay.desktop_flet.position.y == 720
+
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_lock_toggle_is_runtime_only_and_does_not_save_or_mutate_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    saved_desktop: list[tuple[object, object, str, bool]] = []
+    state_changes: list[dict[str, object]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        desktop = self.settings.overlay.desktop_flet
+        saved_desktop.append(
+            (desktop.position.x, desktop.position.y, desktop.size_preset, desktop.locked)
+        )
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+
+    controller = _make_controller(
+        app=SimpleNamespace(
+            on_desktop_overlay_state_changed=lambda **state: state_changes.append(dict(state))
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.locked = False
+    controller.settings.overlay.desktop_flet.position.x = 320
+    controller.settings.overlay.desktop_flet.position.y = 720
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    bridge = FakeOverlayBridge.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    saved_desktop.clear()
+
+    await controller.set_desktop_overlay_captions_locked(True)
+
+    assert controller.desktop_overlay_captions_locked is True
+    assert controller.settings.overlay.desktop_flet.locked is False
+    assert saved_desktop == []
+    assert bridge.desktop_runtime_control_payloads[-1] == {
+        "command": "set_interaction_mode",
+        "mode": "pass_through",
+    }
+    assert state_changes[-1] == {
+        "interaction_mode": "pass_through",
+        "captions_locked": True,
+    }
+
+    await controller.set_desktop_overlay_captions_locked(False)
+
+    assert controller.desktop_overlay_captions_locked is False
+    assert controller.settings.overlay.desktop_flet.locked is False
+    assert saved_desktop == []
+    assert bridge.desktop_runtime_control_payloads[-1] == {
+        "command": "set_interaction_mode",
+        "mode": "edit",
+    }
+
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_size_preset_change_preserves_current_center_without_clamping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    saved_desktop: list[tuple[object, object, str]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        desktop = self.settings.overlay.desktop_flet
+        saved_desktop.append((desktop.position.x, desktop.position.y, desktop.size_preset))
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, *, enabled: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_desktop_work_area_for_current_launch",
+        lambda self: (0, 0, 800, 600),
+        raising=False,
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.size_preset = "small"
+    controller.settings.overlay.desktop_flet.position.x = -100
+    controller.settings.overlay.desktop_flet.position.y = 20
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    bridge = FakeOverlayBridge.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    saved_desktop.clear()
+
+    await controller.set_desktop_overlay_size_preset("xlarge")
+
+    expected_x = -420
+    expected_y = -60
+    assert saved_desktop[-1] == (pytest.approx(expected_x), pytest.approx(expected_y), "xlarge")
+    assert controller.settings.overlay.desktop_flet.position.x == pytest.approx(expected_x)
+    assert controller.settings.overlay.desktop_flet.position.y == pytest.approx(expected_y)
+    assert bridge.desktop_runtime_control_payloads[-1] == {
+        "command": "apply_window_bounds",
+        "x": pytest.approx(expected_x),
+        "y": pytest.approx(expected_y),
+        "width": 1792,
+        "height": 448,
+    }
+
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_size_preset_change_drains_queued_pre_resize_user_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    saved_desktop: list[tuple[object, object, str]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        desktop = self.settings.overlay.desktop_flet
+        saved_desktop.append((desktop.position.x, desktop.position.y, desktop.size_preset))
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, *, enabled: asyncio.sleep(0),
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.size_preset = "small"
+    controller.settings.overlay.desktop_flet.position.x = 300
+    controller.settings.overlay.desktop_flet.position.y = 400
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    event_task = controller._desktop_renderer_events_task  # noqa: SLF001 - freeze queue
+    assert event_task is not None
+    event_task.cancel()
+    await asyncio.gather(event_task, return_exceptions=True)
+    controller._desktop_renderer_events_task = None  # noqa: SLF001
+
+    renderer_events = manager.renderer_events
+    assert isinstance(renderer_events, asyncio.Queue)
+    await renderer_events.put(
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": 300,
+                "y": 400,
+                "width": 1152,
+                "height": 288,
+            },
+        }
+    )
+
+    await controller.set_desktop_overlay_size_preset("xlarge")
+
+    assert renderer_events.empty()
+    assert saved_desktop == [(-20, 320, "xlarge")]
+
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_size_preset_change_supersedes_pending_user_position_debounce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    saved_desktop: list[tuple[object, object, str]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        desktop = self.settings.overlay.desktop_flet
+        saved_desktop.append((desktop.position.x, desktop.position.y, desktop.size_preset))
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, *, enabled: asyncio.sleep(0),
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.size_preset = "small"
+    controller.settings.overlay.desktop_flet.position.x = -100
+    controller.settings.overlay.desktop_flet.position.y = 20
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    saved_desktop.clear()
+
+    renderer_events = manager.renderer_events
+    assert isinstance(renderer_events, asyncio.Queue)
+    await renderer_events.put(
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": 111,
+                "y": 222,
+                "width": 1152,
+                "height": 288,
+            },
+        }
+    )
+    await _wait_until(
+        lambda: controller._desktop_bounds_persist_task is not None
+        and controller._pending_desktop_bounds is not None
+    )
+
+    updated = copy.deepcopy(controller.settings)
+    updated.overlay.desktop_flet.size_preset = "xlarge"
+
+    await controller.apply_settings(updated)
+    await asyncio.sleep(controller_module.DESKTOP_BOUNDS_PERSIST_DEBOUNCE_S * 2)
+
+    expected_x = -420
+    expected_y = -60
+    assert saved_desktop == [(pytest.approx(expected_x), pytest.approx(expected_y), "xlarge")]
+    assert controller.settings.overlay.desktop_flet.position.x == pytest.approx(expected_x)
+    assert controller.settings.overlay.desktop_flet.position.y == pytest.approx(expected_y)
+    assert controller.settings.overlay.desktop_flet.size_preset == "xlarge"
+
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_reset_clears_position_unlocks_preserves_size_and_alpha_and_centers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    saved_desktop: list[tuple[object, object, str, bool, float]] = []
+    state_changes: list[dict[str, object]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        desktop = self.settings.overlay.desktop_flet
+        saved_desktop.append(
+            (
+                desktop.position.x,
+                desktop.position.y,
+                desktop.size_preset,
+                desktop.locked,
+                desktop.visual.background_alpha,
+            )
+        )
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(
+        GuiController,
+        "_desktop_work_area_for_current_launch",
+        lambda self: (0, 0, 1920, 1080),
+        raising=False,
+    )
+
+    controller = _make_controller(
+        app=SimpleNamespace(
+            on_desktop_overlay_state_changed=lambda **state: state_changes.append(dict(state))
+        )
+    )
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.size_preset = "large"
+    controller.settings.overlay.desktop_flet.position.x = 80
+    controller.settings.overlay.desktop_flet.position.y = 90
+    controller.settings.overlay.desktop_flet.locked = True
+    controller.settings.overlay.desktop_flet.visual.background_alpha = 0.44
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    bridge = FakeOverlayBridge.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await controller.set_desktop_overlay_captions_locked(True)
+    saved_desktop.clear()
+    bridge.desktop_runtime_control_payloads.clear()
+
+    await controller.reset_desktop_overlay_position()
+
+    await _wait_until(lambda: len(saved_desktop) == 1, attempts=20, delay_s=0.02)
+
+    assert saved_desktop == [(None, None, "large", False, 0.44)]
+    assert controller.settings.overlay.desktop_flet.position.x is None
+    assert controller.settings.overlay.desktop_flet.position.y is None
+    assert controller.settings.overlay.desktop_flet.size_preset == "large"
+    assert controller.settings.overlay.desktop_flet.locked is False
+    assert controller.settings.overlay.desktop_flet.visual.background_alpha == 0.44
+    assert controller.desktop_overlay_captions_locked is False
+    assert state_changes[-1] == {"interaction_mode": "edit", "captions_locked": False}
+    assert {"command": "set_interaction_mode", "mode": "edit"} in (
+        bridge.desktop_runtime_control_payloads
+    )
+    assert bridge.desktop_runtime_control_payloads[-1] == {
+        "command": "apply_window_bounds",
+        "x": pytest.approx(160),
+        "y": pytest.approx(340),
+        "width": 1600,
+        "height": 400,
+    }
+
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_reset_persists_configured_desktop_target_without_running_renderer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved_desktop: list[tuple[object, object, str, bool, float]] = []
+    runtime_payloads: list[dict[str, object]] = []
+    bounds_payloads: list[dict[str, int | float]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        desktop = self.settings.overlay.desktop_flet
+        saved_desktop.append(
+            (
+                desktop.position.x,
+                desktop.position.y,
+                desktop.size_preset,
+                desktop.locked,
+                desktop.visual.background_alpha,
+            )
+        )
+
+    async def fake_broadcast_runtime_control(
+        self: GuiController,
+        payload: dict[str, object],
+    ) -> bool:
+        _ = self
+        runtime_payloads.append(dict(payload))
+        return True
+
+    async def fake_broadcast_window_bounds_control(
+        self: GuiController,
+        bounds: dict[str, int | float],
+    ) -> None:
+        _ = self
+        bounds_payloads.append(dict(bounds))
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(
+        GuiController,
+        "_broadcast_desktop_runtime_control",
+        fake_broadcast_runtime_control,
+    )
+    monkeypatch.setattr(
+        GuiController,
+        "_broadcast_desktop_window_bounds_control",
+        fake_broadcast_window_bounds_control,
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.size_preset = "large"
+    controller.settings.overlay.desktop_flet.position.x = 80
+    controller.settings.overlay.desktop_flet.position.y = 90
+    controller.settings.overlay.desktop_flet.locked = True
+    controller.settings.overlay.desktop_flet.visual.background_alpha = 0.44
+
+    await controller.reset_desktop_overlay_position()
+
+    assert saved_desktop == [(None, None, "large", False, 0.44)]
+    assert controller.settings.overlay.desktop_flet.position.x is None
+    assert controller.settings.overlay.desktop_flet.position.y is None
+    assert controller.settings.overlay.desktop_flet.size_preset == "large"
+    assert controller.settings.overlay.desktop_flet.locked is False
+    assert controller.settings.overlay.desktop_flet.visual.background_alpha == 0.44
+    assert runtime_payloads == []
+    assert bounds_payloads == []
+
+
+@pytest.mark.asyncio
+async def test_desktop_reset_persistence_cancels_pending_user_position_debounce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    saved_desktop: list[tuple[object, object, str, bool]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        desktop = self.settings.overlay.desktop_flet
+        saved_desktop.append(
+            (desktop.position.x, desktop.position.y, desktop.size_preset, desktop.locked)
+        )
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(
+        GuiController,
+        "_desktop_work_area_for_current_launch",
+        lambda self: (0, 0, 1920, 1080),
+        raising=False,
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.size_preset = "medium"
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    renderer_events = manager.renderer_events
+    assert isinstance(renderer_events, asyncio.Queue)
+    await renderer_events.put(
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": 111,
+                "y": 222,
+                "width": 800,
+                "height": 220,
+            },
+        }
+    )
+    await renderer_events.put(
+        {
+            "type": "overlay_event",
+            "payload": {"event": "reset_to_bottom_center_requested"},
+        }
+    )
+
+    await _wait_until(lambda: len(saved_desktop) == 1, attempts=20, delay_s=0.02)
+    await asyncio.sleep(controller_module.DESKTOP_BOUNDS_PERSIST_DEBOUNCE_S * 2)
+
+    assert saved_desktop == [(None, None, "medium", False)]
+    assert controller.settings.overlay.desktop_flet.position.x is None
+    assert controller.settings.overlay.desktop_flet.position.y is None
+
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_reset_drains_queued_pre_reset_user_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    saved_desktop: list[tuple[object, object, str, bool]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        desktop = self.settings.overlay.desktop_flet
+        saved_desktop.append(
+            (desktop.position.x, desktop.position.y, desktop.size_preset, desktop.locked)
+        )
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(
+        GuiController,
+        "_desktop_work_area_for_current_launch",
+        lambda self: (0, 0, 1920, 1080),
+        raising=False,
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.size_preset = "large"
+    controller.settings.overlay.desktop_flet.position.x = 300
+    controller.settings.overlay.desktop_flet.position.y = 400
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    event_task = controller._desktop_renderer_events_task  # noqa: SLF001 - freeze queue
+    assert event_task is not None
+    event_task.cancel()
+    await asyncio.gather(event_task, return_exceptions=True)
+    controller._desktop_renderer_events_task = None  # noqa: SLF001
+
+    renderer_events = manager.renderer_events
+    assert isinstance(renderer_events, asyncio.Queue)
+    await renderer_events.put(
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": 300,
+                "y": 400,
+                "width": 1600,
+                "height": 400,
+            },
+        }
+    )
+
+    await controller.reset_desktop_overlay_position()
+
+    assert renderer_events.empty()
+    assert saved_desktop == [(None, None, "large", False)]
+
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_source_reset_ignores_event_size_and_cancels_pending_user_position_debounce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    saved_desktop: list[tuple[object, object, str, bool]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        desktop = self.settings.overlay.desktop_flet
+        saved_desktop.append(
+            (desktop.position.x, desktop.position.y, desktop.size_preset, desktop.locked)
+        )
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    monkeypatch.setattr(
+        GuiController,
+        "_desktop_work_area_for_current_launch",
+        lambda self: (0, 0, 1920, 1080),
+        raising=False,
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.size_preset = "small"
+    controller.settings.overlay.desktop_flet.locked = True
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    renderer_events = manager.renderer_events
+    assert isinstance(renderer_events, asyncio.Queue)
+    await renderer_events.put(
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "user",
+                "persist": True,
+                "x": 111,
+                "y": 222,
+                "width": 800,
+                "height": 220,
+            },
+        }
+    )
+    await renderer_events.put(
+        {
+            "type": "overlay_event",
+            "payload": {
+                "event": "window_bounds_changed",
+                "source": "reset",
+                "persist": True,
+                "x": 320,
+                "y": 750,
+                "width": 960,
+                "height": 240,
+            },
+        }
+    )
+
+    await _wait_until(lambda: len(saved_desktop) == 1, attempts=20, delay_s=0.02)
+    await asyncio.sleep(controller_module.DESKTOP_BOUNDS_PERSIST_DEBOUNCE_S * 2)
+
+    assert saved_desktop == [(None, None, "small", False)]
+    assert controller.settings.overlay.desktop_flet.position.x is None
+    assert controller.settings.overlay.desktop_flet.position.y is None
+    assert controller.settings.overlay.desktop_flet.size_preset == "small"
+
+    await controller.set_overlay_enabled(False)
+
+
+def test_vr_overlay_calibration_reset_does_not_mutate_desktop_overlay_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved_desktop: list[tuple[object, object, str, bool, float]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        desktop = self.settings.overlay.desktop_flet
+        saved_desktop.append(
+            (
+                desktop.position.x,
+                desktop.position.y,
+                desktop.size_preset,
+                desktop.locked,
+                desktop.visual.background_alpha,
+            )
+        )
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.desktop_flet.size_preset = "xlarge"
+    controller.settings.overlay.desktop_flet.position.x = 123
+    controller.settings.overlay.desktop_flet.position.y = 456
+    controller.settings.overlay.desktop_flet.locked = True
+    controller.settings.overlay.desktop_flet.visual.background_alpha = 0.33
+    controller.overlay_calibration = OverlayCalibration(distance=3.0, offset_x=2.0)
+    controller._overlay_calibration_draft = OverlayCalibration()
+
+    controller.apply_overlay_calibration()
+
+    assert saved_desktop == [(123, 456, "xlarge", True, 0.33)]
+    assert controller.settings.overlay.desktop_flet.position.x == 123
+    assert controller.settings.overlay.desktop_flet.position.y == 456
+    assert controller.settings.overlay.desktop_flet.size_preset == "xlarge"
+    assert controller.settings.overlay.desktop_flet.locked is True
+    assert controller.settings.overlay.desktop_flet.visual.background_alpha == 0.33
+
+
+def test_desktop_initial_controls_emit_launch_diagnostics_only_in_detailed_mode() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.size_preset = "medium"
+    controller.settings.overlay.desktop_flet.position.x = 597
+    controller.settings.overlay.desktop_flet.position.y = 1017
+    controller.settings.overlay.desktop_flet.locked = True
+    controller.settings.overlay.desktop_flet.visual.background_alpha = 0.5
+    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
+
+    controls = controller._build_initial_desktop_runtime_controls(controller.settings)
+
+    assert controls[-1] == {"command": "set_interaction_mode", "mode": "edit"}
+    assert "bounds_epoch" not in controls[0]
+    messages = [message for _level, message in controller._runtime_logging.detailed_messages]
+    assert any(
+        message.startswith("[DesktopOverlay][Launch]")
+        and "target=desktop" in message
+        and "locked=True" in message
+        and "interaction_mode=edit" in message
+        and "size_preset=medium" in message
+        and "x=597" in message
+        and "y=1017" in message
+        and "width=1344" in message
+        and "height=336" in message
+        and "background_alpha=0.5" in message
+        for message in messages
+    )
+
+    basic_controller = _make_controller(app=SimpleNamespace())
+    basic_controller.settings = copy.deepcopy(controller.settings)
+    basic_controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=False)
+
+    basic_controller._build_initial_desktop_runtime_controls(basic_controller.settings)
+
+    assert basic_controller._runtime_logging.detailed_messages == []
+
+
+@pytest.mark.asyncio
+async def test_desktop_bounds_events_emit_diagnostics_only_in_detailed_mode() -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.locked = False
+    controller._active_overlay_target = "desktop"
+    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
+    payload: dict[object, object] = {
+        "event": "window_bounds_changed",
+        "source": "user",
+        "persist": True,
+        "x": 111,
+        "y": 222,
+        "width": 1152,
+        "height": 288,
+    }
+
+    try:
+        await controller._handle_desktop_window_bounds_changed(payload)
+
+        messages = [message for _level, message in controller._runtime_logging.detailed_messages]
+        assert any(
+            message.startswith("[DesktopOverlay][Bounds] received")
+            and "source=user" in message
+            and "persist=True" in message
+            and "interaction_mode=edit" in message
+            and "x=111" in message
+            and "y=222" in message
+            and "width=1152" in message
+            and "height=288" in message
+            for message in messages
+        )
+        assert any(
+            message.startswith("[DesktopOverlay][Bounds] scheduled_persist") for message in messages
+        )
+    finally:
+        await controller._cancel_desktop_bounds_persistence()
+
+    basic_controller = _make_controller(app=SimpleNamespace())
+    basic_controller.settings = AppSettings()
+    basic_controller.settings.overlay.target = "desktop"
+    basic_controller._active_overlay_target = "desktop"
+    basic_controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=False)
+
+    try:
+        await basic_controller._handle_desktop_window_bounds_changed(payload)
+    finally:
+        await basic_controller._cancel_desktop_bounds_persistence()
+
+    assert basic_controller._runtime_logging.detailed_messages == []
+
+
+@pytest.mark.asyncio
+async def test_desktop_apply_settings_broadcasts_visual_config_for_background_alpha_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.overlay_enabled = True
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.visual.background_alpha = 0.5
+    controller._active_overlay_target = "desktop"
+    bridge = FakeOverlayBridge(session_token="desktop")
+    controller._overlay_bridge = bridge
+
+    updated = copy.deepcopy(controller.settings)
+    updated.overlay.desktop_flet.visual.background_alpha = 0.7
+
+    await controller.apply_settings(updated)
+
+    assert bridge.desktop_runtime_control_payloads == [
+        {
+            "command": "apply_visual_config",
+            "text_scale": 1.0,
+            "background_alpha": 0.7,
+            "outline_width": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_desktop_apply_settings_preserves_runtime_lock_without_persisting_saved_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serialized_desktop: list[dict[str, object]] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        serialized_desktop.append(to_dict(self.settings)["overlay"]["desktop_flet"])
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.ui.overlay_enabled = True
+    controller.settings.overlay.target = "desktop"
+    controller.settings.overlay.desktop_flet.locked = False
+    controller._active_overlay_target = "desktop"
+    controller.overlay_state = "connected"
+    bridge = FakeOverlayBridge(session_token="desktop")
+    controller._overlay_bridge = bridge
+    await controller.set_desktop_overlay_captions_locked(True)
+    serialized_desktop.clear()
+    bridge.desktop_runtime_control_payloads.clear()
+
+    updated = copy.deepcopy(controller.settings)
+    updated.overlay.desktop_flet.visual.background_alpha = 0.7
+
+    await controller.apply_settings(updated)
+
+    assert controller.desktop_overlay_captions_locked is True
+    assert controller.settings.overlay.desktop_flet.locked is False
+    assert serialized_desktop == [
+        {
+            "size_preset": "medium",
+            "position": {"x": None, "y": None},
+            "visual": {"background_alpha": 0.7},
+        }
+    ]
+    assert bridge.desktop_runtime_control_payloads == [
+        {
+            "command": "apply_visual_config",
+            "text_scale": 1.0,
+            "background_alpha": 0.7,
+            "outline_width": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_desktop_interaction_mode_controls_are_desktop_only_and_update_locked_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    save_calls: list[bool] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        save_calls.append(self.settings.overlay.desktop_flet.locked)
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    bridge = FakeOverlayBridge.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    renderer_events = manager.renderer_events
+    assert isinstance(renderer_events, asyncio.Queue)
+    await renderer_events.put(
+        {
+            "type": "overlay_event",
+            "payload": {"event": "interaction_mode_changed", "mode": "pass_through"},
+        }
+    )
+    await _wait_until(lambda: controller.desktop_overlay_captions_locked)
+
+    await controller.set_desktop_overlay_captions_locked(False)
+
+    assert controller.desktop_overlay_captions_locked is False
+    assert controller.settings.overlay.desktop_flet.locked is False
+    assert save_calls == []
+    assert bridge.desktop_runtime_control_payloads[-1] == {
+        "command": "set_interaction_mode",
+        "mode": "edit",
+    }
+
+    steam_controller = _make_controller(app=SimpleNamespace())
+    steam_controller.settings = AppSettings()
+    steam_controller.settings.overlay.target = "steamvr"
+    steam_controller._active_overlay_target = "steamvr"
+    steam_bridge = FakeOverlayBridge(session_token="steamvr")
+    steam_controller._overlay_bridge = steam_bridge
+
+    await steam_controller.set_desktop_overlay_captions_locked(True)
+
+    assert steam_controller.desktop_overlay_captions_locked is False
+    assert steam_bridge.desktop_runtime_control_payloads == []
+
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_lock_request_is_ignored_without_active_desktop_renderer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved_locked: list[bool] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        saved_locked.append(self.settings.overlay.desktop_flet.locked)
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+
+    await controller.set_desktop_overlay_captions_locked(True)
+
+    assert controller.desktop_overlay_captions_locked is False
+    assert controller.desktop_overlay_interaction_mode == "edit"
+    assert controller.settings.overlay.desktop_flet.locked is False
+    assert saved_locked == []
+
+
+@pytest.mark.asyncio
+async def test_desktop_lock_request_is_ignored_until_desktop_renderer_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved_locked: list[bool] = []
+
+    def fake_save_settings(self: GuiController) -> None:
+        assert self.settings is not None
+        saved_locked.append(self.settings.overlay.desktop_flet.locked)
+
+    monkeypatch.setattr(GuiController, "_save_settings", fake_save_settings)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "desktop"
+    controller._active_overlay_target = "desktop"
+    controller._overlay_bridge = FakeOverlayBridge(session_token="desktop")
+    controller.overlay_state = "starting"
+
+    await controller.set_desktop_overlay_captions_locked(True)
+
+    assert controller.desktop_overlay_captions_locked is False
+    assert controller.desktop_overlay_interaction_mode == "edit"
+    assert controller.settings.overlay.desktop_flet.locked is False
+    assert controller._overlay_bridge.desktop_runtime_control_payloads == []
+    assert saved_locked == []
+
+
+@pytest.mark.asyncio
+async def test_overlay_target_routing_apply_settings_stops_before_switching_running_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, *, enabled: asyncio.sleep(0),
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "steamvr"
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    updated = copy.deepcopy(controller.settings)
+    updated.overlay.target = "desktop"
+    updated.ui.overlay_enabled = True
+
+    await controller.apply_settings(updated)
+
+    assert controller.settings.overlay.target == "desktop"
+    assert controller.settings.ui.overlay_enabled is False
+    assert controller.overlay_state == "off"
+    assert manager.stop_calls == 1
+    assert len(FakeOverlayProcessManager.instances) == 1
+
+
+@pytest.mark.asyncio
+async def test_overlay_target_routing_apply_settings_stops_after_in_place_target_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+    monkeypatch.setattr(
+        GuiController,
+        "_configure_vrc_mic_receiver",
+        lambda self, *, enabled: asyncio.sleep(0),
+    )
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = "steamvr"
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+    manager = FakeOverlayProcessManager.instances[0]
+    manager.complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+
+    shared_settings = controller.settings
+    shared_settings.overlay.target = "desktop"
+    shared_settings.ui.overlay_enabled = True
+
+    await controller.apply_settings(shared_settings)
+
+    assert controller.settings.overlay.target == "desktop"
+    assert controller.settings.ui.overlay_enabled is False
+    assert controller.overlay_state == "off"
+    assert manager.stop_calls == 1
+    assert len(FakeOverlayProcessManager.instances) == 1
+
+
+@pytest.mark.asyncio
 async def test_overlay_toggle_does_not_persist_transient_button_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4133,6 +5616,28 @@ async def test_overlay_start_enables_peer_presentation_refresh_for_new_presenter
 
 
 @pytest.mark.asyncio
+async def test_desktop_overlay_start_disables_peer_presentation_refresh_for_new_presenter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
+    controller.hub = DummyHub()
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    assert controller._overlay_presenter is not None
+    assert controller._overlay_presenter.peer_presentation_refresh_burst is False
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
 async def test_overlay_start_product_enables_existing_peer_presentation_refresh_presenter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4156,6 +5661,36 @@ async def test_overlay_start_product_enables_existing_peer_presentation_refresh_
     await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
 
     assert controller._overlay_presenter.peer_presentation_refresh_burst is True
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
+async def test_desktop_overlay_start_disables_existing_peer_presentation_refresh_presenter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    monkeypatch.setattr(GuiController, "_save_settings", lambda self: None)
+
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=Path("settings.json"),
+    )
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = OVERLAY_TARGET_DESKTOP
+    controller.hub = DummyHub()
+    controller._overlay_presenter = OverlayPresenter(
+        calibration=controller.overlay_calibration.copy(),
+        clock=controller.clock,
+        peer_presentation_refresh_burst=True,
+    )
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    assert controller._overlay_presenter.peer_presentation_refresh_burst is False
     FakeOverlayProcessManager.instances[0].complete_startup()
     await _wait_until(lambda: controller.overlay_state == "connected")
     await controller.set_overlay_enabled(False)
@@ -5169,6 +6704,7 @@ async def test_start_mic_loop_wires_self_vad_diagnostics(
     await controller._start_mic_loop()
     await asyncio.sleep(0)
 
+    assert vad_calls[0].get("max_segment_ms") is None
     assert vad_calls[0]["diagnostic_label"] == "self"
     diagnostics_enabled = vad_calls[0]["diagnostics_enabled"]
     assert callable(diagnostics_enabled)

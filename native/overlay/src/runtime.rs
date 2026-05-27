@@ -20,7 +20,8 @@ use crate::openvr::{
 };
 use crate::renderer::{
     CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionDebugOverlay, CaptionLayoutResult,
-    CaptionPresentation, CaptionRenderer, RenderDiagnostics, VisibleCaptionBlock,
+    CaptionPresentation, CaptionRenderer, RenderDiagnostics, StyleBucketSourceCount,
+    VisibleCaptionBlock,
 };
 use crate::state::{
     OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationSnapshot,
@@ -1368,16 +1369,33 @@ fn format_frame_timing_log(
 
 fn format_cache_stats_log(diagnostics: &RenderDiagnostics) -> String {
     format!(
-        "cache_stats text_format_size={} layout_size={} line_size={} block_size={} line_hits={} line_misses={} block_hits={} block_misses={}",
+        "cache_stats text_format_size={} layout_size={} line_size={} block_size={} text_format_hits={} text_format_misses={} font_warmup_attempts={} font_warmup_failures={} directwrite_layout_successes={} heuristic_layout_fallbacks={} layout_hits={} layout_misses={} line_hits={} line_misses={} block_hits={} block_misses={} style_bucket_source_counts=[{}]",
         diagnostics.text_format_cache_size,
         diagnostics.layout_cache_size,
         diagnostics.line_cache_size,
         diagnostics.block_cache_size,
+        diagnostics.text_format_cache_hits,
+        diagnostics.text_format_cache_misses,
+        diagnostics.font_warmup_attempts,
+        diagnostics.font_warmup_failures,
+        diagnostics.directwrite_layout_success_count,
+        diagnostics.heuristic_layout_fallback_count,
+        diagnostics.layout_cache_hits,
+        diagnostics.layout_cache_misses,
         diagnostics.line_cache_hits,
         diagnostics.line_cache_misses,
         diagnostics.block_cache_hits,
         diagnostics.block_cache_misses,
+        format_style_bucket_source_counts(&diagnostics.style_bucket_source_counts),
     )
+}
+
+fn format_style_bucket_source_counts(counts: &[StyleBucketSourceCount]) -> String {
+    counts
+        .iter()
+        .map(|count| format!("{:?}/{:?}:{}", count.bucket, count.source, count.count))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn format_peer_first_render_visibility_checkpoint_log(
@@ -1705,6 +1723,10 @@ fn caption_block_for_strip(strip: &OverlaySlot, visual_debug_prefixes: bool) -> 
         .with_channel(channel)
         .with_variant(variant)
         .with_secondary_text(secondary_text, strip.secondary_enabled)
+        .with_language_metadata(
+            strip.primary_language.clone(),
+            strip.secondary_language.clone(),
+        )
         .with_visual_state(1.0, 0.0, 1.0)
         .with_slot(strip.slot_index, strip.anchor_top_px)
 }
@@ -1770,7 +1792,8 @@ mod tests {
     use crate::openvr::{FrameTimingSample, OpenVrError, OpenVrStartupPreflightError};
     use crate::renderer::{
         CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionLayoutPolicy,
-        CaptionPresentation, RenderDiagnostics,
+        CaptionPresentation, FontLanguageBucket, FontSource, RenderDiagnostics,
+        StyleBucketSourceCount,
     };
     use crate::state::{
         OverlayPresentationBlock, OverlayPresentationBlockVariant, OverlayPresentationCalibration,
@@ -1797,6 +1820,8 @@ mod tests {
             primary_text: primary_text.to_string(),
             secondary_text: secondary_text.to_string(),
             secondary_enabled,
+            primary_language: None,
+            secondary_language: None,
             update_id: None,
             origin_wall_clock_ms: None,
             session_scope: None,
@@ -1819,6 +1844,8 @@ mod tests {
             primary_text: primary_text.to_string(),
             secondary_text: String::new(),
             secondary_enabled: true,
+            primary_language: None,
+            secondary_language: None,
             update_id: None,
             origin_wall_clock_ms: None,
             session_scope: None,
@@ -1862,6 +1889,8 @@ mod tests {
                     primary_text: String::new(),
                     secondary_text: "peer source".to_string(),
                     secondary_enabled: true,
+                    primary_language: None,
+                    secondary_language: None,
                     update_id: None,
                     origin_wall_clock_ms: None,
                     session_scope: None,
@@ -1875,6 +1904,8 @@ mod tests {
                     primary_text: "peer translation".to_string(),
                     secondary_text: "peer original".to_string(),
                     secondary_enabled: true,
+                    primary_language: None,
+                    secondary_language: None,
                     update_id: Some("3bd7ffff-1111-2222-3333-444455556666".to_string()),
                     origin_wall_clock_ms: None,
                     session_scope: None,
@@ -2217,6 +2248,8 @@ mod tests {
                     primary_text: "speaking".into(),
                     secondary_text: "hidden".into(),
                     secondary_enabled: false,
+                    primary_language: None,
+                    secondary_language: None,
                     update_id: None,
                     origin_wall_clock_ms: None,
                     session_scope: None,
@@ -2244,6 +2277,8 @@ mod tests {
                     primary_text: "peer line".into(),
                     secondary_text: String::new(),
                     secondary_enabled: true,
+                    primary_language: None,
+                    secondary_language: None,
                     update_id: Some("upd-peer-2".into()),
                     origin_wall_clock_ms: Some(1712345678902),
                     session_scope: Some("session:peer".into()),
@@ -2257,6 +2292,8 @@ mod tests {
                     primary_text: "self line".into(),
                     secondary_text: String::new(),
                     secondary_enabled: true,
+                    primary_language: None,
+                    secondary_language: None,
                     update_id: Some("upd-self-1".into()),
                     origin_wall_clock_ms: Some(1712345678901),
                     session_scope: Some("session:self".into()),
@@ -2290,6 +2327,8 @@ mod tests {
                 primary_text: "hello".into(),
                 secondary_text: String::new(),
                 secondary_enabled: true,
+                primary_language: None,
+                secondary_language: None,
                 update_id: Some("upd-self-1".into()),
                 origin_wall_clock_ms: Some(1712345678901),
                 session_scope: Some("session:self".into()),
@@ -2313,6 +2352,8 @@ mod tests {
                 primary_text: "hello again".into(),
                 secondary_text: "translated".into(),
                 secondary_enabled: true,
+                primary_language: None,
+                secondary_language: None,
                 update_id: Some("upd-self-2".into()),
                 origin_wall_clock_ms: Some(1712345678955),
                 session_scope: Some("session:self".into()),
@@ -2344,6 +2385,8 @@ mod tests {
                 primary_text: "hello".into(),
                 secondary_text: "translated".into(),
                 secondary_enabled: true,
+                primary_language: None,
+                secondary_language: None,
                 update_id: Some("upd-self-2".into()),
                 origin_wall_clock_ms: Some(1712345678955),
                 session_scope: Some("session:self".into()),
@@ -2533,16 +2576,36 @@ mod tests {
             layout_cache_size: 4,
             line_cache_size: 5,
             block_cache_size: 6,
-            line_cache_hits: 7,
-            line_cache_misses: 8,
-            block_cache_hits: 9,
-            block_cache_misses: 10,
+            text_format_cache_hits: 7,
+            text_format_cache_misses: 8,
+            font_warmup_attempts: 9,
+            font_warmup_failures: 1,
+            directwrite_layout_success_count: 10,
+            heuristic_layout_fallback_count: 2,
+            layout_cache_hits: 11,
+            layout_cache_misses: 12,
+            line_cache_hits: 13,
+            line_cache_misses: 14,
+            block_cache_hits: 15,
+            block_cache_misses: 16,
+            style_bucket_source_counts: vec![
+                StyleBucketSourceCount {
+                    bucket: FontLanguageBucket::CjkJa,
+                    source: FontSource::SystemFont,
+                    count: 2,
+                },
+                StyleBucketSourceCount {
+                    bucket: FontLanguageBucket::CjkZhHant,
+                    source: FontSource::BundledNotoCjkMedium,
+                    count: 1,
+                },
+            ],
             ..RenderDiagnostics::default()
         };
 
         assert_eq!(
             format_cache_stats_log(&diagnostics),
-            "cache_stats text_format_size=3 layout_size=4 line_size=5 block_size=6 line_hits=7 line_misses=8 block_hits=9 block_misses=10"
+            "cache_stats text_format_size=3 layout_size=4 line_size=5 block_size=6 text_format_hits=7 text_format_misses=8 font_warmup_attempts=9 font_warmup_failures=1 directwrite_layout_successes=10 heuristic_layout_fallbacks=2 layout_hits=11 layout_misses=12 line_hits=13 line_misses=14 block_hits=15 block_misses=16 style_bucket_source_counts=[CjkJa/SystemFont:2,CjkZhHant/BundledNotoCjkMedium:1]"
         );
     }
 

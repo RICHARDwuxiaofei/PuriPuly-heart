@@ -171,7 +171,9 @@ def test_silero_vad_onnx_legacy_state_tracks_context_and_reset(tmp_path, monkeyp
     assert len(calls) == 2
     np.testing.assert_array_equal(
         calls[0]["input"],
-        np.concatenate([np.zeros((64,), dtype=np.float32), chunk1], dtype=np.float32).reshape(1, -1),
+        np.concatenate([np.zeros((64,), dtype=np.float32), chunk1], dtype=np.float32).reshape(
+            1, -1
+        ),
     )
     np.testing.assert_array_equal(
         calls[1]["input"],
@@ -184,7 +186,9 @@ def test_silero_vad_onnx_legacy_state_tracks_context_and_reset(tmp_path, monkeyp
 
     np.testing.assert_array_equal(
         calls[2]["input"],
-        np.concatenate([np.zeros((64,), dtype=np.float32), chunk1], dtype=np.float32).reshape(1, -1),
+        np.concatenate([np.zeros((64,), dtype=np.float32), chunk1], dtype=np.float32).reshape(
+            1, -1
+        ),
     )
 
 
@@ -209,7 +213,9 @@ def test_silero_vad_onnx_state_model_tracks_context_and_reset(tmp_path, monkeypa
     assert np.asarray(calls[0]["sr"]).shape == ()
     np.testing.assert_array_equal(
         calls[0]["input"],
-        np.concatenate([np.zeros((64,), dtype=np.float32), chunk1], dtype=np.float32).reshape(1, -1),
+        np.concatenate([np.zeros((64,), dtype=np.float32), chunk1], dtype=np.float32).reshape(
+            1, -1
+        ),
     )
     np.testing.assert_array_equal(
         calls[1]["input"],
@@ -221,7 +227,9 @@ def test_silero_vad_onnx_state_model_tracks_context_and_reset(tmp_path, monkeypa
     assert p3 == pytest.approx(0.8)
     np.testing.assert_array_equal(
         calls[2]["input"],
-        np.concatenate([np.zeros((64,), dtype=np.float32), chunk1], dtype=np.float32).reshape(1, -1),
+        np.concatenate([np.zeros((64,), dtype=np.float32), chunk1], dtype=np.float32).reshape(
+            1, -1
+        ),
     )
 
 

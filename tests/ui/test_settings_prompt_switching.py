@@ -333,6 +333,7 @@ def test_settings_view_llm_modal_lists_logical_translation_models_once(monkeypat
     assert values == [
         TranslationModel.GEMMA4.value,
         TranslationModel.DEEPSEEK_V4_FLASH.value,
+        TranslationModel.DEEPSEEK_V4_PRO.value,
         TranslationModel.GEMINI_3_FLASH.value,
         TranslationModel.GEMINI_31_FLASH_LITE.value,
         TranslationModel.QWEN_35_PLUS.value,

@@ -32,6 +32,7 @@ from puripuly_heart.config.settings import (
     TranslationConnection,
     TranslationModel,
     TranslationSettings,
+    to_dict,
 )
 from puripuly_heart.core.managed_openrouter_release import TalkTogetherPassStatus
 from puripuly_heart.ui import i18n as i18n_module
@@ -131,7 +132,11 @@ def _make_llm_selection_view(
     )
     view._local_llm_connection_card = SimpleNamespace(visible=False, update=lambda: None)
     view._managed_trial_usage_bar = SimpleNamespace(
-        visible=False, percent=None, update=lambda: None
+        visible=False,
+        percent=None,
+        update=lambda: None,
+        _remaining_text=SimpleNamespace(update=lambda: None),
+        _fill_segments=SimpleNamespace(update=lambda: None),
     )
     view._managed_trial_usage_bar.set_percent = lambda percent: setattr(
         view._managed_trial_usage_bar, "percent", percent
@@ -142,11 +147,6 @@ def _make_llm_selection_view(
     view._managed_key_referral_id = None
     view._managed_key_referral_id_label = SimpleNamespace(value="")
     view._managed_key_referral_id_value = SimpleNamespace(value="")
-    view._managed_key_referral_copy_button = SimpleNamespace(
-        disabled=True,
-        tooltip="",
-        update=lambda: None,
-    )
     view._managed_key_referral_helper_text = SimpleNamespace(value="")
     view._managed_key_pass_status = None
     view._managed_key_invite_progress_label = SimpleNamespace(value="", update=lambda: None)
@@ -206,6 +206,8 @@ def _prompt_tab_cards(view: settings_view.SettingsView) -> list[ft.Control]:
 def _overlay_tab_cards(view: settings_view.SettingsView) -> list[ft.Control]:
     cards: list[ft.Control] = []
     for control in _subtab_controls(view, "overlay"):
+        if getattr(control, "visible", True) is False:
+            continue
         for card in _layout_cards(control):
             try:
                 title = _card_title(card)
@@ -764,7 +766,7 @@ def test_managed_key_card_visibility_follows_translation_connection(
     assert view._managed_key_card.visible is expected_visible
 
 
-def test_managed_key_referral_row_shows_empty_state_with_disabled_copy(
+def test_managed_key_referral_row_shows_empty_state_without_copy_button(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -775,13 +777,15 @@ def test_managed_key_referral_row_shows_empty_state_with_disabled_copy(
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
     assert view._managed_key_referral_id_value.value == t("settings.managed_key.referral_id.empty")
-    assert view._managed_key_referral_copy_button.disabled is True
+    referral_row = _wrapped_card_column(view._managed_key_card).controls[4].controls[0]
+    assert view._managed_key_referral_id_value in referral_row.controls
+    assert not any(isinstance(control, ft.IconButton) for control in referral_row.controls)
     assert view._managed_key_referral_helper_text.value == t(
         "settings.managed_key.referral_id.pending_helper"
     )
 
 
-def test_managed_key_referral_row_shows_owned_id_with_enabled_copy(
+def test_managed_key_referral_row_shows_owned_id_without_copy_button(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -795,66 +799,12 @@ def test_managed_key_referral_row_shows_owned_id_with_enabled_copy(
 
     assert view._managed_key_card.visible is True
     assert view._managed_key_referral_id_value.value == "7KQ9M2"
-    assert view._managed_key_referral_copy_button.disabled is False
+    referral_row = _wrapped_card_column(view._managed_key_card).controls[4].controls[0]
+    assert view._managed_key_referral_id_value in referral_row.controls
+    assert not any(isinstance(control, ft.IconButton) for control in referral_row.controls)
     assert view._managed_key_referral_helper_text.value == t(
         "settings.managed_key.referral_id.helper"
     )
-
-
-def test_managed_key_referral_copy_button_copies_owned_id_and_shows_snackbar(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class ClipboardPage:
-        def __init__(self) -> None:
-            self.copied: list[str] = []
-
-        def set_clipboard(self, value: str) -> None:
-            self.copied.append(value)
-
-    settings = AppSettings()
-    settings.provider.llm = LLMProviderName.OPENROUTER
-    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
-    settings.managed_identity.referral_id = "7KQ9M2"
-    settings.validate()
-    snackbar_calls: list[tuple[str, object]] = []
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.show_snackbar = lambda message, color: snackbar_calls.append((message, color))
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    page = attach_dummy_page(monkeypatch, view, ClipboardPage())
-
-    view._managed_key_referral_copy_button.on_click(None)
-
-    assert page.copied == ["7KQ9M2"]
-    assert snackbar_calls == [
-        (t("settings.managed_key.referral_id.copy_success"), settings_view.COLOR_SUCCESS)
-    ]
-
-
-def test_managed_key_referral_copy_button_ignores_missing_owned_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class ClipboardPage:
-        def __init__(self) -> None:
-            self.copied: list[str] = []
-
-        def set_clipboard(self, value: str) -> None:
-            self.copied.append(value)
-
-    settings = AppSettings()
-    settings.provider.llm = LLMProviderName.OPENROUTER
-    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
-    snackbar_calls: list[tuple[str, object]] = []
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.show_snackbar = lambda message, color: snackbar_calls.append((message, color))
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    page = attach_dummy_page(monkeypatch, view, ClipboardPage())
-
-    view._managed_key_referral_copy_button.on_click(None)
-
-    assert page.copied == []
-    assert snackbar_calls == []
 
 
 def test_set_managed_trial_usage_state_tracks_visible_and_remaining_percent(
@@ -918,10 +868,6 @@ def test_set_managed_key_state_updates_card_controls_and_api_section_repaint(
     assert view._managed_trial_usage_bar.percent == 64
     assert view._managed_key_referral_id == "7KQ9M2"
     assert view._managed_key_referral_id_value.value == "7KQ9M2"
-    assert view._managed_key_referral_copy_button.disabled is False
-    assert view._managed_key_referral_copy_button.tooltip == t(
-        "settings.managed_key.referral_id.copy_tooltip"
-    )
     assert "api_keys_column" in updates
 
 
@@ -1079,10 +1025,6 @@ def test_set_managed_key_state_empty_referral_disables_copy_and_repaints_parent(
     assert view._managed_trial_usage_bar.percent is None
     assert view._managed_key_referral_id is None
     assert view._managed_key_referral_id_value.value == t("settings.managed_key.referral_id.empty")
-    assert view._managed_key_referral_copy_button.disabled is True
-    assert view._managed_key_referral_copy_button.tooltip == t(
-        "settings.managed_key.referral_id.pending_helper"
-    )
     assert "api_keys_column" in updates
 
 
@@ -1113,20 +1055,151 @@ def test_set_managed_key_state_shows_talk_together_pass_invite_progress(
     assert view._managed_key_invite_progress_value.value == "1 / 5"
 
 
-def test_managed_key_invite_progress_row_appears_above_talk_together_pass_id(
+def test_set_managed_key_state_repaints_mounted_pass_id_usage_and_invite_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+    view = _make_llm_selection_view(monkeypatch, settings)
+    updates: list[str] = []
+    mounted_page = object()
+
+    view._managed_trial_usage_bar.page = mounted_page
+    view._managed_trial_usage_bar.update = lambda: updates.append("usage_bar")
+    view._managed_trial_usage_bar._remaining_text.page = mounted_page  # noqa: SLF001
+    view._managed_trial_usage_bar._remaining_text.update = lambda: updates.append(  # noqa: SLF001
+        "usage_remaining_text"
+    )
+    view._managed_trial_usage_bar._fill_segments.page = mounted_page  # noqa: SLF001
+    view._managed_trial_usage_bar._fill_segments.update = lambda: updates.append(  # noqa: SLF001
+        "usage_fill_segments"
+    )
+    view._managed_key_referral_id_value.page = mounted_page
+    view._managed_key_referral_id_value.update = lambda: updates.append("referral_value")
+    view._managed_key_referral_helper_text.page = mounted_page
+    view._managed_key_referral_helper_text.update = lambda: updates.append("referral_helper")
+    view._managed_key_invite_progress_label.page = mounted_page
+    view._managed_key_invite_progress_label.update = lambda: updates.append("invite_label")
+    view._managed_key_invite_progress_value.page = mounted_page
+    view._managed_key_invite_progress_value.update = lambda: updates.append("invite_value")
+    view._managed_key_invite_progress_row.page = mounted_page
+    view._managed_key_invite_progress_row.update = lambda: updates.append("invite_row")
+
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=64,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=1,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+    )
+
+    assert view._managed_trial_usage_bar.percent == 64
+    assert view._managed_key_referral_id_value.value == "7KQ9M2"
+    assert view._managed_key_invite_progress_row.visible is True
+    assert view._managed_key_invite_progress_value.value == "1 / 5"
+    assert {
+        "usage_bar",
+        "usage_remaining_text",
+        "usage_fill_segments",
+        "referral_value",
+        "referral_helper",
+        "invite_label",
+        "invite_value",
+        "invite_row",
+    }.issubset(updates)
+
+
+def test_managed_key_invite_progress_survives_managed_china_round_trip_before_settings_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.DEEPSEEK_V4_FLASH,
+        connection=TranslationConnection.MANAGED,
+        connection_history={
+            TranslationModel.DEEPSEEK_V4_FLASH.value: TranslationConnection.MANAGED,
+            TranslationModel.GEMMA4.value: TranslationConnection.MANAGED,
+        },
+    )
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=64,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=1,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+    )
+
+    view._on_translation_connection_selected(TranslationConnection.MANAGED_CHINA.value)
+    assert view._managed_key_referral_id == "7KQ9M2"
+    assert view._managed_key_invite_progress_row.visible is True
+    assert view._managed_key_invite_progress_value.value == "1 / 5"
+
+    view._on_translation_connection_selected(TranslationConnection.MANAGED.value)
+    assert view._managed_key_referral_id == "7KQ9M2"
+    assert view._managed_key_invite_progress_row.visible is True
+    assert view._managed_key_invite_progress_value.value == "1 / 5"
+
+    view._on_llm_selected(TranslationModel.GEMMA4.value)
+    assert view._managed_key_referral_id == "7KQ9M2"
+    assert view._managed_key_invite_progress_row.visible is True
+    assert view._managed_key_invite_progress_value.value == "1 / 5"
+
+
+def test_set_managed_key_state_can_display_preview_referral_without_remembering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.MANAGED
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+    view.set_managed_key_state(
+        visible=True,
+        remaining_percent=100,
+        referral_id="7KQ9M2",
+        pass_status=TalkTogetherPassStatus(
+            pass_id="7KQ9M2",
+            invite_count=1,
+            invite_limit=5,
+            bonus_translations_per_friend=200,
+        ),
+        remember_referral_id=False,
+    )
+
+    assert settings.managed_identity.referral_id is None
+    assert view._managed_key_referral_id == "7KQ9M2"
+    assert view._managed_key_referral_id_value.value == "7KQ9M2"
+    assert view._managed_key_invite_progress_row.visible is True
+
+
+def test_managed_key_invite_progress_row_appears_between_talk_together_pass_id_and_helper_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
 
     managed_key_content = _wrapped_card_column(view._managed_key_card)
     details_column = managed_key_content.controls[4]
-    referral_id_row = details_column.controls[1]
+    referral_id_row = details_column.controls[0]
 
-    assert details_column.controls[0] is view._managed_key_invite_progress_row
     assert view._managed_key_referral_id_label in referral_id_row.controls
+    assert details_column.controls[1] is view._managed_key_invite_progress_row
+    assert details_column.controls[2] is view._managed_key_referral_helper_text
 
 
-def test_set_managed_key_state_hides_invite_progress_when_absent(
+def test_set_managed_key_state_shows_invite_progress_placeholder_when_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -1155,9 +1228,9 @@ def test_set_managed_key_state_hides_invite_progress_when_absent(
         pass_status=None,
     )
 
-    assert view._managed_key_invite_progress_row.visible is False
+    assert view._managed_key_invite_progress_row.visible is True
     assert view._managed_key_pass_status is None
-    assert view._managed_key_invite_progress_value.value == ""
+    assert view._managed_key_invite_progress_value.value == "- / -"
 
 
 def test_set_managed_key_state_clamps_over_limit_invite_progress(
@@ -1822,6 +1895,39 @@ def test_on_stt_selected_updates_provider_and_pipeline_flags(
     assert changed == []
 
 
+def test_on_stt_selected_routes_compatibility_warning_through_snackbar_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    snackbars: list[tuple[str, object]] = []
+    view, _ = _make_settings_view(monkeypatch)
+    page = SimpleNamespace(opened=[])
+    page.open = lambda control: page.opened.append(control)
+    attach_dummy_page(monkeypatch, view, page)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    monkeypatch.setattr(view._qwen_region_btn, "update", lambda: None)
+    monkeypatch.setattr(view._api_keys_column, "update", lambda: None)
+    monkeypatch.setattr(view._stt_text, "update", lambda: None)
+    view.show_snackbar = lambda message, color: snackbars.append((message, color))
+    warning = SimpleNamespace(key="warning.deepgram_not_supported", language_code="xx")
+    monkeypatch.setattr(
+        settings_view,
+        "get_stt_compatibility_warning",
+        lambda *_args, **_kwargs: warning,
+    )
+
+    view._on_stt_selected(STTProviderName.SONIOX.value)
+
+    assert snackbars == [
+        (
+            t(warning.key, language=language_name(warning.language_code)),
+            settings_view.ft.Colors.ORANGE_700,
+        )
+    ]
+    assert page.opened == []
+
+
 def test_on_peer_stt_selected_updates_provider_and_pipeline_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2066,6 +2172,77 @@ def test_on_llm_selected_restores_saved_connection_history(
         "settings.translation_connection.official_byok"
     )
     assert view._prompt_editor.value == "O"
+
+
+def test_on_llm_selected_updates_deepseek_v4_pro_with_default_official_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deepseek_v4_pro = getattr(TranslationModel, "DEEPSEEK_V4_PRO", None)
+    deepseek_model = getattr(DeepSeekLLMModel, "DEEPSEEK_V4_PRO", None)
+
+    assert deepseek_v4_pro is not None
+    assert deepseek_model is not None
+
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMINI_3_FLASH,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+    )
+    settings.provider.llm = LLMProviderName.GEMINI
+    settings.system_prompts = {"gemini": "G", "openrouter": "O", "deepseek": "D"}
+    settings.system_prompt = "G"
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view._on_llm_selected(deepseek_v4_pro.value)
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is not None
+    assert pending.translation.model == deepseek_v4_pro
+    assert pending.translation.connection == TranslationConnection.OFFICIAL_BYOK
+    assert pending.provider.llm == LLMProviderName.DEEPSEEK
+    assert pending.deepseek.llm_model == deepseek_model
+    assert view._llm_text.content.value == t("provider.deepseek_v4_pro")
+    assert view._translation_connection_text.content.value == t(
+        "settings.translation_connection.official_byok"
+    )
+    assert view._managed_trial_usage_bar.visible is False
+    assert view._prompt_editor.value == "G"
+
+
+def test_on_translation_connection_selected_ignores_openrouter_for_deepseek_v4_pro(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deepseek_v4_pro = getattr(TranslationModel, "DEEPSEEK_V4_PRO", None)
+    deepseek_model = getattr(DeepSeekLLMModel, "DEEPSEEK_V4_PRO", None)
+
+    assert deepseek_v4_pro is not None
+    assert deepseek_model is not None
+
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=deepseek_v4_pro,
+        connection=TranslationConnection.OFFICIAL_BYOK,
+        connection_history={deepseek_v4_pro.value: TranslationConnection.OFFICIAL_BYOK},
+    )
+    settings.provider.llm = LLMProviderName.DEEPSEEK
+    settings.deepseek.llm_model = deepseek_model
+    settings.system_prompts = {"deepseek": "D"}
+    settings.system_prompt = "D"
+
+    view = _make_llm_selection_view(monkeypatch, settings)
+
+    view._on_translation_connection_selected(TranslationConnection.OPENROUTER.value)
+
+    pending = view.build_provider_apply_settings()
+
+    assert pending is settings
+    assert pending.translation.model == deepseek_v4_pro
+    assert pending.translation.connection == TranslationConnection.OFFICIAL_BYOK
+    assert pending.provider.llm == LLMProviderName.DEEPSEEK
+    assert pending.deepseek.llm_model == deepseek_model
+    assert view.has_provider_changes is False
 
 
 def test_on_llm_selected_invalid_value_is_noop(
@@ -2429,6 +2606,32 @@ def test_on_translation_connection_selected_updates_settings_and_flags(
     )
     assert view.has_provider_changes is True
     assert changed == []
+
+
+def test_on_translation_connection_selected_auto_applies_managed_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.translation = TranslationSettings(
+        model=TranslationModel.GEMMA4,
+        connection=TranslationConnection.OPENROUTER,
+        connection_history={TranslationModel.GEMMA4.value: TranslationConnection.OPENROUTER},
+    )
+    settings.provider.llm = LLMProviderName.OPENROUTER
+    settings.openrouter.selected_source = OpenRouterCredentialSource.BYOK
+    provider_changes: list[str] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_providers_changed = lambda: provider_changes.append("apply")
+
+    view._on_translation_connection_selected(TranslationConnection.MANAGED.value)
+
+    pending = view.build_provider_apply_settings()
+    assert pending is not None
+    assert pending.translation.connection == TranslationConnection.MANAGED
+    assert pending.openrouter.selected_source == OpenRouterCredentialSource.MANAGED
+    assert provider_changes == ["apply"]
 
 
 def test_on_translation_connection_selected_stages_deepseek_managed_china_routing(
@@ -2891,6 +3094,7 @@ def test_llm_modal_lists_logical_translation_models_once(
     assert [option.value for option in options] == [
         TranslationModel.GEMMA4.value,
         TranslationModel.DEEPSEEK_V4_FLASH.value,
+        TranslationModel.DEEPSEEK_V4_PRO.value,
         TranslationModel.GEMINI_3_FLASH.value,
         TranslationModel.GEMINI_31_FLASH_LITE.value,
         TranslationModel.QWEN_35_PLUS.value,
@@ -2908,6 +3112,9 @@ def test_llm_modal_lists_logical_translation_models_once(
     assert option_by_value[TranslationModel.GEMMA4.value].label == t("provider.gemma4_26b_a4b_it")
     assert option_by_value[TranslationModel.DEEPSEEK_V4_FLASH.value].label == t(
         "provider.deepseek_v4_flash"
+    )
+    assert option_by_value[TranslationModel.DEEPSEEK_V4_PRO.value].label == t(
+        "provider.deepseek_v4_pro"
     )
     assert option_by_value[TranslationModel.LOCAL_LLM.value].label == t("provider.local_llms")
 
@@ -3865,8 +4072,17 @@ def test_overlay_single_action_cards_use_broad_value_slot_click_targets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
+    desktop_settings = AppSettings()
+    desktop_settings.overlay.target = "desktop"
+    desktop_view, _ = _make_settings_view(monkeypatch)
+    desktop_view.load_from_settings(desktop_settings, config_path=Path("settings.json"))
 
     cases = [
+        (
+            _overlay_tab_card(view, t("settings.overlay.caption_location")),
+            view._overlay_target_button,
+            t("settings.overlay.target.steamvr"),
+        ),
         (
             _overlay_tab_card(view, t("settings.overlay.show_translation")),
             view._overlay_translation_button,
@@ -3883,9 +4099,14 @@ def test_overlay_single_action_cards_use_broad_value_slot_click_targets(
             t("settings.overlay.calibration.anchor.head_locked"),
         ),
         (
-            _overlay_tab_card(view, t("settings.overlay.position_reset")),
-            view._overlay_reset_button,
-            t("settings.overlay.calibration.reset"),
+            _overlay_tab_card(desktop_view, t("settings.overlay.desktop.size.title")),
+            desktop_view._desktop_overlay_size_button,
+            t("settings.overlay.desktop.size.option.medium"),
+        ),
+        (
+            _overlay_tab_card(desktop_view, t("settings.overlay.desktop.lock.title")),
+            desktop_view._desktop_overlay_lock_button,
+            t("settings.overlay.desktop.lock.value.move"),
         ),
     ]
 
@@ -3950,6 +4171,699 @@ def test_overlay_text_scale_modal_selection_updates_settings_immediately(
         "settings.overlay.calibration.text_scale.large"
     )
     assert changed == [settings]
+
+
+def test_desktop_gui_caption_location_selector_updates_settings_with_localized_choices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "steamvr"
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+    attach_dummy_page(monkeypatch, view)
+
+    captured: dict[str, object] = {}
+
+    class DummyModal:
+        def __init__(self, _page, title, options, on_select, *, show_description=False):
+            captured["title"] = title
+            captured["options"] = options
+            captured["on_select"] = on_select
+            captured["show_description"] = show_description
+
+        def open(self, current: str) -> None:
+            captured["current"] = current
+
+    monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
+
+    view._on_overlay_target_click(None)
+
+    assert captured["title"] == t("settings.overlay.caption_location")
+    assert captured["show_description"] is True
+    assert [option.value for option in captured["options"]] == ["steamvr", "desktop"]
+    assert [option.label for option in captured["options"]] == [
+        t("settings.overlay.target.steamvr"),
+        t("settings.overlay.target.desktop"),
+    ]
+    assert captured["current"] == "steamvr"
+
+    captured_on_select = captured["on_select"]
+    assert callable(captured_on_select)
+    captured_on_select("desktop")
+
+    assert settings.overlay.target == "desktop"
+    assert view._overlay_target_button.content.value == t("settings.overlay.target.desktop")
+    assert changed == [settings]
+
+
+def test_desktop_gui_product_standard_cards_show_current_values_and_desktop_only_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale("ko")
+        settings = AppSettings()
+        settings.overlay.target = "desktop"
+        settings.overlay.desktop_flet.size_preset = "large"
+        settings.overlay.desktop_flet.locked = False
+        view, _ = _make_settings_view(monkeypatch)
+        view.load_from_settings(settings, config_path=Path("settings.json"))
+
+        overlay_titles = _overlay_tab_card_titles(view)
+        reset_card = _overlay_tab_card(view, t("settings.overlay.position_reset.desktop.title"))
+        reset_actions = _wrapped_card_column(reset_card).controls[1].content
+
+        assert t("settings.overlay.desktop.size.title") == "오버레이 크기"
+        assert t("settings.overlay.desktop.lock.title") == "오버레이 잠금"
+        assert t("settings.overlay.desktop.background_alpha.title") == "배경 투명도"
+        assert t("settings.overlay.position_reset.vr.title") == "위치 초기화"
+        assert t("settings.overlay.position_reset.desktop.title") == "위치 초기화"
+        assert t("settings.overlay.desktop.size.title") in overlay_titles
+        assert t("settings.overlay.desktop.background_alpha.title") in overlay_titles
+        assert t("settings.overlay.desktop.lock.title") in overlay_titles
+        assert t("settings.overlay.position_reset.desktop.title") in overlay_titles
+        assert t("settings.overlay.calibration.anchor") not in overlay_titles
+        assert t("settings.overlay.calibration.distance") not in overlay_titles
+        assert t("settings.overlay.calibration.offset_x") not in overlay_titles
+        assert t("settings.overlay.calibration.offset_y") not in overlay_titles
+        assert t("settings.overlay.calibration.text_scale") not in overlay_titles
+        assert t("settings.overlay.status.off") not in overlay_titles
+        assert all(row.visible is False for row in view._overlay_vr_rows)
+        assert all(row.visible is True for row in view._overlay_desktop_rows)
+        assert view._desktop_overlay_size_button.content.value == t(
+            "settings.overlay.desktop.size.option.large"
+        )
+        assert view._desktop_overlay_background_alpha_value_text.value == "40%"
+        assert view._desktop_overlay_lock_button.content.value == t(
+            "settings.overlay.desktop.lock.value.move"
+        )
+        assert view._desktop_overlay_status_card.visible is False
+        assert view._desktop_overlay_recovery_row.visible is False
+
+        assert reset_actions is view._overlay_desktop_reset_button
+        assert view._overlay_desktop_reset_button.on_click is not None
+        assert view._overlay_desktop_reset_button.content.size == 28
+        assert view._overlay_desktop_reset_button.content.value == t(
+            "settings.overlay.position_reset.action.desktop"
+        )
+
+        visible_overlay_labels: list[str] = []
+        for row in _subtab_controls(view, "overlay"):
+            if getattr(row, "visible", True) is not False:
+                visible_overlay_labels.extend(_control_labels(row))
+        normal_technical_fragments = ("bridge", "renderer", "runtime", "logs")
+        assert not [
+            (label, fragment)
+            for label in visible_overlay_labels
+            for fragment in normal_technical_fragments
+            if fragment in label.lower()
+        ]
+    finally:
+        i18n_module.set_locale(previous_locale)
+
+
+def test_overlay_tab_shows_only_vr_position_controls_for_vr_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "steamvr"
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    assert _overlay_tab_card_titles(view) == [
+        t("settings.overlay.caption_location"),
+        t("settings.overlay.show_translation"),
+        t("settings.overlay.show_peer_original"),
+        t("settings.overlay.calibration.anchor"),
+        t("settings.overlay.calibration.distance"),
+        t("settings.overlay.calibration.offset_x"),
+        t("settings.overlay.calibration.offset_y"),
+        t("settings.overlay.calibration.text_scale"),
+        t("settings.overlay.position_reset.vr.title"),
+    ]
+
+
+def test_overlay_tab_switches_visible_cards_when_caption_location_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "steamvr"
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_overlay_target_selected("desktop")
+
+    overlay_titles = _overlay_tab_card_titles(view)
+    assert t("settings.overlay.desktop.size.title") in overlay_titles
+    assert t("settings.overlay.desktop.background_alpha.title") in overlay_titles
+    assert t("settings.overlay.desktop.lock.title") in overlay_titles
+    assert t("settings.overlay.position_reset.desktop.title") in overlay_titles
+    assert t("settings.overlay.calibration.anchor") not in overlay_titles
+    assert all(row.visible is False for row in view._overlay_vr_rows)
+    assert all(row.visible is True for row in view._overlay_desktop_rows)
+
+
+def test_desktop_gui_background_transparency_card_adjusts_in_ten_percent_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "desktop"
+    settings.overlay.desktop_flet.visual.background_alpha = 0.5
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    assert view._desktop_overlay_background_alpha_value_text.value == "50%"
+
+    view._on_desktop_overlay_background_alpha_step(0.1)
+
+    assert view._settings is not None
+    assert view._settings.overlay.desktop_flet.visual.background_alpha == pytest.approx(0.4)
+    assert view._desktop_overlay_background_alpha_value_text.value == "60%"
+
+    view._on_desktop_overlay_background_alpha_step(-0.1)
+    view._on_desktop_overlay_background_alpha_step(-0.1)
+
+    assert view._settings.overlay.desktop_flet.visual.background_alpha == pytest.approx(0.6)
+    assert view._desktop_overlay_background_alpha_value_text.value == "40%"
+    assert [
+        incoming.overlay.desktop_flet.visual.background_alpha for incoming in changed
+    ] == pytest.approx([0.4, 0.5, 0.6])
+
+
+def test_desktop_gui_background_alpha_emits_copy_without_mutating_loaded_settings_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "desktop"
+    settings.overlay.desktop_flet.visual.background_alpha = 0.5
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._on_desktop_overlay_background_alpha_step(0.1)
+
+    assert settings.overlay.desktop_flet.visual.background_alpha == pytest.approx(0.5)
+    assert changed
+    assert changed[-1] is not settings
+    assert changed[-1].overlay.desktop_flet.visual.background_alpha == pytest.approx(0.4)
+    assert view._settings is changed[-1]
+
+
+def test_desktop_gui_background_transparency_card_clamps_to_zero_and_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "desktop"
+    settings.overlay.desktop_flet.visual.background_alpha = 0.05
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+
+    view._on_desktop_overlay_background_alpha_step(0.1)
+    view._on_desktop_overlay_background_alpha_step(0.1)
+
+    assert view._settings is not None
+    assert view._settings.overlay.desktop_flet.visual.background_alpha == pytest.approx(0.0)
+    assert view._desktop_overlay_background_alpha_value_text.value == "100%"
+
+    view._settings.overlay.desktop_flet.visual.background_alpha = 0.95
+    view._sync_desktop_overlay_main_controls()
+    view._on_desktop_overlay_background_alpha_step(-0.1)
+    view._on_desktop_overlay_background_alpha_step(-0.1)
+
+    assert view._settings.overlay.desktop_flet.visual.background_alpha == pytest.approx(1.0)
+    assert view._desktop_overlay_background_alpha_value_text.value == "0%"
+
+
+def test_desktop_gui_size_card_opens_five_label_only_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.desktop_flet.size_preset = "medium"
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    attach_dummy_page(monkeypatch, view)
+
+    captured: dict[str, object] = {}
+
+    class DummyModal:
+        def __init__(self, _page, title, options, _on_select, *, show_description=False):
+            captured["title"] = title
+            captured["options"] = options
+            captured["show_description"] = show_description
+
+        def open(self, current: str) -> None:
+            captured["current"] = current
+
+    monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
+
+    view._on_desktop_overlay_size_click(None)
+
+    assert captured["title"] == t("settings.overlay.desktop.size.title")
+    assert captured["show_description"] is False
+    assert [option.value for option in captured["options"]] == [
+        "xsmall",
+        "small",
+        "medium",
+        "large",
+        "xlarge",
+    ]
+    assert [option.label for option in captured["options"]] == [
+        t("settings.overlay.desktop.size.option.xsmall"),
+        t("settings.overlay.desktop.size.option.small"),
+        t("settings.overlay.desktop.size.option.medium"),
+        t("settings.overlay.desktop.size.option.large"),
+        t("settings.overlay.desktop.size.option.xlarge"),
+    ]
+    assert [option.description for option in captured["options"]] == ["", "", "", "", ""]
+    assert captured["current"] == "medium"
+
+
+def test_desktop_gui_size_selection_persists_and_emits_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "desktop"
+    settings.overlay.desktop_flet.size_preset = "medium"
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._on_desktop_overlay_size_selected("xlarge")
+
+    assert settings.overlay.desktop_flet.size_preset == "xlarge"
+    assert view._desktop_overlay_size_button.content.value == t(
+        "settings.overlay.desktop.size.option.xlarge"
+    )
+    assert changed == [settings]
+
+
+def test_desktop_gui_size_selection_uses_runtime_callback_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.desktop_flet.size_preset = "medium"
+    changed: list[AppSettings] = []
+    runtime_size_requests: list[str] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+    view.on_desktop_overlay_size_change = runtime_size_requests.append
+
+    view._on_desktop_overlay_size_selected("xlarge")
+
+    assert runtime_size_requests == ["xlarge"]
+    assert changed == []
+    assert settings.overlay.desktop_flet.size_preset == "medium"
+    assert view._desktop_overlay_size_button.content.value == t(
+        "settings.overlay.desktop.size.option.xlarge"
+    )
+
+
+def test_desktop_gui_runtime_size_selection_is_preserved_on_next_settings_emit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.desktop_flet.size_preset = "medium"
+    changed: list[AppSettings] = []
+    runtime_size_requests: list[str] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+    view.on_desktop_overlay_size_change = runtime_size_requests.append
+
+    view._on_desktop_overlay_size_selected("xlarge")
+    view._on_overlay_translation_selected("off")
+
+    assert runtime_size_requests == ["xlarge"]
+    assert settings.overlay.desktop_flet.size_preset == "medium"
+    assert changed
+    assert changed[-1] is not settings
+    assert changed[-1].overlay.desktop_flet.size_preset == "xlarge"
+    assert changed[-1].overlay.show_translation is False
+
+
+def test_desktop_gui_size_runtime_callback_can_return_to_previous_preset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.desktop_flet.size_preset = "medium"
+    runtime_size_requests: list[str] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_desktop_overlay_size_change = runtime_size_requests.append
+
+    view._on_desktop_overlay_size_selected("xlarge")
+    view._on_desktop_overlay_size_selected("medium")
+
+    assert runtime_size_requests == ["xlarge", "medium"]
+    assert view._desktop_overlay_size_button.content.value == t(
+        "settings.overlay.desktop.size.option.medium"
+    )
+
+
+def test_desktop_gui_lock_card_displays_move_for_legacy_saved_lock_when_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "desktop"
+    settings.overlay.desktop_flet.locked = True
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.move"
+    )
+    assert view._desktop_overlay_lock_button.content.value != t(
+        "settings.overlay.desktop.action.lock_captions"
+    )
+    assert settings.overlay.desktop_flet.locked is True
+    assert changed == []
+
+
+def test_desktop_gui_runtime_lock_callback_is_authoritative_without_settings_emit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "desktop"
+    settings.overlay.desktop_flet.locked = False
+    changed: list[AppSettings] = []
+    runtime_lock_requests: list[bool] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+    view.on_desktop_overlay_lock_change = runtime_lock_requests.append
+    view.set_overlay_runtime_state(
+        "connected",
+        overlay_target="desktop",
+        desktop_captions_locked=False,
+    )
+
+    view._on_desktop_overlay_lock_selected("locked")
+
+    assert runtime_lock_requests == [True]
+    assert changed == []
+    assert settings.overlay.desktop_flet.locked is False
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.locked"
+    )
+
+    view._on_overlay_peer_original_selected("off")
+
+    assert changed
+    assert changed[-1].overlay.desktop_flet.locked is False
+    assert changed[-1].overlay.show_peer_original is False
+    assert "locked" not in to_dict(changed[-1])["overlay"]["desktop_flet"]
+
+
+def test_desktop_gui_non_desktop_runtime_lock_sync_displays_move_for_legacy_saved_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "steamvr"
+    settings.overlay.desktop_flet.locked = True
+    changed: list[AppSettings] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+    view.on_desktop_overlay_lock_change = lambda _locked: None
+
+    view.set_overlay_runtime_state(
+        "connected",
+        overlay_target="steamvr",
+        desktop_captions_locked=False,
+    )
+    view._on_overlay_translation_selected("off")
+
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.move"
+    )
+    assert changed
+    assert changed[-1].overlay.show_translation is False
+    assert "locked" not in to_dict(changed[-1])["overlay"]["desktop_flet"]
+
+
+def test_desktop_gui_runtime_lock_notification_controls_next_toggle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "desktop"
+    settings.overlay.desktop_flet.locked = False
+    runtime_lock_requests: list[bool] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_desktop_overlay_lock_change = runtime_lock_requests.append
+
+    view.set_overlay_runtime_state(
+        "running",
+        overlay_target="desktop",
+        desktop_captions_locked=True,
+    )
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.locked"
+    )
+
+    view._on_desktop_overlay_lock_click(None)
+
+    assert runtime_lock_requests == [False]
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.move"
+    )
+
+
+def test_desktop_gui_clears_pending_runtime_lock_when_runtime_becomes_inactive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "desktop"
+    runtime_lock_requests: list[bool] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_desktop_overlay_lock_change = runtime_lock_requests.append
+    view.set_overlay_runtime_state(
+        "connected",
+        overlay_target="desktop",
+        desktop_captions_locked=False,
+    )
+
+    view._on_desktop_overlay_lock_click(None)
+
+    assert runtime_lock_requests == [True]
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.locked"
+    )
+
+    view.set_overlay_runtime_state(
+        "off",
+        overlay_target="desktop",
+        desktop_captions_locked=True,
+    )
+
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.move"
+    )
+
+    view._on_desktop_overlay_lock_click(None)
+
+    assert runtime_lock_requests == [True]
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.move"
+    )
+
+
+@pytest.mark.parametrize("state", ["starting", "failed", "stopping", "off"])
+def test_desktop_gui_ignores_stale_runtime_lock_when_desktop_runtime_is_not_active(
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.target = "desktop"
+    runtime_lock_requests: list[bool] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_desktop_overlay_lock_change = runtime_lock_requests.append
+
+    view.set_overlay_runtime_state(
+        state,
+        overlay_target="desktop",
+        desktop_captions_locked=True,
+    )
+
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.move"
+    )
+
+    view._on_desktop_overlay_lock_click(None)
+
+    assert runtime_lock_requests == []
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.move"
+    )
+
+
+def test_overlay_position_reset_card_separates_vr_and_desktop_reset_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.calibration.distance = 1.2
+    settings.overlay.calibration.offset_y = 0.5
+    settings.overlay.desktop_flet.position.x = 80
+    settings.overlay.desktop_flet.position.y = 90
+    settings.overlay.desktop_flet.size_preset = "large"
+    settings.overlay.desktop_flet.locked = True
+    settings.overlay.desktop_flet.visual.background_alpha = 0.44
+    changed: list[AppSettings] = []
+    desktop_resets: list[bool] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.set_overlay_calibration(settings.overlay.calibration)
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+
+    view._on_overlay_position_reset(None)
+
+    assert settings.overlay.calibration.distance == OverlayCalibration().distance
+    assert settings.overlay.desktop_flet.position.x == 80
+    assert settings.overlay.desktop_flet.position.y == 90
+    assert settings.overlay.desktop_flet.size_preset == "large"
+    assert settings.overlay.desktop_flet.locked is True
+    assert desktop_resets == []
+
+    view._on_desktop_overlay_position_reset(None)
+
+    assert settings.overlay.calibration.offset_y == OverlayCalibration().offset_y
+    assert settings.overlay.desktop_flet.position.x is None
+    assert settings.overlay.desktop_flet.position.y is None
+    assert settings.overlay.desktop_flet.size_preset == "large"
+    assert settings.overlay.desktop_flet.locked is False
+    assert settings.overlay.desktop_flet.visual.background_alpha == 0.44
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.move"
+    )
+    assert desktop_resets == []
+    assert changed == [settings, settings]
+
+
+def test_desktop_gui_runtime_position_reset_defers_to_callback_without_stale_emit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.overlay.desktop_flet.position.x = 80
+    settings.overlay.desktop_flet.position.y = 90
+    settings.overlay.desktop_flet.size_preset = "large"
+    settings.overlay.desktop_flet.locked = True
+    settings.overlay.desktop_flet.visual.background_alpha = 0.44
+    changed: list[AppSettings] = []
+    desktop_resets: list[bool] = []
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+    view.on_desktop_overlay_position_reset = lambda: desktop_resets.append(True)
+
+    view._on_desktop_overlay_position_reset(None)
+
+    assert desktop_resets == [True]
+    assert changed == []
+    assert settings.overlay.desktop_flet.position.x == 80
+    assert settings.overlay.desktop_flet.position.y == 90
+    assert settings.overlay.desktop_flet.locked is True
+    assert view._desktop_overlay_lock_button.content.value == t(
+        "settings.overlay.desktop.lock.value.move"
+    )
+
+    view._on_overlay_translation_selected("off")
+
+    assert changed
+    assert changed[-1] is not settings
+    assert changed[-1].overlay.desktop_flet.position.x is None
+    assert changed[-1].overlay.desktop_flet.position.y is None
+    assert changed[-1].overlay.desktop_flet.size_preset == "large"
+    assert changed[-1].overlay.desktop_flet.locked is False
+    assert changed[-1].overlay.desktop_flet.visual.background_alpha == 0.44
+
+
+def test_overlay_failure_i18n_desktop_gui_recovery_actions_are_user_facing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from puripuly_heart.ui.controller import GuiController
+
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale("en")
+        settings = AppSettings()
+        settings.overlay.target = "desktop"
+        recovery_actions: list[str] = []
+        details_opened: list[bool] = []
+        view, _ = _make_settings_view(monkeypatch)
+        view.load_from_settings(settings, config_path=Path("settings.json"))
+        view.on_desktop_overlay_recovery_action = recovery_actions.append
+        view.on_view_logs = lambda: details_opened.append(True)
+
+        controller = GuiController(
+            page=SimpleNamespace(),
+            app=SimpleNamespace(),
+            config_path=Path("settings.json"),
+        )
+        controller.on_overlay_start_failed("window_configuration_failed")
+        assert controller.failure_reason == "window_configuration_failed"
+
+        view.set_overlay_runtime_state(
+            "failed",
+            failure_reason=controller.failure_reason,
+            overlay_target="desktop",
+            desktop_captions_locked=False,
+        )
+
+        failure_labels = _control_labels(view._desktop_overlay_status_card)
+        assert view._desktop_overlay_status_card.visible is True
+        assert t("settings.overlay.desktop.status.failed") in failure_labels
+        assert t("settings.overlay.desktop.recovery.message.reopen") in failure_labels
+        assert t("settings.overlay.desktop.recovery.action.reopen") in failure_labels
+        assert t("settings.overlay.desktop.recovery.action.view_details") in failure_labels
+
+        raw_key_labels = [label for label in failure_labels if "settings." in label]
+        assert raw_key_labels == []
+        technical_fragments = ("executable", "bridge", "renderer", "runtime", "logs")
+        assert not [
+            (label, fragment)
+            for label in failure_labels
+            for fragment in technical_fragments
+            if fragment in label.lower()
+        ]
+
+        view._on_desktop_overlay_primary_action(None)
+        view._on_desktop_overlay_view_logs(None)
+
+        assert recovery_actions == ["reopen"]
+        assert details_opened == [True]
+
+        view.set_overlay_runtime_state(
+            "failed",
+            failure_reason="bridge_auth_failed",
+            overlay_target="desktop",
+            desktop_captions_locked=False,
+        )
+        retry_labels = _control_labels(view._desktop_overlay_status_card)
+        view._on_desktop_overlay_primary_action(None)
+
+        assert t("settings.overlay.desktop.recovery.message.retry") in retry_labels
+        assert t("settings.overlay.desktop.recovery.action.retry") in retry_labels
+        assert not [label for label in retry_labels if "settings." in label]
+        assert not [
+            (label, fragment)
+            for label in retry_labels
+            for fragment in technical_fragments
+            if fragment in label.lower()
+        ]
+        assert recovery_actions == ["reopen", "retry"]
+    finally:
+        i18n_module.set_locale(previous_locale)
 
 
 def test_audio_change_updates_desktop_loopback_controls(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4330,6 +5244,7 @@ def test_overlay_tab_controls_are_localized(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(AppSettings(), config_path=Path("settings.json"))
 
+    assert view._overlay_target_title.value == t("settings.overlay.caption_location")
     assert view._overlay_translation_title.value == t("settings.overlay.show_translation")
     assert view._overlay_peer_original_title.value == t("settings.overlay.show_peer_original")
     assert view._overlay_anchor_title.value == t("settings.overlay.calibration.anchor")
@@ -4337,7 +5252,16 @@ def test_overlay_tab_controls_are_localized(
     assert view._overlay_offset_x_title.value == t("settings.overlay.calibration.offset_x")
     assert view._overlay_offset_y_title.value == t("settings.overlay.calibration.offset_y")
     assert view._overlay_text_scale_title.value == t("settings.overlay.calibration.text_scale")
-    assert view._overlay_reset_title.value == t("settings.overlay.position_reset")
+    assert view._overlay_vr_reset_title.value == t("settings.overlay.position_reset.vr.title")
+    assert view._overlay_desktop_reset_title.value == t(
+        "settings.overlay.position_reset.desktop.title"
+    )
+    assert view._desktop_overlay_size_title.value == t("settings.overlay.desktop.size.title")
+    assert view._desktop_overlay_background_alpha_title.value == t(
+        "settings.overlay.desktop.background_alpha.title"
+    )
+    assert view._desktop_overlay_lock_title.value == t("settings.overlay.desktop.lock.title")
+    assert view._desktop_overlay_status_card.visible is False
 
 
 @pytest.mark.parametrize("locale", ["en", "ko", "zh-CN"])
@@ -4355,12 +5279,18 @@ def test_overlay_immediate_card_labels_render_from_i18n(
         i18n_module.set_locale(locale)
         view._overlay_translation_title.value = "stale"
         view._overlay_peer_original_title.value = "stale"
+        view._overlay_target_title.value = "stale"
         view._overlay_anchor_title.value = "stale"
         view._overlay_distance_title.value = "stale"
         view._overlay_offset_x_title.value = "stale"
         view._overlay_offset_y_title.value = "stale"
         view._overlay_text_scale_title.value = "stale"
-        view._overlay_reset_title.value = "stale"
+        view._overlay_vr_reset_title.value = "stale"
+        view._overlay_desktop_reset_title.value = "stale"
+        view._desktop_overlay_size_title.value = "stale"
+        view._desktop_overlay_background_alpha_title.value = "stale"
+        view._desktop_overlay_lock_title.value = "stale"
+        view._desktop_overlay_status_title.value = "stale"
 
         view.apply_locale()
 
@@ -4368,14 +5298,26 @@ def test_overlay_immediate_card_labels_render_from_i18n(
         for card in _overlay_tab_cards(view):
             overlay_labels.extend(_control_labels(card))
 
+        assert view._overlay_target_title.value == t("settings.overlay.caption_location")
         assert view._overlay_translation_title.value == t("settings.overlay.show_translation")
         assert view._overlay_peer_original_title.value == t("settings.overlay.show_peer_original")
+        assert view._overlay_target_title.value == t("settings.overlay.caption_location")
         assert view._overlay_anchor_title.value == t("settings.overlay.calibration.anchor")
         assert view._overlay_distance_title.value == t("settings.overlay.calibration.distance")
         assert view._overlay_offset_x_title.value == t("settings.overlay.calibration.offset_x")
         assert view._overlay_offset_y_title.value == t("settings.overlay.calibration.offset_y")
         assert view._overlay_text_scale_title.value == t("settings.overlay.calibration.text_scale")
-        assert view._overlay_reset_title.value == t("settings.overlay.position_reset")
+        assert view._overlay_vr_reset_title.value == t("settings.overlay.position_reset.vr.title")
+        assert view._overlay_desktop_reset_title.value == t(
+            "settings.overlay.position_reset.desktop.title"
+        )
+        assert view._desktop_overlay_size_title.value == t("settings.overlay.desktop.size.title")
+        assert view._desktop_overlay_background_alpha_title.value == t(
+            "settings.overlay.desktop.background_alpha.title"
+        )
+        assert view._desktop_overlay_lock_title.value == t("settings.overlay.desktop.lock.title")
+        assert view._desktop_overlay_status_card.visible is False
+        assert t("settings.overlay.caption_location") in overlay_labels
         assert t("settings.overlay.show_translation") in overlay_labels
         assert t("settings.overlay.show_peer_original") in overlay_labels
         assert t("settings.overlay.calibration.anchor") in overlay_labels
@@ -4383,12 +5325,17 @@ def test_overlay_immediate_card_labels_render_from_i18n(
         assert t("settings.overlay.calibration.offset_x") in overlay_labels
         assert t("settings.overlay.calibration.offset_y") in overlay_labels
         assert t("settings.overlay.calibration.text_scale") in overlay_labels
-        assert t("settings.overlay.position_reset") in overlay_labels
+        assert t("settings.overlay.position_reset.vr.title") in overlay_labels
+        assert t("settings.overlay.desktop.size.title") not in overlay_labels
+        assert t("settings.overlay.desktop.background_alpha.title") not in overlay_labels
+        assert t("settings.overlay.desktop.lock.title") not in overlay_labels
+        assert all(row.visible is True for row in view._overlay_vr_rows)
+        assert all(row.visible is False for row in view._overlay_desktop_rows)
     finally:
         i18n_module.set_locale(old_locale)
 
 
-def test_overlay_tab_uses_three_rows_of_unit_cards(
+def test_overlay_tab_uses_target_specific_unit_card_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
@@ -4397,6 +5344,7 @@ def test_overlay_tab_uses_three_rows_of_unit_cards(
     overlay_controls = _subtab_controls(view, "overlay")
 
     assert overlay_titles == [
+        t("settings.overlay.caption_location"),
         t("settings.overlay.show_translation"),
         t("settings.overlay.show_peer_original"),
         t("settings.overlay.calibration.anchor"),
@@ -4404,23 +5352,43 @@ def test_overlay_tab_uses_three_rows_of_unit_cards(
         t("settings.overlay.calibration.offset_x"),
         t("settings.overlay.calibration.offset_y"),
         t("settings.overlay.calibration.text_scale"),
-        t("settings.overlay.position_reset"),
+        t("settings.overlay.position_reset.vr.title"),
     ]
-    assert len(overlay_controls) == 3
+    assert len(overlay_controls) == 6
     assert _row_card_titles(overlay_controls[0]) == [
+        t("settings.overlay.caption_location"),
         t("settings.overlay.show_translation"),
         t("settings.overlay.show_peer_original"),
-        t("settings.overlay.calibration.anchor"),
     ]
     assert _row_card_titles(overlay_controls[1]) == [
+        t("settings.overlay.calibration.anchor"),
         t("settings.overlay.calibration.distance"),
         t("settings.overlay.calibration.offset_x"),
-        t("settings.overlay.calibration.offset_y"),
     ]
     assert _row_card_titles(overlay_controls[2]) == [
+        t("settings.overlay.calibration.offset_y"),
         t("settings.overlay.calibration.text_scale"),
-        t("settings.overlay.position_reset"),
+        t("settings.overlay.position_reset.vr.title"),
     ]
+    assert _row_card_titles(overlay_controls[3]) == [
+        t("settings.overlay.desktop.size.title"),
+        t("settings.overlay.desktop.lock.title"),
+        t("settings.overlay.desktop.background_alpha.title"),
+    ]
+    assert _row_card_titles(overlay_controls[4]) == [
+        t("settings.overlay.position_reset.desktop.title"),
+    ]
+    assert len(_layout_cards(overlay_controls[4])) == 3
+    assert [getattr(card, "visible", True) for card in _layout_cards(overlay_controls[4])] == [
+        True,
+        True,
+        True,
+    ]
+    assert overlay_controls[1].visible is True
+    assert overlay_controls[2].visible is True
+    assert overlay_controls[3].visible is False
+    assert overlay_controls[4].visible is False
+    assert overlay_controls[5].visible is False
 
 
 def test_legacy_vr_overlay_shell_removed_from_settings_subtabs(
@@ -4442,6 +5410,7 @@ def test_legacy_vr_overlay_shell_removed_from_settings_subtabs(
         t("settings.section.persona"),
     ]
     assert overlay_titles == [
+        t("settings.overlay.caption_location"),
         t("settings.overlay.show_translation"),
         t("settings.overlay.show_peer_original"),
         t("settings.overlay.calibration.anchor"),
@@ -4449,7 +5418,7 @@ def test_legacy_vr_overlay_shell_removed_from_settings_subtabs(
         t("settings.overlay.calibration.offset_x"),
         t("settings.overlay.calibration.offset_y"),
         t("settings.overlay.calibration.text_scale"),
-        t("settings.overlay.position_reset"),
+        t("settings.overlay.position_reset.vr.title"),
     ]
     assert t("settings.section.overlay") not in prompt_labels
     assert t("settings.section.overlay") not in overlay_labels
@@ -4499,6 +5468,7 @@ def test_legacy_overlay_cleanup_copy_renders_from_i18n(
             view._integrated_context_label.value = "stale"
             view._integrated_context_button.content.value = "stale"
             view._integrated_context_hint.value = "stale"
+            view._overlay_target_title.value = "stale"
             view._overlay_translation_title.value = "stale"
             view._overlay_peer_original_title.value = "stale"
             view._overlay_anchor_title.value = "stale"
@@ -4506,7 +5476,12 @@ def test_legacy_overlay_cleanup_copy_renders_from_i18n(
             view._overlay_offset_x_title.value = "stale"
             view._overlay_offset_y_title.value = "stale"
             view._overlay_text_scale_title.value = "stale"
-            view._overlay_reset_title.value = "stale"
+            view._overlay_vr_reset_title.value = "stale"
+            view._overlay_desktop_reset_title.value = "stale"
+            view._desktop_overlay_size_title.value = "stale"
+            view._desktop_overlay_background_alpha_title.value = "stale"
+            view._desktop_overlay_lock_title.value = "stale"
+            view._desktop_overlay_status_title.value = "stale"
 
             view.apply_locale()
 
@@ -4520,6 +5495,7 @@ def test_legacy_overlay_cleanup_copy_renders_from_i18n(
             assert view._integrated_context_label.value == t("settings.integrated_context")
             assert view._integrated_context_button.content.value == t("settings.context.integrated")
             assert view._integrated_context_hint.value == ""
+            assert view._overlay_target_title.value == t("settings.overlay.caption_location")
             assert view._overlay_translation_title.value == t("settings.overlay.show_translation")
             assert view._overlay_peer_original_title.value == t(
                 "settings.overlay.show_peer_original"
@@ -4531,10 +5507,28 @@ def test_legacy_overlay_cleanup_copy_renders_from_i18n(
             assert view._overlay_text_scale_title.value == t(
                 "settings.overlay.calibration.text_scale"
             )
-            assert view._overlay_reset_title.value == t("settings.overlay.position_reset")
+            assert view._overlay_vr_reset_title.value == t(
+                "settings.overlay.position_reset.vr.title"
+            )
+            assert view._overlay_desktop_reset_title.value == t(
+                "settings.overlay.position_reset.desktop.title"
+            )
+            assert view._desktop_overlay_size_title.value == t(
+                "settings.overlay.desktop.size.title"
+            )
+            assert view._desktop_overlay_background_alpha_title.value == t(
+                "settings.overlay.desktop.background_alpha.title"
+            )
+            assert view._desktop_overlay_lock_title.value == t(
+                "settings.overlay.desktop.lock.title"
+            )
+            assert view._desktop_overlay_status_card.visible is False
             assert t("settings.integrated_context") in general_labels
             assert t("settings.context.integrated") in general_labels
             assert t("settings.context.integrated_modal_helper") not in general_labels
+            assert t("settings.overlay.caption_location") in _control_labels(
+                _overlay_tab_card(view, t("settings.overlay.caption_location"))
+            )
             assert t("settings.overlay.show_translation") in translation_labels
             assert t("settings.overlay.calibration.anchor") in anchor_labels
             assert t("settings.section.overlay") not in general_labels
@@ -4602,7 +5596,14 @@ def test_apply_locale_updates_all_settings_clickable_value_fonts_to_zh_cn(
             view._low_latency_text,
             view._translation_connection_text,
             view._openrouter_fallback_text,
+            view._overlay_target_button,
             view._overlay_text_scale_text,
+            view._desktop_overlay_size_button,
+            view._desktop_overlay_lock_button,
+            view._overlay_vr_reset_button,
+            view._overlay_desktop_reset_button,
+            view._desktop_overlay_primary_action,
+            view._desktop_overlay_view_logs_action,
         ):
             assert control.content.font_family == zh_font
     finally:
@@ -4880,7 +5881,17 @@ def test_overlay_tab_labels_and_headings_render_from_i18n(
         assert view._overlay_offset_x_title.value == t("settings.overlay.calibration.offset_x")
         assert view._overlay_offset_y_title.value == t("settings.overlay.calibration.offset_y")
         assert view._overlay_text_scale_title.value == t("settings.overlay.calibration.text_scale")
-        assert view._overlay_reset_title.value == t("settings.overlay.position_reset")
+        assert view._overlay_vr_reset_title.value == t("settings.overlay.position_reset.vr.title")
+        assert view._overlay_desktop_reset_title.value == t(
+            "settings.overlay.position_reset.desktop.title"
+        )
+        assert view._desktop_overlay_size_title.value == t("settings.overlay.desktop.size.title")
+        assert view._desktop_overlay_background_alpha_title.value == t(
+            "settings.overlay.desktop.background_alpha.title"
+        )
+        assert view._desktop_overlay_lock_title.value == t("settings.overlay.desktop.lock.title")
+        assert view._desktop_overlay_status_card.visible is False
+        assert t("settings.overlay.caption_location") in overlay_labels
         assert t("settings.overlay.show_translation") in overlay_labels
         assert t("settings.overlay.show_peer_original") in overlay_labels
         assert t("settings.overlay.calibration.anchor") in overlay_labels
@@ -4888,7 +5899,12 @@ def test_overlay_tab_labels_and_headings_render_from_i18n(
         assert t("settings.overlay.calibration.offset_x") in overlay_labels
         assert t("settings.overlay.calibration.offset_y") in overlay_labels
         assert t("settings.overlay.calibration.text_scale") in overlay_labels
-        assert t("settings.overlay.position_reset") in overlay_labels
+        assert t("settings.overlay.position_reset.vr.title") in overlay_labels
+        assert t("settings.overlay.desktop.size.title") not in overlay_labels
+        assert t("settings.overlay.desktop.background_alpha.title") not in overlay_labels
+        assert t("settings.overlay.desktop.lock.title") not in overlay_labels
+        assert all(row.visible is True for row in view._overlay_vr_rows)
+        assert all(row.visible is False for row in view._overlay_desktop_rows)
     finally:
         i18n_module.set_locale(old_locale)
 

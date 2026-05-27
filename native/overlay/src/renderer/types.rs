@@ -3,6 +3,8 @@ use thiserror::Error;
 #[cfg(windows)]
 use windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT;
 
+use super::font_resolver::{FontLanguageBucket, FontSource, FontWeight, TextStyleKey};
+
 pub(crate) const DEFAULT_SURFACE_WIDTH_PX: u32 = 4096;
 pub(crate) const DEFAULT_SURFACE_HEIGHT_PX: u32 = 1056;
 pub(crate) const DEFAULT_HORIZONTAL_PADDING_PX: u32 = 48;
@@ -45,6 +47,8 @@ pub struct CaptionBlock {
     pub primary_text: String,
     pub secondary_text: String,
     pub secondary_enabled: bool,
+    pub primary_language: Option<String>,
+    pub secondary_language: Option<String>,
     pub block_variant: CaptionBlockVariant,
     pub channel: Option<CaptionChannel>,
     pub opacity: f32,
@@ -77,6 +81,8 @@ impl CaptionBlock {
             primary_text: primary_text.into(),
             secondary_text: String::new(),
             secondary_enabled: true,
+            primary_language: None,
+            secondary_language: None,
             block_variant: CaptionBlockVariant::Finalized,
             channel: None,
             opacity: 1.0,
@@ -95,6 +101,28 @@ impl CaptionBlock {
     ) -> Self {
         self.secondary_text = secondary_text.into();
         self.secondary_enabled = secondary_enabled;
+        self
+    }
+
+    pub fn with_primary_language(mut self, language: impl Into<String>) -> Self {
+        let language = language.into();
+        self.primary_language = clean_language_option(language);
+        self
+    }
+
+    pub fn with_secondary_language(mut self, language: impl Into<String>) -> Self {
+        let language = language.into();
+        self.secondary_language = clean_language_option(language);
+        self
+    }
+
+    pub fn with_language_metadata(
+        mut self,
+        primary_language: Option<String>,
+        secondary_language: Option<String>,
+    ) -> Self {
+        self.primary_language = primary_language.and_then(clean_language_option);
+        self.secondary_language = secondary_language.and_then(clean_language_option);
         self
     }
 
@@ -125,6 +153,15 @@ impl CaptionBlock {
     pub fn has_drawable_text(&self) -> bool {
         !self.primary_text.trim().is_empty()
             || (self.secondary_enabled && !self.secondary_text.trim().is_empty())
+    }
+}
+
+fn clean_language_option(language: String) -> Option<String> {
+    let trimmed = language.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -316,6 +353,8 @@ pub enum LineRole {
 pub struct ResolvedLineLayout {
     pub text: String,
     pub role: LineRole,
+    pub style_key: TextStyleKey,
+    pub style: TextStyleDescriptor,
     pub width_px: f32,
     pub origin_x: f32,
     pub origin_y: f32,
@@ -407,6 +446,8 @@ impl From<ResolvedFrameLayout> for CaptionLayoutResult {
 pub struct LayoutCacheKey {
     pub primary_text: String,
     pub secondary_text: String,
+    pub primary_style_key: TextStyleKey,
+    pub secondary_style_key: TextStyleKey,
     pub channel: Option<CaptionChannel>,
     pub block_variant: CaptionBlockVariant,
     pub secondary_enabled: bool,
@@ -421,6 +462,7 @@ pub struct LayoutCacheKey {
 pub struct LineCacheKey {
     pub text: String,
     pub role: LineRole,
+    pub style_key: TextStyleKey,
     pub channel: Option<CaptionChannel>,
     pub block_variant: CaptionBlockVariant,
     pub font_size_key: u32,
@@ -440,6 +482,12 @@ pub struct RenderDiagnostics {
     pub layout_cache_size: usize,
     pub line_cache_size: usize,
     pub block_cache_size: usize,
+    pub text_format_cache_hits: u32,
+    pub text_format_cache_misses: u32,
+    pub font_warmup_attempts: u32,
+    pub font_warmup_failures: u32,
+    pub directwrite_layout_success_count: u32,
+    pub heuristic_layout_fallback_count: u32,
     pub layout_cache_hits: u32,
     pub layout_cache_misses: u32,
     pub line_cache_hits: u32,
@@ -448,9 +496,47 @@ pub struct RenderDiagnostics {
     pub block_cache_misses: u32,
     pub debug_overlay_draw_count: u32,
     pub debug_overlay_clear_count: u32,
+    pub style_bucket_source_counts: Vec<StyleBucketSourceCount>,
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StyleBucketSourceCount {
+    pub bucket: FontLanguageBucket,
+    pub source: FontSource,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextStyleDescriptor {
+    pub family_name: String,
+    pub weight: FontWeight,
+    pub locale: String,
+    pub source: FontSource,
+    pub bucket: FontLanguageBucket,
+    pub style_key: TextStyleKey,
+}
+
+impl TextStyleDescriptor {
+    pub fn from_parts(
+        family_name: impl Into<String>,
+        weight: FontWeight,
+        locale: impl Into<String>,
+        source: FontSource,
+        bucket: FontLanguageBucket,
+        style_key: TextStyleKey,
+    ) -> Self {
+        Self {
+            family_name: family_name.into(),
+            weight,
+            locale: locale.into(),
+            source,
+            bucket,
+            style_key,
+        }
+    }
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TextScriptBucket {
     Latin,
@@ -462,6 +548,10 @@ pub(crate) enum TextScriptBucket {
 pub(crate) struct ResolvedTextStyle {
     pub family_name: String,
     pub weight: DWRITE_FONT_WEIGHT,
+    pub locale: String,
+    pub source: FontSource,
+    pub bucket: FontLanguageBucket,
+    pub style_key: TextStyleKey,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -499,7 +589,7 @@ pub(crate) fn contains_cjk(text: &str) -> bool {
     })
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) fn text_script_bucket(text: &str) -> TextScriptBucket {
     if contains_cjk(text) {
         TextScriptBucket::Cjk

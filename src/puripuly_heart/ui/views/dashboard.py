@@ -19,6 +19,7 @@ DASHBOARD_DISPLAY_CARD_EXPAND = 1
 DASHBOARD_LANGUAGE_CARD_EXPAND = 1
 DASHBOARD_POWER_BUTTON_ICON_SIZE = 80
 DASHBOARD_POWER_BUTTON_LABEL_SIZE = 32
+OVERLAY_FAILURE_REASON_ONLY_NOTICE_REASONS = {"steamvr_not_running"}
 
 
 class DashboardView(ft.Column):
@@ -563,6 +564,8 @@ class DashboardView(ft.Column):
             f"settings.overlay.failure.{overlay.failure_reason}",
             default=overlay.failure_reason,
         )
+        if overlay.failure_reason in OVERLAY_FAILURE_REASON_ONLY_NOTICE_REASONS:
+            return reason_text, "error"
         return (
             t(
                 "settings.overlay.status.failed_with_reason",

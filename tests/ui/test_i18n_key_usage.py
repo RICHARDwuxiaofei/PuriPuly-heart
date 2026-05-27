@@ -5,6 +5,10 @@ from pathlib import Path
 
 from puripuly_heart.ui import i18n as i18n_module
 from puripuly_heart.ui.i18n import available_locales, source_label
+from tests.ui.test_desktop_overlay_i18n import (
+    DESKTOP_OVERLAY_RECOVERY_I18N_KEYS,
+    SHIPPING_DESKTOP_OVERLAY_I18N_KEYS,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 I18N_DIR = REPO_ROOT / "src" / "puripuly_heart" / "data" / "i18n"
@@ -25,6 +29,37 @@ DYNAMIC_I18N_PREFIXES = (
     "settings.translation_model.",
 )
 
+GITHUB_STAR_SNACKBAR_KEYS = (
+    "github_star.snackbar.message",
+    "github_star.snackbar.action",
+)
+OVERLAY_STEAMVR_NOT_RUNNING_KEY = "settings.overlay.failure.steamvr_not_running"
+
+EXPECTED_GITHUB_STAR_SNACKBAR_KO_COPY = {
+    "github_star.snackbar.message": "PuriPuly가 도움이 됐다면 GitHub에서 Star를 눌러주세요! 큰 힘이 되어요!",
+    "github_star.snackbar.action": "이동",
+}
+EXPECTED_OVERLAY_STEAMVR_NOT_RUNNING_COPY = {
+    "en": "SteamVR is off. If you want to use the desktop overlay, change it in Settings.",
+    "ko": "SteamVR이 꺼져 있어요. 혹시 데스크톱 오버레이를 쓰고싶다면 설정을 바꿔주세요.",
+    "zh-CN": "SteamVR 尚未运行。如果您想使用桌面叠加层，请在设置中更改。",
+    "ja": "SteamVRがオフです。デスクトップオーバーレイを使いたい場合は、設定を変更してください。",
+}
+
+# Overlay target labels are selected with a runtime suffix; keep this exact so target typos fail.
+EXACT_DYNAMIC_I18N_KEYS = frozenset(
+    {
+        "settings.overlay.target.desktop",
+        "settings.overlay.target.steamvr",
+    }
+)
+
+# Desktop-overlay copy is seeded before every product-standard key is referenced in runtime code.
+# Keep this exact, temporary allowlist narrow so typo or stale desktop-overlay keys still fail.
+TEMPORARILY_ALLOWED_UNREFERENCED_I18N_KEYS = frozenset(
+    SHIPPING_DESKTOP_OVERLAY_I18N_KEYS | DESKTOP_OVERLAY_RECOVERY_I18N_KEYS
+)
+
 
 def _load_bundles() -> dict[str, dict[str, str]]:
     return {
@@ -37,6 +72,17 @@ def _runtime_python_source() -> str:
     return "\n".join(
         path.read_text(encoding="utf-8") for path in sorted(RUNTIME_SOURCE_DIR.rglob("*.py"))
     )
+
+
+def _unused_i18n_keys(keys: list[str], runtime_source: str) -> list[str]:
+    return [
+        key
+        for key in keys
+        if key not in runtime_source
+        and not key.startswith(DYNAMIC_I18N_PREFIXES)
+        and key not in EXACT_DYNAMIC_I18N_KEYS
+        and key not in TEMPORARILY_ALLOWED_UNREFERENCED_I18N_KEYS
+    ]
 
 
 def test_i18n_bundles_share_the_same_keys() -> None:
@@ -100,6 +146,34 @@ def test_logs_conversation_keys_are_localized() -> None:
             assert bundle[key] != key
 
     assert bundles["ko"]["logs.conversation.show"] == "대화록 보기"
+
+
+def test_github_star_snackbar_keys_are_localized_for_all_supported_locales() -> None:
+    bundles = _load_bundles()
+    supported_locales = set(available_locales())
+
+    assert set(bundles) == supported_locales
+    for locale, bundle in bundles.items():
+        missing = sorted(set(GITHUB_STAR_SNACKBAR_KEYS) - set(bundle))
+        assert missing == [], locale
+        for key in GITHUB_STAR_SNACKBAR_KEYS:
+            assert bundle[key].strip()
+            assert bundle[key] != key
+
+
+def test_github_star_snackbar_korean_copy_matches_source_spec() -> None:
+    ko = _load_bundles()["ko"]
+
+    assert {
+        key: ko[key] for key in GITHUB_STAR_SNACKBAR_KEYS
+    } == EXPECTED_GITHUB_STAR_SNACKBAR_KO_COPY
+
+
+def test_overlay_steamvr_not_running_copy_points_to_desktop_overlay_setting() -> None:
+    bundles = _load_bundles()
+
+    for locale, expected in EXPECTED_OVERLAY_STEAMVR_NOT_RUNNING_COPY.items():
+        assert bundles[locale][OVERLAY_STEAMVR_NOT_RUNNING_KEY] == expected
 
 
 def test_local_llm_keys_are_localized() -> None:
@@ -180,6 +254,29 @@ def test_zh_cn_qwen_labels_use_qwen_brand_name() -> None:
         assert "通义千问" not in value
 
 
+def test_deepseek_v4_pro_keys_are_localized_with_blank_descriptions() -> None:
+    bundles = _load_bundles()
+    required_keys = {
+        "provider.deepseek_v4_pro",
+        "provider.deepseek_v4_pro.description",
+        "settings.translation_model.deepseek_v4_pro.description",
+    }
+    forbidden_keys = {
+        "provider.deepseek_v4_pro_openrouter",
+        "provider.deepseek_v4_pro_openrouter.description",
+    }
+
+    for locale, bundle in bundles.items():
+        missing = sorted(required_keys - set(bundle))
+        assert missing == [], locale
+        present_forbidden = sorted(forbidden_keys.intersection(bundle))
+        assert present_forbidden == [], locale
+        assert bundle["provider.deepseek_v4_pro"].strip()
+        assert bundle["provider.deepseek_v4_pro"] != "provider.deepseek_v4_pro"
+        assert bundle["provider.deepseek_v4_pro.description"] == ""
+        assert bundle["settings.translation_model.deepseek_v4_pro.description"] == ""
+
+
 def test_managed_key_card_keys_are_localized() -> None:
     bundles = _load_bundles()
     required_keys = {
@@ -188,8 +285,6 @@ def test_managed_key_card_keys_are_localized() -> None:
         "settings.managed_key.referral_id.empty",
         "settings.managed_key.referral_id.pending_helper",
         "settings.managed_key.referral_id.helper",
-        "settings.managed_key.referral_id.copy_tooltip",
-        "settings.managed_key.referral_id.copy_success",
         "settings.managed_key.invite_progress.label",
     }
 
@@ -203,11 +298,8 @@ def test_managed_key_card_keys_are_localized() -> None:
     assert bundles["en"]["settings.managed_key.title"] == "Managed Key"
     assert bundles["en"]["settings.managed_key.referral_id.label"] == "Talk Together Pass ID"
     assert bundles["en"]["settings.managed_key.referral_id.empty"] == "—"
-    assert bundles["en"]["settings.managed_key.referral_id.copy_success"] == "Pass ID copied."
     assert bundles["ko"]["settings.managed_key.title"] == "매니지드 키"
     ko = bundles["ko"]
-    assert ko["settings.managed_key.referral_id.copy_tooltip"] == "Pass ID 복사"
-    assert ko["settings.managed_key.referral_id.copy_success"] == "Pass ID를 복사했어요."
     assert ko["settings.managed_key.referral_id.helper"] == (
         "친구에게 Pass ID를 공유하면 함께 추가 사용량을 받을 수 있어요."
     )
@@ -217,8 +309,6 @@ def test_managed_key_card_keys_are_localized() -> None:
         for key in (
             "settings.managed_key.referral_id.label",
             "settings.managed_key.referral_id.helper",
-            "settings.managed_key.referral_id.copy_tooltip",
-            "settings.managed_key.referral_id.copy_success",
             "settings.managed_key.invite_progress.label",
             "discord_auth.referral_id.label",
             "discord_auth.referral_reward_applied",
@@ -233,10 +323,29 @@ def test_i18n_bundles_do_not_keep_unused_runtime_keys() -> None:
     all_keys = sorted(set().union(*(bundle.keys() for bundle in bundles.values())))
     runtime_source = _runtime_python_source()
 
-    unused_keys = [
-        key
-        for key in all_keys
-        if key not in runtime_source and not key.startswith(DYNAMIC_I18N_PREFIXES)
-    ]
+    unused_keys = _unused_i18n_keys(all_keys, runtime_source)
+
+    assert unused_keys == []
+
+
+def test_unused_key_guard_flags_desktop_overlay_typos() -> None:
+    runtime_source = ""
+    typo_like_keys = {
+        "debug_preview.desktop_overlay_typo",
+        "settings.overlay.caption_location.extra",
+        "settings.overlay.desktop.typo",
+        "settings.overlay.target.typo",
+    }
+
+    unused_keys = _unused_i18n_keys(sorted(typo_like_keys), runtime_source)
+
+    assert unused_keys == sorted(typo_like_keys)
+
+
+def test_desktop_overlay_seed_keys_are_exactly_allowlisted() -> None:
+    unused_keys = _unused_i18n_keys(
+        sorted(TEMPORARILY_ALLOWED_UNREFERENCED_I18N_KEYS),
+        runtime_source="",
+    )
 
     assert unused_keys == []
