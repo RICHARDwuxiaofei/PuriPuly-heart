@@ -91,8 +91,8 @@ class DisplayCard(ft.Container):
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL_DARK,
             selectable=True,
-            no_wrap=True,
-            max_lines=1,
+            no_wrap=False,
+            max_lines=2,
             overflow=ft.TextOverflow.ELLIPSIS,
             visible=False,
         )
