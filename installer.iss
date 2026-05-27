@@ -11,7 +11,7 @@
 #define MyOverlayExeName "PuriPulyHeartOverlay.exe"
 #define MyPackagedAppDir "dist\PuriPulyHeart"
 #define MyStagedOverlayDir "build\overlay"
-#define NotoCjkFontRelativePath "fonts\NotoSansCJK-Medium.ttc"
+#define NotoCjkFontRelativePath "puripuly_heart\data\fonts\NotoSansCJK-Medium.ttc"
 #define LocalSttManifestRelativePath "puripuly_heart\data\models\qwen3-asr-0.6b-int8-sherpa.manifest.json"
 
 #ifndef MyAppId

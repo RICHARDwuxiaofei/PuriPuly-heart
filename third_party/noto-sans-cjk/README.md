@@ -1,12 +1,15 @@
 # Noto Sans CJK Medium TTC provenance
 
-This directory stores the official bundled CJK font source/provenance for the
-native VR Subtitle Overlay. It is source material only; release staging,
-installer output, and runtime resolver behavior are handled by later tasks.
+This directory stores the official bundled CJK font provenance for the native VR
+Subtitle Overlay. The TTC itself lives with the application font assets at
+`src/puripuly_heart/data/fonts/NotoSansCJK-Medium.ttc`; release staging,
+installer output, and runtime resolver behavior are handled by packaging and
+renderer code.
 
 ## Artifact
 
 - File: `NotoSansCJK-Medium.ttc`
+- Source-tree path: `src/puripuly_heart/data/fonts/NotoSansCJK-Medium.ttc`
 - Upstream repository: `notofonts/noto-cjk` (GitHub may redirect to
   `googlefonts/noto-cjk`)
 - Official tag/version: `Sans2.004` / Noto Sans CJK v2.004
@@ -72,13 +75,13 @@ Open Font License 1.1.
 ## Verification
 
 `SHA256SUMS.txt` records the source hash for later comparisons against staged
-and installed font files. Later packaging verification should compare copied
-files against this source hash rather than selecting another font artifact.
+and installed font files. Later packaging verification should compare the app
+asset font against this source hash rather than selecting another font artifact.
 
 PowerShell verification used for this source file:
 
 ```powershell
-$path = "third_party/noto-sans-cjk/NotoSansCJK-Medium.ttc"
+$path = "src/puripuly_heart/data/fonts/NotoSansCJK-Medium.ttc"
 $expectedSize = 18354360
 $expectedSha = "197d5e1e019faca33a4d55931c7d68b8056f3b97cb862049f5cb8de9efdfb8ce"
 $item = Get-Item -LiteralPath $path
