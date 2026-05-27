@@ -15,10 +15,15 @@ pub use openvr::{
     submit_texture, FakeOpenVr, OpenVrError, OpenVrOverlay, OverlayFrameSubmitter,
     OverlayPlacementPolicy,
 };
+#[cfg(windows)]
+pub use renderer::WindowsBundledFontCollection;
 pub use renderer::{
-    BlockBounds, CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionDebugOverlay,
-    CaptionLayoutPolicy, CaptionLayoutResult, CaptionLineLayout, CaptionPresentation,
-    CaptionRenderError, CaptionRenderer, DamageBand, RenderedFrame, VisibleCaptionBlock,
+    bundled_font_path_from_exe_dir, runtime_bundled_font_path, BlockBounds, BundledFaceId,
+    CaptionBlock, CaptionBlockVariant, CaptionChannel, CaptionDebugOverlay, CaptionLayoutPolicy,
+    CaptionLayoutResult, CaptionLineLayout, CaptionPresentation, CaptionRenderError,
+    CaptionRenderer, DamageBand, FontFallbackReason, FontLanguageBucket, FontResolver, FontSource,
+    FontWeight, RenderedFrame, ResolvedFontStyle, StyleBucketSourceCount, TextFamilyKey,
+    TextLocaleKey, TextStyleDescriptor, TextStyleKey, VisibleCaptionBlock,
 };
 pub use runtime::{run_cli, run_with_manifest, OverlayRuntime, RuntimeFailure, StartupError};
 pub use state::{

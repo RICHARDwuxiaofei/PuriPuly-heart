@@ -14,6 +14,7 @@ from puripuly_heart.app.wiring import (
 from puripuly_heart.config.settings import (
     AppSettings,
     DeepgramSTTSettings,
+    DeepSeekLLMModel,
     GeminiLLMModel,
     GeminiSettings,
     LLMProviderName,
@@ -227,6 +228,25 @@ def test_create_llm_provider_deepseek_uses_secret_and_model() -> None:
     assert provider.inner.base_url == "https://api.deepseek.com"
     assert provider.inner.max_tokens == 100
     assert provider.semaphore._value == 4  # type: ignore[attr-defined]
+
+
+def test_create_llm_provider_deepseek_uses_v4_pro_model() -> None:
+    deepseek_model = getattr(DeepSeekLLMModel, "DEEPSEEK_V4_PRO", None)
+
+    assert deepseek_model is not None
+
+    settings = AppSettings(
+        provider=ProviderSettings(llm=LLMProviderName.DEEPSEEK),
+    )
+    settings.deepseek.llm_model = deepseek_model
+    secrets = InMemorySecretStore()
+    secrets.set("deepseek_api_key", "ds-key")
+
+    provider = create_llm_provider(settings, secrets=secrets)
+
+    assert isinstance(provider, SemaphoreLLMProvider)
+    assert isinstance(provider.inner, DeepSeekLLMProvider)
+    assert provider.inner.model == "deepseek-v4-pro"
 
 
 def test_create_llm_provider_deepseek_passes_runtime_logging() -> None:

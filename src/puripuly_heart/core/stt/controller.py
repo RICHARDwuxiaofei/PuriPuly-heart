@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Awaitable, Callable
 from uuid import UUID
@@ -10,6 +11,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 MANAGED_STT_SAMPLE_RATE_HZ = 16000
+PENDING_FINAL_QUEUE_WARN_SIZE = 8
 
 from puripuly_heart.core.audio.diagnostics import AudioFaultProfile, normalize_audio_fault_profile
 from puripuly_heart.core.audio.format import float32_to_pcm16le_bytes
@@ -58,7 +60,7 @@ class ManagedSTTProvider:
     _events: asyncio.Queue = field(default_factory=asyncio.Queue)
 
     _active_utterance_id: UUID | None = None
-    _pending_final_utterance_id: UUID | None = None
+    _pending_final_utterance_ids: deque[UUID] = field(default_factory=deque)
     _audio_ring: RingBufferF32 | None = None
     _reset_timer: asyncio.Task[None] | None = None
     _last_speech_end_time: float | None = None
@@ -201,7 +203,6 @@ class ManagedSTTProvider:
 
     async def _on_speech_start(self, event: SpeechStart) -> None:
         self._active_utterance_id = event.utterance_id
-        self._pending_final_utterance_id = None
         self._diagnostic_chunk_count = 0
         self._diagnostic_sample_count = 0
         self._diagnostic_sum_squares = 0.0
@@ -224,11 +225,18 @@ class ManagedSTTProvider:
     async def _on_speech_end(self, event: SpeechEnd) -> None:
         if self._active_utterance_id == event.utterance_id:
             self._active_utterance_id = None
-        self._pending_final_utterance_id = event.utterance_id
         self._last_speech_end_time = self.clock.now()
 
         # Delegate end-of-speech handling to the backend (silence + finalize etc.)
         if self._active_session is not None:
+            self._pending_final_utterance_ids.append(event.utterance_id)
+            if len(self._pending_final_utterance_ids) > PENDING_FINAL_QUEUE_WARN_SIZE:
+                self._emit_basic(
+                    "[STT] Pending final queue size is unexpectedly high: %s",
+                    len(self._pending_final_utterance_ids),
+                    level=logging.WARNING,
+                    fallback_level=logging.WARNING,
+                )
             self._emit_detailed(
                 "[STT] Speech end handling for id=%s (trailing_silence_ms=%s)",
                 str(event.utterance_id)[:8],
@@ -550,7 +558,7 @@ class ManagedSTTProvider:
         self._emit_detailed("[STT] DRAIN: Session closed", fallback_level=logging.DEBUG)
 
     def _should_finalize_before_stop(self) -> bool:
-        return self._active_utterance_id is not None or self._pending_final_utterance_id is not None
+        return self._active_utterance_id is not None or bool(self._pending_final_utterance_ids)
 
     async def _finalize_before_stop(self, session: STTBackendSession) -> None:
         if self._active_utterance_id is not None:
@@ -582,7 +590,18 @@ class ManagedSTTProvider:
     ) -> None:
         try:
             async for ev in session.events():
-                utterance_id = self._active_utterance_id or self._pending_final_utterance_id
+                if ev.is_final:
+                    utterance_id = (
+                        self._pending_final_utterance_ids.popleft()
+                        if self._pending_final_utterance_ids
+                        else self._active_utterance_id
+                    )
+                else:
+                    utterance_id = self._active_utterance_id or (
+                        self._pending_final_utterance_ids[0]
+                        if self._pending_final_utterance_ids
+                        else None
+                    )
                 if utterance_id is None:
                     continue
                 created_at = self.clock.now()
@@ -594,11 +613,6 @@ class ManagedSTTProvider:
                 )
                 if ev.is_final:
                     await self._events.put(STTFinalEvent(utterance_id, transcript))
-                    if (
-                        self._pending_final_utterance_id == utterance_id
-                        and self._active_utterance_id is None
-                    ):
-                        self._pending_final_utterance_id = None
                 else:
                     await self._events.put(STTPartialEvent(utterance_id, transcript))
         except asyncio.CancelledError:
@@ -617,7 +631,7 @@ class ManagedSTTProvider:
             self._consumer_task = None
             self._session_started_at = None
             self._active_utterance_id = None
-            self._pending_final_utterance_id = None
+            self._pending_final_utterance_ids.clear()
             self._last_speech_end_time = None
             if self._reset_timer is not None:
                 self._reset_timer.cancel()

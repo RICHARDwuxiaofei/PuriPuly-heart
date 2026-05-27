@@ -141,7 +141,7 @@ class _SonioxSession(STTBackendSession):
     _pending_tokens: list[_FinalToken] = field(init=False, default_factory=list)
     _pending_last_end_ms: int | None = field(init=False, default=None)
     _final_tokens: list[_FinalToken] = field(init=False, default_factory=list)
-    _finalize_requested: bool = field(init=False, default=False)
+    _pending_finalize_requests: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         self._events = asyncio.Queue()
@@ -300,23 +300,26 @@ class _SonioxSession(STTBackendSession):
 
     def _flush_final(self) -> None:
         if not self._pending_tokens:
-            if self._finalize_requested:
-                self._finalize_requested = False
+            if self._consume_pending_finalize_request():
                 self._final_tokens.clear()
             return
         updated = self._merge_pending_tokens()
         self._pending_tokens.clear()
         self._pending_last_end_ms = None
         if not updated:
-            if self._finalize_requested:
+            if self._consume_pending_finalize_request():
                 self._emit_final_text()
-                self._finalize_requested = False
                 self._final_tokens.clear()
             return
         self._emit_final_text()
-        if self._finalize_requested:
-            self._finalize_requested = False
+        if self._consume_pending_finalize_request():
             self._final_tokens.clear()
+
+    def _consume_pending_finalize_request(self) -> bool:
+        if self._pending_finalize_requests <= 0:
+            return False
+        self._pending_finalize_requests -= 1
+        return True
 
     def _merge_pending_tokens(self) -> bool:
         new_tokens = self._pending_tokens
@@ -407,7 +410,7 @@ class _SonioxSession(STTBackendSession):
         if self._stopped:
             return
 
-        self._finalize_requested = True
+        self._pending_finalize_requests += 1
         silence_ms = max(int(self.trailing_silence_ms), 0)
         if trailing_silence_ms is None and silence_ms > 0:
             silence_samples = int(self.sample_rate_hz * (silence_ms / 1000.0))

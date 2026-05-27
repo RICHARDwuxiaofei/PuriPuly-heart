@@ -74,6 +74,9 @@ FOUNDER_README_API_KEYS_ANCHOR_BY_LOCALE = {
 }
 FOUNDER_README_DEFAULT_API_KEYS_ANCHOR = "using-your-own-api-keys"
 DEBUG_PREVIEW_TALK_TOGETHER_PASS_ID = "7KQ9M2"
+GITHUB_STAR_REPOSITORY_URL = "https://github.com/kapitalismho/PuriPuly-heart"
+GITHUB_STAR_PROMPT_DELAY_S = 2.5
+GITHUB_STAR_PROMPT_DURATION_MS = 8000
 
 
 def founder_readme_url_for_locale(locale: str | None) -> str:
@@ -114,6 +117,11 @@ class TranslatorApp:
         self._discord_managed_auth_generation = 0
         self._discord_managed_auth_cancelled = False
         self._discord_managed_auth_task_handle = None
+        self._github_star_prompt_launch_pending = True
+        self._launch_high_priority_feedback_shown = False
+        self._launch_high_priority_feedback_reason: str | None = None
+        self._launch_high_priority_snackbar = None
+        self._github_star_prompt_shown_this_launch = False
         self._setup_page()
         self._build_layout()
 
@@ -132,6 +140,15 @@ class TranslatorApp:
         self.view_settings.on_verify_api_key = self._on_verify_api_key
         self.view_settings.on_secret_cleared = self._on_secret_cleared
         self.view_settings.on_local_llm_secret_changed = self._on_local_llm_secret_changed
+        self.view_settings.on_desktop_overlay_lock_change = self._on_desktop_overlay_lock_change
+        self.view_settings.on_desktop_overlay_size_change = self._on_desktop_overlay_size_change
+        self.view_settings.on_desktop_overlay_recovery_action = (
+            self._on_desktop_overlay_recovery_action
+        )
+        self.view_settings.on_desktop_overlay_position_reset = (
+            self._on_desktop_overlay_position_reset
+        )
+        self.view_settings.on_view_logs = self._open_logs_tab
         self.view_settings.show_snackbar = self._show_snackbar
         self.view_logs.on_mode_change = self._on_runtime_logging_mode_change
         self.view_logs.set_runtime_logging_mode(self.controller.runtime_logging_mode)
@@ -240,7 +257,155 @@ class TranslatorApp:
             on_capture_fault_cycle=self._preview_capture_fault_cycle,
             on_stt_fault_cycle=self._preview_stt_fault_cycle,
             on_audio_fault_clear=self._preview_audio_fault_clear,
+            on_github_star_snackbar=self._preview_github_star_snackbar,
         )
+
+    def _mark_launch_high_priority_feedback_shown(
+        self,
+        reason: str,
+        snackbar: object | None = None,
+    ) -> None:
+        if not getattr(self, "_github_star_prompt_launch_pending", True):
+            return
+        self._launch_high_priority_feedback_shown = True
+        self._launch_high_priority_feedback_reason = reason
+        if snackbar is not None:
+            self._launch_high_priority_snackbar = snackbar
+
+    def _launch_feedback_conflicts_with_github_star_prompt(self) -> bool:
+        if getattr(self, "_launch_high_priority_feedback_shown", False):
+            return True
+        snackbar = getattr(self, "_launch_high_priority_snackbar", None)
+        return bool(getattr(snackbar, "open", False))
+
+    async def maybe_show_github_star_prompt_after_launch(
+        self,
+        *,
+        delay_s: float = GITHUB_STAR_PROMPT_DELAY_S,
+    ) -> bool:
+        try:
+            if self._launch_feedback_conflicts_with_github_star_prompt():
+                return False
+            controller = getattr(self, "controller", None)
+            should_show = getattr(controller, "should_show_github_star_prompt", None)
+            if not callable(should_show) or not should_show():
+                return False
+
+            await asyncio.sleep(delay_s)
+
+            if self._launch_feedback_conflicts_with_github_star_prompt():
+                return False
+            if not should_show():
+                return False
+            return await self._open_github_star_prompt_snackbar()
+        finally:
+            self._github_star_prompt_launch_pending = False
+
+    async def _open_github_star_prompt_snackbar(self) -> bool:
+        if getattr(self, "_github_star_prompt_shown_this_launch", False):
+            return False
+        controller = getattr(self, "controller", None)
+        persist_opened = getattr(controller, "persist_github_star_prompt_opened", None)
+        if not callable(persist_opened) or not await persist_opened():
+            return False
+
+        snackbar = None
+
+        def _open_repository(_event) -> None:  # noqa: ANN001
+            async def _persist_click() -> None:
+                persist_clicked = getattr(controller, "persist_github_star_prompt_clicked", None)
+                if callable(persist_clicked):
+                    await persist_clicked()
+
+            self._queue_settings_mutation_task(_persist_click)
+            webbrowser.open(GITHUB_STAR_REPOSITORY_URL)
+            if snackbar is not None:
+                self._close_github_star_prompt_snackbar(snackbar)
+
+        snackbar = self._build_github_star_prompt_snackbar(_open_repository)
+        self._github_star_prompt_shown_this_launch = True
+        self.page.open(snackbar)
+        return True
+
+    def _build_github_star_prompt_snackbar(self, on_click) -> ft.SnackBar:  # noqa: ANN001
+        return ft.SnackBar(
+            content=ft.Row(
+                controls=[
+                    ft.Text(
+                        t("github_star.snackbar.message"),
+                        size=18,
+                        color=ft.Colors.WHITE,
+                        font_family=font_for_language(get_locale()),
+                        expand=True,
+                    ),
+                    ft.TextButton(
+                        text=t("github_star.snackbar.action"),
+                        on_click=on_click,
+                        style=ft.ButtonStyle(
+                            color=ft.Colors.WHITE,
+                            text_style=ft.TextStyle(
+                                size=18,
+                                font_family=font_for_language(get_locale()),
+                            ),
+                            overlay_color=COLOR_PRIMARY,
+                        ),
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.START,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=12,
+            ),
+            bgcolor=COLOR_SUCCESS,
+            duration=GITHUB_STAR_PROMPT_DURATION_MS,
+            behavior=ft.SnackBarBehavior.FLOATING,
+            margin=ft.margin.only(bottom=90),
+            padding=20,
+        )
+
+    def _close_github_star_prompt_snackbar(self, snackbar: ft.SnackBar) -> None:
+        close = getattr(self.page, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close(snackbar)
+        else:
+            snackbar.open = False
+            with contextlib.suppress(Exception):
+                self.page.update()
+        self._displace_current_snackbar_for_flet_028()
+
+    def _displace_current_snackbar_for_flet_028(self) -> None:
+        """Force-dismiss the visible SnackBar on Flet 0.28.x.
+
+        Flet 0.28.3 updates the Python-side ``SnackBar.open`` flag on
+        ``page.close(snackbar)`` but the Flutter-side snackbar remains visible
+        until its duration expires. Opening another SnackBar first removes the
+        current one, so use a transparent 1 ms replacement as a narrow shim.
+        """
+
+        open_control = getattr(self.page, "open", None)
+        if not callable(open_control):
+            return
+        dismissor = ft.SnackBar(
+            content=ft.Text("", size=0),
+            bgcolor=ft.Colors.TRANSPARENT,
+            duration=1,
+            behavior=ft.SnackBarBehavior.FLOATING,
+            margin=ft.margin.only(bottom=90),
+            padding=0,
+        )
+        with contextlib.suppress(Exception):
+            open_control(dismissor)
+
+    def _preview_github_star_snackbar(self) -> None:
+        snackbar = None
+
+        def _open_repository(_event) -> None:  # noqa: ANN001
+            webbrowser.open(GITHUB_STAR_REPOSITORY_URL)
+            if snackbar is not None:
+                self._close_github_star_prompt_snackbar(snackbar)
+
+        snackbar = self._build_github_star_prompt_snackbar(_open_repository)
+        self.page.open(snackbar)
 
     def _preview_brake_notice(self) -> None:
         self._show_snackbar(t("managed_release.brake"), ft.Colors.ORANGE_700)
@@ -276,6 +441,7 @@ class TranslatorApp:
             visible=True,
             remaining_percent=100,
             referral_id=DEBUG_PREVIEW_TALK_TOGETHER_PASS_ID,
+            remember_referral_id=False,
             pass_status=TalkTogetherPassStatus(
                 pass_id=DEBUG_PREVIEW_TALK_TOGETHER_PASS_ID,
                 invite_count=1,
@@ -412,6 +578,16 @@ class TranslatorApp:
 
             self.page.run_task(_scroll)
 
+    def _open_logs_tab(self) -> None:
+        self._on_nav_change(2)
+        selected_attr = getattr(self.bottom_nav, "_selected", None)
+        if selected_attr != 2 and hasattr(self.bottom_nav, "_selected"):
+            self.bottom_nav._selected = 2
+        update_visuals = getattr(self.bottom_nav, "_update_visuals", None)
+        if callable(update_visuals):
+            with contextlib.suppress(Exception):
+                update_visuals()
+
     def apply_locale(self) -> None:
         self.page.title = t("app.title")
         self.page.theme = get_app_theme(font_family=font_for_language(get_locale()))
@@ -443,6 +619,74 @@ class TranslatorApp:
         set_dashboard_contract = getattr(view_dashboard, "set_overlay_peer_contract", None)
         if callable(set_dashboard_contract):
             set_dashboard_contract(contract)
+
+    def _sync_settings_overlay_runtime_state(self) -> None:
+        view_settings = getattr(self, "view_settings", None)
+        set_state = getattr(view_settings, "set_overlay_runtime_state", None)
+        if not callable(set_state):
+            return
+        controller = getattr(self, "controller", None)
+        settings = getattr(controller, "settings", None)
+        overlay_target = None
+        if settings is not None:
+            overlay_target = getattr(settings.overlay, "target", None)
+        desktop_locked = False
+        if controller is not None:
+            desktop_locked = bool(getattr(controller, "desktop_overlay_captions_locked", False))
+        set_state(
+            self.overlay_state,
+            failure_reason=self.overlay_failure_reason,
+            overlay_target=overlay_target,
+            desktop_captions_locked=desktop_locked,
+        )
+
+    def _on_desktop_overlay_lock_change(self, locked: bool) -> None:
+        async def _task():
+            await self.controller.set_desktop_overlay_captions_locked(bool(locked))
+            self._refresh_settings_desktop_overlay_state()
+
+        self.page.run_task(_task)
+
+    def _on_desktop_overlay_size_change(self, size_preset: str) -> None:
+        async def _task():
+            await self.controller.set_desktop_overlay_size_preset(size_preset)
+            self._refresh_settings_desktop_overlay_state()
+
+        self.page.run_task(_task)
+
+    def _on_desktop_overlay_recovery_action(self, action: str) -> None:
+        if action not in {"retry", "reopen"}:
+            return
+
+        async def _task():
+            await self.controller.set_overlay_enabled(True)
+
+        self.page.run_task(_task)
+
+    def _on_desktop_overlay_position_reset(self) -> None:
+        async def _task():
+            await self.controller.reset_desktop_overlay_position()
+            self._refresh_settings_desktop_overlay_state()
+
+        self.page.run_task(_task)
+
+    def _refresh_settings_desktop_overlay_state(self) -> None:
+        controller = getattr(self, "controller", None)
+        settings = getattr(controller, "settings", None)
+        view_settings = getattr(self, "view_settings", None)
+        sync_settings = getattr(view_settings, "sync_desktop_overlay_settings", None)
+        if settings is not None and callable(sync_settings):
+            sync_settings(settings)
+        self._sync_settings_overlay_runtime_state()
+
+    def on_desktop_overlay_state_changed(
+        self,
+        *,
+        interaction_mode: str | None = None,
+        captions_locked: bool | None = None,
+    ) -> None:
+        _ = (interaction_mode, captions_locked)
+        self._sync_settings_overlay_runtime_state()
 
     def _on_manual_submit(self, _source: str, text: str) -> None:
         async def _task():
@@ -607,16 +851,16 @@ class TranslatorApp:
             stt_provider = settings.provider.stt.value
             warning = get_stt_compatibility_warning(source_code, stt_provider)
         if warning:
-            self.page.open(
-                ft.SnackBar(
-                    ft.Text(t(warning.key, language=language_name(warning.language_code))),
-                    bgcolor=ft.Colors.ORANGE_700,
-                    duration=4000,
-                    behavior=ft.SnackBarBehavior.FLOATING,
-                    margin=ft.margin.only(bottom=90),
-                    padding=20,
-                )
+            snackbar = ft.SnackBar(
+                ft.Text(t(warning.key, language=language_name(warning.language_code))),
+                bgcolor=ft.Colors.ORANGE_700,
+                duration=4000,
+                behavior=ft.SnackBarBehavior.FLOATING,
+                margin=ft.margin.only(bottom=90),
+                padding=20,
             )
+            self._mark_launch_high_priority_feedback_shown("stt_compatibility", snackbar)
+            self.page.open(snackbar)
 
         async def _task():
             await self.controller.on_dashboard_language_change(
@@ -648,8 +892,26 @@ class TranslatorApp:
         self.view_logs.set_runtime_logging_mode(self.controller.runtime_logging_mode)
 
     def _on_providers_changed(self) -> None:
+        pending_settings = None
+        view_settings = getattr(self, "view_settings", None)
+        consume_provider_apply_settings = getattr(
+            view_settings,
+            "consume_provider_apply_settings",
+            None,
+        )
+        if callable(consume_provider_apply_settings) and getattr(
+            view_settings,
+            "has_provider_changes",
+            False,
+        ):
+            pending_settings = consume_provider_apply_settings()
+            view_settings.has_provider_changes = False
+
         async def _task():
-            await self.controller.apply_providers()
+            if pending_settings is None:
+                await self.controller.apply_providers()
+            else:
+                await self.controller.apply_providers(pending_settings)
 
         self._queue_settings_mutation_task(_task)
 
@@ -715,6 +977,8 @@ class TranslatorApp:
             close()
 
     def show_discord_managed_auth_dialog(self, preview: bool = False) -> None:
+        if not preview:
+            self._mark_launch_high_priority_feedback_shown("auth_required")
         if preview:
             on_continue = self._close_discord_managed_auth_dialog
             on_byok = self._close_discord_managed_auth_dialog
@@ -927,6 +1191,7 @@ class TranslatorApp:
         webbrowser.open(founder_readme_url_for_locale(get_locale()))
 
     def show_founder_letter_dialog(self) -> None:
+        self._mark_launch_high_priority_feedback_shown("usage_exhaustion")
         dialog = FounderLetterDialog(self.page, on_readme=self._on_founder_letter_readme)
         self._founder_letter_dialog = dialog
         dialog.open()
@@ -1011,16 +1276,16 @@ class TranslatorApp:
 
     def _show_snackbar(self, message: str, bgcolor, duration: int = 4000) -> None:
         """Show a snackbar above the bottom nav."""
-        self.page.open(
-            ft.SnackBar(
-                ft.Text(message, size=18, color=ft.Colors.WHITE),
-                bgcolor=bgcolor,
-                duration=duration,
-                behavior=ft.SnackBarBehavior.FLOATING,
-                margin=ft.margin.only(bottom=90),
-                padding=20,
-            )
+        snackbar = ft.SnackBar(
+            ft.Text(message, size=18, color=ft.Colors.WHITE),
+            bgcolor=bgcolor,
+            duration=duration,
+            behavior=ft.SnackBarBehavior.FLOATING,
+            margin=ft.margin.only(bottom=90),
+            padding=20,
         )
+        self._mark_launch_high_priority_feedback_shown("snackbar", snackbar)
+        self.page.open(snackbar)
 
     def on_overlay_state_changed(
         self,
@@ -1035,7 +1300,7 @@ class TranslatorApp:
         self._log_detailed(
             f"[Overlay] State detail: overlay_state={state} failure_reason={failure_reason}"
         )
-        self.view_settings.set_overlay_runtime_state(state, failure_reason=failure_reason)
+        self._sync_settings_overlay_runtime_state()
         self.refresh_overlay_peer_contract()
 
 
@@ -1048,10 +1313,29 @@ async def main_gui(page: ft.Page, *, config_path, debug_ui_preview: bool = False
     await app.controller.start()
 
     # Check for updates in background
-    await _check_and_notify_update(page, log_detailed=app._log_detailed)
+    update_kwargs = {"log_detailed": app._log_detailed}
+    try:
+        update_parameters = inspect.signature(_check_and_notify_update).parameters
+    except (TypeError, ValueError):
+        update_parameters = {}
+    if "on_launch_snackbar_shown" in update_parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in update_parameters.values()
+    ):
+        update_kwargs["on_launch_snackbar_shown"] = (
+            lambda snackbar: app._mark_launch_high_priority_feedback_shown("update", snackbar)
+        )
+    await _check_and_notify_update(page, **update_kwargs)
+
+    show_github_star_prompt = getattr(app, "maybe_show_github_star_prompt_after_launch", None)
+    if callable(show_github_star_prompt):
+        await show_github_star_prompt()
 
 
-async def _check_and_notify_update(page: ft.Page, log_detailed=None) -> None:
+async def _check_and_notify_update(
+    page: ft.Page,
+    log_detailed=None,
+    on_launch_snackbar_shown=None,
+) -> None:
     """Check for updates and show notification as a toast."""
     try:
         update_info = await check_for_update()
@@ -1104,6 +1388,8 @@ async def _check_and_notify_update(page: ft.Page, log_detailed=None) -> None:
             close_icon_color=ft.Colors.WHITE,
         )
         page.open(snackbar)
+        if callable(on_launch_snackbar_shown):
+            on_launch_snackbar_shown(snackbar)
 
     except Exception as exc:
         message = f"[Update] Check notification failed: {exc}"

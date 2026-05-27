@@ -13,6 +13,7 @@ from puripuly_heart.core.orchestrator import hub as hub_module
 from puripuly_heart.core.orchestrator.hub import ClientHub, _MergeBuffer
 from puripuly_heart.core.overlay.diagnostics import OverlayDiagnosticsRecorder
 from puripuly_heart.core.overlay.presenter import OverlayPresenter
+from puripuly_heart.core.overlay.sink import OverlayEventAdapter
 from puripuly_heart.core.overlay.state import ActiveSelfOverlayMetadata
 from puripuly_heart.core.runtime_logging import (
     LATENCY_TRACE_POINT_CONTRACTS,
@@ -69,6 +70,12 @@ class RecordingOverlaySink:
                 source_text_hash=getattr(event, "source_text_hash", None),
                 source_text_len=getattr(event, "source_text_len", None),
                 logical_turn_key=getattr(event, "logical_turn_key", None),
+                primary_language=(str(getattr(event, "source_language", "") or "").strip() or None),
+                secondary_language=(
+                    str(getattr(event, "target_language", "") or "").strip() or None
+                    if getattr(event, "secondary_text", "").strip()
+                    else None
+                ),
             )
         elif event_type == "self_active_clear":
             self.active_self_metadata = None
@@ -211,9 +218,13 @@ class BlockingTranslateLLMProvider(LLMProvider):
 @dataclass(slots=True)
 class ReleasableTranslateLLMProvider(LLMProvider):
     response_text: str
+    response_source_language: str | None = None
+    response_target_language: str | None = None
     started: asyncio.Event = field(default_factory=asyncio.Event)
     release: asyncio.Future[None] | None = None
     calls: list[str] = field(default_factory=list)
+    requested_source_language: str | None = None
+    requested_target_language: str | None = None
 
     async def translate(
         self,
@@ -225,13 +236,20 @@ class ReleasableTranslateLLMProvider(LLMProvider):
         target_language: str,
         context: str = "",
     ):
-        _ = (utterance_id, system_prompt, source_language, target_language, context)
+        _ = (system_prompt, context)
+        self.requested_source_language = source_language
+        self.requested_target_language = target_language
         self.calls.append(text)
         self.started.set()
         if self.release is None:
             self.release = asyncio.get_running_loop().create_future()
         await self.release
-        return hub_module.Translation(utterance_id=utterance_id, text=self.response_text)
+        return hub_module.Translation(
+            utterance_id=utterance_id,
+            text=self.response_text,
+            source_language=self.response_source_language,
+            target_language=self.response_target_language,
+        )
 
     async def close(self) -> None:
         return
@@ -317,6 +335,43 @@ class RecordingSequencedTranslateLLMProvider(LLMProvider):
         return
 
 
+@dataclass(slots=True)
+class GatedRecordingTranslateLLMProvider(LLMProvider):
+    responses: list[str]
+    start_target: int
+    calls: list[tuple[UUID, str, str]] = field(default_factory=list)
+    all_started: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Future[None] | None = None
+
+    async def translate(
+        self,
+        *,
+        utterance_id: UUID,
+        text: str,
+        system_prompt: str,
+        source_language: str,
+        target_language: str,
+        context: str = "",
+    ):
+        _ = (system_prompt, source_language, target_language)
+        response_index = len(self.calls)
+        self.calls.append((utterance_id, text, context))
+        if len(self.calls) >= self.start_target:
+            self.all_started.set()
+        if self.release is None:
+            self.release = asyncio.get_running_loop().create_future()
+        await self.release
+        if response_index >= len(self.responses):
+            raise AssertionError("no translate response configured")
+        return hub_module.Translation(
+            utterance_id=utterance_id,
+            text=self.responses[response_index],
+        )
+
+    async def close(self) -> None:
+        return
+
+
 @pytest.mark.asyncio
 async def test_hub_emits_self_and_peer_finals_to_overlay_sink() -> None:
     sink = RecordingOverlaySink()
@@ -332,6 +387,522 @@ async def test_hub_emits_self_and_peer_finals_to_overlay_sink() -> None:
         "utterance_closed",
     ]
     assert [event.channel for event in sink.events] == ["self", "self", "peer", "peer"]
+
+
+@pytest.mark.asyncio
+async def test_hub_active_self_overlay_snapshot_uses_spec_translation_languages_not_current_settings() -> (
+    None
+):
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=presenter,
+        source_language="ko",
+        target_language="en",
+    )
+    merge_id = uuid4()
+    source_utterance_id = uuid4()
+    buffer = _MergeBuffer(
+        merge_id=merge_id,
+        parts=["こんにちは"],
+        utterance_ids=[source_utterance_id],
+        spec_text="こんにちは",
+        spec_translation=Translation(
+            utterance_id=merge_id,
+            text="hello",
+            source_text="こんにちは",
+            source_language="ja",
+            target_language="zh-TW",
+        ),
+    )
+
+    await hub._sync_overlay_active_self(buffer)
+
+    block = presenter.snapshot().blocks[0]
+    assert block.channel == "self"
+    assert block.block_variant == "active_self"
+    assert block.primary_text == "こんにちは"
+    assert block.secondary_text == "hello"
+    assert block.primary_language == "ja"
+    assert block.secondary_language == "zh-TW"
+
+
+@pytest.mark.asyncio
+async def test_hub_blank_spec_translation_active_update_keeps_spec_language_metadata() -> None:
+    sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        source_language="ko",
+        target_language="en",
+    )
+    merge_id = uuid4()
+    buffer = _MergeBuffer(
+        merge_id=merge_id,
+        parts=["こんにちは"],
+        utterance_ids=[uuid4()],
+        spec_text="こんにちは",
+        spec_translation=Translation(
+            utterance_id=merge_id,
+            text="   ",
+            source_text="こんにちは",
+            source_language="ja",
+            target_language="zh-TW",
+        ),
+    )
+
+    await hub._sync_overlay_active_self(buffer)
+
+    assert len(sink.events) == 1
+    event = sink.events[0]
+    assert getattr(event, "type", None) == "self_active_update"
+    assert event.secondary_text == ""
+    assert event.source_language == "ja"
+    assert event.target_language == "zh-TW"
+
+
+@pytest.mark.asyncio
+async def test_hub_same_text_blank_spec_language_update_feeds_final_transcript_language() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    merge_id = uuid4()
+    await presenter.emit(
+        adapter.self_active_update(
+            text="こんにちは",
+            secondary_text="",
+            utterance_id=merge_id,
+            occupant_key=f"self:{merge_id}",
+            source_language="ko",
+            target_language="en",
+            created_at=10.0,
+        )
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=presenter,
+        source_language="ko",
+        target_language="en",
+    )
+    buffer = _MergeBuffer(
+        merge_id=merge_id,
+        parts=["こんにちは"],
+        utterance_ids=[uuid4()],
+        spec_text="こんにちは",
+        spec_translation=Translation(
+            utterance_id=merge_id,
+            text="   ",
+            source_text="こんにちは",
+            source_language="ja",
+            target_language="zh-TW",
+        ),
+    )
+
+    await hub._sync_overlay_active_self(buffer)
+    await hub._emit_final_transcript_to_overlay(
+        Transcript(
+            utterance_id=merge_id,
+            text="こんにちは",
+            is_final=True,
+            created_at=10.1,
+            channel="self",
+        )
+    )
+
+    block = presenter.snapshot().blocks[0]
+    assert block.block_variant == "finalized"
+    assert block.primary_text == "こんにちは"
+    assert block.primary_language == "ja"
+
+
+@pytest.mark.asyncio
+async def test_hub_self_translation_overlay_uses_translation_languages_not_current_settings() -> (
+    None
+):
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=presenter,
+        source_language="ko",
+        target_language="en",
+    )
+    utterance_id = uuid4()
+    await hub._emit_overlay_event(
+        hub.overlay_event_adapter.transcript_final(
+            Transcript(
+                utterance_id=utterance_id,
+                text="こんにちは",
+                is_final=True,
+                created_at=10.0,
+                channel="self",
+            ),
+            source_language="ja",
+            target_language="zh-TW",
+        )
+    )
+
+    await hub._emit_translation_to_overlay(
+        translation=Translation(
+            utterance_id=utterance_id,
+            text="你好",
+            source_text="こんにちは",
+            source_language="ja",
+            target_language="zh-TW",
+            channel="self",
+            created_at=10.1,
+        ),
+        applied_context_mode=None,
+    )
+
+    block = presenter.snapshot().blocks[0]
+    assert block.primary_text == "こんにちは"
+    assert block.secondary_text == "你好"
+    assert block.primary_language == "ja"
+    assert block.secondary_language == "zh-TW"
+
+
+@pytest.mark.asyncio
+async def test_hub_translate_and_enqueue_overlay_uses_request_language_after_settings_change() -> (
+    None
+):
+    llm = ReleasableTranslateLLMProvider(response_text="你好")
+    sink = RecordingOverlaySink()
+    hub = ClientHub(
+        stt=None,
+        llm=llm,
+        osc=RecordingOscQueue(),
+        overlay_sink=sink,
+        source_language="ja",
+        target_language="zh-TW",
+    )
+    utterance_id = uuid4()
+
+    task = asyncio.create_task(
+        hub._translate_and_enqueue(
+            utterance_id,
+            "こんにちは",
+            runtime=hub.self_runtime,
+        )
+    )
+    await asyncio.wait_for(llm.started.wait(), timeout=1.0)
+    hub.source_language = "ko"
+    hub.target_language = "en"
+    assert llm.requested_source_language == "ja"
+    assert llm.requested_target_language == "zh-TW"
+    assert llm.release is not None
+    llm.release.set_result(None)
+
+    await task
+
+    translation_events = [
+        event for event in sink.events if getattr(event, "type", None) == "translation_final"
+    ]
+    assert len(translation_events) == 1
+    assert translation_events[0].source_language == "ja"
+    assert translation_events[0].target_language == "zh-TW"
+
+
+@pytest.mark.asyncio
+async def test_hub_translate_text_preserves_provider_language_after_settings_change() -> None:
+    llm = ReleasableTranslateLLMProvider(
+        response_text="你好",
+        response_source_language="ja",
+        response_target_language="zh-TW",
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=llm,
+        osc=RecordingOscQueue(),
+        source_language="es",
+        target_language="fr",
+    )
+    utterance_id = uuid4()
+
+    task = asyncio.create_task(
+        hub._translate_text(
+            utterance_id,
+            "こんにちは",
+            runtime=hub.self_runtime,
+            record_latency=False,
+        )
+    )
+    await asyncio.wait_for(llm.started.wait(), timeout=1.0)
+    hub.source_language = "ko"
+    hub.target_language = "en"
+    assert llm.requested_source_language == "es"
+    assert llm.requested_target_language == "fr"
+    assert llm.release is not None
+    llm.release.set_result(None)
+
+    translation = await task
+
+    assert translation.source_language == "ja"
+    assert translation.target_language == "zh-TW"
+
+
+@pytest.mark.asyncio
+async def test_hub_peer_translation_overlay_uses_translation_languages_not_current_settings() -> (
+    None
+):
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=presenter,
+        source_language="ko",
+        target_language="en",
+        peer_source_language="en",
+        peer_target_language="ko",
+    )
+    utterance_id = uuid4()
+
+    await hub._emit_peer_translation_to_overlay(
+        translation=Translation(
+            utterance_id=utterance_id,
+            text="你好",
+            source_text="こんにちは",
+            source_language="ja",
+            target_language="zh-TW",
+            channel="peer",
+            created_at=10.0,
+        ),
+        runtime=hub.peer_runtime,
+        applied_context_mode=None,
+    )
+
+    block = presenter.snapshot().blocks[0]
+    assert block.primary_text == "你好"
+    assert block.secondary_text == "こんにちは"
+    assert block.primary_language == "zh-TW"
+    assert block.secondary_language == "ja"
+
+
+@pytest.mark.asyncio
+async def test_hub_active_self_sticky_secondary_preserves_cached_secondary_language() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    merge_id = uuid4()
+    await presenter.emit(
+        adapter.self_active_update(
+            text="こんにちは",
+            secondary_text="你好",
+            utterance_id=merge_id,
+            occupant_key=f"self:{merge_id}",
+            source_language="ja",
+            target_language="zh-TW",
+            created_at=10.0,
+        )
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=presenter,
+        source_language="ko",
+        target_language="en",
+    )
+    buffer = _MergeBuffer(
+        merge_id=merge_id,
+        parts=["こんにちは続き"],
+        utterance_ids=[uuid4()],
+    )
+
+    await hub._sync_overlay_active_self(buffer)
+
+    block = presenter.snapshot().blocks[0]
+    assert block.primary_text == "こんにちは続き"
+    assert block.secondary_text == "你好"
+    assert block.secondary_language == "zh-TW"
+
+
+@pytest.mark.asyncio
+async def test_hub_active_self_blank_secondary_preserves_cached_primary_language() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    merge_id = uuid4()
+    await presenter.emit(
+        adapter.self_active_update(
+            text="こんにちは",
+            secondary_text="",
+            utterance_id=merge_id,
+            occupant_key=f"self:{merge_id}",
+            source_language="ja",
+            target_language="zh-TW",
+            created_at=10.0,
+        )
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=presenter,
+        source_language="ko",
+        target_language="en",
+    )
+    buffer = _MergeBuffer(
+        merge_id=merge_id,
+        parts=["こんにちは続き"],
+        utterance_ids=[uuid4()],
+    )
+
+    await hub._sync_overlay_active_self(buffer)
+
+    block = presenter.snapshot().blocks[0]
+    assert block.primary_text == "こんにちは続き"
+    assert block.secondary_text == ""
+    assert block.primary_language == "ja"
+
+
+@pytest.mark.asyncio
+async def test_hub_self_final_transcript_preserves_active_display_language_metadata() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=presenter,
+        source_language="ko",
+        target_language="en",
+    )
+    merge_id = uuid4()
+    buffer = _MergeBuffer(
+        merge_id=merge_id,
+        parts=["こんにちは"],
+        utterance_ids=[uuid4()],
+        spec_text="こんにちは",
+        spec_translation=Translation(
+            utterance_id=merge_id,
+            text="你好",
+            source_text="こんにちは",
+            source_language="ja",
+            target_language="zh-TW",
+        ),
+    )
+    await hub._sync_overlay_active_self(buffer)
+
+    await hub._emit_final_transcript_to_overlay(
+        Transcript(
+            utterance_id=merge_id,
+            text="こんにちは",
+            is_final=True,
+            created_at=10.0,
+            channel="self",
+        )
+    )
+
+    block = presenter.snapshot().blocks[0]
+    assert block.block_variant == "finalized"
+    assert block.primary_text == "こんにちは"
+    assert block.secondary_text == "你好"
+    assert block.primary_language == "ja"
+    assert block.secondary_language == "zh-TW"
+
+
+@pytest.mark.asyncio
+async def test_hub_stale_secondary_blanking_preserves_active_primary_language() -> None:
+    bridge = RecordingPresentationBridge()
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    merge_id = uuid4()
+    await presenter.emit(
+        adapter.self_active_update(
+            text="こんにちは",
+            secondary_text="你好",
+            utterance_id=merge_id,
+            occupant_key=f"self:{merge_id}",
+            source_language="ja",
+            target_language="zh-TW",
+            created_at=10.0,
+        )
+    )
+    first_new_snapshot_index = len(bridge.snapshots)
+    hub = ClientHub(
+        stt=None,
+        llm=None,
+        osc=RecordingOscQueue(),
+        overlay_sink=presenter,
+        source_language="ko",
+        target_language="en",
+    )
+    buffer = _MergeBuffer(
+        merge_id=merge_id,
+        parts=["こんにちは"],
+        utterance_ids=[uuid4()],
+    )
+
+    await hub._commit_merge(buffer, reason="test_stale_secondary")
+
+    blank_active_blocks = [
+        snapshot.blocks[0]
+        for snapshot in bridge.snapshots[first_new_snapshot_index:]
+        if snapshot.blocks
+        and snapshot.blocks[0].block_variant == "active_self"
+        and snapshot.blocks[0].secondary_text == ""
+    ]
+    assert blank_active_blocks
+    assert blank_active_blocks[0].primary_text == "こんにちは"
+    assert blank_active_blocks[0].primary_language == "ja"
+
+
+@pytest.mark.asyncio
+async def test_hub_peer_overlay_snapshot_uses_peer_specific_source_and_target_languages() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=SequencedTranslateLLMProvider(responses=["你好"], delay_s=0.0),
+        osc=RecordingOscQueue(),
+        overlay_sink=presenter,
+        source_language="ko",
+        target_language="en",
+        peer_source_language="ja",
+        peer_target_language="zh-TW",
+        peer_translation_enabled=True,
+    )
+
+    await hub.translate_peer_text_for_test("こんにちは")
+
+    block = presenter.snapshot().blocks[0]
+    assert block.channel == "peer"
+    assert block.primary_text == "你好"
+    assert block.secondary_text == "こんにちは"
+    assert block.primary_language == "zh-TW"
+    assert block.secondary_language == "ja"
 
 
 @pytest.mark.asyncio
@@ -427,6 +998,168 @@ async def test_peer_finals_in_one_parent_vad_create_independent_active_turns_and
         (peer_turn_ids[0], "What about now?"),
         (peer_turn_ids[1], "Can you hear me?"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_back_to_back_peer_parent_segments_keep_derived_output_boundaries() -> None:
+    first_parent_vad_id = uuid4()
+    second_parent_vad_id = uuid4()
+    parent_vad_ids = [first_parent_vad_id, second_parent_vad_id]
+    osc = RecordingOscQueue()
+    sink = RecordingOverlaySink()
+    llm = GatedRecordingTranslateLLMProvider(
+        responses=["first translation", "second translation"],
+        start_target=2,
+    )
+    hub = ClientHub(
+        stt=None,
+        llm=llm,
+        osc=osc,
+        overlay_sink=sink,
+        peer_translation_enabled=True,
+        clock=FakeClock(_now=10.0),
+    )
+    hub.active_chatbox_channel = "peer"
+
+    try:
+        await hub.handle_peer_vad_event(
+            SpeechEnd(first_parent_vad_id, trailing_silence_ms=0, reason="max_duration")
+        )
+        await hub._handle_stt_event(
+            STTFinalEvent(
+                utterance_id=first_parent_vad_id,
+                transcript=Transcript(
+                    utterance_id=first_parent_vad_id,
+                    text="first forced segment",
+                    is_final=True,
+                    created_at=11.0,
+                    channel="peer",
+                ),
+            )
+        )
+        hub.clock.advance(0.1)
+        await hub.handle_peer_vad_event(
+            SpeechEnd(second_parent_vad_id, trailing_silence_ms=0, reason="max_duration")
+        )
+        await hub._handle_stt_event(
+            STTFinalEvent(
+                utterance_id=second_parent_vad_id,
+                transcript=Transcript(
+                    utterance_id=second_parent_vad_id,
+                    text="second forced segment",
+                    is_final=True,
+                    created_at=12.0,
+                    channel="peer",
+                ),
+            )
+        )
+
+        await asyncio.wait_for(llm.all_started.wait(), timeout=0.5)
+
+        peer_turn_ids = [utterance_id for utterance_id, _text, _context in llm.calls]
+        peer_turn_id_set = set(peer_turn_ids)
+        parent_vad_id_set = set(parent_vad_ids)
+        translation_tasks = list(hub.peer_runtime.translation_tasks.values())
+
+        assert len(peer_turn_ids) == 2
+        assert len(peer_turn_id_set) == 2
+        assert peer_turn_id_set.isdisjoint(parent_vad_id_set)
+        assert set(hub.peer_runtime.translation_tasks) == peer_turn_id_set
+        assert len([task for task in translation_tasks if not task.done()]) == 2
+        registered_parent_ids = [
+            hub._peer_turn_parent_ids[peer_turn_id] for peer_turn_id in peer_turn_ids
+        ]
+        assert registered_parent_ids == parent_vad_ids
+        assert llm.calls[0][2] == ""
+        assert '"first forced segment"' in llm.calls[1][2]
+
+        assert llm.release is not None
+        llm.release.set_result(None)
+        await asyncio.gather(*translation_tasks, return_exceptions=True)
+
+        translation_events = [event for event in sink.events if event.type == "translation_final"]
+        close_events = [event for event in sink.events if event.type == "utterance_closed"]
+        ui_events = [hub.ui_events.get_nowait() for _ in range(hub.ui_events.qsize())]
+        transcript_ui_events = [
+            event for event in ui_events if event.type == UIEventType.TRANSCRIPT_FINAL
+        ]
+        translation_done_events = [
+            event for event in ui_events if event.type == UIEventType.TRANSLATION_DONE
+        ]
+        osc_sent_events = [event for event in ui_events if event.type == UIEventType.OSC_SENT]
+
+        assert [event.utterance_id for event in translation_events] == peer_turn_ids
+        assert [event.source_text for event in translation_events] == [
+            "first forced segment",
+            "second forced segment",
+        ]
+        assert [event.logical_turn_key for event in translation_events] == [
+            f"peer:{peer_turn_id}" for peer_turn_id in peer_turn_ids
+        ]
+        assert [event.utterance_id for event in close_events] == peer_turn_ids
+        assert [event.utterance_id for event in transcript_ui_events] == peer_turn_ids
+        assert [event.payload.utterance_id for event in transcript_ui_events] == peer_turn_ids
+        assert [event.utterance_id for event in translation_done_events] == peer_turn_ids
+        assert [event.payload.utterance_id for event in translation_done_events] == peer_turn_ids
+        assert [event.utterance_id for event in osc_sent_events] == peer_turn_ids
+        assert [message.utterance_id for message in osc.messages] == peer_turn_ids
+
+        exposed_output_ids = {
+            event.utterance_id
+            for event in [*sink.events, *ui_events, *osc.messages]
+            if getattr(event, "utterance_id", None) is not None
+        }
+        assert exposed_output_ids == peer_turn_id_set
+        assert parent_vad_id_set.isdisjoint(hub.peer_runtime.utterances)
+        assert hub.peer_runtime.utterance_start_times == {}
+        assert hub.peer_runtime.speech_ended_ids == set()
+        assert hub._latency_timelines == {}
+        assert hub._peer_parent_turn_ids == {}
+        assert hub._peer_turn_parent_ids == {}
+        assert hub._peer_completed_turn_ids == set()
+        assert hub._peer_parent_speech_end_times == {}
+    finally:
+        await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_peer_partial_stt_event_remains_ignored_without_outputs_or_tasks() -> None:
+    parent_vad_id = uuid4()
+    sink = RecordingOverlaySink()
+    osc = RecordingOscQueue()
+    llm = RecordingSequencedTranslateLLMProvider(responses=["unused"], delay_s=0.0)
+    hub = ClientHub(
+        stt=None,
+        llm=llm,
+        osc=osc,
+        overlay_sink=sink,
+        peer_translation_enabled=True,
+    )
+
+    await hub._handle_stt_event(
+        STTPartialEvent(
+            utterance_id=parent_vad_id,
+            transcript=Transcript(
+                utterance_id=parent_vad_id,
+                text="partial peer speech",
+                is_final=False,
+                created_at=11.0,
+                channel="peer",
+            ),
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert sink.events == []
+    assert osc.messages == []
+    assert hub.peer_runtime.utterances == {}
+    assert hub.peer_runtime.translation_tasks == {}
+    assert hub.peer_runtime.utterance_start_times == {}
+    assert hub.peer_runtime.speech_ended_ids == set()
+    assert hub._peer_parent_turn_ids == {}
+    assert hub._peer_turn_parent_ids == {}
+    assert hub.ui_events.empty()
+    assert llm.calls == []
 
 
 @pytest.mark.asyncio
@@ -727,6 +1460,10 @@ async def test_peer_overlay_success_clears_latency_timeline() -> None:
     assert hub._latency_timelines == {}
     assert hub.peer_runtime.utterance_start_times == {}
     assert hub.peer_runtime.speech_ended_ids == set()
+    assert hub._peer_turn_parent_ids == {}
+    assert hub._peer_parent_turn_ids == {}
+    assert hub._peer_completed_turn_ids == set()
+    assert hub._peer_parent_speech_end_times == {}
 
 
 @pytest.mark.asyncio
@@ -757,6 +1494,11 @@ async def test_peer_overlay_translation_defers_bookkeeping_cleanup_until_chatbox
         )
         assert enqueue_utterance_id == peer_turn_id
         assert enqueue_utterance_id != utterance_id
+        assert hub._peer_turn_parent_ids[peer_turn_id] == utterance_id
+        assert hub._peer_parent_turn_ids == {utterance_id: {peer_turn_id}}
+        assert hub._peer_completed_turn_ids == set()
+        assert hub._peer_parent_speech_end_times == {utterance_id: 10.0}
+        assert ("peer", utterance_id) in hub._latency_timelines
         assert enqueue_utterance_id in hub.peer_runtime.utterance_start_times
         assert enqueue_utterance_id in hub.peer_runtime.speech_ended_ids
         saw_live_peer_state = True
@@ -779,12 +1521,20 @@ async def test_peer_overlay_translation_defers_bookkeeping_cleanup_until_chatbox
             ),
         )
     )
-    await asyncio.gather(*hub.peer_runtime.translation_tasks.values(), return_exceptions=True)
+    results = await asyncio.gather(
+        *hub.peer_runtime.translation_tasks.values(),
+        return_exceptions=True,
+    )
 
+    assert results == [None]
     assert saw_live_peer_state is True
     assert hub._latency_timelines == {}
     assert hub.peer_runtime.utterance_start_times == {}
     assert hub.peer_runtime.speech_ended_ids == set()
+    assert hub._peer_turn_parent_ids == {}
+    assert hub._peer_parent_turn_ids == {}
+    assert hub._peer_completed_turn_ids == set()
+    assert hub._peer_parent_speech_end_times == {}
 
 
 @pytest.mark.asyncio
@@ -1977,11 +2727,15 @@ async def test_hub_active_self_metadata_flows_through_presenter_accessor() -> No
         source_text_hash="0123456789abcdef",
         source_text_len=len("hello live"),
         logical_turn_key=logical_turn_key,
+        primary_language="ko",
+        secondary_language="en",
     )
     active_block = presenter.snapshot().blocks[0]
     assert active_block.id == f"self:{merge_id}"
     assert active_block.primary_text == "hello live"
     assert active_block.secondary_text == "translated live"
+    assert active_block.primary_language == "ko"
+    assert active_block.secondary_language == "en"
     assert active_block.occupant_key == f"self:{merge_id}"
     assert {
         "update_id": active_block.update_id,

@@ -13,6 +13,7 @@ from uuid import uuid4
 from puripuly_heart.config.paths import user_config_dir
 
 MAIN_LOG_FILENAME = "puripuly_heart.log"
+MAIN_LOG_BACKUP_FILENAME = "puripuly_heart.backup.log"
 _MAIN_STREAM_HANDLER_NAME = "puripuly_heart.main.stream"
 _MAIN_FILE_HANDLER_NAME = "puripuly_heart.main.file"
 _MAIN_FILE_QUEUE_HANDLER_NAME = "puripuly_heart.main.file.queue"
@@ -197,6 +198,13 @@ def default_main_log_file(*, log_dir: Path | None = None) -> Path:
     return resolved_log_dir / MAIN_LOG_FILENAME
 
 
+def _main_log_backup_namer(default_name: str) -> str:
+    backup_path = Path(default_name)
+    if backup_path.name == f"{MAIN_LOG_FILENAME}.1":
+        return str(backup_path.with_name(MAIN_LOG_BACKUP_FILENAME))
+    return default_name
+
+
 def configure_main_logging(
     *,
     root_logger: logging.Logger | None = None,
@@ -222,10 +230,11 @@ def configure_main_logging(
         else:
             file_handler = RotatingFileHandler(
                 log_file,
-                maxBytes=5 * 1024 * 1024,
-                backupCount=0,
+                maxBytes=10 * 1024 * 1024,
+                backupCount=1,
                 encoding="utf-8",
             )
+        file_handler.namer = _main_log_backup_namer
         file_handler.set_name(_MAIN_FILE_HANDLER_NAME)
         file_handler.setFormatter(_main_formatter())
         file_queue: queue.Queue[logging.LogRecord] = queue.Queue()
@@ -248,6 +257,7 @@ def configure_main_logging(
             _QUEUE_HANDLER_REFCOUNT_ATTR,
             int(getattr(file_queue_handler, _QUEUE_HANDLER_REFCOUNT_ATTR, 1)) + 1,
         )
+        file_handler.namer = _main_log_backup_namer
         file_handler.setFormatter(_main_formatter())
 
     target_logger.setLevel(logging.INFO)

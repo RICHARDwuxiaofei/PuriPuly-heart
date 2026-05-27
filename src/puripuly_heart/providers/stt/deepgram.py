@@ -400,9 +400,7 @@ class _DeepgramSDKSession(STTBackendSession):
             return
         self._summary_logged = True
         total_finals_seen = self._emitted_finals + self._empty_final_drops
-        empty_ratio = (
-            self._empty_final_drops / total_finals_seen if total_finals_seen > 0 else 0.0
-        )
+        empty_ratio = self._empty_final_drops / total_finals_seen if total_finals_seen > 0 else 0.0
         logger.info(
             "[STT][peer] Session summary: emitted_finals=%s empty_final_drops=%s total_finals_seen=%s empty_ratio=%.3f",
             self._emitted_finals,

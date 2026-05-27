@@ -3,7 +3,9 @@ from __future__ import annotations
 import copy
 import json
 import locale
+import math
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -32,13 +34,37 @@ from puripuly_heart.config.llm_profiles import (
 )
 from puripuly_heart.ui.overlay_calibration import OverlayCalibration
 
-SETTINGS_SCHEMA_VERSION = 23
+SETTINGS_SCHEMA_VERSION = 24
 STT_INTERNAL_SAMPLE_RATE_HZ = 16000
 DEFAULT_DESKTOP_AUDIO_VAD_HANGOVER_MS = 500
 MAX_CUSTOM_VOCAB_TERMS = 100
 DEFAULT_OPENROUTER_BROKER_BASE_URL = "https://puripuly-heart-broker.kapitalismho.workers.dev"
 REFERRAL_ID_LENGTH = 6
 REFERRAL_ID_ALPHABET = frozenset("23456789ABCDEFGHJKMNPQRSTUVWXYZ")
+OVERLAY_TARGET_STEAMVR = "steamvr"
+OVERLAY_TARGET_DESKTOP = "desktop"
+OVERLAY_TARGET_VALUES = frozenset({OVERLAY_TARGET_STEAMVR, OVERLAY_TARGET_DESKTOP})
+DESKTOP_FLET_MIN_WIDTH = 480
+DESKTOP_FLET_MIN_HEIGHT = 160
+DESKTOP_FLET_DEFAULT_TEXT_SCALE = 1.0
+DESKTOP_FLET_MIN_TEXT_SCALE = 0.75
+DESKTOP_FLET_MAX_TEXT_SCALE = 1.5
+DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA = 0.6
+DESKTOP_FLET_MIN_BACKGROUND_ALPHA = 0.0
+DESKTOP_FLET_MAX_BACKGROUND_ALPHA = 1.0
+DESKTOP_FLET_MIN_OUTLINE_WIDTH = 0.5
+DESKTOP_FLET_MAX_OUTLINE_WIDTH = 8.0
+DESKTOP_FLET_SIZE_PRESET_ORDER = ("xsmall", "small", "medium", "large", "xlarge")
+DESKTOP_FLET_DEFAULT_SIZE_PRESET = "medium"
+DESKTOP_FLET_SIZE_PRESETS: dict[str, tuple[int, int]] = {
+    "xsmall": (960, 240),
+    "small": (1152, 288),
+    "medium": (1344, 336),
+    "large": (1600, 400),
+    "xlarge": (1792, 448),
+}
+DESKTOP_FLET_DEFAULT_WIDTH = DESKTOP_FLET_SIZE_PRESETS[DESKTOP_FLET_DEFAULT_SIZE_PRESET][0]
+DESKTOP_FLET_DEFAULT_HEIGHT = DESKTOP_FLET_SIZE_PRESETS[DESKTOP_FLET_DEFAULT_SIZE_PRESET][1]
 DEFAULT_CUSTOM_VOCAB_TERMS: dict[str, tuple[str, ...]] = {
     "ko": ("아이리", "시나노"),
     "en": ("airi", "shinano"),
@@ -125,6 +151,7 @@ class QwenLLMModel(str, Enum):
 
 class DeepSeekLLMModel(str, Enum):
     DEEPSEEK_V4_FLASH = "deepseek-v4-flash"
+    DEEPSEEK_V4_PRO = "deepseek-v4-pro"
 
 
 class LocalLLMBackend(str, Enum):
@@ -173,6 +200,7 @@ class OpenRouterFallbackSelectionAlias(str, Enum):
 class TranslationModel(str, Enum):
     GEMMA4 = "gemma4"
     DEEPSEEK_V4_FLASH = "deepseek_v4_flash"
+    DEEPSEEK_V4_PRO = "deepseek_v4_pro"
     GEMINI_3_FLASH = "gemini3_flash"
     GEMINI_31_FLASH_LITE = "gemini31_flash_lite"
     QWEN_35_PLUS = "qwen35_plus"
@@ -225,6 +253,7 @@ TRANSLATION_CONNECTIONS_BY_MODEL: dict[TranslationModel, tuple[TranslationConnec
         TranslationConnection.OPENROUTER,
         TranslationConnection.OFFICIAL_BYOK,
     ),
+    TranslationModel.DEEPSEEK_V4_PRO: (TranslationConnection.OFFICIAL_BYOK,),
     TranslationModel.GEMINI_3_FLASH: (TranslationConnection.OFFICIAL_BYOK,),
     TranslationModel.GEMINI_31_FLASH_LITE: (TranslationConnection.OFFICIAL_BYOK,),
     TranslationModel.QWEN_35_PLUS: (TranslationConnection.OFFICIAL_BYOK,),
@@ -735,26 +764,151 @@ class UiSettings:
     integrated_context_enabled: bool = True
     integrated_context_bootstrapped: bool = False
     clipboard_auto_translate_enabled: bool = False
+    github_star_prompt_clicked: bool = False
+    github_star_prompt_last_shown_at: str | None = None
+    github_star_prompt_show_count: int = 0
+    github_star_prompt_translation_success_observed: bool = False
 
     def validate(self) -> None:
         if not self.locale:
             raise ValueError("locale must be non-empty")
         if not isinstance(self.clipboard_auto_translate_enabled, bool):
             raise ValueError("clipboard_auto_translate_enabled must be a bool")
+        if not isinstance(self.github_star_prompt_clicked, bool):
+            raise ValueError("github_star_prompt_clicked must be a bool")
+        self.github_star_prompt_last_shown_at = _parse_utc_iso8601_timestamp(
+            self.github_star_prompt_last_shown_at
+        )
+        self.github_star_prompt_show_count = _parse_non_negative_int(
+            self.github_star_prompt_show_count
+        )
+        if not isinstance(self.github_star_prompt_translation_success_observed, bool):
+            raise ValueError("github_star_prompt_translation_success_observed must be a bool")
+
+
+@dataclass(slots=True)
+class DesktopFletOverlayBounds:
+    x: int | float | None = None
+    y: int | float | None = None
+    width: int | float = DESKTOP_FLET_DEFAULT_WIDTH
+    height: int | float = DESKTOP_FLET_DEFAULT_HEIGHT
+
+    def validate(self) -> None:
+        self.x, self.y = _normalize_desktop_flet_bounds_position(self.x, self.y)
+        self.width = _normalize_desktop_flet_dimension(
+            self.width,
+            default=DESKTOP_FLET_DEFAULT_WIDTH,
+            minimum=DESKTOP_FLET_MIN_WIDTH,
+        )
+        self.height = _normalize_desktop_flet_dimension(
+            self.height,
+            default=DESKTOP_FLET_DEFAULT_HEIGHT,
+            minimum=DESKTOP_FLET_MIN_HEIGHT,
+        )
+
+
+@dataclass(slots=True)
+class DesktopFletOverlayPosition:
+    x: int | float | None = None
+    y: int | float | None = None
+
+    def validate(self) -> None:
+        self.x, self.y = _normalize_desktop_flet_position(self.x, self.y)
+
+
+@dataclass(slots=True, init=False)
+class DesktopFletOverlayVisualSettings:
+    background_alpha: float = DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA
+
+    def __init__(
+        self,
+        text_scale: object = None,
+        background_alpha: object = DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
+        outline_width: object = None,
+    ) -> None:
+        _ = (text_scale, outline_width)
+        self.background_alpha = background_alpha
+
+    def validate(self) -> None:
+        self.background_alpha = _normalize_desktop_flet_range(
+            self.background_alpha,
+            default=DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
+            minimum=DESKTOP_FLET_MIN_BACKGROUND_ALPHA,
+            maximum=DESKTOP_FLET_MAX_BACKGROUND_ALPHA,
+        )
+
+    @property
+    def text_scale(self) -> float:
+        return DESKTOP_FLET_DEFAULT_TEXT_SCALE
+
+    @text_scale.setter
+    def text_scale(self, _value: object) -> None:
+        return
+
+    @property
+    def outline_width(self) -> None:
+        return None
+
+    @outline_width.setter
+    def outline_width(self, _value: object) -> None:
+        return
+
+
+@dataclass(slots=True)
+class DesktopFletOverlaySettings:
+    size_preset: str = DESKTOP_FLET_DEFAULT_SIZE_PRESET
+    position: DesktopFletOverlayPosition = field(default_factory=DesktopFletOverlayPosition)
+    locked: bool = False
+    visual: DesktopFletOverlayVisualSettings = field(
+        default_factory=DesktopFletOverlayVisualSettings
+    )
+
+    def validate(self) -> None:
+        self.size_preset = _parse_desktop_flet_size_preset(self.size_preset)
+        if not isinstance(self.position, DesktopFletOverlayPosition):
+            self.position = DesktopFletOverlayPosition()
+        if not isinstance(self.locked, bool):
+            self.locked = False
+        if not isinstance(self.visual, DesktopFletOverlayVisualSettings):
+            self.visual = DesktopFletOverlayVisualSettings()
+        self.position.validate()
+        self.visual.validate()
+
+    @property
+    def bounds(self) -> DesktopFletOverlayBounds:
+        width, height = _desktop_flet_dimensions_for_preset(self.size_preset)
+        return DesktopFletOverlayBounds(
+            x=self.position.x,
+            y=self.position.y,
+            width=width,
+            height=height,
+        )
+
+    @bounds.setter
+    def bounds(self, value: object) -> None:
+        bounds = _parse_desktop_flet_bounds(value)
+        self.size_preset = _nearest_desktop_flet_size_preset(bounds.width, bounds.height)
+        self.position = DesktopFletOverlayPosition(x=bounds.x, y=bounds.y)
 
 
 @dataclass(slots=True)
 class OverlaySettings:
+    target: str = OVERLAY_TARGET_STEAMVR
     show_translation: bool = True
     show_peer_original: bool = True
     calibration: OverlayCalibration = field(default_factory=OverlayCalibration)
+    desktop_flet: DesktopFletOverlaySettings = field(default_factory=DesktopFletOverlaySettings)
 
     def validate(self) -> None:
+        self.target = _parse_overlay_target(self.target)
         if not isinstance(self.show_translation, bool):
             raise ValueError("overlay show_translation must be a bool")
         if not isinstance(self.show_peer_original, bool):
             raise ValueError("overlay show_peer_original must be a bool")
         self.calibration.validate()
+        if not isinstance(self.desktop_flet, DesktopFletOverlaySettings):
+            self.desktop_flet = DesktopFletOverlaySettings()
+        self.desktop_flet.validate()
 
 
 @dataclass(slots=True)
@@ -898,6 +1052,248 @@ def _enum_to_value(obj: object) -> object:
     return obj
 
 
+def _parse_overlay_target(value: object) -> str:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized in OVERLAY_TARGET_VALUES:
+            return normalized
+    return OVERLAY_TARGET_STEAMVR
+
+
+def _finite_non_bool_number(value: object) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number):
+        return None
+    return value
+
+
+def _clamp_float(value: float, *, minimum: float, maximum: float) -> float:
+    return min(max(value, minimum), maximum)
+
+
+def _normalize_desktop_flet_bounds_position(
+    x_value: object,
+    y_value: object,
+) -> tuple[int | float | None, int | float | None]:
+    return _normalize_desktop_flet_position(x_value, y_value)
+
+
+def _normalize_desktop_flet_position(
+    x_value: object,
+    y_value: object,
+) -> tuple[int | float | None, int | float | None]:
+    x = _finite_non_bool_number(x_value)
+    y = _finite_non_bool_number(y_value)
+    if x is None or y is None:
+        return None, None
+    return x, y
+
+
+def _normalize_desktop_flet_dimension(
+    value: object,
+    *,
+    default: int,
+    minimum: int,
+) -> int | float:
+    number = _finite_non_bool_number(value)
+    if number is None:
+        return default
+    return max(number, minimum)
+
+
+def _normalize_desktop_flet_range(
+    value: object,
+    *,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    number = _finite_non_bool_number(value)
+    if number is None:
+        return default
+    return _clamp_float(number, minimum=minimum, maximum=maximum)
+
+
+def _parse_desktop_flet_size_preset(value: object) -> str:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized in DESKTOP_FLET_SIZE_PRESET_ORDER:
+            return normalized
+    return DESKTOP_FLET_DEFAULT_SIZE_PRESET
+
+
+def _desktop_flet_dimensions_for_preset(preset: object) -> tuple[int, int]:
+    return DESKTOP_FLET_SIZE_PRESETS[_parse_desktop_flet_size_preset(preset)]
+
+
+def _valid_desktop_flet_legacy_dimension(value: object) -> int | float | None:
+    number = _finite_non_bool_number(value)
+    if number is None or number <= 0:
+        return None
+    return number
+
+
+def _nearest_desktop_flet_size_preset(width_value: object, height_value: object) -> str:
+    width = _valid_desktop_flet_legacy_dimension(width_value)
+    height = _valid_desktop_flet_legacy_dimension(height_value)
+    if width is None or height is None:
+        return DESKTOP_FLET_DEFAULT_SIZE_PRESET
+
+    scores: list[tuple[str, float]] = []
+    for preset in DESKTOP_FLET_SIZE_PRESET_ORDER:
+        preset_width, preset_height = DESKTOP_FLET_SIZE_PRESETS[preset]
+        score = (
+            abs(width - preset_width) / preset_width + abs(height - preset_height) / preset_height
+        )
+        scores.append((preset, score))
+
+    lowest_score = min(score for _preset, score in scores)
+    tied = [
+        preset
+        for preset, score in scores
+        if math.isclose(score, lowest_score, rel_tol=0.0, abs_tol=1e-12)
+    ]
+    if DESKTOP_FLET_DEFAULT_SIZE_PRESET in tied:
+        return DESKTOP_FLET_DEFAULT_SIZE_PRESET
+    return tied[0]
+
+
+def _normalize_desktop_flet_outline_width(value: object) -> float | None:
+    if value is None:
+        return None
+    number = _finite_non_bool_number(value)
+    if number is None or number <= 0:
+        return None
+    return _clamp_float(
+        number,
+        minimum=DESKTOP_FLET_MIN_OUTLINE_WIDTH,
+        maximum=DESKTOP_FLET_MAX_OUTLINE_WIDTH,
+    )
+
+
+def _parse_desktop_flet_bounds(value: object) -> DesktopFletOverlayBounds:
+    if isinstance(value, DesktopFletOverlayBounds):
+        bounds = copy.deepcopy(value)
+        bounds.validate()
+        return bounds
+    data = value if isinstance(value, dict) else {}
+    x, y = _normalize_desktop_flet_bounds_position(data.get("x"), data.get("y"))
+    return DesktopFletOverlayBounds(
+        x=x,
+        y=y,
+        width=_normalize_desktop_flet_dimension(
+            data.get("width"),
+            default=DESKTOP_FLET_DEFAULT_WIDTH,
+            minimum=DESKTOP_FLET_MIN_WIDTH,
+        ),
+        height=_normalize_desktop_flet_dimension(
+            data.get("height"),
+            default=DESKTOP_FLET_DEFAULT_HEIGHT,
+            minimum=DESKTOP_FLET_MIN_HEIGHT,
+        ),
+    )
+
+
+def _parse_desktop_flet_position(value: object) -> DesktopFletOverlayPosition:
+    if isinstance(value, DesktopFletOverlayPosition):
+        position = copy.deepcopy(value)
+        position.validate()
+        return position
+    data: dict[str, object]
+    if isinstance(value, DesktopFletOverlayBounds):
+        data = {"x": value.x, "y": value.y}
+    else:
+        data = value if isinstance(value, dict) else {}
+    x, y = _normalize_desktop_flet_position(data.get("x"), data.get("y"))
+    return DesktopFletOverlayPosition(x=x, y=y)
+
+
+def _parse_desktop_flet_visual(value: object) -> DesktopFletOverlayVisualSettings:
+    if isinstance(value, DesktopFletOverlayVisualSettings):
+        visual = copy.deepcopy(value)
+        visual.validate()
+        return visual
+    data = value if isinstance(value, dict) else {}
+    return DesktopFletOverlayVisualSettings(
+        background_alpha=_normalize_desktop_flet_range(
+            data.get("background_alpha"),
+            default=DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
+            minimum=DESKTOP_FLET_MIN_BACKGROUND_ALPHA,
+            maximum=DESKTOP_FLET_MAX_BACKGROUND_ALPHA,
+        ),
+    )
+
+
+def _parse_desktop_flet_settings(value: object) -> DesktopFletOverlaySettings:
+    if isinstance(value, DesktopFletOverlaySettings):
+        settings = copy.deepcopy(value)
+        settings.validate()
+        return settings
+    data = value if isinstance(value, dict) else {}
+    bounds_data = data.get("bounds") if isinstance(data.get("bounds"), dict) else {}
+    size_preset = (
+        _parse_desktop_flet_size_preset(data.get("size_preset"))
+        if "size_preset" in data
+        else _nearest_desktop_flet_size_preset(
+            bounds_data.get("width"),
+            bounds_data.get("height"),
+        )
+    )
+    position = (
+        _parse_desktop_flet_position(data.get("position"))
+        if "position" in data
+        else _parse_desktop_flet_position(bounds_data)
+    )
+    return DesktopFletOverlaySettings(
+        size_preset=size_preset,
+        position=position,
+        locked=False,
+        visual=_parse_desktop_flet_visual(data.get("visual")),
+    )
+
+
+def _desktop_flet_bounds_to_dict(
+    bounds: DesktopFletOverlayBounds,
+) -> dict[str, int | float | None]:
+    if not isinstance(bounds, DesktopFletOverlayBounds):
+        bounds = DesktopFletOverlayBounds()
+    bounds = copy.deepcopy(bounds)
+    bounds.validate()
+    return {
+        "x": bounds.x,
+        "y": bounds.y,
+        "width": bounds.width,
+        "height": bounds.height,
+    }
+
+
+def _desktop_flet_visual_to_dict(
+    visual: DesktopFletOverlayVisualSettings,
+) -> dict[str, float]:
+    if not isinstance(visual, DesktopFletOverlayVisualSettings):
+        visual = DesktopFletOverlayVisualSettings()
+    visual = copy.deepcopy(visual)
+    visual.validate()
+    return {"background_alpha": visual.background_alpha}
+
+
+def _desktop_flet_settings_to_dict(settings: DesktopFletOverlaySettings) -> dict[str, object]:
+    if not isinstance(settings, DesktopFletOverlaySettings):
+        settings = DesktopFletOverlaySettings()
+    settings = copy.deepcopy(settings)
+    settings.validate()
+    return {
+        "size_preset": settings.size_preset,
+        "position": {"x": settings.position.x, "y": settings.position.y},
+        "visual": _desktop_flet_visual_to_dict(settings.visual),
+    }
+
+
 def to_dict(settings: AppSettings) -> dict[str, Any]:
     settings = copy.deepcopy(settings)
     if _translation_settings_is_exact_default(settings.translation):
@@ -953,9 +1349,11 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "vad_pre_roll_ms": settings.desktop_audio.vad_pre_roll_ms,
         },
         "overlay": {
+            "target": _parse_overlay_target(settings.overlay.target),
             "show_translation": settings.overlay.show_translation,
             "show_peer_original": settings.overlay.show_peer_original,
             "calibration": settings.overlay.calibration.to_dict(),
+            "desktop_flet": _desktop_flet_settings_to_dict(settings.overlay.desktop_flet),
         },
         "stt": {
             "drain_timeout_s": settings.stt.drain_timeout_s,
@@ -1026,6 +1424,16 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             "integrated_context_enabled": settings.ui.integrated_context_enabled,
             "integrated_context_bootstrapped": settings.ui.integrated_context_bootstrapped,
             "clipboard_auto_translate_enabled": settings.ui.clipboard_auto_translate_enabled,
+            "github_star_prompt_clicked": settings.ui.github_star_prompt_clicked,
+            "github_star_prompt_last_shown_at": _parse_utc_iso8601_timestamp(
+                settings.ui.github_star_prompt_last_shown_at
+            ),
+            "github_star_prompt_show_count": _parse_non_negative_int(
+                settings.ui.github_star_prompt_show_count
+            ),
+            "github_star_prompt_translation_success_observed": (
+                settings.ui.github_star_prompt_translation_success_observed
+            ),
         },
         "api_key_verified": {
             "deepgram": settings.api_key_verified.deepgram,
@@ -1452,6 +1860,7 @@ def _derive_translation_settings_from_runtime_values(
     openrouter_provider_routing: OpenRouterProviderRouting,
     gemini_model: GeminiLLMModel,
     qwen_model: QwenLLMModel,
+    deepseek_model: DeepSeekLLMModel,
     history: object = None,
 ) -> TranslationSettings:
     normalized_history = _parse_translation_connection_history(history)
@@ -1495,6 +1904,12 @@ def _derive_translation_settings_from_runtime_values(
         )
 
     if provider_llm == LLMProviderName.DEEPSEEK:
+        if deepseek_model == DeepSeekLLMModel.DEEPSEEK_V4_PRO:
+            return _normalize_translation_settings(
+                model=TranslationModel.DEEPSEEK_V4_PRO,
+                connection=TranslationConnection.OFFICIAL_BYOK,
+                history=normalized_history,
+            )
         return _normalize_translation_settings(
             model=TranslationModel.DEEPSEEK_V4_FLASH,
             connection=TranslationConnection.OFFICIAL_BYOK,
@@ -1541,6 +1956,7 @@ def _derive_translation_settings_from_runtime(
         openrouter_provider_routing=settings.openrouter.provider_routing,
         gemini_model=settings.gemini.llm_model,
         qwen_model=settings.qwen.llm_model,
+        deepseek_model=settings.deepseek.llm_model,
         history=history,
     )
 
@@ -1591,6 +2007,12 @@ def materialize_translation_settings(settings: AppSettings) -> AppSettings:
             settings.openrouter.llm_model,
             settings.openrouter.selected_source,
         )
+        return settings
+
+    if model == TranslationModel.DEEPSEEK_V4_PRO:
+        settings.openrouter.provider_routing = OpenRouterProviderRouting.DEFAULT
+        settings.provider.llm = LLMProviderName.DEEPSEEK
+        settings.deepseek.llm_model = DeepSeekLLMModel.DEEPSEEK_V4_PRO
         return settings
 
     if model == TranslationModel.GEMINI_3_FLASH:
@@ -1719,6 +2141,20 @@ def _apply_materialized_translation_to_data(
         )
         changed |= _set_mapping_value(openrouter_data, "selected_source", selected_source.value)
         changed |= _set_mapping_value(openrouter_data, "selection_alias", selection_alias.value)
+        return changed
+
+    if translation.model == TranslationModel.DEEPSEEK_V4_PRO:
+        changed |= _set_mapping_value(
+            openrouter_data,
+            "provider_routing",
+            OpenRouterProviderRouting.DEFAULT.value,
+        )
+        changed |= _set_mapping_value(provider_data, "llm", LLMProviderName.DEEPSEEK.value)
+        changed |= _set_mapping_value(
+            deepseek_data,
+            "llm_model",
+            DeepSeekLLMModel.DEEPSEEK_V4_PRO.value,
+        )
         return changed
 
     if translation.model == TranslationModel.GEMINI_3_FLASH:
@@ -1892,6 +2328,38 @@ def _parse_optional_str(value: object) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _parse_bool(value: object, fallback: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    return fallback
+
+
+def _parse_non_negative_int(value: object, fallback: int = 0) -> int:
+    if type(value) is not int:
+        return fallback
+    if value < 0:
+        return fallback
+    return value
+
+
+def _parse_utc_iso8601_timestamp(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    parse_value = f"{normalized[:-1]}+00:00" if normalized.endswith("Z") else normalized
+    try:
+        parsed = datetime.fromisoformat(parse_value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        return None
+    return normalized
 
 
 def _parse_optional_float(value: object) -> float | None:
@@ -2284,6 +2752,10 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
         version = 23
 
+    if version < 24:
+        changed = True
+        version = 24
+
     if _normalize_local_llm_data(data):
         changed = True
 
@@ -2501,6 +2973,7 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             ),
             gemini_model=_parse_gemini_llm_model(gemini_data.get("llm_model")),
             qwen_model=_parse_qwen_llm_model(qwen_data.get("llm_model")),
+            deepseek_model=_parse_deepseek_llm_model(deepseek_data.get("llm_model")),
             history=translation_history,
         )
     normalized_translation_data = _translation_settings_to_dict(normalized_translation_settings)
@@ -2540,6 +3013,18 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         overlay_data["calibration"] = normalized_overlay_calibration
         changed = True
 
+    normalized_overlay_target = _parse_overlay_target(overlay_data.get("target"))
+    if overlay_data.get("target") != normalized_overlay_target:
+        overlay_data["target"] = normalized_overlay_target
+        changed = True
+
+    normalized_desktop_flet = _desktop_flet_settings_to_dict(
+        _parse_desktop_flet_settings(overlay_data.get("desktop_flet"))
+    )
+    if overlay_data.get("desktop_flet") != normalized_desktop_flet:
+        overlay_data["desktop_flet"] = normalized_desktop_flet
+        changed = True
+
     ui_data = data.get("ui")
     if not isinstance(ui_data, dict):
         ui_data = {}
@@ -2574,6 +3059,55 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 
     if "peer_translation_enabled" in ui_data:
         del ui_data["peer_translation_enabled"]
+        changed = True
+
+    raw_github_star_prompt_clicked = ui_data.get("github_star_prompt_clicked")
+    normalized_github_star_prompt_clicked = _parse_bool(raw_github_star_prompt_clicked)
+    if (
+        "github_star_prompt_clicked" not in ui_data
+        or raw_github_star_prompt_clicked != normalized_github_star_prompt_clicked
+    ):
+        ui_data["github_star_prompt_clicked"] = normalized_github_star_prompt_clicked
+        changed = True
+
+    raw_github_star_prompt_last_shown_at = ui_data.get("github_star_prompt_last_shown_at")
+    normalized_github_star_prompt_last_shown_at = _parse_utc_iso8601_timestamp(
+        raw_github_star_prompt_last_shown_at
+    )
+    if (
+        "github_star_prompt_last_shown_at" not in ui_data
+        or raw_github_star_prompt_last_shown_at != normalized_github_star_prompt_last_shown_at
+    ):
+        ui_data["github_star_prompt_last_shown_at"] = normalized_github_star_prompt_last_shown_at
+        changed = True
+
+    raw_github_star_prompt_show_count = ui_data.get("github_star_prompt_show_count")
+    normalized_github_star_prompt_show_count = _parse_non_negative_int(
+        raw_github_star_prompt_show_count
+    )
+    if (
+        "github_star_prompt_show_count" not in ui_data
+        or raw_github_star_prompt_show_count != normalized_github_star_prompt_show_count
+        or type(raw_github_star_prompt_show_count)
+        is not type(normalized_github_star_prompt_show_count)
+    ):
+        ui_data["github_star_prompt_show_count"] = normalized_github_star_prompt_show_count
+        changed = True
+
+    raw_github_star_prompt_translation_success_observed = ui_data.get(
+        "github_star_prompt_translation_success_observed"
+    )
+    normalized_github_star_prompt_translation_success_observed = _parse_bool(
+        raw_github_star_prompt_translation_success_observed
+    )
+    if (
+        "github_star_prompt_translation_success_observed" not in ui_data
+        or raw_github_star_prompt_translation_success_observed
+        != normalized_github_star_prompt_translation_success_observed
+    ):
+        ui_data["github_star_prompt_translation_success_observed"] = (
+            normalized_github_star_prompt_translation_success_observed
+        )
         changed = True
 
     if "overlay_calibration" in data:
@@ -2796,6 +3330,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             vad_pre_roll_ms=int(desktop_audio_data.get("vad_pre_roll_ms", 500)),
         ),
         overlay=OverlaySettings(
+            target=_parse_overlay_target(overlay_data.get("target")),
             show_translation=bool(
                 overlay_data.get("show_translation", ui_data.get("show_overlay_translation", True))
             ),
@@ -2842,6 +3377,7 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
                     )
                 ),
             ),
+            desktop_flet=_parse_desktop_flet_settings(overlay_data.get("desktop_flet")),
         ),
         stt=STTSettings(
             drain_timeout_s=float(stt_data.get("drain_timeout_s", 2.0)),
@@ -2955,6 +3491,16 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             ),
             clipboard_auto_translate_enabled=bool(
                 ui_data.get("clipboard_auto_translate_enabled", False)
+            ),
+            github_star_prompt_clicked=_parse_bool(ui_data.get("github_star_prompt_clicked")),
+            github_star_prompt_last_shown_at=_parse_utc_iso8601_timestamp(
+                ui_data.get("github_star_prompt_last_shown_at")
+            ),
+            github_star_prompt_show_count=_parse_non_negative_int(
+                ui_data.get("github_star_prompt_show_count")
+            ),
+            github_star_prompt_translation_success_observed=_parse_bool(
+                ui_data.get("github_star_prompt_translation_success_observed")
             ),
         ),
         api_key_verified=ApiKeyVerificationSettings(
