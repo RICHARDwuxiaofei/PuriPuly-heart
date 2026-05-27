@@ -60,6 +60,8 @@ def _block(
     primary_text: str,
     secondary_text: str = "",
     secondary_enabled: bool = False,
+    primary_language: str | None = None,
+    secondary_language: str | None = None,
 ) -> OverlayPresentationBlock:
     return OverlayPresentationBlock(
         id=block_id,
@@ -70,6 +72,8 @@ def _block(
         primary_text=primary_text,
         secondary_text=secondary_text,
         secondary_enabled=secondary_enabled,
+        primary_language=primary_language,
+        secondary_language=secondary_language,
     )
 
 
@@ -994,10 +998,108 @@ def test_desktop_overlay_caption_rendering_preserves_cjk_emoji_and_minimum_secon
     ]
     assert plan.primary_font_size == 35
     assert plan.secondary_font_size == 21
-    assert {line.font_family for line in plan.lines} == {"Noto Sans CJK KR"}
+    assert {line.font_family for line in plan.lines} == {"Noto Sans CJK JP"}
 
 
-def test_desktop_overlay_caption_font_policy_matches_vr_primary_faces_without_packaged_fonts() -> (
+@pytest.mark.parametrize(
+    (
+        "block",
+        "line_text",
+        "expected_family",
+        "expected_weight",
+        "expected_flet_weight",
+    ),
+    [
+        pytest.param(
+            _block(
+                "explicit-ja-latin-primary",
+                channel="self",
+                block_variant="finalized",
+                appearance_seq=1,
+                primary_text="Arigato for the live captions",
+                primary_language="ja-JP",
+            ),
+            "Arigato for the live captions",
+            "Noto Sans CJK JP",
+            "medium",
+            ft.FontWeight.W_500,
+            id="explicit-primary-ja-latin-text",
+        ),
+        pytest.param(
+            _block(
+                "heuristic-cjk-primary",
+                channel="peer",
+                block_variant="finalized",
+                appearance_seq=1,
+                primary_text="오늘도 captions are readable",
+            ),
+            "오늘도 captions are readable",
+            "Noto Sans CJK JP",
+            "medium",
+            ft.FontWeight.W_500,
+            id="heuristic-cjk-text-without-language",
+        ),
+        pytest.param(
+            _block(
+                "general-english-primary",
+                channel="self",
+                block_variant="finalized",
+                appearance_seq=1,
+                primary_text="Live captions stay readable tonight",
+                primary_language="en-US",
+            ),
+            "Live captions stay readable tonight",
+            "Noto Sans",
+            "semibold",
+            ft.FontWeight.W_600,
+            id="general-english-text",
+        ),
+        pytest.param(
+            _block(
+                "explicit-ja-secondary",
+                channel="peer",
+                block_variant="finalized",
+                appearance_seq=1,
+                primary_text="Translated result",
+                secondary_text="Original text in romaji",
+                secondary_enabled=True,
+                primary_language="en-US",
+                secondary_language="jpn",
+            ),
+            "Original text in romaji",
+            "Noto Sans CJK JP",
+            "medium",
+            ft.FontWeight.W_500,
+            id="explicit-secondary-ja-latin-text",
+        ),
+    ],
+)
+def test_desktop_overlay_caption_font_policy_uses_language_metadata_for_jp_unified_cjk(
+    block: OverlayPresentationBlock,
+    line_text: str,
+    expected_family: str,
+    expected_weight: str,
+    expected_flet_weight: object,
+) -> None:
+    plan = desktop_overlay.build_desktop_caption_plan(
+        OverlayPresentationSnapshot(blocks=[block]),
+        locale="en",
+    )
+
+    line_by_text = {line.text: line for line in plan.lines}
+    line = line_by_text[line_text]
+    assert line.font_family == expected_family
+    assert line.weight == expected_weight
+
+    surface = desktop_overlay.build_desktop_caption_surface(plan)
+    text_control = _caption_text_control(surface, line_text)
+    assert text_control.font_family == expected_family
+    assert text_control.style.font_family == expected_family
+    assert text_control.weight == expected_flet_weight
+    assert text_control.style.weight == expected_flet_weight
+
+
+def test_desktop_overlay_caption_font_policy_uses_latin_and_jp_unified_cjk_faces_without_packaged_fonts() -> (
     None
 ):
     snapshot = OverlayPresentationSnapshot(
@@ -1023,11 +1125,11 @@ def test_desktop_overlay_caption_font_policy_matches_vr_primary_faces_without_pa
 
     assert [(line.text, line.font_family) for line in plan.lines] == [
         ("Live captions stay readable tonight", "Noto Sans"),
-        ("오늘도 captions are readable", "Noto Sans CJK KR"),
+        ("오늘도 captions are readable", "Noto Sans CJK JP"),
     ]
 
 
-def test_desktop_overlay_caption_weight_uses_vr_semibold_default() -> None:
+def test_desktop_overlay_caption_weight_uses_semibold_for_general_text() -> None:
     plan = desktop_overlay.build_desktop_caption_plan(
         OverlayPresentationSnapshot(
             blocks=[
@@ -1214,6 +1316,13 @@ def _walk_control_tree(control: object) -> list[object]:
         for child in children:
             seen.extend(_walk_control_tree(child))
     return seen
+
+
+def _caption_text_control(control: object, text: str) -> ft.Text:
+    for item in _walk_control_tree(control):
+        if isinstance(item, ft.Text) and item.value == text:
+            return item
+    raise AssertionError(f"caption text control not found: {text}")
 
 
 def _page_text_values(page: FakeFletPage) -> set[str]:

@@ -83,7 +83,10 @@ _REQUIRED_MANIFEST_INT_FIELDS = {"contract_version", "parent_pid", "startup_dead
 _DESKTOP_CAPTION_WHITE = "#FFFFFF"
 _DESKTOP_CAPTION_GOLD = "#FFD700"
 _DESKTOP_CAPTION_LATIN_FONT_FAMILY = "Noto Sans"
-_DESKTOP_CAPTION_CJK_FONT_FAMILY = "Noto Sans CJK KR"
+_DESKTOP_CAPTION_CJK_FONT_FAMILY = "Noto Sans CJK JP"
+_DESKTOP_CAPTION_CJK_LANGUAGE_PRIMARY_SUBTAGS = frozenset(
+    {"ko", "kor", "ja", "jpn", "zh", "zho", "chi", "cmn", "yue"}
+)
 _DESKTOP_CAPTION_BACKGROUND_RGB = "000000"
 _DESKTOP_CAPTION_TRANSPARENT = "transparent"
 _DESKTOP_CAPTION_MAX_VISIBLE_SLOTS = 2
@@ -1093,6 +1096,7 @@ def _self_active_lines(
                 priority=100,
                 max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
                 font_size=primary_font_size,
+                language=block.primary_language,
                 active=True,
             )
         )
@@ -1106,6 +1110,7 @@ def _self_active_lines(
                 priority=85,
                 max_lines=_DESKTOP_CAPTION_SECONDARY_MAX_LINES,
                 font_size=secondary_font_size,
+                language=block.secondary_language,
                 active=True,
             )
         )
@@ -1133,6 +1138,7 @@ def _peer_active_lines(
             priority=95,
             max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
             font_size=primary_font_size if promoted else secondary_font_size,
+            language=block.secondary_language if promoted else block.primary_language,
             promoted=promoted,
             active=True,
         ),
@@ -1158,6 +1164,7 @@ def _peer_finalized_lines(
                 priority=90,
                 max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
                 font_size=primary_font_size,
+                language=block.primary_language,
             )
         )
         if secondary_text and block.secondary_enabled:
@@ -1170,6 +1177,7 @@ def _peer_finalized_lines(
                     priority=70,
                     max_lines=_DESKTOP_CAPTION_SECONDARY_MAX_LINES,
                     font_size=secondary_font_size,
+                    language=block.secondary_language,
                 )
             )
         return tuple(lines)
@@ -1183,6 +1191,7 @@ def _peer_finalized_lines(
                 priority=60,
                 max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
                 font_size=primary_font_size,
+                language=block.secondary_language,
                 promoted=True,
             ),
         )
@@ -1208,6 +1217,7 @@ def _self_finalized_lines(
                 priority=65,
                 max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
                 font_size=primary_font_size,
+                language=block.primary_language,
             )
         )
         if secondary_text and block.secondary_enabled:
@@ -1220,6 +1230,7 @@ def _self_finalized_lines(
                     priority=50,
                     max_lines=_DESKTOP_CAPTION_SECONDARY_MAX_LINES,
                     font_size=secondary_font_size,
+                    language=block.secondary_language,
                 )
             )
         return tuple(lines)
@@ -1233,6 +1244,7 @@ def _self_finalized_lines(
                 priority=55,
                 max_lines=_DESKTOP_CAPTION_PRIMARY_MAX_LINES,
                 font_size=primary_font_size,
+                language=block.secondary_language,
                 promoted=True,
             ),
         )
@@ -1248,9 +1260,11 @@ def _caption_line(
     priority: int,
     max_lines: int,
     font_size: int,
+    language: str | None = None,
     promoted: bool = False,
     active: bool = False,
 ) -> DesktopCaptionLine:
+    uses_cjk_font_policy = _desktop_caption_uses_cjk_font_policy(text, language)
     return DesktopCaptionLine(
         text=text,
         role=role,
@@ -1263,7 +1277,12 @@ def _caption_line(
         appearance_seq=block.appearance_seq,
         max_lines=max_lines,
         font_size=font_size,
-        font_family=_desktop_caption_font_family_for_text(text),
+        font_family=(
+            _DESKTOP_CAPTION_CJK_FONT_FAMILY
+            if uses_cjk_font_policy
+            else _DESKTOP_CAPTION_LATIN_FONT_FAMILY
+        ),
+        weight="medium" if uses_cjk_font_policy else "semibold",
         promoted=promoted,
         active=active,
     )
@@ -1372,10 +1391,28 @@ def _desktop_caption_char_is_cjk(char: str) -> bool:
     return _is_caption_cjk_or_hangul(ord(char))
 
 
-def _desktop_caption_font_family_for_text(text: str) -> str:
-    if _desktop_caption_text_contains_cjk(text):
+def _desktop_caption_font_family_for_text(text: str, language: str | None = None) -> str:
+    if _desktop_caption_uses_cjk_font_policy(text, language):
         return _DESKTOP_CAPTION_CJK_FONT_FAMILY
     return _DESKTOP_CAPTION_LATIN_FONT_FAMILY
+
+
+def _desktop_caption_uses_cjk_font_policy(text: str, language: str | None = None) -> bool:
+    return _desktop_caption_language_is_cjk(language) or _desktop_caption_text_contains_cjk(text)
+
+
+def _desktop_caption_language_is_cjk(language: str | None) -> bool:
+    primary_subtag = _desktop_caption_language_primary_subtag(language)
+    return primary_subtag in _DESKTOP_CAPTION_CJK_LANGUAGE_PRIMARY_SUBTAGS
+
+
+def _desktop_caption_language_primary_subtag(language: str | None) -> str | None:
+    if language is None:
+        return None
+    normalized = language.strip().replace("_", "-").lower()
+    if not normalized:
+        return None
+    return next((part for part in normalized.split("-") if part), None)
 
 
 def _desktop_caption_text_contains_cjk(text: str) -> bool:
