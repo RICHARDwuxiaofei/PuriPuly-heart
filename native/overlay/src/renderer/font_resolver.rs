@@ -448,7 +448,11 @@ impl FontResolver {
 }
 
 pub fn bundled_font_path_from_exe_dir(exe_dir: &Path) -> PathBuf {
-    exe_dir.join("fonts").join(BUNDLED_NOTO_CJK_FILE_NAME)
+    exe_dir
+        .join("puripuly_heart")
+        .join("data")
+        .join("fonts")
+        .join(BUNDLED_NOTO_CJK_FILE_NAME)
 }
 
 pub fn runtime_bundled_font_path() -> Result<PathBuf, std::io::Error> {

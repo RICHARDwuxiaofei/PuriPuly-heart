@@ -365,10 +365,12 @@ fn renderer_general_font_resolver_preserves_explicit_locale_and_defaults_en_us()
 }
 
 #[test]
-fn renderer_runtime_bundled_font_path_uses_exe_fonts_directory() {
+fn renderer_runtime_bundled_font_path_uses_packaged_app_data_fonts_directory() {
     assert_eq!(
         bundled_font_path_from_exe_dir(Path::new("C:/PuriPulyHeart")),
         PathBuf::from("C:/PuriPulyHeart")
+            .join("puripuly_heart")
+            .join("data")
             .join("fonts")
             .join("NotoSansCJK-Medium.ttc")
     );
@@ -380,8 +382,10 @@ fn renderer_windows_loads_committed_ttc_as_bundled_collection() {
     let font_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join("third_party")
-        .join("noto-sans-cjk")
+        .join("src")
+        .join("puripuly_heart")
+        .join("data")
+        .join("fonts")
         .join("NotoSansCJK-Medium.ttc");
 
     assert!(font_path.exists(), "expected source TTC at {font_path:?}");
