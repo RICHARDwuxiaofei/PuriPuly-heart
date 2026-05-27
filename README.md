@@ -92,19 +92,19 @@ So I built one that can.
 
 | LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
 |---|---|---|---|---|
-| **Gemma 4 26B A4B** | 8,350 | 2,530 | 3,130 | 1,120 |
+| **Gemma 4 26B A4B** | 14,380 | 2,920 | 3,710 | 1,180 |
 | **DeepSeek V4 Flash** | 10,420 | 2,710 | 3,380 | 1,150 |
 | **DeepSeek V4 Pro** | 3,380 | 1,760 | 2,020 | 930 |
-| **Gemini 3 Flash** | 1,630 | 1,130 | 1,230 | 720 |
-| **Gemini 3.1 Flash-Lite** | 3,260 | 1,720 | 1,970 | 930 |
-| **Qwen 3.5 Plus** | 7,090 | 2,400 | — | — |
+| **Gemini 3 Flash** | 1,710 | 1,170 | 1,280 | 740 |
+| **Gemini 3.1 Flash-Lite** | 3,430 | 1,770 | 2,030 | 940 |
+| **Qwen 3.5 Plus** | 7,460 | 2,460 | — | — |
 | **Local LLMs** | Unlimited | 3,660 | 5,000 | 1,290 |
 
 ### Cost per Utterance
 
 | LLM \ ASR | Qwen ASR (Local) | Qwen ASR (Cloud) | Soniox | Deepgram |
 |---|---|---|---|---|
-| **Gemma 4 26B A4B** | ~$0.0001 | ~$0.0004 | ~$0.0003 | ~$0.0009 |
+| **Gemma 4 26B A4B** | ~$0.0001 | ~$0.0003 | ~$0.0003 | ~$0.0008 |
 | **DeepSeek V4 Flash** | ~$0.0001 | ~$0.0004 | ~$0.0003 | ~$0.0009 |
 | **DeepSeek V4 Pro** | ~$0.0003 | ~$0.0006 | ~$0.0005 | ~$0.0011 |
 | **Gemini 3 Flash** | ~$0.0006 | ~$0.0009 | ~$0.0008 | ~$0.0014 |
