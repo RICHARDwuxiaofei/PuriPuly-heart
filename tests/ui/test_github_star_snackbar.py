@@ -111,7 +111,10 @@ def _utc_z(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _eligible_app(page: DummyPage | None = None) -> tuple[TranslatorApp, DummyPage, GuiController]:
+def _eligible_app(
+    page: DummyPage | None = None,
+    settings: AppSettings | None = None,
+) -> tuple[TranslatorApp, DummyPage, GuiController]:
     page = page or DummyPage()
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = page
@@ -120,7 +123,7 @@ def _eligible_app(page: DummyPage | None = None) -> tuple[TranslatorApp, DummyPa
         app=app,
         config_path=Path("settings.json"),
     )
-    controller.settings = _settings_for_connection(TranslationConnection.MANAGED)
+    controller.settings = settings or _settings_for_connection(TranslationConnection.MANAGED)
     controller._managed_trial_usage_metadata = OpenRouterKeyMetadata(  # noqa: SLF001
         limit_usd=100.0,
         remaining_usd=50.0,
@@ -138,6 +141,9 @@ def test_github_star_prompt_state_blocks_clicked_and_recent_shows() -> None:
     controller = _eligible_managed_controller()
     now = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
 
+    assert controller.should_show_github_star_prompt(now=now) is False
+
+    controller.settings.ui.github_star_prompt_eligible_launch_count = 3
     assert controller.should_show_github_star_prompt(now=now) is True
 
     controller.settings.ui.github_star_prompt_clicked = True
@@ -149,6 +155,81 @@ def test_github_star_prompt_state_blocks_clicked_and_recent_shows() -> None:
 
     controller.settings.ui.github_star_prompt_last_shown_at = _utc_z(now - timedelta(days=14))
     assert controller.should_show_github_star_prompt(now=now) is True
+
+
+@pytest.mark.asyncio
+async def test_launch_github_star_snackbar_counts_eligible_launches_before_first_show(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings_for_connection(TranslationConnection.MANAGED)
+    saved_payloads: list[dict[str, object]] = []
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(app_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        controller_module,
+        "save_settings",
+        lambda _path, updated: saved_payloads.append(to_dict(updated)),
+    )
+
+    first_app, first_page, first_controller = _eligible_app(settings=settings)
+    first_shown = await first_app.maybe_show_github_star_prompt_after_launch()
+
+    assert first_shown is False
+    assert first_page.opened == []
+    assert sleeps == []
+    assert first_controller.settings.ui.github_star_prompt_eligible_launch_count == 1
+    assert saved_payloads[-1]["ui"]["github_star_prompt_eligible_launch_count"] == 1
+
+    second_app, second_page, second_controller = _eligible_app(settings=settings)
+    second_shown = await second_app.maybe_show_github_star_prompt_after_launch()
+
+    assert second_shown is False
+    assert second_page.opened == []
+    assert sleeps == []
+    assert second_controller.settings.ui.github_star_prompt_eligible_launch_count == 2
+    assert saved_payloads[-1]["ui"]["github_star_prompt_eligible_launch_count"] == 2
+
+    third_app, third_page, third_controller = _eligible_app(settings=settings)
+    third_shown = await third_app.maybe_show_github_star_prompt_after_launch()
+
+    assert third_shown is True
+    assert len(sleeps) == 1
+    assert len(third_page.opened) == 1
+    assert third_controller.settings.ui.github_star_prompt_eligible_launch_count == 3
+    assert third_controller.settings.ui.github_star_prompt_show_count == 1
+    assert saved_payloads[-2]["ui"]["github_star_prompt_eligible_launch_count"] == 3
+    assert saved_payloads[-2]["ui"]["github_star_prompt_show_count"] == 0
+    assert saved_payloads[-1]["ui"]["github_star_prompt_show_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_launch_github_star_snackbar_does_not_count_ineligible_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, page, controller = _eligible_app()
+    controller._managed_trial_usage_metadata = None  # noqa: SLF001
+    saved_payloads: list[dict[str, object]] = []
+
+    async def fail_sleep(_seconds: float) -> None:
+        pytest.fail("ineligible launch should skip before sleeping")
+
+    monkeypatch.setattr(app_module.asyncio, "sleep", fail_sleep)
+    monkeypatch.setattr(
+        controller_module,
+        "save_settings",
+        lambda _path, updated: saved_payloads.append(to_dict(updated)),
+    )
+
+    shown = await app.maybe_show_github_star_prompt_after_launch()
+
+    assert shown is False
+    assert page.opened == []
+    assert controller.settings.ui.github_star_prompt_eligible_launch_count == 0
+    assert saved_payloads == []
 
 
 def test_record_github_star_prompt_opened_persists_timestamp_count_and_not_clicked(
@@ -201,7 +282,8 @@ def test_record_github_star_prompt_clicked_persists_permanent_suppression(
 async def test_prompt_open_persistence_uses_async_save_before_display(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, page, _controller = _eligible_app()
+    app, page, controller = _eligible_app()
+    controller.settings.ui.github_star_prompt_eligible_launch_count = 3
     saved_payloads: list[dict[str, object]] = []
     to_thread_calls = 0
 
@@ -234,6 +316,7 @@ async def test_prompt_open_refuses_display_and_restores_state_when_persistence_f
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, page, controller = _eligible_app()
+    controller.settings.ui.github_star_prompt_eligible_launch_count = 3
 
     async def fake_sleep(_seconds: float) -> None:
         return None
@@ -263,8 +346,10 @@ async def test_apply_settings_preserves_current_github_star_prompt_state(
     current.ui.github_star_prompt_last_shown_at = "2026-05-24T12:34:56Z"
     current.ui.github_star_prompt_show_count = 4
     current.ui.github_star_prompt_translation_success_observed = True
+    current.ui.github_star_prompt_eligible_launch_count = 2
     controller = _controller_for(current)
     replacement = _settings_for_connection(TranslationConnection.OPENROUTER)
+    replacement.ui.github_star_prompt_eligible_launch_count = 1
     saved_payloads: list[dict[str, object]] = []
 
     async def noop(*_args: object, **_kwargs: object) -> None:
@@ -287,7 +372,9 @@ async def test_apply_settings_preserves_current_github_star_prompt_state(
     assert replacement.ui.github_star_prompt_last_shown_at == "2026-05-24T12:34:56Z"
     assert replacement.ui.github_star_prompt_show_count == 4
     assert replacement.ui.github_star_prompt_translation_success_observed is True
+    assert replacement.ui.github_star_prompt_eligible_launch_count == 2
     assert saved_payloads[-1]["ui"]["github_star_prompt_clicked"] is True
+    assert saved_payloads[-1]["ui"]["github_star_prompt_eligible_launch_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -397,6 +484,7 @@ async def test_launch_github_star_snackbar_waits_opens_records_and_action_click_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app, page, controller = _eligible_app()
+    controller.settings.ui.github_star_prompt_eligible_launch_count = 3
     saved_payloads: list[dict[str, object]] = []
     sleeps: list[float] = []
     opened_urls: list[str] = []
@@ -492,13 +580,19 @@ async def test_github_star_action_displaces_visible_snackbar_when_page_close_is_
 async def test_launch_github_star_snackbar_skips_if_higher_priority_feedback_was_shown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, page, _controller = _eligible_app()
+    app, page, controller = _eligible_app()
+    saved_payloads: list[dict[str, object]] = []
     sleeps: list[float] = []
 
     async def fake_sleep(seconds: float) -> None:
         sleeps.append(seconds)
 
     monkeypatch.setattr(app_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        controller_module,
+        "save_settings",
+        lambda _path, updated: saved_payloads.append(to_dict(updated)),
+    )
     app._mark_launch_high_priority_feedback_shown("update")
 
     shown = await app.maybe_show_github_star_prompt_after_launch()
@@ -506,23 +600,75 @@ async def test_launch_github_star_snackbar_skips_if_higher_priority_feedback_was
     assert shown is False
     assert sleeps == []
     assert page.opened == []
+    assert controller.settings.ui.github_star_prompt_eligible_launch_count == 1
+    assert saved_payloads[-1]["ui"]["github_star_prompt_eligible_launch_count"] == 1
 
 
 @pytest.mark.asyncio
 async def test_launch_github_star_snackbar_skips_if_feedback_appears_during_delay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app, page, _controller = _eligible_app()
+    app, page, controller = _eligible_app()
+    controller.settings.ui.github_star_prompt_eligible_launch_count = 2
+    saved_payloads: list[dict[str, object]] = []
 
     async def fake_sleep(_seconds: float) -> None:
         app._mark_launch_high_priority_feedback_shown("connection_failure")
 
     monkeypatch.setattr(app_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        controller_module,
+        "save_settings",
+        lambda _path, updated: saved_payloads.append(to_dict(updated)),
+    )
 
     shown = await app.maybe_show_github_star_prompt_after_launch()
 
     assert shown is False
     assert page.opened == []
+    assert controller.settings.ui.github_star_prompt_eligible_launch_count == 3
+    assert controller.settings.ui.github_star_prompt_show_count == 0
+    assert saved_payloads[-1]["ui"]["github_star_prompt_eligible_launch_count"] == 3
+    assert saved_payloads[-1]["ui"]["github_star_prompt_show_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_launch_github_star_snackbar_skips_and_restores_if_feedback_appears_during_open_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, page, controller = _eligible_app()
+    controller.settings.ui.github_star_prompt_eligible_launch_count = 3
+    saved_payloads: list[dict[str, object]] = []
+    to_thread_calls = 0
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    async def feedback_during_first_to_thread(
+        func, /, *args, **kwargs
+    ):  # noqa: ANN001, ANN002, ANN003
+        nonlocal to_thread_calls
+        to_thread_calls += 1
+        if to_thread_calls == 1:
+            app._mark_launch_high_priority_feedback_shown("connection_failure")
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(app_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(controller_module.asyncio, "to_thread", feedback_during_first_to_thread)
+    monkeypatch.setattr(
+        controller_module,
+        "save_settings",
+        lambda _path, updated: saved_payloads.append(to_dict(updated)),
+    )
+
+    shown = await app.maybe_show_github_star_prompt_after_launch()
+
+    assert shown is False
+    assert page.opened == []
+    assert controller.settings.ui.github_star_prompt_last_shown_at is None
+    assert controller.settings.ui.github_star_prompt_show_count == 0
+    assert saved_payloads[0]["ui"]["github_star_prompt_show_count"] == 1
+    assert saved_payloads[-1]["ui"]["github_star_prompt_show_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -541,16 +687,24 @@ async def test_named_higher_priority_launch_feedback_categories_suppress_prompt(
     monkeypatch: pytest.MonkeyPatch,
     reason: str,
 ) -> None:
-    app, page, _controller = _eligible_app()
+    app, page, controller = _eligible_app()
+    saved_payloads: list[dict[str, object]] = []
 
     async def fail_sleep(_seconds: float) -> None:
         pytest.fail("conflicted launch prompts must skip before sleeping")
 
     monkeypatch.setattr(app_module.asyncio, "sleep", fail_sleep)
+    monkeypatch.setattr(
+        controller_module,
+        "save_settings",
+        lambda _path, updated: saved_payloads.append(to_dict(updated)),
+    )
     app._mark_launch_high_priority_feedback_shown(reason)
 
     assert await app.maybe_show_github_star_prompt_after_launch() is False
     assert page.opened == []
+    assert controller.settings.ui.github_star_prompt_eligible_launch_count == 1
+    assert saved_payloads[-1]["ui"]["github_star_prompt_eligible_launch_count"] == 1
 
 
 @pytest.mark.asyncio

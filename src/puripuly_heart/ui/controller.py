@@ -178,6 +178,7 @@ _OVERLAY_FAILURE_REASONS = frozenset(
     }
 )
 GITHUB_STAR_PROMPT_MANAGED_REMAINING_PERCENT_THRESHOLD = 60
+GITHUB_STAR_PROMPT_ELIGIBLE_LAUNCH_THRESHOLD = 3
 GITHUB_STAR_PROMPT_RECENCY_WINDOW = timedelta(days=14)
 _GITHUB_STAR_PROMPT_MANAGED_CONNECTIONS = frozenset(
     {
@@ -956,6 +957,16 @@ class GuiController:
             return bool(self.settings.ui.github_star_prompt_translation_success_observed)
         return False
 
+    def _github_star_prompt_initial_launch_gate_satisfied(self, settings: AppSettings) -> bool:
+        if _github_star_prompt_non_negative_count(settings.ui.github_star_prompt_show_count) > 0:
+            return True
+        return (
+            _github_star_prompt_non_negative_count(
+                settings.ui.github_star_prompt_eligible_launch_count
+            )
+            >= GITHUB_STAR_PROMPT_ELIGIBLE_LAUNCH_THRESHOLD
+        )
+
     def should_show_github_star_prompt(self, *, now: datetime | None = None) -> bool:
         settings = self.settings
         if settings is None:
@@ -963,6 +974,8 @@ class GuiController:
         if settings.ui.github_star_prompt_clicked:
             return False
         if not self.is_github_star_prompt_eligible():
+            return False
+        if not self._github_star_prompt_initial_launch_gate_satisfied(settings):
             return False
 
         last_shown_at = _parse_github_star_prompt_timestamp(
@@ -988,6 +1001,7 @@ class GuiController:
             settings.ui.github_star_prompt_last_shown_at,
             settings.ui.github_star_prompt_show_count,
             settings.ui.github_star_prompt_translation_success_observed,
+            settings.ui.github_star_prompt_eligible_launch_count,
         )
 
     def _restore_github_star_prompt_state_snapshot(
@@ -1000,6 +1014,7 @@ class GuiController:
             last_shown_at,
             show_count,
             translation_success_observed,
+            eligible_launch_count,
         ) = snapshot
         settings.ui.github_star_prompt_clicked = bool(clicked)
         settings.ui.github_star_prompt_last_shown_at = (
@@ -1010,6 +1025,9 @@ class GuiController:
         )
         settings.ui.github_star_prompt_translation_success_observed = bool(
             translation_success_observed
+        )
+        settings.ui.github_star_prompt_eligible_launch_count = (
+            _github_star_prompt_non_negative_count(eligible_launch_count)
         )
 
     def _log_github_star_prompt_save_failure(
@@ -1057,20 +1075,89 @@ class GuiController:
         self,
         *,
         opened_at: datetime | None = None,
+        should_open: Callable[[], bool] | None = None,
     ) -> bool:
         opened_timestamp = _github_star_prompt_utc_timestamp(opened_at)
 
+        while True:
+            async with self._get_github_star_prompt_persistence_lock():
+                settings = self.settings
+                if settings is None:
+                    return False
+                if should_open is not None and not should_open():
+                    return False
+                snapshot = self._github_star_prompt_state_snapshot(settings)
+                settings.ui.github_star_prompt_last_shown_at = opened_timestamp
+                settings.ui.github_star_prompt_show_count = (
+                    _github_star_prompt_non_negative_count(
+                        settings.ui.github_star_prompt_show_count
+                    )
+                    + 1
+                )
+                try:
+                    await asyncio.to_thread(save_settings, self.config_path, settings)
+                except asyncio.CancelledError:
+                    if self.settings is settings:
+                        self._restore_github_star_prompt_state_snapshot(settings, snapshot)
+                    raise
+                except Exception as exc:
+                    if self.settings is settings:
+                        self._restore_github_star_prompt_state_snapshot(settings, snapshot)
+                    self._log_github_star_prompt_save_failure("open state", exc)
+                    return False
+                if self.settings is settings:
+                    if should_open is not None and not should_open():
+                        self._restore_github_star_prompt_state_snapshot(settings, snapshot)
+                        try:
+                            await asyncio.to_thread(save_settings, self.config_path, settings)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            self._log_github_star_prompt_save_failure(
+                                "open state rollback",
+                                exc,
+                            )
+                        return False
+                    return True
+            await asyncio.sleep(0)
+
+    async def persist_github_star_prompt_eligible_launch(self) -> bool:
+        settings = self.settings
+        if settings is None:
+            return False
+        if settings.ui.github_star_prompt_clicked:
+            return False
+        if not self.is_github_star_prompt_eligible():
+            return False
+        if self._github_star_prompt_initial_launch_gate_satisfied(settings):
+            return True
+
         def _mutate(settings: AppSettings) -> bool:
-            settings.ui.github_star_prompt_last_shown_at = opened_timestamp
-            settings.ui.github_star_prompt_show_count = (
-                _github_star_prompt_non_negative_count(settings.ui.github_star_prompt_show_count)
-                + 1
+            if settings.ui.github_star_prompt_clicked:
+                return False
+            if not self.is_github_star_prompt_eligible():
+                return False
+            if self._github_star_prompt_initial_launch_gate_satisfied(settings):
+                return False
+            current_count = _github_star_prompt_non_negative_count(
+                settings.ui.github_star_prompt_eligible_launch_count
+            )
+            settings.ui.github_star_prompt_eligible_launch_count = min(
+                current_count + 1,
+                GITHUB_STAR_PROMPT_ELIGIBLE_LAUNCH_THRESHOLD,
             )
             return True
 
-        return await self._persist_github_star_prompt_mutation(
-            failure_context="open state",
+        await self._persist_github_star_prompt_mutation(
+            failure_context="eligible launch state",
             mutate=_mutate,
+        )
+        settings = self.settings
+        return bool(
+            settings is not None
+            and not settings.ui.github_star_prompt_clicked
+            and self.is_github_star_prompt_eligible()
+            and self._github_star_prompt_initial_launch_gate_satisfied(settings)
         )
 
     def _run_github_star_prompt_persistence_sync(self, coro) -> bool:  # noqa: ANN001
@@ -1171,6 +1258,14 @@ class GuiController:
             replacement_ui.github_star_prompt_translation_success_observed = bool(
                 replacement_ui.github_star_prompt_translation_success_observed
                 or current_ui.github_star_prompt_translation_success_observed
+            )
+            replacement_ui.github_star_prompt_eligible_launch_count = max(
+                _github_star_prompt_non_negative_count(
+                    replacement_ui.github_star_prompt_eligible_launch_count
+                ),
+                _github_star_prompt_non_negative_count(
+                    current_ui.github_star_prompt_eligible_launch_count
+                ),
             )
             replacement_ui.github_star_prompt_show_count = max(
                 _github_star_prompt_non_negative_count(

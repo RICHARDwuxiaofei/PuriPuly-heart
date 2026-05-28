@@ -17,6 +17,7 @@ PROMPT_UI_DEFAULTS = {
     "github_star_prompt_last_shown_at": None,
     "github_star_prompt_show_count": 0,
     "github_star_prompt_translation_success_observed": False,
+    "github_star_prompt_eligible_launch_count": 0,
 }
 
 
@@ -27,6 +28,11 @@ def _github_star_prompt_ui_payload(settings: AppSettings) -> dict[str, object]:
         "github_star_prompt_show_count": settings.ui.github_star_prompt_show_count,
         "github_star_prompt_translation_success_observed": (
             settings.ui.github_star_prompt_translation_success_observed
+        ),
+        "github_star_prompt_eligible_launch_count": getattr(
+            settings.ui,
+            "github_star_prompt_eligible_launch_count",
+            None,
         ),
     }
 
@@ -41,7 +47,8 @@ def test_github_star_prompt_state_defaults_for_existing_settings(tmp_path) -> No
     loaded = load_settings(path)
 
     assert _github_star_prompt_ui_payload(loaded) == PROMPT_UI_DEFAULTS
-    assert {key: to_dict(loaded)["ui"][key] for key in PROMPT_UI_DEFAULTS} == PROMPT_UI_DEFAULTS
+    serialized_ui = to_dict(loaded)["ui"]
+    assert {key: serialized_ui.get(key) for key in PROMPT_UI_DEFAULTS} == PROMPT_UI_DEFAULTS
 
 
 def test_github_star_prompt_state_round_trips_through_ui_settings() -> None:
@@ -53,6 +60,7 @@ def test_github_star_prompt_state_round_trips_through_ui_settings() -> None:
             "github_star_prompt_last_shown_at": persisted_timestamp,
             "github_star_prompt_show_count": 3,
             "github_star_prompt_translation_success_observed": True,
+            "github_star_prompt_eligible_launch_count": 2,
         }
     )
 
@@ -63,10 +71,12 @@ def test_github_star_prompt_state_round_trips_through_ui_settings() -> None:
     assert restored.ui.github_star_prompt_last_shown_at == persisted_timestamp
     assert restored.ui.github_star_prompt_show_count == 3
     assert restored.ui.github_star_prompt_translation_success_observed is True
+    assert getattr(restored.ui, "github_star_prompt_eligible_launch_count", None) == 2
     assert serialized["ui"]["github_star_prompt_clicked"] is True
     assert serialized["ui"]["github_star_prompt_last_shown_at"] == persisted_timestamp
     assert serialized["ui"]["github_star_prompt_show_count"] == 3
     assert serialized["ui"]["github_star_prompt_translation_success_observed"] is True
+    assert serialized["ui"].get("github_star_prompt_eligible_launch_count") == 2
 
 
 @pytest.mark.parametrize(
@@ -124,12 +134,39 @@ def test_github_star_prompt_show_count_load_normalizes_non_integer_values_on_dis
     assert type(persisted["ui"]["github_star_prompt_show_count"]) is int
 
 
+@pytest.mark.parametrize("raw_launch_count", [-1, -10])
+def test_github_star_prompt_negative_eligible_launch_count_is_treated_as_zero(
+    raw_launch_count: int,
+) -> None:
+    settings = from_dict({"ui": {"github_star_prompt_eligible_launch_count": raw_launch_count}})
+
+    assert getattr(settings.ui, "github_star_prompt_eligible_launch_count", None) == 0
+    assert to_dict(settings)["ui"].get("github_star_prompt_eligible_launch_count") == 0
+
+
+@pytest.mark.parametrize("raw_launch_count", [False, 1.0])
+def test_github_star_prompt_eligible_launch_count_migration_normalizes_non_integer_values(
+    raw_launch_count: object,
+) -> None:
+    raw = to_dict(AppSettings())
+    raw["ui"]["github_star_prompt_eligible_launch_count"] = raw_launch_count
+
+    migrated, changed = _migrate_settings_dict(raw)
+
+    assert changed is True
+    assert migrated["ui"].get("github_star_prompt_eligible_launch_count") == 0
+    assert type(migrated["ui"].get("github_star_prompt_eligible_launch_count")) is int
+
+
 def test_github_star_prompt_validation_sanitizes_invalid_prompt_state() -> None:
     settings = AppSettings()
     settings.ui.github_star_prompt_last_shown_at = "not-a-timestamp"
     settings.ui.github_star_prompt_show_count = -7
+    if hasattr(settings.ui, "github_star_prompt_eligible_launch_count"):
+        settings.ui.github_star_prompt_eligible_launch_count = -7
 
     settings.validate()
 
     assert settings.ui.github_star_prompt_last_shown_at is None
     assert settings.ui.github_star_prompt_show_count == 0
+    assert getattr(settings.ui, "github_star_prompt_eligible_launch_count", None) == 0

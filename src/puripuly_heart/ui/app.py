@@ -284,9 +284,19 @@ class TranslatorApp:
         delay_s: float = GITHUB_STAR_PROMPT_DELAY_S,
     ) -> bool:
         try:
+            controller = getattr(self, "controller", None)
+            persist_eligible_launch = getattr(
+                controller,
+                "persist_github_star_prompt_eligible_launch",
+                None,
+            )
+            if not callable(persist_eligible_launch):
+                return False
+            launch_gate_satisfied = await persist_eligible_launch()
             if self._launch_feedback_conflicts_with_github_star_prompt():
                 return False
-            controller = getattr(self, "controller", None)
+            if not launch_gate_satisfied:
+                return False
             should_show = getattr(controller, "should_show_github_star_prompt", None)
             if not callable(should_show) or not should_show():
                 return False
@@ -297,16 +307,18 @@ class TranslatorApp:
                 return False
             if not should_show():
                 return False
-            return await self._open_github_star_prompt_snackbar()
+            return await self._open_github_star_prompt_snackbar(
+                should_open=lambda: not self._launch_feedback_conflicts_with_github_star_prompt()
+            )
         finally:
             self._github_star_prompt_launch_pending = False
 
-    async def _open_github_star_prompt_snackbar(self) -> bool:
+    async def _open_github_star_prompt_snackbar(self, *, should_open=None) -> bool:  # noqa: ANN001
         if getattr(self, "_github_star_prompt_shown_this_launch", False):
             return False
         controller = getattr(self, "controller", None)
         persist_opened = getattr(controller, "persist_github_star_prompt_opened", None)
-        if not callable(persist_opened) or not await persist_opened():
+        if not callable(persist_opened) or not await persist_opened(should_open=should_open):
             return False
 
         snackbar = None
