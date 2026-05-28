@@ -53,6 +53,7 @@
   "settings.audio_host_api.option.windows_directsound": "Windows DirectSound",
   "settings.microphone_test": "Microphone test",
   "settings.microphone_test.action": "Test",
+  "settings.microphone_test.level_label": "Microphone level",
   "settings.microphone": "Microphone",
   "settings.vad.peer": "Peer VAD",
   "settings.vad.peer_hangover_ms": "Peer Hangover (ms)",

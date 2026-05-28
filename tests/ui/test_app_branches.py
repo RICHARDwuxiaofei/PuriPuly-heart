@@ -94,6 +94,31 @@ class RuntimeLoggingController:
         self.detailed_messages.append(message)
 
 
+def _iter_control_tree(control):
+    if control is None:
+        return
+    yield control
+    for attr in ("title", "content", "icon"):
+        child = getattr(control, attr, None)
+        if child is not None and not isinstance(child, str):
+            yield from _iter_control_tree(child)
+    for attr in ("controls", "actions"):
+        for child in getattr(control, attr, None) or []:
+            yield from _iter_control_tree(child)
+
+
+def _dialog_text_values(dialog) -> list[str]:
+    return [
+        node.value
+        for node in _iter_control_tree(dialog)
+        if isinstance(node, ft.Text) and node.value
+    ]
+
+
+def _dialog_progress_bars(dialog) -> list[ft.ProgressBar]:
+    return [node for node in _iter_control_tree(dialog) if isinstance(node, ft.ProgressBar)]
+
+
 class ConstructionDummyController:
     def __init__(self, page, app, config_path):
         self.page = page
@@ -1863,6 +1888,170 @@ async def test_start_microphone_test_callback_uses_page_run_task() -> None:
     assert calls == []
     await app.page.tasks[0]()
     assert calls == ["start"]
+
+
+@pytest.mark.asyncio
+async def test_start_microphone_test_opens_minimal_meter_dialog_on_success() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    start_kwargs: list[dict[str, object]] = []
+
+    async def fake_start_microphone_test(**kwargs) -> bool:
+        start_kwargs.append(dict(kwargs))
+        callback = kwargs["meter_callback"]
+        callback(0.37)
+        return True
+
+    app.controller = SimpleNamespace(
+        start_microphone_test=fake_start_microphone_test,
+        stop_microphone_test=lambda: None,
+        microphone_test_active=True,
+    )
+
+    app._on_start_microphone_test()
+    await app.page.tasks[0]()
+
+    assert len(app.page.opened) == 1
+    dialog = app.page.opened[0]
+    assert _dialog_text_values(dialog) == [app_module.t("settings.microphone_test")]
+    progress_bars = _dialog_progress_bars(dialog)
+    assert len(progress_bars) == 1
+    assert progress_bars[0].value == pytest.approx(0.37)
+    assert progress_bars[0].semantics_label == app_module.t("settings.microphone_test.level_label")
+    assert progress_bars[0].semantics_value == 37
+    assert "meter_callback" in start_kwargs[0]
+    visible_text = " ".join(_dialog_text_values(dialog)).lower()
+    for banned in ("pass", "fail", "success", "stt", "auto-off", "good", "bad", "quiet"):
+        assert banned not in visible_text
+
+
+@pytest.mark.asyncio
+async def test_start_microphone_test_false_does_not_open_modal() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+
+    async def fake_start_microphone_test(**_kwargs) -> bool:
+        return False
+
+    app.controller = SimpleNamespace(start_microphone_test=fake_start_microphone_test)
+
+    app._on_start_microphone_test()
+    await app.page.tasks[0]()
+
+    assert app.page.opened == []
+    assert getattr(app, "_microphone_test_dialog", None) is None
+
+
+@pytest.mark.asyncio
+async def test_microphone_test_meter_callback_updates_open_dialog() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    callbacks: list[object] = []
+
+    async def fake_start_microphone_test(**kwargs) -> bool:
+        callbacks.append(kwargs["meter_callback"])
+        return True
+
+    app.controller = SimpleNamespace(
+        start_microphone_test=fake_start_microphone_test,
+        stop_microphone_test=lambda: None,
+        microphone_test_active=True,
+    )
+
+    app._on_start_microphone_test()
+    await app.page.tasks[0]()
+    callbacks[0](0.82)
+
+    progress_bar = _dialog_progress_bars(app.page.opened[0])[0]
+    assert progress_bar.value == pytest.approx(0.82)
+    assert progress_bar.semantics_value == 82
+
+
+@pytest.mark.asyncio
+async def test_microphone_test_modal_dismiss_stops_runtime_through_page_task() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    stop_calls: list[str] = []
+
+    async def fake_start_microphone_test(**_kwargs) -> bool:
+        return True
+
+    async def fake_stop_microphone_test() -> None:
+        stop_calls.append("stop")
+
+    app.controller = SimpleNamespace(
+        start_microphone_test=fake_start_microphone_test,
+        stop_microphone_test=fake_stop_microphone_test,
+        microphone_test_active=True,
+    )
+
+    app._on_start_microphone_test()
+    await app.page.tasks[0]()
+    dialog = app.page.opened[0]
+
+    dialog.on_dismiss(None)
+
+    assert stop_calls == []
+    assert len(app.page.tasks) == 2
+    await app.page.tasks[1]()
+    assert stop_calls == ["stop"]
+    assert getattr(app, "_microphone_test_dialog", None) is None
+
+
+@pytest.mark.asyncio
+async def test_settings_apply_closes_microphone_test_dialog_after_audio_cleanup() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    events: list[str] = []
+    controller = SimpleNamespace(microphone_test_active=True)
+
+    async def fake_start_microphone_test(**_kwargs) -> bool:
+        events.append("start")
+        return True
+
+    async def fake_apply_settings(settings) -> None:
+        events.append(f"apply:{settings}")
+        controller.microphone_test_active = False
+
+    async def fake_stop_microphone_test() -> None:
+        events.append("stop")
+
+    controller.start_microphone_test = fake_start_microphone_test
+    controller.apply_settings = fake_apply_settings
+    controller.stop_microphone_test = fake_stop_microphone_test
+    app.controller = controller
+
+    app._on_start_microphone_test()
+    await app.page.tasks[0]()
+    dialog = app.page.opened[0]
+
+    app._on_settings_changed("audio")
+    await app.page.tasks[1]()
+
+    assert events == ["start", "apply:audio"]
+    assert app.page.closed == [dialog]
+    assert getattr(app, "_microphone_test_dialog", None) is None
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected"),
+    [
+        ("en", "Microphone level"),
+        ("ko", "마이크 입력 레벨"),
+        ("ja", "マイク入力レベル"),
+        ("zh-CN", "麦克风输入电平"),
+    ],
+)
+def test_microphone_test_level_accessibility_label_is_localized(
+    locale: str,
+    expected: str,
+) -> None:
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale(locale)
+        assert i18n_module.t("settings.microphone_test.level_label") == expected
+    finally:
+        i18n_module.set_locale(previous_locale)
 
 
 @pytest.mark.asyncio

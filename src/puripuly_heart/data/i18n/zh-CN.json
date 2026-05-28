@@ -53,6 +53,7 @@
     "settings.audio_host_api.option.windows_directsound": "Windows DirectSound",
     "settings.microphone_test": "麦克风测试",
     "settings.microphone_test.action": "测试",
+    "settings.microphone_test.level_label": "麦克风输入电平",
     "settings.microphone": "麦克风",
     "settings.vad.peer": "对方 VAD",
     "settings.vad.peer_hangover_ms": "对方拖尾 (ms)",
