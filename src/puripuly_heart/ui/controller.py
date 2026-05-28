@@ -377,7 +377,22 @@ class GuiController:
     _bridge_task: asyncio.Task[None] | None = None
     _mic_task: asyncio.Task[None] | None = None
     _audio_source: AudioSource | None = None
+    _last_mic_loop_close_exception: BaseException | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     _microphone_test_meter_level: float = field(init=False, default=0.0)
+    _microphone_test_task: asyncio.Task[None] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _microphone_test_lifecycle_lock: asyncio.Lock | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     _debug_capture_fault_profile: str = field(init=False, default="none")
     _debug_stt_fault_profile: str = field(init=False, default="none")
     _vad: VadGating | None = None
@@ -391,6 +406,7 @@ class GuiController:
     _last_self_stt_provider_signature: tuple[object, ...] | None = None
     _last_peer_stt_provider_signature: tuple[object, ...] | None = None
     _last_llm_provider_signature: tuple[object, ...] | None = None
+    _last_microphone_test_audio_settings_signature: tuple[object, ...] | None = None
     _last_peer_translation_enabled: bool | None = None
     _last_peer_translation_activation_requested: bool | None = None
     _last_vrc_mic_sync_enabled: bool | None = None
@@ -1778,6 +1794,9 @@ class GuiController:
         self._last_self_stt_provider_signature = self._build_self_stt_provider_signature(settings)
         self._last_peer_stt_provider_signature = self._build_peer_stt_provider_signature(settings)
         self._last_llm_provider_signature = self._build_llm_provider_signature(settings)
+        self._last_microphone_test_audio_settings_signature = (
+            self._microphone_test_audio_settings_signature(settings)
+        )
         self._last_peer_translation_enabled = settings.ui.peer_translation_enabled
         self._last_peer_translation_activation_requested = (
             self._peer_translation_activation_requested_for(settings)
@@ -2514,6 +2533,7 @@ class GuiController:
         await self._drain_github_star_prompt_translation_success_task()
         await self._stop_clipboard_watcher()
         await self._cancel_local_stt_download()
+        await self.stop_microphone_test()
         await self.set_stt_enabled(False)
         await self._configure_vrc_mic_receiver(enabled=False)
         await self._shutdown_overlay_runtime(preserve_failure_reason=True)
@@ -3640,6 +3660,18 @@ class GuiController:
             return peer_language or language
 
         await self._preserve_github_star_prompt_observation_before_settings_replace(settings)
+        prev_microphone_test_audio_signature = (
+            self._last_microphone_test_audio_settings_signature
+            or self._microphone_test_audio_settings_signature(self.settings)
+        )
+        next_microphone_test_audio_signature = self._microphone_test_audio_settings_signature(
+            settings
+        )
+        if (
+            prev_microphone_test_audio_signature is not None
+            and prev_microphone_test_audio_signature != next_microphone_test_audio_signature
+        ):
+            await self.stop_microphone_test_for_audio_settings_change()
 
         prev_locale = get_locale()
         prev_overlay_enabled = (
@@ -3741,6 +3773,7 @@ class GuiController:
                 f"{self.hub is not None and presenter is not None and getattr(self.hub, 'overlay_sink', None) is presenter}"
             )
         self.settings = settings
+        self._last_microphone_test_audio_settings_signature = next_microphone_test_audio_signature
         self._sync_overlay_calibration_cache(settings)
         self._sync_desktop_overlay_interaction_mode_from_settings(settings)
         self._save_settings()
@@ -4514,6 +4547,156 @@ class GuiController:
     def microphone_test_meter_level(self) -> float:
         return self._microphone_test_meter_level
 
+    @property
+    def microphone_test_active(self) -> bool:
+        task = self._microphone_test_task
+        return task is not None and not task.done()
+
+    def _get_microphone_test_lifecycle_lock(self) -> asyncio.Lock:
+        if self._microphone_test_lifecycle_lock is None:
+            self._microphone_test_lifecycle_lock = asyncio.Lock()
+        return self._microphone_test_lifecycle_lock
+
+    @staticmethod
+    def _microphone_test_audio_settings_signature(
+        settings: AppSettings | None,
+    ) -> tuple[object, ...] | None:
+        if settings is None:
+            return None
+        return (
+            settings.audio.input_host_api,
+            settings.audio.input_device,
+            settings.audio.internal_sample_rate_hz,
+            settings.audio.internal_channels,
+        )
+
+    def _self_stt_active_or_desired_for_microphone_test(self) -> bool:
+        return bool(
+            self._stt_desired
+            or self._local_stt_pending_enable_after_install
+            or self._mic_task is not None
+            or self._audio_source is not None
+        )
+
+    def _log_microphone_test_stt_auto_off(
+        self,
+        *,
+        requested: bool,
+        completed: bool,
+        exception: BaseException | None = None,
+    ) -> None:
+        self.log_basic(
+            "[MicTest] stt_auto_off "
+            f"requested={requested} "
+            f"completed={completed} "
+            "exception_class="
+            f"{_mic_test_log_value(type(exception).__name__ if exception else None)} "
+            "exception_message="
+            f"{_mic_test_log_value(str(exception) if exception else None)}"
+        )
+
+    async def _prepare_microphone_test_capture(self) -> bool:
+        requested = self._self_stt_active_or_desired_for_microphone_test()
+        if not requested:
+            if self._last_mic_loop_close_exception is not None:
+                self._log_microphone_test_stt_auto_off(
+                    requested=False,
+                    completed=False,
+                    exception=self._last_mic_loop_close_exception,
+                )
+                return False
+            self._log_microphone_test_stt_auto_off(
+                requested=False,
+                completed=True,
+            )
+            return True
+
+        try:
+            await self.set_stt_enabled(False)
+            if self._last_mic_loop_close_exception is not None:
+                raise self._last_mic_loop_close_exception
+            if self._mic_task is not None or self._audio_source is not None:
+                raise RuntimeError("self microphone source still open after STT auto-off")
+        except Exception as exc:
+            self._log_microphone_test_stt_auto_off(
+                requested=True,
+                completed=False,
+                exception=exc,
+            )
+            return False
+
+        self._log_microphone_test_stt_auto_off(
+            requested=True,
+            completed=True,
+        )
+        return True
+
+    async def start_microphone_test(
+        self,
+        *,
+        meter_callback: Callable[[float], object] | None = None,
+        level_log_interval_s: float = _MICROPHONE_TEST_LEVEL_INTERVAL_S,
+    ) -> bool:
+        if self.settings is None:
+            return False
+        if self._last_microphone_test_audio_settings_signature is None:
+            self._last_microphone_test_audio_settings_signature = (
+                self._microphone_test_audio_settings_signature(self.settings)
+            )
+        async with self._get_microphone_test_lifecycle_lock():
+            task = self._microphone_test_task
+            if task is not None:
+                if not task.done():
+                    return False
+                await asyncio.gather(task, return_exceptions=True)
+                if self._microphone_test_task is task:
+                    self._microphone_test_task = None
+
+            if not await self._prepare_microphone_test_capture():
+                return False
+
+            self._microphone_test_task = asyncio.create_task(
+                self._run_microphone_test_session(
+                    meter_callback=meter_callback,
+                    level_log_interval_s=level_log_interval_s,
+                )
+            )
+            return True
+
+    async def _run_microphone_test_session(
+        self,
+        *,
+        meter_callback: Callable[[float], object] | None,
+        level_log_interval_s: float,
+    ) -> None:
+        current_task = asyncio.current_task()
+        try:
+            await self.run_microphone_test_capture(
+                meter_callback=meter_callback,
+                level_log_interval_s=level_log_interval_s,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._log_error(f"Microphone test error: {exc}")
+        finally:
+            if self._microphone_test_task is current_task:
+                self._microphone_test_task = None
+
+    async def stop_microphone_test(self) -> None:
+        async with self._get_microphone_test_lifecycle_lock():
+            task = self._microphone_test_task
+            if task is None:
+                return
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if self._microphone_test_task is task:
+                self._microphone_test_task = None
+
+    async def stop_microphone_test_for_audio_settings_change(self) -> None:
+        await self.stop_microphone_test()
+
     async def _set_microphone_test_meter_level(
         self,
         value: float,
@@ -4808,6 +4991,16 @@ class GuiController:
         if self._mic_task is not None:
             return
 
+        if self._audio_source is not None or self._last_mic_loop_close_exception is not None:
+            await self._stop_mic_loop()
+            if self._audio_source is not None or self._last_mic_loop_close_exception is not None:
+                self.log_detailed(
+                    "[STT] Skipping microphone start while previous microphone source close is pending",
+                    level=logging.WARNING,
+                    exception=self._last_mic_loop_close_exception,
+                )
+                return
+
         try:
             model_path = ensure_silero_vad_onnx()
         except Exception as exc:
@@ -5066,9 +5259,13 @@ class GuiController:
             self._mic_task = None
 
         if self._audio_source is not None:
-            with contextlib.suppress(Exception):
+            try:
                 await self._audio_source.close()
-            self._audio_source = None
+            except Exception as exc:
+                self._last_mic_loop_close_exception = exc
+            else:
+                self._last_mic_loop_close_exception = None
+                self._audio_source = None
         self._vad = None
         if self.vrc_mic_audio_gate is not None:
             self.vrc_mic_audio_gate.reset()

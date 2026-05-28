@@ -7120,6 +7120,445 @@ async def test_run_microphone_test_capture_cancellation_after_nonzero_frame_clea
 
 
 @pytest.mark.asyncio
+async def test_start_microphone_test_disables_self_stt_before_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller._stt_desired = True
+    source_closed: list[str] = []
+    capture_preflight_state: list[tuple[bool, bool, bool]] = []
+    capture_started = asyncio.Event()
+
+    class FakeSelfSource:
+        async def close(self) -> None:
+            source_closed.append("closed")
+
+    controller._audio_source = FakeSelfSource()
+    controller._mic_task = asyncio.create_task(asyncio.sleep(3600))
+
+    async def fake_capture(self, **_kwargs) -> None:
+        capture_preflight_state.append(
+            (
+                self._stt_desired,
+                self._mic_task is None,
+                self._audio_source is None,
+            )
+        )
+        capture_started.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(GuiController, "run_microphone_test_capture", fake_capture)
+
+    started = await controller.start_microphone_test()
+    await capture_started.wait()
+    await controller.stop_microphone_test()
+
+    messages = _mic_test_basic_messages(controller)
+    assert started is True
+    assert source_closed == ["closed"]
+    assert capture_preflight_state == [(False, True, True)]
+    assert controller._stt_desired is False
+    assert controller._mic_task is None
+    assert controller._audio_source is None
+    assert any(
+        message.startswith("[MicTest] stt_auto_off ")
+        and "requested=True" in message
+        and "completed=True" in message
+        and "exception_class=None" in message
+        and "exception_message=None" in message
+        for message in messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_microphone_test_when_stt_already_off_logs_neutral_auto_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    disable_calls: list[bool] = []
+    capture_calls: list[str] = []
+
+    async def unexpected_disable(self, enabled: bool) -> None:
+        _ = self
+        disable_calls.append(enabled)
+
+    async def fake_capture(self, **_kwargs) -> None:
+        _ = self
+        capture_calls.append("captured")
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", unexpected_disable)
+    monkeypatch.setattr(GuiController, "run_microphone_test_capture", fake_capture)
+
+    started = await controller.start_microphone_test()
+    await _wait_until(lambda: controller._microphone_test_task is None)
+
+    messages = _mic_test_basic_messages(controller)
+    assert started is True
+    assert disable_calls == []
+    assert capture_calls == ["captured"]
+    assert any(
+        message.startswith("[MicTest] stt_auto_off ")
+        and "requested=False" in message
+        and "completed=True" in message
+        and "exception_class=None" in message
+        and "exception_message=None" in message
+        for message in messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_microphone_test_clears_pending_self_stt_desire_before_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller._local_stt_pending_enable_after_install = True
+    capture_pending_state: list[bool] = []
+
+    async def fake_capture(self, **_kwargs) -> None:
+        capture_pending_state.append(self._local_stt_pending_enable_after_install)
+
+    monkeypatch.setattr(GuiController, "run_microphone_test_capture", fake_capture)
+
+    started = await controller.start_microphone_test()
+    await _wait_until(lambda: controller._microphone_test_task is None)
+
+    messages = _mic_test_basic_messages(controller)
+    assert started is True
+    assert capture_pending_state == [False]
+    assert any(
+        message.startswith("[MicTest] stt_auto_off ")
+        and "requested=True" in message
+        and "completed=True" in message
+        for message in messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_microphone_test_stop_exception_logs_and_skips_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller._stt_desired = True
+    capture_calls: list[str] = []
+    raw_message = "self mic teardown exploded"
+
+    async def failing_disable(self, enabled: bool) -> None:
+        _ = self, enabled
+        raise RuntimeError(raw_message)
+
+    async def unexpected_capture(self, **_kwargs) -> None:
+        _ = self
+        capture_calls.append("captured")
+
+    monkeypatch.setattr(GuiController, "set_stt_enabled", failing_disable)
+    monkeypatch.setattr(GuiController, "run_microphone_test_capture", unexpected_capture)
+
+    started = await controller.start_microphone_test()
+
+    messages = _mic_test_basic_messages(controller)
+    assert started is False
+    assert capture_calls == []
+    assert controller._microphone_test_task is None
+    assert any(
+        message.startswith("[MicTest] stt_auto_off ")
+        and "requested=True" in message
+        and "completed=False" in message
+        and "exception_class='RuntimeError'" in message
+        and f"exception_message={raw_message!r}" in message
+        for message in messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_microphone_test_source_close_exception_retains_source_until_retry_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller._stt_desired = True
+    raw_message = "self source close exploded"
+    close_calls: list[str] = []
+    capture_calls: list[str] = []
+
+    class FailingSelfSource:
+        async def close(self) -> None:
+            close_calls.append("close")
+            if len(close_calls) == 1:
+                raise RuntimeError(raw_message)
+
+    async def fake_capture(self, **_kwargs) -> None:
+        _ = self
+        capture_calls.append("captured")
+
+    source = FailingSelfSource()
+    controller._audio_source = source
+    controller._mic_task = asyncio.create_task(asyncio.sleep(3600))
+    monkeypatch.setattr(GuiController, "run_microphone_test_capture", fake_capture)
+
+    first_started = await controller.start_microphone_test()
+
+    messages = _mic_test_basic_messages(controller)
+    assert first_started is False
+    assert close_calls == ["close"]
+    assert capture_calls == []
+    assert controller._mic_task is None
+    assert controller._audio_source is source
+    assert isinstance(controller._last_mic_loop_close_exception, RuntimeError)
+    assert any(
+        message.startswith("[MicTest] stt_auto_off ")
+        and "requested=True" in message
+        and "completed=False" in message
+        and "exception_class='RuntimeError'" in message
+        and f"exception_message={raw_message!r}" in message
+        for message in messages
+    )
+
+    second_started = await controller.start_microphone_test()
+    await _wait_until(lambda: controller._microphone_test_task is None)
+
+    assert second_started is True
+    assert close_calls == ["close", "close"]
+    assert capture_calls == ["captured"]
+    assert controller._audio_source is None
+    assert controller._last_mic_loop_close_exception is None
+
+
+@pytest.mark.asyncio
+async def test_start_microphone_test_retry_after_source_close_exception_still_skips_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller._stt_desired = True
+    raw_message = "self source close exploded"
+    close_calls: list[str] = []
+    capture_calls: list[str] = []
+
+    class FailingSelfSource:
+        async def close(self) -> None:
+            close_calls.append("close")
+            raise RuntimeError(raw_message)
+
+    async def unexpected_capture(self, **_kwargs) -> None:
+        _ = self
+        capture_calls.append("captured")
+
+    source = FailingSelfSource()
+    controller._audio_source = source
+    controller._mic_task = asyncio.create_task(asyncio.sleep(3600))
+    monkeypatch.setattr(GuiController, "run_microphone_test_capture", unexpected_capture)
+
+    try:
+        first_started = await controller.start_microphone_test()
+        second_started = await controller.start_microphone_test()
+        await asyncio.sleep(0)
+
+        messages = _mic_test_basic_messages(controller)
+        assert first_started is False
+        assert second_started is False
+        assert close_calls == ["close", "close"]
+        assert capture_calls == []
+        assert controller._microphone_test_task is None
+        assert controller._audio_source is source
+        assert isinstance(controller._last_mic_loop_close_exception, RuntimeError)
+        assert any(
+            message.startswith("[MicTest] stt_auto_off ")
+            and "requested=True" in message
+            and "completed=False" in message
+            and "exception_class='RuntimeError'" in message
+            and f"exception_message={raw_message!r}" in message
+            for message in messages
+        )
+    finally:
+        await controller.stop_microphone_test()
+
+
+@pytest.mark.asyncio
+async def test_start_microphone_test_rejects_duplicate_start_without_duplicate_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    capture_started = asyncio.Event()
+    capture_calls: list[str] = []
+
+    async def fake_capture(self, **_kwargs) -> None:
+        _ = self
+        capture_calls.append("captured")
+        capture_started.set()
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(GuiController, "run_microphone_test_capture", fake_capture)
+
+    first_started = await controller.start_microphone_test()
+    await capture_started.wait()
+    duplicate_started = await controller.start_microphone_test()
+    await controller.stop_microphone_test()
+
+    assert first_started is True
+    assert duplicate_started is False
+    assert capture_calls == ["captured"]
+    assert controller._microphone_test_task is None
+
+
+@pytest.mark.asyncio
+async def test_audio_settings_change_stops_active_microphone_test_and_next_start_uses_update(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=tmp_path / "settings.json",
+    )
+    controller.settings = AppSettings()
+    controller.settings.audio.input_device = "Old Mic"
+    controller._runtime_logging = RuntimeLoggingSpy()
+    capture_devices: list[str] = []
+    capture_cancelled: list[str] = []
+    capture_started = [asyncio.Event(), asyncio.Event()]
+
+    async def fake_capture(self, **_kwargs) -> None:
+        device_name = self.settings.audio.input_device
+        capture_devices.append(device_name)
+        capture_started[len(capture_devices) - 1].set()
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            capture_cancelled.append(device_name)
+
+    monkeypatch.setattr(GuiController, "run_microphone_test_capture", fake_capture)
+
+    assert await controller.start_microphone_test() is True
+    await capture_started[0].wait()
+
+    updated = copy.deepcopy(controller.settings)
+    updated.audio.input_device = "New Mic"
+    await controller.apply_settings(updated)
+
+    assert controller._microphone_test_task is None
+    assert capture_devices == ["Old Mic"]
+    assert capture_cancelled == ["Old Mic"]
+
+    assert await controller.start_microphone_test() is True
+    await capture_started[1].wait()
+    await controller.stop_microphone_test()
+
+    assert capture_devices == ["Old Mic", "New Mic"]
+
+
+@pytest.mark.asyncio
+async def test_audio_settings_change_stops_active_microphone_test_after_in_place_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    controller = GuiController(
+        page=SimpleNamespace(),
+        app=SimpleNamespace(),
+        config_path=tmp_path / "settings.json",
+    )
+    controller.settings = AppSettings()
+    controller.settings.audio.input_device = "Old Mic"
+    controller._runtime_logging = RuntimeLoggingSpy()
+    capture_started = asyncio.Event()
+    capture_cancelled: list[str] = []
+
+    async def fake_capture(self, **_kwargs) -> None:
+        device_name = self.settings.audio.input_device
+        capture_started.set()
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            capture_cancelled.append(device_name)
+
+    monkeypatch.setattr(GuiController, "run_microphone_test_capture", fake_capture)
+
+    assert await controller.start_microphone_test() is True
+    await capture_started.wait()
+
+    controller.settings.audio.input_device = "New Mic"
+    try:
+        await controller.apply_settings(controller.settings)
+
+        assert controller._microphone_test_task is None
+        assert capture_cancelled == ["Old Mic"]
+    finally:
+        await controller.stop_microphone_test()
+
+
+@pytest.mark.asyncio
+async def test_stop_microphone_test_is_idempotent_and_cleans_active_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    capture_started = asyncio.Event()
+    capture_cancelled: list[str] = []
+
+    async def fake_capture(self, **_kwargs) -> None:
+        _ = self
+        capture_started.set()
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            capture_cancelled.append("cancelled")
+
+    monkeypatch.setattr(GuiController, "run_microphone_test_capture", fake_capture)
+
+    assert await controller.start_microphone_test() is True
+    await capture_started.wait()
+    await controller.stop_microphone_test()
+    await controller.stop_microphone_test()
+
+    assert capture_cancelled == ["cancelled"]
+    assert controller._microphone_test_task is None
+    assert controller._stt_desired is False
+
+
+@pytest.mark.asyncio
+async def test_controller_stop_cancels_active_microphone_test(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    capture_started = asyncio.Event()
+    capture_cancelled: list[str] = []
+
+    async def fake_capture(self, **_kwargs) -> None:
+        _ = self
+        capture_started.set()
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            capture_cancelled.append("cancelled")
+
+    monkeypatch.setattr(GuiController, "run_microphone_test_capture", fake_capture)
+
+    assert await controller.start_microphone_test() is True
+    await capture_started.wait()
+    await controller.stop()
+
+    assert capture_cancelled == ["cancelled"]
+    assert controller._microphone_test_task is None
+
+
+@pytest.mark.asyncio
 async def test_start_mic_loop_normalizes_wasapi_compatibility_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7171,6 +7610,81 @@ async def test_start_mic_loop_normalizes_wasapi_compatibility_mode(
     assert source_calls[0].get("wasapi_auto_convert") is True
     assert source_calls[0].get("wasapi_exclusive") is False
     assert source_calls[0]["channels"] == 1
+
+
+@pytest.mark.asyncio
+async def test_start_mic_loop_retries_retained_source_close_before_opening_new_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.audio.input_host_api = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    controller.settings.audio.input_device = "Compat Mic"
+    controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy()
+    raw_message = "retained source still busy"
+    close_calls: list[str] = []
+    source_calls: list[dict[str, object]] = []
+
+    class RetainedSource:
+        async def close(self) -> None:
+            close_calls.append("retained")
+            if len(close_calls) == 1:
+                raise RuntimeError(raw_message)
+
+    class NewSource:
+        actual_sample_rate_hz = 48000
+        requested_channels = 1
+        opened_channels = 1
+        frame_channels = 1
+
+        async def close(self) -> None:
+            return None
+
+    retained_source = RetainedSource()
+    controller._audio_source = retained_source
+    controller._last_mic_loop_close_exception = RuntimeError(raw_message)
+
+    def fake_source(*_args, **kwargs) -> NewSource:
+        source_calls.append(dict(kwargs))
+        return NewSource()
+
+    async def fake_run_mic_loop(self) -> None:
+        _ = self
+        return None
+
+    monkeypatch.setattr(controller_module, "ensure_silero_vad_onnx", lambda: Path("vad.onnx"))
+    monkeypatch.setattr(controller_module, "SileroVadOnnx", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "VadGating", lambda *a, **k: object())
+    monkeypatch.setattr(controller_module, "resolve_sounddevice_input_device", lambda **kwargs: 7)
+    monkeypatch.setattr(
+        controller_module,
+        "determine_self_mic_capture_channels",
+        lambda *, device_idx, internal_channels: _self_mic_decision(
+            device_idx=device_idx,
+            preferred_channels=1,
+        ),
+    )
+    monkeypatch.setattr(controller_module, "SoundDeviceAudioSource", fake_source)
+    monkeypatch.setattr(GuiController, "_run_mic_loop", fake_run_mic_loop)
+
+    await controller._start_mic_loop()
+
+    assert close_calls == ["retained"]
+    assert source_calls == []
+    assert controller._audio_source is retained_source
+    assert isinstance(controller._last_mic_loop_close_exception, RuntimeError)
+    assert controller._mic_task is None
+
+    await controller._start_mic_loop()
+    await asyncio.sleep(0)
+
+    assert close_calls == ["retained", "retained"]
+    assert len(source_calls) == 1
+    assert source_calls[0]["device"] == 7
+    assert controller._audio_source is not retained_source
+    assert controller._last_mic_loop_close_exception is None
+    assert controller._mic_task is not None
 
 
 @pytest.mark.asyncio
