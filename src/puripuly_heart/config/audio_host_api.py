@@ -5,6 +5,7 @@ from dataclasses import dataclass
 WINDOWS_WASAPI_HOST_API = "Windows WASAPI"
 WINDOWS_WASAPI_COMPATIBILITY_HOST_API = "Windows WASAPI (Compatibility Mode)"
 WINDOWS_DIRECTSOUND_HOST_API = "Windows DirectSound"
+WINDOWS_MME_HOST_API = "MME"
 
 
 @dataclass(frozen=True, slots=True)

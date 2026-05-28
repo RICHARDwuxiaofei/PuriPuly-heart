@@ -47,6 +47,7 @@
   "settings.deepgram_api_key": "Deepgram API Key",
   "settings.soniox_api_key": "Soniox API Key",
   "settings.audio_host_api": "Audio Host API",
+  "settings.audio_host_api.option.windows_mme": "MME",
   "settings.audio_host_api.option.windows_wasapi": "Windows WASAPI",
   "settings.audio_host_api.option.windows_wasapi_compatibility": "Windows WASAPI (Compatibility Mode)",
   "settings.audio_host_api.option.windows_directsound": "Windows DirectSound",
