@@ -33,6 +33,7 @@ from puripuly_heart.ui.components.bottom_nav import BottomNavBar
 from puripuly_heart.ui.components.debug_preview_panel import DebugPreviewPanel
 from puripuly_heart.ui.components.discord_managed_auth_dialog import DiscordManagedAuthDialog
 from puripuly_heart.ui.components.founder_letter_dialog import FounderLetterDialog
+from puripuly_heart.ui.components.microphone_test_dialog import MicrophoneTestDialog
 from puripuly_heart.ui.components.peer_translation_eula_dialog import PeerTranslationEulaDialog
 from puripuly_heart.ui.components.title_bar import TitleBar
 from puripuly_heart.ui.controller import GuiController
@@ -79,6 +80,16 @@ GITHUB_STAR_PROMPT_DELAY_S = 2.5
 GITHUB_STAR_PROMPT_DURATION_MS = 8000
 
 
+def _callable_accepts_keyword(callable_obj: object, keyword: str) -> bool:
+    try:
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return True
+    return keyword in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+
+
 def founder_readme_url_for_locale(locale: str | None) -> str:
     readme_path = FOUNDER_README_PATH_BY_LOCALE.get(locale or "", "README.md")
     anchor = FOUNDER_README_API_KEYS_ANCHOR_BY_LOCALE.get(
@@ -122,6 +133,7 @@ class TranslatorApp:
         self._launch_high_priority_feedback_reason: str | None = None
         self._launch_high_priority_snackbar = None
         self._github_star_prompt_shown_this_launch = False
+        self._microphone_test_dialog: MicrophoneTestDialog | None = None
         self._setup_page()
         self._build_layout()
 
@@ -501,6 +513,15 @@ class TranslatorApp:
         self.page.run_task(_task)
 
     def _close_open_dialog_for_navigation(self) -> None:
+        microphone_test_dialog = getattr(self, "_microphone_test_dialog", None)
+        if microphone_test_dialog is not None and getattr(
+            microphone_test_dialog,
+            "is_open",
+            False,
+        ):
+            microphone_test_dialog.close(notify=True)
+            return
+
         dialog = getattr(self.page, "dialog", None)
         close_dialog = getattr(self.page, "close", None)
         if dialog is None or not callable(close_dialog):
@@ -888,14 +909,56 @@ class TranslatorApp:
     def _on_settings_changed(self, settings) -> None:
         async def _task():
             await self.controller.apply_settings(settings)
+            self._close_microphone_test_dialog_if_inactive()
 
         self._queue_settings_mutation_task(_task)
 
     def _on_start_microphone_test(self) -> None:
         async def _task():
-            await self.controller.start_microphone_test()
+            existing_dialog = getattr(self, "_microphone_test_dialog", None)
+            if existing_dialog is not None and getattr(existing_dialog, "is_open", False):
+                return
+
+            dialog = MicrophoneTestDialog(
+                self.page,
+                on_close=self._on_microphone_test_dialog_closed,
+            )
+            start_microphone_test = self.controller.start_microphone_test
+            if _callable_accepts_keyword(start_microphone_test, "meter_callback"):
+                start_result = start_microphone_test(meter_callback=dialog.set_level)
+            else:
+                start_result = start_microphone_test()
+            started = await start_result if inspect.isawaitable(start_result) else start_result
+            if not started:
+                return
+            self._microphone_test_dialog = dialog
+            dialog.open()
 
         self._queue_settings_mutation_task(_task)
+
+    def _on_microphone_test_dialog_closed(self) -> None:
+        if getattr(self, "_microphone_test_dialog", None) is not None:
+            self._microphone_test_dialog = None
+
+        async def _task() -> None:
+            stop_microphone_test = getattr(self.controller, "stop_microphone_test", None)
+            if not callable(stop_microphone_test):
+                return
+            result = stop_microphone_test()
+            if inspect.isawaitable(result):
+                await result
+
+        self.page.run_task(_task)
+
+    def _close_microphone_test_dialog_if_inactive(self) -> None:
+        dialog = getattr(self, "_microphone_test_dialog", None)
+        if dialog is None:
+            return
+        controller = getattr(self, "controller", None)
+        if bool(getattr(controller, "microphone_test_active", False)):
+            return
+        self._microphone_test_dialog = None
+        dialog.close(notify=False)
 
     def _on_prompt_apply_settings(self, settings) -> None:
         async def _task():
