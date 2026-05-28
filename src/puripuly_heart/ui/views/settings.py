@@ -233,6 +233,7 @@ class SettingsView(ft.Column):
         self.on_desktop_overlay_recovery_action: Callable[[str], None] | None = None
         self.on_desktop_overlay_position_reset: Callable[[], None] | None = None
         self.on_view_logs: Callable[[], None] | None = None
+        self.on_start_microphone_test: Callable[[], None] | None = None
         self.show_snackbar: Callable[[str, str], None] | None = None
         self.runtime_log_basic: Callable[..., None] | None = None
         self.runtime_log_detailed: Callable[..., None] | None = None
@@ -371,6 +372,7 @@ class SettingsView(ft.Column):
             self._ui_text,
             self._chatbox_source_text,
             self._clipboard_auto_translate_text,
+            self._microphone_test_text,
             self._vrc_mic_text,
             self._mic_audio_text,
             self._audio_host_api_text,
@@ -1063,6 +1065,21 @@ class SettingsView(ft.Column):
             value=self._vrc_mic_text,
         )
 
+        self._microphone_test_text = self._build_clickable_text(
+            t("settings.microphone_test.action"),
+            self._on_microphone_test_click,
+        )
+        self._microphone_test_title = ft.Text(
+            t("settings.microphone_test"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=COLOR_NEUTRAL,
+        )
+        microphone_test_card = self._wrap_unit_card(
+            title=self._microphone_test_title,
+            value=self._microphone_test_text,
+        )
+
         integrated_context_card = self._build_integrated_context_unit_card()
 
         general_primary_row = ft.Container(
@@ -1208,7 +1225,7 @@ class SettingsView(ft.Column):
         )
         general_vad_row = ft.Container(
             content=ft.Row(
-                [vrc_mic_card, self._self_vad_card, self._peer_vad_card],
+                [microphone_test_card, self._self_vad_card, self._peer_vad_card],
                 spacing=16,
                 expand=True,
             ),
@@ -1217,7 +1234,7 @@ class SettingsView(ft.Column):
             content=ft.Row(
                 [
                     clipboard_auto_translate_card,
-                    self._wrap_empty_unit_card(),
+                    vrc_mic_card,
                     self._wrap_empty_unit_card(),
                 ],
                 spacing=16,
@@ -4333,6 +4350,12 @@ class SettingsView(ft.Column):
         next_value = "off" if self._settings.osc.vrc_mic_intercept else "on"
         self._on_vrc_mic_selected(next_value)
 
+    def _on_microphone_test_click(self, e) -> None:
+        """Request the app/controller-owned microphone-test lifecycle."""
+        _ = e
+        if self.on_start_microphone_test is not None:
+            self.on_start_microphone_test()
+
     def _on_vrc_mic_selected(self, value: str) -> None:
         """处理选项卡的选择结果
 
@@ -4580,6 +4603,7 @@ class SettingsView(ft.Column):
         self._loopback_audio_title.value = t("settings.section.loopback_audio")
         self._self_vad_title.value = t("settings.section.self_vad_sensitivity")
         self._peer_vad_title.value = t("settings.section.peer_vad_sensitivity")
+        self._microphone_test_title.value = t("settings.microphone_test")
         self._peer_vad_field.label = t("settings.vad.peer")
         self._peer_hangover_field.label = t("settings.vad.peer_hangover_ms")
         self._peer_pre_roll_field.label = t("settings.vad.peer_pre_roll_ms")
@@ -4711,6 +4735,10 @@ class SettingsView(ft.Column):
                 "settings.clipboard_auto_translate.on"
                 if display_settings.ui.clipboard_auto_translate_enabled
                 else "settings.clipboard_auto_translate.off"
+            )
+            self._set_unit_card_value_text(
+                self._microphone_test_text,
+                t("settings.microphone_test.action"),
             )
             self._sync_overlay_controls()
             self._sync_overlay_calibration_controls()

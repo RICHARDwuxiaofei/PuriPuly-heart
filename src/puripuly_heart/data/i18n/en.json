@@ -51,6 +51,8 @@
   "settings.audio_host_api.option.windows_wasapi": "Windows WASAPI",
   "settings.audio_host_api.option.windows_wasapi_compatibility": "Windows WASAPI (Compatibility Mode)",
   "settings.audio_host_api.option.windows_directsound": "Windows DirectSound",
+  "settings.microphone_test": "Microphone test",
+  "settings.microphone_test.action": "Test",
   "settings.microphone": "Microphone",
   "settings.vad.peer": "Peer VAD",
   "settings.vad.peer_hangover_ms": "Peer Hangover (ms)",

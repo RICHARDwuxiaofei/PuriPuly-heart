@@ -140,6 +140,7 @@ class TranslatorApp:
         self.view_settings.on_verify_api_key = self._on_verify_api_key
         self.view_settings.on_secret_cleared = self._on_secret_cleared
         self.view_settings.on_local_llm_secret_changed = self._on_local_llm_secret_changed
+        self.view_settings.on_start_microphone_test = self._on_start_microphone_test
         self.view_settings.on_desktop_overlay_lock_change = self._on_desktop_overlay_lock_change
         self.view_settings.on_desktop_overlay_size_change = self._on_desktop_overlay_size_change
         self.view_settings.on_desktop_overlay_recovery_action = (
@@ -887,6 +888,12 @@ class TranslatorApp:
     def _on_settings_changed(self, settings) -> None:
         async def _task():
             await self.controller.apply_settings(settings)
+
+        self._queue_settings_mutation_task(_task)
+
+    def _on_start_microphone_test(self) -> None:
+        async def _task():
+            await self.controller.start_microphone_test()
 
         self._queue_settings_mutation_task(_task)
 

@@ -152,6 +152,7 @@ class ConstructionDummySettingsView(ft.Container):
         self.on_settings_changed = None
         self.on_prompt_apply_settings = None
         self.on_providers_changed = None
+        self.on_start_microphone_test = None
         self.on_request_openrouter_pkce = None
         self.on_verify_api_key = None
         self.on_secret_cleared = None
@@ -242,6 +243,7 @@ def test_translator_app_init_builds_layout_and_wires_callbacks(
     assert app.view_dashboard.on_toggle_peer_translation == app._on_peer_translation_toggle
     assert app.view_settings.on_verify_api_key == app._on_verify_api_key
     assert app.view_settings.on_prompt_apply_settings == app._on_prompt_apply_settings
+    assert app.view_settings.on_start_microphone_test == app._on_start_microphone_test
     assert app.view_settings.on_desktop_overlay_lock_change == (app._on_desktop_overlay_lock_change)
     assert app.view_settings.on_desktop_overlay_size_change == (app._on_desktop_overlay_size_change)
     assert app.view_settings.on_desktop_overlay_recovery_action == (
@@ -1841,6 +1843,52 @@ async def test_on_settings_changed_applies_raw_settings_without_prompt_merge() -
     assert len(app.page.tasks) == 1
     await app.page.tasks[0]()
     assert seen == [raw_settings]
+
+
+@pytest.mark.asyncio
+async def test_start_microphone_test_callback_uses_page_run_task() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    calls: list[str] = []
+
+    async def fake_start_microphone_test() -> bool:
+        calls.append("start")
+        return True
+
+    app.controller = SimpleNamespace(start_microphone_test=fake_start_microphone_test)
+
+    app._on_start_microphone_test()
+
+    assert len(app.page.tasks) == 1
+    assert calls == []
+    await app.page.tasks[0]()
+    assert calls == ["start"]
+
+
+@pytest.mark.asyncio
+async def test_start_microphone_test_waits_for_pending_settings_queue() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    events: list[str] = []
+
+    async def fake_apply_settings(settings) -> None:
+        events.append(f"apply:{settings}")
+
+    async def fake_start_microphone_test() -> bool:
+        events.append("start")
+        return True
+
+    app.controller = SimpleNamespace(
+        apply_settings=fake_apply_settings,
+        start_microphone_test=fake_start_microphone_test,
+    )
+
+    app._on_settings_changed("audio")
+    app._on_start_microphone_test()
+
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert events == ["apply:audio", "start"]
 
 
 def test_on_request_openrouter_pkce_uses_settings_mutation_queue(
