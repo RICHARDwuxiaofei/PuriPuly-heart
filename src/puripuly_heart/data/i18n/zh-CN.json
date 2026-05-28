@@ -51,6 +51,8 @@
     "settings.audio_host_api.option.windows_wasapi": "Windows WASAPI",
     "settings.audio_host_api.option.windows_wasapi_compatibility": "Windows WASAPI（兼容模式）",
     "settings.audio_host_api.option.windows_directsound": "Windows DirectSound",
+    "settings.microphone_test": "麦克风测试",
+    "settings.microphone_test.action": "测试",
     "settings.microphone": "麦克风",
     "settings.vad.peer": "对方 VAD",
     "settings.vad.peer_hangover_ms": "对方拖尾 (ms)",

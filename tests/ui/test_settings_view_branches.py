@@ -248,6 +248,18 @@ def _card_title(card: ft.Control) -> str | None:
     return None
 
 
+def _card_value_text(card: ft.Control) -> str | None:
+    column = _wrapped_card_column(card)
+    controls = getattr(column, "controls", None)
+    if not controls or len(controls) < 2:
+        return None
+    value_slot = getattr(controls[1], "content", None)
+    value_text = getattr(value_slot, "content", None)
+    if isinstance(value_text, ft.Text):
+        return value_text.value
+    return None
+
+
 def _general_tab_card_titles(view: settings_view.SettingsView) -> list[str]:
     titles: list[str] = []
     for row in _subtab_controls(view, "general"):
@@ -4889,7 +4901,7 @@ def test_audio_change_updates_desktop_loopback_controls(monkeypatch: pytest.Monk
     assert changed == [settings, settings, settings, settings]
 
 
-def test_general_tab_uses_four_row_layout_with_clipboard_card_in_final_row(
+def test_general_tab_places_microphone_test_and_displaced_cards(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
@@ -4911,13 +4923,62 @@ def test_general_tab_uses_four_row_layout_with_clipboard_card_in_final_row(
         t("settings.section.loopback_audio"),
     ]
     assert _row_card_titles(general_controls[2]) == [
-        t("settings.vrc_mic_intercept"),
+        t("settings.microphone_test"),
         t("settings.section.self_vad_sensitivity"),
         t("settings.section.peer_vad_sensitivity"),
     ]
     assert _row_card_titles(general_controls[3]) == [
         t("settings.clipboard_auto_translate"),
+        t("settings.vrc_mic_intercept"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_title", "expected_action"),
+    [
+        ("en", "Microphone test", "Test"),
+        ("ko", "마이크 테스트", "테스트"),
+        ("ja", "マイクテスト", "テスト"),
+        ("zh-CN", "麦克风测试", "测试"),
+    ],
+)
+def test_microphone_test_card_uses_localized_title_and_action(
+    monkeypatch: pytest.MonkeyPatch,
+    locale: str,
+    expected_title: str,
+    expected_action: str,
+) -> None:
+    old_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale(locale)
+        view, _ = _make_settings_view(monkeypatch)
+        card = _general_tab_card(view, t("settings.microphone_test"))
+
+        assert _card_title(card) == expected_title
+        assert _card_value_text(card) == expected_action
+        assert _tree_contains_control(card, view._microphone_test_text)
+    finally:
+        i18n_module.set_locale(old_locale)
+
+
+def test_microphone_test_card_click_invokes_start_callback_without_modal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    calls: list[str] = []
+    view.on_start_microphone_test = lambda: calls.append("start")
+    modal_calls: list[str] = []
+
+    class DummyModal:
+        def __init__(self, *_args, **_kwargs) -> None:
+            modal_calls.append("created")
+
+    monkeypatch.setattr(settings_view, "SettingsModal", DummyModal)
+
+    view._on_microphone_test_click(None)
+
+    assert calls == ["start"]
+    assert modal_calls == []
 
 
 def test_general_tab_excludes_prompt_and_overlay_controls(
@@ -5144,6 +5205,8 @@ def test_general_tab_labels_and_section_headings_render_from_i18n(
         assert view._loopback_audio_title.value == t("settings.section.loopback_audio")
         assert view._integrated_context_label.value == t("settings.integrated_context")
         assert view._low_latency_title.value == t("settings.low_latency_mode")
+        assert view._microphone_test_title.value == t("settings.microphone_test")
+        assert view._microphone_test_text.content.value == t("settings.microphone_test.action")
         assert view._self_vad_title.value == t("settings.section.self_vad_sensitivity")
         assert view._peer_vad_title.value == t("settings.section.peer_vad_sensitivity")
         assert view._peer_vad_field.label == t("settings.vad.peer")
