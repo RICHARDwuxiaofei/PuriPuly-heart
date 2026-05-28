@@ -93,6 +93,12 @@
       "name": "EA_PE",
       "avatar_url": "https://ui-avatars.com/api/?name=EA&size=160&background=F0FFF4&color=2F6B45&rounded=true&bold=true",
       "contributions": ["thanks"]
+    },
+    {
+      "login": "ephedrine",
+      "name": "Ephedrine",
+      "avatar_url": "https://ui-avatars.com/api/?name=EPH&size=160&background=F4F0FF&color=4C3B7A&rounded=true&bold=true",
+      "contributions": ["thanks"]
     }
   ]
 }
