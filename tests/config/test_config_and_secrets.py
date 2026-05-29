@@ -8,6 +8,9 @@ import pytest
 
 from puripuly_heart.config.audio_host_api import (
     WINDOWS_DIRECTSOUND_HOST_API,
+    WINDOWS_MME_HOST_API,
+    WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
+    WINDOWS_WASAPI_HOST_API,
 )
 from puripuly_heart.config.llm_profiles import (
     OPENROUTER_FALLBACK_SELECTION_ALIASES,
@@ -219,21 +222,27 @@ def test_settings_validation_rejects_legacy_8khz_audio() -> None:
         settings.validate()
 
 
-def test_default_audio_host_api_is_auto_blank() -> None:
+def test_default_audio_host_api_is_wasapi_compatibility_mode() -> None:
     settings = AppSettings()
 
-    assert settings.audio.input_host_api == ""
-    assert to_dict(settings)["audio"]["input_host_api"] == ""
+    assert settings.audio.input_host_api == WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    assert to_dict(settings)["audio"]["input_host_api"] == WINDOWS_WASAPI_COMPATIBILITY_HOST_API
 
 
-def test_from_dict_defaults_missing_audio_host_api_to_auto_blank() -> None:
+def test_from_dict_defaults_missing_audio_host_api_to_wasapi_compatibility_mode() -> None:
     raw = to_dict(AppSettings())
     raw["audio"].pop("input_host_api")
 
     loaded = from_dict(raw)
 
-    assert loaded.audio.input_host_api == ""
-    assert to_dict(loaded)["audio"]["input_host_api"] == ""
+    assert loaded.audio.input_host_api == WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    assert to_dict(loaded)["audio"]["input_host_api"] == WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+
+
+def test_from_dict_defaults_missing_audio_block_host_api_to_wasapi_compatibility_mode() -> None:
+    loaded = from_dict({})
+
+    assert loaded.audio.input_host_api == WINDOWS_WASAPI_COMPATIBILITY_HOST_API
 
 
 def test_from_dict_preserves_explicit_blank_audio_host_api() -> None:
@@ -244,6 +253,26 @@ def test_from_dict_preserves_explicit_blank_audio_host_api() -> None:
 
     assert loaded.audio.input_host_api == ""
     assert to_dict(loaded)["audio"]["input_host_api"] == ""
+
+
+@pytest.mark.parametrize(
+    "host_api",
+    [
+        WINDOWS_WASAPI_HOST_API,
+        WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
+        WINDOWS_DIRECTSOUND_HOST_API,
+        WINDOWS_MME_HOST_API,
+        "Unknown Host API",
+    ],
+)
+def test_from_dict_preserves_explicit_audio_host_api_values(host_api: str) -> None:
+    raw = to_dict(AppSettings())
+    raw["audio"]["input_host_api"] = host_api
+
+    loaded = from_dict(raw)
+
+    assert loaded.audio.input_host_api == host_api
+    assert to_dict(loaded)["audio"]["input_host_api"] == host_api
 
 
 def test_migrate_v17_preserves_saved_directsound_host_api_and_device() -> None:
