@@ -1130,11 +1130,12 @@ def test_installer_script_uses_inno_managed_local_stt_download() -> None:
     assert "FileSize64" in script
     assert "ValidateLocalSttInstalledManifest" in script
     assert "selected_revision" in script
-    assert "LocalSttDownloadFailed" in script
     assert "DownloadLocalSttSource('huggingface'" in script
     assert "DownloadLocalSttSource('modelscope'" in script
     assert "function RunLocalSttModelInstall(): Boolean;" in script
     assert "if not RunLocalSttModelInstall() then begin" in script
+    assert "continuing app install without bundled ASR model" in script
+    assert "Result := ExpandConstant('{cm:LocalSttDownloadFailed}');" not in script
     assert "CurStepChanged" not in script
     assert "GetSelectedLocalSttSource" not in script
     assert "LocalSttSourceComboBox" not in script

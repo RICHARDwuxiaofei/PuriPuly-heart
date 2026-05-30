@@ -542,6 +542,6 @@ begin
   ResetSuspiciousInstallDir();
   Result := '';
   if not RunLocalSttModelInstall() then begin
-    Result := ExpandConstant('{cm:LocalSttDownloadFailed}');
+    Log('Local STT provisioning did not complete; continuing app install without bundled ASR model. The app can retry the local STT model download at runtime.');
   end;
 end;
