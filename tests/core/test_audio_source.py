@@ -7,6 +7,12 @@ import numpy as np
 import pytest
 
 import puripuly_heart.core.audio.source as audio_source_module
+from puripuly_heart.config.audio_host_api import (
+    WINDOWS_DIRECTSOUND_HOST_API,
+    WINDOWS_MME_HOST_API,
+    WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
+    WINDOWS_WASAPI_HOST_API,
+)
 from puripuly_heart.core.audio.source import (
     SelfMicCaptureChannelDecision,
     SoundDeviceAudioSource,
@@ -15,6 +21,17 @@ from puripuly_heart.core.audio.source import (
     query_sounddevice_input_metadata,
     resolve_sounddevice_input_device,
 )
+
+
+def _observe_microphone_test_route(**kwargs):
+    assert hasattr(audio_source_module, "observe_microphone_test_route")
+    return audio_source_module.observe_microphone_test_route(**kwargs)
+
+
+def _microphone_test_route_observation_type():
+    observation_type = getattr(audio_source_module, "MicrophoneTestRouteObservation", None)
+    assert observation_type is not None
+    return observation_type
 
 
 @pytest.mark.parametrize(
@@ -189,6 +206,208 @@ def test_resolve_sounddevice_input_device_by_name(monkeypatch):
 
 def test_resolve_sounddevice_input_device_returns_none_when_blank() -> None:
     assert resolve_sounddevice_input_device() is None
+
+
+def test_observe_microphone_test_route_true_auto_allows_system_default_without_querying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_query(*_args, **_kwargs):
+        raise AssertionError("true Auto should not query PortAudio before opening system default")
+
+    fake_sd = SimpleNamespace(
+        query_hostapis=unexpected_query,
+        query_devices=unexpected_query,
+    )
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    observation = _observe_microphone_test_route(saved_host_api="", requested_device="")
+
+    assert isinstance(observation, _microphone_test_route_observation_type())
+    assert observation.saved_host_api == ""
+    assert observation.actual_host_api == ""
+    assert observation.requested_device == ""
+    assert observation.hostapi_index is None
+    assert observation.resolved_device_idx is None
+    assert observation.resolved_device_name is None
+    assert observation.resolution_exception_class is None
+    assert observation.resolution_exception_message is None
+    assert observation.should_attempt_open is True
+    assert observation.wasapi_auto_convert is False
+    assert observation.wasapi_exclusive is False
+
+
+def test_observe_microphone_test_route_uses_host_api_default_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_sd = SimpleNamespace(
+        query_hostapis=lambda: [
+            {"name": WINDOWS_WASAPI_HOST_API, "default_input_device": 1},
+        ],
+        query_devices=lambda: [
+            {"max_input_channels": 0, "hostapi": 0, "name": "Out"},
+            {"max_input_channels": 2, "hostapi": 0, "name": "Default Mic"},
+        ],
+    )
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    observation = _observe_microphone_test_route(
+        saved_host_api=WINDOWS_WASAPI_HOST_API,
+        requested_device="",
+    )
+
+    assert observation.hostapi_index == 0
+    assert observation.resolved_device_idx == 1
+    assert observation.resolved_device_name == "Default Mic"
+    assert observation.should_attempt_open is True
+    assert observation.actual_host_api == WINDOWS_WASAPI_HOST_API
+    assert observation.wasapi_auto_convert is False
+    assert observation.wasapi_exclusive is False
+
+
+def test_observe_microphone_test_route_host_api_default_miss_does_not_open_global_auto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_sd = SimpleNamespace(
+        query_hostapis=lambda: [
+            {"name": WINDOWS_WASAPI_HOST_API, "default_input_device": -1},
+        ],
+        query_devices=lambda: [
+            {"max_input_channels": 2, "hostapi": 0, "name": "Available Mic"},
+        ],
+    )
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    observation = _observe_microphone_test_route(
+        saved_host_api=WINDOWS_WASAPI_HOST_API,
+        requested_device="",
+    )
+
+    assert observation.hostapi_index == 0
+    assert observation.resolved_device_idx is None
+    assert observation.resolved_device_name is None
+    assert observation.should_attempt_open is False
+    assert observation.resolution_exception_class is None
+    assert observation.resolution_exception_message is None
+
+
+def test_observe_microphone_test_route_explicit_device_miss_does_not_open_global_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_sd = SimpleNamespace(
+        query_hostapis=lambda: [{"name": WINDOWS_MME_HOST_API, "default_input_device": 0}],
+        query_devices=lambda: [
+            {"max_input_channels": 2, "hostapi": 0, "name": "마이크"},
+        ],
+    )
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    observation = _observe_microphone_test_route(
+        saved_host_api=WINDOWS_MME_HOST_API,
+        requested_device="Missing Mic",
+    )
+
+    assert observation.saved_host_api == WINDOWS_MME_HOST_API
+    assert observation.actual_host_api == WINDOWS_MME_HOST_API
+    assert observation.requested_device == "Missing Mic"
+    assert observation.hostapi_index == 0
+    assert observation.resolved_device_idx is None
+    assert observation.resolved_device_name is None
+    assert observation.should_attempt_open is False
+    assert observation.resolution_exception_class is None
+    assert observation.resolution_exception_message is None
+
+
+@pytest.mark.parametrize(
+    ("host_api", "device_name"),
+    [
+        (WINDOWS_MME_HOST_API, "MME Mic"),
+        (WINDOWS_DIRECTSOUND_HOST_API, "DirectSound Mic"),
+    ],
+)
+def test_observe_microphone_test_route_resolves_mme_and_directsound_devices(
+    monkeypatch: pytest.MonkeyPatch,
+    host_api: str,
+    device_name: str,
+) -> None:
+    fake_sd = SimpleNamespace(
+        query_hostapis=lambda: [
+            {"name": WINDOWS_MME_HOST_API, "default_input_device": 0},
+            {"name": WINDOWS_DIRECTSOUND_HOST_API, "default_input_device": 1},
+        ],
+        query_devices=lambda: [
+            {"max_input_channels": 2, "hostapi": 0, "name": "MME Mic"},
+            {"max_input_channels": 2, "hostapi": 1, "name": "DirectSound Mic"},
+        ],
+    )
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    observation = _observe_microphone_test_route(
+        saved_host_api=host_api,
+        requested_device=device_name.lower(),
+    )
+
+    assert observation.saved_host_api == host_api
+    assert observation.actual_host_api == host_api
+    assert observation.resolved_device_name == device_name
+    assert observation.resolved_device_idx in {0, 1}
+    assert observation.should_attempt_open is True
+    assert observation.wasapi_auto_convert is False
+    assert observation.wasapi_exclusive is False
+
+
+def test_observe_microphone_test_route_maps_wasapi_compatibility_to_actual_wasapi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_sd = SimpleNamespace(
+        query_hostapis=lambda: [
+            {"name": WINDOWS_WASAPI_HOST_API, "default_input_device": 2},
+        ],
+        query_devices=lambda: [
+            {"max_input_channels": 0, "hostapi": 0, "name": "Out"},
+            {"max_input_channels": 0, "hostapi": 0, "name": "Other Out"},
+            {"max_input_channels": 2, "hostapi": 0, "name": "Compat Mic"},
+        ],
+    )
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    observation = _observe_microphone_test_route(
+        saved_host_api=WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
+        requested_device="Compat Mic",
+    )
+
+    assert observation.saved_host_api == WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    assert observation.actual_host_api == WINDOWS_WASAPI_HOST_API
+    assert observation.hostapi_index == 0
+    assert observation.resolved_device_idx == 2
+    assert observation.resolved_device_name == "Compat Mic"
+    assert observation.should_attempt_open is True
+    assert observation.wasapi_auto_convert is True
+    assert observation.wasapi_exclusive is False
+
+
+def test_observe_microphone_test_route_records_resolution_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_query_error():
+        raise RuntimeError("portaudio unavailable")
+
+    fake_sd = SimpleNamespace(query_hostapis=raise_query_error, query_devices=lambda: [])
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", fake_sd)
+
+    observation = _observe_microphone_test_route(
+        saved_host_api=WINDOWS_MME_HOST_API,
+        requested_device="마이크",
+    )
+
+    assert observation.saved_host_api == WINDOWS_MME_HOST_API
+    assert observation.actual_host_api == WINDOWS_MME_HOST_API
+    assert observation.requested_device == "마이크"
+    assert observation.hostapi_index is None
+    assert observation.resolved_device_idx is None
+    assert observation.resolved_device_name is None
+    assert observation.should_attempt_open is False
+    assert observation.resolution_exception_class == "RuntimeError"
+    assert observation.resolution_exception_message == "portaudio unavailable"
 
 
 @pytest.mark.parametrize(
