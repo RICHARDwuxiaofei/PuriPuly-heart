@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.1.0-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.1.1-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -147,7 +147,14 @@ So I built one that can.
 
 7. Enable OSC in VRChat: Action menu → Settings → OSC → Enable.
 
-* If voice is not recognized, select the correct microphone in the PuriPuly Settings tab.
+### If audio capture does not work
+If audio capture does not work, open **Settings > General** and follow these steps.
+
+1. Change **Audio Host API** to **Auto** or **MME**.
+2. Select the correct microphone.
+3. Restart the app.
+
+If it still does not work, report it by Twitter DM or in [issue #10](https://github.com/kapitalismho/PuriPuly-heart/issues/10).
 
 ---
 
@@ -451,7 +458,7 @@ pnpm --filter @puripuly-heart/broker run dev
 
 ## Special Thanks
 
-SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์, EA\_PE
+SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์, EA\_PE, Ephedrine
 
 ---
 

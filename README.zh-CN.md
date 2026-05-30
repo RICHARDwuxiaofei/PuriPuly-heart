@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.1.0-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.1.1-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -148,7 +148,14 @@
 
 7. 在 VRChat 中启用 OSC：Action menu → Settings → OSC → Enable
 
-* 如果无法识别语音，请在 PuriPuly 的设置标签页中选择正确的麦克风。
+### 如果无法捕获音频
+如果无法捕获音频，请在 **设置 > 常规** 中按以下步骤操作。
+
+1. 将 **应用音频接口** 改为 **自动选择** 或 **MME**
+2. 选择正确的麦克风
+3. 重启应用
+
+如果仍未解决，请通过 Twitter DM 或 [issue #10](https://github.com/kapitalismho/PuriPuly-heart/issues/10) 报告。
 
 ---
 
@@ -449,7 +456,7 @@ pnpm --filter @puripuly-heart/broker run dev
 
 ## Special Thanks
 
-SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์, EA\_PE
+SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์, EA\_PE, Ephedrine
 
 ---
 

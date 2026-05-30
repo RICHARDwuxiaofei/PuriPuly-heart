@@ -5,7 +5,7 @@
 <h1 align="center">PuriPuly <3</h1>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.1.0-blue" alt="Version" />
+  <img src="https://img.shields.io/badge/version-2.1.1-blue" alt="Version" />
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later" />
   <img src="https://img.shields.io/badge/python-3.12-yellow" alt="Python" />
   <img src="https://img.shields.io/badge/platform-Windows-lightgrey" alt="Platform" />
@@ -147,7 +147,14 @@
 
 7. VRChatでOSCを有効化: Action menu → Settings → OSC → Enable
 
-* 音声が認識されない場合は、PuriPulyの設定タブで正しいマイクを選択してください。
+### 音声がキャプチャされない場合
+音声がキャプチャされない場合は、**設定 > 一般** で次の手順を行ってください。
+
+1. **オーディオホストAPI** を **自動選択** または **MME** に変更
+2. 正しいマイクを選択
+3. アプリを再起動
+
+それでも解決しない場合は、Twitter DMまたは [issue #10](https://github.com/kapitalismho/PuriPuly-heart/issues/10) で報告してください。
 
 ---
 
@@ -451,7 +458,7 @@ pnpm --filter @puripuly-heart/broker run dev
 
 ## Special Thanks
 
-SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์, EA\_PE
+SUI\_32C, Nagikokoro, motoka96, \_Ykol魚, kascr\_, Just Monika V, FLUVIA, Han โชเล่ย์, EA\_PE, Ephedrine
 
 ---
 

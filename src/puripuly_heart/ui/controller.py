@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Protocol
 
 import flet as ft
+import numpy as np
 
 from puripuly_heart.app.wiring import (
     build_peer_stt_provider_signature,
@@ -53,12 +54,15 @@ from puripuly_heart.config.settings import (
 )
 from puripuly_heart.core.audio.desktop_pipeline import DesktopPeerPipeline
 from puripuly_heart.core.audio.desktop_source import DesktopLoopbackAudioSource
+from puripuly_heart.core.audio.diagnostics import compute_audio_frame_metrics
 from puripuly_heart.core.audio.gate import VrcMicAudioGate
 from puripuly_heart.core.audio.source import (
     AudioSource,
+    MicrophoneTestRouteObservation,
     SelfMicCaptureChannelDecision,
     SoundDeviceAudioSource,
     determine_self_mic_capture_channels,
+    observe_microphone_test_route,
     resolve_sounddevice_input_device,
 )
 from puripuly_heart.core.clipboard.watcher import create_clipboard_watcher
@@ -178,6 +182,7 @@ _OVERLAY_FAILURE_REASONS = frozenset(
     }
 )
 GITHUB_STAR_PROMPT_MANAGED_REMAINING_PERCENT_THRESHOLD = 60
+GITHUB_STAR_PROMPT_ELIGIBLE_LAUNCH_THRESHOLD = 3
 GITHUB_STAR_PROMPT_RECENCY_WINDOW = timedelta(days=14)
 _GITHUB_STAR_PROMPT_MANAGED_CONNECTIONS = frozenset(
     {
@@ -200,6 +205,71 @@ DISCORD_AUTH_ERROR_KEY_BY_SUBCODE = {
     "oauth_session_expired": "discord_auth.error.expired",
     "loopback_unavailable": "discord_auth.error.loopback_unavailable",
 }
+_MICROPHONE_TEST_LEVEL_INTERVAL_S = 1.0
+
+
+def _mic_test_log_value(value: object) -> str:
+    if value is None:
+        return "None"
+    if isinstance(value, str):
+        return repr(value)
+    if isinstance(value, float):
+        return str(value)
+    return str(value)
+
+
+def _mic_test_db(value: float) -> float:
+    if value <= 0.0:
+        return -120.0
+    return round(float(20.0 * math.log10(max(value, 1e-6))), 1)
+
+
+@dataclass(slots=True)
+class _MicrophoneTestLevelStats:
+    frames: int = 0
+    audio_ms: float = 0.0
+    sample_count: int = 0
+    square_sum: float = 0.0
+    peak_abs: float = 0.0
+    zero_count: int = 0
+
+    def add_frame(self, frame) -> None:  # noqa: ANN001
+        metrics = compute_audio_frame_metrics(frame)
+        samples = np.asarray(frame.samples, dtype=np.float32)
+        self.frames += 1
+        self.audio_ms += metrics.audio_ms
+        self.sample_count += int(samples.size)
+        if samples.size == 0:
+            return
+
+        abs_samples = np.abs(samples)
+        self.square_sum += float(np.sum(np.square(samples, dtype=np.float32)))
+        self.peak_abs = max(self.peak_abs, float(np.max(abs_samples)))
+        self.zero_count += int(np.count_nonzero(abs_samples < 1e-6))
+
+    @property
+    def rms_db(self) -> float:
+        if self.sample_count <= 0:
+            return -120.0
+        return _mic_test_db(math.sqrt(self.square_sum / float(self.sample_count)))
+
+    @property
+    def peak_db(self) -> float:
+        return _mic_test_db(self.peak_abs)
+
+    @property
+    def zero_ratio(self) -> float:
+        if self.sample_count <= 0:
+            return 1.0
+        return round(float(self.zero_count) / float(self.sample_count), 3)
+
+    def reset(self) -> None:
+        self.frames = 0
+        self.audio_ms = 0.0
+        self.sample_count = 0
+        self.square_sum = 0.0
+        self.peak_abs = 0.0
+        self.zero_count = 0
 
 
 def _canonical_json_signature(value: object) -> str:
@@ -307,6 +377,22 @@ class GuiController:
     _bridge_task: asyncio.Task[None] | None = None
     _mic_task: asyncio.Task[None] | None = None
     _audio_source: AudioSource | None = None
+    _last_mic_loop_close_exception: BaseException | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _microphone_test_meter_level: float = field(init=False, default=0.0)
+    _microphone_test_task: asyncio.Task[None] | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
+    _microphone_test_lifecycle_lock: asyncio.Lock | None = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
     _debug_capture_fault_profile: str = field(init=False, default="none")
     _debug_stt_fault_profile: str = field(init=False, default="none")
     _vad: VadGating | None = None
@@ -320,6 +406,7 @@ class GuiController:
     _last_self_stt_provider_signature: tuple[object, ...] | None = None
     _last_peer_stt_provider_signature: tuple[object, ...] | None = None
     _last_llm_provider_signature: tuple[object, ...] | None = None
+    _last_microphone_test_audio_settings_signature: tuple[object, ...] | None = None
     _last_peer_translation_enabled: bool | None = None
     _last_peer_translation_activation_requested: bool | None = None
     _last_vrc_mic_sync_enabled: bool | None = None
@@ -956,6 +1043,16 @@ class GuiController:
             return bool(self.settings.ui.github_star_prompt_translation_success_observed)
         return False
 
+    def _github_star_prompt_initial_launch_gate_satisfied(self, settings: AppSettings) -> bool:
+        if _github_star_prompt_non_negative_count(settings.ui.github_star_prompt_show_count) > 0:
+            return True
+        return (
+            _github_star_prompt_non_negative_count(
+                settings.ui.github_star_prompt_eligible_launch_count
+            )
+            >= GITHUB_STAR_PROMPT_ELIGIBLE_LAUNCH_THRESHOLD
+        )
+
     def should_show_github_star_prompt(self, *, now: datetime | None = None) -> bool:
         settings = self.settings
         if settings is None:
@@ -963,6 +1060,8 @@ class GuiController:
         if settings.ui.github_star_prompt_clicked:
             return False
         if not self.is_github_star_prompt_eligible():
+            return False
+        if not self._github_star_prompt_initial_launch_gate_satisfied(settings):
             return False
 
         last_shown_at = _parse_github_star_prompt_timestamp(
@@ -988,6 +1087,7 @@ class GuiController:
             settings.ui.github_star_prompt_last_shown_at,
             settings.ui.github_star_prompt_show_count,
             settings.ui.github_star_prompt_translation_success_observed,
+            settings.ui.github_star_prompt_eligible_launch_count,
         )
 
     def _restore_github_star_prompt_state_snapshot(
@@ -1000,6 +1100,7 @@ class GuiController:
             last_shown_at,
             show_count,
             translation_success_observed,
+            eligible_launch_count,
         ) = snapshot
         settings.ui.github_star_prompt_clicked = bool(clicked)
         settings.ui.github_star_prompt_last_shown_at = (
@@ -1010,6 +1111,9 @@ class GuiController:
         )
         settings.ui.github_star_prompt_translation_success_observed = bool(
             translation_success_observed
+        )
+        settings.ui.github_star_prompt_eligible_launch_count = (
+            _github_star_prompt_non_negative_count(eligible_launch_count)
         )
 
     def _log_github_star_prompt_save_failure(
@@ -1057,20 +1161,89 @@ class GuiController:
         self,
         *,
         opened_at: datetime | None = None,
+        should_open: Callable[[], bool] | None = None,
     ) -> bool:
         opened_timestamp = _github_star_prompt_utc_timestamp(opened_at)
 
+        while True:
+            async with self._get_github_star_prompt_persistence_lock():
+                settings = self.settings
+                if settings is None:
+                    return False
+                if should_open is not None and not should_open():
+                    return False
+                snapshot = self._github_star_prompt_state_snapshot(settings)
+                settings.ui.github_star_prompt_last_shown_at = opened_timestamp
+                settings.ui.github_star_prompt_show_count = (
+                    _github_star_prompt_non_negative_count(
+                        settings.ui.github_star_prompt_show_count
+                    )
+                    + 1
+                )
+                try:
+                    await asyncio.to_thread(save_settings, self.config_path, settings)
+                except asyncio.CancelledError:
+                    if self.settings is settings:
+                        self._restore_github_star_prompt_state_snapshot(settings, snapshot)
+                    raise
+                except Exception as exc:
+                    if self.settings is settings:
+                        self._restore_github_star_prompt_state_snapshot(settings, snapshot)
+                    self._log_github_star_prompt_save_failure("open state", exc)
+                    return False
+                if self.settings is settings:
+                    if should_open is not None and not should_open():
+                        self._restore_github_star_prompt_state_snapshot(settings, snapshot)
+                        try:
+                            await asyncio.to_thread(save_settings, self.config_path, settings)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            self._log_github_star_prompt_save_failure(
+                                "open state rollback",
+                                exc,
+                            )
+                        return False
+                    return True
+            await asyncio.sleep(0)
+
+    async def persist_github_star_prompt_eligible_launch(self) -> bool:
+        settings = self.settings
+        if settings is None:
+            return False
+        if settings.ui.github_star_prompt_clicked:
+            return False
+        if not self.is_github_star_prompt_eligible():
+            return False
+        if self._github_star_prompt_initial_launch_gate_satisfied(settings):
+            return True
+
         def _mutate(settings: AppSettings) -> bool:
-            settings.ui.github_star_prompt_last_shown_at = opened_timestamp
-            settings.ui.github_star_prompt_show_count = (
-                _github_star_prompt_non_negative_count(settings.ui.github_star_prompt_show_count)
-                + 1
+            if settings.ui.github_star_prompt_clicked:
+                return False
+            if not self.is_github_star_prompt_eligible():
+                return False
+            if self._github_star_prompt_initial_launch_gate_satisfied(settings):
+                return False
+            current_count = _github_star_prompt_non_negative_count(
+                settings.ui.github_star_prompt_eligible_launch_count
+            )
+            settings.ui.github_star_prompt_eligible_launch_count = min(
+                current_count + 1,
+                GITHUB_STAR_PROMPT_ELIGIBLE_LAUNCH_THRESHOLD,
             )
             return True
 
-        return await self._persist_github_star_prompt_mutation(
-            failure_context="open state",
+        await self._persist_github_star_prompt_mutation(
+            failure_context="eligible launch state",
             mutate=_mutate,
+        )
+        settings = self.settings
+        return bool(
+            settings is not None
+            and not settings.ui.github_star_prompt_clicked
+            and self.is_github_star_prompt_eligible()
+            and self._github_star_prompt_initial_launch_gate_satisfied(settings)
         )
 
     def _run_github_star_prompt_persistence_sync(self, coro) -> bool:  # noqa: ANN001
@@ -1171,6 +1344,14 @@ class GuiController:
             replacement_ui.github_star_prompt_translation_success_observed = bool(
                 replacement_ui.github_star_prompt_translation_success_observed
                 or current_ui.github_star_prompt_translation_success_observed
+            )
+            replacement_ui.github_star_prompt_eligible_launch_count = max(
+                _github_star_prompt_non_negative_count(
+                    replacement_ui.github_star_prompt_eligible_launch_count
+                ),
+                _github_star_prompt_non_negative_count(
+                    current_ui.github_star_prompt_eligible_launch_count
+                ),
             )
             replacement_ui.github_star_prompt_show_count = max(
                 _github_star_prompt_non_negative_count(
@@ -1613,6 +1794,9 @@ class GuiController:
         self._last_self_stt_provider_signature = self._build_self_stt_provider_signature(settings)
         self._last_peer_stt_provider_signature = self._build_peer_stt_provider_signature(settings)
         self._last_llm_provider_signature = self._build_llm_provider_signature(settings)
+        self._last_microphone_test_audio_settings_signature = (
+            self._microphone_test_audio_settings_signature(settings)
+        )
         self._last_peer_translation_enabled = settings.ui.peer_translation_enabled
         self._last_peer_translation_activation_requested = (
             self._peer_translation_activation_requested_for(settings)
@@ -2349,6 +2533,7 @@ class GuiController:
         await self._drain_github_star_prompt_translation_success_task()
         await self._stop_clipboard_watcher()
         await self._cancel_local_stt_download()
+        await self.stop_microphone_test()
         await self.set_stt_enabled(False)
         await self._configure_vrc_mic_receiver(enabled=False)
         await self._shutdown_overlay_runtime(preserve_failure_reason=True)
@@ -3475,6 +3660,18 @@ class GuiController:
             return peer_language or language
 
         await self._preserve_github_star_prompt_observation_before_settings_replace(settings)
+        prev_microphone_test_audio_signature = (
+            self._last_microphone_test_audio_settings_signature
+            or self._microphone_test_audio_settings_signature(self.settings)
+        )
+        next_microphone_test_audio_signature = self._microphone_test_audio_settings_signature(
+            settings
+        )
+        if (
+            prev_microphone_test_audio_signature is not None
+            and prev_microphone_test_audio_signature != next_microphone_test_audio_signature
+        ):
+            await self.stop_microphone_test_for_audio_settings_change()
 
         prev_locale = get_locale()
         prev_overlay_enabled = (
@@ -3576,6 +3773,7 @@ class GuiController:
                 f"{self.hub is not None and presenter is not None and getattr(self.hub, 'overlay_sink', None) is presenter}"
             )
         self.settings = settings
+        self._last_microphone_test_audio_settings_signature = next_microphone_test_audio_signature
         self._sync_overlay_calibration_cache(settings)
         self._sync_desktop_overlay_interaction_mode_from_settings(settings)
         self._save_settings()
@@ -4345,12 +4543,463 @@ class GuiController:
         if callable(hook):
             hook()
 
+    @property
+    def microphone_test_meter_level(self) -> float:
+        return self._microphone_test_meter_level
+
+    @property
+    def microphone_test_active(self) -> bool:
+        task = self._microphone_test_task
+        return task is not None and not task.done()
+
+    def _get_microphone_test_lifecycle_lock(self) -> asyncio.Lock:
+        if self._microphone_test_lifecycle_lock is None:
+            self._microphone_test_lifecycle_lock = asyncio.Lock()
+        return self._microphone_test_lifecycle_lock
+
+    @staticmethod
+    def _microphone_test_audio_settings_signature(
+        settings: AppSettings | None,
+    ) -> tuple[object, ...] | None:
+        if settings is None:
+            return None
+        return (
+            settings.audio.input_host_api,
+            settings.audio.input_device,
+            settings.audio.internal_sample_rate_hz,
+            settings.audio.internal_channels,
+        )
+
+    def _self_stt_active_or_desired_for_microphone_test(self) -> bool:
+        return bool(
+            self._stt_desired
+            or self._local_stt_pending_enable_after_install
+            or self._mic_task is not None
+            or self._audio_source is not None
+        )
+
+    def _log_microphone_test_stt_auto_off(
+        self,
+        *,
+        requested: bool,
+        completed: bool,
+        exception: BaseException | None = None,
+    ) -> None:
+        self.log_basic(
+            "[MicTest] stt_auto_off "
+            f"requested={requested} "
+            f"completed={completed} "
+            "exception_class="
+            f"{_mic_test_log_value(type(exception).__name__ if exception else None)} "
+            "exception_message="
+            f"{_mic_test_log_value(str(exception) if exception else None)}"
+        )
+
+    async def _prepare_microphone_test_capture(self) -> bool:
+        requested = self._self_stt_active_or_desired_for_microphone_test()
+        if not requested:
+            if self._last_mic_loop_close_exception is not None:
+                self._log_microphone_test_stt_auto_off(
+                    requested=False,
+                    completed=False,
+                    exception=self._last_mic_loop_close_exception,
+                )
+                return False
+            self._log_microphone_test_stt_auto_off(
+                requested=False,
+                completed=True,
+            )
+            return True
+
+        try:
+            await self.set_stt_enabled(False)
+            if self._last_mic_loop_close_exception is not None:
+                raise self._last_mic_loop_close_exception
+            if self._mic_task is not None or self._audio_source is not None:
+                raise RuntimeError("self microphone source still open after STT auto-off")
+        except Exception as exc:
+            self._log_microphone_test_stt_auto_off(
+                requested=True,
+                completed=False,
+                exception=exc,
+            )
+            return False
+
+        self._log_microphone_test_stt_auto_off(
+            requested=True,
+            completed=True,
+        )
+        return True
+
+    async def start_microphone_test(
+        self,
+        *,
+        meter_callback: Callable[[float], object] | None = None,
+        level_log_interval_s: float = _MICROPHONE_TEST_LEVEL_INTERVAL_S,
+    ) -> bool:
+        if self.settings is None:
+            return False
+        if self._last_microphone_test_audio_settings_signature is None:
+            self._last_microphone_test_audio_settings_signature = (
+                self._microphone_test_audio_settings_signature(self.settings)
+            )
+        async with self._get_microphone_test_lifecycle_lock():
+            task = self._microphone_test_task
+            if task is not None:
+                if not task.done():
+                    return False
+                await asyncio.gather(task, return_exceptions=True)
+                if self._microphone_test_task is task:
+                    self._microphone_test_task = None
+
+            if not await self._prepare_microphone_test_capture():
+                return False
+
+            self._microphone_test_task = asyncio.create_task(
+                self._run_microphone_test_session(
+                    meter_callback=meter_callback,
+                    level_log_interval_s=level_log_interval_s,
+                )
+            )
+            return True
+
+    async def _run_microphone_test_session(
+        self,
+        *,
+        meter_callback: Callable[[float], object] | None,
+        level_log_interval_s: float,
+    ) -> None:
+        current_task = asyncio.current_task()
+        try:
+            await self.run_microphone_test_capture(
+                meter_callback=meter_callback,
+                level_log_interval_s=level_log_interval_s,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._log_error(f"Microphone test error: {exc}")
+        finally:
+            if self._microphone_test_task is current_task:
+                self._microphone_test_task = None
+
+    async def stop_microphone_test(self) -> None:
+        async with self._get_microphone_test_lifecycle_lock():
+            task = self._microphone_test_task
+            if task is None:
+                return
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if self._microphone_test_task is task:
+                self._microphone_test_task = None
+
+    async def stop_microphone_test_for_audio_settings_change(self) -> None:
+        await self.stop_microphone_test()
+
+    async def _set_microphone_test_meter_level(
+        self,
+        value: float,
+        meter_callback: Callable[[float], object] | None,
+    ) -> None:
+        level = max(0.0, min(1.0, float(value)))
+        if level <= 1e-6:
+            level = 0.0
+        self._microphone_test_meter_level = level
+        if meter_callback is None:
+            return
+        try:
+            result = meter_callback(level)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.debug("Microphone-test meter callback raised", exc_info=True)
+
+    @staticmethod
+    def _microphone_test_meter_level_from_frame(frame) -> float:  # noqa: ANN001
+        samples = np.asarray(frame.samples, dtype=np.float32)
+        if samples.size == 0:
+            return 0.0
+        peak_abs = float(np.max(np.abs(samples)))
+        if peak_abs <= 1e-6:
+            return 0.0
+        return min(1.0, peak_abs)
+
+    @staticmethod
+    def _format_microphone_test_route_log(
+        observation: MicrophoneTestRouteObservation,
+    ) -> str:
+        return (
+            "[MicTest] route "
+            f"saved_host_api={_mic_test_log_value(observation.saved_host_api)} "
+            f"actual_host_api={_mic_test_log_value(observation.actual_host_api)} "
+            f"requested_device={_mic_test_log_value(observation.requested_device)} "
+            f"hostapi_index={_mic_test_log_value(observation.hostapi_index)} "
+            f"resolved_device_idx={_mic_test_log_value(observation.resolved_device_idx)} "
+            f"resolved_device_name={_mic_test_log_value(observation.resolved_device_name)} "
+            "resolution_exception_class="
+            f"{_mic_test_log_value(observation.resolution_exception_class)} "
+            "resolution_exception_message="
+            f"{_mic_test_log_value(observation.resolution_exception_message)}"
+        )
+
+    @staticmethod
+    def _microphone_test_source_value(source: object | None, attr: str, fallback: object) -> object:
+        if source is None:
+            return fallback
+        try:
+            return getattr(source, attr, fallback)
+        except Exception:
+            return fallback
+
+    @staticmethod
+    def _microphone_test_source_int(
+        source: object | None,
+        attr: str,
+        fallback: int | None,
+    ) -> int | None:
+        if source is None:
+            return fallback
+        try:
+            value = getattr(source, attr, fallback)
+            if value is None:
+                return None
+            return int(value)
+        except Exception:
+            return fallback
+
+    def _log_microphone_test_open(
+        self,
+        *,
+        attempted: bool,
+        opened: bool,
+        requested_channels: int | None,
+        source: object | None,
+        observation: MicrophoneTestRouteObservation,
+        exception: BaseException | None = None,
+    ) -> None:
+        opened_channels = self._microphone_test_source_int(source, "opened_channels", None)
+        frame_channels = self._microphone_test_source_int(source, "frame_channels", opened_channels)
+        actual_sample_rate_hz = self._microphone_test_source_value(
+            source,
+            "actual_sample_rate_hz",
+            None,
+        )
+        self.log_basic(
+            "[MicTest] open "
+            f"attempted={attempted} "
+            f"opened={opened} "
+            f"requested_channels={_mic_test_log_value(requested_channels)} "
+            f"opened_channels={_mic_test_log_value(opened_channels)} "
+            f"frame_channels={_mic_test_log_value(frame_channels)} "
+            "requested_sample_rate_hz=None "
+            f"actual_sample_rate_hz={_mic_test_log_value(actual_sample_rate_hz)} "
+            f"wasapi_auto_convert={observation.wasapi_auto_convert} "
+            f"wasapi_exclusive={observation.wasapi_exclusive} "
+            "exception_class="
+            f"{_mic_test_log_value(type(exception).__name__ if exception else None)} "
+            "exception_message="
+            f"{_mic_test_log_value(str(exception) if exception else None)}"
+        )
+
+    def _log_microphone_test_level(
+        self,
+        stats: _MicrophoneTestLevelStats,
+        *,
+        source: object | None,
+    ) -> None:
+        self.log_basic(
+            "[MicTest] level "
+            f"rms_db={stats.rms_db:.1f} "
+            f"peak_db={stats.peak_db:.1f} "
+            f"zero_ratio={stats.zero_ratio:.3f} "
+            f"frames={stats.frames} "
+            f"audio_ms={stats.audio_ms:.1f} "
+            f"queue_drops={self._microphone_test_source_int(source, 'queue_drop_count', 0)} "
+            "callback_statuses="
+            f"{self._microphone_test_source_int(source, 'callback_status_count', 0)}"
+        )
+
+    def _log_microphone_test_end(
+        self,
+        *,
+        opened: bool,
+        stats: _MicrophoneTestLevelStats,
+        source: object | None,
+        exception: BaseException | None,
+    ) -> None:
+        self.log_basic(
+            "[MicTest] end "
+            f"opened={opened} "
+            f"frames_total={stats.frames} "
+            f"audio_ms_total={stats.audio_ms:.1f} "
+            f"rms_db_total={stats.rms_db:.1f} "
+            f"peak_db_max={stats.peak_db:.1f} "
+            f"zero_ratio_total={stats.zero_ratio:.3f} "
+            f"queue_drops={self._microphone_test_source_int(source, 'queue_drop_count', 0)} "
+            "callback_statuses="
+            f"{self._microphone_test_source_int(source, 'callback_status_count', 0)} "
+            "exception_class="
+            f"{_mic_test_log_value(type(exception).__name__ if exception else None)} "
+            "exception_message="
+            f"{_mic_test_log_value(str(exception) if exception else None)}"
+        )
+
+    async def run_microphone_test_capture(
+        self,
+        *,
+        meter_callback: Callable[[float], object] | None = None,
+        level_log_interval_s: float = _MICROPHONE_TEST_LEVEL_INTERVAL_S,
+    ) -> None:
+        assert self.settings is not None
+        level_log_interval_s = max(0.0, float(level_log_interval_s))
+        source: object | None = None
+        opened = False
+        end_exception: BaseException | None = None
+        level_logged = False
+        pending_frame: asyncio.Task[object] | None = None
+        interval_stats = _MicrophoneTestLevelStats()
+        total_stats = _MicrophoneTestLevelStats()
+
+        await self._set_microphone_test_meter_level(0.0, meter_callback)
+        observation = observe_microphone_test_route(
+            saved_host_api=self.settings.audio.input_host_api,
+            requested_device=self.settings.audio.input_device,
+        )
+        self.log_basic(self._format_microphone_test_route_log(observation))
+
+        try:
+            if not observation.should_attempt_open:
+                self._log_microphone_test_open(
+                    attempted=False,
+                    opened=False,
+                    requested_channels=None,
+                    source=None,
+                    observation=observation,
+                )
+                self._log_microphone_test_level(interval_stats, source=None)
+                level_logged = True
+                return
+
+            decision = determine_self_mic_capture_channels(
+                device_idx=observation.resolved_device_idx,
+                internal_channels=self.settings.audio.internal_channels,
+            )
+            requested_channels = decision.preferred_capture_channels
+            try:
+                source = SoundDeviceAudioSource(
+                    sample_rate_hz=None,
+                    channels=requested_channels,
+                    device=observation.resolved_device_idx,
+                    wasapi_auto_convert=observation.wasapi_auto_convert,
+                    wasapi_exclusive=observation.wasapi_exclusive,
+                )
+            except Exception as exc:
+                end_exception = exc
+                self._log_microphone_test_open(
+                    attempted=True,
+                    opened=False,
+                    requested_channels=requested_channels,
+                    source=None,
+                    observation=observation,
+                    exception=exc,
+                )
+                self._log_microphone_test_level(interval_stats, source=None)
+                level_logged = True
+                return
+
+            opened = True
+            self._log_microphone_test_open(
+                attempted=True,
+                opened=True,
+                requested_channels=requested_channels,
+                source=source,
+                observation=observation,
+            )
+
+            frame_iterator = source.frames()  # type: ignore[attr-defined]
+            pending_frame = asyncio.create_task(anext(frame_iterator))
+            last_level_log_s = self.clock.now()
+            while True:
+                if level_log_interval_s > 0.0:
+                    elapsed_s = max(0.0, self.clock.now() - last_level_log_s)
+                    timeout_s = max(0.0, level_log_interval_s - elapsed_s)
+                    done, _pending = await asyncio.wait({pending_frame}, timeout=timeout_s)
+                    if not done:
+                        self._log_microphone_test_level(interval_stats, source=source)
+                        level_logged = True
+                        interval_stats.reset()
+                        last_level_log_s = self.clock.now()
+                        continue
+                else:
+                    await asyncio.wait({pending_frame})
+
+                try:
+                    frame = pending_frame.result()
+                except StopAsyncIteration:
+                    pending_frame = None
+                    break
+
+                interval_stats.add_frame(frame)
+                total_stats.add_frame(frame)
+                await self._set_microphone_test_meter_level(
+                    self._microphone_test_meter_level_from_frame(frame),
+                    meter_callback,
+                )
+                pending_frame = asyncio.create_task(anext(frame_iterator))
+
+                if level_log_interval_s <= 0.0 or (
+                    self.clock.now() - last_level_log_s >= level_log_interval_s
+                ):
+                    self._log_microphone_test_level(interval_stats, source=source)
+                    level_logged = True
+                    interval_stats.reset()
+                    last_level_log_s = self.clock.now()
+        except asyncio.CancelledError as exc:
+            end_exception = exc
+            raise
+        except Exception as exc:
+            end_exception = exc
+        finally:
+            if pending_frame is not None and not pending_frame.done():
+                pending_frame.cancel()
+                with contextlib.suppress(Exception):
+                    await asyncio.gather(pending_frame, return_exceptions=True)
+
+            if source is not None:
+                with contextlib.suppress(Exception):
+                    await source.close()  # type: ignore[attr-defined]
+
+            if source is not None and interval_stats.frames > 0:
+                self._log_microphone_test_level(interval_stats, source=source)
+                level_logged = True
+            elif source is not None and not level_logged:
+                self._log_microphone_test_level(interval_stats, source=source)
+
+            self._log_microphone_test_end(
+                opened=opened,
+                stats=total_stats,
+                source=source,
+                exception=end_exception,
+            )
+            await self._set_microphone_test_meter_level(0.0, meter_callback)
+
     async def _start_mic_loop(self) -> None:
         assert self.settings is not None
         assert self.hub is not None
 
         if self._mic_task is not None:
             return
+
+        if self._audio_source is not None or self._last_mic_loop_close_exception is not None:
+            await self._stop_mic_loop()
+            if self._audio_source is not None or self._last_mic_loop_close_exception is not None:
+                self.log_detailed(
+                    "[STT] Skipping microphone start while previous microphone source close is pending",
+                    level=logging.WARNING,
+                    exception=self._last_mic_loop_close_exception,
+                )
+                return
 
         try:
             model_path = ensure_silero_vad_onnx()
@@ -4610,9 +5259,13 @@ class GuiController:
             self._mic_task = None
 
         if self._audio_source is not None:
-            with contextlib.suppress(Exception):
+            try:
                 await self._audio_source.close()
-            self._audio_source = None
+            except Exception as exc:
+                self._last_mic_loop_close_exception = exc
+            else:
+                self._last_mic_loop_close_exception = None
+                self._audio_source = None
         self._vad = None
         if self.vrc_mic_audio_gate is not None:
             self.vrc_mic_audio_gate.reset()
