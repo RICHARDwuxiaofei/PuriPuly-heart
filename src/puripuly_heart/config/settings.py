@@ -13,7 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from puripuly_heart.config.audio_host_api import (
     WINDOWS_DIRECTSOUND_HOST_API,
-    WINDOWS_WASAPI_HOST_API,
+    WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
 )
 from puripuly_heart.config.llm_profiles import (
     OPENROUTER_FALLBACK_SELECTION_ALIAS_DEEPSEEK_V4_FLASH,
@@ -437,7 +437,7 @@ class AudioSettings:
     internal_sample_rate_hz: int = STT_INTERNAL_SAMPLE_RATE_HZ
     internal_channels: int = 1
     ring_buffer_ms: int = 500
-    input_host_api: str = WINDOWS_WASAPI_HOST_API
+    input_host_api: str = WINDOWS_WASAPI_COMPATIBILITY_HOST_API
     input_device: str = ""
 
     def validate(self) -> None:
@@ -768,6 +768,7 @@ class UiSettings:
     github_star_prompt_last_shown_at: str | None = None
     github_star_prompt_show_count: int = 0
     github_star_prompt_translation_success_observed: bool = False
+    github_star_prompt_eligible_launch_count: int = 0
 
     def validate(self) -> None:
         if not self.locale:
@@ -784,6 +785,9 @@ class UiSettings:
         )
         if not isinstance(self.github_star_prompt_translation_success_observed, bool):
             raise ValueError("github_star_prompt_translation_success_observed must be a bool")
+        self.github_star_prompt_eligible_launch_count = _parse_non_negative_int(
+            self.github_star_prompt_eligible_launch_count
+        )
 
 
 @dataclass(slots=True)
@@ -1433,6 +1437,9 @@ def to_dict(settings: AppSettings) -> dict[str, Any]:
             ),
             "github_star_prompt_translation_success_observed": (
                 settings.ui.github_star_prompt_translation_success_observed
+            ),
+            "github_star_prompt_eligible_launch_count": _parse_non_negative_int(
+                settings.ui.github_star_prompt_eligible_launch_count
             ),
         },
         "api_key_verified": {
@@ -2693,8 +2700,9 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             if (
                 isinstance(input_host_api, str)
                 and input_host_api.strip() == WINDOWS_DIRECTSOUND_HOST_API
+                and input_host_api != WINDOWS_DIRECTSOUND_HOST_API
             ):
-                audio_data["input_host_api"] = WINDOWS_WASAPI_HOST_API
+                audio_data["input_host_api"] = WINDOWS_DIRECTSOUND_HOST_API
                 changed = True
 
         version = 17
@@ -3110,6 +3118,24 @@ def _migrate_settings_dict(raw: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         )
         changed = True
 
+    raw_github_star_prompt_eligible_launch_count = ui_data.get(
+        "github_star_prompt_eligible_launch_count"
+    )
+    normalized_github_star_prompt_eligible_launch_count = _parse_non_negative_int(
+        raw_github_star_prompt_eligible_launch_count
+    )
+    if (
+        "github_star_prompt_eligible_launch_count" not in ui_data
+        or raw_github_star_prompt_eligible_launch_count
+        != normalized_github_star_prompt_eligible_launch_count
+        or type(raw_github_star_prompt_eligible_launch_count)
+        is not type(normalized_github_star_prompt_eligible_launch_count)
+    ):
+        ui_data["github_star_prompt_eligible_launch_count"] = (
+            normalized_github_star_prompt_eligible_launch_count
+        )
+        changed = True
+
     if "overlay_calibration" in data:
         del data["overlay_calibration"]
         changed = True
@@ -3256,7 +3282,11 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
         else STTProviderName.DEEPGRAM.value
     )
 
-    input_host_api_raw = audio_data.get("input_host_api", WINDOWS_WASAPI_HOST_API)
+    input_host_api_raw = (
+        audio_data["input_host_api"]
+        if "input_host_api" in audio_data
+        else WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    )
     input_device_raw = audio_data.get("input_device")
     vad_threshold_raw = stt_data.get("vad_speech_threshold")
     legacy_system_prompt = str(data.get("system_prompt", ""))
@@ -3501,6 +3531,9 @@ def from_dict(data: dict[str, Any]) -> AppSettings:
             ),
             github_star_prompt_translation_success_observed=_parse_bool(
                 ui_data.get("github_star_prompt_translation_success_observed")
+            ),
+            github_star_prompt_eligible_launch_count=_parse_non_negative_int(
+                ui_data.get("github_star_prompt_eligible_launch_count")
             ),
         ),
         api_key_verified=ApiKeyVerificationSettings(

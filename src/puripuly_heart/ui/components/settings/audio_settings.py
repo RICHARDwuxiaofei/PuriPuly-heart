@@ -9,6 +9,7 @@ import flet as ft
 
 from puripuly_heart.config.audio_host_api import (
     WINDOWS_DIRECTSOUND_HOST_API,
+    WINDOWS_MME_HOST_API,
     WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
     WINDOWS_WASAPI_HOST_API,
     normalize_input_host_api,
@@ -118,6 +119,7 @@ class AudioSettings(ft.Column):
             return self._default_option_label
 
         label_key_by_value = {
+            WINDOWS_MME_HOST_API: "settings.audio_host_api.option.windows_mme",
             WINDOWS_WASAPI_HOST_API: "settings.audio_host_api.option.windows_wasapi",
             WINDOWS_WASAPI_COMPATIBILITY_HOST_API: (
                 "settings.audio_host_api.option.windows_wasapi_compatibility"
@@ -233,6 +235,14 @@ class AudioSettings(ft.Column):
         except Exception as e:
             logger.warning(f"Failed to enumerate host APIs: {e}")
             return options
+
+        if WINDOWS_MME_HOST_API.casefold() in available_host_apis:
+            options.append(
+                OptionItem(
+                    value=WINDOWS_MME_HOST_API,
+                    label=self._host_api_label_for(WINDOWS_MME_HOST_API),
+                )
+            )
 
         if WINDOWS_WASAPI_HOST_API.casefold() in available_host_apis:
             options.append(

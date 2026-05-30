@@ -209,13 +209,30 @@ jobs:
           name: release-artifacts
           path: release-artifacts
 
+      - name: Render release body
+        env:
+          INSTALLER_EXE: PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          template_path = Path(".github/release-template.md")
+          release_body_path = Path("release-body.md")
+          release_body = template_path.read_text(encoding="utf-8").replace(
+              "{{INSTALLER_EXE}}",
+              os.environ["INSTALLER_EXE"],
+          )
+          release_body_path.write_text(release_body, encoding="utf-8")
+          PY
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           draft: true
-          body_path: .github/release-template.md
+          body_path: release-body.md
           files: |
             release-artifacts/installer_output/PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe
             release-artifacts/installer_output/PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe.sha256

@@ -4,7 +4,7 @@
 #define MyAppName "PuriPuly <3"
 #define MyAppDirName "PuriPulyHeart"
 #define MyAppGroupName "PuriPulyHeart"
-#define MyAppVersion "2.1.0"
+#define MyAppVersion "2.1.1"
 #define MyAppPublisher "salee"
 #define MyAppURL "https://github.com/kapitalismho/PuriPuly-heart"
 #define MyAppExeName "PuriPulyHeart.exe"
@@ -542,6 +542,6 @@ begin
   ResetSuspiciousInstallDir();
   Result := '';
   if not RunLocalSttModelInstall() then begin
-    Result := ExpandConstant('{cm:LocalSttDownloadFailed}');
+    Log('Local STT provisioning did not complete; continuing app install without bundled ASR model. The app can retry the local STT model download at runtime.');
   end;
 end;
