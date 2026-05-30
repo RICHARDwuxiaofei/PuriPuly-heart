@@ -54,6 +54,8 @@
   "settings.microphone_test": "マイクテスト",
   "settings.microphone_test.action": "テスト",
   "settings.microphone_test.level_label": "マイク入力レベル",
+  "settings.microphone_test.host_api_hint": "音声がキャプチャされない場合は、ホストAPIを自動選択またはMMEに変更してからアプリを再起動してください",
+  "settings.microphone_test.start_failed": "マイクテストを開始できませんでした",
   "settings.microphone": "マイク",
   "settings.vad.peer": "相手VAD",
   "settings.vad.peer_hangover_ms": "相手ハングオーバー (ms)",

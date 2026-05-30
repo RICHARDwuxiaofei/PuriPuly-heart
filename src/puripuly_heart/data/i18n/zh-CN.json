@@ -54,6 +54,8 @@
     "settings.microphone_test": "麦克风测试",
     "settings.microphone_test.action": "测试",
     "settings.microphone_test.level_label": "麦克风输入电平",
+    "settings.microphone_test.host_api_hint": "如果无法捕获音频，请将主机 API 改为自动选择或 MME，然后重启应用",
+    "settings.microphone_test.start_failed": "无法开始麦克风测试",
     "settings.microphone": "麦克风",
     "settings.vad.peer": "对方 VAD",
     "settings.vad.peer_hangover_ms": "对方拖尾 (ms)",

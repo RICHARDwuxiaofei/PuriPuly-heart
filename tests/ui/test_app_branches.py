@@ -80,6 +80,18 @@ class DummyContent:
         self.update_calls += 1
 
 
+class InlineMicrophoneTestSettingsView:
+    def __init__(self) -> None:
+        self.levels: list[float] = []
+        self.active_states: list[bool] = []
+
+    def set_microphone_test_level(self, value: float) -> None:
+        self.levels.append(value)
+
+    def set_microphone_test_active(self, active: bool) -> None:
+        self.active_states.append(active)
+
+
 class RuntimeLoggingController:
     def __init__(self) -> None:
         self.basic_messages: list[str] = []
@@ -115,8 +127,8 @@ def _dialog_text_values(dialog) -> list[str]:
     ]
 
 
-def _dialog_progress_bars(dialog) -> list[ft.ProgressBar]:
-    return [node for node in _iter_control_tree(dialog) if isinstance(node, ft.ProgressBar)]
+def _dialog_containers(dialog) -> list[ft.Container]:
+    return [node for node in _iter_control_tree(dialog) if isinstance(node, ft.Container)]
 
 
 class ConstructionDummyController:
@@ -184,6 +196,7 @@ class ConstructionDummySettingsView(ft.Container):
         self.on_local_llm_secret_changed = None
         self.on_desktop_overlay_lock_change = None
         self.on_desktop_overlay_size_change = None
+        self.on_stop_microphone_test = None
         self.on_desktop_overlay_recovery_action = None
         self.on_desktop_overlay_position_reset = None
         self.show_snackbar = None
@@ -1871,9 +1884,67 @@ async def test_on_settings_changed_applies_raw_settings_without_prompt_merge() -
 
 
 @pytest.mark.asyncio
+async def test_start_microphone_test_success_opens_percentage_modal() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app.view_settings = InlineMicrophoneTestSettingsView()
+    start_kwargs: list[dict[str, object]] = []
+
+    async def fake_start_microphone_test(**kwargs) -> bool:
+        start_kwargs.append(dict(kwargs))
+        kwargs["meter_callback"](0.37)
+        return True
+
+    app.controller = SimpleNamespace(
+        start_microphone_test=fake_start_microphone_test,
+        stop_microphone_test=lambda: None,
+        microphone_test_active=True,
+    )
+
+    app._on_start_microphone_test()
+    await app.page.tasks[0]()
+
+    assert len(app.page.opened) == 1
+    dialog = app.page.opened[0]
+    assert "37%" in _dialog_text_values(dialog)
+    percent_text = next(
+        node
+        for node in _iter_control_tree(dialog)
+        if isinstance(node, ft.Text) and node.value == "37%"
+    )
+    assert percent_text.color == app_module.COLOR_PRIMARY
+    assert percent_text.size == 96
+    assert i18n_module.t("settings.microphone_test.host_api_hint") in _dialog_text_values(dialog)
+    modal_panel = next(
+        node
+        for node in _dialog_containers(dialog)
+        if getattr(node, "width", None) == 450 and getattr(node, "height", None) == 500
+    )
+    assert modal_panel.width == 450
+    assert modal_panel.height == 500
+    hint_text = next(
+        node
+        for node in _iter_control_tree(dialog)
+        if isinstance(node, ft.Text)
+        and node.value == i18n_module.t("settings.microphone_test.host_api_hint")
+    )
+    assert hint_text.size == 28
+    number_container = next(
+        node
+        for node in _dialog_containers(dialog)
+        if getattr(node, "content", None) is percent_text
+    )
+    assert number_container.bgcolor == ft.Colors.TRANSPARENT
+    assert dialog.modal is False
+    assert not any(isinstance(node, ft.IconButton) for node in _iter_control_tree(dialog))
+    assert "meter_callback" in start_kwargs[0]
+
+
+@pytest.mark.asyncio
 async def test_start_microphone_test_callback_uses_page_run_task() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
+    app.view_settings = InlineMicrophoneTestSettingsView()
     calls: list[str] = []
 
     async def fake_start_microphone_test() -> bool:
@@ -1888,12 +1959,14 @@ async def test_start_microphone_test_callback_uses_page_run_task() -> None:
     assert calls == []
     await app.page.tasks[0]()
     assert calls == ["start"]
+    assert len(app.page.opened) == 1
 
 
 @pytest.mark.asyncio
-async def test_start_microphone_test_opens_minimal_meter_dialog_on_success() -> None:
+async def test_start_microphone_test_updates_modal_meter_on_success() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
+    app.view_settings = InlineMicrophoneTestSettingsView()
     start_kwargs: list[dict[str, object]] = []
 
     async def fake_start_microphone_test(**kwargs) -> bool:
@@ -1912,23 +1985,40 @@ async def test_start_microphone_test_opens_minimal_meter_dialog_on_success() -> 
     await app.page.tasks[0]()
 
     assert len(app.page.opened) == 1
-    dialog = app.page.opened[0]
-    assert _dialog_text_values(dialog) == [app_module.t("settings.microphone_test")]
-    progress_bars = _dialog_progress_bars(dialog)
-    assert len(progress_bars) == 1
-    assert progress_bars[0].value == pytest.approx(0.37)
-    assert progress_bars[0].semantics_label == app_module.t("settings.microphone_test.level_label")
-    assert progress_bars[0].semantics_value == 37
+    assert "37%" in _dialog_text_values(app.page.opened[0])
     assert "meter_callback" in start_kwargs[0]
-    visible_text = " ".join(_dialog_text_values(dialog)).lower()
-    for banned in ("pass", "fail", "success", "stt", "auto-off", "good", "bad", "quiet"):
-        assert banned not in visible_text
 
 
 @pytest.mark.asyncio
-async def test_start_microphone_test_false_does_not_open_modal() -> None:
+async def test_start_microphone_test_false_opens_failure_modal() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
+    app.view_settings = InlineMicrophoneTestSettingsView()
+
+    async def fake_start_microphone_test(**_kwargs) -> bool:
+        return False
+
+    app.controller = SimpleNamespace(
+        start_microphone_test=fake_start_microphone_test,
+    )
+
+    app._on_start_microphone_test()
+    await app.page.tasks[0]()
+
+    assert len(app.page.opened) == 1
+    assert i18n_module.t("settings.microphone_test.start_failed") in _dialog_text_values(
+        app.page.opened[0]
+    )
+    assert i18n_module.t("settings.microphone_test.host_api_hint") in _dialog_text_values(
+        app.page.opened[0]
+    )
+
+
+@pytest.mark.asyncio
+async def test_start_microphone_test_false_modal_has_no_close_button() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app.view_settings = InlineMicrophoneTestSettingsView()
 
     async def fake_start_microphone_test(**_kwargs) -> bool:
         return False
@@ -1938,14 +2028,17 @@ async def test_start_microphone_test_false_does_not_open_modal() -> None:
     app._on_start_microphone_test()
     await app.page.tasks[0]()
 
-    assert app.page.opened == []
-    assert getattr(app, "_microphone_test_dialog", None) is None
+    assert len(app.page.opened) == 1
+    assert not any(
+        isinstance(node, ft.IconButton) for node in _iter_control_tree(app.page.opened[0])
+    )
 
 
 @pytest.mark.asyncio
-async def test_microphone_test_meter_callback_updates_open_dialog() -> None:
+async def test_microphone_test_meter_callback_updates_modal_percentage() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
+    app.view_settings = InlineMicrophoneTestSettingsView()
     callbacks: list[object] = []
 
     async def fake_start_microphone_test(**kwargs) -> bool:
@@ -1962,15 +2055,41 @@ async def test_microphone_test_meter_callback_updates_open_dialog() -> None:
     await app.page.tasks[0]()
     callbacks[0](0.82)
 
-    progress_bar = _dialog_progress_bars(app.page.opened[0])[0]
-    assert progress_bar.value == pytest.approx(0.82)
-    assert progress_bar.semantics_value == 82
+    assert "82%" in _dialog_text_values(app.page.opened[0])
 
 
 @pytest.mark.asyncio
-async def test_microphone_test_modal_dismiss_stops_runtime_through_page_task() -> None:
+async def test_stop_microphone_test_stops_runtime_through_settings_queue() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
+    app.view_settings = InlineMicrophoneTestSettingsView()
+    stop_calls: list[str] = []
+
+    async def fake_start_microphone_test(**_kwargs) -> bool:
+        return True
+
+    async def fake_stop_microphone_test() -> None:
+        stop_calls.append("stop")
+
+    app.controller = SimpleNamespace(
+        start_microphone_test=fake_start_microphone_test,
+        stop_microphone_test=fake_stop_microphone_test,
+        microphone_test_active=True,
+    )
+
+    app._on_stop_microphone_test()
+
+    assert stop_calls == []
+    assert len(app.page.tasks) == 1
+    await app.page.tasks[0]()
+    assert stop_calls == ["stop"]
+
+
+@pytest.mark.asyncio
+async def test_microphone_test_backdrop_dismiss_stops_runtime() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app.view_settings = InlineMicrophoneTestSettingsView()
     stop_calls: list[str] = []
 
     async def fake_start_microphone_test(**_kwargs) -> bool:
@@ -1987,21 +2106,51 @@ async def test_microphone_test_modal_dismiss_stops_runtime_through_page_task() -
 
     app._on_start_microphone_test()
     await app.page.tasks[0]()
-    dialog = app.page.opened[0]
 
-    dialog.on_dismiss(None)
+    assert len(app.page.opened) == 1
+    app._microphone_test_dialog._handle_dismiss(None)
 
-    assert stop_calls == []
     assert len(app.page.tasks) == 2
     await app.page.tasks[1]()
     assert stop_calls == ["stop"]
-    assert getattr(app, "_microphone_test_dialog", None) is None
 
 
 @pytest.mark.asyncio
-async def test_settings_apply_closes_microphone_test_dialog_after_audio_cleanup() -> None:
+async def test_navigation_cleanup_closes_microphone_test_modal_and_stops_runtime() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
+    app.view_settings = InlineMicrophoneTestSettingsView()
+    stop_calls: list[str] = []
+
+    async def fake_start_microphone_test(**_kwargs) -> bool:
+        return True
+
+    async def fake_stop_microphone_test() -> None:
+        stop_calls.append("stop")
+
+    app.controller = SimpleNamespace(
+        start_microphone_test=fake_start_microphone_test,
+        stop_microphone_test=fake_stop_microphone_test,
+        microphone_test_active=True,
+    )
+
+    app._on_start_microphone_test()
+    await app.page.tasks[0]()
+    opened_dialog = app.page.opened[0]
+
+    app._close_open_dialog_for_navigation()
+
+    assert app.page.closed == [opened_dialog]
+    assert len(app.page.tasks) == 2
+    await app.page.tasks[1]()
+    assert stop_calls == ["stop"]
+
+
+@pytest.mark.asyncio
+async def test_settings_apply_closes_microphone_test_modal_after_audio_cleanup() -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    app.view_settings = InlineMicrophoneTestSettingsView()
     events: list[str] = []
     controller = SimpleNamespace(microphone_test_active=True)
 
@@ -2023,14 +2172,13 @@ async def test_settings_apply_closes_microphone_test_dialog_after_audio_cleanup(
 
     app._on_start_microphone_test()
     await app.page.tasks[0]()
-    dialog = app.page.opened[0]
 
     app._on_settings_changed("audio")
     await app.page.tasks[1]()
 
     assert events == ["start", "apply:audio"]
-    assert app.page.closed == [dialog]
-    assert getattr(app, "_microphone_test_dialog", None) is None
+    assert len(app.page.opened) == 1
+    assert app.page.closed == [app.page.opened[0]]
 
 
 @pytest.mark.parametrize(
@@ -2054,10 +2202,62 @@ def test_microphone_test_level_accessibility_label_is_localized(
         i18n_module.set_locale(previous_locale)
 
 
+@pytest.mark.parametrize(
+    ("locale", "expected"),
+    [
+        ("en", "Couldn’t start microphone test"),
+        ("ko", "마이크 테스트를 시작하지 못했어요"),
+        ("ja", "マイクテストを開始できませんでした"),
+        ("zh-CN", "无法开始麦克风测试"),
+    ],
+)
+def test_microphone_test_start_failed_label_is_localized(
+    locale: str,
+    expected: str,
+) -> None:
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale(locale)
+        assert i18n_module.t("settings.microphone_test.start_failed") == expected
+    finally:
+        i18n_module.set_locale(previous_locale)
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected"),
+    [
+        (
+            "en",
+            "If audio isn’t being captured, change Host API to Auto or MME, then restart the app.",
+        ),
+        (
+            "ko",
+            "오디오 캡쳐가 되지 않으면 호스트 API를 자동선택 혹은 MME로 변경 후 앱을 재시작해주세요",
+        ),
+        (
+            "ja",
+            "音声がキャプチャされない場合は、ホストAPIを自動選択またはMMEに変更してからアプリを再起動してください",
+        ),
+        ("zh-CN", "如果无法捕获音频，请将主机 API 改为自动选择或 MME，然后重启应用"),
+    ],
+)
+def test_microphone_test_host_api_hint_is_localized(
+    locale: str,
+    expected: str,
+) -> None:
+    previous_locale = i18n_module.get_locale()
+    try:
+        i18n_module.set_locale(locale)
+        assert i18n_module.t("settings.microphone_test.host_api_hint") == expected
+    finally:
+        i18n_module.set_locale(previous_locale)
+
+
 @pytest.mark.asyncio
 async def test_start_microphone_test_waits_for_pending_settings_queue() -> None:
     app = TranslatorApp.__new__(TranslatorApp)
     app.page = DummyPage()
+    app.view_settings = InlineMicrophoneTestSettingsView()
     events: list[str] = []
 
     async def fake_apply_settings(settings) -> None:
