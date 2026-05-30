@@ -8,6 +8,8 @@ import pytest
 
 from puripuly_heart.config.audio_host_api import (
     WINDOWS_DIRECTSOUND_HOST_API,
+    WINDOWS_MME_HOST_API,
+    WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
     WINDOWS_WASAPI_HOST_API,
 )
 from puripuly_heart.config.llm_profiles import (
@@ -220,21 +222,27 @@ def test_settings_validation_rejects_legacy_8khz_audio() -> None:
         settings.validate()
 
 
-def test_default_audio_host_api_is_wasapi() -> None:
+def test_default_audio_host_api_is_wasapi_compatibility_mode() -> None:
     settings = AppSettings()
 
-    assert settings.audio.input_host_api == WINDOWS_WASAPI_HOST_API
-    assert to_dict(settings)["audio"]["input_host_api"] == WINDOWS_WASAPI_HOST_API
+    assert settings.audio.input_host_api == WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    assert to_dict(settings)["audio"]["input_host_api"] == WINDOWS_WASAPI_COMPATIBILITY_HOST_API
 
 
-def test_from_dict_defaults_missing_audio_host_api_to_wasapi() -> None:
+def test_from_dict_defaults_missing_audio_host_api_to_wasapi_compatibility_mode() -> None:
     raw = to_dict(AppSettings())
     raw["audio"].pop("input_host_api")
 
     loaded = from_dict(raw)
 
-    assert loaded.audio.input_host_api == WINDOWS_WASAPI_HOST_API
-    assert to_dict(loaded)["audio"]["input_host_api"] == WINDOWS_WASAPI_HOST_API
+    assert loaded.audio.input_host_api == WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+    assert to_dict(loaded)["audio"]["input_host_api"] == WINDOWS_WASAPI_COMPATIBILITY_HOST_API
+
+
+def test_from_dict_defaults_missing_audio_block_host_api_to_wasapi_compatibility_mode() -> None:
+    loaded = from_dict({})
+
+    assert loaded.audio.input_host_api == WINDOWS_WASAPI_COMPATIBILITY_HOST_API
 
 
 def test_from_dict_preserves_explicit_blank_audio_host_api() -> None:
@@ -247,7 +255,27 @@ def test_from_dict_preserves_explicit_blank_audio_host_api() -> None:
     assert to_dict(loaded)["audio"]["input_host_api"] == ""
 
 
-def test_migrate_v17_moves_saved_directsound_to_wasapi_and_preserves_device() -> None:
+@pytest.mark.parametrize(
+    "host_api",
+    [
+        WINDOWS_WASAPI_HOST_API,
+        WINDOWS_WASAPI_COMPATIBILITY_HOST_API,
+        WINDOWS_DIRECTSOUND_HOST_API,
+        WINDOWS_MME_HOST_API,
+        "Unknown Host API",
+    ],
+)
+def test_from_dict_preserves_explicit_audio_host_api_values(host_api: str) -> None:
+    raw = to_dict(AppSettings())
+    raw["audio"]["input_host_api"] = host_api
+
+    loaded = from_dict(raw)
+
+    assert loaded.audio.input_host_api == host_api
+    assert to_dict(loaded)["audio"]["input_host_api"] == host_api
+
+
+def test_migrate_v17_preserves_saved_directsound_host_api_and_device() -> None:
     raw = to_dict(AppSettings())
     raw["settings_version"] = 16
     raw["audio"]["input_host_api"] = WINDOWS_DIRECTSOUND_HOST_API
@@ -257,11 +285,11 @@ def test_migrate_v17_moves_saved_directsound_to_wasapi_and_preserves_device() ->
 
     assert changed is True
     assert migrated["settings_version"] == SETTINGS_SCHEMA_VERSION
-    assert migrated["audio"]["input_host_api"] == WINDOWS_WASAPI_HOST_API
+    assert migrated["audio"]["input_host_api"] == WINDOWS_DIRECTSOUND_HOST_API
     assert migrated["audio"]["input_device"] == "User Selected Mic"
 
 
-def test_migrate_v17_strips_directsound_host_api_before_migration_and_preserves_device() -> None:
+def test_migrate_v17_normalizes_directsound_host_api_and_preserves_device() -> None:
     raw = to_dict(AppSettings())
     raw["settings_version"] = 16
     raw["audio"]["input_host_api"] = f" {WINDOWS_DIRECTSOUND_HOST_API} "
@@ -271,7 +299,7 @@ def test_migrate_v17_strips_directsound_host_api_before_migration_and_preserves_
 
     assert changed is True
     assert migrated["settings_version"] == SETTINGS_SCHEMA_VERSION
-    assert migrated["audio"]["input_host_api"] == WINDOWS_WASAPI_HOST_API
+    assert migrated["audio"]["input_host_api"] == WINDOWS_DIRECTSOUND_HOST_API
     assert migrated["audio"]["input_device"] == "Whitespace DirectSound Mic"
 
 
@@ -301,7 +329,7 @@ def test_migrate_v18_preserves_directsound_when_removing_legacy_osc_rate_limits(
     assert migrated["osc"] == expected_osc
 
 
-def test_load_settings_persists_v17_directsound_migration(tmp_path) -> None:
+def test_load_settings_persists_v17_directsound_preservation(tmp_path) -> None:
     path = tmp_path / "settings.json"
     raw = to_dict(AppSettings())
     raw["settings_version"] = 16
@@ -312,10 +340,10 @@ def test_load_settings_persists_v17_directsound_migration(tmp_path) -> None:
     loaded = load_settings(path)
     stored = json.loads(path.read_text(encoding="utf-8"))
 
-    assert loaded.audio.input_host_api == WINDOWS_WASAPI_HOST_API
+    assert loaded.audio.input_host_api == WINDOWS_DIRECTSOUND_HOST_API
     assert loaded.audio.input_device == "Manual DirectSound Mic"
     assert stored["settings_version"] == SETTINGS_SCHEMA_VERSION
-    assert stored["audio"]["input_host_api"] == WINDOWS_WASAPI_HOST_API
+    assert stored["audio"]["input_host_api"] == WINDOWS_DIRECTSOUND_HOST_API
     assert stored["audio"]["input_device"] == "Manual DirectSound Mic"
 
 

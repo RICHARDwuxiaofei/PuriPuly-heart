@@ -9,6 +9,7 @@ from typing import AsyncIterator, Protocol
 import janus
 import numpy as np
 
+from puripuly_heart.config.audio_host_api import normalize_input_host_api
 from puripuly_heart.core.audio.format import AudioFrameF32
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,21 @@ class SelfMicCaptureChannelDecision:
     internal_channels: int
     preferred_capture_channels: int
     metadata: SoundDeviceInputMetadata
+
+
+@dataclass(frozen=True, slots=True)
+class MicrophoneTestRouteObservation:
+    saved_host_api: str
+    actual_host_api: str
+    requested_device: str
+    hostapi_index: int | None
+    resolved_device_idx: int | None
+    resolved_device_name: str | None
+    resolution_exception_class: str | None
+    resolution_exception_message: str | None
+    should_attempt_open: bool
+    wasapi_auto_convert: bool = False
+    wasapi_exclusive: bool = False
 
 
 def _input_metadata_from_info(
@@ -172,6 +188,236 @@ def determine_self_mic_capture_channels(
         internal_channels=internal_channels,
         preferred_capture_channels=preferred_capture_channels,
         metadata=resolved_metadata,
+    )
+
+
+def _sounddevice_mapping_get(item: object, key: str, default: object = None) -> object:
+    getter = getattr(item, "get", None)
+    if callable(getter):
+        return getter(key, default)
+    return default
+
+
+def _sounddevice_device_name(item: object) -> str | None:
+    value = _sounddevice_mapping_get(item, "name", None)
+    return str(value) if value is not None else None
+
+
+def _sounddevice_input_channels(item: object) -> int:
+    try:
+        return int(_sounddevice_mapping_get(item, "max_input_channels", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _sounddevice_device_hostapi_index(item: object) -> int | None:
+    value = _sounddevice_mapping_get(item, "hostapi", None)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _microphone_test_observation(
+    *,
+    saved_host_api: str,
+    actual_host_api: str,
+    requested_device: str,
+    hostapi_index: int | None,
+    resolved_device_idx: int | None,
+    resolved_device_name: str | None,
+    should_attempt_open: bool,
+    wasapi_auto_convert: bool,
+    wasapi_exclusive: bool,
+    resolution_exception: BaseException | None = None,
+) -> MicrophoneTestRouteObservation:
+    return MicrophoneTestRouteObservation(
+        saved_host_api=saved_host_api,
+        actual_host_api=actual_host_api,
+        requested_device=requested_device,
+        hostapi_index=hostapi_index,
+        resolved_device_idx=resolved_device_idx,
+        resolved_device_name=resolved_device_name,
+        resolution_exception_class=(
+            type(resolution_exception).__name__ if resolution_exception is not None else None
+        ),
+        resolution_exception_message=(
+            str(resolution_exception) if resolution_exception is not None else None
+        ),
+        should_attempt_open=should_attempt_open,
+        wasapi_auto_convert=wasapi_auto_convert,
+        wasapi_exclusive=wasapi_exclusive,
+    )
+
+
+def _microphone_test_device_idx_resolves(
+    devices: list[object],
+    device_idx: int,
+    *,
+    hostapi_index: int | None,
+) -> bool:
+    if device_idx < 0 or device_idx >= len(devices):
+        return False
+    info = devices[device_idx]
+    if _sounddevice_input_channels(info) <= 0:
+        return False
+    if hostapi_index is None:
+        return True
+    return _sounddevice_device_hostapi_index(info) == hostapi_index
+
+
+def _resolve_microphone_test_requested_device_idx(
+    devices: list[object],
+    *,
+    requested_device: str,
+    hostapi_index: int | None,
+) -> int | None:
+    with contextlib.suppress(ValueError):
+        idx = int(requested_device)
+        if _microphone_test_device_idx_resolves(
+            devices,
+            idx,
+            hostapi_index=hostapi_index,
+        ):
+            return idx
+
+    requested_device_lower = requested_device.lower()
+    for idx, info in enumerate(devices):
+        if not _microphone_test_device_idx_resolves(
+            devices,
+            idx,
+            hostapi_index=hostapi_index,
+        ):
+            continue
+        name = _sounddevice_device_name(info) or ""
+        if name.lower() == requested_device_lower:
+            return idx
+    return None
+
+
+def observe_microphone_test_route(
+    *,
+    saved_host_api: str | None = "",
+    requested_device: str | None = "",
+) -> MicrophoneTestRouteObservation:
+    """Resolve the manual microphone-test route without hidden fallback.
+
+    ``device_idx=None`` remains an openable route only for true Auto/system-default
+    testing, where both the normalized Host API and requested device are blank.
+    Any explicit Host API or device miss returns a neutral observation and sets
+    ``should_attempt_open`` to ``False`` for the downstream capture/logging layer.
+    """
+
+    profile = normalize_input_host_api(saved_host_api)
+    saved_value = profile.saved_value
+    actual_host_api = profile.actual_host_api
+    requested_value = str(requested_device or "").strip()
+
+    if not actual_host_api and not requested_value:
+        return _microphone_test_observation(
+            saved_host_api=saved_value,
+            actual_host_api=actual_host_api,
+            requested_device=requested_value,
+            hostapi_index=None,
+            resolved_device_idx=None,
+            resolved_device_name=None,
+            should_attempt_open=True,
+            wasapi_auto_convert=profile.wasapi_auto_convert,
+            wasapi_exclusive=profile.wasapi_exclusive,
+        )
+
+    import sounddevice as sd  # type: ignore
+
+    hostapi_index: int | None = None
+    hostapis: list[object] = []
+    if actual_host_api:
+        try:
+            hostapis = list(sd.query_hostapis())
+        except Exception as exc:
+            return _microphone_test_observation(
+                saved_host_api=saved_value,
+                actual_host_api=actual_host_api,
+                requested_device=requested_value,
+                hostapi_index=None,
+                resolved_device_idx=None,
+                resolved_device_name=None,
+                should_attempt_open=False,
+                wasapi_auto_convert=profile.wasapi_auto_convert,
+                wasapi_exclusive=profile.wasapi_exclusive,
+                resolution_exception=exc,
+            )
+
+        for idx, item in enumerate(hostapis):
+            name = str(_sounddevice_mapping_get(item, "name", "") or "")
+            if name.lower() == actual_host_api.lower():
+                hostapi_index = idx
+                break
+        if hostapi_index is None:
+            return _microphone_test_observation(
+                saved_host_api=saved_value,
+                actual_host_api=actual_host_api,
+                requested_device=requested_value,
+                hostapi_index=None,
+                resolved_device_idx=None,
+                resolved_device_name=None,
+                should_attempt_open=False,
+                wasapi_auto_convert=profile.wasapi_auto_convert,
+                wasapi_exclusive=profile.wasapi_exclusive,
+            )
+
+    try:
+        devices = list(sd.query_devices())
+    except Exception as exc:
+        return _microphone_test_observation(
+            saved_host_api=saved_value,
+            actual_host_api=actual_host_api,
+            requested_device=requested_value,
+            hostapi_index=hostapi_index,
+            resolved_device_idx=None,
+            resolved_device_name=None,
+            should_attempt_open=False,
+            wasapi_auto_convert=profile.wasapi_auto_convert,
+            wasapi_exclusive=profile.wasapi_exclusive,
+            resolution_exception=exc,
+        )
+
+    resolved_device_idx: int | None = None
+    if requested_value:
+        resolved_device_idx = _resolve_microphone_test_requested_device_idx(
+            devices,
+            requested_device=requested_value,
+            hostapi_index=hostapi_index,
+        )
+    elif hostapi_index is not None:
+        default_input = _sounddevice_mapping_get(
+            hostapis[hostapi_index],
+            "default_input_device",
+            None,
+        )
+        if type(default_input) is int and _microphone_test_device_idx_resolves(
+            devices,
+            default_input,
+            hostapi_index=hostapi_index,
+        ):
+            resolved_device_idx = default_input
+
+    resolved_device_name = (
+        _sounddevice_device_name(devices[resolved_device_idx])
+        if resolved_device_idx is not None
+        else None
+    )
+    return _microphone_test_observation(
+        saved_host_api=saved_value,
+        actual_host_api=actual_host_api,
+        requested_device=requested_value,
+        hostapi_index=hostapi_index,
+        resolved_device_idx=resolved_device_idx,
+        resolved_device_name=resolved_device_name,
+        should_attempt_open=resolved_device_idx is not None,
+        wasapi_auto_convert=profile.wasapi_auto_convert,
+        wasapi_exclusive=profile.wasapi_exclusive,
     )
 
 
