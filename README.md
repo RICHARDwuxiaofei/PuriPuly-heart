@@ -147,7 +147,12 @@ So I built one that can.
 
 7. Enable OSC in VRChat: Action menu → Settings → OSC → Enable.
 
-* If voice is not recognized, select the correct microphone in the PuriPuly Settings tab.
+### If audio capture does not work
+If audio capture does not work, open **Settings > General** and follow these steps.
+
+1. Change **Audio Host API** to **Auto** or **MME**.
+2. Select the correct microphone.
+3. Restart the app.
 
 ---
 
