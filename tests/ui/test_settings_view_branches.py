@@ -4957,6 +4957,7 @@ def test_microphone_test_card_uses_localized_title_and_action(
         assert _card_title(card) == expected_title
         assert _card_value_text(card) == expected_action
         assert _tree_contains_control(card, view._microphone_test_text)
+        assert not any(isinstance(node, ft.Slider) for node in _iter_control_tree(card))
     finally:
         i18n_module.set_locale(old_locale)
 
@@ -4979,6 +4980,25 @@ def test_microphone_test_card_click_invokes_start_callback_without_modal(
 
     assert calls == ["start"]
     assert modal_calls == []
+
+
+def test_microphone_test_card_clicks_always_request_start_without_inline_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, _ = _make_settings_view(monkeypatch)
+    card = _general_tab_card(view, t("settings.microphone_test"))
+    calls: list[str] = []
+    view.on_start_microphone_test = lambda: calls.append("start")
+
+    assert not any(isinstance(node, ft.Slider) for node in _iter_control_tree(card))
+    assert view._microphone_test_text.content.value == t("settings.microphone_test.action")
+
+    view._on_microphone_test_click(None)
+    assert calls == ["start"]
+
+    view._on_microphone_test_click(None)
+    assert calls == ["start", "start"]
+    assert view._microphone_test_text.content.value == t("settings.microphone_test.action")
 
 
 def test_general_tab_excludes_prompt_and_overlay_controls(

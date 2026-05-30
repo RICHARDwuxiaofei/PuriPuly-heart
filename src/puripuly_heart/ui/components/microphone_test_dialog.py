@@ -8,18 +8,19 @@ from puripuly_heart.ui.components.glow import create_glow_stack
 from puripuly_heart.ui.fonts import font_for_language
 from puripuly_heart.ui.i18n import get_locale, t
 from puripuly_heart.ui.theme import (
-    COLOR_BACKGROUND,
     COLOR_DIVIDER,
-    COLOR_NEUTRAL,
+    COLOR_NEUTRAL_DARK,
     COLOR_PRIMARY,
-    COLOR_PRIMARY_CONTAINER,
     COLOR_SURFACE,
     get_card_shadow,
 )
 
-_DIALOG_WIDTH = 480
-_METER_HEIGHT = 30
-_METER_WIDTH = 360
+_DIALOG_WIDTH = 450
+_DIALOG_HEIGHT = 500
+_CONTENT_SIZE = 386
+_PERCENT_TEXT_SIZE = 96
+_FAILURE_TEXT_SIZE = 24
+_HINT_TEXT_SIZE = 28
 
 
 def _clamp_level(value: float) -> float:
@@ -29,12 +30,12 @@ def _clamp_level(value: float) -> float:
     return level
 
 
-def _level_semantics_value(level: float) -> int:
-    return int(round(_clamp_level(level) * 100))
+def _level_percent(value: float) -> int:
+    return int(round(_clamp_level(value) * 100))
 
 
 class MicrophoneTestDialog:
-    """Minimal microphone-test modal with a live accessible level meter."""
+    """Minimal microphone-test modal with a large live percentage readout."""
 
     def __init__(
         self,
@@ -45,8 +46,10 @@ class MicrophoneTestDialog:
         self._page = page
         self._on_close = on_close
         self._dialog: ft.AlertDialog | None = None
-        self._level_bar: ft.ProgressBar | None = None
+        self._level_text: ft.Text | None = None
+        self._hint_text: ft.Text | None = None
         self._level = 0.0
+        self._failed = False
         self._is_open = False
         self._close_notified = False
 
@@ -82,73 +85,68 @@ class MicrophoneTestDialog:
             if callable(close):
                 close(dialog)
 
+    def reset(self) -> None:
+        self._level = 0.0
+        self._failed = False
+        self._sync_text()
+
     def set_level(self, value: float) -> None:
         self._level = _clamp_level(value)
-        if self._level_bar is None:
-            return
-        self._sync_level_bar()
-        if getattr(self._level_bar, "page", None) is None:
-            return
-        try:
-            self._level_bar.update()
-        except AssertionError as exc:
-            if "Control must be added" not in str(exc):
-                raise
+        self._failed = False
+        self._sync_text()
+
+    def show_failure(self) -> None:
+        self._level = 0.0
+        self._failed = True
+        self._sync_text()
 
     def _build_dialog(self) -> ft.AlertDialog:
-        self._level_bar = ft.ProgressBar(
-            value=self._level,
-            semantics_label=t("settings.microphone_test.level_label"),
-            semantics_value=_level_semantics_value(self._level),
-            bar_height=_METER_HEIGHT,
-            width=_METER_WIDTH,
-            color=COLOR_PRIMARY,
-            bgcolor=COLOR_PRIMARY_CONTAINER,
-            border_radius=18,
-        )
-
-        title = ft.Text(
-            t("settings.microphone_test"),
-            size=24,
+        self._level_text = ft.Text(
+            self._text_value(),
+            size=self._text_size(),
             weight=ft.FontWeight.BOLD,
-            color=COLOR_NEUTRAL,
+            color=self._text_color(),
+            text_align=ft.TextAlign.CENTER,
             font_family=font_for_language(get_locale()),
+            semantics_label=t("settings.microphone_test.level_label"),
         )
-        close_button = ft.IconButton(
-            icon=ft.Icons.CLOSE,
-            icon_color=COLOR_NEUTRAL,
-            tooltip=t("openrouter.handoff.close"),
-            on_click=self._handle_close_click,
+        self._hint_text = ft.Text(
+            t("settings.microphone_test.host_api_hint"),
+            size=_HINT_TEXT_SIZE,
+            color=COLOR_NEUTRAL_DARK,
+            text_align=ft.TextAlign.CENTER,
+            font_family=font_for_language(get_locale()),
         )
 
         modal_content = ft.Container(
             width=_DIALOG_WIDTH,
-            padding=ft.padding.symmetric(horizontal=32, vertical=28),
+            height=_DIALOG_HEIGHT,
+            padding=28,
             bgcolor=COLOR_SURFACE,
-            border_radius=28,
+            border_radius=30,
             border=ft.border.all(1, ft.Colors.with_opacity(0.35, COLOR_DIVIDER)),
             shadow=get_card_shadow(),
+            alignment=ft.alignment.center,
             content=ft.Column(
                 controls=[
-                    ft.Row(
-                        controls=[title, ft.Container(expand=True), close_button],
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
                     ft.Container(
-                        content=self._level_bar,
+                        width=_CONTENT_SIZE,
+                        content=self._level_text,
                         alignment=ft.alignment.center,
-                        padding=ft.padding.symmetric(horizontal=14, vertical=18),
-                        bgcolor=COLOR_BACKGROUND,
-                        border_radius=24,
+                        bgcolor=ft.Colors.TRANSPARENT,
+                        expand=True,
                     ),
+                    self._hint_text,
                 ],
-                spacing=24,
-                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                spacing=12,
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                tight=False,
             ),
         )
 
         return ft.AlertDialog(
-            modal=True,
+            modal=False,
             content=create_glow_stack(modal_content),
             content_padding=0,
             bgcolor=ft.Colors.TRANSPARENT,
@@ -157,14 +155,30 @@ class MicrophoneTestDialog:
             on_dismiss=self._handle_dismiss,
         )
 
-    def _sync_level_bar(self) -> None:
-        if self._level_bar is None:
-            return
-        self._level_bar.value = self._level
-        self._level_bar.semantics_value = _level_semantics_value(self._level)
+    def _text_value(self) -> str:
+        if self._failed:
+            return t("settings.microphone_test.start_failed")
+        return f"{_level_percent(self._level)}%"
 
-    def _handle_close_click(self, _event) -> None:  # noqa: ANN001
-        self.close(notify=True)
+    def _text_size(self) -> int:
+        return _FAILURE_TEXT_SIZE if self._failed else _PERCENT_TEXT_SIZE
+
+    def _text_color(self) -> str:
+        return COLOR_NEUTRAL_DARK if self._failed else COLOR_PRIMARY
+
+    def _sync_text(self) -> None:
+        if self._level_text is None:
+            return
+        self._level_text.value = self._text_value()
+        self._level_text.size = self._text_size()
+        self._level_text.color = self._text_color()
+        if getattr(self._level_text, "page", None) is None:
+            return
+        try:
+            self._level_text.update()
+        except AssertionError as exc:
+            if "Control must be added" not in str(exc):
+                raise
 
     def _handle_dismiss(self, _event) -> None:  # noqa: ANN001
         if not self._is_open:

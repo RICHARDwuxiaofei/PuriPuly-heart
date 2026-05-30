@@ -909,20 +909,15 @@ class TranslatorApp:
     def _on_settings_changed(self, settings) -> None:
         async def _task():
             await self.controller.apply_settings(settings)
-            self._close_microphone_test_dialog_if_inactive()
+            self._sync_microphone_test_dialog_if_inactive()
 
         self._queue_settings_mutation_task(_task)
 
     def _on_start_microphone_test(self) -> None:
         async def _task():
-            existing_dialog = getattr(self, "_microphone_test_dialog", None)
-            if existing_dialog is not None and getattr(existing_dialog, "is_open", False):
-                return
-
-            dialog = MicrophoneTestDialog(
-                self.page,
-                on_close=self._on_microphone_test_dialog_closed,
-            )
+            dialog = self._get_microphone_test_dialog()
+            dialog.reset()
+            dialog.open()
             start_microphone_test = self.controller.start_microphone_test
             if _callable_accepts_keyword(start_microphone_test, "meter_callback"):
                 start_result = start_microphone_test(meter_callback=dialog.set_level)
@@ -930,35 +925,47 @@ class TranslatorApp:
                 start_result = start_microphone_test()
             started = await start_result if inspect.isawaitable(start_result) else start_result
             if not started:
+                dialog.show_failure()
                 return
-            self._microphone_test_dialog = dialog
-            dialog.open()
 
         self._queue_settings_mutation_task(_task)
 
-    def _on_microphone_test_dialog_closed(self) -> None:
-        if getattr(self, "_microphone_test_dialog", None) is not None:
-            self._microphone_test_dialog = None
-
+    def _on_stop_microphone_test(self) -> None:
         async def _task() -> None:
             stop_microphone_test = getattr(self.controller, "stop_microphone_test", None)
-            if not callable(stop_microphone_test):
-                return
-            result = stop_microphone_test()
-            if inspect.isawaitable(result):
-                await result
+            if callable(stop_microphone_test):
+                result = stop_microphone_test()
+                if inspect.isawaitable(result):
+                    await result
+            self._close_microphone_test_dialog()
 
-        self.page.run_task(_task)
+        self._queue_settings_mutation_task(_task)
 
-    def _close_microphone_test_dialog_if_inactive(self) -> None:
+    def _get_microphone_test_dialog(self) -> MicrophoneTestDialog:
+        dialog = getattr(self, "_microphone_test_dialog", None)
+        if dialog is None:
+            dialog = MicrophoneTestDialog(
+                self.page,
+                on_close=self._on_microphone_test_dialog_dismiss,
+            )
+            self._microphone_test_dialog = dialog
+        return dialog
+
+    def _close_microphone_test_dialog(self) -> None:
         dialog = getattr(self, "_microphone_test_dialog", None)
         if dialog is None:
             return
+        dialog.close(notify=False)
+        dialog.reset()
+
+    def _on_microphone_test_dialog_dismiss(self) -> None:
+        self._on_stop_microphone_test()
+
+    def _sync_microphone_test_dialog_if_inactive(self) -> None:
         controller = getattr(self, "controller", None)
         if bool(getattr(controller, "microphone_test_active", False)):
             return
-        self._microphone_test_dialog = None
-        dialog.close(notify=False)
+        self._close_microphone_test_dialog()
 
     def _on_prompt_apply_settings(self, settings) -> None:
         async def _task():
