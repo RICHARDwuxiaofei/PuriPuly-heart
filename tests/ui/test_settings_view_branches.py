@@ -4415,7 +4415,7 @@ def test_desktop_gui_background_transparency_card_clamps_to_zero_and_one(
     assert view._desktop_overlay_background_alpha_value_text.value == "0%"
 
 
-def test_desktop_gui_size_card_opens_five_label_only_options(
+def test_desktop_gui_size_card_opens_six_label_only_options_large_to_tiny(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -4442,20 +4442,22 @@ def test_desktop_gui_size_card_opens_five_label_only_options(
     assert captured["title"] == t("settings.overlay.desktop.size.title")
     assert captured["show_description"] is False
     assert [option.value for option in captured["options"]] == [
-        "xsmall",
-        "small",
-        "medium",
-        "large",
         "xlarge",
+        "large",
+        "medium",
+        "small",
+        "xsmall",
+        "tiny",
     ]
     assert [option.label for option in captured["options"]] == [
-        t("settings.overlay.desktop.size.option.xsmall"),
-        t("settings.overlay.desktop.size.option.small"),
-        t("settings.overlay.desktop.size.option.medium"),
-        t("settings.overlay.desktop.size.option.large"),
         t("settings.overlay.desktop.size.option.xlarge"),
+        t("settings.overlay.desktop.size.option.large"),
+        t("settings.overlay.desktop.size.option.medium"),
+        t("settings.overlay.desktop.size.option.small"),
+        t("settings.overlay.desktop.size.option.xsmall"),
+        t("settings.overlay.desktop.size.option.tiny"),
     ]
-    assert [option.description for option in captured["options"]] == ["", "", "", "", ""]
+    assert [option.description for option in captured["options"]] == ["", "", "", "", "", ""]
     assert captured["current"] == "medium"
 
 

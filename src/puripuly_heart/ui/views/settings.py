@@ -21,6 +21,7 @@ from puripuly_heart.config.llm_profiles import (
 from puripuly_heart.config.prompts import load_prompt_for_provider
 from puripuly_heart.config.settings import (
     DESKTOP_FLET_DEFAULT_BACKGROUND_ALPHA,
+    DESKTOP_FLET_SIZE_PRESET_DISPLAY_ORDER,
     DESKTOP_FLET_SIZE_PRESET_ORDER,
     LOCAL_LLM_RESERVED_EXTRA_BODY_KEYS,
     LOCAL_LLM_SENSITIVE_EXTRA_BODY_KEYS,
@@ -3794,7 +3795,7 @@ class SettingsView(ft.Column):
                 value=preset,
                 label=self._desktop_overlay_size_label_for(preset),
             )
-            for preset in DESKTOP_FLET_SIZE_PRESET_ORDER
+            for preset in DESKTOP_FLET_SIZE_PRESET_DISPLAY_ORDER
         ]
         modal = SettingsModal(
             self.page,

@@ -36,12 +36,25 @@ def test_overlay_settings_desktop_flet_defaults_serialize_canonical_shape() -> N
 
 def test_overlay_settings_desktop_flet_size_presets_match_c_light_caption_layout() -> None:
     assert DESKTOP_FLET_SIZE_PRESETS == {
+        "tiny": (640, 160),
         "xsmall": (960, 240),
         "small": (1152, 288),
         "medium": (1344, 336),
         "large": (1600, 400),
         "xlarge": (1792, 448),
     }
+
+
+def test_overlay_settings_desktop_flet_tiny_preset_round_trips() -> None:
+    settings = from_dict({"overlay": {"desktop_flet": {"size_preset": "tiny"}}})
+
+    data = to_dict(settings)
+    round_tripped = from_dict(data)
+
+    assert data["overlay"]["desktop_flet"]["size_preset"] == "tiny"
+    assert round_tripped.overlay.desktop_flet.size_preset == "tiny"
+    assert round_tripped.overlay.desktop_flet.bounds.width == 640
+    assert round_tripped.overlay.desktop_flet.bounds.height == 160
 
 
 def test_overlay_settings_desktop_flet_legacy_locked_loads_startup_safe_and_is_not_serialized() -> (

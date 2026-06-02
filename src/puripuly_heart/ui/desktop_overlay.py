@@ -37,6 +37,7 @@ from puripuly_heart.config.settings import (
     DESKTOP_FLET_MIN_OUTLINE_WIDTH,
     DESKTOP_FLET_MIN_TEXT_SCALE,
     DESKTOP_FLET_MIN_WIDTH,
+    DESKTOP_FLET_SIZE_PRESET_DISPLAY_ORDER,
     DESKTOP_FLET_SIZE_PRESET_ORDER,
     DESKTOP_FLET_SIZE_PRESETS,
     DesktopFletOverlayVisualSettings,
@@ -307,6 +308,7 @@ class DesktopCaptionSizePreset:
 
 
 _DESKTOP_CAPTION_SIZE_PRESETS: dict[str, DesktopCaptionSizePreset] = {
+    "tiny": DesktopCaptionSizePreset("tiny", 640, 160, 20, 12, 10, 2, 10, 4),
     "xsmall": DesktopCaptionSizePreset("xsmall", 960, 240, 29, 18, 14, 6, 12, 6),
     "small": DesktopCaptionSizePreset("small", 1152, 288, 35, 21, 18, 8, 14, 8),
     "medium": DesktopCaptionSizePreset("medium", 1344, 336, 41, 25, 22, 10, 16, 10),
@@ -679,7 +681,7 @@ def build_desktop_overlay_preview_catalog(
     )
     size_presets = tuple(
         _preview_size_preset(preset_id, locale=locale)
-        for preset_id in DESKTOP_FLET_SIZE_PRESET_ORDER
+        for preset_id in DESKTOP_FLET_SIZE_PRESET_DISPLAY_ORDER
     )
     background_surfaces = tuple(
         DesktopOverlayPreviewBackgroundSurface(
