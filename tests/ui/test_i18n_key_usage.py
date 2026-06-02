@@ -207,7 +207,6 @@ def test_local_llm_keys_are_localized() -> None:
         assert missing == [], locale
         for key in required_keys:
             if key in {
-                "settings.translation_model.local_llm.description",
                 "settings.local_llm.api_key.description",
             }:
                 assert bundle[key] == ""
@@ -217,6 +216,25 @@ def test_local_llm_keys_are_localized() -> None:
 
     assert bundles["en"]["settings.translation_connection.ollama"] == "OpenAI-compatible API"
     assert bundles["ko"]["settings.translation_connection.ollama"] == "OpenAI 호환 API"
+    expected_local_llm_descriptions = {
+        "en": "You can use an OpenAI-compatible API",
+        "ko": "OpenAI 호환 API를 사용할 수 있어요",
+        "ja": "OpenAI互換APIを使用できます",
+        "zh-CN": "可以使用 OpenAI 兼容 API",
+    }
+    expected_gemini31_flash_lite_descriptions = {
+        "en": "Translation speed may be unstable",
+        "ko": "번역 속도가 불안정할 수 있어요",
+        "ja": "翻訳速度が不安定になることがあります",
+        "zh-CN": "翻译速度可能不稳定",
+    }
+    for locale, expected in expected_local_llm_descriptions.items():
+        assert bundles[locale]["settings.translation_model.local_llm.description"] == expected
+    for locale, expected in expected_gemini31_flash_lite_descriptions.items():
+        assert (
+            bundles[locale]["settings.translation_model.gemini31_flash_lite.description"]
+            == expected
+        )
     assert bundles["ko"]["settings.local_llm.connection"] == "OpenAI 호환 LLM 서버"
     assert bundles["ko"]["settings.local_llm.base_url"] == "Base URL"
     expected_model_copy = {
