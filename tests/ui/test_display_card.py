@@ -186,6 +186,23 @@ def test_display_card_primary_and_secondary_wrap_to_two_lines() -> None:
     assert card._display_secondary.overflow == display_card_module.ft.TextOverflow.ELLIPSIS
 
 
+def test_display_card_input_footer_stays_outside_expanding_display_region() -> None:
+    card = DisplayCard(on_submit=lambda _text: None)
+
+    glow_stack = card.content
+    padded_content_layer = glow_stack.controls[1].content
+    main_content = padded_content_layer.content
+    display_region, input_footer = main_content.controls
+    divider_container = input_footer.controls[0]
+
+    assert main_content.alignment == display_card_module.ft.MainAxisAlignment.START
+    assert display_region.expand is True
+    assert display_region.clip_behavior == display_card_module.ft.ClipBehavior.HARD_EDGE
+    assert divider_container.padding.bottom == 4
+    assert input_footer.expand is None
+    assert input_footer.tight is True
+
+
 def test_display_card_debug_prefix_is_rendered_before_visible_lines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
