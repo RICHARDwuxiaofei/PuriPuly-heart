@@ -179,6 +179,7 @@
     "settings.overlay.position_reset.action.desktop": "重置桌面",
     "settings.overlay.desktop.size.title": "叠加层大小",
     "settings.overlay.desktop.background_alpha.title": "背景透明度",
+    "settings.overlay.desktop.size.option.tiny": "极小",
     "settings.overlay.desktop.size.option.xsmall": "特小",
     "settings.overlay.desktop.size.option.small": "小",
     "settings.overlay.desktop.size.option.medium": "中",

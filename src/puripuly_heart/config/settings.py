@@ -54,9 +54,11 @@ DESKTOP_FLET_MIN_BACKGROUND_ALPHA = 0.0
 DESKTOP_FLET_MAX_BACKGROUND_ALPHA = 1.0
 DESKTOP_FLET_MIN_OUTLINE_WIDTH = 0.5
 DESKTOP_FLET_MAX_OUTLINE_WIDTH = 8.0
-DESKTOP_FLET_SIZE_PRESET_ORDER = ("xsmall", "small", "medium", "large", "xlarge")
+DESKTOP_FLET_SIZE_PRESET_ORDER = ("tiny", "xsmall", "small", "medium", "large", "xlarge")
+DESKTOP_FLET_SIZE_PRESET_DISPLAY_ORDER = tuple(reversed(DESKTOP_FLET_SIZE_PRESET_ORDER))
 DESKTOP_FLET_DEFAULT_SIZE_PRESET = "medium"
 DESKTOP_FLET_SIZE_PRESETS: dict[str, tuple[int, int]] = {
+    "tiny": (640, 160),
     "xsmall": (960, 240),
     "small": (1152, 288),
     "medium": (1344, 336),

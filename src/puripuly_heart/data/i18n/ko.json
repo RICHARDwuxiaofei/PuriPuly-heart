@@ -179,6 +179,7 @@
   "settings.overlay.position_reset.action.desktop": "데스크톱 초기화",
   "settings.overlay.desktop.size.title": "오버레이 크기",
   "settings.overlay.desktop.background_alpha.title": "배경 투명도",
+  "settings.overlay.desktop.size.option.tiny": "아주 작게",
   "settings.overlay.desktop.size.option.xsmall": "더 작게",
   "settings.overlay.desktop.size.option.small": "작게",
   "settings.overlay.desktop.size.option.medium": "보통",

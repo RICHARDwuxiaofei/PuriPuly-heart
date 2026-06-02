@@ -4656,6 +4656,25 @@ async def test_desktop_size_preset_change_preserves_current_center_without_clamp
         "height": 448,
     }
 
+    await controller.set_desktop_overlay_size_preset("tiny")
+
+    tiny_expected_x = 156
+    tiny_expected_y = 84
+    assert saved_desktop[-1] == (
+        pytest.approx(tiny_expected_x),
+        pytest.approx(tiny_expected_y),
+        "tiny",
+    )
+    assert controller.settings.overlay.desktop_flet.position.x == pytest.approx(tiny_expected_x)
+    assert controller.settings.overlay.desktop_flet.position.y == pytest.approx(tiny_expected_y)
+    assert bridge.desktop_runtime_control_payloads[-1] == {
+        "command": "apply_window_bounds",
+        "x": pytest.approx(tiny_expected_x),
+        "y": pytest.approx(tiny_expected_y),
+        "width": 640,
+        "height": 160,
+    }
+
     await controller.set_overlay_enabled(False)
 
 
