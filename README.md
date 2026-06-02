@@ -124,8 +124,9 @@ So I built one that can.
 | Service | Free Credit | Duration | Note |
 |--------|------------|------|------|
 | **Deepgram** | $200 | None | - |
-| **Gemini** | $10 | 1 year | Credited monthly |
-| **Qwen** | 1M tokens per model | 90 days | Singapore region |
+| **Google AI Studio** | $10 | 1 year | Monthly for Gemini subscribers |
+| **Alibaba Cloud** | 1M tokens per model | 90 days | Singapore region |
+| **Alibaba Cloud** | ¥300 | 1 year | Students in China |
 
 ---
 
