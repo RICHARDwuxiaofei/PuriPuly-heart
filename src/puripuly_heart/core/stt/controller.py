@@ -61,6 +61,7 @@ class ManagedSTTProvider:
 
     _active_utterance_id: UUID | None = None
     _pending_final_utterance_ids: deque[UUID] = field(default_factory=deque)
+    _pending_final_utterance_times: dict[UUID, float] = field(default_factory=dict)
     _audio_ring: RingBufferF32 | None = None
     _reset_timer: asyncio.Task[None] | None = None
     _last_speech_end_time: float | None = None
@@ -229,7 +230,9 @@ class ManagedSTTProvider:
 
         # Delegate end-of-speech handling to the backend (silence + finalize etc.)
         if self._active_session is not None:
+            ended_at = self.clock.now()
             self._pending_final_utterance_ids.append(event.utterance_id)
+            self._pending_final_utterance_times[event.utterance_id] = ended_at
             if len(self._pending_final_utterance_ids) > PENDING_FINAL_QUEUE_WARN_SIZE:
                 self._emit_basic(
                     "[STT] Pending final queue size is unexpectedly high: %s",
@@ -584,6 +587,33 @@ class ManagedSTTProvider:
             channel=self.channel,
         )
 
+    def _drop_stale_pending_final_utterance_ids(self) -> None:
+        stale_after_s = max(0.0, float(self.reconnect_window_s))
+        now = self.clock.now()
+
+        while self._pending_final_utterance_ids:
+            if len(self._pending_final_utterance_ids) <= 1 and self._active_utterance_id is None:
+                return
+
+            utterance_id = self._pending_final_utterance_ids[0]
+            ended_at = self._pending_final_utterance_times.get(utterance_id)
+            if ended_at is None:
+                return
+
+            age_s = now - ended_at
+            if age_s <= stale_after_s:
+                return
+
+            self._pending_final_utterance_ids.popleft()
+            self._pending_final_utterance_times.pop(utterance_id, None)
+            self._emit_detailed(
+                "[STT] Dropped stale pending final id=%s age_s=%.1f",
+                str(utterance_id)[:8],
+                age_s,
+                level=logging.WARNING,
+                fallback_level=logging.WARNING,
+            )
+
     async def _consume_session_events(
         self,
         session: STTBackendSession,
@@ -591,11 +621,14 @@ class ManagedSTTProvider:
         try:
             async for ev in session.events():
                 if ev.is_final:
+                    self._drop_stale_pending_final_utterance_ids()
                     utterance_id = (
                         self._pending_final_utterance_ids.popleft()
                         if self._pending_final_utterance_ids
                         else self._active_utterance_id
                     )
+                    if utterance_id is not None:
+                        self._pending_final_utterance_times.pop(utterance_id, None)
                 else:
                     utterance_id = self._active_utterance_id or (
                         self._pending_final_utterance_ids[0]
@@ -632,6 +665,7 @@ class ManagedSTTProvider:
             self._session_started_at = None
             self._active_utterance_id = None
             self._pending_final_utterance_ids.clear()
+            self._pending_final_utterance_times.clear()
             self._last_speech_end_time = None
             if self._reset_timer is not None:
                 self._reset_timer.cancel()
