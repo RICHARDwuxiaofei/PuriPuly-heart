@@ -1080,6 +1080,56 @@ async def test_managed_stt_provider_multiple_pending_finals_resolve_fifo() -> No
         await stt.close()
 
 
+async def test_managed_stt_provider_drops_stale_pending_final_before_later_final() -> None:
+    backend = Float32Backend()
+    clock = FakeClock(10.0)
+    stt = ManagedSTTProvider(
+        backend=backend,
+        sample_rate_hz=16000,
+        clock=clock,
+        reconnect_window_s=20.0,
+        reset_deadline_s=90.0,
+    )
+
+    stale_utterance_id = uuid4()
+    current_utterance_id = uuid4()
+    stream = stt.events()
+
+    try:
+        await stt.handle_vad_event(
+            SpeechStart(
+                stale_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(1.0),
+            )
+        )
+        await _next_state(stream, STTSessionState.STREAMING)
+        await stt.handle_vad_event(SpeechEnd(stale_utterance_id))
+
+        clock.advance(25.0)
+
+        await stt.handle_vad_event(
+            SpeechStart(
+                current_utterance_id,
+                pre_roll=np.zeros(0, dtype=np.float32),
+                chunk=samples(0.5),
+            )
+        )
+        await stt.handle_vad_event(SpeechEnd(current_utterance_id))
+
+        await backend.sessions[0]._queue.put(
+            STTBackendTranscriptEvent(text="current final", is_final=True)
+        )
+
+        event = await _next_typed_event(stream, STTFinalEvent)
+
+        assert event.utterance_id == current_utterance_id
+        assert event.transcript.utterance_id == current_utterance_id
+        assert event.transcript.text == "current final"
+    finally:
+        await stt.close()
+
+
 async def test_managed_stt_provider_repeated_forced_boundaries_reuse_session_and_finalize_fifo() -> (
     None
 ):
