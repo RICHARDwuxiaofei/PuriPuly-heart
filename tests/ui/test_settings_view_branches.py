@@ -6474,8 +6474,7 @@ def test_custom_vocabulary_loads_current_source_language_bucket_as_tags(
     custom_vocab_card = _prompt_tab_card(view, t("settings.section.custom_vocabulary"))
 
     assert _tree_contains_control(custom_vocab_card, view._custom_vocab_tag_editor)
-    if hasattr(view, "_custom_vocab_terms"):
-        assert not _tree_contains_control(custom_vocab_card, view._custom_vocab_terms)
+    assert not hasattr(view, "_custom_vocab_terms")
     assert _custom_vocab_chip_terms(view) == ["Puripuly", "VRChat"]
     assert view._custom_vocab_tag_editor._input_field.hint_text == t(  # noqa: SLF001
         "settings.custom_vocabulary.add_placeholder"
@@ -6857,166 +6856,230 @@ def test_custom_vocabulary_default_load_refreshes_from_settings(
     assert view._custom_vocab_tag_editor._input_field.value == ""  # noqa: SLF001
 
 
-def test_custom_vocabulary_add_control_preserves_input_before_persistence_callback(
+def test_custom_vocabulary_add_control_persists_unique_terms_and_emits_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
     settings.languages.source_language = "ko"
-    settings.stt.custom_terms = {"ko": ["Puripuly"]}
+    settings.stt.custom_terms = {"ko": ["Puripuly"], "en": ["Avatar"]}
+    settings.stt.custom_vocabulary_enabled = False
+    changed: list[AppSettings] = []
+    detailed_messages: list[str] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = lambda incoming: changed.append(incoming)
+    view.runtime_log_detailed = lambda message, *, level=logging.INFO: detailed_messages.append(
+        message
+    )
+    view._custom_vocab_tag_editor._input_field.value = " VRChat, Soniox\nPuripuly "  # noqa: SLF001
+
+    view._custom_vocab_tag_editor._add_button.on_click(None)  # noqa: SLF001
+
+    assert view._custom_vocab_tag_editor.on_add_terms is not None
+    assert view._custom_vocab_tag_editor._input_field.value == ""  # noqa: SLF001
+    assert settings.stt.custom_vocabulary_enabled is True
+    assert settings.stt.custom_terms == {
+        "ko": ["Puripuly", "VRChat", "Soniox"],
+        "en": ["Avatar"],
+    }
+    assert _custom_vocab_chip_terms(view) == ["Puripuly", "VRChat", "Soniox"]
+    assert len(changed) == 1
+    assert changed[-1].stt.custom_terms == settings.stt.custom_terms
+    assert changed[-1].stt.custom_vocabulary_enabled is True
+    assert detailed_messages == ["[Settings] Custom vocabulary applied: language=ko, terms=3"]
+
+
+def test_custom_vocabulary_add_normalizes_direct_raw_terms_exact_case_sensitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": ["Puripuly"], "en": ["Avatar"]}
     changed: list[AppSettings] = []
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
     view.on_settings_changed = changed.append
-    view._custom_vocab_tag_editor._input_field.value = "VRChat, Soniox"  # noqa: SLF001
+    view._custom_vocab_tag_editor._input_field.value = "draft"  # noqa: SLF001
 
-    view._custom_vocab_tag_editor._add_button.on_click(None)  # noqa: SLF001
+    view._on_custom_vocabulary_add_terms([" puripuly, Puripuly\nPURIPULY ", " "])
 
-    assert view._custom_vocab_tag_editor.on_add_terms is None
-    assert view._custom_vocab_tag_editor._input_field.value == "VRChat, Soniox"  # noqa: SLF001
-    assert settings.stt.custom_terms == {"ko": ["Puripuly"]}
-    assert changed == []
-
-
-def test_custom_vocabulary_apply_empty_terms_preserves_intentional_empty_bucket(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    settings.languages.source_language = "ko"
-    settings.stt.custom_terms = {"ko": ["Puripuly"]}
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-
-    view._custom_vocab_terms.value = ""
-    view._on_custom_vocabulary_terms_change(None)
-    view._on_custom_vocabulary_terms_blur(None)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-
-    assert settings.stt.custom_terms == {"ko": []}
-    assert settings.stt.custom_vocabulary_enabled is False
-    assert view._custom_vocab_terms.value == ""
-
-
-def test_custom_vocabulary_typing_does_not_emit_or_persist(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    settings.languages.source_language = "ko"
-    settings.stt.custom_terms = {"ko": ["Puripuly"], "en": ["Avatar"]}
-    changed: list[AppSettings] = []
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.on_settings_changed = lambda incoming: changed.append(incoming)
-
-    view._custom_vocab_terms.value = "Puripuly\nVRChat"
-    view._on_custom_vocabulary_terms_change(None)
-
-    assert changed == []
-    assert settings.stt.custom_terms == {"ko": ["Puripuly"], "en": ["Avatar"]}
-    assert view._custom_vocab_terms.value == "Puripuly\nVRChat"
-
-
-def test_custom_vocabulary_blur_applies_updates_current_bucket_and_emits_once(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    settings.languages.source_language = "ko"
-    settings.stt.custom_terms = {"ko": ["Puripuly"], "en": ["Avatar"]}
-    changed: list[AppSettings] = []
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.on_settings_changed = lambda incoming: changed.append(incoming)
-
-    view._custom_vocab_terms.value = " Puripuly \nVRChat\n\nPuripuly "
-    view._on_custom_vocabulary_terms_change(None)
-    view._on_custom_vocabulary_terms_blur(None)
-
-    assert settings.stt.custom_vocabulary_enabled is True
+    assert view._custom_vocab_tag_editor._input_field.value == ""  # noqa: SLF001
     assert settings.stt.custom_terms == {
-        "ko": ["Puripuly", "VRChat"],
+        "ko": ["Puripuly", "puripuly", "PURIPULY"],
         "en": ["Avatar"],
     }
-    assert view._custom_vocab_terms.value == "Puripuly\nVRChat"
-    assert changed == [settings]
+    assert _custom_vocab_chip_terms(view) == ["Puripuly", "puripuly", "PURIPULY"]
+    assert len(changed) == 1
 
 
-def test_custom_vocabulary_blur_updates_only_current_bucket_and_emits_once(
+def test_custom_vocabulary_empty_and_duplicate_adds_clear_input_without_emit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
     settings.languages.source_language = "ko"
     settings.stt.custom_terms = {"ko": ["Puripuly"], "en": ["Avatar"]}
+    settings.stt.custom_vocabulary_enabled = True
     changed: list[AppSettings] = []
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.on_settings_changed = lambda incoming: changed.append(incoming)
-
-    view._custom_vocab_terms.value = " Puripuly \nVRChat\n\nPuripuly "
-    view._on_custom_vocabulary_terms_change(None)
-    view._on_custom_vocabulary_terms_blur(None)
-
-    assert settings.stt.custom_vocabulary_enabled is True
-    assert settings.stt.custom_terms == {
-        "ko": ["Puripuly", "VRChat"],
-        "en": ["Avatar"],
-    }
-    assert changed == [settings]
-
-
-def test_custom_vocabulary_caps_to_100_terms_and_shows_snackbar(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    settings.languages.source_language = "ko"
-    changed: list[AppSettings] = []
-    snackbars: list[tuple[str, str]] = []
-    terms = [f"term-{i:03d}" for i in range(101)]
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-    view.on_settings_changed = lambda incoming: changed.append(incoming)
-    view.show_snackbar = lambda msg, bg: snackbars.append((msg, bg))
-
-    view._custom_vocab_terms.value = "\n".join(terms)
-    view._on_custom_vocabulary_terms_change(None)
-    view._on_custom_vocabulary_terms_blur(None)
-
-    assert settings.stt.custom_terms == {
-        "ko": terms[:100],
-        "en": ["airi", "shinano"],
-        "zh-CN": ["airi", "shinano"],
-        "ja": ["airi", "shinano"],
-    }
-    assert settings.stt.custom_vocabulary_enabled is True
-    assert view._custom_vocab_terms.value == "\n".join(terms[:100])
-    assert changed == [settings]
-    assert snackbars == [
-        (t("snackbar.custom_vocabulary_limit", max_terms=100), settings_view.ft.Colors.ORANGE_700)
-    ]
-
-
-def test_custom_vocabulary_blur_logs_applied_state(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    settings.languages.source_language = "ko"
     detailed_messages: list[str] = []
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = changed.append
     view.runtime_log_detailed = lambda message, *, level=logging.INFO: detailed_messages.append(
         message
     )
-    view._custom_vocab_terms.value = "Puripuly\nVRChat"
-    view._on_custom_vocabulary_terms_change(None)
+    view._custom_vocab_tag_editor._input_field.value = " , Puripuly,  Puripuly  \n "  # noqa: SLF001
 
-    view._on_custom_vocabulary_terms_blur(None)
+    view._custom_vocab_tag_editor._add_button.on_click(None)  # noqa: SLF001
 
-    assert detailed_messages == ["[Settings] Custom vocabulary applied: language=ko, terms=2"]
+    assert view._custom_vocab_tag_editor._input_field.value == ""  # noqa: SLF001
+    assert settings.stt.custom_terms == {"ko": ["Puripuly"], "en": ["Avatar"]}
+    assert _custom_vocab_chip_terms(view) == ["Puripuly"]
+    assert changed == []
+    assert detailed_messages == []
+
+
+def test_custom_vocabulary_typing_add_input_does_not_emit_or_persist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": ["Puripuly"], "en": ["Avatar"]}
+    changed: list[AppSettings] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = changed.append
+
+    view._custom_vocab_tag_editor._input_field.value = "Puripuly\nVRChat"  # noqa: SLF001
+
+    assert changed == []
+    assert settings.stt.custom_terms == {"ko": ["Puripuly"], "en": ["Avatar"]}
+    assert view._custom_vocab_tag_editor._input_field.value == "Puripuly\nVRChat"  # noqa: SLF001
+
+
+def test_custom_vocabulary_remove_control_persists_current_bucket_and_emits_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": ["Puripuly", "VRChat"], "en": ["Avatar"]}
+    settings.stt.custom_vocabulary_enabled = True
+    changed: list[AppSettings] = []
+    detailed_messages: list[str] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = changed.append
+    view.runtime_log_detailed = lambda message, *, level=logging.INFO: detailed_messages.append(
+        message
+    )
+
+    remove_button = view._custom_vocab_tag_editor._chip_remove_button(  # noqa: SLF001
+        view._custom_vocab_tag_editor._chips_wrap.controls[0]  # noqa: SLF001
+    )
+    remove_button.on_click(None)
+
+    assert settings.stt.custom_vocabulary_enabled is True
+    assert settings.stt.custom_terms == {"ko": ["VRChat"], "en": ["Avatar"]}
+    assert _custom_vocab_chip_terms(view) == ["VRChat"]
+    assert len(changed) == 1
+    assert changed[-1].stt.custom_terms == settings.stt.custom_terms
+    assert detailed_messages == ["[Settings] Custom vocabulary applied: language=ko, terms=1"]
+
+
+def test_custom_vocabulary_remove_last_term_derives_disabled_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": ["Puripuly"], "en": []}
+    settings.stt.custom_vocabulary_enabled = True
+    changed: list[AppSettings] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = changed.append
+
+    view._on_custom_vocabulary_remove_term("Puripuly")
+
+    assert settings.stt.custom_terms == {"ko": [], "en": []}
+    assert settings.stt.custom_vocabulary_enabled is False
+    assert _custom_vocab_chip_terms(view) == []
+    assert len(changed) == 1
+    assert changed[-1].stt.custom_vocabulary_enabled is False
+
+
+def test_custom_vocabulary_add_caps_partial_terms_and_shows_snackbar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    existing_terms = [f"term-{i:03d}" for i in range(99)]
+    settings.stt.custom_terms = {"ko": existing_terms, "en": ["Avatar"]}
+    settings.stt.custom_vocabulary_enabled = True
+    changed: list[AppSettings] = []
+    snackbars: list[tuple[str, str]] = []
+    detailed_messages: list[str] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = changed.append
+    view.show_snackbar = lambda msg, bg: snackbars.append((msg, bg))
+    view.runtime_log_detailed = lambda message, *, level=logging.INFO: detailed_messages.append(
+        message
+    )
+
+    view._on_custom_vocabulary_add_terms(["fits,overflow"])
+
+    assert settings.stt.custom_terms == {
+        "ko": [*existing_terms, "fits"],
+        "en": ["Avatar"],
+    }
+    assert settings.stt.custom_vocabulary_enabled is True
+    assert _custom_vocab_chip_terms(view)[-1] == "fits"
+    assert len(changed) == 1
+    assert snackbars == [
+        (t("snackbar.custom_vocabulary_limit", max_terms=100), settings_view.ft.Colors.ORANGE_700)
+    ]
+    assert detailed_messages == [
+        "[Settings] Custom vocabulary capped: language=ko, requested=101, applied=100",
+        "[Settings] Custom vocabulary applied: language=ko, terms=100",
+    ]
+
+
+def test_custom_vocabulary_add_when_bucket_full_shows_limit_without_emit_or_runtime_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    existing_terms = [f"term-{i:03d}" for i in range(100)]
+    settings.stt.custom_terms = {"ko": existing_terms, "en": []}
+    settings.stt.custom_vocabulary_enabled = True
+    changed: list[AppSettings] = []
+    snackbars: list[tuple[str, str]] = []
+    detailed_messages: list[str] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = changed.append
+    view.show_snackbar = lambda msg, bg: snackbars.append((msg, bg))
+    view.runtime_log_detailed = lambda message, *, level=logging.INFO: detailed_messages.append(
+        message
+    )
+
+    view._on_custom_vocabulary_add_terms(["overflow"])
+
+    assert settings.stt.custom_terms == {"ko": existing_terms, "en": []}
+    assert settings.stt.custom_vocabulary_enabled is True
+    assert _custom_vocab_chip_terms(view) == existing_terms
+    assert changed == []
+    assert snackbars == [
+        (t("snackbar.custom_vocabulary_limit", max_terms=100), settings_view.ft.Colors.ORANGE_700)
+    ]
+    assert detailed_messages == []
 
 
 def test_on_qwen_region_selected_uses_detailed_runtime_log(
