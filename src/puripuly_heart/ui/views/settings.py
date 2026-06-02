@@ -50,6 +50,7 @@ from puripuly_heart.ui.components.managed_trial_usage_bar import ManagedTrialUsa
 from puripuly_heart.ui.components.settings import (
     ApiKeyField,
     AudioSettings,
+    CustomVocabularyTagEditor,
     OptionItem,
     PromptEditor,
     SettingsModal,
@@ -1902,26 +1903,16 @@ class SettingsView(ft.Column):
             weight=ft.FontWeight.BOLD,
             color=COLOR_NEUTRAL,
         )
-        self._custom_vocab_info_icon = ft.Icon(
-            name=ft.Icons.INFO_OUTLINE,
-            color=COLOR_NEUTRAL,
-            size=24,
-            tooltip=t("settings.custom_vocabulary_tooltip"),
-        )
-        custom_vocab_header = ft.Row(
-            controls=[
-                self._custom_vocab_title,
-                ft.Container(expand=True),
-                self._custom_vocab_info_icon,
-            ],
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-        self._custom_vocab_helper_text = ft.Text(
-            self._custom_vocabulary_helper_copy(),
+        self._custom_vocab_description_text = ft.Text(
+            t("settings.custom_vocabulary.description"),
             size=16,
             color=COLOR_NEUTRAL,
         )
+        self._custom_vocab_tag_editor = CustomVocabularyTagEditor()
+        self._apply_custom_vocabulary_tag_editor_locale()
+
+        # Legacy, non-rendered textarea state is retained until add/remove persistence
+        # replaces the old parsing helpers in a follow-up gate task.
         self._custom_vocab_terms = ft.TextField(
             multiline=True,
             min_lines=5,
@@ -1937,9 +1928,11 @@ class SettingsView(ft.Column):
         row7 = SharedCardWrapper(
             ft.Column(
                 [
-                    custom_vocab_header,
-                    ft.Container(height=16),
-                    self._custom_vocab_terms,
+                    self._custom_vocab_title,
+                    ft.Container(height=6),
+                    self._custom_vocab_description_text,
+                    ft.Container(height=12),
+                    self._custom_vocab_tag_editor,
                 ],
                 spacing=0,
             ),
@@ -2148,17 +2141,25 @@ class SettingsView(ft.Column):
             provider=provider_label(self._active_prompt_key()),
         )
 
-    def _custom_vocabulary_helper_copy(self) -> str:
-        return t(
-            "settings.custom_vocabulary_helper",
-            language=language_name(self._current_source_language()),
+    def _custom_vocabulary_description_copy(self) -> str:
+        return t("settings.custom_vocabulary.description")
+
+    def _apply_custom_vocabulary_tag_editor_locale(self) -> None:
+        self._custom_vocab_tag_editor.set_placeholder(
+            t("settings.custom_vocabulary.add_placeholder")
+        )
+        self._custom_vocab_tag_editor.set_add_label(t("settings.custom_vocabulary.add_action"))
+        self._custom_vocab_tag_editor.set_empty_text(t("settings.custom_vocabulary.empty"))
+        self._custom_vocab_tag_editor.set_remove_label_template(
+            t("settings.custom_vocabulary.remove_hint")
         )
 
     def _sync_prompt_tab_copy(self) -> None:
         self._prompt_for_text.value = self._prompt_provider_copy()
-        self._custom_vocab_helper_text.value = self._custom_vocabulary_helper_copy()
+        self._custom_vocab_description_text.value = self._custom_vocabulary_description_copy()
+        self._apply_custom_vocabulary_tag_editor_locale()
         if self.page:
-            for control in (self._prompt_for_text, self._custom_vocab_helper_text):
+            for control in (self._prompt_for_text, self._custom_vocab_description_text):
                 with contextlib.suppress(Exception):
                     control.update()
 
@@ -2166,6 +2167,8 @@ class SettingsView(ft.Column):
         if not self._settings:
             self._custom_vocab_draft_terms = {}
             self._custom_vocab_terms.value = ""
+            self._custom_vocab_tag_editor.set_terms([])
+            self._custom_vocab_tag_editor.clear_input()
             return
 
         source_language = self._current_source_language()
@@ -2180,6 +2183,10 @@ class SettingsView(ft.Column):
         )
         self._custom_vocab_draft_terms[source_language] = current_value
         self._custom_vocab_terms.value = current_value
+        self._custom_vocab_tag_editor.set_terms(
+            list(self._settings.stt.custom_terms.get(source_language, []))
+        )
+        self._custom_vocab_tag_editor.clear_input()
 
     def _parse_custom_vocabulary_terms(self) -> tuple[list[str], int]:
         terms: list[str] = []
@@ -2800,6 +2807,7 @@ class SettingsView(ft.Column):
         else:
             self._prompt_editor.load_default_prompt(emit_change=False)
             settings.system_prompt = self._prompt_editor.value
+        self._set_custom_vocabulary_draft_from_settings(preserve_existing=False)
         self._sync_prompt_tab_copy()
 
         try:
@@ -4633,7 +4641,6 @@ class SettingsView(ft.Column):
                 self._local_llm_extra_body.error_text = message
         self._persona_title.value = t("settings.section.persona")
         self._custom_vocab_title.value = t("settings.section.custom_vocabulary")
-        self._custom_vocab_info_icon.tooltip = t("settings.custom_vocabulary_tooltip")
         self._vrc_mic_title.value = t("settings.vrc_mic_intercept")
         self._chatbox_source_title.value = t("settings.chatbox_include_source")
         self._clipboard_auto_translate_title.value = t("settings.clipboard_auto_translate")

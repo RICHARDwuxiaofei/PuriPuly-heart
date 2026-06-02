@@ -95,16 +95,11 @@ EXACT_DYNAMIC_I18N_KEYS = frozenset(
     }
 )
 
-# Desktop-overlay copy and this i18n-only custom-vocabulary tag-editor task seed
-# product-standard keys before every key is referenced in runtime code.
-# CUSTOM_VOCABULARY_TAG_EDITOR_I18N_KEYS are allowed here only until the
-# SettingsView integration surfaces the tag-editor UI copy; that integration
-# must remove those custom-vocabulary keys from this allowlist once consumed.
+# Desktop-overlay copy seeds product-standard keys before every key is referenced
+# in runtime code.
 # Keep this exact, temporary allowlist narrow so typo or stale seeded keys still fail.
 TEMPORARILY_ALLOWED_UNREFERENCED_I18N_KEYS = frozenset(
-    SHIPPING_DESKTOP_OVERLAY_I18N_KEYS
-    | DESKTOP_OVERLAY_RECOVERY_I18N_KEYS
-    | set(CUSTOM_VOCABULARY_TAG_EDITOR_I18N_KEYS)
+    SHIPPING_DESKTOP_OVERLAY_I18N_KEYS | DESKTOP_OVERLAY_RECOVERY_I18N_KEYS
 )
 
 

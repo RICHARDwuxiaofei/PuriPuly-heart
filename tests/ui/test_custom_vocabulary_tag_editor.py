@@ -81,6 +81,15 @@ def test_visible_add_control_splits_commas_and_newlines_into_raw_submitted_value
     assert editor._input_field.value == ""
 
 
+def test_visible_add_control_preserves_input_when_no_add_callback_is_installed() -> None:
+    editor = _make_editor()
+    editor._input_field.value = "Puripuly,VRChat"
+
+    editor._add_button.on_click(None)
+
+    assert editor._input_field.value == "Puripuly,VRChat"
+
+
 def test_visible_add_control_ignores_empty_delimiter_segments_without_trimming_raw_values() -> None:
     editor = _make_editor()
     added: list[list[str]] = []
