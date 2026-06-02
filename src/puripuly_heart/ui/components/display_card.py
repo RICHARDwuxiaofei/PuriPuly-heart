@@ -123,53 +123,55 @@ class DisplayCard(ft.Container):
             on_blur=self._handle_input_blur,
         )
 
-        main_content = ft.Column(
+        display_region = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                self._display_primary,
+                                self._display_secondary,
+                            ],
+                            spacing=4,
+                            tight=True,
+                        ),
+                        expand=True,
+                    ),
+                    self._notice_chip,
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            ),
+            alignment=ft.alignment.top_left,
+            padding=ft.padding.only(left=8),
+            expand=True,
+            clip_behavior=ft.ClipBehavior.HARD_EDGE,
+        )
+        input_footer = ft.Column(
             [
                 ft.Container(
-                    content=ft.Row(
-                        [
-                            ft.Container(
-                                content=ft.Column(
-                                    [
-                                        self._display_primary,
-                                        self._display_secondary,
-                                    ],
-                                    spacing=4,
-                                ),
-                                expand=True,
-                            ),
-                            self._notice_chip,
-                        ],
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                        vertical_alignment=ft.CrossAxisAlignment.START,
-                    ),
-                    alignment=ft.alignment.top_left,
-                    padding=ft.padding.only(left=8),
+                    content=ft.Divider(height=1, color=ft.Colors.with_opacity(0.2, COLOR_NEUTRAL)),
+                    padding=ft.padding.only(bottom=4),
                 ),
-                ft.Column(
+                ft.Row(
                     [
                         ft.Container(
-                            content=ft.Divider(
-                                height=1, color=ft.Colors.with_opacity(0.2, COLOR_NEUTRAL)
-                            ),
-                            padding=ft.padding.only(bottom=16),
+                            content=ft.Text("•", size=36, color="#FFADAC"),
+                            padding=ft.padding.only(right=8),
                         ),
-                        ft.Row(
-                            [
-                                ft.Container(
-                                    content=ft.Text("•", size=36, color="#FFADAC"),
-                                    padding=ft.padding.only(right=8),
-                                ),
-                                self._input_field,
-                            ],
-                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        ),
+                        self._input_field,
                     ],
-                    spacing=0,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
             ],
+            spacing=0,
+            tight=True,
+        )
+
+        main_content = ft.Column(
+            [display_region, input_footer],
             expand=True,
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            alignment=ft.MainAxisAlignment.START,
             spacing=8,
         )
 
