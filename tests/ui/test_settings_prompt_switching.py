@@ -20,7 +20,7 @@ from puripuly_heart.config.settings import (
     TranslationSettings,
 )
 from puripuly_heart.ui import i18n as i18n_module
-from puripuly_heart.ui.i18n import language_name, provider_label, t
+from puripuly_heart.ui.i18n import provider_label, t
 from puripuly_heart.ui.views import settings as settings_view
 from tests.helpers.flet_page import attach_dummy_page
 
@@ -161,7 +161,7 @@ def test_deepseek_managed_and_fallback_keep_single_prompt(monkeypatch) -> None:
     assert pending.system_prompt == "GEMINI CUSTOM"
 
 
-def test_prompt_tab_labels_and_helper_copy_render_from_i18n(monkeypatch) -> None:
+def test_prompt_tab_labels_and_tag_editor_copy_render_from_i18n(monkeypatch) -> None:
     settings = AppSettings()
     settings.provider.llm = LLMProviderName.QWEN
     settings.languages.source_language = "en"
@@ -180,9 +180,14 @@ def test_prompt_tab_labels_and_helper_copy_render_from_i18n(monkeypatch) -> None
             "settings.prompt_for",
             provider=provider_label(LLMProviderName.QWEN.value),
         )
-        assert view._custom_vocab_helper_text.value == t(
-            "settings.custom_vocabulary_helper",
-            language=language_name("en"),
+        assert view._custom_vocab_description_text.value == t(
+            "settings.custom_vocabulary.description"
+        )
+        assert view._custom_vocab_tag_editor._input_field.hint_text == t(  # noqa: SLF001
+            "settings.custom_vocabulary.add_placeholder"
+        )
+        assert view._custom_vocab_tag_editor._add_button.text == t(  # noqa: SLF001
+            "settings.custom_vocabulary.add_action"
         )
     finally:
         i18n_module.set_locale(previous_locale)

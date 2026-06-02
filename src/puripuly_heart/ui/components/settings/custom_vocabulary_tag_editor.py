@@ -205,10 +205,12 @@ class CustomVocabularyTagEditor(ft.Column):
         raw_value = self._input_field.value or ""
         if raw_value == "":
             return
+        if self.on_add_terms is None:
+            return
 
         raw_terms = [part for part in _ADD_SPLIT_RE.split(raw_value) if part != ""]
         self.clear_input()
-        if raw_terms and self.on_add_terms is not None:
+        if raw_terms:
             self.on_add_terms(raw_terms)
 
     def _handle_remove(self, term: str) -> None:

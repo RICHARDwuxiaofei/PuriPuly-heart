@@ -168,7 +168,13 @@ def _make_llm_selection_view(
         provider=None,
     )
     view._prompt_for_text = SimpleNamespace(value="")
-    view._custom_vocab_helper_text = SimpleNamespace(value="")
+    view._custom_vocab_description_text = SimpleNamespace(value="", update=lambda: None)
+    view._custom_vocab_tag_editor = SimpleNamespace(
+        set_placeholder=lambda _text: None,
+        set_add_label=lambda _text: None,
+        set_empty_text=lambda _text: None,
+        set_remove_label_template=lambda _template: None,
+    )
     view.on_request_openrouter_pkce = None
     view._prompt_editor.set_provider = lambda provider: setattr(
         view._prompt_editor, "provider", provider
@@ -352,6 +358,21 @@ def _control_labels(control: ft.Control) -> list[str]:
 
 def _tree_contains_control(root: ft.Control, target: ft.Control) -> bool:
     return any(node is target for node in _iter_control_tree(root))
+
+
+def _control_tooltips(control: ft.Control) -> list[str]:
+    return [
+        tooltip
+        for node in _iter_control_tree(control)
+        if (tooltip := getattr(node, "tooltip", None))
+    ]
+
+
+def _custom_vocab_chip_terms(view: settings_view.SettingsView) -> list[str]:
+    return [
+        str(getattr(chip, "data", ""))
+        for chip in view._custom_vocab_tag_editor._chips_wrap.controls  # noqa: SLF001
+    ]
 
 
 def _button_style_value(
@@ -2992,8 +3013,7 @@ def test_refresh_after_openrouter_pkce_success_preserves_unrelated_drafts(
 
     view, _ = _make_settings_view(monkeypatch, store)
     view.load_from_settings(initial, config_path=Path("settings.json"))
-    view._custom_vocab_terms.value = "Puripuly\nVRChat"
-    view._on_custom_vocabulary_terms_change(None)
+    view._custom_vocab_tag_editor._input_field.value = "VRChat"  # noqa: SLF001
     view._google_key.value = "typed-google-draft"
 
     updated = AppSettings()
@@ -3008,7 +3028,8 @@ def test_refresh_after_openrouter_pkce_success_preserves_unrelated_drafts(
 
     view.refresh_after_openrouter_pkce_success(updated, config_path=Path("settings.json"))
 
-    assert view._custom_vocab_terms.value == "Puripuly\nVRChat"
+    assert view._custom_vocab_tag_editor._input_field.value == ""  # noqa: SLF001
+    assert _custom_vocab_chip_terms(view) == ["아이리", "시나노"]
     assert view._google_key.value == "typed-google-draft"
     assert view._openrouter_key.value == "pkce-openrouter-key"
     assert view._openrouter_key._current_status == "success"
@@ -6439,7 +6460,7 @@ def test_apply_locale_refreshes_vrc_mic_title_and_value(
     assert view._vrc_mic_text.content.value == t("settings.vrc_mic.on")
 
 
-def test_custom_vocabulary_loads_current_source_language_bucket(
+def test_custom_vocabulary_loads_current_source_language_bucket_as_tags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -6450,66 +6471,66 @@ def test_custom_vocabulary_loads_current_source_language_bucket(
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
+    custom_vocab_card = _prompt_tab_card(view, t("settings.section.custom_vocabulary"))
 
-    assert view._custom_vocab_terms.value == "Puripuly\nVRChat"
-    assert view._custom_vocab_terms.helper_text == ""
-    assert view._custom_vocab_terms.shift_enter is False
-    assert view._custom_vocab_terms.label is None
-    assert view._custom_vocab_terms.border_color == settings_view.COLOR_DIVIDER
+    assert _tree_contains_control(custom_vocab_card, view._custom_vocab_tag_editor)
+    if hasattr(view, "_custom_vocab_terms"):
+        assert not _tree_contains_control(custom_vocab_card, view._custom_vocab_terms)
+    assert _custom_vocab_chip_terms(view) == ["Puripuly", "VRChat"]
+    assert view._custom_vocab_tag_editor._input_field.hint_text == t(  # noqa: SLF001
+        "settings.custom_vocabulary.add_placeholder"
+    )
+    assert view._custom_vocab_tag_editor._add_button.text == t(  # noqa: SLF001
+        "settings.custom_vocabulary.add_action"
+    )
+    text_fields = [
+        node for node in _iter_control_tree(custom_vocab_card) if isinstance(node, ft.TextField)
+    ]
+    assert text_fields == [view._custom_vocab_tag_editor._input_field]  # noqa: SLF001
+    assert view._custom_vocab_tag_editor._input_field.min_lines == 1  # noqa: SLF001
+    assert view._custom_vocab_tag_editor._input_field.max_lines == 2  # noqa: SLF001
 
 
-def test_custom_vocabulary_loads_seeded_settings_defaults_as_initial_value(
+@pytest.mark.parametrize(
+    ("source_language", "expected_terms"),
+    [
+        ("ko", ["아이리", "시나노"]),
+        ("en", ["airi", "shinano"]),
+        ("zh-CN", ["airi", "shinano"]),
+        ("ja", ["airi", "shinano"]),
+    ],
+)
+def test_custom_vocabulary_loads_seeded_settings_defaults_as_tags(
     monkeypatch: pytest.MonkeyPatch,
+    source_language: str,
+    expected_terms: list[str],
 ) -> None:
     settings = AppSettings()
-    settings.languages.source_language = "ko"
+    settings.languages.source_language = source_language
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    assert view._custom_vocab_terms.value == "아이리\n시나노"
-    assert view._custom_vocab_terms.helper_text == ""
+    assert _custom_vocab_chip_terms(view) == expected_terms
+    assert view._custom_vocab_tag_editor._empty_text.value == t(  # noqa: SLF001
+        "settings.custom_vocabulary.empty"
+    )
 
 
-def test_custom_vocabulary_loads_seeded_settings_defaults_for_zh_cn(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    settings.languages.source_language = "zh-CN"
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-
-    assert view._custom_vocab_terms.value == "airi\nshinano"
-    assert view._custom_vocab_terms.helper_text == ""
-
-
-def test_custom_vocabulary_loads_seeded_settings_defaults_for_ja(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    settings = AppSettings()
-    settings.languages.source_language = "ja"
-
-    view, _ = _make_settings_view(monkeypatch)
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-
-    assert view._custom_vocab_terms.value == "airi\nshinano"
-    assert view._custom_vocab_terms.helper_text == ""
-
-
-def test_custom_vocabulary_info_icon_is_in_card_header(
+def test_custom_vocabulary_card_shows_inline_helper_without_info_icon(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view, _ = _make_settings_view(monkeypatch)
 
     custom_vocab_card = _prompt_tab_card(view, t("settings.section.custom_vocabulary"))
     custom_vocab_column = _wrapped_card_column(custom_vocab_card)
-    header = custom_vocab_column.controls[0]
 
-    assert isinstance(header, settings_view.ft.Row)
-    assert header.controls[0] is view._custom_vocab_title
-    assert header.controls[-1] is view._custom_vocab_info_icon
-    assert view._custom_vocab_info_icon.tooltip == t("settings.custom_vocabulary_tooltip")
+    assert custom_vocab_column.controls[0] is view._custom_vocab_title
+    assert view._custom_vocab_description_text in custom_vocab_column.controls
+    assert view._custom_vocab_description_text.value == t("settings.custom_vocabulary.description")
+    assert t("settings.custom_vocabulary.description") in _control_labels(custom_vocab_card)
+    assert not hasattr(view, "_custom_vocab_info_icon")
+    assert t("settings.custom_vocabulary_tooltip") not in _control_tooltips(custom_vocab_card)
 
 
 def test_prompt_tab_uses_shared_full_width_cards(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6525,7 +6546,7 @@ def test_prompt_tab_uses_shared_full_width_cards(monkeypatch: pytest.MonkeyPatch
     assert all(card.expand is False for card in prompt_cards)
 
 
-def test_prompt_tab_hides_prompt_provider_copy_and_language_helper_text(
+def test_prompt_tab_hides_prompt_provider_copy_and_old_language_helper_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -6548,29 +6569,30 @@ def test_prompt_tab_hides_prompt_provider_copy_and_language_helper_text(
             "settings.prompt_for",
             provider=provider_label(LLMProviderName.GEMINI.value),
         ) not in _control_labels(prompt_card)
-        assert t(
-            "settings.custom_vocabulary_helper",
-            language=language_name("zh-CN"),
-        ) not in _control_labels(custom_vocab_card)
+        assert not hasattr(view, "_custom_vocab_helper_text")
+        assert t("settings.custom_vocabulary.description") in _control_labels(custom_vocab_card)
     finally:
         i18n_module.set_locale(old_locale)
 
 
 @pytest.mark.parametrize(
-    ("locale", "expected_tooltip"),
+    ("locale", "expected_description"),
     [
         (
             "ko",
-            "자신의 말하는 음성에만 적용이 되어요\n또한 Deepgram과 Soniox 사용 시에만 설정이 쓰여요",
+            "내 음성에만 적용돼요. 지원되는 음성 인식 제공자가 인식률을 높이는 데 사용해요.",
         ),
-        ("en", "Only applies to your speech.\nOnly applies to Deepgram and Soniox."),
-        ("zh-CN", "仅适用于你的语音。\n仅适用于 Deepgram 和 Soniox。"),
+        (
+            "en",
+            "Applies to your own speech. Supported speech recognition providers use these hints to improve recognition.",
+        ),
+        ("zh-CN", "仅适用于你的语音。支持的语音识别提供商会使用这些提示来提高识别率。"),
     ],
 )
-def test_custom_vocabulary_tooltip_copy_matches_new_provider_scope(
+def test_custom_vocabulary_inline_helper_copy_matches_provider_scope(
     monkeypatch: pytest.MonkeyPatch,
     locale: str,
-    expected_tooltip: str,
+    expected_description: str,
 ) -> None:
     settings = AppSettings()
     settings.ui.locale = locale
@@ -6583,7 +6605,10 @@ def test_custom_vocabulary_tooltip_copy_matches_new_provider_scope(
         i18n_module.set_locale(locale)
         view.apply_locale()
 
-        assert view._custom_vocab_info_icon.tooltip == expected_tooltip
+        custom_vocab_card = _prompt_tab_card(view, t("settings.section.custom_vocabulary"))
+        assert view._custom_vocab_description_text.value == expected_description
+        assert expected_description in _control_labels(custom_vocab_card)
+        assert not hasattr(view, "_custom_vocab_info_icon")
     finally:
         i18n_module.set_locale(old_locale)
 
@@ -6757,7 +6782,7 @@ def test_integrated_context_general_card_labels_render_from_i18n(
         i18n_module.set_locale(old_locale)
 
 
-def test_custom_vocabulary_switching_source_language_updates_editor_payload(
+def test_custom_vocabulary_switching_source_language_updates_tags_and_clears_add_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -6766,18 +6791,22 @@ def test_custom_vocabulary_switching_source_language_updates_editor_payload(
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
-    assert view._custom_vocab_terms.value == "Puripuly"
+    assert _custom_vocab_chip_terms(view) == ["Puripuly"]
+    view._custom_vocab_tag_editor._input_field.value = "unsubmitted hint"  # noqa: SLF001
 
     settings.languages.source_language = "en"
-    view.load_from_settings(settings, config_path=Path("settings.json"))
-
-    assert view._custom_vocab_terms.value == "Avatar\nOSC"
-    assert view._custom_vocab_helper_text.value == (
-        f"One term per line for {language_name('en')}. Changes save when you leave this field."
+    view.load_from_settings(
+        settings,
+        config_path=Path("settings.json"),
+        preserve_custom_vocab_draft=True,
     )
 
+    assert _custom_vocab_chip_terms(view) == ["Avatar", "OSC"]
+    assert view._custom_vocab_tag_editor._input_field.value == ""  # noqa: SLF001
+    assert view._custom_vocab_description_text.value == t("settings.custom_vocabulary.description")
 
-def test_custom_vocabulary_preserves_unsaved_drafts_across_source_language_reload(
+
+def test_custom_vocabulary_preserve_reload_discards_unsubmitted_add_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = AppSettings()
@@ -6786,9 +6815,7 @@ def test_custom_vocabulary_preserves_unsaved_drafts_across_source_language_reloa
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
-
-    view._custom_vocab_terms.value = "Puripuly\nVRChat"
-    view._on_custom_vocabulary_terms_change(None)
+    view._custom_vocab_tag_editor._input_field.value = "VRChat"  # noqa: SLF001
 
     settings.languages.source_language = "en"
     view.load_from_settings(
@@ -6796,16 +6823,19 @@ def test_custom_vocabulary_preserves_unsaved_drafts_across_source_language_reloa
         config_path=Path("settings.json"),
         preserve_custom_vocab_draft=True,
     )
-    assert view._custom_vocab_terms.value == "Avatar"
+    assert _custom_vocab_chip_terms(view) == ["Avatar"]
+    assert view._custom_vocab_tag_editor._input_field.value == ""  # noqa: SLF001
 
     settings.languages.source_language = "ko"
+    view._custom_vocab_tag_editor._input_field.value = "Puripuly draft"  # noqa: SLF001
     view.load_from_settings(
         settings,
         config_path=Path("settings.json"),
         preserve_custom_vocab_draft=True,
     )
 
-    assert view._custom_vocab_terms.value == "Puripuly\nVRChat"
+    assert _custom_vocab_chip_terms(view) == ["Puripuly"]
+    assert view._custom_vocab_tag_editor._input_field.value == ""  # noqa: SLF001
 
 
 def test_custom_vocabulary_default_load_refreshes_from_settings(
@@ -6818,12 +6848,34 @@ def test_custom_vocabulary_default_load_refreshes_from_settings(
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    view._custom_vocab_terms.value = "Puripuly\nVRChat"
-    view._on_custom_vocabulary_terms_change(None)
+    view._custom_vocab_tag_editor.set_terms(["Puripuly", "VRChat"])
+    view._custom_vocab_tag_editor._input_field.value = "unsubmitted"  # noqa: SLF001
 
     view.load_from_settings(settings, config_path=Path("settings.json"))
 
-    assert view._custom_vocab_terms.value == "Puripuly"
+    assert _custom_vocab_chip_terms(view) == ["Puripuly"]
+    assert view._custom_vocab_tag_editor._input_field.value == ""  # noqa: SLF001
+
+
+def test_custom_vocabulary_add_control_preserves_input_before_persistence_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = AppSettings()
+    settings.languages.source_language = "ko"
+    settings.stt.custom_terms = {"ko": ["Puripuly"]}
+    changed: list[AppSettings] = []
+
+    view, _ = _make_settings_view(monkeypatch)
+    view.load_from_settings(settings, config_path=Path("settings.json"))
+    view.on_settings_changed = changed.append
+    view._custom_vocab_tag_editor._input_field.value = "VRChat, Soniox"  # noqa: SLF001
+
+    view._custom_vocab_tag_editor._add_button.on_click(None)  # noqa: SLF001
+
+    assert view._custom_vocab_tag_editor.on_add_terms is None
+    assert view._custom_vocab_tag_editor._input_field.value == "VRChat, Soniox"  # noqa: SLF001
+    assert settings.stt.custom_terms == {"ko": ["Puripuly"]}
+    assert changed == []
 
 
 def test_custom_vocabulary_apply_empty_terms_preserves_intentional_empty_bucket(
@@ -6990,20 +7042,34 @@ def test_apply_locale_refreshes_custom_vocabulary_text(
     settings = AppSettings()
     settings.provider.stt = STTProviderName.DEEPGRAM
     settings.languages.source_language = "en"
+    settings.stt.custom_terms = {"en": ["Puripuly"]}
 
     view, _ = _make_settings_view(monkeypatch)
     view.load_from_settings(settings, config_path=Path("settings.json"))
     view._custom_vocab_title.value = "stale-title"
-    view._custom_vocab_terms.label = "stale-label"
-    view._custom_vocab_terms.helper_text = "stale-helper"
-    view._custom_vocab_info_icon.tooltip = "stale-tooltip"
+    view._custom_vocab_description_text.value = "stale-description"
+    view._custom_vocab_tag_editor.set_placeholder("stale-placeholder")
+    view._custom_vocab_tag_editor.set_add_label("stale-add")
+    view._custom_vocab_tag_editor.set_empty_text("stale-empty")
+    view._custom_vocab_tag_editor.set_remove_label_template("stale-remove {term}")
 
     view.apply_locale()
 
     assert view._custom_vocab_title.value == t("settings.section.custom_vocabulary")
-    assert view._custom_vocab_terms.label is None
-    assert view._custom_vocab_terms.helper_text == ""
-    assert view._custom_vocab_info_icon.tooltip == t("settings.custom_vocabulary_tooltip")
+    assert view._custom_vocab_description_text.value == t("settings.custom_vocabulary.description")
+    assert view._custom_vocab_tag_editor._input_field.hint_text == t(  # noqa: SLF001
+        "settings.custom_vocabulary.add_placeholder"
+    )
+    assert view._custom_vocab_tag_editor._add_button.text == t(  # noqa: SLF001
+        "settings.custom_vocabulary.add_action"
+    )
+    assert view._custom_vocab_tag_editor._empty_text.value == t(  # noqa: SLF001
+        "settings.custom_vocabulary.empty"
+    )
+    remove_button = view._custom_vocab_tag_editor._chip_remove_button(  # noqa: SLF001
+        view._custom_vocab_tag_editor._chips_wrap.controls[0]  # noqa: SLF001
+    )
+    assert remove_button.tooltip == t("settings.custom_vocabulary.remove_hint", term="Puripuly")
 
 
 def test_settings_view_uses_generic_subtab_shell(monkeypatch: pytest.MonkeyPatch) -> None:
