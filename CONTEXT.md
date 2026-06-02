@@ -20,6 +20,10 @@ _Avoid_: transcription result, STT text
 Localized text produced from a transcript for the configured target language while preserving conversational tone.
 _Avoid_: response, output text
 
+**Speech Recognition Hint**:
+A user-supplied word or phrase that may bias speech recognition for the user's own Channel and selected source language. It is not a transcript correction, a translation glossary, or a guaranteed rewrite.
+_Avoid_: custom vocabulary, tag, prompt term
+
 **Channel**:
 The side of a conversation that a Utterance Segment belongs to: either the user's own speech path or another participant's speech path when peer voice translation is enabled.
 _Avoid_: stream, role, side, local user, remote user
