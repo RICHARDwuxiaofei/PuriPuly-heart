@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 import puripuly_heart.core.stt.controller as stt_controller_module
+from puripuly_heart.config.settings import STTProviderName
 from puripuly_heart.core.clock import FakeClock
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
 from puripuly_heart.core.stt.backend import STTBackendTranscriptEvent
@@ -1333,6 +1334,208 @@ async def test_managed_stt_provider_peer_channel_produces_final_event():
     assert isinstance(event, STTFinalEvent)
     assert event.transcript.channel == "peer"
     assert event.transcript.text == "peer line"
+
+
+@pytest.mark.parametrize(
+    ("channel", "text"),
+    [("self", "leşme"), ("peer", "acia")],
+)
+async def test_managed_stt_provider_suppresses_known_local_qwen_final_and_notifies_without_text(
+    channel,
+    text,
+) -> None:
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    notifications: list[object] = []
+    provider = ManagedSTTProvider(
+        backend=FakeBackend(),
+        sample_rate_hz=16000,
+        channel=channel,
+        stt_provider_name=STTProviderName.LOCAL_QWEN,
+        runtime_logging=runtime_logging,
+        on_final_transcript_suppressed=notifications.append,
+    )
+    utterance_id = uuid4()
+    provider._pending_final_utterance_ids.append(utterance_id)
+    provider._pending_final_utterance_times[utterance_id] = 10.0
+
+    await provider._consume_session_events(
+        EventOnlySession([STTBackendTranscriptEvent(text=text, is_final=True)])
+    )
+
+    assert provider._events.empty()
+    assert list(provider._pending_final_utterance_ids) == []
+    assert provider._pending_final_utterance_times == {}
+    assert len(notifications) == 1
+    notification = notifications[0]
+    assert getattr(notification, "utterance_id") == utterance_id
+    assert getattr(notification, "channel") == channel
+    assert getattr(notification, "stt_provider_name") == STTProviderName.LOCAL_QWEN
+    assert not hasattr(notification, "text")
+    assert not hasattr(notification, "transcript")
+
+    messages = _runtime_log_messages(log_stream)
+    assert any(
+        f"[STT][local_qwen][{channel}] Known hallucination suppressed" in message
+        and f"utterance_id={str(utterance_id)[:8]}" in message
+        and "notification=emitted" in message
+        for message in messages
+    )
+    assert not any(text in message for message in messages)
+    assert not any("text=" in message for message in messages)
+
+
+async def test_managed_stt_provider_suppression_log_marks_missing_notification_callback_without_text() -> (
+    None
+):
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+    provider = ManagedSTTProvider(
+        backend=FakeBackend(),
+        sample_rate_hz=16000,
+        stt_provider_name=STTProviderName.LOCAL_QWEN,
+        runtime_logging=runtime_logging,
+    )
+    utterance_id = uuid4()
+    provider._pending_final_utterance_ids.append(utterance_id)
+
+    await provider._consume_session_events(
+        EventOnlySession([STTBackendTranscriptEvent(text="leşme", is_final=True)])
+    )
+
+    messages = _runtime_log_messages(log_stream)
+    assert provider._events.empty()
+    assert any(
+        "[STT][local_qwen][self] Known hallucination suppressed" in message
+        and f"utterance_id={str(utterance_id)[:8]}" in message
+        and "notification=not_configured" in message
+        for message in messages
+    )
+    assert not any("leşme" in message for message in messages)
+    assert not any("text=" in message for message in messages)
+
+
+async def test_managed_stt_provider_suppression_log_marks_notification_failure_without_text() -> (
+    None
+):
+    runtime_logging, log_stream = _make_runtime_logging_capture()
+
+    def fail_notification(_notification: object) -> None:
+        raise RuntimeError("counter unavailable")
+
+    provider = ManagedSTTProvider(
+        backend=FakeBackend(),
+        sample_rate_hz=16000,
+        stt_provider_name=STTProviderName.LOCAL_QWEN,
+        runtime_logging=runtime_logging,
+        on_final_transcript_suppressed=fail_notification,
+    )
+    utterance_id = uuid4()
+    provider._pending_final_utterance_ids.append(utterance_id)
+
+    await provider._consume_session_events(
+        EventOnlySession([STTBackendTranscriptEvent(text="acia", is_final=True)])
+    )
+
+    messages = _runtime_log_messages(log_stream)
+    assert provider._events.empty()
+    assert any(
+        "[STT][local_qwen][self] Known hallucination suppressed" in message
+        and f"utterance_id={str(utterance_id)[:8]}" in message
+        and "notification=failed" in message
+        for message in messages
+    )
+    assert not any("acia" in message for message in messages)
+    assert not any("text=" in message for message in messages)
+
+
+@pytest.mark.parametrize(
+    "stt_provider_name",
+    [STTProviderName.DEEPGRAM, STTProviderName.SONIOX, STTProviderName.QWEN_ASR],
+)
+async def test_managed_stt_provider_allows_known_text_from_non_local_provider_instances(
+    stt_provider_name,
+) -> None:
+    notifications: list[object] = []
+    provider = ManagedSTTProvider(
+        backend=FakeBackend(),
+        sample_rate_hz=16000,
+        stt_provider_name=stt_provider_name,
+        on_final_transcript_suppressed=notifications.append,
+    )
+    utterance_id = uuid4()
+    provider._pending_final_utterance_ids.append(utterance_id)
+
+    await provider._consume_session_events(
+        EventOnlySession([STTBackendTranscriptEvent(text="leşme", is_final=True)])
+    )
+
+    event = await _next_event(provider.events())
+    assert isinstance(event, STTFinalEvent)
+    assert event.utterance_id == utterance_id
+    assert event.transcript.text == "leşme"
+    assert notifications == []
+    assert list(provider._pending_final_utterance_ids) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["的答案", "虚构", "夫", "夫夫", "格力", "Leşme", "xleşmex", "AcIa", "acia."],
+)
+async def test_managed_stt_provider_allows_non_matching_local_qwen_finals(text: str) -> None:
+    notifications: list[object] = []
+    provider = ManagedSTTProvider(
+        backend=FakeBackend(),
+        sample_rate_hz=16000,
+        stt_provider_name=STTProviderName.LOCAL_QWEN,
+        on_final_transcript_suppressed=notifications.append,
+    )
+    utterance_id = uuid4()
+    provider._pending_final_utterance_ids.append(utterance_id)
+
+    await provider._consume_session_events(
+        EventOnlySession([STTBackendTranscriptEvent(text=text, is_final=True)])
+    )
+
+    event = await _next_event(provider.events())
+    assert isinstance(event, STTFinalEvent)
+    assert event.transcript.text == text
+    assert notifications == []
+
+
+async def test_managed_stt_provider_suppression_decision_uses_producer_instance_identity() -> None:
+    local_notifications: list[object] = []
+    local_provider = ManagedSTTProvider(
+        backend=FakeBackend(),
+        sample_rate_hz=16000,
+        stt_provider_name=STTProviderName.LOCAL_QWEN,
+        on_final_transcript_suppressed=local_notifications.append,
+    )
+    local_id = uuid4()
+    local_provider._pending_final_utterance_ids.append(local_id)
+
+    non_local_notifications: list[object] = []
+    non_local_provider = ManagedSTTProvider(
+        backend=FakeBackend(),
+        sample_rate_hz=16000,
+        stt_provider_name=STTProviderName.DEEPGRAM,
+        on_final_transcript_suppressed=non_local_notifications.append,
+    )
+    non_local_id = uuid4()
+    non_local_provider._pending_final_utterance_ids.append(non_local_id)
+
+    await local_provider._consume_session_events(
+        EventOnlySession([STTBackendTranscriptEvent(text="leşme", is_final=True)])
+    )
+    await non_local_provider._consume_session_events(
+        EventOnlySession([STTBackendTranscriptEvent(text="leşme", is_final=True)])
+    )
+
+    assert local_provider._events.empty()
+    assert getattr(local_notifications[0], "stt_provider_name") == STTProviderName.LOCAL_QWEN
+    non_local_event = await _next_event(non_local_provider.events())
+    assert isinstance(non_local_event, STTFinalEvent)
+    assert non_local_event.utterance_id == non_local_id
+    assert non_local_event.transcript.text == "leşme"
+    assert non_local_notifications == []
 
 
 async def test_managed_stt_provider_skips_empty_audio_send() -> None:

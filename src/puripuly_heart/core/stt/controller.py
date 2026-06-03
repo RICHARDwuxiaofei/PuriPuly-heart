@@ -9,6 +9,8 @@ from uuid import UUID
 
 import numpy as np
 
+from puripuly_heart.config.settings import STTProviderName
+
 logger = logging.getLogger(__name__)
 MANAGED_STT_SAMPLE_RATE_HZ = 16000
 PENDING_FINAL_QUEUE_WARN_SIZE = 8
@@ -23,6 +25,9 @@ from puripuly_heart.core.stt.backend import (
     STTBackendFloat32Session,
     STTBackendSession,
 )
+from puripuly_heart.core.stt.local_qwen_hallucination import (
+    is_known_local_qwen_hallucination,
+)
 from puripuly_heart.core.vad.gating import SpeechChunk, SpeechEnd, SpeechStart, VadEvent
 from puripuly_heart.domain.events import (
     STTErrorEvent,
@@ -34,10 +39,18 @@ from puripuly_heart.domain.events import (
 from puripuly_heart.domain.models import ChannelId, Transcript
 
 
+@dataclass(frozen=True, slots=True)
+class FinalTranscriptSuppressedNotification:
+    utterance_id: UUID
+    channel: ChannelId
+    stt_provider_name: STTProviderName
+
+
 @dataclass(slots=True)
 class ManagedSTTProvider:
     backend: STTBackend
     sample_rate_hz: int
+    stt_provider_name: STTProviderName | None = None
     channel: ChannelId = "self"
     clock: Clock = SystemClock()
     reset_deadline_s: float = 180.0
@@ -49,6 +62,9 @@ class ManagedSTTProvider:
     connect_retry_max_s: float = 6.0
     reconnect_window_s: float = 20.0
     on_terminal_failure: Callable[[Exception], Awaitable[None] | None] | None = None
+    on_final_transcript_suppressed: (
+        Callable[[FinalTranscriptSuppressedNotification], Awaitable[None] | None] | None
+    ) = None
     runtime_logging: SessionRuntimeLoggingService | None = None
     stt_input_fault_profile_provider: Callable[[], AudioFaultProfile | str | None] | None = None
 
@@ -75,6 +91,11 @@ class ManagedSTTProvider:
     def __post_init__(self) -> None:
         if self.channel not in ("self", "peer"):
             raise ValueError("channel must be 'self' or 'peer'")
+        if self.stt_provider_name is not None and not isinstance(
+            self.stt_provider_name,
+            STTProviderName,
+        ):
+            self.stt_provider_name = STTProviderName(self.stt_provider_name)
         if self.sample_rate_hz != MANAGED_STT_SAMPLE_RATE_HZ:
             raise ValueError(f"sample_rate_hz must be {MANAGED_STT_SAMPLE_RATE_HZ}")
         if self.reset_deadline_s <= 0:
@@ -614,6 +635,54 @@ class ManagedSTTProvider:
                 fallback_level=logging.WARNING,
             )
 
+    def _should_suppress_final_transcript(self, text: str) -> bool:
+        return (
+            self.stt_provider_name is STTProviderName.LOCAL_QWEN
+            and is_known_local_qwen_hallucination(text)
+        )
+
+    async def _handle_suppressed_final_transcript(
+        self,
+        *,
+        utterance_id: UUID,
+    ) -> None:
+        provider_name = self.stt_provider_name
+        if provider_name is not STTProviderName.LOCAL_QWEN:
+            return
+
+        notification_status = "not_configured"
+        if self.on_final_transcript_suppressed is not None:
+            notification = FinalTranscriptSuppressedNotification(
+                utterance_id=utterance_id,
+                channel=self.channel,
+                stt_provider_name=provider_name,
+            )
+            try:
+                maybe_awaitable = self.on_final_transcript_suppressed(notification)
+                if inspect.isawaitable(maybe_awaitable):
+                    await maybe_awaitable
+            except Exception as exc:
+                notification_status = "failed"
+                self._emit_detailed(
+                    "[STT][%s][%s] Suppressed-final notification callback failed: %s",
+                    provider_name.value,
+                    self.channel,
+                    exc,
+                    level=logging.WARNING,
+                    fallback_level=logging.WARNING,
+                )
+            else:
+                notification_status = "emitted"
+
+        self._emit_basic(
+            "[STT][%s][%s] Known hallucination suppressed: utterance_id=%s notification=%s",
+            provider_name.value,
+            self.channel,
+            str(utterance_id)[:8],
+            notification_status,
+            fallback_level=logging.INFO,
+        )
+
     async def _consume_session_events(
         self,
         session: STTBackendSession,
@@ -636,6 +705,11 @@ class ManagedSTTProvider:
                         else None
                     )
                 if utterance_id is None:
+                    continue
+                if ev.is_final and self._should_suppress_final_transcript(ev.text):
+                    await self._handle_suppressed_final_transcript(
+                        utterance_id=utterance_id,
+                    )
                     continue
                 created_at = self.clock.now()
                 transcript = self._build_transcript(

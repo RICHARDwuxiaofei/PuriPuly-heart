@@ -893,5 +893,8 @@ async def test_headless_runner_uses_selected_peer_provider_configuration(
     assert peer_settings.peer_soniox_stt.keepalive_interval_s == 8.0
     assert peer_settings.peer_soniox_stt.trailing_silence_ms == 300
     assert isinstance(created_hub["peer_stt"], FakeManagedSTTProvider)
+    assert isinstance(created_hub["stt"], FakeManagedSTTProvider)
+    assert created_hub["stt"].kwargs["stt_provider_name"] == settings.provider.stt
     assert created_hub["peer_stt"].backend is peer_backend
     assert created_hub["peer_stt"].channel == "peer"
+    assert created_hub["peer_stt"].kwargs["stt_provider_name"] == STTProviderName.SONIOX

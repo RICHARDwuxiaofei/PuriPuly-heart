@@ -250,6 +250,107 @@ async def test_local_qwen_backend_emits_final_transcript_on_speech_end(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["leşme", "acia"])
+async def test_local_qwen_backend_redacts_known_hallucination_text_in_transcript_log_but_emits_final_event(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    text: str,
+) -> None:
+    class FakeStream:
+        def __init__(self) -> None:
+            self.result = SimpleNamespace(text=text)
+
+        def accept_waveform(self, sample_rate: int, samples) -> None:
+            _ = (sample_rate, samples)
+
+    class FakeRecognizer:
+        def create_stream(self) -> FakeStream:
+            return FakeStream()
+
+        def decode_stream(self, stream: FakeStream) -> None:
+            _ = stream
+
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    _install_fake_sherpa(monkeypatch, recognizer_factory=lambda _config: FakeRecognizer())
+
+    backend = LocalQwenSherpaSTTBackend(
+        model_dir=Path("/models/qwen"),
+        sample_rate_hz=16000,
+        stream_label="self",
+    )
+    session = await backend.open_session()
+
+    with caplog.at_level(logging.INFO, logger=local_qwen_module.__name__):
+        await session.send_audio(b"\x00\x00\xff\x7f")
+        await session.on_speech_end()
+
+    gen = session.events()
+    event = await gen.__anext__()
+
+    assert event.text == text
+    assert event.is_final is True
+    assert any(
+        "[STT][local_qwen][self] Transcript: '<known-local-qwen-hallucination>'" in message
+        for message in caplog.messages
+    )
+    assert not any(text in message for message in caplog.messages)
+
+
+@pytest.mark.asyncio
+async def test_local_qwen_backend_keeps_non_matching_transcript_text_useful_in_log(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    text = "hello local qwen"
+
+    class FakeStream:
+        def __init__(self) -> None:
+            self.result = SimpleNamespace(text=text)
+
+        def accept_waveform(self, sample_rate: int, samples) -> None:
+            _ = (sample_rate, samples)
+
+    class FakeRecognizer:
+        def create_stream(self) -> FakeStream:
+            return FakeStream()
+
+        def decode_stream(self, stream: FakeStream) -> None:
+            _ = stream
+
+    monkeypatch.setattr(
+        local_qwen_module,
+        "validate_local_stt_runtime_ready",
+        lambda *args, **kwargs: _installed_manifest(),
+    )
+    _install_fake_sherpa(monkeypatch, recognizer_factory=lambda _config: FakeRecognizer())
+
+    backend = LocalQwenSherpaSTTBackend(
+        model_dir=Path("/models/qwen"),
+        sample_rate_hz=16000,
+        stream_label="self",
+    )
+    session = await backend.open_session()
+
+    with caplog.at_level(logging.INFO, logger=local_qwen_module.__name__):
+        await session.send_audio(b"\x00\x00\xff\x7f")
+        await session.on_speech_end()
+
+    gen = session.events()
+    event = await gen.__anext__()
+
+    assert event.text == text
+    assert event.is_final is True
+    assert any(
+        "[STT][local_qwen][self] Transcript: 'hello local qwen'" in message
+        for message in caplog.messages
+    )
+
+
+@pytest.mark.asyncio
 async def test_local_qwen_session_send_audio_f32_preserves_float32_samples(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
