@@ -77,6 +77,7 @@ class OverlayPresenter(OverlaySink):
     show_translation: bool = True
     show_peer_original: bool = True
     peer_presentation_refresh_burst: bool = True
+    self_presentation_refresh_burst: bool = True
 
     _terminal_registry: OrderedDict[tuple[str, UUID], int] = field(
         init=False,
@@ -1056,6 +1057,59 @@ class OverlayPresenter(OverlaySink):
             if not task.done():
                 task.cancel()
         self._expiration_tasks.clear()
+
+    def _self_presentation_refresh_key_for_event(
+        self,
+        event: OverlayEventUnion,
+    ) -> tuple[str, UUID] | None:
+        if not self.self_presentation_refresh_burst:
+            return None
+        if event.channel != "self" or event.utterance_id is None:
+            return None
+        if isinstance(event, (SelfTranscriptFinal, TranslationFinal)):
+            return ("self", event.utterance_id)
+        return None
+
+    def _snapshot_has_refreshable_self_key(self, key: tuple[str, UUID]) -> bool:
+        return self._refreshable_self_block_in_snapshot(self.snapshot(), key) is not None
+
+    def _self_presentation_refresh_request_key_for_event(
+        self,
+        event: OverlayEventUnion,
+        *,
+        previous_snapshot: OverlayPresentationSnapshot,
+    ) -> tuple[str, UUID] | None:
+        key = self._self_presentation_refresh_key_for_event(event)
+        if key is None:
+            return None
+        current_block = self._refreshable_self_block_in_snapshot(self.snapshot(), key)
+        if current_block is None:
+            return None
+        previous_block = self._refreshable_self_block_in_snapshot(previous_snapshot, key)
+        previous_signature = (
+            self._presentation_state.visible_block_content_signature(previous_block)
+            if previous_block is not None
+            else None
+        )
+        current_signature = self._presentation_state.visible_block_content_signature(current_block)
+        if previous_signature == current_signature:
+            return None
+        return key
+
+    def _refreshable_self_block_in_snapshot(
+        self,
+        snapshot: OverlayPresentationSnapshot,
+        key: tuple[str, UUID],
+    ) -> OverlayPresentationBlock | None:
+        if key[0] != "self":
+            return None
+        block_id = f"self:{key[1]}"
+        for block in snapshot.blocks:
+            if block.channel != "self" or block.id != block_id:
+                continue
+            if block.block_variant == "finalized" and block.primary_text.strip():
+                return block
+        return None
 
     def _peer_presentation_refresh_key_for_event(
         self,

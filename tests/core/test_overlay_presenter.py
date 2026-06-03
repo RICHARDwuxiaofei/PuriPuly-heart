@@ -27,6 +27,7 @@ from puripuly_heart.core.overlay.sink import (
     SelfActiveUpdate,
     SelfTranscriptFinal,
     TranslationFinal,
+    TranslationStreamUpdate,
 )
 from puripuly_heart.core.overlay.state import (
     ActiveSelfOverlayMetadata,
@@ -392,6 +393,379 @@ def test_overlay_presentation_state_self_refresh_marker_respects_disabled_flag()
 
     assert snapshot.blocks[0].session_scope is None
     assert state._snapshot_has_self_presentation_refresh_marker() is False
+
+
+@pytest.mark.asyncio
+async def test_presenter_self_transcript_final_refresh_request_requires_changed_visible_source_row() -> (
+    None
+):
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    turn_id = uuid4()
+
+    initial_event = adapter.transcript_final(
+        Transcript(
+            utterance_id=turn_id,
+            channel="self",
+            text="self source final one",
+            is_final=True,
+            created_at=10.0,
+        ),
+        source_language="ko",
+        target_language="en",
+    )
+    previous_snapshot = presenter.snapshot()
+
+    await presenter.emit(initial_event)
+
+    assert presenter._self_presentation_refresh_request_key_for_event(
+        initial_event,
+        previous_snapshot=previous_snapshot,
+    ) == ("self", turn_id)
+
+    previous_snapshot = presenter.snapshot()
+    await presenter.emit(initial_event)
+
+    assert (
+        presenter._self_presentation_refresh_request_key_for_event(
+            initial_event,
+            previous_snapshot=previous_snapshot,
+        )
+        is None
+    )
+
+    changed_event = SelfTranscriptFinal(
+        event_id="self-source-final-changed",
+        seq=initial_event.seq + 1,
+        utterance_id=turn_id,
+        channel="self",
+        created_at=10.2,
+        text="self source final two",
+        source_language="ko",
+        target_language="en",
+        is_final=True,
+    )
+    previous_snapshot = presenter.snapshot()
+
+    await presenter.emit(changed_event)
+
+    assert presenter._self_presentation_refresh_request_key_for_event(
+        changed_event,
+        previous_snapshot=previous_snapshot,
+    ) == ("self", turn_id)
+
+
+@pytest.mark.asyncio
+async def test_presenter_self_refresh_request_requires_feature_enabled() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+        self_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    turn_id = uuid4()
+    event = adapter.transcript_final(
+        Transcript(
+            utterance_id=turn_id,
+            channel="self",
+            text="self disabled source final",
+            is_final=True,
+            created_at=10.0,
+        ),
+        source_language="ko",
+        target_language="en",
+    )
+    previous_snapshot = presenter.snapshot()
+
+    await presenter.emit(event)
+
+    assert (
+        presenter._self_presentation_refresh_request_key_for_event(
+            event,
+            previous_snapshot=previous_snapshot,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_presenter_translation_final_refresh_request_requires_visible_content_change() -> (
+    None
+):
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    turn_id = uuid4()
+
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=turn_id,
+                channel="self",
+                text="self source before translation",
+                is_final=True,
+                created_at=10.0,
+            ),
+            source_language="ko",
+            target_language="en",
+        )
+    )
+    translation_event = adapter.translation_final(
+        utterance_id=turn_id,
+        channel="self",
+        text="visible self translation",
+        source_language="ko",
+        target_language="en",
+        applied_context_mode=None,
+        created_at=10.1,
+    )
+    previous_snapshot = presenter.snapshot()
+
+    await presenter.emit(translation_event)
+
+    assert presenter._self_presentation_refresh_request_key_for_event(
+        translation_event,
+        previous_snapshot=previous_snapshot,
+    ) == ("self", turn_id)
+
+    duplicate_event = TranslationFinal(
+        event_id="duplicate-self-translation-final",
+        seq=translation_event.seq,
+        utterance_id=turn_id,
+        channel="self",
+        created_at=10.2,
+        text="visible self translation",
+        source_language="ko",
+        target_language="en",
+        is_final=True,
+        applied_context_mode=None,
+    )
+    previous_snapshot = presenter.snapshot()
+
+    await presenter.emit(duplicate_event)
+
+    assert (
+        presenter._self_presentation_refresh_request_key_for_event(
+            duplicate_event,
+            previous_snapshot=previous_snapshot,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_presenter_hidden_translation_final_without_visible_change_is_not_self_refresh_request() -> (
+    None
+):
+    bridge = RecordingPresentationBridge()
+    presenter = OverlayPresenter(
+        bridge=bridge,
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+        show_translation=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    turn_id = uuid4()
+    source_event = adapter.transcript_final(
+        Transcript(
+            utterance_id=turn_id,
+            channel="self",
+            text="visible source only while translation hidden",
+            is_final=True,
+            created_at=10.0,
+        ),
+        source_language="ko",
+        target_language="en",
+    )
+    previous_snapshot = presenter.snapshot()
+
+    await presenter.emit(source_event)
+
+    assert presenter._self_presentation_refresh_request_key_for_event(
+        source_event,
+        previous_snapshot=previous_snapshot,
+    ) == ("self", turn_id)
+
+    translation_event = adapter.translation_final(
+        utterance_id=turn_id,
+        channel="self",
+        text="hidden translation final",
+        source_language="ko",
+        target_language="en",
+        applied_context_mode=None,
+        created_at=10.1,
+    )
+    previous_snapshot = presenter.snapshot()
+    snapshot_count_before_translation = len(bridge.snapshots)
+
+    await presenter.emit(translation_event)
+
+    assert presenter.snapshot() == previous_snapshot
+    assert len(bridge.snapshots) == snapshot_count_before_translation
+    assert (
+        presenter._self_presentation_refresh_request_key_for_event(
+            translation_event,
+            previous_snapshot=previous_snapshot,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_presenter_self_refresh_request_rejects_named_non_trigger_events() -> None:
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    live_turn_id = uuid4()
+
+    source_only_live_event = adapter.self_active_update(
+        text="source-only live self",
+        utterance_id=live_turn_id,
+        occupant_key=f"self:{live_turn_id}",
+        created_at=10.0,
+    )
+    previous_snapshot = presenter.snapshot()
+
+    await presenter.emit(source_only_live_event)
+
+    assert (
+        presenter._self_presentation_refresh_request_key_for_event(
+            source_only_live_event,
+            previous_snapshot=previous_snapshot,
+        )
+        is None
+    )
+
+    preview_turn_id = uuid4()
+    active_preview_event = adapter.self_active_update(
+        text="active self source",
+        secondary_text="active preview translation",
+        utterance_id=preview_turn_id,
+        occupant_key=f"self:{preview_turn_id}",
+        created_at=10.1,
+    )
+    previous_snapshot = presenter.snapshot()
+
+    await presenter.emit(active_preview_event)
+
+    assert (
+        presenter._self_presentation_refresh_request_key_for_event(
+            active_preview_event,
+            previous_snapshot=previous_snapshot,
+        )
+        is None
+    )
+
+    finalized_turn_id = uuid4()
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=finalized_turn_id,
+                channel="self",
+                text="self source before stream",
+                is_final=True,
+                created_at=10.2,
+            ),
+            source_language="ko",
+            target_language="en",
+        )
+    )
+    stream_event = TranslationStreamUpdate(
+        event_id="self-translation-stream",
+        seq=50,
+        utterance_id=finalized_turn_id,
+        channel="self",
+        created_at=10.3,
+        text="streaming translation preview",
+        source_language="ko",
+        target_language="en",
+        is_final=False,
+        applied_context_mode=None,
+    )
+    previous_snapshot = presenter.snapshot()
+
+    await presenter.emit(stream_event)
+
+    assert (
+        presenter._self_presentation_refresh_request_key_for_event(
+            stream_event,
+            previous_snapshot=previous_snapshot,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_presenter_self_refresh_request_requires_utterance_id_and_current_matching_block() -> (
+    None
+):
+    presenter = OverlayPresenter(
+        calibration=OverlayCalibration(),
+        peer_presentation_refresh_burst=False,
+    )
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    visible_turn_id = uuid4()
+
+    await presenter.emit(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=visible_turn_id,
+                channel="self",
+                text="visible self source",
+                is_final=True,
+                created_at=10.0,
+            ),
+            source_language="ko",
+            target_language="en",
+        )
+    )
+
+    previous_snapshot = presenter.snapshot()
+    missing_utterance_event = SelfTranscriptFinal(
+        event_id="missing-utterance-self-final",
+        seq=100,
+        utterance_id=None,
+        channel="self",
+        created_at=10.1,
+        text="missing utterance source",
+        source_language="ko",
+        target_language="en",
+        is_final=True,
+    )
+    other_turn_event = TranslationFinal(
+        event_id="mismatched-self-translation-final",
+        seq=101,
+        utterance_id=uuid4(),
+        channel="self",
+        created_at=10.2,
+        text="other translation",
+        source_language="ko",
+        target_language="en",
+        is_final=True,
+        applied_context_mode=None,
+    )
+
+    assert (
+        presenter._self_presentation_refresh_request_key_for_event(
+            missing_utterance_event,
+            previous_snapshot=previous_snapshot,
+        )
+        is None
+    )
+    assert (
+        presenter._self_presentation_refresh_request_key_for_event(
+            other_turn_event,
+            previous_snapshot=previous_snapshot,
+        )
+        is None
+    )
 
 
 def test_overlay_presentation_state_exposes_active_self_metadata() -> None:
