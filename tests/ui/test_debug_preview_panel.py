@@ -27,13 +27,13 @@ DEBUG_PREVIEW_I18N_KEYS = {
     "debug_preview.discord_auth",
     "debug_preview.discord_callback_page",
     "debug_preview.peer_translation_eula",
+    "debug_preview.local_qwen_hallucination_modal",
     "debug_preview.talk_together_pass_invite_progress",
     "debug_preview.capture_fault_cycle",
     "debug_preview.stt_fault_cycle",
     "debug_preview.audio_fault_clear",
     "debug_preview.capture_fault_snackbar",
     "debug_preview.stt_fault_snackbar",
-    "debug_preview.local_qwen_hallucination_modal",
     "peer_translation_eula.body",
     "peer_translation_eula.accept",
     "peer_translation_eula.cancel",
@@ -49,6 +49,7 @@ ACTION_KEYS = [
     "discord_auth",
     "discord_callback_page",
     "peer_translation_eula",
+    "local_qwen_hallucination_modal",
     "talk_together_pass_invite_progress",
     "capture_fault_cycle",
     "stt_fault_cycle",
@@ -66,6 +67,7 @@ def _callbacks(seen: list[str]):
         "on_discord_auth": lambda: seen.append("discord_auth"),
         "on_discord_callback_page": lambda: seen.append("discord_callback_page"),
         "on_peer_translation_eula": lambda: seen.append("peer_translation_eula"),
+        "on_local_qwen_hallucination_modal": lambda: seen.append("local_qwen_hallucination_modal"),
         "on_talk_together_pass_invite_progress": lambda: seen.append(
             "talk_together_pass_invite_progress"
         ),
@@ -158,6 +160,10 @@ def test_debug_preview_panel_apply_locale_refreshes_labels(
         == "label:debug_preview.peer_translation_eula"
     )
     assert (
+        _button_label(panel._action_buttons["local_qwen_hallucination_modal"])
+        == "label:debug_preview.local_qwen_hallucination_modal"
+    )
+    assert (
         _button_label(panel._action_buttons["talk_together_pass_invite_progress"])
         == "label:debug_preview.talk_together_pass_invite_progress"
     )
@@ -189,6 +195,7 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
         "Discord auth",
         "Discord callback page",
         "Peer translation EULA",
+        "Local Qwen warning",
         "Invite 1/5",
         "Cycle capture fault",
         "Cycle STT fault",
@@ -208,6 +215,10 @@ def test_debug_preview_panel_uses_text_button_label_api_when_available(
     assert (
         panel._action_buttons["peer_translation_eula"].text
         == "label:debug_preview.peer_translation_eula"
+    )
+    assert (
+        panel._action_buttons["local_qwen_hallucination_modal"].text
+        == "label:debug_preview.local_qwen_hallucination_modal"
     )
     assert (
         panel._action_buttons["talk_together_pass_invite_progress"].text
