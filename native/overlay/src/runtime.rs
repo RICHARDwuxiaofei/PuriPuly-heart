@@ -174,6 +174,13 @@ struct TwoRowWindowState {
     update_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct FrameStageDurations {
+    receive_to_apply_us: Option<u128>,
+    render_duration_us: Option<u128>,
+    receive_to_submit_us: Option<u128>,
+}
+
 impl OverlayRuntime {
     pub fn new(snapshot: OverlayPresentationSnapshot) -> Self {
         let seeded_peer_ids = peer_overlay_first_emit_block_ids_from_snapshot(&snapshot);
@@ -484,6 +491,19 @@ impl OverlayRuntime {
         bridge: &mut BridgeClient,
         logger: &OverlayLogger,
     ) -> Result<(), RuntimeFailure> {
+        self.submit_frame_if_needed_with_timing(renderer, openvr, bridge, logger, None, None)
+            .await
+    }
+
+    async fn submit_frame_if_needed_with_timing<S: OverlayFrameSubmitter>(
+        &mut self,
+        renderer: &CaptionRenderer,
+        openvr: &mut S,
+        bridge: &mut BridgeClient,
+        logger: &OverlayLogger,
+        snapshot_received_at: Option<Instant>,
+        receive_to_apply_us: Option<u128>,
+    ) -> Result<(), RuntimeFailure> {
         if self.first_texture_submitted && !self.redraw_requested {
             return Ok(());
         }
@@ -519,6 +539,11 @@ impl OverlayRuntime {
         {
             self.hide_deadline = Some(Instant::now() + EMPTY_OVERLAY_HIDE_DELAY);
         }
+        let render_started = if detailed_logging {
+            Some(Instant::now())
+        } else {
+            None
+        };
         let frame = if blocks.is_empty() {
             renderer
                 .render_empty_frame()
@@ -528,13 +553,19 @@ impl OverlayRuntime {
                 .render_blocks_with_debug_overlay(blocks, debug_overlay)
                 .map_err(|error| RuntimeFailure::Render(error.to_string()))?
         };
+        let render_duration_us = render_started.map(|start| start.elapsed().as_micros());
         let self_block_count = visible_self_block_count(frame.layout());
         let fully_transparent = frame.is_fully_transparent();
         let rendered_diagnostic_rows =
             collect_rendered_diagnostic_rows(self.state(), frame.layout());
         log_runtime_info(
             logger,
-            format_frame_rendered_log(frame.layout(), fully_transparent),
+            format_frame_rendered_log(
+                frame.layout(),
+                fully_transparent,
+                &rendered_diagnostic_rows,
+                render_duration_us,
+            ),
         )
         .await?;
         if !peer_overlay_first_render_ids.is_empty() {
@@ -618,6 +649,11 @@ impl OverlayRuntime {
         self.emit_peer_overlay_first_render_hooks(logger, peer_overlay_first_render_ids)
             .await?;
         if detailed_logging {
+            let stage_durations = FrameStageDurations {
+                receive_to_apply_us,
+                render_duration_us,
+                receive_to_submit_us: snapshot_received_at.map(|start| start.elapsed().as_micros()),
+            };
             log_runtime_info(
                 logger,
                 format_frame_submitted_log(
@@ -628,6 +664,8 @@ impl OverlayRuntime {
                     self.overlay_visible,
                     should_show_after_submit,
                     submit_duration_us,
+                    &rendered_diagnostic_rows,
+                    stage_durations,
                 ),
             )
             .await?;
@@ -701,8 +739,10 @@ impl OverlayRuntime {
                 Ok(true)
             }
             Ok(BridgeIncoming::Snapshot(snapshot)) => {
+                let snapshot_received_at = Instant::now();
                 log_runtime_info(logger, format_snapshot_received_log(&snapshot)).await?;
                 let outcome = self.apply_snapshot(snapshot);
+                let receive_to_apply_us = snapshot_received_at.elapsed().as_micros();
                 log_runtime_info(
                     logger,
                     format_state_snapshot_log(&outcome, self.state(), self.redraw_requested),
@@ -712,8 +752,15 @@ impl OverlayRuntime {
                     .await?;
                 self.emit_pending_visible_update_applied_diagnostics(logger)
                     .await?;
-                self.submit_frame_if_needed(renderer, openvr, bridge, logger)
-                    .await?;
+                self.submit_frame_if_needed_with_timing(
+                    renderer,
+                    openvr,
+                    bridge,
+                    logger,
+                    Some(snapshot_received_at),
+                    Some(receive_to_apply_us),
+                )
+                .await?;
                 Ok(true)
             }
             Ok(BridgeIncoming::Event(event)) => {
@@ -910,18 +957,32 @@ fn caption_variant_name(variant: CaptionBlockVariant) -> &'static str {
 
 fn format_snapshot_block_summary(block: &OverlayPresentationBlock) -> String {
     format!(
-        "id={} variant={} sec={}",
+        "id={} variant={} sec={} channel={} update_id={} session_scope={} origin_wall_clock_ms={}",
         block.id,
         overlay_variant_name(block.block_variant),
-        log_runtime_secondary_state(block.secondary_enabled, &block.secondary_text)
+        log_runtime_secondary_state(block.secondary_enabled, &block.secondary_text),
+        block.channel,
+        format_optional_str(block.update_id.as_deref()),
+        format_optional_str(block.session_scope.as_deref()),
+        format_optional_u64(block.origin_wall_clock_ms),
     )
+}
+
+fn update_ids_from_snapshot(snapshot: &OverlayPresentationSnapshot) -> Vec<String> {
+    snapshot
+        .blocks
+        .iter()
+        .filter_map(|block| block.update_id.clone())
+        .filter(|update_id| !update_id.is_empty())
+        .collect()
 }
 
 fn format_snapshot_received_log(snapshot: &OverlayPresentationSnapshot) -> String {
     format!(
-        "bridge_snapshot_received revision={} block_count={} blocks=[{}]",
+        "bridge_snapshot_received revision={} block_count={} update_ids=[{}] blocks=[{}]",
         snapshot.revision,
         snapshot.blocks.len(),
+        update_ids_from_snapshot(snapshot).join(","),
         snapshot
             .blocks
             .iter()
@@ -938,16 +999,30 @@ fn format_scene_slots(scene: &OverlayScene) -> String {
         .enumerate()
         .map(|(slot_index, slot)| match slot {
             Some(slot) => format!(
-                "slot{}=id={} variant={} sec={}",
+                "slot{}=id={} variant={} channel={} update_id={} session_scope={} origin_wall_clock_ms={} sec={}",
                 slot_index,
                 slot.id,
                 overlay_variant_name(slot.block_variant),
+                slot.channel,
+                format_optional_str(slot.update_id.as_deref()),
+                format_optional_str(slot.session_scope.as_deref()),
+                format_optional_u64(slot.origin_wall_clock_ms),
                 log_runtime_secondary_state(slot.secondary_enabled, &slot.secondary_text)
             ),
             None => format!("slot{}=empty", slot_index),
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+fn update_ids_from_scene(scene: &OverlayScene) -> Vec<String> {
+    scene
+        .slots()
+        .iter()
+        .flatten()
+        .filter_map(|slot| slot.update_id.clone())
+        .filter(|update_id| !update_id.is_empty())
+        .collect()
 }
 
 fn format_state_snapshot_log(
@@ -962,21 +1037,23 @@ fn format_state_snapshot_log(
             visual_changed,
             redraw_requested: outcome_redraw_requested,
         } => format!(
-            "state_snapshot_applied incoming_revision={} current_revision={} visual_changed={} redraw_requested={} slots=[{}]",
+            "state_snapshot_applied incoming_revision={} current_revision={} visual_changed={} redraw_requested={} update_ids=[{}] slots=[{}]",
             incoming_revision,
             current_revision,
             visual_changed,
             outcome_redraw_requested,
+            update_ids_from_scene(state.scene()).join(","),
             format_scene_slots(state.scene())
         ),
         SnapshotApplyOutcome::Ignored {
             incoming_revision,
             current_revision,
         } => format!(
-            "state_snapshot_ignored incoming_revision={} current_revision={} redraw_requested={} slots=[{}]",
+            "state_snapshot_ignored incoming_revision={} current_revision={} redraw_requested={} update_ids=[{}] slots=[{}]",
             incoming_revision,
             current_revision,
             redraw_requested,
+            update_ids_from_scene(state.scene()).join(","),
             format_scene_slots(state.scene())
         ),
     }
@@ -1302,26 +1379,73 @@ fn format_visible_block_summary(block: &VisibleCaptionBlock) -> String {
     )
 }
 
-fn format_frame_rendered_log(layout: &CaptionLayoutResult, fully_transparent: bool) -> String {
+fn update_ids_from_rendered_rows(rows: &[RenderedDiagnosticRow]) -> Vec<String> {
+    rows.iter()
+        .filter_map(|row| row.row.update_id.clone())
+        .filter(|update_id| !update_id.is_empty())
+        .collect()
+}
+
+fn block_ids_from_layout(layout: &CaptionLayoutResult) -> Vec<String> {
+    layout
+        .visible_blocks
+        .iter()
+        .map(|block| block.id.clone())
+        .collect()
+}
+
+fn format_rendered_diagnostic_row_summary(row: &RenderedDiagnosticRow) -> String {
     format!(
-        "frame_rendered visible_block_count={} fully_transparent={} blocks=[{}]",
+        "{} bounds={:.1},{:.1},{:.1},{:.1} visual_bounds={:.1},{:.1},{:.1},{:.1} secondary_present={} truncated_secondary={}",
+        format_diagnostic_row_summary(&row.row),
+        row.bounds.left_px,
+        row.bounds.top_px,
+        row.bounds.right_px,
+        row.bounds.bottom_px,
+        row.visual_bounds.left_px,
+        row.visual_bounds.top_px,
+        row.visual_bounds.right_px,
+        row.visual_bounds.bottom_px,
+        row.secondary_present,
+        row.truncated_secondary,
+    )
+}
+
+fn format_rendered_diagnostic_rows(rows: &[RenderedDiagnosticRow]) -> String {
+    rows.iter()
+        .map(format_rendered_diagnostic_row_summary)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn append_optional_duration(line: &mut String, name: &str, duration_us: Option<u128>) {
+    if let Some(duration_us) = duration_us {
+        line.push_str(&format!(" {name}={duration_us}"));
+    }
+}
+
+fn format_frame_rendered_log(
+    layout: &CaptionLayoutResult,
+    fully_transparent: bool,
+    rendered_rows: &[RenderedDiagnosticRow],
+    render_duration_us: Option<u128>,
+) -> String {
+    let mut line = format!(
+        "frame_rendered visible_block_count={} fully_transparent={} update_ids=[{}] block_ids=[{}] rows=[{}] blocks=[{}]",
         layout.visible_blocks.len(),
         fully_transparent,
+        update_ids_from_rendered_rows(rendered_rows).join(","),
+        block_ids_from_layout(layout).join(","),
+        format_rendered_diagnostic_rows(rendered_rows),
         layout
             .visible_blocks
             .iter()
             .map(format_visible_block_summary)
             .collect::<Vec<_>>()
             .join("; ")
-    )
-}
-
-fn visible_self_block_count(layout: &CaptionLayoutResult) -> usize {
-    layout
-        .visible_blocks
-        .iter()
-        .filter(|block| block.channel == Some(CaptionChannel::SelfChannel))
-        .count()
+    );
+    append_optional_duration(&mut line, "render_duration_us", render_duration_us);
+    line
 }
 
 fn format_frame_submitted_log(
@@ -1332,9 +1456,11 @@ fn format_frame_submitted_log(
     overlay_visible_after: bool,
     should_show_after_submit: bool,
     submit_duration_us: Option<u128>,
+    rendered_rows: &[RenderedDiagnosticRow],
+    stage_durations: FrameStageDurations,
 ) -> String {
     let mut line = format!(
-        "frame_submitted revision={} visible_block_count={} self_block_count={} fully_transparent={} overlay_visible_before={} overlay_visible_after={} should_show_after_submit={}",
+        "frame_submitted revision={} visible_block_count={} self_block_count={} fully_transparent={} overlay_visible_before={} overlay_visible_after={} should_show_after_submit={} update_ids=[{}] block_ids=[{}] rows=[{}]",
         revision,
         layout.visible_blocks.len(),
         visible_self_block_count(layout),
@@ -1342,11 +1468,35 @@ fn format_frame_submitted_log(
         overlay_visible_before,
         overlay_visible_after,
         should_show_after_submit,
+        update_ids_from_rendered_rows(rendered_rows).join(","),
+        block_ids_from_layout(layout).join(","),
+        format_rendered_diagnostic_rows(rendered_rows),
     );
-    if let Some(duration_us) = submit_duration_us {
-        line.push_str(&format!(" submit_duration_us={duration_us}"));
-    }
+    append_optional_duration(&mut line, "submit_duration_us", submit_duration_us);
+    append_optional_duration(
+        &mut line,
+        "receive_to_apply_us",
+        stage_durations.receive_to_apply_us,
+    );
+    append_optional_duration(
+        &mut line,
+        "render_duration_us",
+        stage_durations.render_duration_us,
+    );
+    append_optional_duration(
+        &mut line,
+        "receive_to_submit_us",
+        stage_durations.receive_to_submit_us,
+    );
     line
+}
+
+fn visible_self_block_count(layout: &CaptionLayoutResult) -> usize {
+    layout
+        .visible_blocks
+        .iter()
+        .filter(|block| block.channel == Some(CaptionChannel::SelfChannel))
+        .count()
 }
 
 fn format_frame_timing_log(
@@ -1782,11 +1932,11 @@ mod tests {
         format_frame_timing_log, format_overlay_visible_update_rendered_log,
         format_peer_first_render_visibility_checkpoint_log,
         format_peer_first_render_visibility_desync_suspected_log, format_snapshot_received_log,
-        format_snapshot_slot_correlation_log, format_two_row_window_closed_log,
-        peer_overlay_first_emit_block_ids_from_snapshot,
+        format_snapshot_slot_correlation_log, format_state_snapshot_log,
+        format_two_row_window_closed_log, peer_overlay_first_emit_block_ids_from_snapshot,
         peer_overlay_first_render_block_ids_from_caption_blocks, prepare_openvr_runtime,
-        DiagnosticRow, OverlayRuntime, RenderedDiagnosticRow, SnapshotApplyOutcome, StartupError,
-        TwoRowWindowState,
+        DiagnosticRow, FrameStageDurations, OverlayRuntime, RenderedDiagnosticRow,
+        SnapshotApplyOutcome, StartupError, TwoRowWindowState,
     };
     use crate::logging::{OverlayLogger, OverlayLoggingMode};
     use crate::openvr::{FrameTimingSample, OpenVrError, OpenVrStartupPreflightError};
@@ -2238,7 +2388,21 @@ mod tests {
             revision: 7,
             calibration: OverlayPresentationCalibration::default(),
             blocks: vec![
-                block("self:1", "self", "hello", "", true),
+                OverlayPresentationBlock {
+                    id: "self:1".into(),
+                    occupant_key: "self:1".into(),
+                    appearance_seq: 1,
+                    channel: "self".into(),
+                    block_variant: OverlayPresentationBlockVariant::Finalized,
+                    primary_text: "hello".into(),
+                    secondary_text: String::new(),
+                    secondary_enabled: true,
+                    primary_language: None,
+                    secondary_language: None,
+                    update_id: Some("upd-self-1".into()),
+                    origin_wall_clock_ms: Some(1712345678901),
+                    session_scope: Some("session:self".into()),
+                },
                 OverlayPresentationBlock {
                     id: "self:active".into(),
                     occupant_key: "self:merge-1".into(),
@@ -2258,8 +2422,50 @@ mod tests {
         });
 
         assert!(summary.contains("bridge_snapshot_received revision=7 block_count=2"));
+        assert!(summary.contains("update_ids=[upd-self-1]"));
         assert!(summary.contains("id=self:1 variant=finalized sec=enabled/0"));
+        assert!(summary.contains("update_id=upd-self-1"));
+        assert!(summary.contains("session_scope=session:self"));
+        assert!(summary.contains("origin_wall_clock_ms=1712345678901"));
         assert!(summary.contains("id=self:active variant=active_self sec=disabled/6"));
+    }
+
+    #[test]
+    fn state_snapshot_summary_includes_slot_update_ids() {
+        let runtime = OverlayRuntime::new(OverlayPresentationSnapshot {
+            revision: 7,
+            calibration: OverlayPresentationCalibration::default(),
+            blocks: vec![OverlayPresentationBlock {
+                id: "self:1".into(),
+                occupant_key: "self:1".into(),
+                appearance_seq: 1,
+                channel: "self".into(),
+                block_variant: OverlayPresentationBlockVariant::Finalized,
+                primary_text: "hello".into(),
+                secondary_text: "translated".into(),
+                secondary_enabled: true,
+                primary_language: None,
+                secondary_language: None,
+                update_id: Some("upd-self-1".into()),
+                origin_wall_clock_ms: Some(1712345678901),
+                session_scope: Some("session:self".into()),
+            }],
+        });
+        let outcome = SnapshotApplyOutcome::Applied {
+            incoming_revision: 7,
+            current_revision: 7,
+            visual_changed: true,
+            redraw_requested: true,
+        };
+
+        let summary = format_state_snapshot_log(&outcome, runtime.state(), true);
+
+        assert!(summary.contains("state_snapshot_applied incoming_revision=7 current_revision=7"));
+        assert!(summary.contains("update_ids=[upd-self-1]"));
+        assert!(summary.contains("slot0=id=self:1"));
+        assert!(summary.contains("update_id=upd-self-1"));
+        assert!(summary.contains("session_scope=session:self"));
+        assert!(summary.contains("origin_wall_clock_ms=1712345678901"));
     }
 
     #[test]
@@ -2503,9 +2709,36 @@ mod tests {
             &CaptionPresentation::default(),
         );
 
-        let summary = format_frame_rendered_log(&layout, false);
+        let rendered_rows = vec![RenderedDiagnosticRow {
+            row: DiagnosticRow {
+                id: "self:1".into(),
+                occupant_key: "self:1".into(),
+                channel: "self".into(),
+                block_variant: OverlayPresentationBlockVariant::Finalized,
+                update_id: Some("upd-self-1".into()),
+                origin_wall_clock_ms: Some(1712345678901),
+                session_scope: Some("session:self".into()),
+                presenter_order: 0,
+                slot_order: 0,
+                slot_index: 0,
+                slot_anchor_top_px: 40.0,
+                primary_text: "primary".into(),
+                secondary_text: "this secondary line should be truncated in a narrow layout".into(),
+                secondary_enabled: true,
+            },
+            bounds: crate::renderer::BlockBounds::new(0.0, 40.0, 320.0, 220.0),
+            visual_bounds: crate::renderer::VisualBounds::new(0.0, 40.0, 320.0, 220.0),
+            secondary_present: true,
+            truncated_secondary: true,
+        }];
+
+        let summary = format_frame_rendered_log(&layout, false, &rendered_rows, Some(1234));
 
         assert!(summary.contains("frame_rendered visible_block_count=1 fully_transparent=false"));
+        assert!(summary.contains("update_ids=[upd-self-1]"));
+        assert!(summary.contains("block_ids=[self:1]"));
+        assert!(summary.contains("render_duration_us=1234"));
+        assert!(summary.contains("session_scope=session:self"));
         assert!(summary.contains("id=self:1 variant=finalized secondary_present=true"));
         assert!(summary.contains("truncated_secondary=true"));
     }
@@ -2526,9 +2759,47 @@ mod tests {
             &CaptionPresentation::default(),
         );
 
-        let summary = format_frame_submitted_log(&layout, 7, false, false, true, true, None);
+        let rendered_rows = vec![RenderedDiagnosticRow {
+            row: DiagnosticRow {
+                id: "self:1".into(),
+                occupant_key: "self:1".into(),
+                channel: "self".into(),
+                block_variant: OverlayPresentationBlockVariant::Finalized,
+                update_id: Some("upd-self-1".into()),
+                origin_wall_clock_ms: Some(1712345678901),
+                session_scope: Some("session:self".into()),
+                presenter_order: 0,
+                slot_order: 0,
+                slot_index: 0,
+                slot_anchor_top_px: 40.0,
+                primary_text: "primary".into(),
+                secondary_text: "translated".into(),
+                secondary_enabled: true,
+            },
+            bounds: crate::renderer::BlockBounds::new(0.0, 40.0, 320.0, 220.0),
+            visual_bounds: crate::renderer::VisualBounds::new(0.0, 40.0, 320.0, 220.0),
+            secondary_present: true,
+            truncated_secondary: false,
+        }];
+
+        let summary = format_frame_submitted_log(
+            &layout,
+            7,
+            false,
+            false,
+            true,
+            true,
+            None,
+            &rendered_rows,
+            FrameStageDurations::default(),
+        );
 
         assert!(summary.contains("frame_submitted revision=7"));
+        assert!(summary.contains("update_ids=[upd-self-1]"));
+        assert!(summary.contains("block_ids=[self:1,peer:1]"));
+        assert!(summary.contains("rows=[id=self:1"));
+        assert!(summary.contains("session_scope=session:self"));
+        assert!(summary.contains("origin_wall_clock_ms=1712345678901"));
         assert!(summary.contains("visible_block_count=2"));
         assert!(summary.contains("self_block_count=1"));
         assert!(summary.contains("fully_transparent=false"));
@@ -2537,9 +2808,25 @@ mod tests {
         assert!(summary.contains("should_show_after_submit=true"));
         assert!(!summary.contains("submit_duration_us="));
 
-        let summary_with_duration =
-            format_frame_submitted_log(&layout, 7, false, false, true, true, Some(421));
+        let summary_with_duration = format_frame_submitted_log(
+            &layout,
+            7,
+            false,
+            false,
+            true,
+            true,
+            Some(421),
+            &rendered_rows,
+            FrameStageDurations {
+                receive_to_apply_us: Some(11),
+                render_duration_us: Some(1234),
+                receive_to_submit_us: Some(3456),
+            },
+        );
         assert!(summary_with_duration.contains("submit_duration_us=421"));
+        assert!(summary_with_duration.contains("receive_to_apply_us=11"));
+        assert!(summary_with_duration.contains("render_duration_us=1234"));
+        assert!(summary_with_duration.contains("receive_to_submit_us=3456"));
     }
 
     #[test]

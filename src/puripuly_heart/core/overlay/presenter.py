@@ -780,6 +780,9 @@ class OverlayPresenter(OverlaySink):
             {
                 "id": block.id,
                 "variant": block.block_variant,
+                "update_id": block.update_id,
+                "origin_wall_clock_ms": block.origin_wall_clock_ms,
+                "session_scope": block.session_scope,
                 "primary_len": len(block.primary_text),
                 "secondary_len": len(block.secondary_text),
             }

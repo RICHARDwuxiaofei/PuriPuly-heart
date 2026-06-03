@@ -5026,10 +5026,13 @@ async def test_presenter_snapshot_publish_logs_only_to_detailed_runtime_logging(
             "[OverlayPresenter] Snapshot publish" in message
             for message in _runtime_log_messages(basic_stream)
         )
-        assert any(
-            "[OverlayPresenter] Snapshot publish" in message
+        detailed_publish_messages = [
+            message
             for message in _runtime_log_messages(detailed_stream)
-        )
+            if "[OverlayPresenter] Snapshot publish" in message
+        ]
+        assert detailed_publish_messages
+        assert any("update_id" in message for message in detailed_publish_messages)
     finally:
         basic_runtime_logging.close()
         detailed_runtime_logging.close()

@@ -2689,6 +2689,13 @@ class GuiController:
             )
             self._active_overlay_target = overlay_target
             peer_presentation_refresh_burst = overlay_target != OVERLAY_TARGET_DESKTOP
+            self.log_detailed(
+                "[Overlay][Start] "
+                f"target={overlay_target} "
+                f"overlay_instance_id={overlay_instance_id} "
+                f"logging_mode={self.runtime_logging_mode} "
+                f"peer_presentation_refresh_burst={peer_presentation_refresh_burst}"
+            )
 
             if presenter is None:
                 presenter = OverlayPresenter(
