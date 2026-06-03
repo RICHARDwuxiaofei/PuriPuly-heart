@@ -130,7 +130,10 @@ class DiscordManagedAuthDialog:
             return
 
         if self._referral_id_field is not None:
-            self._referral_id_field.disabled = True
+            referral_id_field = self._referral_id_field
+            if referral_id_field in self._dialog_result.body_column.controls:
+                self._dialog_result.body_column.controls.remove(referral_id_field)
+            self._referral_id_field = None
 
         self._body_text.value = join_body_paragraphs(
             split_body_paragraphs(t("discord_auth.waiting_body"))
