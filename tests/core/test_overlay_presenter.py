@@ -116,6 +116,39 @@ class _ExplodingValue:
         raise AssertionError("formatted eagerly")
 
 
+def _generate_overlay_state_snapshot(
+    state: OverlayPresentationState,
+    *,
+    revision: int,
+    show_translation: bool = True,
+    peer_presentation_refresh_burst: bool = False,
+    self_presentation_refresh_burst: bool = True,
+):
+    next_appearance_seq = 0
+
+    def next_appearance() -> int:
+        nonlocal next_appearance_seq
+        next_appearance_seq += 1
+        return next_appearance_seq
+
+    selection = state.visible_block_selection(
+        entries=state.entries,
+        live_self_entry=state.live_entry_for_channel("self"),
+        live_peer_entry=state.live_entry_for_channel("peer"),
+        visible_window_target_blocks=2,
+        show_translation=show_translation,
+        show_peer_original=True,
+        peer_presentation_refresh_burst=peer_presentation_refresh_burst,
+        self_presentation_refresh_burst=self_presentation_refresh_burst,
+        next_appearance_seq=next_appearance,
+    )
+    return state.generate_snapshot(
+        revision=revision,
+        calibration=OverlayPresentationCalibration(),
+        rendered_entries=selection.rendered_entries,
+    )
+
+
 def test_overlay_presentation_state_peer_refresh_methods_own_target_and_nonce() -> None:
     state = OverlayPresentationState()
     key = ("peer", uuid4())
@@ -153,6 +186,212 @@ def test_overlay_presentation_state_peer_refresh_methods_own_target_and_nonce() 
     assert state.peer_presentation_refresh_target_key is None
     assert state.peer_presentation_refresh_nonce == 0
     assert state.end_peer_presentation_refresh(other_key) is False
+
+
+def test_overlay_presentation_state_self_refresh_methods_own_target_and_nonce_without_peer_state() -> (
+    None
+):
+    state = OverlayPresentationState()
+    self_key = ("self", uuid4())
+    other_self_key = ("self", uuid4())
+    peer_key = ("peer", uuid4())
+
+    state.begin_peer_presentation_refresh(peer_key)
+    assert state.tick_peer_presentation_refresh(peer_key) is True
+
+    assert callable(getattr(state, "begin_self_presentation_refresh", None))
+    assert callable(getattr(state, "tick_self_presentation_refresh", None))
+    assert callable(getattr(state, "end_self_presentation_refresh", None))
+
+    assert state.begin_self_presentation_refresh(self_key) is False
+    assert state.self_presentation_refresh_target_key == self_key
+    assert state.self_presentation_refresh_nonce == 0
+    assert state.peer_presentation_refresh_target_key == peer_key
+    assert state.peer_presentation_refresh_nonce == 1
+
+    assert state.tick_self_presentation_refresh(other_self_key) is False
+    assert state.self_presentation_refresh_nonce == 0
+
+    assert state.tick_self_presentation_refresh(self_key) is True
+    assert state.self_presentation_refresh_nonce == 1
+    assert state.peer_presentation_refresh_target_key == peer_key
+    assert state.peer_presentation_refresh_nonce == 1
+
+    assert state.begin_self_presentation_refresh(other_self_key) is False
+    assert state.self_presentation_refresh_target_key == other_self_key
+    assert state.self_presentation_refresh_nonce == 0
+    assert state.peer_presentation_refresh_target_key == peer_key
+    assert state.peer_presentation_refresh_nonce == 1
+
+    assert state.end_self_presentation_refresh(self_key) is False
+    assert state.self_presentation_refresh_target_key == other_self_key
+    assert state.self_presentation_refresh_nonce == 0
+
+    assert state.tick_self_presentation_refresh(other_self_key) is True
+    assert state.self_presentation_refresh_nonce == 1
+
+    assert state.end_self_presentation_refresh(other_self_key) is False
+    assert state.self_presentation_refresh_target_key is None
+    assert state.self_presentation_refresh_nonce == 0
+    assert state.peer_presentation_refresh_target_key == peer_key
+    assert state.peer_presentation_refresh_nonce == 1
+
+
+def test_overlay_presentation_state_self_refresh_marker_revises_source_only_finalized_self() -> (
+    None
+):
+    state = OverlayPresentationState()
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    turn_id = uuid4()
+    key = ("self", turn_id)
+
+    result = state.apply_self_finalized_update(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=turn_id,
+                channel="self",
+                text="hello source only",
+                is_final=True,
+                created_at=10.0,
+            ),
+            source_language="ko",
+            target_language="en",
+        ),
+        now=10.0,
+        show_translation=True,
+        next_appearance_seq=lambda: 1,
+        terminal_update_reason=lambda _channel, _utterance_id: None,
+    )
+    assert result.changed is True
+
+    initial_snapshot = _generate_overlay_state_snapshot(state, revision=1)
+    initial_block = initial_snapshot.blocks[0]
+    initial_signature = state.rendered_block_signature(initial_block)
+    assert initial_block.channel == "self"
+    assert initial_block.block_variant == "finalized"
+    assert initial_block.primary_text == "hello source only"
+    assert initial_block.secondary_text == ""
+    assert initial_block.session_scope is None
+
+    assert state.begin_self_presentation_refresh(key) is False
+    assert state.tick_self_presentation_refresh(key) is True
+    first_refresh = _generate_overlay_state_snapshot(state, revision=2)
+    first_refresh_block = first_refresh.blocks[0]
+
+    assert first_refresh_block.session_scope == "self_presentation_refresh=1"
+    assert state._snapshot_has_self_presentation_refresh_marker() is True
+    first_refresh_signature = state.rendered_block_signature(first_refresh_block)
+    assert first_refresh_signature != initial_signature
+
+    assert state.tick_self_presentation_refresh(key) is True
+    second_refresh = _generate_overlay_state_snapshot(state, revision=3)
+    second_refresh_block = second_refresh.blocks[0]
+
+    assert second_refresh_block.session_scope == "self_presentation_refresh=2"
+    assert state.rendered_block_signature(second_refresh_block) != first_refresh_signature
+
+    assert state.end_self_presentation_refresh(key) is True
+    clean_snapshot = _generate_overlay_state_snapshot(state, revision=4)
+
+    assert clean_snapshot.blocks[0].session_scope is None
+    assert state._snapshot_has_self_presentation_refresh_marker() is False
+    assert state.rendered_block_signature(clean_snapshot.blocks[0]) == initial_signature
+
+
+def test_overlay_presentation_state_self_refresh_marker_appends_to_existing_self_session_scope() -> (
+    None
+):
+    state = OverlayPresentationState()
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    turn_id = uuid4()
+    key = ("self", turn_id)
+
+    state.apply_self_finalized_update(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=turn_id,
+                channel="self",
+                text="hello source",
+                is_final=True,
+                created_at=10.0,
+            ),
+            source_language="ko",
+            target_language="en",
+        ),
+        now=10.0,
+        show_translation=True,
+        next_appearance_seq=lambda: 1,
+        terminal_update_reason=lambda _channel, _utterance_id: None,
+    )
+    state.apply_self_translation_update(
+        adapter.translation_final(
+            utterance_id=turn_id,
+            channel="self",
+            text="translated self",
+            source_language="ko",
+            target_language="en",
+            applied_context_mode=None,
+            created_at=10.1,
+            update_id="upd-self-final",
+            origin_wall_clock_ms=1712345678901,
+            session_scope="session:self",
+            source_text_hash="selffinalhash123",
+            source_text_len=len("hello source"),
+            logical_turn_key=f"self:{turn_id}",
+        ),
+        now=10.1,
+        show_translation=True,
+        next_appearance_seq=lambda: 1,
+        terminal_update_reason=lambda _channel, _utterance_id: None,
+    )
+
+    assert state.begin_self_presentation_refresh(key) is False
+    assert state.tick_self_presentation_refresh(key) is True
+    snapshot = _generate_overlay_state_snapshot(state, revision=1)
+    block = snapshot.blocks[0]
+
+    assert block.session_scope == "session:self|self_presentation_refresh=1"
+    assert block.update_id == "upd-self-final"
+    assert block.origin_wall_clock_ms == 1712345678901
+    assert block.source_text_hash == "selffinalhash123"
+    assert block.source_text_len == len("hello source")
+    assert block.logical_turn_key == f"self:{turn_id}"
+
+
+def test_overlay_presentation_state_self_refresh_marker_respects_disabled_flag() -> None:
+    state = OverlayPresentationState()
+    adapter = OverlayEventAdapter(clock=FakeClock(_now=10.0))
+    turn_id = uuid4()
+    key = ("self", turn_id)
+
+    state.apply_self_finalized_update(
+        adapter.transcript_final(
+            Transcript(
+                utterance_id=turn_id,
+                channel="self",
+                text="hello disabled refresh",
+                is_final=True,
+                created_at=10.0,
+            ),
+            source_language="ko",
+            target_language="en",
+        ),
+        now=10.0,
+        show_translation=True,
+        next_appearance_seq=lambda: 1,
+        terminal_update_reason=lambda _channel, _utterance_id: None,
+    )
+
+    assert state.begin_self_presentation_refresh(key) is False
+    assert state.tick_self_presentation_refresh(key) is True
+    snapshot = _generate_overlay_state_snapshot(
+        state,
+        revision=1,
+        self_presentation_refresh_burst=False,
+    )
+
+    assert snapshot.blocks[0].session_scope is None
+    assert state._snapshot_has_self_presentation_refresh_marker() is False
 
 
 def test_overlay_presentation_state_exposes_active_self_metadata() -> None:
