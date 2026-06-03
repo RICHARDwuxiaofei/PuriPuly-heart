@@ -691,6 +691,8 @@ async def test_init_pipeline_wires_self_stt_fault_provider_with_debug_gate(
     await controller._init_pipeline()
 
     provider = stt_calls[0]["stt_input_fault_profile_provider"]
+    assert stt_calls[0]["stt_provider_name"] == controller.settings.provider.stt
+    assert callable(stt_calls[0]["on_final_transcript_suppressed"])
     assert callable(provider)
     assert provider() == "stt_input_low_snr_vad_pass"
 
@@ -723,6 +725,8 @@ async def test_rebuild_stt_provider_wires_self_stt_fault_provider_with_debug_gat
     await controller._rebuild_stt_provider()
 
     provider = stt_calls[0]["stt_input_fault_profile_provider"]
+    assert stt_calls[0]["stt_provider_name"] == controller.settings.provider.stt
+    assert callable(stt_calls[0]["on_final_transcript_suppressed"])
     assert callable(provider)
     assert provider() == "none"
     assert controller.debug_stt_fault_profile == "stt_input_low_snr_vad_pass"
@@ -753,6 +757,8 @@ def test_create_peer_stt_provider_wires_fault_provider_with_debug_gate(
 
     provider = stt_calls[0]["stt_input_fault_profile_provider"]
     assert stt_calls[0]["channel"] == "peer"
+    assert stt_calls[0]["stt_provider_name"] == config.backend.provider
+    assert callable(stt_calls[0]["on_final_transcript_suppressed"])
     assert callable(provider)
     assert provider() == "stt_input_low_snr_vad_pass"
 

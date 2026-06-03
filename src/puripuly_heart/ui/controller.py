@@ -122,7 +122,10 @@ from puripuly_heart.core.overlay.process import (
 )
 from puripuly_heart.core.runtime.peer_channel import PeerChannelRuntime, PeerRuntimeConfig
 from puripuly_heart.core.runtime_logging import SessionLoggingMode, SessionRuntimeLoggingService
-from puripuly_heart.core.stt.controller import ManagedSTTProvider
+from puripuly_heart.core.stt.controller import (
+    FinalTranscriptSuppressedNotification,
+    ManagedSTTProvider,
+)
 from puripuly_heart.core.stt.custom_vocab import get_effective_custom_terms
 from puripuly_heart.core.vad.bundled import SILERO_VAD_VERSION, ensure_silero_vad_onnx
 from puripuly_heart.core.vad.gating import VadGating, create_peer_vad_gating
@@ -4114,10 +4117,12 @@ class GuiController:
             stt = ManagedSTTProvider(
                 backend=backend,
                 sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                stt_provider_name=self.settings.provider.stt,
                 clock=self.clock,
                 reset_deadline_s=STT_RESET_DEADLINE_S,
                 drain_timeout_s=self.settings.stt.drain_timeout_s,
                 bridging_ms=self.settings.audio.ring_buffer_ms,
+                on_final_transcript_suppressed=self._on_final_transcript_suppressed,
                 runtime_logging=self.runtime_logging,
                 stt_input_fault_profile_provider=lambda: (
                     self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
@@ -4157,12 +4162,14 @@ class GuiController:
         return ManagedSTTProvider(
             backend=peer_backend,
             sample_rate_hz=config.backend.sample_rate_hz,
+            stt_provider_name=config.backend.provider,
             channel="peer",
             clock=self.clock,
             reset_deadline_s=STT_RESET_DEADLINE_S,
             drain_timeout_s=self.settings.stt.drain_timeout_s,
             bridging_ms=max(1, config.vad_pre_roll_ms),
             on_terminal_failure=on_terminal_failure,
+            on_final_transcript_suppressed=self._on_final_transcript_suppressed,
             runtime_logging=self.runtime_logging,
             stt_input_fault_profile_provider=lambda: (
                 self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"
@@ -4201,6 +4208,17 @@ class GuiController:
 
     def _detailed_audio_diag_enabled(self) -> bool:
         return self.runtime_logging.mode is SessionLoggingMode.DETAILED
+
+    def _on_final_transcript_suppressed(
+        self,
+        notification: FinalTranscriptSuppressedNotification,
+    ) -> None:
+        self.log_detailed(
+            "[STT][SuppressedFinalNotification] "
+            f"provider={notification.stt_provider_name.value} "
+            f"channel={notification.channel} "
+            f"utterance_id={str(notification.utterance_id)[:8]}"
+        )
 
     def cycle_debug_capture_fault_profile(self) -> str:
         if not self._debug_audio_fault_allowed():
@@ -4418,10 +4436,12 @@ class GuiController:
             stt = ManagedSTTProvider(
                 backend=backend,
                 sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                stt_provider_name=self.settings.provider.stt,
                 clock=self.clock,
                 reset_deadline_s=STT_RESET_DEADLINE_S,
                 drain_timeout_s=self.settings.stt.drain_timeout_s,
                 bridging_ms=self.settings.audio.ring_buffer_ms,
+                on_final_transcript_suppressed=self._on_final_transcript_suppressed,
                 runtime_logging=self.runtime_logging,
                 stt_input_fault_profile_provider=lambda: (
                     self._debug_stt_fault_profile if self._debug_audio_fault_allowed() else "none"

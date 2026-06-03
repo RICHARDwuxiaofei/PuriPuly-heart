@@ -25,9 +25,13 @@ from puripuly_heart.core.stt.backend import (
     STTBackendSession,
     STTBackendTranscriptEvent,
 )
+from puripuly_heart.core.stt.local_qwen_hallucination import (
+    is_known_local_qwen_hallucination,
+)
 
 DEFAULT_SHERPA_NUM_THREADS = 3
 LOCAL_QWEN_RECOGNIZER_SAMPLE_RATE_HZ = 16000
+_KNOWN_HALLUCINATION_LOG_REDACTION = "<known-local-qwen-hallucination>"
 logger = logging.getLogger(__name__)
 
 
@@ -55,6 +59,12 @@ def _audio_diag_prefix(stream_label: str | None) -> str:
     if stream_label:
         return f"{prefix}[{stream_label}]"
     return prefix
+
+
+def _transcript_text_for_log(text: str) -> str:
+    if is_known_local_qwen_hallucination(text):
+        return _KNOWN_HALLUCINATION_LOG_REDACTION
+    return text
 
 
 def _looks_repetitive(text: str) -> bool:
@@ -299,7 +309,7 @@ class _LocalQwenSherpaSession(STTBackendSession):
             logger.info(
                 "%s Transcript: '%s' (final, audio_ms=%.1f, inference_ms=%.1f, rtf=%.3f)",
                 _log_prefix(self.backend.stream_label),
-                text,
+                _transcript_text_for_log(text),
                 audio_ms,
                 inference_ms,
                 rtf,

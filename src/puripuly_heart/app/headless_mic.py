@@ -102,6 +102,7 @@ class HeadlessMicRunner:
         stt = ManagedSTTProvider(
             backend=backend,
             sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+            stt_provider_name=self.settings.provider.stt,
             clock=self.clock,
             reset_deadline_s=STT_RESET_DEADLINE_S,
             drain_timeout_s=self.settings.stt.drain_timeout_s,
@@ -114,6 +115,7 @@ class HeadlessMicRunner:
                 peer_stt = ManagedSTTProvider(
                     backend=peer_backend,
                     sample_rate_hz=self.settings.audio.internal_sample_rate_hz,
+                    stt_provider_name=self.settings.provider.peer_stt,
                     channel="peer",
                     clock=self.clock,
                     reset_deadline_s=STT_RESET_DEADLINE_S,
