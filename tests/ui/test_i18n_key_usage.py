@@ -56,8 +56,13 @@ EXACT_DYNAMIC_I18N_KEYS = frozenset(
 
 # Desktop-overlay copy is seeded before every product-standard key is referenced in runtime code.
 # Keep this exact, temporary allowlist narrow so typo or stale desktop-overlay keys still fail.
+STAGED_LOCAL_QWEN_DEBUG_PREVIEW_I18N_KEYS = frozenset(
+    {"debug_preview.local_qwen_hallucination_modal"}
+)
 TEMPORARILY_ALLOWED_UNREFERENCED_I18N_KEYS = frozenset(
-    SHIPPING_DESKTOP_OVERLAY_I18N_KEYS | DESKTOP_OVERLAY_RECOVERY_I18N_KEYS
+    SHIPPING_DESKTOP_OVERLAY_I18N_KEYS
+    | DESKTOP_OVERLAY_RECOVERY_I18N_KEYS
+    | STAGED_LOCAL_QWEN_DEBUG_PREVIEW_I18N_KEYS
 )
 
 

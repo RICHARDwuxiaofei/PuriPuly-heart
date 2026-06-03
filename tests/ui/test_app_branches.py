@@ -533,6 +533,60 @@ def test_debug_audio_fault_actions_do_not_call_persistence_or_providers(monkeypa
     assert forbidden_calls == []
 
 
+def test_local_qwen_guidance_modal_open_stt_settings_routes_to_settings_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_app_construction(monkeypatch)
+
+    class FakeBottomNavBar(ft.Container):
+        def __init__(self, on_change):
+            super().__init__()
+            self._on_change = on_change
+            self._selected = 0
+            self.visual_updates = 0
+
+        def _update_visuals(self) -> None:
+            self.visual_updates += 1
+
+    monkeypatch.setattr(app_module, "BottomNavBar", FakeBottomNavBar)
+    forbidden_calls: list[str] = []
+    monkeypatch.setattr(
+        app_module,
+        "save_settings",
+        lambda *args, **kwargs: forbidden_calls.append("save_settings"),
+    )
+    monkeypatch.setattr(
+        app_module.webbrowser,
+        "open",
+        lambda *args, **kwargs: forbidden_calls.append("webbrowser.open"),
+    )
+
+    page = DummyPage()
+    app = TranslatorApp(page, config_path=Path("settings.json"))
+    monkeypatch.setattr(app.content_area, "update", lambda: None)
+    app.controller.apply_settings = lambda *args, **kwargs: forbidden_calls.append("apply_settings")
+    app.controller.apply_providers = lambda *args, **kwargs: forbidden_calls.append(
+        "apply_providers"
+    )
+    app.view_settings.has_provider_changes = True
+
+    app.show_local_qwen_hallucination_dialog()
+
+    dialog = app._local_qwen_hallucination_dialog
+    opened_dialog = page.opened[-1]
+    assert opened_dialog is dialog._dialog
+
+    dialog._dialog_result.primary_button.on_click(None)
+
+    assert page.closed == [opened_dialog]
+    assert app.content_area.content is app.view_settings
+    assert app.content_area.padding == 0
+    assert app.bottom_nav._selected == 1
+    assert app.bottom_nav.visual_updates == 1
+    assert page.tasks == []
+    assert forbidden_calls == []
+
+
 def test_debug_preview_talk_together_pass_invite_progress_sets_settings_state_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
