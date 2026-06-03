@@ -209,6 +209,7 @@ DISCORD_AUTH_ERROR_KEY_BY_SUBCODE = {
     "loopback_unavailable": "discord_auth.error.loopback_unavailable",
 }
 _MICROPHONE_TEST_LEVEL_INTERVAL_S = 1.0
+LOCAL_QWEN_HALLUCINATION_GUIDANCE_TRIGGER_COUNT = 2
 
 
 def _mic_test_log_value(value: object) -> str:
@@ -507,6 +508,8 @@ class GuiController:
         repr=False,
     )
     _runtime_logging: SessionRuntimeLoggingService | None = field(init=False, default=None)
+    _local_qwen_hallucination_detection_count: int = field(init=False, default=0)
+    _local_qwen_hallucination_modal_shown: bool = field(init=False, default=False)
 
     overlay_state: str = "off"
     failure_reason: str | None = None
@@ -4219,6 +4222,36 @@ class GuiController:
             f"channel={notification.channel} "
             f"utterance_id={str(notification.utterance_id)[:8]}"
         )
+        if notification.stt_provider_name is STTProviderName.LOCAL_QWEN:
+            self._record_local_qwen_hallucination_guidance_detection(notification)
+
+    def _record_local_qwen_hallucination_guidance_detection(
+        self,
+        notification: FinalTranscriptSuppressedNotification,
+    ) -> None:
+        self._local_qwen_hallucination_detection_count += 1
+        count = self._local_qwen_hallucination_detection_count
+        self.log_detailed(
+            "[STT][SuppressedFinalNotification] "
+            f"local_qwen_guidance count={count} "
+            f"channel={notification.channel} "
+            f"modal_shown={self._local_qwen_hallucination_modal_shown}"
+        )
+        if count < LOCAL_QWEN_HALLUCINATION_GUIDANCE_TRIGGER_COUNT:
+            return
+        if self._local_qwen_hallucination_modal_shown:
+            return
+
+        show_dialog = getattr(self.app, "show_local_qwen_hallucination_dialog", None)
+        if not callable(show_dialog):
+            self.log_detailed(
+                "[STT][SuppressedFinalNotification] "
+                f"local_qwen_guidance count={count} guidance_modal=unavailable"
+            )
+            return
+
+        self._local_qwen_hallucination_modal_shown = True
+        show_dialog()
 
     def cycle_debug_capture_fault_profile(self) -> str:
         if not self._debug_audio_fault_allowed():

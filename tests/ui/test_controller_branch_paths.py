@@ -7,7 +7,7 @@ import logging
 import re
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable
+from typing import Callable, Literal
 from uuid import uuid4
 
 import flet as ft
@@ -80,6 +80,7 @@ from puripuly_heart.core.runtime_logging import (
     SessionLoggingMode,
     SessionRuntimeLoggingService,
 )
+from puripuly_heart.core.stt.controller import FinalTranscriptSuppressedNotification
 from puripuly_heart.domain.models import Transcript
 from puripuly_heart.providers.llm.gemini import GeminiLLMProvider
 from puripuly_heart.providers.llm.local_openai import LocalOpenAICompatibleLLMProvider
@@ -558,6 +559,122 @@ class FakeOverlayProcessManager:
 
 def _make_controller(*, app: object) -> GuiController:
     return GuiController(page=SimpleNamespace(), app=app, config_path=Path("settings.json"))
+
+
+def _local_qwen_suppressed_notification(
+    *,
+    channel: Literal["self", "peer"] = "self",
+) -> FinalTranscriptSuppressedNotification:
+    return FinalTranscriptSuppressedNotification(
+        utterance_id=uuid4(),
+        channel=channel,
+        stt_provider_name=STTProviderName.LOCAL_QWEN,
+    )
+
+
+def test_local_qwen_suppression_first_gui_detection_counts_without_modal() -> None:
+    modal_calls: list[str] = []
+    app = SimpleNamespace(
+        debug_ui_preview=False,
+        show_local_qwen_hallucination_dialog=lambda: modal_calls.append("modal"),
+    )
+    controller = _make_controller(app=app)
+    controller._runtime_logging = RuntimeLoggingSpy()
+
+    controller._on_final_transcript_suppressed(_local_qwen_suppressed_notification())
+
+    assert controller._local_qwen_hallucination_detection_count == 1
+    assert controller._local_qwen_hallucination_modal_shown is False
+    assert modal_calls == []
+
+
+def test_local_qwen_suppression_second_gui_detection_opens_modal_once_without_settings_persistence() -> (
+    None
+):
+    settings = AppSettings()
+    before = to_dict(settings)
+    modal_calls: list[str] = []
+    app = SimpleNamespace(
+        debug_ui_preview=False,
+        show_local_qwen_hallucination_dialog=lambda: modal_calls.append("modal"),
+    )
+    controller = _make_controller(app=app)
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = settings
+
+    controller._on_final_transcript_suppressed(_local_qwen_suppressed_notification(channel="self"))
+    controller._on_final_transcript_suppressed(_local_qwen_suppressed_notification(channel="peer"))
+    controller._on_final_transcript_suppressed(_local_qwen_suppressed_notification(channel="self"))
+
+    assert controller._local_qwen_hallucination_detection_count == 3
+    assert controller._local_qwen_hallucination_modal_shown is True
+    assert modal_calls == ["modal"]
+    assert to_dict(settings) == before
+    assert not any("hallucination" in key for key in to_dict(settings)["ui"])
+
+
+def test_local_qwen_suppression_provider_switch_does_not_reset_same_session_modal_state() -> None:
+    modal_calls: list[str] = []
+    app = SimpleNamespace(
+        debug_ui_preview=False,
+        show_local_qwen_hallucination_dialog=lambda: modal_calls.append("modal"),
+    )
+    controller = _make_controller(app=app)
+    controller._runtime_logging = RuntimeLoggingSpy()
+    controller.settings = AppSettings()
+
+    controller._on_final_transcript_suppressed(_local_qwen_suppressed_notification())
+    controller._on_final_transcript_suppressed(_local_qwen_suppressed_notification())
+    controller.settings.provider.stt = STTProviderName.DEEPGRAM
+    controller.settings.provider.stt = STTProviderName.LOCAL_QWEN
+    controller._on_final_transcript_suppressed(_local_qwen_suppressed_notification())
+
+    assert controller._local_qwen_hallucination_detection_count == 3
+    assert controller._local_qwen_hallucination_modal_shown is True
+    assert modal_calls == ["modal"]
+
+
+def test_local_qwen_suppression_new_gui_session_resets_counter_and_modal_state() -> None:
+    first_session_modal_calls: list[str] = []
+    first_controller = _make_controller(
+        app=SimpleNamespace(
+            debug_ui_preview=False,
+            show_local_qwen_hallucination_dialog=lambda: first_session_modal_calls.append("modal"),
+        )
+    )
+    first_controller._runtime_logging = RuntimeLoggingSpy()
+    first_controller._on_final_transcript_suppressed(_local_qwen_suppressed_notification())
+    first_controller._on_final_transcript_suppressed(_local_qwen_suppressed_notification())
+    assert first_session_modal_calls == ["modal"]
+
+    new_session_modal_calls: list[str] = []
+    new_controller = _make_controller(
+        app=SimpleNamespace(
+            debug_ui_preview=False,
+            show_local_qwen_hallucination_dialog=lambda: new_session_modal_calls.append("modal"),
+        )
+    )
+    new_controller._runtime_logging = RuntimeLoggingSpy()
+
+    new_controller._on_final_transcript_suppressed(_local_qwen_suppressed_notification())
+
+    assert new_controller._local_qwen_hallucination_detection_count == 1
+    assert new_controller._local_qwen_hallucination_modal_shown is False
+    assert new_session_modal_calls == []
+
+
+def test_local_qwen_suppression_non_gui_callback_logs_only_without_modal_attempt() -> None:
+    app = SimpleNamespace(debug_ui_preview=False)
+    controller = _make_controller(app=app)
+    controller._runtime_logging = RuntimeLoggingSpy()
+
+    controller._on_final_transcript_suppressed(_local_qwen_suppressed_notification())
+    controller._on_final_transcript_suppressed(_local_qwen_suppressed_notification())
+
+    assert controller._local_qwen_hallucination_detection_count == 2
+    assert controller._local_qwen_hallucination_modal_shown is False
+    messages = [message for _level, message in controller._runtime_logging.detailed_messages]
+    assert any("guidance_modal=unavailable" in message for message in messages)
 
 
 def test_debug_capture_fault_is_disabled_without_debug_preview() -> None:
