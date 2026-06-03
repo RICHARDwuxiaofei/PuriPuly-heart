@@ -19,6 +19,7 @@ from puripuly_heart.config.settings import (
     OpenRouterProviderRouting,
     OpenRouterSelectionAlias,
     ProviderSettings,
+    STTProviderName,
     TranslationConnection,
     TranslationModel,
     TranslationSettings,
@@ -438,6 +439,7 @@ def test_translator_app_mounts_debug_preview_when_enabled(
         "on_discord_auth",
         "on_discord_callback_page",
         "on_peer_translation_eula",
+        "on_local_qwen_hallucination_modal",
         "on_talk_together_pass_invite_progress",
         "on_capture_fault_cycle",
         "on_stt_fault_cycle",
@@ -452,6 +454,12 @@ def test_translator_app_mounts_debug_preview_when_enabled(
     github_star = seen["callbacks"]["on_github_star_snackbar"]
     assert getattr(github_star, "__self__", None) is app
     assert getattr(github_star, "__func__", None) is TranslatorApp._preview_github_star_snackbar
+    local_qwen_modal = seen["callbacks"]["on_local_qwen_hallucination_modal"]
+    assert getattr(local_qwen_modal, "__self__", None) is app
+    assert (
+        getattr(local_qwen_modal, "__func__", None)
+        is TranslatorApp._preview_local_qwen_hallucination_modal
+    )
     pass_progress = seen["callbacks"]["on_talk_together_pass_invite_progress"]
     assert getattr(pass_progress, "__self__", None) is app
     assert (
@@ -469,6 +477,65 @@ def test_translator_app_mounts_debug_preview_when_enabled(
     root = page.added[0]
     assert isinstance(root.content, ft.Stack)
     assert root.content.controls[-1] is app.debug_preview_panel
+
+
+def test_debug_preview_local_qwen_modal_opens_production_dialog_without_state_or_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TranslatorApp.__new__(TranslatorApp)
+    app.page = DummyPage()
+    settings = AppSettings()
+    settings.provider.stt = STTProviderName.DEEPGRAM
+    app.controller = SimpleNamespace(
+        settings=settings,
+        _local_qwen_hallucination_detection_count=1,
+        _local_qwen_hallucination_modal_shown=False,
+        apply_settings=lambda *_args, **_kwargs: pytest.fail(
+            "debug modal preview must not apply settings"
+        ),
+        apply_providers=lambda *_args, **_kwargs: pytest.fail(
+            "debug modal preview must not apply providers"
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    class FakeLocalQwenHallucinationDialog:
+        def __init__(self, page, *, on_open_stt_settings):
+            captured["page"] = page
+            captured["on_open_stt_settings"] = on_open_stt_settings
+
+        def open(self) -> None:
+            captured["opened"] = True
+
+    monkeypatch.setattr(
+        app_module,
+        "LocalQwenHallucinationDialog",
+        FakeLocalQwenHallucinationDialog,
+    )
+    monkeypatch.setattr(
+        app_module,
+        "save_settings",
+        lambda *_args, **_kwargs: pytest.fail("debug modal preview must not save settings"),
+    )
+    monkeypatch.setattr(
+        app_module.webbrowser,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail("debug modal preview must not open external URLs"),
+    )
+
+    app._preview_local_qwen_hallucination_modal()
+
+    assert captured["page"] is app.page
+    assert captured["opened"] is True
+    assert getattr(captured["on_open_stt_settings"], "__self__", None) is app
+    assert (
+        getattr(captured["on_open_stt_settings"], "__func__", None)
+        is TranslatorApp._open_settings_tab
+    )
+    assert app._local_qwen_hallucination_dialog.__class__ is FakeLocalQwenHallucinationDialog
+    assert app.controller._local_qwen_hallucination_detection_count == 1
+    assert app.controller._local_qwen_hallucination_modal_shown is False
+    assert app.page.tasks == []
 
 
 def test_debug_preview_panel_wires_audio_fault_actions(monkeypatch) -> None:
