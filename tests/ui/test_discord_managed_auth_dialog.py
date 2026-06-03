@@ -284,6 +284,24 @@ def test_discord_managed_auth_dialog_waiting_state_uses_waiting_labels() -> None
     assert dialog._reopen_browser_button is dialog._actions.controls[1]
 
 
+def test_discord_managed_auth_dialog_removes_referral_field_when_waiting() -> None:
+    page = DummyPage()
+    dialog = _dialog(page)
+
+    dialog.open()
+    assert dialog._dialog_result is not None
+    body_column = dialog._dialog_result.body_column
+    field = dialog._referral_id_field
+    assert field is not None
+    assert field in body_column.controls
+
+    dialog.set_waiting()
+
+    assert field not in body_column.controls
+    assert dialog._referral_id_field is None
+    assert body_column.controls == [dialog._body_text]
+
+
 def test_discord_managed_auth_dialog_callback_received_expands_body() -> None:
     set_locale("ko")
     page = DummyPage()
