@@ -5252,6 +5252,41 @@ def test_desktop_initial_controls_emit_launch_diagnostics_only_in_detailed_mode(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overlay_target", "expected_refresh_burst"),
+    [("desktop", "False"), ("steamvr", "True")],
+)
+async def test_overlay_start_logs_selected_target_for_experiment_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    overlay_target: str,
+    expected_refresh_burst: str,
+) -> None:
+    _patch_overlay_runtime(monkeypatch)
+    controller = _make_controller(app=SimpleNamespace())
+    controller.settings = AppSettings()
+    controller.settings.overlay.target = overlay_target
+    controller.hub = DummyHub()
+    controller._runtime_logging = RuntimeLoggingSpy(detailed_enabled=True)
+
+    await controller.set_overlay_enabled(True)
+    await _wait_until(lambda: len(FakeOverlayProcessManager.instances) == 1)
+
+    messages = [message for _level, message in controller._runtime_logging.detailed_messages]
+    assert any(
+        message.startswith("[Overlay][Start]")
+        and f"target={overlay_target}" in message
+        and "overlay_instance_id=overlay-" in message
+        and "logging_mode=detailed" in message
+        and f"peer_presentation_refresh_burst={expected_refresh_burst}" in message
+        for message in messages
+    )
+
+    FakeOverlayProcessManager.instances[0].complete_startup()
+    await _wait_until(lambda: controller.overlay_state == "connected")
+    await controller.set_overlay_enabled(False)
+
+
+@pytest.mark.asyncio
 async def test_desktop_bounds_events_emit_diagnostics_only_in_detailed_mode() -> None:
     controller = _make_controller(app=SimpleNamespace())
     controller.settings = AppSettings()
@@ -6276,9 +6311,13 @@ async def test_run_overlay_start_preserves_traceback_in_detailed_log(
     assert controller._runtime_logging.basic_messages == [
         (logging.INFO, "[Overlay] State transition: off -> failed failure_reason=unknown")
     ]
-    assert len(controller._runtime_logging.detailed_messages) >= 1
-    level, message = controller._runtime_logging.detailed_messages[0]
-    assert level == logging.ERROR
+    error_messages = [
+        message
+        for level, message in controller._runtime_logging.detailed_messages
+        if level == logging.ERROR
+    ]
+    assert len(error_messages) == 1
+    message = error_messages[0]
     assert "[Overlay] Failed to start overlay runtime" in message
     assert "Traceback (most recent call last):" in message
     assert "RuntimeError: boom" in message
