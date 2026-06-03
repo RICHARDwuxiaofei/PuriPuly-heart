@@ -33,6 +33,7 @@ DEBUG_PREVIEW_I18N_KEYS = {
     "debug_preview.audio_fault_clear",
     "debug_preview.capture_fault_snackbar",
     "debug_preview.stt_fault_snackbar",
+    "debug_preview.local_qwen_hallucination_modal",
     "peer_translation_eula.body",
     "peer_translation_eula.accept",
     "peer_translation_eula.cancel",

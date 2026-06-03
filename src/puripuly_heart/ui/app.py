@@ -33,6 +33,9 @@ from puripuly_heart.ui.components.bottom_nav import BottomNavBar
 from puripuly_heart.ui.components.debug_preview_panel import DebugPreviewPanel
 from puripuly_heart.ui.components.discord_managed_auth_dialog import DiscordManagedAuthDialog
 from puripuly_heart.ui.components.founder_letter_dialog import FounderLetterDialog
+from puripuly_heart.ui.components.local_qwen_hallucination_dialog import (
+    LocalQwenHallucinationDialog,
+)
 from puripuly_heart.ui.components.microphone_test_dialog import MicrophoneTestDialog
 from puripuly_heart.ui.components.peer_translation_eula_dialog import PeerTranslationEulaDialog
 from puripuly_heart.ui.components.title_bar import TitleBar
@@ -500,6 +503,14 @@ class TranslatorApp:
         self._peer_translation_eula_dialog = dialog
         dialog.open()
 
+    def show_local_qwen_hallucination_dialog(self) -> None:
+        dialog = LocalQwenHallucinationDialog(
+            self.page,
+            on_open_stt_settings=self._open_settings_tab,
+        )
+        self._local_qwen_hallucination_dialog = dialog
+        dialog.open()
+
     def _accept_peer_translation_eula_and_enable(self) -> None:
         async def _task():
             settings = getattr(self.controller, "settings", None)
@@ -614,9 +625,16 @@ class TranslatorApp:
 
     def _open_logs_tab(self) -> None:
         self._on_nav_change(2)
+        self._set_bottom_nav_selected(2)
+
+    def _open_settings_tab(self) -> None:
+        self._on_nav_change(1)
+        self._set_bottom_nav_selected(1)
+
+    def _set_bottom_nav_selected(self, index: int) -> None:
         selected_attr = getattr(self.bottom_nav, "_selected", None)
-        if selected_attr != 2 and hasattr(self.bottom_nav, "_selected"):
-            self.bottom_nav._selected = 2
+        if selected_attr != index and hasattr(self.bottom_nav, "_selected"):
+            self.bottom_nav._selected = index
         update_visuals = getattr(self.bottom_nav, "_update_visuals", None)
         if callable(update_visuals):
             with contextlib.suppress(Exception):
