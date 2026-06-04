@@ -180,8 +180,6 @@ jobs:
           & $iscc installer.iss
           $installer = "installer_output/PuriPulyHeart-Setup-$env:APP_VERSION.exe"
           if (-not (Test-Path $installer)) { throw "Installer not found: $installer" }
-          $hash = (Get-FileHash -Path $installer -Algorithm SHA256).Hash
-          "$hash  PuriPulyHeart-Setup-$env:APP_VERSION.exe" | Out-File -FilePath "$installer.sha256" -Encoding ascii
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
@@ -189,7 +187,6 @@ jobs:
           name: release-artifacts
           path: |
             installer_output/PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe
-            installer_output/PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe.sha256
             build/soxr-release-inputs/PuriPulyHeart-soxr-third-party-source-bundle.zip
           if-no-files-found: error
 
@@ -235,5 +232,4 @@ jobs:
           body_path: release-body.md
           files: |
             release-artifacts/installer_output/PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe
-            release-artifacts/installer_output/PuriPulyHeart-Setup-${{ needs.verify-version.outputs.version }}.exe.sha256
             release-artifacts/build/soxr-release-inputs/PuriPulyHeart-soxr-third-party-source-bundle.zip
